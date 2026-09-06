@@ -518,6 +518,22 @@ starts on its own node.
 
 ### Node death
 
+**Drilling it, by hand.** The SLO probe cannot: "dead" is the `Node` object's own Ready condition
+going non-True, and nothing inside the cluster can produce that — a taint evicts pods and leaves
+the node Ready, which is why `drill.dead.node`, `ws.interrupted` and `env.clone.interrupted` file
+a skip naming this paragraph instead of a sample. The recipe, on a pool node holding a workspace:
+
+1. `ssh` to the node and `sudo systemctl stop k3s-agent` (the kubelet on a server node is `k3s`).
+2. Watch the parent go `Degraded=True/NodeDead` after `WS_NODE_DEAD_SECS` (180 s), and its volume
+   `Unavailable` if something was running on it. `kubectl get workspace -o wide` shows both.
+3. A RUNNING worktree is interrupted, not moved: `POST /v1/workspaces/{id}/start` answers 409 "its
+   node is down; it resumes when the node returns", and a clone of it answers `based_on` naming the
+   age of the cut it grafted onto. An environment clone answers 409 — there are no live bytes.
+4. A stopped, replicated parent is un-placed and re-claimed by an up-to-date node; the replicas the
+   dead node held heal onto a third node on their own.
+5. `sudo systemctl start k3s-agent`. The node returns Ready, the interrupted worktree resumes, and
+   `retire_pass` retires the copy its replacement made redundant.
+
 A node is dead once its `Node` object has been NotReady for `WS_NODE_DEAD_SECS` (default 180, enough for a reboot to finish without healing around it; the DaemonSet no longer overrides it) —
 that floor, not a shorter probe, is what keeps a brief kubelet hiccup from tearing anything down.
 Every surviving agent's pull beat then does two things to that node's volumes: replicas heal onto

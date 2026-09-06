@@ -590,13 +590,13 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["bak.daily.slots", "Backups", "Every daily backup slot is present", "99.9 %", "monthly", "13 · Monthly"],
   ["bak.versioning", "Backups", "Backup versioning is enabled and retains history", "99.9 %", "monthly", "13 · Monthly"],
   ["bak.cosmos", "Backups", "The Cosmos backup for HyperDX succeeds", "99.9 %", "monthly", "13 · Monthly"],
-  ["drill.dead.node", "Resilience drills", "A dead-node drill heals every replica onto a live node", "99.9 %", "monthly", "13 · Monthly"],
+  ["drill.dead.node", "Resilience drills", "A dead-node drill heals every replica onto a live node — walked by the operator's node-level drill, not by the probe", "99.9 %", "monthly", "13 · Monthly"],
   ["drill.drain", "Resilience drills", "A drain of the node holding a running worktree keeps that worktree running and releases the idle volumes beside it", "99.9 %", "monthly", "13 · Monthly"],
   ["drill.redis.down", "Resilience drills", "The system keeps operating correctly with Redis down", "99.9 %", "monthly", "13 · Monthly"],
   ["cluster.decommission", "Resilience drills", "A decommission is refused until the agent stamps `drained`, then cordons the node", "99.9 %", "monthly", "13 · Monthly"],
   ["drill.clickhouse.down", "Resilience drills", "With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500", "99.9 %", "monthly", "13 · Monthly"],
-  ["ws.interrupted", "Workspace lifecycle", "Starting a workspace whose node is down is refused with the sentence naming the node, and a clone of it names the cut it grafted onto", "99.9 %", "monthly", "13 · Monthly"],
-  ["env.clone.interrupted", "Environments", "Cloning an environment whose node is down is refused with 409 — there are no live bytes to copy", "99.9 %", "monthly", "13 · Monthly"],
+  ["ws.interrupted", "Workspace lifecycle", "Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill", "99.9 %", "monthly", "13 · Monthly"],
+  ["env.clone.interrupted", "Environments", "Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy", "99.9 %", "monthly", "13 · Monthly"],
 ];
 
 /** The journey in order. Boot and teardown report no SLO and are stages all the same: they take

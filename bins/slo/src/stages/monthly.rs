@@ -40,11 +40,6 @@ const DRAIN_CAP: Duration = Duration::from_secs(600);
 /// Long enough that a fleet leaning on Redis for anything load-bearing would show it, short enough
 /// that the CronJob's two hours still fit the dead-node drill after it.
 const REDIS_DOWN: Duration = Duration::from_secs(300);
-/// `WS_NODE_DEAD_SECS`'s compiled default, used when the region does not publish one.
-const NODE_DEAD_FALLBACK: u64 = 180;
-/// The grace on top of it: the sweep is a beat, not an instant, and a drill that started asking one
-/// second after the deadline would report a flake as a failure.
-const DEAD_SLACK: u64 = 60;
 
 /// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
 /// times out by DROPPING the step's future, so an outer timeout that fired first would take the
@@ -63,103 +58,16 @@ pub async fn run(c: &mut Ctx) {
     clickhouse_down(c).await;
 }
 
-/// `ws.interrupted` and `env.clone.interrupted`: the two refusals a node going down owes a person.
+/// `ws.interrupted` and `env.clone.interrupted`: NOT AUTOMATED, for `drill.dead.node`'s reason.
 ///
-/// A running worktree on a dead node is INTERRUPTED, never moved — `/v1` refuses to start it with
-/// a sentence naming why, and the documented way forward is a clone, which grafts onto the newest
-/// cut an up-to-date node already holds and says in `based_on` how old that is. An environment has
-/// no such fallback (its clone copies live bytes from the node that holds it), so its clone is a
-/// 409. All three assertions share one taint window because they share one dead node — waiting out
-/// `nodeDeadSecs` twice would cost the monthly run six minutes for nothing.
+/// Both refusals exist only while a node is genuinely down — a taint evicts pods but leaves the
+/// node Ready, so `/v1` would place the worktree happily and the 409 these ids are about would
+/// never be offered. They are walked by the same operator drill, in the window it opens.
 async fn interrupted(c: &mut Ctx) {
-    let (Some(k), Some(ws)) = (c.kube.clone(), probe_workspace(c).await) else {
-        let why = "no kubeconfig, or no probe workspace to interrupt";
-        c.skip("ws.interrupted", why);
-        return c.skip("env.clone.interrupted", why);
-    };
-    // RUNNING, deliberately: a stopped worktree is placeable elsewhere, and the refusal this id is
-    // about only exists for one a person is typing into.
-    let Some(owner) = node_of(c, &ws).await else {
-        c.skip("ws.interrupted", "the workspace names no node");
-        return c.skip("env.clone.interrupted", "the workspace names no node");
-    };
-    let env = probe_environment(c).await;
-    let wait = Duration::from_secs(node_dead_secs(c).await + DEAD_SLACK);
-    let body_cap = wait + DRAIN_CAP;
-    let seen: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
-    let env_out = seen.clone();
-    {
-        let (ws, owner, env) = (ws.clone(), owner.clone(), env.clone());
-        c.step("ws.interrupted", step_cap(body_cap), move |c| {
-            let jwt = c.probe_jwt.clone();
-            let start = api(c, &format!("/v1/workspaces/{ws}/start"));
-            let clone = api(c, &format!("/v1/workspaces/{ws}/clone"));
-            let name = format!("{}-int", c.prefix());
-            async move {
-                let body = async {
-                    kill_agent(&k, &owner).await?;
-                    tokio::time::sleep(wait).await;
-                    // The refusal, and its sentence: a 409 that named something else would leave
-                    // the person with no way forward at all.
-                    let (status, text) =
-                        super::raw(c, reqwest::Method::POST, &start, &jwt, Some(Value::Null), &[]).await?;
-                    if status.as_u16() != 409 {
-                        return Err(anyhow!("starting an interrupted workspace answered {status}, not 409"));
-                    }
-                    if !text.contains("its node is down") {
-                        return Err(anyhow!("the refusal does not say why: {}", text.chars().take(160).collect::<String>()));
-                    }
-                    // The way forward: a clone that says what it grafted onto.
-                    let made = post(c, &clone, &jwt, json!({ "name": name })).await.context("the clone of an interrupted workspace was refused")?;
-                    let based = made.get("based_on").ok_or_else(|| anyhow!("the clone named no `based_on`"))?;
-                    if based.get("age_seconds").and_then(Value::as_u64).is_none() {
-                        return Err(anyhow!("`based_on` does not say how old the cut it grafted onto is"));
-                    }
-                    if let Some(id) = made.get("id").and_then(Value::as_str) {
-                        // Named `run-…`, so teardown's prefix sweep takes it either way; recorded
-                        // so the volume goes with it.
-                        c.state.extra_volumes.push(id.to_string());
-                    }
-                    // And the environment's own answer, recorded here rather than judged: the two
-                    // are different SLIs, and one taint window is all they share.
-                    if let Some(env) = &env {
-                        let url = api(c, &format!("/v1/environments/{env}/clone"));
-                        let (status, text) = super::raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "name": format!("{name}-e") })), &[]).await?;
-                        *env_out.lock().expect("lock") = Some(format!("{status} {}", text.chars().take(160).collect::<String>()));
-                    }
-                    Ok(())
-                };
-                drill::with_taint(&k, &owner, body_cap, body).await
-            }
-            .boxed()
-        })
-        .await;
-    }
-    let out = seen.lock().expect("lock").clone();
-    let Some(answer) = out else {
-        return c.skip("env.clone.interrupted", "no environment was cloned while its node was down");
-    };
-    c.step("env.clone.interrupted", Duration::from_secs(5), move |_| {
-        async move {
-            if answer.starts_with("409") {
-                return Ok(());
-            }
-            Err(anyhow!("cloning an environment whose node is down answered {answer}"))
-        }
-        .boxed()
-    })
-    .await;
+    c.skip("ws.interrupted", NODE_LEVEL_DRILL);
+    c.skip("env.clone.interrupted", NODE_LEVEL_DRILL);
 }
 
-/// The environment stage 6 left, by this run's own name.
-async fn probe_environment(c: &Ctx) -> Option<String> {
-    let rows = get(c, &api(c, "/v1/environments"), &c.probe_jwt).await.ok()?;
-    rows.as_array()?
-        .iter()
-        .find(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&c.prefix())))
-        .and_then(|r| r.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-}
 
 /// `drill.clickhouse.down`: the history layer is optional, and the fleet must behave as if it is.
 ///
@@ -369,13 +277,31 @@ async fn tarball_age(c: &mut Ctx) {
     }
     c.step("bak.tarball.age", READ_CEILING, |_| {
         async move {
-            let newest = slots()
-                .await?
-                .into_iter()
+            let all = slots().await?;
+            let newest = all
+                .iter()
                 .filter(|(n, _)| n.starts_with("hourly-") && n.ends_with(SLOT_SUFFIX))
-                .map(|(_, at)| at)
-                .max()
-                .ok_or_else(|| anyhow!("the backup container holds no hourly tarball at all"))?;
+                .map(|(_, at)| *at)
+                .max();
+            // Naming what IS there, not only what is missing: the first live monthly run found
+            // `hourly-03.tgz` — the node's installed unit is an older script that writes plain,
+            // unencrypted tarballs — and "no hourly tarball at all" sent the operator looking for
+            // a backup that had in fact run.
+            let Some(newest) = newest else {
+                let seen: Vec<&str> = all
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .filter(|n| n.starts_with("hourly-"))
+                    .take(3)
+                    .collect();
+                return Err(match seen.is_empty() {
+                    true => anyhow!("the backup container holds no hourly tarball at all"),
+                    false => anyhow!(
+                        "the newest hourly blob is {}, not {SLOT_SUFFIX} — the encrypted backup unit is not the one installed on the node",
+                        seen.join(", ")
+                    ),
+                });
+            };
             let mins = (Utc::now() - newest).num_minutes();
             if mins >= MAX_TARBALL_AGE_MINS {
                 return Err(anyhow!("the newest backup is {mins} minutes old"));
@@ -405,7 +331,18 @@ async fn daily_slots(c: &mut Ctx) {
                 .filter(|want| !have.contains(want))
                 .collect();
             if !missing.is_empty() {
-                return Err(anyhow!("no backup in slot {}", missing.join(", ")));
+                // Same reason as `tarball_age`: an unencrypted `daily-Mon.tgz` beside the missing
+                // `daily-Mon.tgz.enc` is a different problem from no backup at all, and the
+                // operator should read which one this is.
+                let plain: Vec<&String> = have.iter().filter(|n| n.starts_with("daily-") && !n.ends_with(SLOT_SUFFIX)).collect();
+                return Err(match plain.is_empty() {
+                    true => anyhow!("no backup in slot {}", missing.join(", ")),
+                    false => anyhow!(
+                        "no backup in slot {} — the container holds unencrypted slots instead ({}), so the encrypted unit is not the one installed",
+                        missing.join(", "),
+                        plain.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                });
             }
             Ok(())
         }
@@ -528,97 +465,28 @@ fn form(pairs: &[(&str, &str)]) -> String {
 
 // ── drills ──────────────────────────────────────────────────────────────
 
-/// `drill.dead.node`: a node that stops existing, and a workspace that comes back somewhere else.
+/// `drill.dead.node`: NOT AUTOMATED, and a skip that says why.
 ///
-/// The taint and the agent pod together are what make the node LOOK dead rather than merely busy:
-/// `NoExecute` evicts what is on it (which is what a dead node does), and the node's own agent is
-/// the thing that would otherwise keep claiming its objects. The wait is `nodeDeadSecs` — read from
-/// the region rather than assumed, because a cluster that raised it would otherwise fail this drill
-/// for being patient — plus a beat's grace.
+/// The first live monthly run failed it by construction. The drill deleted the node's agent pod
+/// and tainted the node, but the product's definition of dead is the NODE's own Ready condition
+/// being non-True for `WS_NODE_DEAD_SECS` (`peer::unplaceable`) — the DaemonSet puts the agent back
+/// in seconds and the node never leaves Ready, so nothing is ever un-placed and the drill was
+/// measuring a state the fleet was never in.
+///
+/// A real node death cannot be produced from inside the cluster, and the probe must not be given
+/// node-level access to produce one: a synthetic user with a way to stop kubelets is a bigger
+/// hole than this id is worth. So the id stays in the catalogue and files a SKIP naming the
+/// operator's own recipe — the console shows "not automated" rather than nothing at all, which is
+/// the honest state. `drill.drain`, which uses the decommission label the product itself uses, is
+/// the automated monthly path.
 async fn dead_node(c: &mut Ctx) {
-    let (Some(k), Some(ws)) = (c.kube.clone(), probe_workspace(c).await) else {
-        return c.skip("drill.dead.node", "no kubeconfig, or no probe workspace to move");
-    };
-    let jwt = c.probe_jwt.clone();
-    // Stopped FIRST, and outside the step: a running worktree is *interrupted* by its node dying,
-    // never moved, and asking a dead node's running workspace to start is a 409 by design.
-    let stop = api(c, &format!("/v1/workspaces/{ws}/stop"));
-    if let Err(e) = post(c, &stop, &jwt, Value::Null).await {
-        return c.skip("drill.dead.node", &format!("could not stop the workspace: {e:#}"));
-    }
-    let doc = api(c, &format!("/v1/workspaces/{ws}"));
-    if let Err(e) = poll_json(c, &doc, &jwt, Duration::from_secs(60), |v| {
-        v.get("state").and_then(Value::as_str) == Some("stopped")
-    })
-    .await
-    {
-        return c.skip("drill.dead.node", &format!("the workspace never stopped: {e:#}"));
-    }
-    let Some(owner) = node_of(c, &ws).await else {
-        // The stop above is this function's own mutation, and it undoes it: a workspace left
-        // stopped is one the LATER stages of a monthly run would find missing, and one a person
-        // watching the console would have to start by hand.
-        let start = api(c, &format!("/v1/workspaces/{ws}/start"));
-        if let Err(e) = post(c, &start, &jwt, Value::Null).await {
-            tracing::warn!(op = "restart", name = %ws, error = %format!("{e:#}"), "slo.drill.undo.failed");
-        }
-        return c.skip("drill.dead.node", "the workspace names no node");
-    };
-    let wait = Duration::from_secs(node_dead_secs(c).await + DEAD_SLACK);
-    let body_cap = wait + DRAIN_CAP;
-    let ws = ws.to_string();
-    c.step("drill.dead.node", step_cap(body_cap), move |c| {
-        let jwt = c.probe_jwt.clone();
-        let start = api(c, &format!("/v1/workspaces/{ws}/start"));
-        let doc = api(c, &format!("/v1/workspaces/{ws}"));
-        let owner2 = owner.clone();
-        async move {
-            let body = async {
-                kill_agent(&k, &owner2).await?;
-                tokio::time::sleep(wait).await;
-                post(c, &start, &jwt, Value::Null).await.context("the workspace would not start")?;
-                poll_json(c, &doc, &jwt, DRAIN_CAP, |v| {
-                    v.get("state").and_then(Value::as_str) == Some("ready")
-                        && v.get("placement").and_then(Value::as_str).is_some_and(|n| n != owner2)
-                })
-                .await
-                .with_context(|| format!("it never came back on a node other than {owner2}"))
-            };
-            drill::with_taint(&k, &owner, body_cap, body).await
-        }
-        .boxed()
-    })
-    .await;
+    c.skip("drill.dead.node", NODE_LEVEL_DRILL);
 }
 
-/// The DaemonSet pod on one node. Deleting it is what makes the node stop reconciling its own
-/// objects; the DaemonSet brings it straight back, which is fine — the taint is what keeps it off.
-async fn kill_agent(k: &kube::Client, node: &str) -> Result<()> {
-    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
-        kube::Api::namespaced(k.clone(), "kube-system");
-    let list = pods
-        .list(&kube::api::ListParams::default().labels("app=kloudlite-agent").fields(&format!("spec.nodeName={node}")))
-        .await
-        .map_err(|e| anyhow!("could not find {node}'s agent: {e}"))?;
-    for p in list.items {
-        let name = kube::ResourceExt::name_any(&p);
-        pods.delete(&name, &kube::api::DeleteParams::default())
-            .await
-            .map_err(|e| anyhow!("could not delete {name}: {e}"))?;
-    }
-    Ok(())
-}
+/// The reason every id that needs a genuinely dead node carries, naming where the recipe lives.
+const NODE_LEVEL_DRILL: &str = "a dead node needs the operator's node-level drill: stop the kubelet on one pool node — recipe in deploy/k3s/README.md";
 
-/// The region's own `nodeDeadSecs`, or the compiled default. A cluster that raised the value would
-/// otherwise fail this drill for doing exactly what it was configured to do.
-async fn node_dead_secs(c: &Ctx) -> u64 {
-    let url = admin(c, &format!("/admin/settings/clusters/{}", c.cfg.region));
-    get(c, &url, &c.admin_jwt)
-        .await
-        .ok()
-        .and_then(|v| v.pointer("/spec/nodeDeadSecs").and_then(Value::as_u64))
-        .unwrap_or(NODE_DEAD_FALLBACK)
-}
+
 
 /// `drill.drain`: a drain does NOT interrupt what is running on the node.
 ///

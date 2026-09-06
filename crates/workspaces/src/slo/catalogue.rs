@@ -428,15 +428,20 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bak.daily.slots", feature: "Backups", sli: "Every daily backup slot is present", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "bak.versioning", feature: "Backups", sli: "Backup versioning is enabled and retains history", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "bak.cosmos", feature: "Backups", sli: "The Cosmos backup for HyperDX succeeds", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
-    Slo { id: "drill.dead.node", feature: "Resilience drills", sli: "A dead-node drill heals every replica onto a live node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    // NOT AUTOMATED, and the SLI says so rather than the id vanishing: "dead" is the NODE's Ready
+    // condition going non-True for `WS_NODE_DEAD_SECS`, which cannot be produced from inside the
+    // cluster — a taint evicts pods and leaves the node Ready. The probe files a skip naming the
+    // operator recipe in deploy/k3s/README.md, so the console shows "not automated" rather than a
+    // green row nothing produced. Same for the two ids below it.
+    Slo { id: "drill.dead.node", feature: "Resilience drills", sli: "A dead-node drill heals every replica onto a live node — walked by the operator's node-level drill, not by the probe", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain of the node holding a running worktree keeps that worktree running and releases the idle volumes beside it", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.redis.down", feature: "Resilience drills", sli: "The system keeps operating correctly with Redis down", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "cluster.decommission", feature: "Resilience drills", sli: "A decommission is refused until the agent stamps `drained`, then cordons the node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.clickhouse.down", feature: "Resilience drills", sli: "With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     // Both are REFUSALS, so 99.9 % rather than 100 %: only `sec.*` spends no budget at all, and a
     // 409 that never came because the api was down is an availability failure like any other.
-    Slo { id: "ws.interrupted", feature: "Workspace lifecycle", sli: "Starting a workspace whose node is down is refused with the sentence naming the node, and a clone of it names the cut it grafted onto", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
-    Slo { id: "env.clone.interrupted", feature: "Environments", sli: "Cloning an environment whose node is down is refused with 409 — there are no live bytes to copy", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "ws.interrupted", feature: "Workspace lifecycle", sli: "Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "env.clone.interrupted", feature: "Environments", sli: "Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
 ];
 
 #[cfg(test)]
