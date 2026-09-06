@@ -82,6 +82,8 @@ pub const DEFAULT_BUDGET_SECS: u64 = 780;
 pub const OVER_BUDGET: &str = "run budget exhausted";
 /// The detail on every id a fast run skips because an hourly run is in flight.
 pub const HOURLY_IN_FLIGHT: &str = "an hourly run is in flight";
+pub const WEEKLY_IN_FLIGHT: &str = "a weekly drill is in flight";
+pub const MONTHLY_IN_FLIGHT: &str = "a monthly drill is in flight";
 /// The detail on every id a fast run skips because the fleet is mid-roll.
 pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
 
@@ -121,41 +123,73 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
     skipped
 }
 
-/// Is an hourly run in flight right now? Asked by the fast suite before it starts anything.
-///
-/// The two suites run as different tenants, so they no longer collide on a key or a grant — but
-/// they still share the region's nodes, and a fast workspace placed beside the hourly's five
-/// waits on `Insufficient cpu` and fails its own ceiling. The hourly journey covers every fast id
-/// at the same targets, so the fast run YIELDS: every id skipped, no sample filed, nothing
-/// measured twice. A `running` row older than an hour is a crash the parent never closed, and
-/// does not count; the answer is `false` on any error, because a probe that cannot ask must
-/// still probe.
-pub async fn hourly_in_flight(c: &Ctx) -> bool {
-    let url = stages::admin(c, "/admin/slo/runs?suite=hourly&limit=3");
+/// Is a run of `suite` in flight right now, as the admin process records it? A `running` row
+/// older than the suite's own deadline is a crash the parent never closed, and does not count;
+/// the answer is `false` on any error, because a probe that cannot ask must still probe.
+pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
+    let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=3", suite.as_str()));
     let v = match stages::get(c, &url, &c.admin_jwt).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %format!("{e:#}"), "slo.hourly.check.failed");
+            tracing::warn!(suite = suite.as_str(), error = %format!("{e:#}"), "slo.inflight.check.failed");
             return false;
         }
     };
     let rows = v.get("runs").and_then(|r| r.as_array()).cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
-    tracing::info!(rows = rows.len(), first = %rows.first().map(|r| r.to_string()).unwrap_or_default(), "slo.hourly.check");
+    // The CronJob deadlines from deploy/kloudlite.yaml: a `running` row older than its own
+    // deadline is a crash the parent never closed.
+    let deadline: i64 = match suite {
+        Suite::Fast => 900,
+        Suite::Hourly | Suite::Weekly => 3_600,
+        Suite::Monthly => 7_200,
+    };
     rows.iter().any(|r| {
         let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
         let fresh = r
             .get("started")
             .and_then(|s| s.as_str())
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .is_some_and(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < 3600);
+            .is_some_and(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < deadline);
         running && fresh
     })
 }
 
-/// `(updated, ready, desired)` for a workload, or `None` when it has no status yet.
+/// The suites `kind` must not run beside, longest first, and the detail every skipped id carries.
 ///
-/// `None` reads as "not rolling": a status the API server has not filled in is a fact about the
-/// read, not about the fleet, and the probe's default everywhere here is to probe.
+/// The two suites already run as different tenants, so they no longer collide on a key or a
+/// grant — but they share the region's nodes, and the drills go further: weekly cordons a node
+/// and monthly decommissions one, so a fast or hourly workspace placed beside them fails for the
+/// drill's reason, not its own. The longer journey covers every shorter id at the same targets,
+/// so the shorter run YIELDS: every id skipped, no sample filed, nothing measured twice.
+pub fn yields_to(kind: Suite) -> &'static [(Suite, &'static str)] {
+    match kind {
+        Suite::Fast => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT), (Suite::Hourly, HOURLY_IN_FLIGHT)],
+        Suite::Hourly => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT)],
+        Suite::Weekly | Suite::Monthly => &[],
+    }
+}
+
+/// Backwards-compatible name for the fast suite's oldest yield.
+pub async fn hourly_in_flight(c: &Ctx) -> bool {
+    suite_in_flight(c, Suite::Hourly).await
+}
+
+/// A drill waits for a fast or hourly run already in flight to finish before its first
+/// destructive stage, bounded by one fast deadline: cancelling a run mid-journey would file a
+/// failed sample for the drill's reason, and a drill that starts a minute late loses nothing.
+pub async fn wait_for_shorter_runs(c: &Ctx) {
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(900) {
+        let busy = suite_in_flight(c, Suite::Fast).await || suite_in_flight(c, Suite::Hourly).await;
+        if !busy {
+            return;
+        }
+        tracing::info!(waited_secs = started.elapsed().as_secs(), "slo.drill.waiting");
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+    tracing::warn!("slo.drill.waited.out");
+}
+
 type Counts = Option<(i32, i32, i32)>;
 
 fn deployment_counts(o: &Deployment) -> Counts {
@@ -230,15 +264,19 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages = suite(kind);
-    let yield_to = if kind != Suite::Fast {
-        None
-    } else if hourly_in_flight(c).await {
-        Some(HOURLY_IN_FLIGHT)
-    } else if rollout_in_flight(c).await {
-        Some(ROLLOUT_IN_FLIGHT)
-    } else {
-        None
-    };
+    let mut yield_to = None;
+    for (longer, why) in yields_to(kind) {
+        if suite_in_flight(c, *longer).await {
+            yield_to = Some(*why);
+            break;
+        }
+    }
+    if yield_to.is_none() && kind == Suite::Fast && rollout_in_flight(c).await {
+        yield_to = Some(ROLLOUT_IN_FLIGHT);
+    }
+    if yields_to(kind).is_empty() {
+        wait_for_shorter_runs(c).await;
+    }
     if let Some(why) = yield_to {
         let skipped = skip_remaining_because(c, kind, &stages, why);
         tracing::warn!(skipped, reason = why, "slo.run.yielded");

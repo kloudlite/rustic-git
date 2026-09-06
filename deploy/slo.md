@@ -21,11 +21,14 @@ cannot fill a five-minute window. It runs as its own tenant pair (`slo-hourly`/`
 and the drills as `slo-drill*`) with its own SSH key, so a ~50-minute run never shares an SSH key,
 a superadmin grant or a quota with the five-minute suite underneath it.
 
-A fast run YIELDS rather than filing a bad sample: it skips every id with "an hourly run is in
-flight" when the hourly suite is mid-journey (they share the region's nodes), and with "a rollout
-is in flight" when any central workload or the region's agent DaemonSet is short of its desired
-replicas — a run through a roll measures the roll, not the service. The hourly, weekly and monthly
-suites never yield; their window is the operator's own choice.
+A shorter run YIELDS to a longer one rather than filing a bad sample: a fast run skips every id
+with "an hourly run is in flight", "a weekly drill is in flight" or "a monthly drill is in flight"
+when that suite is mid-journey (they share the region's nodes, and the drills cordon and
+decommission them), and with "a rollout is in flight" when any central workload or the region's
+agent DaemonSet is short of its desired replicas — a run through a roll measures the roll, not the
+service. The hourly yields to the two drills the same way. The drills never yield; instead they
+WAIT, up to one fast deadline, for a fast or hourly run already in flight to finish before their
+first destructive stage.
 
 | id | Feature | SLI | Target | Suite | Journey step |
 | --- | --- | --- | --- | --- | --- |
