@@ -1556,13 +1556,13 @@ mod tests {
     }
 
     /// The pod's three hostPath mounts point at the paths the agent actually manages on disk.
-    #[test]
     /// `ready` has to mean a person can get in. The default image is gated on sshd accepting a
     /// connection; a user's own image, whose entrypoint we do not know, is not gated at all rather
     /// than held NotReady forever behind a port it may never open.
     #[test]
     fn the_default_image_is_ready_only_once_sshd_listens() {
-        let spec = ws_spec();
+        let mut spec = ws_spec();
+        spec.image = crate::model::DEFAULT_WS_IMAGE.into();
         let p = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).unwrap();
         let c = &p.spec.unwrap().containers[0];
         let probe = c.readiness_probe.as_ref().expect("the default image carries a readiness probe");
@@ -1574,6 +1574,7 @@ mod tests {
         assert!(p.spec.unwrap().containers[0].readiness_probe.is_none(), "an unknown image is not gated on a port it may never open");
     }
 
+    #[test]
     fn a_workspace_pods_host_paths_match_the_agents_layout() {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).unwrap();
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
