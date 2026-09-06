@@ -1796,8 +1796,10 @@ async fn one_connect_failure_does_not_move_a_repo() {
 /// after a forced claim, which fenced a peer to get here. Before force-claims existed only a
 /// healthy node could claim, so this gap was unreachable; now it is not.
 ///
-/// Catches: `open()` returning 500 and keeping the lease. The failure is a read-only cache dir,
-/// which fails `create_dir_all` inside `open_repo` on a node that is healthy in every other way.
+/// Catches: `open()` returning 500 and keeping the lease. The failure is the cache dir being a
+/// plain FILE, which fails `create_dir_all` inside `open_repo` with ENOTDIR on a node that is
+/// healthy in every other way — a read-only directory would do the same for a normal user, but
+/// root (the dev pod) walks straight through permission bits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_open_releases_the_lease_it_was_just_granted() {
     let e = common::env().await;
@@ -1810,9 +1812,8 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
 
     // Jam the shelf: A can claim, but cannot lay the repo down on disk.
     let cache = a._tmp.path().join("cache");
-    let mut perms = std::fs::metadata(&cache).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&cache, perms.clone()).unwrap();
+    std::fs::remove_dir_all(&cache).unwrap();
+    std::fs::write(&cache, b"not a directory").unwrap();
 
     let res = client().await
         .get(format!("http://{}/{repo}/info/refs?service=git-upload-pack", a.public))
@@ -1834,10 +1835,6 @@ async fn a_failed_open_releases_the_lease_it_was_just_granted() {
         held.is_none(),
         "A kept a lease on a repo it cannot open: {held:?}"
     );
-
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&cache, perms).unwrap();
 }
 
 /// A forward that fails asks the leader; a second failed forward for the same repo within a second
