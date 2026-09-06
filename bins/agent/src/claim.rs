@@ -311,6 +311,13 @@ enum Verdict {
     Claim(serde_json::Value),
     /// Leave it alone — someone else's, or not ours to answer.
     Decline,
+    /// Not claimable by this node RIGHT NOW, and nothing about the parent itself will change when
+    /// it becomes so. The one case: `may_claim` said no because this node is not up to date for
+    /// the volume — which, while the owner's pin is released mid-handover (`start_placement` cleared
+    /// it, the taker has not claimed yet), is EVERY node at once. A restore or clone created in that
+    /// window was declined by all three and, with `await_change` as the fallback, never looked at
+    /// again: the object that changes next is the Volume, which is not this watch. So: come back.
+    Later,
     /// Leave it alone AND, once it has gone unclaimed long enough, say why: nobody has room. The
     /// string is the user-facing message.
     NoCapacity(String),
@@ -320,6 +327,12 @@ enum Verdict {
 /// `Placed=False/NoCapacity`. Long enough that a peer with room wins the race first in the normal
 /// case; short enough that "Creating" never sits unexplained for minutes.
 const NO_CAPACITY_AFTER_SECS: i64 = 60;
+
+/// How long a `Later` waits before this node asks again. Short, because the wait it covers is a
+/// handover's own window (a release CAS, one claim, one `take_volume`: seconds) and the person is
+/// watching "creating"; bounded in cost because this controller only ever holds UNPLACED objects,
+/// normally none.
+const LATER_SECS: u64 = 10;
 
 /// What the claim decides for one object, given what it currently says about itself.
 ///
@@ -372,7 +385,7 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
     }
     let p = placement(ctx, volume, worktree, pinned_cut).await?;
     if !may_claim(&ctx.node, &owner, &p) {
-        return Ok(Decline);
+        return Ok(Verdict::Later);
     }
     // The capacity gate, and ONLY on the fresh path: `may_claim` let this through because there are
     // no bytes anywhere yet, so every node is equally correct and the one with room should take it.
@@ -452,6 +465,7 @@ where
         let patch = match decide(ctx, &obj.name_any(), &p, phase, obj.meta().generation.unwrap_or(0)).await? {
             Verdict::Claim(patch) => patch,
             Verdict::Decline => return Ok(Action::await_change()),
+            Verdict::Later => return Ok(Action::requeue(std::time::Duration::from_secs(LATER_SECS))),
             Verdict::NoCapacity(why) => {
                 // Every node that declines writes the same condition, and `mark_parent_of`'s idle
                 // check absorbs the duplicates — the same shape the dead-node sweep uses. A later

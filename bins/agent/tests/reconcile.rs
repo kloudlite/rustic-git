@@ -652,6 +652,43 @@ async fn a_clone_is_not_claimed_by_a_node_that_is_behind_on_its_source() {
     );
 }
 
+/// A restore that arrives while its source volume is MID-HANDOVER: the owner has released its pin
+/// (`spec.nodeName` empty) and the taker has not claimed yet. Nobody is owner, this node's replica
+/// does not hold the push the restore is pinned to, and neither does anyone else's — every node
+/// declines. What must not happen is what did: `await_change` as the answer, so the restore sat at
+/// "creating" until the probe gave up, because the object that changes next is the Volume, not the
+/// workspace. A decline of this kind comes back on a timer.
+#[tokio::test]
+async fn a_restore_declined_mid_handover_is_retried_rather_than_forgotten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            kloudlite_workspaces::kube_test::get(
+                "/apis/kloudlite.io/v1alpha1/volumes/ws-src",
+                serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+                                   "metadata": {"name": "ws-src", "uid": "src-uid"},
+                                   "spec": {"owner": "alice", "nodeName": "", "region": "r1", "quotaGb": 20}}),
+            ),
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200,
+                    body: snapshot_list_of("Snapshot", vec![snapshot_cr("ws-src-a", "ws-src")]) },
+            kloudlite_workspaces::kube_test::not_found(format!(
+                "/apis/kloudlite.io/v1alpha1/volumereplicas/{}",
+                crd::replica_name("ws-src", "node-a")
+            )),
+        ],
+    );
+    let mut w = workspace(serde_json::json!({}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::SeededFrom { volume: "ws-src".into(), snapshot: "ws-src-a".into() }),
+    });
+
+    let action = kloudlite_agent::claim::claim_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "nobody may claim it yet: {:?}", rec.calls());
+    assert_ne!(action, kube::runtime::controller::Action::await_change(), "a mid-handover decline must come back on its own");
+}
+
 /// The same clone, on a node whose replica HOLDS the source worktree's newest transient: claimed,
 /// with no "same node as the source" rule anywhere in it.
 #[tokio::test]
