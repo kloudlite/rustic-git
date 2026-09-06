@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# One run per branch: a newer push cancels the older run rather than queueing behind it on the
+# two build-0 slots. Only the newest commit's image ever gets pinned, so the older run is waste.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # build-0, the same VM the fast loop builds on: 16 cores and a target dir that persists
