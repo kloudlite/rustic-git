@@ -6,8 +6,12 @@
 # run of the suite yields to the ghost for ten minutes), and the failures are printed. Refuses to
 # start while any SLO Job is active — a hand run and a scheduled one must never overlap.
 set -euo pipefail
-SUITE=${1:?fast|hourly|weekly|monthly}; FF=1; [ "${2:-}" = "--no-fail-fast" ] && FF=0
 POD=$(kubectl -n kloudlite get pods -l app=dev -o jsonpath='{.items[0].metadata.name}')
+# `--attach /work/runs/<log>`: watch a run already started in the pod instead of starting one.
+ATTACH=""; if [ "${1:-}" = "--attach" ]; then ATTACH=${2:?log path in the pod}; SUITE=attach; shift 2; fi
+FF=1; [ "${1:-}" = "--no-fail-fast" ] && FF=0
+[ -n "$ATTACH" ] || SUITE=${1:?fast|hourly|weekly|monthly}
+if [ -z "$ATTACH" ]; then
 case "$SUITE" in
   fast)    U=slo-probe;  O=slo-other;        K=/etc/slo-ssh-fast;   B=840  ;;
   hourly)  U=slo-hourly; O=slo-hourly-other; K=/etc/slo-ssh-hourly; B=3000 ;;
@@ -21,6 +25,7 @@ LOG=/work/runs/$SUITE-$(date -u +%H%M).log
 kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pgrep -x kloudlite-slo >/dev/null && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
   cd /work/src && (nohup env KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
   /work/target/dev-image/kloudlite-slo run --suite $SUITE > $LOG 2>&1 &); sleep 1; echo started $LOG"
+else LOG=$ATTACH; echo "attached to $LOG"; fi
 summarise() { kubectl -n kloudlite exec -i "$POD" -- python3 - "$LOG" <<'PY'
 import sys,json
 done=0; fails=[]; n=0; skipped=0; run=''; last=''
