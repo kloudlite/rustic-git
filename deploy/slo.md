@@ -169,7 +169,7 @@ first destructive stage.
 | `env.services.policies` | Environments | An owner's namespace carries the OwnerBinding NetworkPolicies | 99.9 % | hourly | 14 · Experience |
 | `web.pages` | Web app | Every page route in the app's fixed list loads, each within 1500 ms | 99.9 % | hourly | 14 · Experience |
 | `repo.metadata` | Git hosting | The browse `lastmod` route answers for a commit this run pushed | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
-| `id.session.reads` | Identity | The passkey `used` mark, the legacy quota-request create and the api's own settings read all answer | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `id.session.reads` | Identity | The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `kl.commands` | Identity | `kl ws`, `kl ws list --team` and `kl logout` answer | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |

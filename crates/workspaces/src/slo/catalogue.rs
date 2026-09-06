@@ -386,7 +386,7 @@ pub const CATALOGUE: &[Slo] = &[
     // route: each is a single read whose failure is the same failure, and a per-route id would be
     // a catalogue nobody reads.
     Slo { id: "repo.metadata", feature: "Git hosting", sli: "The browse `lastmod` route answers for a commit this run pushed", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark, the legacy quota-request create and the api's own settings read all answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "kl.commands", feature: "Identity", sli: "`kl ws`, `kl ws list --team` and `kl logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.reads", feature: "Admin", sli: "`/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
 

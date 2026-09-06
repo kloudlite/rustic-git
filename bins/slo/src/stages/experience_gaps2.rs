@@ -262,9 +262,10 @@ pub(super) async fn session_reads(c: &mut Ctx) {
             if doc.get("clone_host").is_none() && doc.get("cloneHost").is_none() {
                 return Err(anyhow!("the settings read carries no clone host"));
             }
-            // `NewPasskey` (crates/api/src/passkeys.rs:14) is `id` + `public_key`, with the rest
-            // defaulted — `credential_id` was a field the route has never had, and it answered 422.
-            let made = post(c, &passkeys, &jwt, json!({ "id": name, "public_key": name, "name": name }))
+            // `NewPasskey` (crates/api/src/passkeys.rs:12) is `#[serde(rename_all = "camelCase")]`,
+            // so the wire field is `publicKey` — `public_key` was still a 422, exactly as
+            // `credential_id` had been.
+            let made = post(c, &passkeys, &jwt, json!({ "id": name, "publicKey": name, "name": name }))
                 .await
                 .context("could not register a passkey to mark used")?;
             let id = made
@@ -272,8 +273,15 @@ pub(super) async fn session_reads(c: &mut Ctx) {
                 .and_then(Value::as_str)
                 .unwrap_or(&name)
                 .to_string();
+            // The `used` mark is PEER ONLY (`passkeys.rs:152`, `peer_only`) — it is stamped after a
+            // sign-in, before a session exists — so what a session-holding probe can assert is the
+            // refusal, which is the same half `id.signin.passkey` asserts for the lookup.
             let used = api(c, &format!("/v1/passkeys/{id}/used"));
-            let mark = post(c, &used, &jwt, Value::Null).await.context("the `used` mark was refused");
+            let (status, body) = raw(c, reqwest::Method::POST, &used, &jwt, Some(json!({ "counter": 1 })), &[]).await?;
+            let mark = match status.as_u16() {
+                401 | 403 => Ok(()),
+                other => Err(anyhow!("the `used` mark answered {other} to a session, and it is peer-only: {}", body.chars().take(160).collect::<String>())),
+            };
             // The credential goes whatever the mark did — a probe passkey left on the account is
             // a credential nobody owns.
             let _ = super::call(
@@ -315,11 +323,17 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
             // of these exits 1 with "not logged in", which measures the probe, not the CLI. The
             // same staging `id.cli.sshconfig` does, and the same revoke afterwards.
             let (token, id) = super::experience_gaps::cli_login(c, &jwt, &device).await?;
+            // A 404 is SUCCESS for an undo: `kl logout` revokes the token itself, so the
+            // credential this would take back is already gone — and "already revoked" is the state
+            // the compensation wanted. Anything else still fails the step.
             let revoke = || async {
-                super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &jwt, None)
-                    .await
-                    .map(|_| ())
-                    .context("the CLI token was left LIVE")
+                let url = api(c, &format!("/v1/cli/tokens/{id}"));
+                let (status, body) = raw(c, reqwest::Method::DELETE, &url, &jwt, None, &[]).await?;
+                match status.as_u16() {
+                    404 => Ok(()),
+                    code if (200..300).contains(&code) => Ok(()),
+                    code => Err(anyhow!("the CLI token was left LIVE: {code}: {}", body.chars().take(160).collect::<String>())),
+                }
             };
             let body = async {
                 let dir = home.join(".config/kl");

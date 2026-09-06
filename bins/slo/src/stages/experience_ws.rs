@@ -23,15 +23,21 @@ use crate::ctx::Ctx;
 /// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
 /// availability SLOs with no target latency; theirs is a whole seeded create plus an exec, which
 /// is the same 180 s the seeded step itself is given, plus room for the second create.
-const ADD_CEILING: Duration = Duration::from_secs(150);
+const ADD_CEILING: Duration = Duration::from_secs(200);
 const REMOVE_CEILING: Duration = Duration::from_secs(90);
-const SEEDED_CEILING: Duration = Duration::from_secs(150);
-const KEY_CEILING: Duration = Duration::from_secs(150);
-const HOME_CEILING: Duration = Duration::from_secs(150);
+const SEEDED_CEILING: Duration = Duration::from_secs(200);
+const KEY_CEILING: Duration = Duration::from_secs(200);
+const HOME_CEILING: Duration = Duration::from_secs(200);
 
 /// How long a create is given to reach `ready` INSIDE a step. Below every ceiling above, so a
 /// workspace that never starts leaves room for the step to say so.
-const READY: Duration = Duration::from_secs(110);
+///
+/// 150, not 110: the git-seed init container RETRIES its clone 24 times at 5 s
+/// (`crates/workspaces/src/k8s.rs`, the seed command), which is a 120 s window a rotated platform
+/// key is expected to be picked up inside — `key.platform.regenerate` was cut off at 108 s and
+/// reported the fleet doing exactly what it is written to do. Every ceiling above it moved with
+/// it, so a step still gets to say WHY rather than timing out on its own.
+const READY: Duration = Duration::from_secs(150);
 
 /// One exec's own ceiling. The polls below repeat it, so this bounds a single API-server round
 /// trip, not the wait.
