@@ -47,7 +47,7 @@ spec:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
-                pkg-config libssl-dev clang cmake python3 >/dev/null
+                pkg-config libssl-dev clang cmake python3 tini procps jq >/dev/null
               # HOME on the disk: gh's login, the git identity, safe.directory and ssh known_hosts
               # all live under it and must outlive a pod restart.
               mkdir -p /work/home /work/bin
@@ -65,7 +65,9 @@ spec:
                 echo "fbecbfd375b3686002c2e81d51c390172f5ffba3d6b47920d55342cb03f557af  /work/bin/kubectl" | sha256sum -c - >/dev/null
                 chmod +x /work/bin/crane /work/bin/kubectl
               fi
-              echo ready; exec sleep infinity
+              # tini as PID 1: a bare `sleep` never reaps, so every finished probe run stayed a
+              # zombie and the runner kept seeing "a suite is already running".
+              echo ready; exec /usr/bin/tini -- sleep infinity
           env:
             - { name: CARGO_HOME, value: /work/cargo }
             - { name: CARGO_TARGET_DIR, value: /work/target }

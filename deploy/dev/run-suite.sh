@@ -22,7 +22,7 @@ esac
 ACTIVE=$(kubectl -n kloudlite get jobs -o json | python3 -c 'import sys,json; print(" ".join(j["metadata"]["name"] for j in json.load(sys.stdin)["items"] if (j.get("status",{}).get("active") or 0)>0))')
 [ -z "$ACTIVE" ] || { echo "refusing: probe Job(s) active: $ACTIVE" >&2; exit 3; }
 LOG=/work/runs/$SUITE-$(date -u +%H%M).log
-kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pgrep -x kloudlite-slo >/dev/null && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
+kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; ps -o stat= -C kloudlite-slo 2>/dev/null | grep -qv Z && { echo 'a suite is already running in the pod' >&2; exit 3; }; \
   cd /work/src && (nohup env KLOUDLITE_SLO_USER=$U KLOUDLITE_SLO_OTHER=$O KLOUDLITE_SLO_BUDGET_SECS=$B KLOUDLITE_SLO_SSH_KEY=$K/id_ed25519 \
   /work/target/dev-image/kloudlite-slo run --suite $SUITE > $LOG 2>&1 &); sleep 1; echo started $LOG"
 else LOG=$ATTACH; echo "attached to $LOG"; fi

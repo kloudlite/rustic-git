@@ -11,7 +11,8 @@ pulls. There is no rsync, so what runs in the cluster is always a pushed commit.
 | bring the pod to origin/master and build | `deploy/dev/sync.sh` (every binary) or `deploy/dev/sync.sh --slo` (probe + `kl` only) |
 | tests, clippy | `deploy/dev/test.sh -p <crate> --lib …` (pulls first); clippy: `deploy/dev/exec.sh cargo clippy --workspace --all-targets -- -D warnings` |
 | a shell in the checkout | `deploy/dev/exec.sh` |
-| run a probe suite | `deploy/dev/slo.sh fast\|hourly\|weekly\|monthly` — the CronJob's tenant, key and budget, no image |
+| run a probe suite, fail fast | `deploy/dev/run-suite.sh weekly` (kills on the first failed step, closes the row); `--no-fail-fast` to let it finish; `--attach /work/runs/<log>` to watch one already running |
+| watch a run live | `deploy/dev/tail.sh` — one line per step; the console's SLO page shows the same run stage by stage |
 | serve a tier from the pod | build it, run the binary in the pod with that tier's env, then `kubectl -n kloudlite patch svc <tier>` to select `app: dev` (label the pod) — and put the selector back |
 
 ## Git: the pod pulls, and can push
