@@ -160,7 +160,8 @@ pub(super) async fn pages(c: &mut Ctx) {
             let mut slow = vec![];
             for path in paths {
                 let at = std::time::Instant::now();
-                super::git::renders(c, &format!("{base}{path}"), &path)
+                let landing = path.split('?').next().unwrap_or(&path).to_string();
+                super::git::renders(c, &format!("{base}{path}"), &landing)
                     .await
                     .with_context(|| format!("{path} did not render"))?;
                 let ms = at.elapsed().as_millis();
@@ -203,8 +204,11 @@ const STATIC_PAGES: [&str; 15] = [
 ];
 
 /// The repo-scoped routes, appended to this run's own repo.
+/// `/commits` takes its branch as `?ref=`, not as a path segment (`app/(shell)/[owner]/[repo]/
+/// commits/page.tsx` — `searchParams: { ref, from }`), which is why the query is on the path here
+/// and `renders` compares the path alone.
 const REPO_PAGES: [&str; 6] =
-    ["", "/tree/main", "/commits/main", "/pulls", "/pulls/new", "/settings"];
+    ["", "/tree/main", "/commits?ref=main", "/pulls", "/pulls/new", "/settings"];
 
 /// `repo.metadata`: the browse `lastmod` route answers for a commit this run pushed.
 ///
@@ -258,7 +262,9 @@ pub(super) async fn session_reads(c: &mut Ctx) {
             if doc.get("clone_host").is_none() && doc.get("cloneHost").is_none() {
                 return Err(anyhow!("the settings read carries no clone host"));
             }
-            let made = post(c, &passkeys, &jwt, json!({ "name": name, "credential_id": name, "public_key": name }))
+            // `NewPasskey` (crates/api/src/passkeys.rs:14) is `id` + `public_key`, with the rest
+            // defaulted — `credential_id` was a field the route has never had, and it answered 422.
+            let made = post(c, &passkeys, &jwt, json!({ "id": name, "public_key": name, "name": name }))
                 .await
                 .context("could not register a passkey to mark used")?;
             let id = made
@@ -298,24 +304,54 @@ pub(super) async fn session_reads(c: &mut Ctx) {
 /// `kl logout` is LAST and deliberate: it forgets this pod's stored token, which every earlier
 /// `kl` step has already used — and the token itself is revoked by teardown either way.
 pub(super) async fn kl_commands(c: &mut Ctx) {
+    let device = format!("{}-klc", c.prefix());
+    let home = c.tmp.join("klhome-cmd");
     c.step("kl.commands", CLI_CEILING, move |c| {
-        let kl = c.programs.kl.clone();
-        let env = std::collections::HashMap::from([("HOME".to_string(), c.tmp.display().to_string())]);
+        let jwt = c.probe_jwt.clone();
+        let (kl, api_url) = (c.programs.kl.clone(), c.cfg.api_url.clone());
+        let probe = c.probe_user.clone();
         async move {
-            for args in [vec!["ws", "list"], vec!["ws", "list", "--team", "no-such-team"], vec!["logout"]] {
-                let argv: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
-                let what = argv.join(" ");
-                // `kl ws list --team` on a team nobody is in must ANSWER, empty or refused — what
-                // it may not do is fail to run at all, which is what a broken CLI looks like.
-                if let Err(e) = tools::run(&kl, &argv, &env, None, CLI_CEILING).await {
-                    let detail = format!("{e:#}");
-                    let refused = detail.contains("no such team") || detail.contains("not a member");
-                    if !(what.contains("--team") && refused) {
-                        return Err(anyhow!("`kl {what}` failed: {detail}"));
+            // A real CLI token and the config `kl login` would have written: without it every one
+            // of these exits 1 with "not logged in", which measures the probe, not the CLI. The
+            // same staging `id.cli.sshconfig` does, and the same revoke afterwards.
+            let (token, id) = super::experience_gaps::cli_login(c, &jwt, &device).await?;
+            let revoke = || async {
+                super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &jwt, None)
+                    .await
+                    .map(|_| ())
+                    .context("the CLI token was left LIVE")
+            };
+            let body = async {
+                let dir = home.join(".config/kl");
+                std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
+                let cfg = json!({
+                    "api": api_url,
+                    "token": token,
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "username": probe,
+                });
+                std::fs::write(dir.join("config.json"), cfg.to_string()).context("could not stage the CLI login")?;
+                let env = std::collections::HashMap::from([
+                    ("HOME".to_string(), home.display().to_string()),
+                    ("KL_CONFIG_DIR".to_string(), dir.display().to_string()),
+                ]);
+                // `logout` LAST: it forgets the config the two before it read.
+                for args in [vec!["ws", "list"], vec!["ws", "list", "--team", "no-such-team"], vec!["logout"]] {
+                    let argv: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+                    let what = argv.join(" ");
+                    if let Err(e) = tools::run(&kl, &argv, &env, None, CLI_CEILING).await {
+                        let detail = format!("{e:#}");
+                        // `--team` on a team nobody is in must ANSWER, empty or refused; what it
+                        // may not do is fail to run at all.
+                        let refused = detail.contains("no such team") || detail.contains("not a member");
+                        if !(what.contains("--team") && refused) {
+                            return Err(anyhow!("`kl {what}` failed: {detail}"));
+                        }
                     }
                 }
-            }
-            Ok(())
+                Ok(())
+            };
+            crate::drill::undoing(CLI_CEILING - Duration::from_secs(10), body, revoke).await
         }
         .boxed()
     })
@@ -340,11 +376,14 @@ pub(super) async fn reads(c: &mut Ctx) {
                 return Err(anyhow!("`/admin/nodes` did not answer a list"));
             }
             let doc = get(c, &schema, &jwt).await.context("`/admin/settings/schema`")?;
-            // The Configuration screen renders from this: an empty schema is a blank page.
-            let fields = doc.get("fields").and_then(Value::as_array).map(Vec::len).unwrap_or(0)
-                + doc.as_array().map(Vec::len).unwrap_or(0);
-            if fields == 0 {
-                return Err(anyhow!("the settings schema names no field"));
+            // `{ central: [...], cluster: [...] }` — one row per meta-table entry
+            // (`api/admin/schema.rs:246`). BOTH scopes, because the Configuration screen renders
+            // the two tabs from them and a missing one is a blank tab.
+            for scope in ["central", "cluster"] {
+                let rows = doc.get(scope).and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+                if rows == 0 {
+                    return Err(anyhow!("the settings schema names no {scope} field"));
+                }
             }
             // `active` is what the region already is — the write is the route being exercised,
             // never a change to the fleet's own state.

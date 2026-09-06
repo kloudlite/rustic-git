@@ -36,7 +36,10 @@ use crate::tools;
 const QUICK: Duration = Duration::from_secs(20);
 const READ_CEILING: Duration = Duration::from_secs(15);
 const KEY_BODY: Duration = Duration::from_secs(60);
-const KEY_CEILING: Duration = Duration::from_secs(KEY_BODY.as_secs() + UNDO_SLACK);
+/// The add half's body plus its undo slack, plus the revocation window the remove half waits out:
+/// a key is not really removed until the last node's auth cache has let go of it.
+const KEY_CEILING: Duration =
+    Duration::from_secs(KEY_BODY.as_secs() + UNDO_SLACK + REVOCATION_WINDOW.as_secs());
 const MERGE_CEILING: Duration = Duration::from_secs(300);
 const MERGEABILITY_CEILING: Duration = Duration::from_secs(60);
 const TEAM_ENV_CEILING: Duration = Duration::from_secs(240);
@@ -155,7 +158,7 @@ pub(super) async fn cli_tokens(c: &mut Ctx) {
 
 /// The whole `kl login` handshake, answering `(token, id)`. The device name carries the run
 /// prefix, which is teardown's only handle on what this mints.
-async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(String, String)> {
+pub(super) async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(String, String)> {
     let started = post(c, &api(c, "/v1/cli/code"), "", json!({ "device": device }))
         .await
         .context("the login handshake was refused")?;
@@ -328,21 +331,50 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
                 ssh_works(&git_bin, &argv, &env, KEY_BODY - Duration::from_secs(20)).await
             };
             undoing(KEY_BODY, clones, forget).await?;
-            match tools::run(&git_bin, &argv, &env, None, Duration::from_secs(30)).await {
-                Ok(_) => Err(anyhow!("a removed key could still read the repo")),
-                Err(e) => {
-                    let detail = format!("{e:#}");
-                    if detail.contains("Permission denied") {
-                        Ok(())
-                    } else {
-                        Err(anyhow!("ssh failed for some other reason than a refusal: {detail}"))
-                    }
-                }
+            // Polled, not asked once: the credential lookup is cached per NODE for
+            // `auth::CACHE_TTL` (60 s, `crates/storage/src/auth.rs:41`), and `remove_ssh_key`
+            // (:139) evicts only the cache of the process that performed the delete — "other nodes
+            // still take up to a minute" is the design's own sentence (:105). A refusal that
+            // arrives inside that window is the fleet working; one that never arrives is the leak.
+            let refused = refused_within(&git_bin, &argv, &env, REVOCATION_WINDOW).await;
+            match refused {
+                true => Ok(()),
+                false => Err(anyhow!(
+                    "a removed key could still read the repo after {} s, which is past the auth cache's own TTL",
+                    REVOCATION_WINDOW.as_secs()
+                )),
             }
         }
         .boxed()
     })
     .await;
+}
+
+/// The window a removed key may still be honoured in: the auth cache's TTL plus a beat. Anything
+/// past it is a credential the fleet forgot to forget.
+const REVOCATION_WINDOW: Duration = Duration::from_secs(75);
+
+/// Whether the key is refused before `cap` runs out. A refusal is `Permission denied`; anything
+/// else ssh says is neither an acceptance nor a refusal and keeps the loop going until the window
+/// closes, so a transient network error cannot read as a revocation.
+async fn refused_within(
+    git: &str,
+    argv: &[String],
+    env: &std::collections::HashMap<String, String>,
+    cap: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        match tools::run(git, argv, env, None, Duration::from_secs(30)).await {
+            Ok(_) => {}
+            Err(e) if format!("{e:#}").contains("Permission denied") => return true,
+            Err(e) => tracing::info!(error = %format!("{e:#}"), "slo.key.revocation.waiting"),
+        }
+        if start.elapsed() >= cap {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// The SSH clone URL for one of the probe's own repos.

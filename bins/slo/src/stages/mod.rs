@@ -105,9 +105,18 @@ pub(crate) async fn raw(
     // `without_url`: reqwest puts the whole URL in its Display, and these URLs carry query
     // strings — `?poll=` on the CLI handshake is a one-shot credential. A connection error is the
     // one path where a secret reaches a step detail without anyone formatting it there.
-    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
+    // The PATH, never the query: reqwest's own Display carries the whole URL and a query string
+    // here can be a one-shot credential (`?poll=` on the CLI handshake) — but an error with no
+    // address at all reads as "error sending request" and says nothing, which cost a live run its
+    // triage. The path is what tells a reader the URL was malformed.
+    let r = req.send().await.map_err(|e| anyhow!("{} ({})", e.without_url(), path_of(url)))?;
     let status = r.status();
     Ok((status, r.text().await.unwrap_or_default()))
+}
+
+/// A URL with its query string cut off — safe to put in a step detail.
+pub(crate) fn path_of(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
 }
 
 /// `{api_url}{path}`, with the trailing slash the deployment may or may not have set removed once.
@@ -670,18 +679,20 @@ mod http_tests {
     use super::*;
     use crate::testkit;
 
-    /// A URL is not a safe thing to put in a step detail. `/v1/cli/token?poll=…` carries a
-    /// one-shot credential in its query string, and reqwest's own `Display` prints the whole URL —
-    /// so a connection error is the one path where a secret reaches ClickHouse with nobody having
-    /// formatted it there.
+    /// A QUERY STRING is not a safe thing to put in a step detail — `/v1/cli/token?poll=…` carries
+    /// a one-shot credential, and reqwest's own `Display` prints the whole URL, so a connection
+    /// error is the one path where a secret reaches ClickHouse with nobody formatting it there.
+    /// The PATH is deliberately kept: a live run reported "error sending request" with no address
+    /// at all, and a malformed URL is invisible without it.
     #[tokio::test]
-    async fn a_connection_error_never_carries_the_url() {
+    async fn a_connection_error_carries_the_path_and_never_the_query() {
         let c = testkit::ctx().await;
         // Port 1, refused: the failure is reqwest's, which is the one that carries the URL.
         let url = format!("{}/v1/cli/token?poll=SECRETPOLLVALUE", c.cfg.api_url);
         let e = get(&c, &url, "").await.expect_err("nothing is listening");
         let detail = format!("{e:#}");
         assert!(!detail.contains("SECRETPOLLVALUE"), "the poll secret leaked: {detail}");
-        assert!(!detail.contains("/v1/cli/token"), "the url leaked: {detail}");
+        assert!(!detail.contains("poll="), "the query leaked: {detail}");
+        assert!(detail.contains("/v1/cli/token"), "the path is what makes a bad URL visible: {detail}");
     }
 }

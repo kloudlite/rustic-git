@@ -171,7 +171,10 @@ async fn agent_heartbeat(c: &mut Ctx) {
                 // repeated here would go stale the day a region moved its pool.
                 let script = "stat -c %Y \"${WS_POOL:-/mnt/wspool}/.agent-heartbeat\"; date +%s";
                 let (code, out, err) =
-                    crate::kube::exec(&k, "kube-system", &name, None, &["sh", "-c", script], Duration::from_secs(15)).await?;
+                    // NAMED: the agent pod carries more than one container, and an exec that names
+                    // none is answered `400 Bad Request` at the WebSocket upgrade — which reads as
+                    // a broken agent rather than a probe that did not say where to run.
+                    crate::kube::exec(&k, "kube-system", &name, Some(AGENT_CONTAINER), &["sh", "-c", script], Duration::from_secs(15)).await?;
                 if code != 0 {
                     return Err(anyhow!("{name} has no heartbeat file: exit {code}: {}", err.trim()));
                 }
@@ -189,6 +192,9 @@ async fn agent_heartbeat(c: &mut Ctx) {
     })
     .await;
 }
+
+/// The DaemonSet's container name (`deploy/k3s/agent-daemonset.yaml`).
+const AGENT_CONTAINER: &str = "agent";
 
 /// Five minutes: the agent beats far more often than that, and the DaemonSet's own probe is what
 /// restarts a pod that stopped — this is the window in which that restart should already have
@@ -262,17 +268,16 @@ async fn origin(c: &mut Ctx) {
     let Some(host) = c.cfg.hosts.first().cloned() else {
         return c.skip("edge.origin", "no hostname to pin");
     };
-    // The env is the override, not the source: left empty it used to skip on EVERY run, so this id
-    // has produced no sample since it shipped and its 30-day attainment was undefined. The address
-    // is a fact the cluster already publishes — the Ingress's own `status.loadBalancer` — so it is
-    // read from there. `cf-sync.sh` allow-lists Cloudflare's ranges on the ingress, so a direct
-    // dial is very likely REFUSED: that is still the origin answering, which is all this SLI is.
-    let ip = match c.cfg.origin_ip.clone() {
-        Some(ip) => ip,
-        None => match ingress_ip().await {
-            Ok(ip) => ip,
-            Err(e) => return c.skip("edge.origin", &format!("no origin address: {e:#}")),
-        },
+    // Back to a documented skip when the env is empty, and this time the reason is measured
+    // rather than assumed: reading the address off the Ingress worked, and the dial timed out
+    // after 15 s. A pod cannot reach its own cluster's public load-balancer address on Azure —
+    // the LB does not hairpin — so no address the CLUSTER publishes is dialable from inside it.
+    // The env stays as the override for a probe run from somewhere that can reach it.
+    let Some(ip) = c.cfg.origin_ip.clone() else {
+        return c.skip(
+            "edge.origin",
+            "no KLOUDLITE_SLO_ORIGIN_IP: the ingress address the cluster publishes does not hairpin back into the pod network, so a probe inside the cluster cannot dial the origin",
+        );
     };
     c.step("edge.origin", ORIGIN_CEILING, move |_| {
         async move {
@@ -296,25 +301,6 @@ async fn origin(c: &mut Ctx) {
         .boxed()
     })
     .await;
-}
-
-/// The address the region's ingress controller publishes for our own Ingress objects.
-///
-/// From the Ingress rather than from the ingress-controller Service: the probe's AKS grants are
-/// namespaced to `kloudlite`, and the object that names OUR front door is the one in it.
-async fn ingress_ip() -> Result<String> {
-    use k8s_openapi::api::networking::v1::Ingress;
-    let aks = crate::drill::incluster()?;
-    let api: kube::Api<Ingress> = kube::Api::namespaced(aks, "kloudlite");
-    let list = api
-        .list(&kube::api::ListParams::default())
-        .await
-        .map_err(|e| anyhow!("could not list the ingresses: {e}"))?;
-    list.items
-        .iter()
-        .filter_map(|i| i.status.as_ref()?.load_balancer.as_ref()?.ingress.as_ref()?.first()?.ip.clone())
-        .next()
-        .ok_or_else(|| anyhow!("no Ingress in `kloudlite` publishes a load balancer address"))
 }
 
 /// `edge.ssh.lb`: the SSH load balancer accepts a TCP connection.
