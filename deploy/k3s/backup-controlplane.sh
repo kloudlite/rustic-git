@@ -61,7 +61,7 @@ tar -czf "$WORK/k3s-backup.tgz" -C "$WORK" state.db identity.tgz objects.yaml
 
 : "${SAS_FILE:=/etc/kloudlite/k3s-backup.sas}"
 : "${KEY_FILE:=/etc/kloudlite/k3s-backup.key}"
-: "${ACCOUNT:=kloudlitegitkolomi}"
+: "${ACCOUNT:=rusticgitkolomi}"
 : "${CONTAINER:=k3s-backup}"
 [ -s "$KEY_FILE" ] || { echo "no encryption key at $KEY_FILE — see deploy/k3s/README.md, Control-plane backup step 1b" >&2; exit 1; }
 openssl enc -aes-256-cbc -pbkdf2 -salt -pass "file:$KEY_FILE" -in "$WORK/k3s-backup.tgz" -out "$WORK/k3s-backup.tgz.enc"
