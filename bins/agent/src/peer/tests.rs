@@ -445,7 +445,26 @@ impl PeerServer {
 /// Serve `app` on the fixed production port, exclusively.
 async fn serve_on_the_peer_port(app: Router) -> PeerServer {
     let guard = peer_port_lock().lock_owned().await;
-    let listener = std::net::TcpListener::bind("127.0.0.1:8444").unwrap();
+    // The lock serialises these tests, but the previous server's socket can still be closing when
+    // the next one binds — the port is the production one and cannot move, so wait for it briefly
+    // instead of failing the whole suite on a race with the kernel (CI, 2026-09-06).
+    let listener = {
+        let mut last = None;
+        let mut got = None;
+        for _ in 0..40 {
+            match std::net::TcpListener::bind("127.0.0.1:8444") {
+                Ok(l) => {
+                    got = Some(l);
+                    break;
+                }
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        got.unwrap_or_else(|| panic!("peer port 8444 never freed: {last:?}"))
+    };
     listener.set_nonblocking(true).unwrap();
     let tokio_listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let (stop, rx) = tokio::sync::oneshot::channel::<()>();
