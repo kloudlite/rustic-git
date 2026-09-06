@@ -93,7 +93,10 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
 fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
-    ctx_with_homes_export(pool, routes, nix, Some("test:/".into()))
+    // A literal address, never a name: the agent resolves the export host at boot, and a name
+    // that happens to resolve on a laptop (`test`) is NXDOMAIN inside the cluster, where these
+    // tests also run — 160 of them failed there on "Name or service not known".
+    ctx_with_homes_export(pool, routes, nix, Some("127.0.0.1:/".into()))
 }
 
 /// The `WS_HOMES_EXPORT`-unset variant: a node with no shared-home mount, which every workspace
@@ -838,7 +841,7 @@ async fn a_parent_a_full_node_declined_is_claimed_by_a_node_with_room() {
             binding_route(),
         ],
         Arc::new(FakeNix::default()),
-        Some("test:/".into()),
+        Some("127.0.0.1:/".into()),
     );
     kloudlite_agent::claim::claim_workspace(&w, &roomy).await.unwrap();
     let sent = roomy_rec.sent("PUT", WS_STATUS);
@@ -5130,7 +5133,7 @@ fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> 
             pool.to_string_lossy().into(),
             "r1".into(),
             vec!["session".into(), "env".into()],
-            Some("test:/".into()),
+            Some("127.0.0.1:/".into()),
             Arc::new(FakeNix::default()),
             profiles,
             test_settings(),
