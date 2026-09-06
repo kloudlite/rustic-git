@@ -34,10 +34,19 @@ fn userkey_key(owner: &str) -> OsPath {
     OsPath::from(format!("auth/userkey/{owner}"))
 }
 
-/// How long a credential lookup is reused. Every authenticated request needs one, and an object
-/// store round trip is far slower than the request itself; credentials change rarely.
-/// The cost is revocation latency: a deleted token keeps working for up to this long. A miss is
-/// cached for the same time, except that registering the credential clears it.
+/// How long a credential MISS is reused. A sprayed bogus token or fingerprint is one object-store
+/// GET each without this, and there is an unbounded supply of them.
+///
+/// Hits are NOT cached, deliberately. They were, for the same round-trip reason, and the cost was
+/// revocation latency — but the cache is per PROCESS while the revocation happens in another one:
+/// `remove_ssh_key` and `revoke_token_digest` run in the api tier, and the credential is checked
+/// in every `kloudlite-srv` pod, whose caches nothing evicted. A key deleted through the API kept
+/// opening SSH sessions for a minute (found by the probe's `key.ssh.lifecycle`, 2026-09-06). A
+/// revoked credential must stop working now, everywhere, and the price is one small GET per
+/// authenticated request against the store the request is about to read anyway.
+///
+// ponytail: no cross-process invalidation; if that GET ever shows in a profile, add a peer
+// broadcast that evicts by key and cache hits again behind it.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Entries (hits and misses together) past which a miss sweeps the map: every cached miss and
@@ -57,8 +66,10 @@ impl Store {
     async fn lookup(&self, key: OsPath) -> Result<Option<String>> {
         let cache_key = key.to_string();
         if let Some((at, v)) = self.auth_cache().get(&cache_key) {
-            if at.elapsed() < CACHE_TTL {
-                return Ok(v.clone());
+            // A cached MISS answers; a cached hit is never trusted, so a revocation in another
+            // process takes effect on the next request rather than at the end of the TTL.
+            if v.is_none() && at.elapsed() < CACHE_TTL {
+                return Ok(None);
             }
         }
         let owner = match self.os.get(&key).await {
@@ -78,13 +89,22 @@ impl Store {
         // unbounded growth.
         // ponytail: sweep-on-overflow, not LRU; an LRU crate only if a profile says so.
         let mut cache = self.auth_cache();
-        if owner.is_none() && cache.len() >= NEG_CAP {
-            cache.retain(|_, (at, v)| v.is_some() && at.elapsed() < CACHE_TTL);
-            if cache.len() >= NEG_CAP {
-                cache.clear();
+        match &owner {
+            // Only misses are kept, so the map holds exactly the sprayed-credential entries the
+            // cap exists for and the sweep no longer has hits to preserve.
+            None => {
+                if cache.len() >= NEG_CAP {
+                    cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+                    if cache.len() >= NEG_CAP {
+                        cache.clear();
+                    }
+                }
+                cache.insert(cache_key, (Instant::now(), None));
+            }
+            Some(_) => {
+                cache.remove(&cache_key);
             }
         }
-        cache.insert(cache_key, (Instant::now(), owner.clone()));
         Ok(owner)
     }
 
@@ -234,6 +254,7 @@ mod tests {
     use crate::store::Store;
     use std::time::Instant;
     use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::ObjectStoreExt;
     use std::sync::Arc;
 
     async fn store() -> (Store, tempfile::TempDir) {
@@ -291,6 +312,21 @@ mod tests {
         assert_eq!(store.owner_for_fingerprint(fp).await.unwrap().as_deref(), Some("alice"));
         store.remove_ssh_key(fp).await.unwrap();
         assert_eq!(store.owner_for_fingerprint(fp).await.unwrap(), None);
+    }
+
+    /// The revocation above happens in the process that also authenticates. The real one does not:
+    /// the api tier deletes the key and every `kloudlite-srv` pod checks it, so an eviction that
+    /// only clears the local map left the key working elsewhere for a TTL. Nothing may cache a
+    /// HIT — here the deletion goes straight to the object store, behind the cache's back, and
+    /// the very next lookup must already refuse.
+    #[tokio::test]
+    async fn a_credential_revoked_in_another_process_stops_at_once() {
+        let (store, _dir) = store().await;
+        let fp = "SHA256:another-process";
+        store.add_ssh_key("alice", fp).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint(fp).await.unwrap().as_deref(), Some("alice"));
+        store.os.delete(&super::sshkey_key(fp)).await.unwrap();
+        assert_eq!(store.owner_for_fingerprint(fp).await.unwrap(), None, "a hit must not be cached");
     }
 
     /// Misses are cached — a sprayed bogus token must not be one object-store GET each — but
