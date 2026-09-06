@@ -35,9 +35,7 @@ const CLI_CEILING: Duration = Duration::from_secs(30);
 /// instead is that Kubernetes is TRACKING the ceiling (`status.hard` and `status.used` are both
 /// filled in), which is the state in which it does the refusing.
 pub(super) async fn quota_namespace(c: &mut Ctx) {
-    let Some(k) = c.kube.clone() else {
-        return c.skip("ws.quota.namespace", "no kubeconfig");
-    };
+    let Some(k) = c.kube.clone() else { return c.skip("ws.quota.namespace", "no kubeconfig") };
     let ns = kloudlite_workspaces::crd::ws_namespace(&c.probe_user, "");
     c.step("ws.quota.namespace", KUBE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
@@ -96,20 +94,9 @@ fn millis(q: &str) -> Option<u64> {
 
 fn bytes(q: &str) -> Option<u64> {
     let q = q.trim();
-    for (suffix, mult) in [
-        ("Ki", 1u64 << 10),
-        ("Mi", 1 << 20),
-        ("Gi", 1 << 30),
-        ("Ti", 1u64 << 40),
-        ("K", 1_000),
-        ("M", 1_000_000),
-        ("G", 1_000_000_000),
-    ] {
+    for (suffix, mult) in [("Ki", 1u64 << 10), ("Mi", 1 << 20), ("Gi", 1 << 30), ("Ti", 1u64 << 40), ("K", 1_000), ("M", 1_000_000), ("G", 1_000_000_000)] {
         if let Some(n) = q.strip_suffix(suffix) {
-            return n
-                .parse::<f64>()
-                .ok()
-                .map(|v| (v * mult as f64).round() as u64);
+            return n.parse::<f64>().ok().map(|v| (v * mult as f64).round() as u64);
         }
     }
     q.parse::<f64>().ok().map(|v| v.round() as u64)
@@ -121,9 +108,7 @@ fn bytes(q: &str) -> Option<u64> {
 /// gateway's ingress rule), and it is the only thing between one person's workspace and the rest
 /// of the cluster. `env.attach.pair` reads the `attach-{ws}` pair and nothing read these.
 pub(super) async fn services_policies(c: &mut Ctx) {
-    let Some(k) = c.kube.clone() else {
-        return c.skip("env.services.policies", "no kubeconfig");
-    };
+    let Some(k) = c.kube.clone() else { return c.skip("env.services.policies", "no kubeconfig") };
     let ns = kloudlite_workspaces::crd::ws_namespace(&c.probe_user, "");
     c.step("env.services.policies", KUBE_CEILING, move |_| {
         async move {
@@ -134,11 +119,8 @@ pub(super) async fn services_policies(c: &mut Ctx) {
                 .await
                 .map_err(|e| anyhow!("could not list the policies in {ns}: {e}"))?;
             let names: Vec<String> = list.items.iter().map(kube::ResourceExt::name_any).collect();
-            let missing: Vec<&str> = BINDING_POLICIES
-                .iter()
-                .copied()
-                .filter(|p| !names.iter().any(|n| n == p))
-                .collect();
+            let missing: Vec<&str> =
+                BINDING_POLICIES.iter().copied().filter(|p| !names.iter().any(|n| n == p)).collect();
             if !missing.is_empty() {
                 return Err(anyhow!("{ns} is missing {}", missing.join(", ")));
             }
@@ -152,13 +134,8 @@ pub(super) async fn services_policies(c: &mut Ctx) {
 /// The policies `apply_binding` writes into every owner namespace, by name. Repeated rather than
 /// imported for the same reason `BOOT_FIELDS` is: what matters is the name on the object in the
 /// cluster, and a probe that derived it from the same code that wrote it would agree with itself.
-const BINDING_POLICIES: [&str; 5] = [
-    "default-deny",
-    "allow-dns",
-    "allow-same-namespace",
-    "allow-internet-egress",
-    "allow-gateway-ssh",
-];
+const BINDING_POLICIES: [&str; 5] =
+    ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh"];
 
 /// `web.pages`: every page route in the app's fixed list renders, each inside 1500 ms.
 ///
@@ -230,14 +207,8 @@ const STATIC_PAGES: [&str; 15] = [
 /// `/commits` takes its branch as `?ref=`, not as a path segment (`app/(shell)/[owner]/[repo]/
 /// commits/page.tsx` — `searchParams: { ref, from }`), which is why the query is on the path here
 /// and `renders` compares the path alone.
-const REPO_PAGES: [&str; 6] = [
-    "",
-    "/tree/main",
-    "/commits?ref=main",
-    "/pulls",
-    "/pulls/new",
-    "/settings",
-];
+const REPO_PAGES: [&str; 6] =
+    ["", "/tree/main", "/commits?ref=main", "/pulls", "/pulls/new", "/settings"];
 
 /// `repo.metadata`: the browse `lastmod` route answers for a commit this run pushed.
 ///
@@ -254,14 +225,10 @@ pub(super) async fn metadata(c: &mut Ctx) {
         let refs = api(c, &format!("/api/{probe}/{repo}/refs"));
         let base = api(c, &format!("/api/{probe}/{repo}/lastmod"));
         async move {
-            let refs = get(c, &refs, &jwt)
-                .await
-                .context("could not read the refs")?;
+            let refs = get(c, &refs, &jwt).await.context("could not read the refs")?;
             let oid = super::git::oid_of(&refs, "main")
                 .ok_or_else(|| anyhow!("the repo has no `main` to ask about"))?;
-            let doc = get(c, &format!("{base}/{oid}"), &jwt)
-                .await
-                .context("lastmod would not answer")?;
+            let doc = get(c, &format!("{base}/{oid}"), &jwt).await.context("lastmod would not answer")?;
             // An answer that names nothing is the failure the column shows as blank rows.
             if doc.is_null() || (doc.as_object().is_some_and(|o| o.is_empty())) {
                 return Err(anyhow!("lastmod answered nothing for {oid}"));
@@ -291,23 +258,16 @@ pub(super) async fn session_reads(c: &mut Ctx) {
         async move {
             // Public and display-only, so no token: a settings read that started demanding one
             // would break the clone box for every visitor of a public repo.
-            let doc = get(c, &central, "")
-                .await
-                .context("the api's own settings read")?;
+            let doc = get(c, &central, "").await.context("the api's own settings read")?;
             if doc.get("clone_host").is_none() && doc.get("cloneHost").is_none() {
                 return Err(anyhow!("the settings read carries no clone host"));
             }
             // `NewPasskey` (crates/api/src/passkeys.rs:12) is `#[serde(rename_all = "camelCase")]`,
             // so the wire field is `publicKey` — `public_key` was still a 422, exactly as
             // `credential_id` had been.
-            let made = post(
-                c,
-                &passkeys,
-                &jwt,
-                json!({ "id": name, "publicKey": name, "name": name }),
-            )
-            .await
-            .context("could not register a passkey to mark used")?;
+            let made = post(c, &passkeys, &jwt, json!({ "id": name, "publicKey": name, "name": name }))
+                .await
+                .context("could not register a passkey to mark used")?;
             let id = made
                 .get("id")
                 .and_then(Value::as_str)
@@ -317,21 +277,10 @@ pub(super) async fn session_reads(c: &mut Ctx) {
             // sign-in, before a session exists — so what a session-holding probe can assert is the
             // refusal, which is the same half `id.signin.passkey` asserts for the lookup.
             let used = api(c, &format!("/v1/passkeys/{id}/used"));
-            let (status, body) = raw(
-                c,
-                reqwest::Method::POST,
-                &used,
-                &jwt,
-                Some(json!({ "counter": 1 })),
-                &[],
-            )
-            .await?;
+            let (status, body) = raw(c, reqwest::Method::POST, &used, &jwt, Some(json!({ "counter": 1 })), &[]).await?;
             let mark = match status.as_u16() {
                 401 | 403 => Ok(()),
-                other => Err(anyhow!(
-                    "the `used` mark answered {other} to a session, and it is peer-only: {}",
-                    body.chars().take(160).collect::<String>()
-                )),
+                other => Err(anyhow!("the `used` mark answered {other} to a session, and it is peer-only: {}", body.chars().take(160).collect::<String>())),
             };
             // The credential goes whatever the mark did — a probe passkey left on the account is
             // a credential nobody owns.
@@ -346,23 +295,21 @@ pub(super) async fn session_reads(c: &mut Ctx) {
             mark?;
             // The retired create, which the console still unions in. One pending per owner per
             // kind, so a 409 here is the previous run's row and not a failure of the route.
-            let (status, body) = raw(
-                c,
-                reqwest::Method::POST,
-                &legacy,
-                &jwt,
-                // `NewQuotaRequest` nests the dimensions under `requested` (a
-                // `RequestedQuota`, crates/workspaces/src/crd/mod.rs:935) — a flat `diskGb`
-                // is a 422 before the handler ever runs.
-                Some(json!({ "reason": "slo probe legacy create", "requested": { "diskGb": 1 } })),
-                &[],
-            )
-            .await?;
+            let (status, body) =
+                raw(
+                    c,
+                    reqwest::Method::POST,
+                    &legacy,
+                    &jwt,
+                    // `NewQuotaRequest` nests the dimensions under `requested` (a
+                    // `RequestedQuota`, crates/workspaces/src/crd/mod.rs:935) — a flat `diskGb`
+                    // is a 422 before the handler ever runs.
+                    Some(json!({ "reason": "slo probe legacy create", "requested": { "diskGb": 1 } })),
+                    &[],
+                )
+                .await?;
             if !status.is_success() && status.as_u16() != 409 {
-                return Err(anyhow!(
-                    "the legacy quota-request create answered {status}: {}",
-                    body.chars().take(200).collect::<String>()
-                ));
+                return Err(anyhow!("the legacy quota-request create answered {status}: {}", body.chars().take(200).collect::<String>()));
             }
             Ok(())
         }
@@ -396,42 +343,32 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
                 match status.as_u16() {
                     404 => Ok(()),
                     code if (200..300).contains(&code) => Ok(()),
-                    code => Err(anyhow!(
-                        "the CLI token was left LIVE: {code}: {}",
-                        body.chars().take(160).collect::<String>()
-                    )),
+                    code => Err(anyhow!("the CLI token was left LIVE: {code}: {}", body.chars().take(160).collect::<String>())),
                 }
             };
             let body = async {
                 let dir = home.join(".config/kl");
-                std::fs::create_dir_all(&dir)
-                    .with_context(|| format!("could not make {}", dir.display()))?;
+                std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
                 let cfg = json!({
                     "api": api_url,
                     "token": token,
                     "expires_at": "2099-01-01T00:00:00Z",
                     "username": probe,
                 });
-                std::fs::write(dir.join("config.json"), cfg.to_string())
-                    .context("could not stage the CLI login")?;
+                std::fs::write(dir.join("config.json"), cfg.to_string()).context("could not stage the CLI login")?;
                 let env = std::collections::HashMap::from([
                     ("HOME".to_string(), home.display().to_string()),
                     ("KL_CONFIG_DIR".to_string(), dir.display().to_string()),
                 ]);
                 // `logout` LAST: it forgets the config the two before it read.
-                for args in [
-                    vec!["ws", "list"],
-                    vec!["ws", "list", "--team", "no-such-team"],
-                    vec!["logout"],
-                ] {
+                for args in [vec!["ws", "list"], vec!["ws", "list", "--team", "no-such-team"], vec!["logout"]] {
                     let argv: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
                     let what = argv.join(" ");
                     if let Err(e) = tools::run(&kl, &argv, &env, None, CLI_CEILING).await {
                         let detail = format!("{e:#}");
                         // `--team` on a team nobody is in must ANSWER, empty or refused; what it
                         // may not do is fail to run at all.
-                        let refused =
-                            detail.contains("no such team") || detail.contains("not a member");
+                        let refused = detail.contains("no such team") || detail.contains("not a member");
                         if !(what.contains("--team") && refused) {
                             return Err(anyhow!("`kl {what}` failed: {detail}"));
                         }
@@ -460,49 +397,29 @@ pub(super) async fn reads(c: &mut Ctx) {
         let unknown = admin(c, "/admin/history/no-such-series?range=1d&step=1h");
         async move {
             let rows = get(c, &nodes, &jwt).await.context("`/admin/nodes`")?;
-            if rows
-                .get("nodes")
-                .and_then(Value::as_array)
-                .or_else(|| rows.as_array())
-                .is_none()
-            {
+            if rows.get("nodes").and_then(Value::as_array).or_else(|| rows.as_array()).is_none() {
                 return Err(anyhow!("`/admin/nodes` did not answer a list"));
             }
-            let doc = get(c, &schema, &jwt)
-                .await
-                .context("`/admin/settings/schema`")?;
+            let doc = get(c, &schema, &jwt).await.context("`/admin/settings/schema`")?;
             // `{ central: [...], cluster: [...] }` — one row per meta-table entry
             // (`api/admin/schema.rs:246`). BOTH scopes, because the Configuration screen renders
             // the two tabs from them and a missing one is a blank tab.
             for scope in ["central", "cluster"] {
-                let rows = doc
-                    .get(scope)
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
+                let rows = doc.get(scope).and_then(Value::as_array).map(Vec::len).unwrap_or(0);
                 if rows == 0 {
                     return Err(anyhow!("the settings schema names no {scope} field"));
                 }
             }
             // `active` is what the region already is — the write is the route being exercised,
             // never a change to the fleet's own state.
-            super::call(
-                c,
-                reqwest::Method::PUT,
-                &status,
-                &jwt,
-                Some(json!({ "status": "active", "note": "slo probe status read" })),
-            )
-            .await
-            .context("the cluster status write was refused")?;
+            super::call(c, reqwest::Method::PUT, &status, &jwt, Some(json!({ "status": "active", "note": "slo probe status read" })))
+                .await
+                .context("the cluster status write was refused")?;
             let (code, body) = raw(c, reqwest::Method::GET, &unknown, &jwt, None, &[]).await?;
             match code.as_u16() {
                 404 => Ok(()),
                 503 => Ok(()),
-                other => Err(anyhow!(
-                    "an unknown history series answered {other}, not 404: {}",
-                    body.chars().take(200).collect::<String>()
-                )),
+                other => Err(anyhow!("an unknown history series answered {other}, not 404: {}", body.chars().take(200).collect::<String>())),
             }
         }
         .boxed()

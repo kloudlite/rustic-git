@@ -40,11 +40,7 @@ impl Ctx {
             stage: stage.to_string(),
             steps: self.steps.clone(),
         };
-        let url = format!(
-            "{}/admin/slo/runs/{}",
-            self.cfg.admin_url.trim_end_matches('/'),
-            self.run_id
-        );
+        let url = format!("{}/admin/slo/runs/{}", self.cfg.admin_url.trim_end_matches('/'), self.run_id);
         let mut last = String::new();
         let attempts = BACKOFF.len() as u32 + 1;
         for attempt in 1..=attempts {

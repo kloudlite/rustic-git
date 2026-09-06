@@ -69,12 +69,7 @@ pub async fn run(c: &mut Ctx) {
 async fn worker_lanes(c: &mut Ctx) {
     let aks = match crate::drill::incluster() {
         Ok(k) => k,
-        Err(e) => {
-            return c.skip(
-                "worker.lane.health",
-                &format!("no in-cluster client: {e:#}"),
-            )
-        }
+        Err(e) => return c.skip("worker.lane.health", &format!("no in-cluster client: {e:#}")),
     };
     c.step("worker.lane.health", READ_CEILING, move |c| {
         async move {
@@ -111,9 +106,7 @@ async fn lane_ages(c: &Ctx, aks: &kube::Client) -> Result<Vec<(String, f64)>> {
     let mut out = vec![];
     for pod in &pods.items {
         let name = kube::ResourceExt::name_any(pod);
-        let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) else {
-            continue;
-        };
+        let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) else { continue };
         let body = c
             .http
             .get(format!("http://{ip}:9464/metrics"))
@@ -124,11 +117,7 @@ async fn lane_ages(c: &Ctx, aks: &kube::Client) -> Result<Vec<(String, f64)>> {
             .text()
             .await
             .unwrap_or_default();
-        out.extend(
-            parse_lane_ages(&body)
-                .into_iter()
-                .map(|(lane, age)| (format!("{name}/{lane}"), age)),
-        );
+        out.extend(parse_lane_ages(&body).into_iter().map(|(lane, age)| (format!("{name}/{lane}"), age)));
     }
     Ok(out)
 }
@@ -153,9 +142,7 @@ fn parse_lane_ages(body: &str) -> Vec<(String, f64)> {
 /// do. Its own liveness file (`{pool}/.agent-heartbeat`, written on a beat) is the one number that
 /// says otherwise, read through the same exec grant the workspace steps use.
 async fn agent_heartbeat(c: &mut Ctx) {
-    let Some(k) = c.kube.clone() else {
-        return c.skip("agent.heartbeat", "no kubeconfig");
-    };
+    let Some(k) = c.kube.clone() else { return c.skip("agent.heartbeat", "no kubeconfig") };
     c.step("agent.heartbeat", Duration::from_secs(30), move |_| {
         async move {
             use k8s_openapi::api::apps::v1::DaemonSet;
@@ -370,28 +357,18 @@ async fn log_latency(c: &mut Ctx) {
 async fn pod_coverage(c: &mut Ctx) {
     c.step("tel.pod.coverage", READ_CEILING, |c| {
         let jwt = c.admin_jwt.clone();
-        let (workloads, coverage) = (
-            admin(c, "/admin/workloads"),
-            admin(c, "/admin/slo/coverage"),
-        );
+        let (workloads, coverage) =
+            (admin(c, "/admin/workloads"), admin(c, "/admin/slo/coverage"));
         async move {
-            let rows = get(c, &workloads, &jwt)
-                .await
-                .context("could not list the workloads")?;
-            let seen = get(c, &coverage, &jwt)
-                .await
-                .context("could not read the coverage")?;
+            let rows = get(c, &workloads, &jwt).await.context("could not list the workloads")?;
+            let seen = get(c, &coverage, &jwt).await.context("could not read the coverage")?;
             // `/admin/workloads` is the CENTRAL list, so coverage judged over it alone was really
             // "every central workload is scraped" — the region's own two DaemonSets, the agent and
             // the collector that scrapes everything else, were the two nothing checked.
             let instances: Vec<String> = seen
                 .get("instances")
                 .and_then(Value::as_array)
-                .map(|v| {
-                    v.iter()
-                        .filter_map(|i| i.as_str().map(str::to_string))
-                        .collect()
-                })
+                .map(|v| v.iter().filter_map(|i| i.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             let missing: Vec<String> = rows
                 .as_array()
@@ -432,25 +409,18 @@ async fn pipeline(c: &mut Ctx) {
         (
             "tel.stream.lag",
             "stream_pending",
-            (|v| {
-                (v < MAX_STREAM_PENDING)
-                    .then_some(())
-                    .ok_or_else(|| anyhow!("{v} entries pending"))
-            }) as fn(f64) -> Result<()>,
+            (|v| (v < MAX_STREAM_PENDING).then_some(()).ok_or_else(|| anyhow!("{v} entries pending")))
+                as fn(f64) -> Result<()>,
         ),
         ("tel.ch.disk", "ch_disk_free_pct", |v| {
-            (v > MIN_DISK_FREE_PCT)
-                .then_some(())
-                .ok_or_else(|| anyhow!("{v:.1} % free"))
+            (v > MIN_DISK_FREE_PCT).then_some(()).ok_or_else(|| anyhow!("{v:.1} % free"))
         }),
     ] {
         c.step(id, PIPELINE_CEILING, move |c| {
             let jwt = c.admin_jwt.clone();
             let url = admin(c, "/admin/slo/pipeline");
             async move {
-                let v = get(c, &url, &jwt)
-                    .await
-                    .context("could not read the pipeline")?;
+                let v = get(c, &url, &jwt).await.context("could not read the pipeline")?;
                 let n = v
                     .get(field)
                     .and_then(Value::as_f64)
@@ -474,10 +444,7 @@ mod tests {
                     worker_lane_heartbeat_age_seconds{lane=\"1\"} 2400\n\
                     worker_jobs_total 7\n";
         let ages = super::parse_lane_ages(body);
-        assert_eq!(
-            ages,
-            vec![("0".to_string(), 3.5), ("1".to_string(), 2400.0)]
-        );
+        assert_eq!(ages, vec![("0".to_string(), 3.5), ("1".to_string(), 2400.0)]);
         assert!(super::parse_lane_ages("worker_jobs_total 7\n").is_empty());
     }
 

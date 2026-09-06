@@ -26,13 +26,7 @@ pub async fn run(c: &mut Ctx) {
     // writes a workspace's `authorized_keys` Secret only for an owner who has one (see
     // `write_user_key`). A person reaches that page in the web; the probe never does, so it reads
     // it here — otherwise every gateway login answers "Permission denied (publickey)".
-    if let Err(e) = get(
-        c,
-        &api(c, &format!("/v1/platform-key?owner={probe}")),
-        &c.probe_jwt.clone(),
-    )
-    .await
-    {
+    if let Err(e) = get(c, &api(c, &format!("/v1/platform-key?owner={probe}")), &c.probe_jwt.clone()).await {
         tracing::warn!(reason = "platform-key", error = %e, "slo.identity.degraded");
     }
     // The session JWT is minted in-process from the Secret, so there is no password path to walk:
@@ -58,20 +52,13 @@ pub async fn run(c: &mut Ctx) {
             let out = post(c, &api(c, "/v1/tokens"), &jwt, body).await?;
             // Recorded so teardown revokes it by id even if the name sweep somehow misses it.
             // `_id` at the root: the answer is `IssuedToken`, whose `meta` is flattened into it.
-            c.state.token = out
-                .pointer("/_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            c.state.token = out.pointer("/_id").and_then(|v| v.as_str()).map(str::to_string);
             // The one time it is readable, and it is never logged: a token in a step detail would
             // outlive the run in ClickHouse.
             // Kept, not printed: `reg.push.ok` logs in to the registry with this exact value.
-            c.state.token_value = out
-                .get("token")
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-                .map(str::to_string);
-            c.state
-                .token_value
+            c.state.token_value =
+                out.get("token").and_then(|v| v.as_str()).filter(|t| !t.is_empty()).map(str::to_string);
+            c.state.token_value
                 .as_ref()
                 .map(|_| ())
                 .ok_or_else(|| anyhow!("the answer carried no token"))
@@ -111,33 +98,22 @@ async fn passkey(c: &mut Ctx, name: &str) {
                 "publicKey": "slo-probe-synthetic-public-key",
                 "name": name,
             });
-            let out = post(c, &base, &jwt, body)
-                .await
-                .context("could not register the passkey");
+            let out = post(c, &base, &jwt, body).await.context("could not register the passkey");
             // Deleted whatever the rest of the step said, and before the step can return: a
             // registration nobody takes back is a sign-in credential left on the account.
             let forget = || async {
-                super::call(
-                    c,
-                    reqwest::Method::DELETE,
-                    &format!("{base}/{id}"),
-                    &jwt,
-                    None,
-                )
-                .await
-                .map(|_| ())
-                .context("the synthetic passkey was left REGISTERED")
+                super::call(c, reqwest::Method::DELETE, &format!("{base}/{id}"), &jwt, None)
+                    .await
+                    .map(|_| ())
+                    .context("the synthetic passkey was left REGISTERED")
             };
             let checks = async {
                 out?;
-                let listed = get(c, &base, &jwt)
-                    .await
-                    .context("could not list the passkeys")?;
+                let listed = get(c, &base, &jwt).await.context("could not list the passkeys")?;
                 // `_id`, not `id`: `directory::Passkey` renames its credential id for Mongo, so
                 // that is the field both the create's answer and the listing carry.
                 let there = listed.as_array().is_some_and(|rows| {
-                    rows.iter()
-                        .any(|r| r.get("_id").and_then(|v| v.as_str()) == Some(id.as_str()))
+                    rows.iter().any(|r| r.get("_id").and_then(|v| v.as_str()) == Some(id.as_str()))
                 });
                 if !there {
                     return Err(anyhow!("the passkey was accepted but is not listed"));
@@ -150,9 +126,7 @@ async fn passkey(c: &mut Ctx, name: &str) {
                     super::raw(c, reqwest::Method::POST, &lookup, &jwt, Some(body), &[]).await?;
                 match status.as_u16() {
                     401 | 403 => Ok(()),
-                    other => Err(anyhow!(
-                        "the passkey lookup answered {other} to a session token"
-                    )),
+                    other => Err(anyhow!("the passkey lookup answered {other} to a session token")),
                 }
             };
             crate::drill::undoing(Duration::from_secs(10), checks, forget).await
@@ -170,50 +144,47 @@ async fn passkey(c: &mut Ctx, name: &str) {
 async fn key(c: &mut Ctx, name: &str) {
     let probe = c.probe_user.clone();
     c.step("id.key.usable", KEY_TIMEOUT, |c| {
-        let (name, jwt) = (name.to_string(), c.probe_jwt.clone());
-        let (key_path, keygen) = (c.cfg.ssh_key_path.clone(), c.programs.ssh_keygen.clone());
-        async move {
-            // Derived from the private half rather than mounted beside it: two files that must
-            // agree are two files that can disagree, and the Secret holds only the one.
-            let public = tools::plain(&keygen, &["-y", "-f", &key_path], Duration::from_secs(10))
-                .await
-                .context("could not read the probe's public key")?;
-            let public = public.trim().to_string();
-            let body = serde_json::json!({ "owner": probe, "name": name, "key": public });
-            // The probe's key is ONE key per tenant, registered under this run's name and
-            // removed at teardown — so a run that died before teardown (a deadline, a killed
-            // pod) leaves it registered under the dead run's name, and the api refuses the
-            // same fingerprint twice. That leftover is this tenant's own and this step's to
-            // replace: delete it by fingerprint and register again. Any other 409 is a fault.
-            if let Err(e) = post(c, &api(c, "/v1/keys"), &jwt, body.clone()).await {
-                let text = format!("{e:#}");
-                if !text.contains("409") {
-                    return Err(e.context("could not register the key"));
+            let (name, jwt) = (name.to_string(), c.probe_jwt.clone());
+            let (key_path, keygen) = (c.cfg.ssh_key_path.clone(), c.programs.ssh_keygen.clone());
+            async move {
+                // Derived from the private half rather than mounted beside it: two files that must
+                // agree are two files that can disagree, and the Secret holds only the one.
+                let public = tools::plain(&keygen, &["-y", "-f", &key_path], Duration::from_secs(10))
+                    .await
+                    .context("could not read the probe's public key")?;
+                let public = public.trim().to_string();
+                let body = serde_json::json!({ "owner": probe, "name": name, "key": public });
+                // The probe's key is ONE key per tenant, registered under this run's name and
+                // removed at teardown — so a run that died before teardown (a deadline, a killed
+                // pod) leaves it registered under the dead run's name, and the api refuses the
+                // same fingerprint twice. That leftover is this tenant's own and this step's to
+                // replace: delete it by fingerprint and register again. Any other 409 is a fault.
+                if let Err(e) = post(c, &api(c, "/v1/keys"), &jwt, body.clone()).await {
+                    let text = format!("{e:#}");
+                    if !text.contains("409") {
+                        return Err(e.context("could not register the key"));
+                    }
+                    let fp = tools::plain(&keygen, &["-lf", &key_path], Duration::from_secs(10))
+                        .await
+                        .context("could not fingerprint the probe's key")?;
+                    let fp = fp.split_whitespace().nth(1).unwrap_or_default().to_string();
+                    let del = api(c, &format!("/v1/keys/{fp}"));
+                    super::call(c, reqwest::Method::DELETE, &del, &jwt, None)
+                        .await
+                        .context("could not remove the leftover key a dead run left registered")?;
+                    post(c, &api(c, "/v1/keys"), &jwt, body).await.context("could not register the key after replacing the leftover")?;
                 }
-                let fp = tools::plain(&keygen, &["-lf", &key_path], Duration::from_secs(10))
-                    .await
-                    .context("could not fingerprint the probe's key")?;
-                let fp = fp.split_whitespace().nth(1).unwrap_or_default().to_string();
-                let del = api(c, &format!("/v1/keys/{fp}"));
-                super::call(c, reqwest::Method::DELETE, &del, &jwt, None)
-                    .await
-                    .context("could not remove the leftover key a dead run left registered")?;
-                post(c, &api(c, "/v1/keys"), &jwt, body)
-                    .await
-                    .context("could not register the key after replacing the leftover")?;
+                let listed = get(c, &api(c, &format!("/v1/keys?owner={probe}")), &jwt).await?;
+                let found = listed
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name)));
+                if !found {
+                    return Err(anyhow!("the key was accepted but is not listed"));
+                }
+                c.state.key = Some(name);
+                Ok(())
             }
-            let listed = get(c, &api(c, &format!("/v1/keys?owner={probe}")), &jwt).await?;
-            let found = listed.as_array().is_some_and(|rows| {
-                rows.iter()
-                    .any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name))
-            });
-            if !found {
-                return Err(anyhow!("the key was accepted but is not listed"));
-            }
-            c.state.key = Some(name);
-            Ok(())
-        }
-        .boxed()
+            .boxed()
     })
     .await;
 }
@@ -226,41 +197,17 @@ async fn cli_flow(c: &mut Ctx, name: &str) {
         async move {
             // The device name carries the run prefix, which is the only handle teardown has on the
             // token this mints.
-            let started = post(
-                c,
-                &api(c, "/v1/cli/code"),
-                "",
-                serde_json::json!({ "device": name }),
-            )
-            .await?;
-            let code = started
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let poll = started
-                .get("poll")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+            let started = post(c, &api(c, "/v1/cli/code"), "", serde_json::json!({ "device": name })).await?;
+            let code = started.get("code").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let poll = started.get("poll").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             if code.is_empty() || poll.is_empty() {
                 return Err(anyhow!("the login handshake answered no code"));
             }
-            post(
-                c,
-                &api(c, "/v1/cli/approve"),
-                &jwt,
-                serde_json::json!({ "code": code }),
-            )
-            .await?;
+            post(c, &api(c, "/v1/cli/approve"), &jwt, serde_json::json!({ "code": code })).await?;
             // One poll, not a loop: approve is synchronous, so a 202 here means the row the
             // approval wrote is not visible to the replica that answered — which is the failure.
             let out = get(c, &api(c, &format!("/v1/cli/token?poll={poll}")), "").await?;
-            if out
-                .get("token")
-                .and_then(|v| v.as_str())
-                .is_none_or(str::is_empty)
-            {
+            if out.get("token").and_then(|v| v.as_str()).is_none_or(str::is_empty) {
                 return Err(anyhow!("the approved login handed back no token"));
             }
             // The id, not the token: the id is what revokes it, and the token itself must never be
@@ -302,13 +249,9 @@ pub(crate) async fn tiers(c: &mut Ctx, repo: &str) {
         let args = super::git::authed(c, &["ls-remote", &url]);
         let (git, env) = (c.programs.git.clone(), super::git::git_env(c));
         async move {
-            get(c, &api(c, &format!("/v1/repos?owner={probe}")), &jwt)
-                .await
-                .context("/v1")?;
+            get(c, &api(c, &format!("/v1/repos?owner={probe}")), &jwt).await.context("/v1")?;
             get(c, &refs, &jwt).await.context("browse")?;
-            tools::run(&git, &args, &env, None, Duration::from_secs(30))
-                .await
-                .context("git over HTTP")?;
+            tools::run(&git, &args, &env, None, Duration::from_secs(30)).await.context("git over HTTP")?;
             Ok(())
         }
         .boxed()

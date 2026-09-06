@@ -37,9 +37,7 @@ pub async fn ctx() -> Ctx {
 /// Serve a hand-built router and answer its base url. For the stage tests, which need particular
 /// routes to fail rather than one blanket status.
 pub async fn serve(app: axum::Router) -> String {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = l.local_addr().expect("addr");
     tokio::spawn(async move {
         let _ = axum::serve(l, app).await;
@@ -56,11 +54,8 @@ pub async fn ctx_against(app: axum::Router) -> Ctx {
     // The stage tests write nothing, but `Ctx::tmp` is under the real temp dir and two tests must
     // not share one.
     static NTH: AtomicUsize = AtomicUsize::new(0);
-    c.tmp = std::env::temp_dir().join(format!(
-        "slo-test-{}-{}",
-        std::process::id(),
-        NTH.fetch_add(1, Ordering::SeqCst)
-    ));
+    c.tmp = std::env::temp_dir()
+        .join(format!("slo-test-{}-{}", std::process::id(), NTH.fetch_add(1, Ordering::SeqCst)));
     c
 }
 
@@ -75,9 +70,7 @@ pub async fn stub(status: fn() -> axum::http::StatusCode) -> (String, Arc<Atomic
             status()
         }
     }));
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = l.local_addr().expect("addr");
     tokio::spawn(async move {
         let _ = axum::serve(l, app).await;

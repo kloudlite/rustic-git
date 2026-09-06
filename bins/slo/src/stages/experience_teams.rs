@@ -33,8 +33,8 @@ use serde_json::Value;
 
 use super::git::{git, BASE_BRANCH};
 use super::{api, drain_team, get, poll_json, post, raw, TEAM_DRAIN};
-use crate::ctx::Ctx;
 use crate::drill::{undoing, UNDO_SLACK};
+use crate::ctx::Ctx;
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
 // answer must be a breach with a number, never a step the probe cut off.
@@ -107,9 +107,7 @@ pub(super) async fn create(c: &mut Ctx) {
         let url = api(c, "/v1/teams");
         async move {
             let body = serde_json::json!({ "slug": slug, "name": "kloudlite slo probe" });
-            post(c, &url, &jwt, body)
-                .await
-                .context("could not create the team")?;
+            post(c, &url, &jwt, body).await.context("could not create the team")?;
             let team = get(c, &api(c, &format!("/v1/teams/{slug}")), &jwt)
                 .await
                 .context("the team was created but cannot be read back")?;
@@ -149,15 +147,11 @@ pub(super) async fn invite_accept(c: &mut Ctx) {
                 .to_string();
             let preview = api(c, &format!("/v1/invites/{token}"));
             let accept = api(c, &format!("/v1/invites/{token}/accept"));
-            let seen = get(c, &preview, &other)
-                .await
-                .context("the invited person cannot preview it")?;
+            let seen = get(c, &preview, &other).await.context("the invited person cannot preview it")?;
             if seen.get("team").and_then(Value::as_str) != Some(slug.as_str()) {
                 return Err(anyhow!("the preview names a different team"));
             }
-            post(c, &accept, &other, Value::Null)
-                .await
-                .context("the invitation was not accepted")?;
+            post(c, &accept, &other, Value::Null).await.context("the invitation was not accepted")?;
             // Spent, so the second attempt is `Gone` — a 404, the same answer a made-up token gets.
             refused(c, reqwest::Method::POST, &accept, &other, "a second accept").await
         }
@@ -196,11 +190,7 @@ fn role_of(team: &Value, email: &str) -> Option<String> {
     team.get("members")?
         .as_array()?
         .iter()
-        .find(|m| {
-            m.get("email")
-                .and_then(Value::as_str)
-                .is_some_and(|e| e.eq_ignore_ascii_case(email))
-        })
+        .find(|m| m.get("email").and_then(Value::as_str).is_some_and(|e| e.eq_ignore_ascii_case(email)))
         .and_then(|m| m.get("role"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -251,32 +241,18 @@ pub(super) async fn repo_shared(c: &mut Ctx) {
                 .filter(|t| !t.is_empty())
                 .ok_or_else(|| anyhow!("the answer carried no token"))?
                 .to_string();
-            let id = minted
-                .get("_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let id = minted.get("_id").and_then(Value::as_str).map(str::to_string);
 
             // Revoked outside the cancellable region, so a clone that runs out of time never
             // leaves a live credential for a team that teardown is about to delete.
             let revoke = || async {
                 let Some(id) = id else { return Ok(()) };
-                super::call(
-                    c,
-                    reqwest::Method::DELETE,
-                    &api(c, &format!("/v1/tokens/{id}")),
-                    &other,
-                    None,
-                )
-                .await
-                .map(|_| ())
-                .context("the team credential was left LIVE")
+                super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/tokens/{id}")), &other, None)
+                    .await
+                    .map(|_| ())
+                    .context("the team credential was left LIVE")
             };
-            undoing(
-                TEAM_REPO_BODY,
-                push_and_clone(c, &work, &dest, &url, &token, &refs),
-                revoke,
-            )
-            .await
+            undoing(TEAM_REPO_BODY, push_and_clone(c, &work, &dest, &url, &token, &refs), revoke).await
         }
         .boxed()
     })
@@ -294,38 +270,16 @@ async fn push_and_clone(
     refs: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(work).with_context(|| format!("could not make {}", work.display()))?;
-    git(
-        c,
-        vec![
-            "init".into(),
-            "-q".into(),
-            format!("--initial-branch={BASE_BRANCH}"),
-        ],
-        Some(work),
-    )
-    .await?;
+    git(c, vec!["init".into(), "-q".into(), format!("--initial-branch={BASE_BRANCH}")], Some(work)).await?;
     std::fs::write(work.join("README.md"), "# shared\n").context("could not write README.md")?;
     git(c, vec!["add".into(), "-A".into()], Some(work)).await?;
-    git(
-        c,
-        vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()],
-        Some(work),
-    )
-    .await?;
-    git(
-        c,
-        with_token(token, &["push", "-q", url, BASE_BRANCH]),
-        Some(work),
-    )
-    .await
-    .context("a member could not push to the team repo")?;
-    git(
-        c,
-        with_token(token, &["clone", "-q", url, &dest.display().to_string()]),
-        None,
-    )
-    .await
-    .context("a member could not clone the team repo")?;
+    git(c, vec!["commit".into(), "-q".into(), "-m".into(), "seed".into()], Some(work)).await?;
+    git(c, with_token(token, &["push", "-q", url, BASE_BRANCH]), Some(work))
+        .await
+        .context("a member could not push to the team repo")?;
+    git(c, with_token(token, &["clone", "-q", url, &dest.display().to_string()]), None)
+        .await
+        .context("a member could not clone the team repo")?;
     // The third identity: no credential at all. Asked over HTTP rather than through `git`, because
     // only a status can tell a refusal from a DNS failure — and a step that counted "the command
     // failed" as a refusal would stay green through the outage it exists to catch.
@@ -333,10 +287,7 @@ async fn push_and_clone(
     if matches!(status.as_u16(), 401 | 403 | 404) {
         return Ok(());
     }
-    Err(anyhow!(
-        "an anonymous read of a private team repo answered {status}: {}",
-        clip(&body)
-    ))
+    Err(anyhow!("an anonymous read of a private team repo answered {status}: {}", clip(&body)))
 }
 
 /// `-c http.extraHeader=…` carrying one specific token as git's `x:<token>` Basic pair.
@@ -382,9 +333,7 @@ pub(super) async fn workspace(c: &mut Ctx) {
         });
         let url = api(c, "/v1/workspaces");
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not create the team workspace")?;
+            let doc = post(c, &url, &jwt, body).await.context("could not create the team workspace")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -399,13 +348,10 @@ pub(super) async fn workspace(c: &mut Ctx) {
 
             let ns = kloudlite_workspaces::crd::ws_namespace(&probe, &slug);
             if !ns.starts_with("wt-") {
-                return Err(anyhow!(
-                    "a team workspace's namespace is {ns}, not a team one"
-                ));
+                return Err(anyhow!("a team workspace's namespace is {ns}, not a team one"));
             }
             let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-            let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
-                kube::Api::namespaced(k.clone(), &ns);
+            let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), &ns);
             let out = match pods.get_opt(&id).await {
                 Ok(Some(_)) => Ok(()),
                 Ok(None) => Err(anyhow!("the workspace is ready but has no pod in {ns}")),
@@ -430,10 +376,7 @@ pub(super) async fn workspace(c: &mut Ctx) {
 /// would keep working and this SLO would be green while the access it names was never withdrawn.
 pub(super) async fn member_remove(c: &mut Ctx) {
     if !is_member(c).await {
-        return c.skip(
-            "team.member.remove",
-            "the second user never joined the team",
-        );
+        return c.skip("team.member.remove", "the second user never joined the team");
     }
     c.step("team.member.remove", QUICK, |c| {
         let other_email = c.other_email.clone();
@@ -450,14 +393,7 @@ pub(super) async fn member_remove(c: &mut Ctx) {
                 .await
                 .context("could not remove the member")?;
             if had {
-                refused(
-                    c,
-                    reqwest::Method::GET,
-                    &refs,
-                    &other,
-                    "a removed member's read",
-                )
-                .await?;
+                refused(c, reqwest::Method::GET, &refs, &other, "a removed member's read").await?;
             }
             let (status, body) = raw(
                 c,
@@ -472,22 +408,10 @@ pub(super) async fn member_remove(c: &mut Ctx) {
                 return Ok(());
             }
             // Best effort: a credential that should never have been issued is worse left standing.
-            if let Some(id) = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|v| v.get("_id").and_then(Value::as_str).map(str::to_string))
-            {
-                let _ = super::call(
-                    c,
-                    reqwest::Method::DELETE,
-                    &api(c, &format!("/v1/tokens/{id}")),
-                    &other,
-                    None,
-                )
-                .await;
+            if let Some(id) = serde_json::from_str::<Value>(&body).ok().and_then(|v| v.get("_id").and_then(Value::as_str).map(str::to_string)) {
+                let _ = super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/tokens/{id}")), &other, None).await;
             }
-            Err(anyhow!(
-                "a removed member could still mint a team credential: {status}"
-            ))
+            Err(anyhow!("a removed member could still mint a team credential: {status}"))
         }
         .boxed()
     })
@@ -506,24 +430,13 @@ pub(super) async fn delete(c: &mut Ctx) {
     }
     let slug = team_slug(c);
     let repo = api(c, &format!("/v1/repos/{slug}/{}", shared_repo(c)));
-    if let Err(e) = super::call(
-        c,
-        reqwest::Method::DELETE,
-        &repo,
-        &c.probe_jwt.clone(),
-        None,
-    )
-    .await
-    {
+    if let Err(e) = super::call(c, reqwest::Method::DELETE, &repo, &c.probe_jwt.clone(), None).await {
         tracing::warn!(kind = "repo", op = "delete", error = %format!("{e:#}"), "slo.teardown.failed");
     }
 
     c.step("team.delete", DELETE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let (del, read) = (
-            api(c, &format!("/v1/teams/{slug}")),
-            api(c, &format!("/v1/teams/{slug}")),
-        );
+        let (del, read) = (api(c, &format!("/v1/teams/{slug}")), api(c, &format!("/v1/teams/{slug}")));
         async move {
             // Inside the step, and fatal to it: a team workspace is billed to the team and listed
             // only under it, so deleting the team over one strands a subvolume nothing can find
@@ -542,25 +455,13 @@ pub(super) async fn delete(c: &mut Ctx) {
 /// Whether the team this run creates is there. A read, not a remembered flag: the step that made
 /// it reports its own outcome, and every later id wants to know what the platform holds now.
 async fn team_exists(c: &Ctx) -> bool {
-    get(
-        c,
-        &api(c, &format!("/v1/teams/{}", team_slug(c))),
-        &c.probe_jwt,
-    )
-    .await
-    .is_ok()
+    get(c, &api(c, &format!("/v1/teams/{}", team_slug(c))), &c.probe_jwt).await.is_ok()
 }
 
 /// Whether the second user is in it — asked as THEM, because `/v1/teams/{slug}` answers 404 to a
 /// non-member and that is precisely the question.
 async fn is_member(c: &Ctx) -> bool {
-    get(
-        c,
-        &api(c, &format!("/v1/teams/{}", team_slug(c))),
-        &c.other_jwt,
-    )
-    .await
-    .is_ok()
+    get(c, &api(c, &format!("/v1/teams/{}", team_slug(c))), &c.other_jwt).await.is_ok()
 }
 
 // ── the repo and pull-request verbs ─────────────────────────────────────────
@@ -589,20 +490,12 @@ pub(super) async fn protection(c: &mut Ctx) {
         let pulls = api(c, &format!("/v1/repos/{probe}/{name}/pulls"));
         let run_id = c.run_id.clone();
         async move {
-            post(
-                c,
-                &rule,
-                &jwt,
-                serde_json::json!({ "pattern": BASE_BRANCH }),
-            )
-            .await
-            .context("could not protect the branch")?;
-            let listed = get(c, &rule, &jwt)
+            post(c, &rule, &jwt, serde_json::json!({ "pattern": BASE_BRANCH }))
                 .await
-                .context("could not read the rules back")?;
+                .context("could not protect the branch")?;
+            let listed = get(c, &rule, &jwt).await.context("could not read the rules back")?;
             let protected = listed.as_array().is_some_and(|rows| {
-                rows.iter()
-                    .any(|r| r.get("pattern").and_then(Value::as_str) == Some(BASE_BRANCH))
+                rows.iter().any(|r| r.get("pattern").and_then(Value::as_str) == Some(BASE_BRANCH))
             });
             if !protected {
                 return Err(anyhow!("the rule was accepted but is not listed"));
@@ -610,15 +503,10 @@ pub(super) async fn protection(c: &mut Ctx) {
             // Outside the cancellable region: a run that leaves `main` protected breaks the NEXT
             // run's stage 2 push, and the step's own timeout would drop this with the body.
             let unprotect = || async {
-                post(
-                    c,
-                    &rule,
-                    &jwt,
-                    serde_json::json!({ "pattern": BASE_BRANCH, "remove": true }),
-                )
-                .await
-                .map(|_| ())
-                .context("`main` was left PROTECTED")
+                post(c, &rule, &jwt, serde_json::json!({ "pattern": BASE_BRANCH, "remove": true }))
+                    .await
+                    .map(|_| ())
+                    .context("`main` was left PROTECTED")
             };
             let walked = refuse_then_merge(c, &work, &url, &branch, &refs, &pulls, &jwt, &run_id);
             undoing(PROTECTION_BODY, walked, unprotect).await
@@ -642,39 +530,9 @@ async fn refuse_then_merge(
     run_id: &str,
 ) -> Result<()> {
     // An orphan: no shared history with `main` at all, so the push can only be a rewrite.
-    git(
-        c,
-        vec![
-            "checkout".into(),
-            "-q".into(),
-            "--orphan".into(),
-            "rewrite".into(),
-        ],
-        Some(work),
-    )
-    .await?;
-    git(
-        c,
-        vec![
-            "commit".into(),
-            "-q".into(),
-            "--allow-empty".into(),
-            "-m".into(),
-            "rewrite".into(),
-        ],
-        Some(work),
-    )
-    .await?;
-    let force = super::git::authed(
-        c,
-        &[
-            "push",
-            "-q",
-            "--force",
-            url,
-            &format!("rewrite:{BASE_BRANCH}"),
-        ],
-    );
+    git(c, vec!["checkout".into(), "-q".into(), "--orphan".into(), "rewrite".into()], Some(work)).await?;
+    git(c, vec!["commit".into(), "-q".into(), "--allow-empty".into(), "-m".into(), "rewrite".into()], Some(work)).await?;
+    let force = super::git::authed(c, &["push", "-q", "--force", url, &format!("rewrite:{BASE_BRANCH}")]);
     match git(c, force, Some(work)).await {
         Ok(_) => return Err(anyhow!("a protected branch accepted a rewrite")),
         Err(e) => {
@@ -683,9 +541,7 @@ async fn refuse_then_merge(
             // through the outage it exists to catch.
             let detail = format!("{e:#}");
             if !detail.contains("is protected") {
-                return Err(anyhow!(
-                    "the push failed for some other reason than the rule: {detail}"
-                ));
+                return Err(anyhow!("the push failed for some other reason than the rule: {detail}"));
             }
         }
     }
@@ -694,56 +550,23 @@ async fn refuse_then_merge(
     // From the branch's CURRENT tip, fetched now: this clone's `main` is stage 2's, and the PR
     // stage has merged past it since, so a branch off the local copy is not a fast-forward.
     let fetch = super::git::authed(c, &["fetch", "-q", url, BASE_BRANCH]);
-    git(c, fetch, Some(work))
-        .await
-        .context("could not fetch the base branch")?;
-    git(
-        c,
-        vec![
-            "checkout".into(),
-            "-q".into(),
-            "-B".into(),
-            branch.into(),
-            "FETCH_HEAD".into(),
-        ],
-        Some(work),
-    )
-    .await?;
-    std::fs::write(work.join("protected.txt"), format!("{run_id}\n"))
-        .context("could not write protected.txt")?;
+    git(c, fetch, Some(work)).await.context("could not fetch the base branch")?;
+    git(c, vec!["checkout".into(), "-q".into(), "-B".into(), branch.into(), "FETCH_HEAD".into()], Some(work)).await?;
+    std::fs::write(work.join("protected.txt"), format!("{run_id}\n")).context("could not write protected.txt")?;
     git(c, vec!["add".into(), "-A".into()], Some(work)).await?;
-    git(
-        c,
-        vec![
-            "commit".into(),
-            "-q".into(),
-            "-m".into(),
-            "through a pull request".into(),
-        ],
-        Some(work),
-    )
-    .await?;
+    git(c, vec!["commit".into(), "-q".into(), "-m".into(), "through a pull request".into()], Some(work)).await?;
     let push = super::git::authed(c, &["push", "-q", url, branch]);
-    git(c, push, Some(work))
-        .await
-        .context("could not push the change branch")?;
-    let target = git(c, vec!["rev-parse".into(), branch.into()], Some(work))
-        .await?
-        .trim()
-        .to_string();
+    git(c, push, Some(work)).await.context("could not push the change branch")?;
+    let target = git(c, vec!["rev-parse".into(), branch.into()], Some(work)).await?.trim().to_string();
 
     let body = serde_json::json!({ "title": format!("slo protection {run_id}"), "base": BASE_BRANCH, "head": branch });
-    let opened = post(c, pulls, jwt, body)
-        .await
-        .context("could not open the change")?;
+    let opened = post(c, pulls, jwt, body).await.context("could not open the change")?;
     let number = opened
         .get("number")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow!("the answer carried no number"))?;
     let merge = format!("{pulls}/{number}/merge?strategy=fast-forward");
-    post(c, &merge, jwt, Value::Null)
-        .await
-        .context("could not ask for the merge")?;
+    post(c, &merge, jwt, Value::Null).await.context("could not ask for the merge")?;
     let landed = poll_json(c, refs, jwt, MERGE_CAP, |r| {
         super::git::oid_of(r, BASE_BRANCH).as_deref() == Some(target.as_str())
     })
@@ -752,24 +575,12 @@ async fn refuse_then_merge(
         // The worker's own verdict, so a refusal reads as the fleet's sentence rather than as a
         // silence: `merge.state` and `merge.detail` are what the person waiting would see.
         let pr = super::get(c, &format!("{pulls}/{number}"), jwt).await.ok();
-        let job = pr
-            .as_ref()
-            .and_then(|p| p.get("merge"))
-            .cloned()
-            .unwrap_or(Value::Null);
+        let job = pr.as_ref().and_then(|p| p.get("merge")).cloned().unwrap_or(Value::Null);
         let (state, detail) = (
-            job.get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("no job")
-                .to_string(),
-            job.get("detail")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
+            job.get("state").and_then(Value::as_str).unwrap_or("no job").to_string(),
+            job.get("detail").and_then(Value::as_str).unwrap_or("").to_string(),
         );
-        return landed.map(|_| ()).with_context(|| {
-            format!("the merge into a protected branch never landed: merge {state} {detail}")
-        });
+        return landed.map(|_| ()).with_context(|| format!("the merge into a protected branch never landed: merge {state} {detail}"));
     }
     Ok(())
 }
@@ -791,22 +602,10 @@ pub(super) async fn commit_patch(c: &mut Ctx) {
         let log = api(c, &format!("/api/{probe}/{name}/log"));
         let run_id = c.run_id.clone();
         async move {
-            let oid = patch(
-                c,
-                &url,
-                &jwt,
-                BASE_BRANCH,
-                &branch,
-                &format!("slo edit {run_id}"),
-                "experience.txt",
-            )
-            .await?;
+            let oid = patch(c, &url, &jwt, BASE_BRANCH, &branch, &format!("slo edit {run_id}"), "experience.txt").await?;
             poll_json(c, &format!("{log}/{oid}"), &jwt, LOG_CAP, |rows| {
                 rows.as_array().is_some_and(|rows| {
-                    rows.first()
-                        .and_then(|r| r.get("oid"))
-                        .and_then(Value::as_str)
-                        == Some(oid.as_str())
+                    rows.first().and_then(|r| r.get("oid")).and_then(Value::as_str) == Some(oid.as_str())
                 })
             })
             .await
@@ -837,9 +636,7 @@ async fn patch(
         "message": message,
         "changes": [{ "path": path, "contentBase64": content }],
     });
-    let out = post(c, url, jwt, body)
-        .await
-        .context("could not commit the patch")?;
+    let out = post(c, url, jwt, body).await.context("could not commit the patch")?;
     out.get("commit")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -861,23 +658,13 @@ pub(super) async fn compare(c: &mut Ctx) {
     c.step("repo.compare", QUICK, move |c| {
         let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
-        let url = api(
-            c,
-            &format!("/v1/repos/{probe}/{name}/compare?base={BASE_BRANCH}&head={branch}"),
-        );
+        let url = api(c, &format!("/v1/repos/{probe}/{name}/compare?base={BASE_BRANCH}&head={branch}"));
         async move {
             let seen = get(c, &url, &jwt).await.context("could not compare")?;
-            let commits = seen
-                .get("commits")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+            let commits = seen.get("commits").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
             match commits {
                 [one] if one.get("oid").and_then(Value::as_str) == Some(oid.as_str()) => Ok(()),
-                other => Err(anyhow!(
-                    "the compare lists {} commits, not the one edit",
-                    other.len()
-                )),
+                other => Err(anyhow!("the compare lists {} commits, not the one edit", other.len())),
             }
         }
         .boxed()
@@ -889,13 +676,7 @@ pub(super) async fn compare(c: &mut Ctx) {
 /// the ids that need it, not a second failure for the step that should have pushed it.
 async fn branch_oid(c: &Ctx, name: &str, branch: &str) -> Option<String> {
     let probe = c.probe_user.clone();
-    let refs = get(
-        c,
-        &api(c, &format!("/api/{probe}/{name}/refs")),
-        &c.probe_jwt,
-    )
-    .await
-    .ok()?;
+    let refs = get(c, &api(c, &format!("/api/{probe}/{name}/refs")), &c.probe_jwt).await.ok()?;
     super::git::oid_of(&refs, branch)
 }
 
@@ -906,10 +687,7 @@ pub(super) async fn comment(c: &mut Ctx) {
     };
     let branch = patch_branch(c);
     if branch_oid(c, &name, &branch).await.is_none() {
-        return c.skip(
-            "pr.comment",
-            "the edit never made a branch to open a change from",
-        );
+        return c.skip("pr.comment", "the edit never made a branch to open a change from");
     }
     c.step("pr.comment", PULL_CEILING, move |c| {
         let probe = c.probe_user.clone();
@@ -918,30 +696,18 @@ pub(super) async fn comment(c: &mut Ctx) {
         let said = format!("slo probe {}", c.run_id);
         async move {
             let number = open_pull(c, &pulls, &jwt, &branch, &said).await?;
-            post(
-                c,
-                &format!("{pulls}/{number}/comments"),
-                &jwt,
-                serde_json::json!({ "body": said }),
-            )
-            .await
-            .context("could not comment")?;
-            let pull = get(c, &format!("{pulls}/{number}"), &jwt)
+            post(c, &format!("{pulls}/{number}/comments"), &jwt, serde_json::json!({ "body": said }))
                 .await
-                .context("could not read the change")?;
+                .context("could not comment")?;
+            let pull = get(c, &format!("{pulls}/{number}"), &jwt).await.context("could not read the change")?;
             let there = pull
                 .get("comments")
                 .and_then(Value::as_array)
-                .is_some_and(|cs| {
-                    cs.iter()
-                        .any(|x| x.get("body").and_then(Value::as_str) == Some(said.as_str()))
-                });
+                .is_some_and(|cs| cs.iter().any(|x| x.get("body").and_then(Value::as_str) == Some(said.as_str())));
             if there {
                 Ok(())
             } else {
-                Err(anyhow!(
-                    "the comment was accepted but the change does not carry it"
-                ))
+                Err(anyhow!("the comment was accepted but the change does not carry it"))
             }
         }
         .boxed()
@@ -964,17 +730,7 @@ pub(super) async fn close(c: &mut Ctx) {
     let jwt = c.probe_jwt.clone();
     let run = c.run_id.clone();
     // Untimed precondition, like `pr.rs`'s `open`: the catalogue has no id for making a branch.
-    if let Err(e) = patch(
-        c,
-        &commits,
-        &jwt,
-        BASE_BRANCH,
-        &branch,
-        &format!("slo close {run}"),
-        "closed.txt",
-    )
-    .await
-    {
+    if let Err(e) = patch(c, &commits, &jwt, BASE_BRANCH, &branch, &format!("slo close {run}"), "closed.txt").await {
         return c.skip("pr.close", &format!("no change to close: {e:#}"));
     }
     c.step("pr.close", PULL_CEILING, move |c| {
@@ -996,10 +752,7 @@ pub(super) async fn close(c: &mut Ctx) {
             let (status, body) = raw(c, reqwest::Method::POST, &url, &jwt, None, &[]).await?;
             match status.as_u16() {
                 409 => Ok(()),
-                _ => Err(anyhow!(
-                    "merging a closed change answered {status}: {}",
-                    clip(&body)
-                )),
+                _ => Err(anyhow!("merging a closed change answered {status}: {}", clip(&body))),
             }
         }
         .boxed()
@@ -1008,14 +761,9 @@ pub(super) async fn close(c: &mut Ctx) {
 }
 
 async fn open_pull(c: &Ctx, pulls: &str, jwt: &str, branch: &str, title: &str) -> Result<i64> {
-    let body =
-        serde_json::json!({ "title": title, "body": "", "base": BASE_BRANCH, "head": branch });
-    let out = post(c, pulls, jwt, body)
-        .await
-        .context("could not open the change")?;
-    out.get("number")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("the answer carried no number"))
+    let body = serde_json::json!({ "title": title, "body": "", "base": BASE_BRANCH, "head": branch });
+    let out = post(c, pulls, jwt, body).await.context("could not open the change")?;
+    out.get("number").and_then(Value::as_i64).ok_or_else(|| anyhow!("the answer carried no number"))
 }
 
 /// `commit.verify`: the signature endpoint answers for a real commit.
@@ -1044,13 +792,7 @@ pub(super) async fn verify(c: &mut Ctx) {
 /// A refusal, and only a refusal: 401, 403 or 404. A 5xx, a timeout or a success are all the thing
 /// the check exists to catch, so none of them may pass — the rule every refusal step in this probe
 /// is written to (`deploy/slo.md`'s security section, and `sec.*` in stage 9).
-async fn refused(
-    c: &Ctx,
-    method: reqwest::Method,
-    url: &str,
-    token: &str,
-    what: &str,
-) -> Result<()> {
+async fn refused(c: &Ctx, method: reqwest::Method, url: &str, token: &str, what: &str) -> Result<()> {
     let (status, body) = raw(c, method, url, token, None, &[]).await?;
     if matches!(status.as_u16(), 401 | 403 | 404) {
         return Ok(());
@@ -1070,18 +812,11 @@ mod tests {
     use axum::routing::{get as axget, post as axpost};
 
     fn sample<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
-        c.steps
-            .iter()
-            .find(|s| s.slo_id == id)
-            .unwrap_or_else(|| panic!("no {id}"))
+        c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("no {id}"))
     }
 
     fn once(c: &Ctx, id: &str) {
-        assert_eq!(
-            c.steps.iter().filter(|s| s.slo_id == id).count(),
-            1,
-            "{id} was not reported exactly once"
-        );
+        assert_eq!(c.steps.iter().filter(|s| s.slo_id == id).count(), 1, "{id} was not reported exactly once");
     }
 
     /// The team ids each report exactly once when the platform is answering — and `team.create`
@@ -1105,18 +840,8 @@ mod tests {
 
         let made = sample(&c, "team.create");
         assert!(!made.ok && !made.skipped, "the create carries the failure");
-        for id in [
-            "team.invite.accept",
-            "team.role.set",
-            "team.repo.shared",
-            "team.workspace",
-            "team.member.remove",
-            "team.delete",
-        ] {
-            assert!(
-                sample(&c, id).skipped,
-                "{id} should be skipped, not sampled"
-            );
+        for id in ["team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete"] {
+            assert!(sample(&c, id).skipped, "{id} should be skipped, not sampled");
             once(&c, id);
         }
         assert_eq!(c.failed(), 1, "one broken thing is one failure");
@@ -1133,20 +858,12 @@ mod tests {
             "members": [{ "email": crate::ctx::email_of(crate::ctx::OTHER_USER), "role": "admin" }],
         });
         let app = axum::Router::new()
-            .route(
-                "/v1/teams",
-                axpost(|| async { (StatusCode::CREATED, axum::Json(serde_json::json!({}))) }),
-            )
-            .route(
-                "/v1/teams/{slug}",
-                axget(move || {
-                    let team = team.clone();
-                    async move { axum::Json(team) }
-                }),
-            )
-            .fallback(
-                axget(|| async { StatusCode::NOT_FOUND }).post(|| async { StatusCode::NOT_FOUND }),
-            );
+            .route("/v1/teams", axpost(|| async { (StatusCode::CREATED, axum::Json(serde_json::json!({}))) }))
+            .route("/v1/teams/{slug}", axget(move || {
+                let team = team.clone();
+                async move { axum::Json(team) }
+            }))
+            .fallback(axget(|| async { StatusCode::NOT_FOUND }).post(|| async { StatusCode::NOT_FOUND }));
         let mut c = testkit::ctx_against(app).await;
         c.run_id = "fast-1".into();
         c.kube = None;
@@ -1159,24 +876,13 @@ mod tests {
         member_remove(&mut c).await;
         delete(&mut c).await;
 
-        for id in [
-            "team.create",
-            "team.invite.accept",
-            "team.role.set",
-            "team.repo.shared",
-            "team.workspace",
-            "team.member.remove",
-            "team.delete",
-        ] {
+        for id in ["team.create", "team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete"] {
             once(&c, id);
         }
         // The one id that must SKIP rather than create anything: without a kubeconfig there is no
         // way to tell the team namespace from the personal one, and a workspace made to measure
         // nothing is a workspace left behind.
-        assert!(
-            sample(&c, "team.workspace").skipped,
-            "no kubeconfig must skip, not create"
-        );
+        assert!(sample(&c, "team.workspace").skipped, "no kubeconfig must skip, not create");
     }
 
     /// The repo and pull-request ids: with no repo every one of them skips, exactly once, and
@@ -1193,18 +899,8 @@ mod tests {
         close(&mut c).await;
         verify(&mut c).await;
 
-        for id in [
-            "repo.protection",
-            "repo.commit.patch",
-            "repo.compare",
-            "pr.comment",
-            "pr.close",
-            "commit.verify",
-        ] {
-            assert!(
-                sample(&c, id).skipped && sample(&c, id).detail == "no repo",
-                "{id}"
-            );
+        for id in ["repo.protection", "repo.commit.patch", "repo.compare", "pr.comment", "pr.close", "commit.verify"] {
+            assert!(sample(&c, id).skipped && sample(&c, id).detail == "no repo", "{id}");
             once(&c, id);
         }
         assert_eq!(c.failed(), 0);
@@ -1215,8 +911,7 @@ mod tests {
     #[tokio::test]
     async fn every_repo_id_is_reported_exactly_once_with_a_repo() {
         let app = axum::Router::new().fallback(
-            axget(|| async { StatusCode::INTERNAL_SERVER_ERROR })
-                .post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            axget(|| async { StatusCode::INTERNAL_SERVER_ERROR }).post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
         );
         let mut c = testkit::ctx_against(app).await;
         c.state.repo = Some("run-fast-1".into());
@@ -1228,14 +923,7 @@ mod tests {
         close(&mut c).await;
         verify(&mut c).await;
 
-        for id in [
-            "repo.protection",
-            "repo.commit.patch",
-            "repo.compare",
-            "pr.comment",
-            "pr.close",
-            "commit.verify",
-        ] {
+        for id in ["repo.protection", "repo.commit.patch", "repo.compare", "pr.comment", "pr.close", "commit.verify"] {
             once(&c, id);
         }
     }
@@ -1244,26 +932,14 @@ mod tests {
     /// success" as a refusal, which would let a 500 from a broken tier read as access denied.
     #[tokio::test]
     async fn only_401_403_404_count_as_a_refusal() {
-        for (code, pass) in [
-            (401, true),
-            (403, true),
-            (404, true),
-            (200, false),
-            (409, false),
-            (500, false),
-        ] {
+        for (code, pass) in [(401, true), (403, true), (404, true), (200, false), (409, false), (500, false)] {
             let app = axum::Router::new().fallback(axget(move || async move {
                 StatusCode::from_u16(code).expect("status")
             }));
             let c = testkit::ctx_against(app).await;
             let url = api(&c, "/v1/anything");
             let got = refused(&c, reqwest::Method::GET, &url, "", "a read").await;
-            assert_eq!(
-                got.is_ok(),
-                pass,
-                "{code} should {} be a refusal",
-                if pass { "" } else { "not" }
-            );
+            assert_eq!(got.is_ok(), pass, "{code} should {} be a refusal", if pass { "" } else { "not" });
         }
     }
 
@@ -1276,10 +952,7 @@ mod tests {
         let args = with_token("SECRET", &["clone", "url"]);
         let want = base64::engine::general_purpose::STANDARD.encode("x:SECRET");
         assert_eq!(args[0], "-c");
-        assert_eq!(
-            args[1],
-            format!("http.extraHeader=Authorization: Basic {want}")
-        );
+        assert_eq!(args[1], format!("http.extraHeader=Authorization: Basic {want}"));
         assert_eq!(&args[2..], ["clone", "url"]);
     }
 
@@ -1290,27 +963,14 @@ mod tests {
         let mut c = testkit::ctx().await;
         c.run_id = "hourly-1757000000".into();
         let p = c.prefix();
-        for name in [
-            team_slug(&c),
-            shared_repo(&c),
-            prot_branch(&c),
-            patch_branch(&c),
-            closed_branch(&c),
-        ] {
-            assert!(
-                name.starts_with(&p),
-                "{name} is not swept by the {p} prefix"
-            );
+        for name in [team_slug(&c), shared_repo(&c), prot_branch(&c), patch_branch(&c), closed_branch(&c)] {
+            assert!(name.starts_with(&p), "{name} is not swept by the {p} prefix");
         }
         // A team slug is a handle: `check_handle` caps it at 39 characters and permits only
         // lowercase letters, digits and dashes.
         let slug = team_slug(&c);
         assert!(slug.len() <= 39, "{slug} is too long to be a handle");
-        assert!(
-            slug.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
-            "{slug}"
-        );
+        assert!(slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{slug}");
         assert!(!slug.starts_with('-') && !slug.ends_with('-'), "{slug}");
     }
 }

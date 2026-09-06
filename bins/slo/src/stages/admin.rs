@@ -54,39 +54,37 @@ pub async fn run(c: &mut Ctx) {
 async fn queue(c: &mut Ctx) -> Option<String> {
     let reason = format!("{} slo probe", c.prefix());
     c.step("req.queue", QUEUE_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
-        let url = api(c, "/v1/requests");
-        let queue = admin(c, "/admin/requests");
-        let body = serde_json::json!({
-            "kind": KIND,
-            "reason": reason,
-            "other": { "title": "slo probe", "body": reason },
-        });
-        async move {
-            let made = post(c, &url, &jwt, body)
-                .await
-                .context("could not open a request")?;
-            let id = made
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the answer carried no request id"))?
-                .to_string();
-            // Recorded before the wait, so teardown denies it even if the queue read fails.
-            // The CR itself goes in `sweep_requests`, by owner, whether or not this ran.
-            c.state.request = Some(id.clone());
-            poll_json(c, &queue, &admin_jwt, QUEUE_CEILING, |v| {
-                // `pending` rather than a literal comparison: a row the API server has not
-                // stamped a status onto yet IS pending to the api (`is_pending_generic`), and a
-                // probe that disagreed about that is what let a status-less row block a
-                // tenant's quota requests for a day.
-                rows(v).iter().any(|r| {
-                    r.get("id").and_then(Value::as_str) == Some(id.as_str()) && super::pending(r)
+            let jwt = c.probe_jwt.clone();
+            let admin_jwt = c.admin_jwt.clone();
+            let url = api(c, "/v1/requests");
+            let queue = admin(c, "/admin/requests");
+            let body = serde_json::json!({
+                "kind": KIND,
+                "reason": reason,
+                "other": { "title": "slo probe", "body": reason },
+            });
+            async move {
+                let made = post(c, &url, &jwt, body).await.context("could not open a request")?;
+                let id = made
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("the answer carried no request id"))?
+                    .to_string();
+                // Recorded before the wait, so teardown denies it even if the queue read fails.
+                // The CR itself goes in `sweep_requests`, by owner, whether or not this ran.
+                c.state.request = Some(id.clone());
+                poll_json(c, &queue, &admin_jwt, QUEUE_CEILING, |v| {
+                    // `pending` rather than a literal comparison: a row the API server has not
+                    // stamped a status onto yet IS pending to the api (`is_pending_generic`), and a
+                    // probe that disagreed about that is what let a status-less row block a
+                    // tenant's quota requests for a day.
+                    rows(v).iter().any(|r| {
+                        r.get("id").and_then(Value::as_str) == Some(id.as_str()) && super::pending(r)
+                    })
                 })
-            })
-            .await
-            .context("the request never appeared as pending in the admin queue")
-        }
+                .await
+                .context("the request never appeared as pending in the admin queue")
+            }
         .boxed()
     })
     .await;
@@ -101,39 +99,33 @@ async fn queue(c: &mut Ctx) -> Option<String> {
 /// step where the interesting failure is a write that SUCCEEDED and left no trace.
 async fn audit_row(c: &mut Ctx, id: &str) {
     let id = id.to_string();
-    let ok = c
-        .step("audit.row", AUDIT_CEILING, move |c| {
-            let jwt = c.admin_jwt.clone();
-            let deny = admin(c, &format!("/admin/requests/{id}/deny"));
-            // `action` and `target` are exactly what `deny_request` records, so a row that comes back
-            // is this deny's own and not some other admin's.
-            let log = admin(
-                c,
-                &format!("/admin/audit?action=request.denied&target={id}"),
-            );
-            // The dual write: every audit row is copied into `kloudlite.events` as `admin.<action>`,
-            // where the console's own history charts read it. The object-store log stays the legal
-            // record, so a ClickHouse that is not deployed is not a breach — that is `503 history
-            // unavailable`, which this tolerates and nothing else does.
-            let events = admin(c, "/admin/history/events?limit=200");
-            async move {
-                post(c, &deny, &jwt, serde_json::json!({ "note": "slo probe" }))
-                    .await
-                    .context("could not deny the request")?;
-                // The row is written after the response, best-effort by design — so this polls rather
-                // than reading once.
-                poll_json(c, &log, &jwt, AUDIT_CEILING, |v| {
-                    v.get("rows")
-                        .and_then(Value::as_array)
-                        .is_some_and(|r| !r.is_empty())
-                })
+    let ok = c.step("audit.row", AUDIT_CEILING, move |c| {
+        let jwt = c.admin_jwt.clone();
+        let deny = admin(c, &format!("/admin/requests/{id}/deny"));
+        // `action` and `target` are exactly what `deny_request` records, so a row that comes back
+        // is this deny's own and not some other admin's.
+        let log = admin(c, &format!("/admin/audit?action=request.denied&target={id}"));
+        // The dual write: every audit row is copied into `kloudlite.events` as `admin.<action>`,
+        // where the console's own history charts read it. The object-store log stays the legal
+        // record, so a ClickHouse that is not deployed is not a breach — that is `503 history
+        // unavailable`, which this tolerates and nothing else does.
+        let events = admin(c, "/admin/history/events?limit=200");
+        async move {
+            post(c, &deny, &jwt, serde_json::json!({ "note": "slo probe" }))
                 .await
-                .context("the deny left no audit row")?;
-                dual_written(c, &events, &jwt, &id).await
-            }
-            .boxed()
-        })
-        .await;
+                .context("could not deny the request")?;
+            // The row is written after the response, best-effort by design — so this polls rather
+            // than reading once.
+            poll_json(c, &log, &jwt, AUDIT_CEILING, |v| {
+                v.get("rows").and_then(Value::as_array).is_some_and(|r| !r.is_empty())
+            })
+            .await
+            .context("the deny left no audit row")?;
+            dual_written(c, &events, &jwt, &id).await
+        }
+        .boxed()
+    })
+    .await;
     if !ok {
         // The step is already recorded; a 503 turns that sample into a skip, which is no sample.
         // Rewriting the row rather than checking first keeps the DENY — the write whose row this
@@ -171,12 +163,7 @@ async fn dual_written(c: &Ctx, url: &str, jwt: &str, target: &str) -> Result<()>
         return Err(anyhow!("the history events read answered {status}"));
     }
     let seen: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-    let rows = seen
-        .get("events")
-        .and_then(Value::as_array)
-        .or_else(|| seen.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let rows = seen.get("events").and_then(Value::as_array).or_else(|| seen.as_array()).cloned().unwrap_or_default();
     let there = rows.iter().any(|r| {
         let carried = r.to_string();
         carried.contains("admin.request.denied") && carried.contains(target)
@@ -205,17 +192,11 @@ async fn signals(c: &mut Ctx) {
         let region = c.cfg.region.clone();
         let url = admin(c, "/admin/monitoring/signals");
         async move {
-            let v = get(c, &url, &jwt)
-                .await
-                .context("could not read the signals table")?;
+            let v = get(c, &url, &jwt).await.context("could not read the signals table")?;
             if v.get("source").and_then(Value::as_str) != Some("history") {
                 return Err(anyhow!("no rule state has been recorded at all"));
             }
-            let rows = v
-                .get("signals")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let rows = v.get("signals").and_then(Value::as_array).cloned().unwrap_or_default();
             let mine: Vec<&Value> = rows
                 .iter()
                 .filter(|r| r.get("region").and_then(Value::as_str) == Some(region.as_str()))
@@ -270,22 +251,13 @@ const NO_SAMPLES: &str = "no collector reporting";
 /// would have called that healthy.
 fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
     if rows.is_empty() {
-        return Err(anyhow!(
-            "the signals table lists no rule at all for {region}"
-        ));
+        return Err(anyhow!("the signals table lists no rule at all for {region}"));
     }
-    let state = |r: &Value| {
-        r.get("state")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
+    let state = |r: &Value| r.get("state").and_then(Value::as_str).unwrap_or_default().to_string();
     // An uncovered window must be `unknown`. A row that carries the fill's own reason and any
     // other state is the evaluator having reported a verdict for samples it never had.
     if let Some(bad) = rows.iter().find(|r| {
-        r.get("detail")
-            .and_then(Value::as_str)
-            .is_some_and(|d| d.contains(NO_SAMPLES))
+        r.get("detail").and_then(Value::as_str).is_some_and(|d| d.contains(NO_SAMPLES))
             && state(r) != "unknown"
     }) {
         return Err(anyhow!(
@@ -297,26 +269,18 @@ fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
     // Every state is one of the four the evaluator writes: an unrecognised word renders as a
     // colourless cell nobody can act on.
     if let Some(bad) = rows.iter().find(|r| !STATES.contains(&state(r).as_str())) {
-        return Err(anyhow!(
-            "a rule in {region} reports `{}`, which is not a state",
-            state(bad)
-        ));
+        return Err(anyhow!("a rule in {region} reports `{}`, which is not a state", state(bad)));
     }
     // And something is actually being evaluated.
     if rows.iter().all(|r| state(r) == "unknown") {
-        return Err(anyhow!(
-            "every rule in {region} is unknown: nothing is evaluating"
-        ));
+        return Err(anyhow!("every rule in {region} is unknown: nothing is evaluating"));
     }
     // Every RECORDED row names the moment it transitioned. A row with no `ts` is one the API filled
     // in for a rule that has never been recorded, and that row must carry the fill's own reason —
     // anything else is a state the console renders with no age against it at all.
     if let Some(bad) = rows.iter().find(|r| {
         r.get("ts").and_then(Value::as_str).is_none()
-            && !r
-                .get("detail")
-                .and_then(Value::as_str)
-                .is_some_and(|d| d.contains(NO_SAMPLES))
+            && !r.get("detail").and_then(Value::as_str).is_some_and(|d| d.contains(NO_SAMPLES))
     }) {
         return Err(anyhow!(
             "`{}` reports `{}` with no timestamp: nothing says when it was recorded",
@@ -344,7 +308,9 @@ mod tests {
     /// an uncovered window report a verdict would have called that healthy.
     #[test]
     fn an_uncovered_window_may_never_report_a_verdict() {
-        let row = |alert: &str, state: &str, detail: &str| serde_json::json!({ "alert": alert, "region": "r", "state": state, "detail": detail });
+        let row = |alert: &str, state: &str, detail: &str| {
+            serde_json::json!({ "alert": alert, "region": "r", "state": state, "detail": detail })
+        };
         let row = |alert: &str, state: &str, detail: &str| {
             let mut v = row(alert, state, detail);
             // Every recorded row carries one; the fill's does not, which is the pair below.
@@ -353,26 +319,17 @@ mod tests {
             }
             v
         };
-        let ok = [
-            row("A", "ok", ""),
-            row("B", "unknown", "no collector reporting for this region"),
-        ];
+        let ok = [row("A", "ok", ""), row("B", "unknown", "no collector reporting for this region")];
         let rows: Vec<&Value> = ok.iter().collect();
         assert!(evaluating(&rows, "r").is_ok());
         // The failure: a rule with no samples reporting `ok`.
         let bad = [row("A", "ok", "no collector reporting for this region")];
         let rows: Vec<&Value> = bad.iter().collect();
-        assert!(evaluating(&rows, "r")
-            .unwrap_err()
-            .to_string()
-            .contains("no samples"));
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("no samples"));
         // The failure the id already caught: nothing is evaluating at all.
         let dead = [row("A", "unknown", ""), row("B", "unknown", "")];
         let rows: Vec<&Value> = dead.iter().collect();
-        assert!(evaluating(&rows, "r")
-            .unwrap_err()
-            .to_string()
-            .contains("nothing is evaluating"));
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("nothing is evaluating"));
         // An empty table reads as "nothing is wrong" on the page, which is the one thing the fill
         // exists to prevent.
         assert!(evaluating(&[], "r").is_err());
@@ -381,13 +338,9 @@ mod tests {
         let rows: Vec<&Value> = odd.iter().collect();
         assert!(evaluating(&rows, "r").is_err());
         // And a recorded row with no timestamp: the weakness the ms bound used to paper over.
-        let undated =
-            [serde_json::json!({ "alert": "A", "region": "r", "state": "ok", "detail": "" })];
+        let undated = [serde_json::json!({ "alert": "A", "region": "r", "state": "ok", "detail": "" })];
         let rows: Vec<&Value> = undated.iter().collect();
-        assert!(evaluating(&rows, "r")
-            .unwrap_err()
-            .to_string()
-            .contains("no timestamp"));
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("no timestamp"));
     }
 
     /// Nothing reachable: every id is still produced exactly once, as a failure with a reason,
@@ -397,9 +350,6 @@ mod tests {
         let mut c = crate::testkit::ctx().await;
         run(&mut c).await;
         let ids: Vec<&str> = c.steps.iter().map(|s| s.slo_id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["req.queue", "audit.row", "signals.fresh", "history.api"]
-        );
+        assert_eq!(ids, ["req.queue", "audit.row", "signals.fresh", "history.api"]);
     }
 }

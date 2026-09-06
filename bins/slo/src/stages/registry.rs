@@ -90,7 +90,10 @@ pub async fn run(c: &mut Ctx) {
 async fn token(c: &mut Ctx, secret: &str, image: &str) {
     c.step("reg.token.p95", TOKEN_CEILING, |c| {
         let (secret, scope) = (secret.to_string(), pull_scope(c, image));
-        async move { bearer(c, Some(&secret), &scope).await.map(|_| ()) }.boxed()
+        async move {
+            bearer(c, Some(&secret), &scope).await.map(|_| ())
+        }
+        .boxed()
     })
     .await;
 }
@@ -108,23 +111,14 @@ async fn push(c: &mut Ctx, secret: &str, a: &str) -> Result<String> {
     let host = host(c);
     let (dir_a, dir_b) = (c.tmp.join("img-a"), c.tmp.join("img-b"));
     let ok = {
-        let (secret, a, b) = (
-            secret.to_string(),
-            a.to_string(),
-            format!("{}-b", c.prefix()),
-        );
+        let (secret, a, b) = (secret.to_string(), a.to_string(), format!("{}-b", c.prefix()));
         c.step("reg.push.ok", PUSH_CEILING, move |c| {
             let crane = authed(c);
             async move {
                 write_layout(&dir_a, &layer, &a).context("could not build image a")?;
                 write_layout(&dir_b, &layer, &b).context("could not build image b")?;
-                crane
-                    .login(&host, &probe, &secret)
-                    .await
-                    .context("could not log in")?;
-                crane
-                    .push(&dir_a, &format!("{host}/{probe}/{a}:latest"))
-                    .await
+                crane.login(&host, &probe, &secret).await.context("could not log in")?;
+                crane.push(&dir_a, &format!("{host}/{probe}/{a}:latest")).await
             }
             .boxed()
         })
@@ -162,10 +156,7 @@ async fn manifest(c: &mut Ctx, secret: &str, image: &str) {
             )
             .await?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "{status}: {}",
-                    body.chars().take(200).collect::<String>()
-                ));
+                return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
             }
             Ok(())
         }
@@ -180,12 +171,8 @@ async fn manifest(c: &mut Ctx, secret: &str, image: &str) {
 /// there, and two separate 5 s waits would report 10 s as a pass.
 async fn tags(c: &mut Ctx, secret: &str, image: &str) {
     let probe = c.probe_user.clone();
-    let bearer = match bearer(
-        c,
-        Some(secret),
-        &format!("{} registry:catalog:*", pull_scope(c, image)),
-    )
-    .await
+    let bearer = match bearer(c, Some(secret), &format!("{} registry:catalog:*", pull_scope(c, image)))
+        .await
     {
         Ok(t) => t,
         Err(e) => return c.skip("reg.tags.visible", &format!("no registry token: {e:#}")),
@@ -196,17 +183,13 @@ async fn tags(c: &mut Ctx, secret: &str, image: &str) {
     c.step("reg.tags.visible", TAGS_CEILING, move |c| {
         async move {
             let start = Instant::now();
-            poll_json(c, &tags_url, &bearer, TAGS_CAP, |v| {
-                has(v, "tags", "latest")
-            })
-            .await
-            .context("the tag never appeared")?;
+            poll_json(c, &tags_url, &bearer, TAGS_CAP, |v| has(v, "tags", "latest"))
+                .await
+                .context("the tag never appeared")?;
             let left = TAGS_CAP.saturating_sub(start.elapsed());
-            poll_json(c, &catalog_url, &bearer, left, |v| {
-                has(v, "repositories", &want)
-            })
-            .await
-            .context("the image never appeared in the catalogue")
+            poll_json(c, &catalog_url, &bearer, left, |v| has(v, "repositories", &want))
+                .await
+                .context("the image never appeared in the catalogue")
         }
         .boxed()
     })
@@ -234,35 +217,19 @@ async fn shared_layer(c: &mut Ctx, secret: &str, a: &str, b: &str, layer: &str) 
     let (host, a, b, layer) = (host(c), a.to_string(), b.to_string(), layer.to_string());
     c.step("reg.shared.layer", SHARED_CEILING, move |c| {
         let crane = authed(c);
-        let (jwt, del) = (
-            c.probe_jwt.clone(),
-            api(c, &format!("/api/{probe}/{b}/imagedelete")),
-        );
+        let (jwt, del) = (c.probe_jwt.clone(), api(c, &format!("/api/{probe}/{b}/imagedelete")));
         async move {
             let (status, _) =
                 super::raw(c, reqwest::Method::HEAD, &head, &bearer, None, &[]).await?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "the layer image a pushed is not there for b to mount: {status}"
-                ));
+                return Err(anyhow!("the layer image a pushed is not there for b to mount: {status}"));
             }
-            crane
-                .push(&dir_b, &format!("{host}/{probe}/{b}:latest"))
-                .await
-                .context("could not push the sibling")?;
-            post(c, &del, &jwt, serde_json::Value::Null)
-                .await
-                .context("could not delete the sibling")?;
+            crane.push(&dir_b, &format!("{host}/{probe}/{b}:latest")).await.context("could not push the sibling")?;
+            post(c, &del, &jwt, serde_json::Value::Null).await.context("could not delete the sibling")?;
             let _ = std::fs::remove_dir_all(&dest);
-            crane
-                .pull(&format!("{host}/{probe}/{a}:latest"), &dest)
-                .await
-                .context("could not pull")?;
-            let got = std::fs::read(
-                dest.join("blobs/sha256")
-                    .join(layer.trim_start_matches("sha256:")),
-            )
-            .context("the shared layer is not in the pulled image")?;
+            crane.pull(&format!("{host}/{probe}/{a}:latest"), &dest).await.context("could not pull")?;
+            let got = std::fs::read(dest.join("blobs/sha256").join(layer.trim_start_matches("sha256:")))
+                .context("the shared layer is not in the pulled image")?;
             if sha256(&got) != layer {
                 return Err(anyhow!("the shared layer came back with different bytes"));
             }
@@ -284,23 +251,16 @@ async fn visibility(c: &mut Ctx, image: &str) {
     c.step("reg.visibility", VISIBILITY_CEILING, move |c| {
         let anon = anonymous(c);
         let (jwt, image) = (c.probe_jwt.clone(), image.to_string());
-        let flip = api(
-            c,
-            &format!("/api/{probe}/{image}/imagevisibility?visibility=public"),
-        );
+        let flip = api(c, &format!("/api/{probe}/{image}/imagevisibility?visibility=public"));
         let reference = format!("{host}/{probe}/{image}:latest");
         async move {
             let _ = std::fs::remove_dir_all(&dest);
             if anon.pull(&reference, &dest).await.is_ok() {
                 return Err(anyhow!("a private image pulled anonymously"));
             }
-            post(c, &flip, &jwt, serde_json::Value::Null)
-                .await
-                .context("could not make it public")?;
+            post(c, &flip, &jwt, serde_json::Value::Null).await.context("could not make it public")?;
             let _ = std::fs::remove_dir_all(&dest);
-            anon.pull(&reference, &dest)
-                .await
-                .context("a public image refused an anonymous pull")?;
+            anon.pull(&reference, &dest).await.context("a public image refused an anonymous pull")?;
             Ok(())
         }
         .boxed()
@@ -317,25 +277,20 @@ async fn visibility(c: &mut Ctx, image: &str) {
 async fn catalogue(c: &mut Ctx) {
     let probe = c.probe_user.clone();
     let want = format!("{}-a", c.prefix());
-    c.step(
-        "reg.catalogue",
-        CATALOGUE_CEILING + Duration::from_secs(5),
-        move |c| {
-            let jwt = c.probe_jwt.clone();
-            let url = api(c, &format!("/api/{probe}/images"));
-            async move {
-                poll_json(c, &url, &jwt, CATALOGUE_CEILING, |v| {
-                    v.as_array().is_some_and(|rows| {
-                        rows.iter()
-                            .any(|r| r.get("name").and_then(|n| n.as_str()) == Some(want.as_str()))
-                    })
+    c.step("reg.catalogue", CATALOGUE_CEILING + Duration::from_secs(5), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/api/{probe}/images"));
+        async move {
+            poll_json(c, &url, &jwt, CATALOGUE_CEILING, |v| {
+                v.as_array().is_some_and(|rows| {
+                    rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(want.as_str()))
                 })
-                .await
-                .context("the pushed image never appeared in the owner's catalogue")
-            }
-            .boxed()
-        },
-    )
+            })
+            .await
+            .context("the pushed image never appeared in the owner's catalogue")
+        }
+        .boxed()
+    })
     .await;
 }
 
@@ -363,27 +318,18 @@ async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
             // The tag rides in the BODY as plain text — `imagetagdelete` reads
             // `String::from_utf8_lossy(&body)` — so this is the one call here that cannot go
             // through `post`, which would send it as a JSON string with its quotes.
-            delete_tag(c, &del_tag, &jwt, "latest")
-                .await
-                .context("could not delete the tag")?;
+            delete_tag(c, &del_tag, &jwt, "latest").await.context("could not delete the tag")?;
             let tags = super::raw(c, reqwest::Method::GET, &tags_url, &bearer, None, &[]).await?;
-            if has(
-                &serde_json::from_str(&tags.1).unwrap_or(serde_json::Value::Null),
-                "tags",
-                "latest",
-            ) {
+            if has(&serde_json::from_str(&tags.1).unwrap_or(serde_json::Value::Null), "tags", "latest") {
                 return Err(anyhow!("the tag is still in the tag list after the delete"));
             }
-            post(c, &del_image, &jwt, serde_json::Value::Null)
-                .await
-                .context("could not delete the image")?;
+            post(c, &del_image, &jwt, serde_json::Value::Null).await.context("could not delete the image")?;
             // The listing is a cached view (`Cache-Control: max-age=5` on public reads, the api's
             // own listing cache behind it), so the delete is judged by the target's bound, not by
             // the first read after it.
             super::poll_json(c, &listing, &jwt, DELETE_CEILING, |rows| {
                 !rows.as_array().is_some_and(|rows| {
-                    rows.iter()
-                        .any(|r| r.get("name").and_then(|n| n.as_str()) == Some(image.as_str()))
+                    rows.iter().any(|r| r.get("name").and_then(|n| n.as_str()) == Some(image.as_str()))
                 })
             })
             .await
@@ -411,15 +357,7 @@ async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
     if status.is_success() {
         return Ok(());
     }
-    Err(anyhow!(
-        "{status}: {}",
-        r.text()
-            .await
-            .unwrap_or_default()
-            .chars()
-            .take(200)
-            .collect::<String>()
-    ))
+    Err(anyhow!("{status}: {}", r.text().await.unwrap_or_default().chars().take(200).collect::<String>()))
 }
 
 /// `reg.canary`: the long-lived image `bootstrap` pushed still pulls, and is still the same image.
@@ -443,10 +381,7 @@ async fn canary(c: &mut Ctx, secret: &str) {
         async move {
             // Repeated rather than assumed: a canary that only passed after `reg.push.ok` had
             // logged in would go red for the wrong reason the day the push fails.
-            crane
-                .login(&host, &probe, &secret)
-                .await
-                .context("could not log in")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
             let got = crane.digest(&reference).await?;
             if got != want {
                 return Err(anyhow!("the canary is {got}, not the pinned {want}"));
@@ -491,9 +426,7 @@ pub async fn ensure_canary(c: &Ctx) -> Result<String> {
         Some(id) => {
             let url = api(c, &format!("/v1/tokens/{id}"));
             // Best effort, and never allowed to mask the push's own outcome.
-            if let Err(e) =
-                super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await
-            {
+            if let Err(e) = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await {
                 tracing::warn!(op = "revoke", error = %format!("{e:#}"), "slo.bootstrap.failed");
             }
         }
@@ -514,20 +447,14 @@ async fn push_canary(
     secret: &str,
 ) -> Result<String> {
     let probe = c.probe_user.clone();
-    crane
-        .login(host, &probe, secret)
-        .await
-        .context("could not log in")?;
+    crane.login(host, &probe, secret).await.context("could not log in")?;
     let dir = c.tmp.join("canary");
     std::fs::create_dir_all(&c.tmp)?;
     let want = write_layout(&dir, &vec![0x5c; LAYER_BYTES], "canary")?;
     if crane.digest(reference).await.ok().as_deref() == Some(want.as_str()) {
         return Ok(want);
     }
-    crane
-        .push(&dir, reference)
-        .await
-        .context("could not push the canary")?;
+    crane.push(&dir, reference).await.context("could not push the canary")?;
     crane.digest(reference).await
 }
 
@@ -546,10 +473,7 @@ pub(crate) fn base(c: &Ctx) -> String {
 
 /// The same value as an image-reference prefix: `crane` takes a host, never a URL.
 pub(crate) fn host(c: &Ctx) -> String {
-    base(c)
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .to_string()
+    base(c).trim_start_matches("https://").trim_start_matches("http://").to_string()
 }
 
 fn pull_scope(c: &Ctx, image: &str) -> String {
@@ -572,29 +496,18 @@ fn anonymous(c: &Ctx) -> Crane {
 pub(crate) async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result<String> {
     let probe = c.probe_user.clone();
     use base64::Engine;
-    let url = format!(
-        "{}/v2/token?service={}&scope={}",
-        base(c),
-        host(c),
-        urlencoding(scope)
-    );
+    let url = format!("{}/v2/token?service={}&scope={}", base(c), host(c), urlencoding(scope));
     let mut req = c.http.get(&url);
     if let Some(s) = secret {
         let basic = base64::engine::general_purpose::STANDARD.encode(format!("{probe}:{s}"));
         req = req.header("authorization", format!("Basic {basic}"));
     }
     // `without_url`: the URL is not a secret here, but the rule is the module's, not the caller's.
-    let r = req
-        .send()
-        .await
-        .map_err(|e| anyhow!("{}", e.without_url()))?;
+    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
     let body = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!(
-            "{status}: {}",
-            body.chars().take(200).collect::<String>()
-        ));
+        return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
     }
     serde_json::from_str::<serde_json::Value>(&body)
         .ok()
@@ -683,10 +596,7 @@ pub(crate) fn write_layout(dir: &Path, layer: &[u8], image: &str) -> Result<Stri
             "annotations": { "org.opencontainers.image.ref.name": "latest" },
         }],
     });
-    write(
-        &dir.join("oci-layout"),
-        br#"{"imageLayoutVersion":"1.0.0"}"#,
-    )?;
+    write(&dir.join("oci-layout"), br#"{"imageLayoutVersion":"1.0.0"}"#)?;
     write(&dir.join("index.json"), index.to_string().as_bytes())?;
     Ok(manifest_digest)
 }
@@ -712,22 +622,13 @@ mod tests {
     fn layer_of(dir: &Path) -> (String, String) {
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("index.json")).expect("index")).unwrap();
-        let m = index["manifests"][0]["digest"]
-            .as_str()
-            .expect("manifest digest");
+        let m = index["manifests"][0]["digest"].as_str().expect("manifest digest");
         let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(
-                dir.join("blobs/sha256")
-                    .join(m.trim_start_matches("sha256:")),
-            )
-            .unwrap(),
+            &std::fs::read(dir.join("blobs/sha256").join(m.trim_start_matches("sha256:"))).unwrap(),
         )
         .unwrap();
         (
-            manifest["layers"][0]["digest"]
-                .as_str()
-                .unwrap()
-                .to_string(),
+            manifest["layers"][0]["digest"].as_str().unwrap().to_string(),
             manifest["config"]["digest"].as_str().unwrap().to_string(),
         )
     }
@@ -747,9 +648,7 @@ mod tests {
         // And they are genuinely two images, not the same one pushed twice.
         assert_ne!(config_a, config_b);
         // The layer really is on disk under its digest, which is what `crane push` uploads.
-        let path = root
-            .join("a/blobs/sha256")
-            .join(layer_a.trim_start_matches("sha256:"));
+        let path = root.join("a/blobs/sha256").join(layer_a.trim_start_matches("sha256:"));
         assert_eq!(std::fs::read(path).expect("layer blob").len(), layer.len());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -767,23 +666,11 @@ mod tests {
         c.tmp = blocked.join("tmp");
         c.state.token_value = Some("t".into());
         run(&mut c).await;
-        let push = c
-            .steps
-            .iter()
-            .find(|s| s.slo_id == "reg.push.ok")
-            .expect("reg.push.ok");
+        let push = c.steps.iter().find(|s| s.slo_id == "reg.push.ok").expect("reg.push.ok");
         assert!(!push.ok && !push.skipped, "{push:?}");
-        assert!(
-            push.detail.contains("could not build image a"),
-            "{}",
-            push.detail
-        );
+        assert!(push.detail.contains("could not build image a"), "{}", push.detail);
         for id in AFTER_PUSH {
-            let s = c
-                .steps
-                .iter()
-                .find(|s| s.slo_id == id)
-                .unwrap_or_else(|| panic!("{id}"));
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped, "{id} should be skipped, not counted twice");
         }
         let _ = std::fs::remove_file(&blocked);
@@ -791,14 +678,8 @@ mod tests {
 
     #[test]
     fn a_scope_survives_the_query_string() {
-        assert_eq!(
-            urlencoding("repository:a/b:pull,push"),
-            "repository%3Aa/b%3Apull%2Cpush"
-        );
-        assert_eq!(
-            urlencoding("registry:catalog:*"),
-            "registry%3Acatalog%3A%2A"
-        );
+        assert_eq!(urlencoding("repository:a/b:pull,push"), "repository%3Aa/b%3Apull%2Cpush");
+        assert_eq!(urlencoding("registry:catalog:*"), "registry%3Acatalog%3A%2A");
     }
 
     /// The deployment sets a bare host, because that is what a `docker pull` line carries, and the

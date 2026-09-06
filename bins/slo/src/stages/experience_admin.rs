@@ -67,10 +67,8 @@ pub(crate) fn probe_quota() -> Value {
 pub async fn request_approve(c: &mut Ctx) {
     let name = format!("{}-q", c.prefix());
     let reason = format!("{} slo probe quota", c.prefix());
-    c.step("request.approve", APPROVE_CEILING, move |c| {
-        approve(c, APPROVE_BODY, name, reason).boxed()
-    })
-    .await;
+    c.step("request.approve", APPROVE_CEILING, move |c| approve(c, APPROVE_BODY, name, reason).boxed())
+        .await;
 }
 
 /// The step's whole body, with the body's ceiling as an argument so a test can watch the
@@ -89,13 +87,9 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
     let made: Arc<Mutex<Option<String>>> = Arc::default();
     let created = made.clone();
     let body = async {
-        let q = get(c, &quota_url, &jwt)
-            .await
-            .context("could not read the quota")?;
-        let limit = q
-            .get("limit")
-            .cloned()
-            .ok_or_else(|| anyhow!("the quota answer carried no limit"))?;
+        let q = get(c, &quota_url, &jwt).await.context("could not read the quota")?;
+        let limit =
+            q.get("limit").cloned().ok_or_else(|| anyhow!("the quota answer carried no limit"))?;
         let cap = disk_gb(&limit).ok_or_else(|| anyhow!("the quota limit carries no diskGb"))?;
         let used = q.get("used").and_then(disk_gb).unwrap_or(0);
         let create = json!({
@@ -104,31 +98,20 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
             "quota_gb": cap.saturating_sub(used) + HEADROOM,
             "packages": [],
         });
-        let (status, text) = raw(
-            c,
-            reqwest::Method::POST,
-            &ws_url,
-            &jwt,
-            Some(create.clone()),
-            &[],
-        )
-        .await?;
+        let (status, text) =
+            raw(c, reqwest::Method::POST, &ws_url, &jwt, Some(create.clone()), &[]).await?;
         if status != reqwest::StatusCode::CONFLICT {
             // Recorded even here: a create that SUCCEEDED is a workspace the undo must take back.
             *created.lock().expect("lock") = id_of(&text);
-            return Err(anyhow!(
-                "an over-quota create answered {status}: {}",
-                clip(&text)
-            ));
+            return Err(anyhow!("an over-quota create answered {status}: {}", clip(&text)));
         }
         let body = json!({
             "kind": "quota",
             "reason": reason,
             "quota": { "diskGb": cap + HEADROOM },
         });
-        let made = post(c, &req_url, &jwt, body)
-            .await
-            .context("could not open the quota request")?;
+        let made =
+            post(c, &req_url, &jwt, body).await.context("could not open the quota request")?;
         let id = made
             .get("id")
             .and_then(Value::as_str)
@@ -148,16 +131,10 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
         // `Ctx::step` cannot box.
         let held = made.lock().expect("lock").clone();
         let dropped = match held {
-            Some(id) => call(
-                c,
-                reqwest::Method::DELETE,
-                &api(c, &format!("/v1/workspaces/{id}")),
-                &jwt,
-                None,
-            )
-            .await
-            .map(|_| ())
-            .with_context(|| format!("the over-quota workspace {id} was left RUNNING")),
+            Some(id) => call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), &jwt, None)
+                .await
+                .map(|_| ())
+                .with_context(|| format!("the over-quota workspace {id} was left RUNNING")),
             None => Ok(()),
         };
         let body = json!({ "spec": probe_quota(), "note": "slo probe quota restore" });
@@ -212,9 +189,7 @@ pub async fn admin_stop(c: &mut Ctx) {
         let ws_url = api(c, "/v1/workspaces");
         async move {
             let body = json!({ "name": name, "region": region, "quota_gb": 1, "packages": [] });
-            let made = post(c, &ws_url, &jwt, body)
-                .await
-                .context("could not create a workspace to stop")?;
+            let made = post(c, &ws_url, &jwt, body).await.context("could not create a workspace to stop")?;
             let id = made
                 .get("id")
                 .and_then(Value::as_str)
@@ -223,20 +198,16 @@ pub async fn admin_stop(c: &mut Ctx) {
             // Left for teardown's prefix sweep rather than deleted here: the step is about the
             // stop, and a delete inside it would turn a slow delete into a stop breach.
             let ws = api(c, &format!("/v1/workspaces/{id}"));
-            poll_json(c, &ws, &jwt, Duration::from_secs(90), |v| {
-                state_is(v, "ready")
-            })
-            .await
-            .context("the workspace never became ready")?;
+            poll_json(c, &ws, &jwt, Duration::from_secs(90), |v| state_is(v, "ready"))
+                .await
+                .context("the workspace never became ready")?;
             let stop = admin(c, &format!("/admin/workspaces/{id}/stop"));
             post(c, &stop, &admin_jwt, json!({ "note": NOTE }))
                 .await
                 .context("the admin stop was refused")?;
-            poll_json(c, &ws, &jwt, Duration::from_secs(30), |v| {
-                state_is(v, "stopped")
-            })
-            .await
-            .context("the owner's own read never showed it stopped")
+            poll_json(c, &ws, &jwt, Duration::from_secs(30), |v| state_is(v, "stopped"))
+                .await
+                .context("the owner's own read never showed it stopped")
         }
         .boxed()
     })
@@ -257,17 +228,10 @@ pub async fn superadmin_grant(c: &mut Ctx) {
         async move {
             let body = json!({ "note": NOTE });
             let granted = async {
-                post(c, &one, &jwt, body.clone())
-                    .await
-                    .context("the grant was refused")?;
-                match listed(c, &all, &jwt)
-                    .await
-                    .context("could not read the roster after the grant")?
-                {
+                post(c, &one, &jwt, body.clone()).await.context("the grant was refused")?;
+                match listed(c, &all, &jwt).await.context("could not read the roster after the grant")? {
                     true => Ok(()),
-                    false => Err(anyhow!(
-                        "the roster does not list the account the grant added"
-                    )),
+                    false => Err(anyhow!("the roster does not list the account the grant added")),
                 }
             };
             // Outside the cancellable region: the probe must not leave a second superadmin
@@ -279,13 +243,8 @@ pub async fn superadmin_grant(c: &mut Ctx) {
                     .context("the account was left a SUPERADMIN")
             };
             undoing(GRANT_BODY, granted, revoke).await?;
-            match listed(c, &all, &jwt)
-                .await
-                .context("could not read the roster after the revoke")?
-            {
-                true => Err(anyhow!(
-                    "the roster still lists the account after the revoke"
-                )),
+            match listed(c, &all, &jwt).await.context("could not read the roster after the revoke")? {
+                true => Err(anyhow!("the roster still lists the account after the revoke")),
                 false => Ok(()),
             }
         }
@@ -300,9 +259,7 @@ async fn listed(c: &Ctx, url: &str, jwt: &str) -> Result<bool> {
     let other_email = c.other_email.clone();
     let v = get(c, url, jwt).await?;
     Ok(v.as_array().unwrap_or(&vec![]).iter().any(|r| {
-        r.get("_id")
-            .and_then(Value::as_str)
-            .is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
+        r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
     }))
 }
 
@@ -320,9 +277,7 @@ pub async fn feed(c: &mut Ctx) {
         let feed = api(c, &format!("/v1/activity?owner={probe}&limit=100"));
         async move {
             let body = json!({ "owner": probe, "name": name, "visibility": "private" });
-            post(c, &repos, &jwt, body)
-                .await
-                .context("could not create the repo")?;
+            post(c, &repos, &jwt, body).await.context("could not create the repo")?;
             // Two seconds inside the step's own ceiling, so a feed that never carries the repo
             // reports what it last saw rather than the step's bare "timed out".
             poll_json(c, &feed, &jwt, FEED_CEILING - Duration::from_secs(2), |v| {
@@ -342,11 +297,7 @@ pub async fn feed(c: &mut Ctx) {
 /// The `id` off a create's body, whatever the body is. `None` for anything that is not a JSON
 /// object with one — a refusal, an HTML error page, an empty 204.
 fn id_of(text: &str) -> Option<String> {
-    serde_json::from_str::<Value>(text)
-        .ok()?
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    serde_json::from_str::<Value>(text).ok()?.get("id").and_then(Value::as_str).map(str::to_string)
 }
 
 fn disk_gb(v: &Value) -> Option<u64> {
@@ -391,8 +342,7 @@ mod tests {
                 // The first create is the over-quota one the raise is asked for; every later one
                 // is a workspace that fits.
                 if s.creates.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return (axum::http::StatusCode::CONFLICT, "diskGb: 1 of 1 in use")
-                        .into_response();
+                    return (axum::http::StatusCode::CONFLICT, "diskGb: 1 of 1 in use").into_response();
                 }
                 Json(json!({ "id": "ws-probe" })).into_response()
             }
@@ -401,11 +351,7 @@ mod tests {
         let ws = move || {
             let s = s.clone();
             async move {
-                let state = if s.stopped.load(Ordering::SeqCst) {
-                    "stopped"
-                } else {
-                    "ready"
-                };
+                let state = if s.stopped.load(Ordering::SeqCst) { "stopped" } else { "ready" };
                 Json(json!({ "id": "ws-probe", "state": state }))
             }
         };
@@ -447,27 +393,12 @@ mod tests {
         };
         use axum::response::IntoResponse;
         Router::new()
-            .route(
-                "/v1/quota",
-                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }),
-            )
+            .route("/v1/quota", get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }))
             .route("/v1/workspaces", post(creates))
-            .route(
-                "/v1/workspaces/{id}",
-                get(ws).delete(|_: Path<String>| async { Json(json!({})) }),
-            )
-            .route(
-                "/v1/requests",
-                post(|| async { Json(json!({ "id": "req-1" })) }),
-            )
-            .route(
-                "/admin/requests/{id}/approve",
-                post(|_: Path<String>| async { Json(json!({})) }),
-            )
-            .route(
-                "/admin/quota/{owner}",
-                put(|_: Path<String>| async { Json(json!({})) }),
-            )
+            .route("/v1/workspaces/{id}", get(ws).delete(|_: Path<String>| async { Json(json!({})) }))
+            .route("/v1/requests", post(|| async { Json(json!({ "id": "req-1" })) }))
+            .route("/admin/requests/{id}/approve", post(|_: Path<String>| async { Json(json!({})) }))
+            .route("/admin/quota/{owner}", put(|_: Path<String>| async { Json(json!({})) }))
             .route("/admin/workspaces/{id}/stop", post(stop))
             .route("/api/admin/superadmins", get(roster))
             .route("/api/admin/superadmins/{user}", post(grant).delete(revoke))
@@ -489,12 +420,8 @@ mod tests {
         feed(c).await;
     }
 
-    const IDS: [&str; 4] = [
-        "request.approve",
-        "admin.stop.workspace",
-        "superadmin.grant",
-        "feed.experience",
-    ];
+    const IDS: [&str; 4] =
+        ["request.approve", "admin.stop.workspace", "superadmin.grant", "feed.experience"];
 
     /// A fleet that answers: every id is recorded once, and passes.
     #[tokio::test]
@@ -569,10 +496,7 @@ mod tests {
             )
             // A create that is NOT refused: the quota did not do its job, and the workspace it
             // made is the undo's problem.
-            .route(
-                "/v1/workspaces",
-                post(|| async { Json(json!({ "id": "ws-probe" })) }),
-            )
+            .route("/v1/workspaces", post(|| async { Json(json!({ "id": "ws-probe" })) }))
             .route(
                 "/v1/workspaces/{id}",
                 delete(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
@@ -594,10 +518,7 @@ mod tests {
 
         let out = approve(&c, Duration::from_secs(10), "ws".into(), "why".into()).await;
         let detail = format!("{:#}", out.expect_err("the create was not refused"));
-        assert!(
-            detail.contains("an over-quota create answered 200"),
-            "{detail}"
-        );
+        assert!(detail.contains("an over-quota create answered 200"), "{detail}");
         assert_eq!(puts.load(Ordering::SeqCst), 1, "the quota was left RAISED");
     }
 
@@ -627,26 +548,15 @@ mod quota_yaml {
         let want = super::probe_quota();
         let mut seen = 0;
         for doc in yaml.split("\n---\n").map(|d| format!("{}\n", d.trim_end())) {
-            if !crate::ctx::SUITE_TENANTS
-                .iter()
-                .any(|(p, _)| doc.contains(&format!("name: {p}\n")))
-            {
+            if !crate::ctx::SUITE_TENANTS.iter().any(|(p, _)| doc.contains(&format!("name: {p}\n"))) {
                 continue;
             }
             seen += 1;
             for (k, v) in want.as_object().unwrap() {
                 let line = format!("\n  {k}: {v}\n");
-                assert!(
-                    doc.contains(&line),
-                    "a quotas-slo.yaml primary object lacks `{}`",
-                    line.trim()
-                );
+                assert!(doc.contains(&line), "a quotas-slo.yaml primary object lacks `{}`", line.trim());
             }
         }
-        assert_eq!(
-            seen,
-            crate::ctx::SUITE_TENANTS.len(),
-            "one primary Quota object per suite"
-        );
+        assert_eq!(seen, crate::ctx::SUITE_TENANTS.len(), "one primary Quota object per suite");
     }
 }

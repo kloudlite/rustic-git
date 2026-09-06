@@ -90,10 +90,7 @@ async fn roll_zero_errors(c: &mut Ctx) {
     };
     let work = c.tmp.join("git").join(&repo);
     if !work.is_dir() {
-        return c.skip(
-            "roll.zero.errors",
-            "stage 2 left no working tree to push from",
-        );
+        return c.skip("roll.zero.errors", "stage 2 left no working tree to push from");
     }
     let aks = match drill::incluster() {
         Ok(k) => k,
@@ -112,9 +109,7 @@ async fn roll_zero_errors(c: &mut Ctx) {
             n: Default::default(),
         };
         async move {
-            settled(&sts)
-                .await
-                .context("the srv tier was already mid-roll, so this is not our roll")?;
+            settled(&sts).await.context("the srv tier was already mid-roll, so this is not our roll")?;
             let before = pod_names(&pods).await?;
             let stamp = chrono::Utc::now().to_rfc3339();
             sts.patch(
@@ -129,9 +124,7 @@ async fn roll_zero_errors(c: &mut Ctx) {
             .await
             .map_err(|e| anyhow!("the roll could not be started: {e}"))?;
             let settle = || async {
-                settled(&sts)
-                    .await
-                    .context("the srv tier was left mid-roll")
+                settled(&sts).await.context("the srv tier was left mid-roll")
             };
             let watch = async { watch_roll(c, &pods, &refs, &jwt, &before, &push).await };
             drill::undoing(ROLL_CAP, watch, settle).await
@@ -178,12 +171,7 @@ async fn watch_roll(
                 bad.push(format!("push: {e:#}"));
             }
         }
-        for pod in pods
-            .list(&ListParams::default().labels(SRV_PODS))
-            .await
-            .map_err(|e| anyhow!("{e}"))?
-            .items
-        {
+        for pod in pods.list(&ListParams::default().labels(SRV_PODS)).await.map_err(|e| anyhow!("{e}"))?.items {
             let (name, uid) = (kube::ResourceExt::name_any(&pod), uid_of(&pod));
             if pod.metadata.deletion_timestamp.is_none() || drained.contains(&uid) {
                 continue;
@@ -194,13 +182,7 @@ async fn watch_roll(
             // Logs while it is still there: once the pod is gone so is its log, which is why this
             // is read on the beat rather than after the roll.
             let log = pods
-                .logs(
-                    &name,
-                    &kube::api::LogParams {
-                        tail_lines: Some(400),
-                        ..Default::default()
-                    },
-                )
+                .logs(&name, &kube::api::LogParams { tail_lines: Some(400), ..Default::default() })
                 .await
                 .unwrap_or_default();
             if log.contains("ownership.drained") {
@@ -214,19 +196,12 @@ async fn watch_roll(
             break;
         }
         if started.elapsed() >= ROLL_CAP - Duration::from_secs(60) {
-            return Err(anyhow!(
-                "the roll did not finish in {} s",
-                ROLL_CAP.as_secs()
-            ));
+            return Err(anyhow!("the roll did not finish in {} s", ROLL_CAP.as_secs()));
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     if !bad.is_empty() {
-        return Err(anyhow!(
-            "{} bad answers through the roll: {}",
-            bad.len(),
-            bad.join(" · ")
-        ));
+        return Err(anyhow!("{} bad answers through the roll: {}", bad.len(), bad.join(" · ")));
     }
     let silent: Vec<&String> = leaving.iter().filter(|p| !drained.contains(p)).collect();
     if !silent.is_empty() {
@@ -250,19 +225,11 @@ async fn routed(c: &Ctx, url: &str, jwt: &str) -> std::result::Result<(), String
             // 421 Misdirected Request: ask again, which is what the client does.
             Ok((status, body)) if status.as_u16() == 421 => {
                 if attempt + 1 == RETRIES {
-                    return Err(format!(
-                        "421 did not resolve after {RETRIES} tries: {}",
-                        body.chars().take(120).collect::<String>()
-                    ));
+                    return Err(format!("421 did not resolve after {RETRIES} tries: {}", body.chars().take(120).collect::<String>()));
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            Ok((status, body)) => {
-                return Err(format!(
-                    "{status}: {}",
-                    body.chars().take(120).collect::<String>()
-                ))
-            }
+            Ok((status, body)) => return Err(format!("{status}: {}", body.chars().take(120).collect::<String>())),
             // A dropped connection is a failed answer, counted — never propagated, or one blip
             // would end the step before it had measured the roll.
             Err(e) => return Err(format!("transport: {e:#}")),
@@ -292,33 +259,14 @@ impl Pushing {
         let i = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::fs::write(self.work.join("roll.txt"), format!("{i}\n")).context("could not write")?;
         super::git::git(c, vec!["add".into(), "-A".into()], Some(&self.work)).await?;
-        super::git::git(
-            c,
-            vec![
-                "commit".into(),
-                "-q".into(),
-                "-m".into(),
-                format!("roll {i}"),
-            ],
-            Some(&self.work),
-        )
-        .await?;
+        super::git::git(c, vec!["commit".into(), "-q".into(), "-m".into(), format!("roll {i}")], Some(&self.work)).await?;
         let refspec = format!("HEAD:refs/heads/{}", self.branch);
-        super::git::git(
-            c,
-            super::git::authed(c, &["push", "-q", &self.url, &refspec]),
-            Some(&self.work),
-        )
-        .await
-        .map(|_| ())
+        super::git::git(c, super::git::authed(c, &["push", "-q", &self.url, &refspec]), Some(&self.work)).await.map(|_| ())
     }
 }
 
 fn uid_of(p: &Pod) -> String {
-    p.metadata
-        .uid
-        .clone()
-        .unwrap_or_else(|| kube::ResourceExt::name_any(p))
+    p.metadata.uid.clone().unwrap_or_else(|| kube::ResourceExt::name_any(p))
 }
 
 /// The live srv pods as `(name, uid)`. The uid is what identity means across a StatefulSet roll —
@@ -339,16 +287,10 @@ async fn pod_names(pods: &Api<Pod>) -> Result<Vec<(String, String)>> {
 async fn settled(sts: &Api<StatefulSet>) -> Result<()> {
     let start = std::time::Instant::now();
     loop {
-        let o = sts
-            .get(SRV)
-            .await
-            .map_err(|e| anyhow!("could not read {SRV}: {e}"))?;
+        let o = sts.get(SRV).await.map_err(|e| anyhow!("could not read {SRV}: {e}"))?;
         let want = o.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
         let st = o.status.unwrap_or_default();
-        let (updated, ready) = (
-            st.updated_replicas.unwrap_or(0),
-            st.ready_replicas.unwrap_or(0),
-        );
+        let (updated, ready) = (st.updated_replicas.unwrap_or(0), st.ready_replicas.unwrap_or(0));
         if updated >= want && ready >= want {
             return Ok(());
         }
@@ -372,12 +314,7 @@ async fn drain_handover(c: &mut Ctx) {
     };
     let aks = match drill::incluster() {
         Ok(k) => k,
-        Err(e) => {
-            return c.skip(
-                "srv.drain.handover",
-                &format!("no in-cluster client: {e:#}"),
-            )
-        }
+        Err(e) => return c.skip("srv.drain.handover", &format!("no in-cluster client: {e:#}")),
     };
     let probe = c.probe_user.clone();
     c.step("srv.drain.handover", step_cap(DRAIN_CAP), move |c| {
@@ -387,10 +324,7 @@ async fn drain_handover(c: &mut Ctx) {
         let sts: Api<StatefulSet> = Api::namespaced(aks.clone(), CENTRAL_NS);
         async move {
             let names = pod_names(&pods).await?;
-            let victim = names
-                .first()
-                .map(|(name, _)| name.clone())
-                .ok_or_else(|| anyhow!("no srv pod to drain"))?;
+            let victim = names.first().map(|(name, _)| name.clone()).ok_or_else(|| anyhow!("no srv pod to drain"))?;
             let ip = pods
                 .get(&victim)
                 .await
@@ -400,24 +334,16 @@ async fn drain_handover(c: &mut Ctx) {
             pods.delete(&victim, &kube::api::DeleteParams::default())
                 .await
                 .map_err(|e| anyhow!("could not ask {victim} to leave: {e}"))?;
-            let settle = || async {
-                settled(&sts)
-                    .await
-                    .context("the srv tier was left short a pod")
-            };
+            let settle = || async { settled(&sts).await.context("the srv tier was left short a pod") };
             let body = async {
                 // `draining` on /healthz is what takes it out of the Service. A pod that vanished
                 // before the first poll is a grace period shorter than the probe's beat, not a
                 // failed handover — so a 404/refused dial ends the wait rather than failing it.
                 let saw = draining(c, &ip, DRAIN_CAP / 2).await?;
                 // And the repo still reads, which is the half a person would notice.
-                let (status, text) =
-                    super::raw(c, reqwest::Method::GET, &refs, &jwt, None, &[]).await?;
+                let (status, text) = super::raw(c, reqwest::Method::GET, &refs, &jwt, None, &[]).await?;
                 if !status.is_success() {
-                    return Err(anyhow!(
-                        "a repo stopped reading while a pod drained: {status}: {}",
-                        text.chars().take(120).collect::<String>()
-                    ));
+                    return Err(anyhow!("a repo stopped reading while a pod drained: {status}: {}", text.chars().take(120).collect::<String>()));
                 }
                 if !saw {
                     return Err(anyhow!("{victim} never reported `draining` on /healthz"));
@@ -437,13 +363,7 @@ async fn draining(c: &Ctx, ip: &str, cap: Duration) -> Result<bool> {
     let start = std::time::Instant::now();
     let mut answered = false;
     loop {
-        match c
-            .http
-            .get(format!("http://{ip}:{SRV_HTTP_PORT}/healthz"))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-        {
+        match c.http.get(format!("http://{ip}:{SRV_HTTP_PORT}/healthz")).timeout(Duration::from_secs(3)).send().await {
             Ok(r) => {
                 let body = r.text().await.unwrap_or_default();
                 answered = true;
@@ -456,10 +376,7 @@ async fn draining(c: &Ctx, ip: &str, cap: Duration) -> Result<bool> {
             Err(_) if answered => return Ok(true),
             Err(e) => {
                 if start.elapsed() >= cap {
-                    return Err(anyhow!(
-                        "{ip} never answered /healthz at all: {}",
-                        e.without_url()
-                    ));
+                    return Err(anyhow!("{ip} never answered /healthz at all: {}", e.without_url()));
                 }
             }
         }
@@ -497,39 +414,23 @@ async fn moved_image(c: &mut Ctx) {
         let dest = c.tmp.join("pull-moved");
         async move {
             let layer = super::registry::random_layer();
-            super::registry::write_layout(&dir, &layer, &name)
-                .context("could not build the image")?;
-            crane
-                .login(&host, &probe, &secret)
-                .await
-                .context("could not log in")?;
+            super::registry::write_layout(&dir, &layer, &name).context("could not build the image")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
             let reference = format!("{host}/{probe}/{name}:latest");
-            crane
-                .push(&dir, &reference)
-                .await
-                .context("could not push it")?;
+            crane.push(&dir, &reference).await.context("could not push it")?;
             // Warm: this pull opens the image's database on whichever node owns it now.
             let _ = std::fs::remove_dir_all(&dest);
-            crane
-                .pull(&reference, &dest)
-                .await
-                .context("the image would not pull before the move")?;
+            crane.pull(&reference, &dest).await.context("the image would not pull before the move")?;
             // Every pod out and back, one at a time — the ownership map moves with them. Inside
             // `undoing` like every other fleet mutation: a body that times out mid-restart must
             // still leave the tier waited out rather than half rolled.
-            let settle = || async {
-                settled(&sts)
-                    .await
-                    .context("the srv tier was left mid-restart")
-            };
+            let settle = || async { settled(&sts).await.context("the srv tier was left mid-restart") };
             let body = async {
                 for (pod, _) in pod_names(&pods).await? {
                     pods.delete(&pod, &kube::api::DeleteParams::default())
                         .await
                         .map_err(|e| anyhow!("could not restart {pod}: {e}"))?;
-                    settled(&sts)
-                        .await
-                        .with_context(|| format!("the tier did not come back after {pod}"))?;
+                    settled(&sts).await.with_context(|| format!("the tier did not come back after {pod}"))?;
                 }
                 let _ = std::fs::remove_dir_all(&dest);
                 crane
@@ -565,23 +466,12 @@ async fn blob_session(c: &mut Ctx) {
             // A real image first: `referrers` answers about a manifest that exists, and the whole
             // session dance below runs in a repository the token already has a scope for.
             let layer = super::registry::random_layer();
-            let digest = super::registry::write_layout(&dir, &layer, &name)
-                .context("could not build the image")?;
-            crane
-                .login(&host, &probe, &secret)
+            let digest = super::registry::write_layout(&dir, &layer, &name).context("could not build the image")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
+            crane.push(&dir, &format!("{host}/{probe}/{name}:latest")).await.context("could not push it")?;
+            let token = super::registry::bearer(c, Some(&secret), &format!("repository:{probe}/{name}:pull,push"))
                 .await
-                .context("could not log in")?;
-            crane
-                .push(&dir, &format!("{host}/{probe}/{name}:latest"))
-                .await
-                .context("could not push it")?;
-            let token = super::registry::bearer(
-                c,
-                Some(&secret),
-                &format!("repository:{probe}/{name}:pull,push"),
-            )
-            .await
-            .context("could not mint a registry token")?;
+                .context("could not mint a registry token")?;
             let v2 = format!("{base}/v2/{probe}/{name}");
 
             // 1 · a chunked upload, in two PATCHes with a status read between them.
@@ -589,30 +479,16 @@ async fn blob_session(c: &mut Ctx) {
             let (half, rest) = body.split_at(1024);
             let want = super::registry::sha256(&body);
             let session = start_upload(c, &v2, &token).await?;
-            patch_chunk(c, &session, &token, half, 0)
-                .await
-                .context("the first chunk")?;
-            let (status, _, range) =
-                raw_v2(c, reqwest::Method::GET, &session, &token, None).await?;
+            patch_chunk(c, &session, &token, half, 0).await.context("the first chunk")?;
+            let (status, _, range) = raw_v2(c, reqwest::Method::GET, &session, &token, None).await?;
             if status.as_u16() != 204 || range.is_empty() {
-                return Err(anyhow!(
-                    "an upload session's status answered {status} with range {range:?}"
-                ));
+                return Err(anyhow!("an upload session's status answered {status} with range {range:?}"));
             }
-            patch_chunk(c, &session, &token, rest, half.len())
-                .await
-                .context("the second chunk")?;
-            let put = format!(
-                "{session}{}digest={want}",
-                if session.contains('?') { "&" } else { "?" }
-            );
-            let (status, text, _) =
-                raw_v2(c, reqwest::Method::PUT, &put, &token, Some(vec![])).await?;
+            patch_chunk(c, &session, &token, rest, half.len()).await.context("the second chunk")?;
+            let put = format!("{session}{}digest={want}", if session.contains('?') { "&" } else { "?" });
+            let (status, text, _) = raw_v2(c, reqwest::Method::PUT, &put, &token, Some(vec![])).await?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "finishing the chunked upload answered {status}: {}",
-                    text.chars().take(160).collect::<String>()
-                ));
+                return Err(anyhow!("finishing the chunked upload answered {status}: {}", text.chars().take(160).collect::<String>()));
             }
 
             // 2 · it is really there, then really gone — the client DELETE, which no other id walks.
@@ -623,10 +499,7 @@ async fn blob_session(c: &mut Ctx) {
             }
             let (status, text, _) = raw_v2(c, reqwest::Method::DELETE, &blob, &token, None).await?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "deleting a blob answered {status}: {}",
-                    text.chars().take(160).collect::<String>()
-                ));
+                return Err(anyhow!("deleting a blob answered {status}: {}", text.chars().take(160).collect::<String>()));
             }
             let (status, _, _) = raw_v2(c, reqwest::Method::HEAD, &blob, &token, None).await?;
             if status.as_u16() != 404 {
@@ -645,19 +518,10 @@ async fn blob_session(c: &mut Ctx) {
             }
 
             // 4 · referrers, about the manifest the push above left.
-            let (status, text, _) = raw_v2(
-                c,
-                reqwest::Method::GET,
-                &format!("{v2}/referrers/{digest}"),
-                &token,
-                None,
-            )
-            .await?;
+            let (status, text, _) =
+                raw_v2(c, reqwest::Method::GET, &format!("{v2}/referrers/{digest}"), &token, None).await?;
             if !status.is_success() {
-                return Err(anyhow!(
-                    "referrers answered {status}: {}",
-                    text.chars().take(160).collect::<String>()
-                ));
+                return Err(anyhow!("referrers answered {status}: {}", text.chars().take(160).collect::<String>()));
             }
             let doc: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             doc.get("manifests")
@@ -681,16 +545,9 @@ async fn start_upload(c: &Ctx, v2: &str, token: &str) -> Result<String> {
         .await
         .map_err(|e| anyhow!("could not start an upload: {}", e.without_url()))?;
     let status = r.status();
-    let location = r
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    let location = r.headers().get("location").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     if status.as_u16() != 202 || location.is_empty() {
-        return Err(anyhow!(
-            "starting an upload answered {status} with location {location:?}"
-        ));
+        return Err(anyhow!("starting an upload answered {status} with location {location:?}"));
     }
     // The registry may answer an absolute URL or a path; both are legal, and only one is a URL.
     Ok(match location.starts_with("http") {
@@ -705,10 +562,7 @@ async fn patch_chunk(c: &Ctx, session: &str, token: &str, bytes: &[u8], from: us
         .patch(session)
         .header("authorization", format!("Bearer {token}"))
         .header("content-type", "application/octet-stream")
-        .header(
-            "content-range",
-            format!("{from}-{}", from + bytes.len() - 1),
-        )
+        .header("content-range", format!("{from}-{}", from + bytes.len() - 1))
         .body(bytes.to_vec())
         .send()
         .await
@@ -728,24 +582,13 @@ async fn raw_v2(
     token: &str,
     body: Option<Vec<u8>>,
 ) -> Result<(reqwest::StatusCode, String, String)> {
-    let mut req = c
-        .http
-        .request(method, url)
-        .header("authorization", format!("Bearer {token}"));
+    let mut req = c.http.request(method, url).header("authorization", format!("Bearer {token}"));
     if let Some(b) = body {
         req = req.header("content-length", b.len().to_string()).body(b);
     }
-    let r = req
-        .send()
-        .await
-        .map_err(|e| anyhow!("{}", e.without_url()))?;
+    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
-    let range = r
-        .headers()
-        .get("range")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+    let range = r.headers().get("range").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
     Ok((status, r.text().await.unwrap_or_default(), range))
 }
 
@@ -833,9 +676,7 @@ where
     loop {
         match check().await? {
             None => return Ok(start.elapsed()),
-            Some(why) if start.elapsed() >= cap => {
-                return Err(anyhow!("{what} after {} s: {why}", cap.as_secs()))
-            }
+            Some(why) if start.elapsed() >= cap => return Err(anyhow!("{what} after {} s: {why}", cap.as_secs())),
             Some(_) => tokio::time::sleep(Duration::from_secs(5)).await,
         }
     }
@@ -860,74 +701,31 @@ async fn gc_packs(c: &mut Ctx) {
                 std::fs::write(work.join("gc.txt"), format!("{i}")).context("could not write")?;
                 let g = |a: Vec<String>| super::git::git(c, a, Some(&work));
                 g(vec!["add".into(), "-A".into()]).await?;
-                g(vec![
-                    "commit".into(),
-                    "-q".into(),
-                    "-m".into(),
-                    format!("gc {i}"),
-                ])
-                .await?;
+                g(vec!["commit".into(), "-q".into(), "-m".into(), format!("gc {i}")]).await?;
             }
-            super::git::git(
-                c,
-                super::git::authed(c, &["push", "-q", &http, "HEAD:refs/heads/gc"]),
-                Some(&work),
-            )
-            .await
-            .context("the push failed")?;
-            let want = super::git::git(
-                c,
-                vec!["rev-parse".into(), "HEAD^{tree}".into()],
-                Some(&work),
-            )
-            .await?;
+            super::git::git(c, super::git::authed(c, &["push", "-q", &http, "HEAD:refs/heads/gc"]), Some(&work))
+                .await
+                .context("the push failed")?;
+            let want = super::git::git(c, vec!["rev-parse".into(), "HEAD^{tree}".into()], Some(&work)).await?;
             // A whole pass: the lane walks every repo in turn, and a check that raced it would say
             // nothing about the sweep at all.
             tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
             let _ = std::fs::remove_dir_all(&dest);
-            super::git::git(
-                c,
-                super::git::authed(
-                    c,
-                    &[
-                        "clone",
-                        "-q",
-                        "--branch",
-                        "gc",
-                        &http,
-                        &dest.display().to_string(),
-                    ],
-                ),
-                None,
-            )
-            .await
-            .context("the repo would not clone after a consolidation pass")?;
-            let got = super::git::git(
-                c,
-                vec!["rev-parse".into(), "HEAD^{tree}".into()],
-                Some(&dest),
-            )
-            .await?;
+            super::git::git(c, super::git::authed(c, &["clone", "-q", "--branch", "gc", &http, &dest.display().to_string()]), None)
+                .await
+                .context("the repo would not clone after a consolidation pass")?;
+            let got = super::git::git(c, vec!["rev-parse".into(), "HEAD^{tree}".into()], Some(&dest)).await?;
             if got.trim() != want.trim() {
-                return Err(anyhow!(
-                    "the tree changed across a consolidation pass: {} became {}",
-                    want.trim(),
-                    got.trim()
-                ));
+                return Err(anyhow!("the tree changed across a consolidation pass: {} became {}", want.trim(), got.trim()));
             }
             // And the index markers still list it: the marker reconcile is one of the five sweeps,
             // and a repo that vanished from the listing is invisible to every page in the app.
-            let rows = get(c, &listing, &jwt)
-                .await
-                .context("could not list the repos")?;
+            let rows = get(c, &listing, &jwt).await.context("could not list the repos")?;
             let listed = rows
                 .get("repos")
                 .and_then(Value::as_array)
                 .or_else(|| rows.as_array())
-                .is_some_and(|rs| {
-                    rs.iter()
-                        .any(|r| r.get("name").and_then(Value::as_str) == Some(repo.as_str()))
-                });
+                .is_some_and(|rs| rs.iter().any(|r| r.get("name").and_then(Value::as_str) == Some(repo.as_str())));
             if !listed {
                 return Err(anyhow!("the repo is no longer listed after a sweep"));
             }
@@ -946,11 +744,7 @@ async fn gc_packs(c: &mut Ctx) {
 /// points at all.
 async fn retain(c: &mut Ctx, cold: Option<&str>) {
     let (Some(k), Some(ws)) = (c.kube.clone(), cold.map(str::to_string)) else {
-        let why = if c.kube.is_none() {
-            "no kubeconfig"
-        } else {
-            "no cold workspace"
-        };
+        let why = if c.kube.is_none() { "no kubeconfig" } else { "no cold workspace" };
         return c.skip("snap.retain", why);
     };
     c.step("snap.retain", step_cap(SWEEP_CAP), move |c| {
@@ -965,9 +759,7 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
             // the reconcile has recorded it, which is moments, not never.
             let started = std::time::Instant::now();
             let volume = loop {
-                let v = get(c, &doc, &jwt)
-                    .await
-                    .context("could not read the workspace")?;
+                let v = get(c, &doc, &jwt).await.context("could not read the workspace")?;
                 if let Some(id) = v.get("volume").and_then(Value::as_str) {
                     break id.to_string();
                 }
@@ -976,11 +768,7 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             };
-            let pushes = Some(
-                super::experience_env::push_once(c, &ws, "retain")
-                    .await
-                    .context("could not push")?,
-            );
+            let pushes = Some(super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
             let history = api(c, &format!("/v1/volumes/{volume}/history"));
             // Long enough that several sync beats have certainly cut and pruned.
             tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
@@ -989,43 +777,28 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
                 .list(&kube::api::ListParams::default())
                 .await
                 .map_err(|e| anyhow!("could not list the snapshots: {e}"))?;
-            let mine: Vec<&crd::Snapshot> = all
-                .items
-                .iter()
-                .filter(|s| s.spec.volume == volume)
-                .collect();
+            let mine: Vec<&crd::Snapshot> =
+                all.items.iter().filter(|s| s.spec.volume == volume).collect();
             let mut per_worktree: std::collections::HashMap<String, usize> = Default::default();
             for s in mine.iter().filter(|s| s.spec.transient) {
-                let ready = s
-                    .status
-                    .as_ref()
-                    .is_some_and(|st| st.phase == crd::Phase::Ready);
+                let ready = s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
                 if ready {
                     *per_worktree.entry(s.spec.worktree.clone()).or_default() += 1;
                 }
             }
             if let Some((wt, n)) = per_worktree.iter().find(|(_, n)| **n > 1) {
-                return Err(anyhow!(
-                    "{n} Ready sync points remain for worktree {wt:?}: retain has stopped pruning"
-                ));
+                return Err(anyhow!("{n} Ready sync points remain for worktree {wt:?}: retain has stopped pruning"));
             }
             // And the push is still there — the half that loses somebody's cut if it is wrong.
             let Some(push) = pushes else { return Ok(()) };
-            let doc = get(c, &history, &jwt)
-                .await
-                .context("could not read the history")?;
+            let doc = get(c, &history, &jwt).await.context("could not read the history")?;
             let kept = doc
                 .get("snapshots")
                 .and_then(Value::as_array)
                 .or_else(|| doc.as_array())
-                .is_some_and(|rs| {
-                    rs.iter()
-                        .any(|r| r.get("id").and_then(Value::as_str) == Some(push.as_str()))
-                });
+                .is_some_and(|rs| rs.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(push.as_str())));
             if !kept {
-                return Err(anyhow!(
-                    "the push {push} is gone from history: retain pruned a snapshot"
-                ));
+                return Err(anyhow!("the push {push} is gone from history: retain pruned a snapshot"));
             }
             Ok(())
         }
@@ -1041,9 +814,7 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
 /// from the other end: a workspace this run deleted must leave no attach directory, and no
 /// `Snapshot` may name a `Volume` that no longer exists.
 async fn janitor(c: &mut Ctx) {
-    let Some(k) = c.kube.clone() else {
-        return c.skip("agent.janitor", "no kubeconfig");
-    };
+    let Some(k) = c.kube.clone() else { return c.skip("agent.janitor", "no kubeconfig") };
     let prefix = c.prefix();
     c.step("agent.janitor", step_cap(SWEEP_CAP), move |_| {
         async move {
@@ -1071,10 +842,7 @@ async fn janitor(c: &mut Ctx) {
                 .map(kube::ResourceExt::name_any)
                 .collect();
             if !orphans.is_empty() {
-                return Err(anyhow!(
-                    "a snapshot record outlived its volume: {}",
-                    orphans.join(", ")
-                ));
+                return Err(anyhow!("a snapshot record outlived its volume: {}", orphans.join(", ")));
             }
             Ok(())
         }
@@ -1107,41 +875,24 @@ async fn lanes(c: &mut Ctx) {
         let dest = c.tmp.join("pull-lanes");
         async move {
             let layer = super::registry::random_layer();
-            super::registry::write_layout(&dir, &layer, &name)
-                .context("could not build the image")?;
-            crane
-                .login(&host, &probe, &secret)
-                .await
-                .context("could not log in")?;
+            super::registry::write_layout(&dir, &layer, &name).context("could not build the image")?;
+            crane.login(&host, &probe, &secret).await.context("could not log in")?;
             let reference = format!("{host}/{probe}/{name}:latest");
-            crane
-                .push(&dir, &reference)
-                .await
-                .context("could not push it")?;
+            crane.push(&dir, &reference).await.context("could not push it")?;
             for _ in 0..3 {
                 let _ = std::fs::remove_dir_all(&dest);
-                crane
-                    .pull(&reference, &dest)
-                    .await
-                    .context("the image would not pull")?;
+                crane.pull(&reference, &dest).await.context("the image would not pull")?;
             }
             // The flush lane's own beat, then the number it is supposed to have written.
             poll_json(c, &tags, &jwt, SWEEP_CAP - Duration::from_secs(60), |v| {
-                let rows = v
-                    .get("tags")
-                    .and_then(Value::as_array)
-                    .or_else(|| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
+                let rows = v.get("tags").and_then(Value::as_array).or_else(|| v.as_array()).cloned().unwrap_or_default();
                 rows.iter().any(|r| {
                     r.get("tag").and_then(Value::as_str) == Some("latest")
                         && r.get("pulls").and_then(Value::as_u64).unwrap_or(0) > 0
                 })
             })
             .await
-            .context(
-                "three pulls never reached the image's pull counter: the flush lane is not running",
-            )
+            .context("three pulls never reached the image's pull counter: the flush lane is not running")
         }
         .boxed()
     })
@@ -1166,11 +917,7 @@ async fn lanes(c: &mut Ctx) {
 // free, is what makes them measure only what they name.
 async fn spread(c: &mut Ctx, cold: Option<&str>) {
     let (Some(ws), Some(k)) = (cold.map(str::to_string), c.kube.clone()) else {
-        let why = if cold.is_none() {
-            "no cold workspace"
-        } else {
-            "no kubeconfig"
-        };
+        let why = if cold.is_none() { "no cold workspace" } else { "no kubeconfig" };
         return c.skip("ws.spread", why);
     };
     match placeable_nodes(&k).await {
@@ -1186,37 +933,23 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
             api(c, &format!("/v1/workspaces/{ws}/start")),
         );
         async move {
-            let before = get(c, &doc, &jwt)
-                .await
-                .context("could not read the workspace")?;
-            let was = before
-                .get("placement")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            post(c, &stop, &jwt, Value::Null)
-                .await
-                .context("could not stop it")?;
+            let before = get(c, &doc, &jwt).await.context("could not read the workspace")?;
+            let was = before.get("placement").and_then(Value::as_str).unwrap_or_default().to_string();
+            post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
             poll_json(c, &doc, &jwt, Duration::from_secs(60), |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
             })
             .await
             .context("it never stopped")?;
-            post(c, &start, &jwt, Value::Null)
-                .await
-                .context("could not start it")?;
+            post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
             // Ready AND elsewhere, in one predicate: coming back on the node it left is placement
             // never having handed the volume over, which is what this id is about.
             poll_json(c, &doc, &jwt, Duration::from_secs(120), |v| {
                 v.get("state").and_then(Value::as_str) == Some("ready")
-                    && v.get("placement")
-                        .and_then(Value::as_str)
-                        .is_some_and(|n| !n.is_empty() && n != was)
+                    && v.get("placement").and_then(Value::as_str).is_some_and(|n| !n.is_empty() && n != was)
             })
             .await
-            .with_context(|| {
-                format!("it came back on {was}: the movable volume was never handed over")
-            })
+            .with_context(|| format!("it came back on {was}: the movable volume was never handed over"))
         }
         .boxed()
     })
@@ -1228,10 +961,7 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
 async fn placeable_nodes(k: &kube::Client) -> Result<usize> {
     use k8s_openapi::api::core::v1::Node;
     let api: Api<Node> = Api::all(k.clone());
-    let list = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| anyhow!("could not list the nodes: {e}"))?;
+    let list = api.list(&ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
     Ok(list
         .items
         .iter()
@@ -1241,11 +971,7 @@ async fn placeable_nodes(k: &kube::Client) -> Result<usize> {
                 .as_ref()
                 .and_then(|s| s.conditions.as_ref())
                 .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
-            let cordoned = n
-                .spec
-                .as_ref()
-                .and_then(|s| s.unschedulable)
-                .unwrap_or(false);
+            let cordoned = n.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false);
             let leaving = n
                 .metadata
                 .labels
@@ -1379,92 +1105,53 @@ const MAX_PER_WS: usize = 10;
 /// workload whose restart costs the fleet nothing.
 async fn workload_roll(c: &mut Ctx) {
     let (region, Some(k3s)) = (c.cfg.region.clone(), c.kube.clone()) else {
-        return c.skip(
-            "admin.workload.roll",
-            "no kubeconfig to read the restart annotation from",
-        );
+        return c.skip("admin.workload.roll", "no kubeconfig to read the restart annotation from");
     };
-    c.step(
-        "admin.workload.roll",
-        step_cap(Duration::from_secs(240)),
-        move |c| {
-            let jwt = c.admin_jwt.clone();
-            let workloads = admin(c, "/admin/workloads");
-            let roll = admin(
-                c,
-                &format!("/admin/workloads/{region}/kloudlite-agent/roll"),
-            );
-            let k3s = k3s.clone();
-            async move {
-                let before = annotation_of(&k3s)
-                    .await
-                    .context("could not read the agent DaemonSet")?;
-                post(
-                    c,
-                    &roll,
-                    &jwt,
-                    json!({ "reason": "slo probe workload roll" }),
-                )
+    c.step("admin.workload.roll", step_cap(Duration::from_secs(240)), move |c| {
+        let jwt = c.admin_jwt.clone();
+        let workloads = admin(c, "/admin/workloads");
+        let roll = admin(c, &format!("/admin/workloads/{region}/kloudlite-agent/roll"));
+        let k3s = k3s.clone();
+        async move {
+            let before = annotation_of(&k3s).await.context("could not read the agent DaemonSet")?;
+            post(c, &roll, &jwt, json!({ "reason": "slo probe workload roll" }))
                 .await
                 .context("the roll was refused")?;
-                // The WRITE itself: `kloudlite.io/restarted-at` on the pod template is what a roll IS,
-                // and it is a fact rather than a race — the old check sampled `/admin/workloads` for a
-                // dip below desired, which a single-node DaemonSet need never show.
-                let after = annotation_of(&k3s)
-                    .await
-                    .context("could not re-read the agent DaemonSet")?;
-                if after == before {
-                    return Err(anyhow!(
-                        "the roll answered 2xx and the restart annotation did not move"
-                    ));
-                }
-                // And every reader came back: a roll that restarts a workload into CrashLoop is a roll
-                // nobody wanted.
-                // The roll is not over when the pods are ready: they were ready BEFORE it started, and
-                // reading that answered "back" in 178 ms while every agent was still about to restart —
-                // so `ws.spread`, next in line, ran across three agent restarts and lost its handover.
-                // Over means every pod is on the new template and ready, which the DaemonSet's own
-                // status says; how long that takes is the number a person waits on a settings save.
-                let took = settle(
-                    Duration::from_secs(180),
-                    "the rolled DaemonSet never settled",
-                    || async {
-                        use k8s_openapi::api::apps::v1::DaemonSet;
-                        let api: Api<DaemonSet> = Api::namespaced(k3s.clone(), "kube-system");
-                        let ds = api
-                            .get("kloudlite-agent")
-                            .await
-                            .map_err(|e| anyhow!("{e}"))?;
-                        let st = ds.status.unwrap_or_default();
-                        let (desired, updated, ready) = (
-                            st.desired_number_scheduled,
-                            st.updated_number_scheduled.unwrap_or(0),
-                            st.number_ready,
-                        );
-                        let settled = desired > 0
-                            && updated >= desired
-                            && ready >= desired
-                            && ds
-                                .metadata
-                                .generation
-                                .is_some_and(|g| st.observed_generation.unwrap_or(0) >= g);
-                        Ok((!settled).then(|| {
-                            format!("{updated}/{desired} on the new template, {ready} ready")
-                        }))
-                    },
-                )
-                .await?;
-                tracing::info!(ms = took.as_millis() as u64, "slo.workload.roll.settled");
-                // And the admin's own view agrees, which is what the console shows a person.
-                poll_rows(c, &workloads, &jwt, Duration::from_secs(60), |r| {
-                    agent_row(r).is_some_and(|(ready, desired)| ready >= desired && desired > 0)
-                })
-                .await
-                .context("the console never showed the rolled workload ready")
+            // The WRITE itself: `kloudlite.io/restarted-at` on the pod template is what a roll IS,
+            // and it is a fact rather than a race — the old check sampled `/admin/workloads` for a
+            // dip below desired, which a single-node DaemonSet need never show.
+            let after = annotation_of(&k3s).await.context("could not re-read the agent DaemonSet")?;
+            if after == before {
+                return Err(anyhow!("the roll answered 2xx and the restart annotation did not move"));
             }
-            .boxed()
-        },
-    )
+            // And every reader came back: a roll that restarts a workload into CrashLoop is a roll
+            // nobody wanted.
+            // The roll is not over when the pods are ready: they were ready BEFORE it started, and
+            // reading that answered "back" in 178 ms while every agent was still about to restart —
+            // so `ws.spread`, next in line, ran across three agent restarts and lost its handover.
+            // Over means every pod is on the new template and ready, which the DaemonSet's own
+            // status says; how long that takes is the number a person waits on a settings save.
+            let took = settle(Duration::from_secs(180), "the rolled DaemonSet never settled", || async {
+                use k8s_openapi::api::apps::v1::DaemonSet;
+                let api: Api<DaemonSet> = Api::namespaced(k3s.clone(), "kube-system");
+                let ds = api.get("kloudlite-agent").await.map_err(|e| anyhow!("{e}"))?;
+                let st = ds.status.unwrap_or_default();
+                let (desired, updated, ready) = (st.desired_number_scheduled, st.updated_number_scheduled.unwrap_or(0), st.number_ready);
+                let settled = desired > 0 && updated >= desired && ready >= desired
+                    && ds.metadata.generation.is_some_and(|g| st.observed_generation.unwrap_or(0) >= g);
+                Ok((!settled).then(|| format!("{updated}/{desired} on the new template, {ready} ready")))
+            })
+            .await?;
+            tracing::info!(ms = took.as_millis() as u64, "slo.workload.roll.settled");
+            // And the admin's own view agrees, which is what the console shows a person.
+            poll_rows(c, &workloads, &jwt, Duration::from_secs(60), |r| {
+                agent_row(r).is_some_and(|(ready, desired)| ready >= desired && desired > 0)
+            })
+            .await
+            .context("the console never showed the rolled workload ready")
+        }
+        .boxed()
+    })
     .await;
 }
 
@@ -1473,10 +1160,7 @@ async fn workload_roll(c: &mut Ctx) {
 async fn annotation_of(k3s: &kube::Client) -> Result<String> {
     use k8s_openapi::api::apps::v1::DaemonSet;
     let api: Api<DaemonSet> = Api::namespaced(k3s.clone(), "kube-system");
-    let ds = api
-        .get("kloudlite-agent")
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
+    let ds = api.get("kloudlite-agent").await.map_err(|e| anyhow!("{e}"))?;
     Ok(ds
         .spec
         .and_then(|s| s.template.metadata)
@@ -1486,21 +1170,12 @@ async fn annotation_of(k3s: &kube::Client) -> Result<String> {
 }
 
 async fn rows_of(c: &Ctx, url: &str, jwt: &str) -> Result<Vec<Value>> {
-    let doc = get(c, url, jwt)
-        .await
-        .context("could not read the workloads")?;
-    Ok(doc
-        .get("workloads")
-        .and_then(Value::as_array)
-        .or_else(|| doc.as_array())
-        .cloned()
-        .unwrap_or_default())
+    let doc = get(c, url, jwt).await.context("could not read the workloads")?;
+    Ok(doc.get("workloads").and_then(Value::as_array).or_else(|| doc.as_array()).cloned().unwrap_or_default())
 }
 
 fn agent_row(rows: &[Value]) -> Option<(i64, i64)> {
-    let r = rows
-        .iter()
-        .find(|r| r.get("name").and_then(Value::as_str) == Some("kloudlite-agent"))?;
+    let r = rows.iter().find(|r| r.get("name").and_then(Value::as_str) == Some("kloudlite-agent"))?;
     let n = |k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
     Some((n("ready"), n("desired")))
 }

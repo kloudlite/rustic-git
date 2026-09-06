@@ -78,10 +78,7 @@ fn req(k: &str) -> Result<String> {
 }
 
 fn opt(k: &str, default: &str) -> String {
-    std::env::var(k)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| default.to_string())
+    std::env::var(k).ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| default.to_string())
 }
 
 impl Config {
@@ -110,8 +107,7 @@ impl Config {
             canary_digest: Some(opt("KLOUDLITE_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
             azure: azure(),
             redis_host: Some(opt("KLOUDLITE_SLO_REDIS_HOST", "")).filter(|v| !v.is_empty()),
-            clickhouse_host: Some(opt("KLOUDLITE_SLO_CLICKHOUSE_HOST", ""))
-                .filter(|v| !v.is_empty()),
+            clickhouse_host: Some(opt("KLOUDLITE_SLO_CLICKHOUSE_HOST", "")).filter(|v| !v.is_empty()),
         })
     }
 }
@@ -173,14 +169,8 @@ mod tests {
 
     #[test]
     fn an_ssh_host_is_split_or_refused_never_guessed() {
-        assert_eq!(
-            split_ssh_host("git.example.com"),
-            Some(("git.example.com", 22))
-        );
-        assert_eq!(
-            split_ssh_host("git.example.com:2222"),
-            Some(("git.example.com", 2222))
-        );
+        assert_eq!(split_ssh_host("git.example.com"), Some(("git.example.com", 22)));
+        assert_eq!(split_ssh_host("git.example.com:2222"), Some(("git.example.com", 2222)));
         assert_eq!(split_ssh_host("[::1]:2222"), Some(("::1", 2222)));
         assert_eq!(split_ssh_host("[::1]"), Some(("::1", 22)));
         // A bare v6 address, and a port that is not a number: both refused rather than dialled.
@@ -193,18 +183,12 @@ mod tests {
     /// `slo-probe` with no test failing.
     #[test]
     fn the_tenant_pair_comes_from_the_environment() {
-        assert_eq!(
-            opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER),
-            "slo-probe"
-        );
+        assert_eq!(opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER), "slo-probe");
         std::env::set_var("KLOUDLITE_SLO_USER", "slo-hourly");
         std::env::set_var("KLOUDLITE_SLO_OTHER", "slo-hourly-other");
         let user = opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER);
         assert_eq!(crate::ctx::email_of(&user), "slo-hourly@kloudlite.io");
-        assert_eq!(
-            opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER),
-            "slo-hourly-other"
-        );
+        assert_eq!(opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER), "slo-hourly-other");
         std::env::remove_var("KLOUDLITE_SLO_USER");
         std::env::remove_var("KLOUDLITE_SLO_OTHER");
     }

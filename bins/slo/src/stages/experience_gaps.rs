@@ -71,38 +71,18 @@ pub(super) async fn username(c: &mut Ctx) {
             // 409 path exists only for an account with NO handle, and this tenant has had one
             // since bootstrap — so the invariant this id can actually assert is the one that
             // matters anyway: the claim is IRREVERSIBLE.
-            let (status, body) = raw(
-                c,
-                reqwest::Method::POST,
-                &url,
-                &jwt,
-                Some(json!({ "username": format!("{probe}2") })),
-                &[],
-            )
-            .await?;
+            let (status, body) =
+                raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "username": format!("{probe}2") })), &[]).await?;
             if status.as_u16() != 400 || !body.contains("already set") {
-                return Err(anyhow!(
-                    "re-claiming a handle answered {status}: {}",
-                    clip(&body)
-                ));
+                return Err(anyhow!("re-claiming a handle answered {status}: {}", clip(&body)));
             }
             // And the shape check runs before the directory is asked at all, so a malformed handle
             // is refused whoever is asking.
-            let (status, body) = raw(
-                c,
-                reqwest::Method::POST,
-                &url,
-                &jwt,
-                Some(json!({ "username": "-Not A Handle-" })),
-                &[],
-            )
-            .await?;
+            let (status, body) =
+                raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "username": "-Not A Handle-" })), &[]).await?;
             match status.as_u16() {
                 400 if !body.contains("already set") => Ok(()),
-                other => Err(anyhow!(
-                    "claiming a malformed handle answered {other}: {}",
-                    clip(&body)
-                )),
+                other => Err(anyhow!("claiming a malformed handle answered {other}: {}", clip(&body))),
             }
         }
         .boxed()
@@ -126,10 +106,7 @@ pub(super) async fn profile_upsert(c: &mut Ctx) {
                 401 | 403 => Ok(()),
                 // A 2xx here is the failure the route's own comment names: a leaked session token
                 // renewing itself for as long as its holder likes.
-                other => Err(anyhow!(
-                    "the session-minting upsert answered {other} to a session token: {}",
-                    clip(&text)
-                )),
+                other => Err(anyhow!("the session-minting upsert answered {other} to a session token: {}", clip(&text))),
             }
         }
         .boxed()
@@ -154,28 +131,17 @@ pub(super) async fn cli_tokens(c: &mut Ctx) {
             // only. `/v1/repos` is the second kind, so the 401 it answers says nothing about the
             // token — it says the probe asked the wrong door.
             let mine = api(c, "/v1/cli/tokens");
-            get(c, &mine, &token)
-                .await
-                .context("a fresh CLI token was not honoured")?;
-            let listed = get(c, &mine, &jwt)
-                .await
-                .context("could not list the CLI tokens")?;
+            get(c, &mine, &token).await.context("a fresh CLI token was not honoured")?;
+            let listed = get(c, &mine, &jwt).await.context("could not list the CLI tokens")?;
             let there = listed.as_array().is_some_and(|rows| {
-                rows.iter()
-                    .any(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                rows.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))
             });
             if !there {
                 return Err(anyhow!("the CLI token was minted but is not listed"));
             }
-            call(
-                c,
-                reqwest::Method::DELETE,
-                &api(c, &format!("/v1/cli/tokens/{id}")),
-                &jwt,
-                None,
-            )
-            .await
-            .context("could not revoke the CLI token")?;
+            call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &jwt, None)
+                .await
+                .context("could not revoke the CLI token")?;
             let (status, _) = raw(c, reqwest::Method::GET, &mine, &token, None, &[]).await?;
             match status.as_u16() {
                 401 | 403 => Ok(()),
@@ -193,34 +159,20 @@ pub(super) async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(Strin
     let started = post(c, &api(c, "/v1/cli/code"), "", json!({ "device": device }))
         .await
         .context("the login handshake was refused")?;
-    let code = started
-        .get("code")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let poll = started
-        .get("poll")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let code = started.get("code").and_then(Value::as_str).unwrap_or_default().to_string();
+    let poll = started.get("poll").and_then(Value::as_str).unwrap_or_default().to_string();
     if code.is_empty() || poll.is_empty() {
         return Err(anyhow!("the login handshake answered no code"));
     }
-    post(c, &api(c, "/v1/cli/approve"), jwt, json!({ "code": code }))
-        .await
-        .context("the approval was refused")?;
-    let out = get(c, &api(c, &format!("/v1/cli/token?poll={poll}")), "")
-        .await
-        .context("the token collection failed")?;
+    post(c, &api(c, "/v1/cli/approve"), jwt, json!({ "code": code })).await.context("the approval was refused")?;
+    let out = get(c, &api(c, &format!("/v1/cli/token?poll={poll}")), "").await.context("the token collection failed")?;
     let token = out
         .get("token")
         .and_then(Value::as_str)
         .filter(|t| !t.is_empty())
         .ok_or_else(|| anyhow!("the approved login handed back no token"))?
         .to_string();
-    let rows = get(c, &api(c, "/v1/cli/tokens"), jwt)
-        .await
-        .context("could not list the CLI tokens")?;
+    let rows = get(c, &api(c, "/v1/cli/tokens"), jwt).await.context("could not list the CLI tokens")?;
     let id = rows
         .as_array()
         .into_iter()
@@ -240,12 +192,7 @@ pub(super) async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(Strin
 /// will not put in a config, so a run where every workspace was skipped exits zero having written
 /// a file with nothing in it.
 pub(super) async fn sshconfig(c: &mut Ctx) {
-    let Some(ws) = c
-        .state
-        .ux_workspace
-        .clone()
-        .or_else(|| c.state.workspace.clone())
-    else {
+    let Some(ws) = c.state.ux_workspace.clone().or_else(|| c.state.workspace.clone()) else {
         return c.skip("id.cli.sshconfig", "no workspace to write a host block for");
     };
     let device = format!("{}-cli", c.prefix());
@@ -260,21 +207,14 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
             // 30-day credential, and one per hour that nobody takes back is the leak `KINDS`'
             // `cli-token` entry exists to avoid.
             let revoke = || async {
-                call(
-                    c,
-                    reqwest::Method::DELETE,
-                    &api(c, &format!("/v1/cli/tokens/{id}")),
-                    &jwt,
-                    None,
-                )
-                .await
-                .map(|_| ())
-                .context("the CLI token was left LIVE")
+                call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &jwt, None)
+                    .await
+                    .map(|_| ())
+                    .context("the CLI token was left LIVE")
             };
             let body = async {
                 let dir = home.join(".config/kl");
-                std::fs::create_dir_all(&dir)
-                    .with_context(|| format!("could not make {}", dir.display()))?;
+                std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
                 // Exactly what `kl login` stores, so the command has nothing to do but read it.
                 let cfg = json!({
                     "api": api_url,
@@ -282,21 +222,14 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
                     "expires_at": "2099-01-01T00:00:00Z",
                     "username": probe,
                 });
-                std::fs::write(dir.join("config.json"), cfg.to_string())
-                    .context("could not stage the CLI login")?;
+                std::fs::write(dir.join("config.json"), cfg.to_string()).context("could not stage the CLI login")?;
                 let env = std::collections::HashMap::from([
                     ("HOME".to_string(), home.display().to_string()),
                     ("KL_CONFIG_DIR".to_string(), dir.display().to_string()),
                 ]);
-                tools::run(
-                    &kl,
-                    &["ws".to_string(), KL_SSH_CONFIG.into()],
-                    &env,
-                    None,
-                    SSHCONFIG_CEILING,
-                )
-                .await
-                .with_context(|| format!("`kl ws {KL_SSH_CONFIG}` failed"))?;
+                tools::run(&kl, &["ws".to_string(), KL_SSH_CONFIG.into()], &env, None, SSHCONFIG_CEILING)
+                    .await
+                    .with_context(|| format!("`kl ws {KL_SSH_CONFIG}` failed"))?;
                 let block = std::fs::read_to_string(home.join(".ssh/kloudlite_config"))
                     .context("no ~/.ssh/kloudlite_config was written")?;
                 has_host_block(&block, &ws)
@@ -324,9 +257,7 @@ fn has_host_block(block: &str, id: &str) -> Result<()> {
         return Err(anyhow!("the ssh config carries no block for {id}"));
     }
     if !block.contains(&proxy) {
-        return Err(anyhow!(
-            "{id}'s block has no ProxyCommand through the gateway"
-        ));
+        return Err(anyhow!("{id}'s block has no ProxyCommand through the gateway"));
     }
     Ok(())
 }
@@ -351,37 +282,16 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
     let _ = std::fs::remove_file(key.with_extension("pub"));
     let made = tools::plain(
         &c.programs.ssh_keygen,
-        &[
-            "-q",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-C",
-            "slo lifecycle",
-            "-f",
-            &key.display().to_string(),
-        ],
+        &["-q", "-t", "ed25519", "-N", "", "-C", "slo lifecycle", "-f", &key.display().to_string()],
         Duration::from_secs(20),
     )
     .await;
     if let Err(e) = made {
         return c.skip("key.ssh.lifecycle", &format!("no throwaway key: {e:#}"));
     }
-    let public = match tools::plain(
-        &c.programs.ssh_keygen,
-        &["-y", "-f", &key.display().to_string()],
-        Duration::from_secs(10),
-    )
-    .await
-    {
+    let public = match tools::plain(&c.programs.ssh_keygen, &["-y", "-f", &key.display().to_string()], Duration::from_secs(10)).await {
         Ok(p) => p.trim().to_string(),
-        Err(e) => {
-            return c.skip(
-                "key.ssh.lifecycle",
-                &format!("could not read the throwaway key: {e:#}"),
-            )
-        }
+        Err(e) => return c.skip("key.ssh.lifecycle", &format!("could not read the throwaway key: {e:#}")),
     };
     let probe = c.probe_user.clone();
     let name = format!("{}-lifecycle", c.prefix());
@@ -394,14 +304,9 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
         let git_bin = c.programs.git.clone();
         let keys = api(c, "/v1/keys");
         async move {
-            let added = post(
-                c,
-                &keys,
-                &jwt,
-                json!({ "owner": probe, "name": name, "key": public }),
-            )
-            .await
-            .context("could not add the key")?;
+            let added = post(c, &keys, &jwt, json!({ "owner": probe, "name": name, "key": public }))
+                .await
+                .context("could not add the key")?;
             let id = added
                 .pointer("/_id")
                 .and_then(Value::as_str)
@@ -411,16 +316,10 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
             // outside the cancellable region and the refusal is checked after it: a key the probe
             // left behind is a standing credential for this account.
             let forget = || async {
-                call(
-                    c,
-                    reqwest::Method::DELETE,
-                    &api(c, &format!("/v1/keys/{}", path_seg(&id))),
-                    &jwt,
-                    None,
-                )
-                .await
-                .map(|_| ())
-                .context("the throwaway key was left REGISTERED")
+                call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/keys/{}", path_seg(&id))), &jwt, None)
+                    .await
+                    .map(|_| ())
+                    .context("the throwaway key was left REGISTERED")
             };
             let argv = vec!["ls-remote".to_string(), url];
             let clones = async {
@@ -495,10 +394,7 @@ async fn ssh_works(
             Err(e) => why = format!("{e:#}"),
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!(
-                "a newly added key never cloned after {} ms: {why}",
-                cap.as_millis()
-            ));
+            return Err(anyhow!("a newly added key never cloned after {} ms: {why}", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -531,23 +427,13 @@ pub(super) async fn description(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/v1/repos/{probe}/{name}"));
         async move {
-            call(
-                c,
-                reqwest::Method::PATCH,
-                &url,
-                &jwt,
-                Some(json!({ "description": want })),
-            )
-            .await
-            .context("could not save the description")?;
-            let seen = get(c, &url, &jwt)
+            call(c, reqwest::Method::PATCH, &url, &jwt, Some(json!({ "description": want })))
                 .await
-                .context("could not read the repo back")?;
+                .context("could not save the description")?;
+            let seen = get(c, &url, &jwt).await.context("could not read the repo back")?;
             match seen.get("description").and_then(Value::as_str) {
                 Some(d) if d == want => Ok(()),
-                other => Err(anyhow!(
-                    "the repo reads back {other:?}, not the description just saved"
-                )),
+                other => Err(anyhow!("the repo reads back {other:?}, not the description just saved")),
             }
         }
         .boxed()
@@ -619,9 +505,7 @@ async fn one_strategy(
         "message": format!("slo {strategy} {run}"),
         "changes": [{ "path": path, "contentBase64": content }],
     });
-    post(c, commits, jwt, body)
-        .await
-        .context("could not make the branch")?;
+    post(c, commits, jwt, body).await.context("could not make the branch")?;
     let opened = post(
         c,
         pulls,
@@ -634,21 +518,12 @@ async fn one_strategy(
         .get("number")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow!("the answer carried no number"))?;
-    post(
-        c,
-        &format!("{pulls}/{number}/merge?strategy={strategy}"),
-        jwt,
-        Value::Null,
-    )
-    .await
-    .context("the merge was refused")?;
-    poll_json(
-        c,
-        &format!("{pulls}/{number}"),
-        jwt,
-        Duration::from_secs(60),
-        |p| p.get("state").and_then(Value::as_str) == Some("merged"),
-    )
+    post(c, &format!("{pulls}/{number}/merge?strategy={strategy}"), jwt, Value::Null)
+        .await
+        .context("the merge was refused")?;
+    poll_json(c, &format!("{pulls}/{number}"), jwt, Duration::from_secs(60), |p| {
+        p.get("state").and_then(Value::as_str) == Some("merged")
+    })
     .await
     .context("the change never reached `merged`")?;
     // The TREE, not the status. `merged` is the record the worker wrote; what the SLI promises is
@@ -694,9 +569,7 @@ async fn landed_on_main(
             if got == want {
                 return Ok(());
             }
-            Err(anyhow!(
-                "`{path}` on `{BASE_BRANCH}` holds {got:?}, not {want:?}"
-            ))
+            Err(anyhow!("`{path}` on `{BASE_BRANCH}` holds {got:?}, not {want:?}"))
         }
         .await;
         match seen {
@@ -740,43 +613,16 @@ pub(super) async fn mergeability(c: &mut Ctx) {
             // held the first's line — a clean fast-forward, which is what this reported before.
             let a = format!("run-{run}-clean");
             let b = format!("run-{run}-dirty");
-            branch_with(
-                c,
-                &commits,
-                &jwt,
-                &a,
-                &path,
-                &enc("one\n"),
-                &format!("slo clean {run}"),
-            )
-            .await?;
-            branch_with(
-                c,
-                &commits,
-                &jwt,
-                &b,
-                &path,
-                &enc("two\n"),
-                &format!("slo dirty {run}"),
-            )
-            .await?;
+            branch_with(c, &commits, &jwt, &a, &path, &enc("one\n"), &format!("slo clean {run}")).await?;
+            branch_with(c, &commits, &jwt, &b, &path, &enc("two\n"), &format!("slo dirty {run}")).await?;
             let clean = open(c, &pulls, &jwt, &a, &format!("slo clean {run}")).await?;
             verdict(c, &pulls, &jwt, clean, "clean").await?;
-            post(
-                c,
-                &format!("{pulls}/{clean}/merge?strategy=fast-forward"),
-                &jwt,
-                Value::Null,
-            )
-            .await
-            .context("could not land the clean change")?;
-            poll_json(
-                c,
-                &format!("{pulls}/{clean}"),
-                &jwt,
-                Duration::from_secs(60),
-                |p| p.get("state").and_then(Value::as_str) == Some("merged"),
-            )
+            post(c, &format!("{pulls}/{clean}/merge?strategy=fast-forward"), &jwt, Value::Null)
+                .await
+                .context("could not land the clean change")?;
+            poll_json(c, &format!("{pulls}/{clean}"), &jwt, Duration::from_secs(60), |p| {
+                p.get("state").and_then(Value::as_str) == Some("merged")
+            })
             .await
             .context("the clean change never merged, so nothing can conflict with it")?;
             // `b` now writes the same path from a base `main` has moved past — the one shape a
@@ -805,20 +651,13 @@ async fn branch_with(
         "message": message,
         "changes": [{ "path": path, "contentBase64": content }],
     });
-    post(c, commits, jwt, body)
-        .await
-        .map(|_| ())
-        .with_context(|| format!("could not make {branch}"))
+    post(c, commits, jwt, body).await.map(|_| ()).with_context(|| format!("could not make {branch}"))
 }
 
 async fn open(c: &Ctx, pulls: &str, jwt: &str, branch: &str, title: &str) -> Result<i64> {
     let body = json!({ "title": title, "base": BASE_BRANCH, "head": branch });
-    let out = post(c, pulls, jwt, body)
-        .await
-        .context("could not open the change")?;
-    out.get("number")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("the answer carried no number"))
+    let out = post(c, pulls, jwt, body).await.context("could not open the change")?;
+    out.get("number").and_then(Value::as_i64).ok_or_else(|| anyhow!("the answer carried no number"))
 }
 
 /// Wait for the owner's own mergeability verdict to be the one asked for.
@@ -831,10 +670,7 @@ async fn verdict(c: &Ctx, pulls: &str, jwt: &str, number: i64, want: &str) -> Re
     let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let last = seen.clone();
     poll_json(c, &url, jwt, Duration::from_secs(25), move |p| {
-        let state = p
-            .pointer("/mergeability/state")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let state = p.pointer("/mergeability/state").and_then(Value::as_str).unwrap_or("unknown");
         *last.lock().expect("lock") = state.to_string();
         state != "unknown"
     })
@@ -856,10 +692,7 @@ async fn verdict(c: &Ctx, pulls: &str, jwt: &str, number: i64, want: &str) -> Re
 /// into a detail — `raw` carries the status and the body, never the URL.
 pub(super) async fn invite_revoke(c: &mut Ctx) {
     let slug = super::experience_teams::team_slug(c);
-    if get(c, &api(c, &format!("/v1/teams/{slug}")), &c.probe_jwt)
-        .await
-        .is_err()
-    {
+    if get(c, &api(c, &format!("/v1/teams/{slug}")), &c.probe_jwt).await.is_err() {
         return c.skip("team.invite.revoke", "the team was never created");
     }
     c.step("team.invite.revoke", QUICK, move |c| {
@@ -867,14 +700,9 @@ pub(super) async fn invite_revoke(c: &mut Ctx) {
         let (jwt, other) = (c.probe_jwt.clone(), c.other_jwt.clone());
         let invites = api(c, &format!("/v1/teams/{slug}/invites"));
         async move {
-            let issued = post(
-                c,
-                &invites,
-                &jwt,
-                json!({ "email": other_email, "role": "member" }),
-            )
-            .await
-            .context("could not invite")?;
+            let issued = post(c, &invites, &jwt, json!({ "email": other_email, "role": "member" }))
+                .await
+                .context("could not invite")?;
             let token = issued
                 .get("token")
                 .and_then(Value::as_str)
@@ -894,23 +722,14 @@ pub(super) async fn invite_revoke(c: &mut Ctx) {
             // `invites` is ALREADY absolute; wrapping it in `api()` again concatenated two full
             // URLs and reqwest refused to send the result — a transport error, which is why this
             // read as "could not revoke" rather than as any answer the api gave.
-            call(
-                c,
-                reqwest::Method::DELETE,
-                &format!("{invites}/{id}"),
-                &jwt,
-                None,
-            )
-            .await
-            .context("could not revoke the invitation")?;
+            call(c, reqwest::Method::DELETE, &format!("{invites}/{id}"), &jwt, None)
+                .await
+                .context("could not revoke the invitation")?;
             let accept = api(c, &format!("/v1/invites/{token}/accept"));
             let (status, body) = raw(c, reqwest::Method::POST, &accept, &other, None, &[]).await?;
             match status.as_u16() {
                 401 | 403 | 404 | 410 => Ok(()),
-                other => Err(anyhow!(
-                    "a revoked invitation answered {other}: {}",
-                    clip(&body)
-                )),
+                other => Err(anyhow!("a revoked invitation answered {other}: {}", clip(&body))),
             }
         }
         .boxed()
@@ -929,10 +748,7 @@ pub(super) async fn team_environment(c: &mut Ctx) {
         return c.skip("team.environment", "no kubeconfig");
     }
     let slug = super::experience_teams::team_slug(c);
-    if get(c, &api(c, &format!("/v1/teams/{slug}")), &c.probe_jwt)
-        .await
-        .is_err()
-    {
+    if get(c, &api(c, &format!("/v1/teams/{slug}")), &c.probe_jwt).await.is_err() {
         return c.skip("team.environment", "the team was never created");
     }
     let name = format!("{}-teamenv", c.prefix());
@@ -954,9 +770,7 @@ pub(super) async fn team_environment(c: &mut Ctx) {
             }],
         });
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not create the team environment")?;
+            let doc = post(c, &url, &jwt, body).await.context("could not create the team environment")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -994,11 +808,9 @@ pub(super) async fn team_environment(c: &mut Ctx) {
 /// environment exactly as it does for a person's, which the failure's own `env-d874…` shows.
 async fn team_env_ready(c: &Ctx, id: &str, one: &str, jwt: &str) -> Result<()> {
     let cap = TEAM_ENV_CEILING - Duration::from_secs(60);
-    poll_json(c, one, jwt, cap, |v| {
-        v.get("state").and_then(Value::as_str) == Some("running")
-    })
-    .await
-    .context("the team environment never reported running")?;
+    poll_json(c, one, jwt, cap, |v| v.get("state").and_then(Value::as_str) == Some("running"))
+        .await
+        .context("the team environment never reported running")?;
     // The StatefulSet's own ready replica, through the same helper stage 6 uses.
     super::environment::service_ready(c, id, cap)
         .await
@@ -1015,11 +827,7 @@ async fn team_env_ready(c: &Ctx, id: &str, one: &str, jwt: &str) -> Result<()> {
             &ns,
             "redis-0",
             None,
-            &[
-                "sh",
-                "-c",
-                "getent hosts redis >/dev/null && redis-cli -h redis ping",
-            ],
+            &["sh", "-c", "getent hosts redis >/dev/null && redis-cli -h redis ping"],
             Duration::from_secs(20),
         )
         .await
@@ -1029,9 +837,7 @@ async fn team_env_ready(c: &Ctx, id: &str, one: &str, jwt: &str) -> Result<()> {
             Err(e) => why = format!("{e:#}"),
         }
         if start.elapsed() >= SVC_ANSWERS {
-            return Err(anyhow!(
-                "the service in {ns} does not resolve and answer: {why}"
-            ));
+            return Err(anyhow!("the service in {ns} does not resolve and answer: {why}"));
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -1049,11 +855,7 @@ const SVC_ANSWERS: Duration = Duration::from_secs(30);
 /// is read from Kubernetes rather than inferred: there is no API that reports one.
 pub(super) async fn attach_pair(c: &mut Ctx) {
     let (Some(env), Some(k)) = (c.state.env_multi.clone(), c.kube.clone()) else {
-        let why = if c.kube.is_none() {
-            "no kubeconfig"
-        } else {
-            "no environment to attach to"
-        };
+        let why = if c.kube.is_none() { "no kubeconfig" } else { "no environment to attach to" };
         return c.skip("env.attach.pair", why);
     };
     let name = format!("{}-att", c.prefix());
@@ -1062,34 +864,22 @@ pub(super) async fn attach_pair(c: &mut Ctx) {
         let url = api(c, "/v1/workspaces");
         let region = c.cfg.region.clone();
         async move {
-            let body =
-                json!({ "name": name, "region": region, "quota_gb": QUOTA_GB, "packages": [] });
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not create the workspace")?;
+            let body = json!({ "name": name, "region": region, "quota_gb": QUOTA_GB, "packages": [] });
+            let doc = post(c, &url, &jwt, body).await.context("could not create the workspace")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("the answer carried no workspace id"))?
                 .to_string();
             let one = api(c, &format!("/v1/workspaces/{id}"));
-            poll_json(
-                c,
-                &one,
-                &jwt,
-                ATTACH_PAIR_CEILING - Duration::from_secs(30),
-                |v| v.get("state").and_then(Value::as_str) == Some("ready"),
-            )
+            poll_json(c, &one, &jwt, ATTACH_PAIR_CEILING - Duration::from_secs(30), |v| {
+                v.get("state").and_then(Value::as_str) == Some("ready")
+            })
             .await
             .context("the workspace never became ready")?;
-            post(
-                c,
-                &format!("{one}/attach"),
-                &jwt,
-                json!({ "environment": env }),
-            )
-            .await
-            .context("could not attach")?;
+            post(c, &format!("{one}/attach"), &jwt, json!({ "environment": env }))
+                .await
+                .context("could not attach")?;
             let ns = kloudlite_workspaces::crd::env_namespace(&env);
             let policy = format!("attach-{id}");
             // Present first, or the absence below says nothing: a policy that was never written is
@@ -1097,14 +887,10 @@ pub(super) async fn attach_pair(c: &mut Ctx) {
             netpol_is(&k, &ns, &policy, true, Duration::from_secs(30))
                 .await
                 .context("attaching wrote no environment-side policy")?;
-            call(c, reqwest::Method::DELETE, &one, &jwt, None)
-                .await
-                .context("could not delete the workspace")?;
+            call(c, reqwest::Method::DELETE, &one, &jwt, None).await.context("could not delete the workspace")?;
             netpol_is(&k, &ns, &policy, false, Duration::from_secs(30))
                 .await
-                .context(
-                    "deleting the attached workspace left the environment-side policy standing",
-                )
+                .context("deleting the attached workspace left the environment-side policy standing")
         }
         .boxed()
     })
@@ -1112,33 +898,19 @@ pub(super) async fn attach_pair(c: &mut Ctx) {
 }
 
 /// Wait until a NetworkPolicy is there, or is not.
-async fn netpol_is(
-    k: &kube::Client,
-    ns: &str,
-    name: &str,
-    want: bool,
-    cap: Duration,
-) -> Result<()> {
+async fn netpol_is(k: &kube::Client, ns: &str, name: &str, want: bool, cap: Duration) -> Result<()> {
     let api: kube::Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
         kube::Api::namespaced(k.clone(), ns);
     let start = std::time::Instant::now();
     loop {
         // An unreadable namespace is not an answer: reading an error as "it is gone" would pass
         // this id through an API server that stopped answering.
-        let there = api
-            .get_opt(name)
-            .await
-            .map_err(|e| anyhow!("could not read {ns}/{name}: {e}"))?
-            .is_some();
+        let there = api.get_opt(name).await.map_err(|e| anyhow!("could not read {ns}/{name}: {e}"))?.is_some();
         if there == want {
             return Ok(());
         }
         if start.elapsed() >= cap {
-            let what = if want {
-                "never appeared"
-            } else {
-                "is still there"
-            };
+            let what = if want { "never appeared" } else { "is still there" };
             return Err(anyhow!("{ns}/{name} {what} after {} ms", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1157,25 +929,16 @@ pub(super) async fn vol_list(c: &mut Ctx) {
         let jwt = c.probe_jwt.clone();
         let url = api(c, "/v1/volumes");
         async move {
-            let rows = get(c, &url, &jwt)
-                .await
-                .context("could not list the volumes")?;
-            let rows = rows
-                .as_array()
-                .ok_or_else(|| anyhow!("the volume list is not a list"))?;
+            let rows = get(c, &url, &jwt).await.context("could not list the volumes")?;
+            let rows = rows.as_array().ok_or_else(|| anyhow!("the volume list is not a list"))?;
             let mine = rows
                 .iter()
                 .filter(|r| {
-                    r.get("display_name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|n| n.starts_with(&prefix))
+                    r.get("display_name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix))
                 })
                 .count();
             if mine == 0 {
-                return Err(anyhow!(
-                    "the listing names none of the {} volumes this run holds",
-                    rows.len()
-                ));
+                return Err(anyhow!("the listing names none of the {} volumes this run holds", rows.len()));
             }
             Ok(())
         }
@@ -1207,9 +970,7 @@ pub(super) async fn admin_stop_environment(c: &mut Ctx) {
             })
             .await
             .context("the environment was not running to begin with")?;
-            post(c, &stop, &admin_jwt, json!({ "note": NOTE }))
-                .await
-                .context("the admin stop was refused")?;
+            post(c, &stop, &admin_jwt, json!({ "note": NOTE })).await.context("the admin stop was refused")?;
             poll_json(c, &one, &jwt, Duration::from_secs(45), |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
             })
@@ -1305,15 +1066,9 @@ pub(super) async fn screens(c: &mut Ctx) {
             if !listed {
                 return Err(anyhow!("the owners screen does not list {probe}"));
             }
-            get(c, &owner, &jwt)
-                .await
-                .context("the owner detail screen")?;
-            get(c, &clusters, &jwt)
-                .await
-                .context("the clusters screen")?;
-            get(c, &overview, &jwt)
-                .await
-                .context("the overview screen")?;
+            get(c, &owner, &jwt).await.context("the owner detail screen")?;
+            get(c, &clusters, &jwt).await.context("the clusters screen")?;
+            get(c, &overview, &jwt).await.context("the overview screen")?;
             Ok(())
         }
         .boxed()
@@ -1328,14 +1083,8 @@ pub(super) async fn workloads(c: &mut Ctx) {
         let jwt = c.admin_jwt.clone();
         let url = admin(c, "/admin/workloads");
         async move {
-            let rows = get(c, &url, &jwt)
-                .await
-                .context("could not read the workloads")?;
-            let rows = rows
-                .get("workloads")
-                .and_then(Value::as_array)
-                .or_else(|| rows.as_array())
-                .cloned();
+            let rows = get(c, &url, &jwt).await.context("could not read the workloads")?;
+            let rows = rows.get("workloads").and_then(Value::as_array).or_else(|| rows.as_array()).cloned();
             let rows = match rows {
                 Some(rows) if !rows.is_empty() => rows,
                 // Empty is the failure, not a quiet fleet: `KNOWN` is compiled in, so a list with
@@ -1347,10 +1096,7 @@ pub(super) async fn workloads(c: &mut Ctx) {
             // reader, so a list missing one names a workload nothing will ever wait for — and the
             // save would go out ahead of the pods that read it. So the whole `KNOWN` list, with
             // `ready` and `desired` on each, which is what the precheck reads.
-            let named: Vec<&str> = rows
-                .iter()
-                .filter_map(|r| r.get("name").and_then(Value::as_str))
-                .collect();
+            let named: Vec<&str> = rows.iter().filter_map(|r| r.get("name").and_then(Value::as_str)).collect();
             let missing: Vec<&str> = kloudlite_workspaces::api::workloads::KNOWN_CENTRAL
                 .iter()
                 .chain(kloudlite_workspaces::api::workloads::KNOWN_PER_REGION)
@@ -1358,20 +1104,12 @@ pub(super) async fn workloads(c: &mut Ctx) {
                 .filter(|name| !named.contains(name))
                 .collect();
             if !missing.is_empty() {
-                return Err(anyhow!(
-                    "the workloads list does not name {}",
-                    missing.join(", ")
-                ));
+                return Err(anyhow!("the workloads list does not name {}", missing.join(", ")));
             }
-            if let Some(bad) = rows
-                .iter()
-                .find(|r| r.get("ready").is_none() || r.get("desired").is_none())
-            {
+            if let Some(bad) = rows.iter().find(|r| r.get("ready").is_none() || r.get("desired").is_none()) {
                 return Err(anyhow!(
                     "`{}` is listed without ready/desired, which is what a Boot save prechecks",
-                    bad.get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("a workload")
+                    bad.get("name").and_then(Value::as_str).unwrap_or("a workload")
                 ));
             }
             Ok(())
@@ -1424,14 +1162,9 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
         let admin_jwt = c.admin_jwt.clone();
         let team = api(c, &format!("/v1/teams/{slug}"));
         async move {
-            post(
-                c,
-                &api(c, "/v1/teams"),
-                &jwt,
-                json!({ "slug": slug, "name": "slo probe requests" }),
-            )
-            .await
-            .context("could not create the team the access request is for")?;
+            post(c, &api(c, "/v1/teams"), &jwt, json!({ "slug": slug, "name": "slo probe requests" }))
+                .await
+                .context("could not create the team the access request is for")?;
             let drop_team = || async {
                 call(c, reqwest::Method::DELETE, &team, &jwt, None)
                     .await
@@ -1447,18 +1180,11 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
                     "reason": format!("{} slo probe access", c.prefix()),
                     "access": { "team": slug, "role": "member" },
                 });
-                let made = post(c, &api(c, "/v1/requests"), &other, ask)
-                    .await
-                    .context("could not open the access request")?;
+                let made = post(c, &api(c, "/v1/requests"), &other, ask).await.context("could not open the access request")?;
                 let id = id_of(made)?;
-                post(
-                    c,
-                    &admin(c, &format!("/admin/requests/{id}/approve")),
-                    &admin_jwt,
-                    json!({ "note": NOTE }),
-                )
-                .await
-                .context("the access approval was refused")?;
+                post(c, &admin(c, &format!("/admin/requests/{id}/approve")), &admin_jwt, json!({ "note": NOTE }))
+                    .await
+                    .context("the access approval was refused")?;
                 poll_json(c, &team, &other, Duration::from_secs(20), |v| {
                     v.get("slug").and_then(Value::as_str) == Some(slug.as_str())
                 })
@@ -1471,22 +1197,13 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
                     "reason": format!("{} slo probe deny", c.prefix()),
                     "other": { "title": "slo probe", "body": "deny me" },
                 });
-                let made = post(c, &api(c, "/v1/requests"), &other, ask)
-                    .await
-                    .context("could not open the request to deny")?;
+                let made = post(c, &api(c, "/v1/requests"), &other, ask).await.context("could not open the request to deny")?;
                 let id = id_of(made)?;
                 let note = format!("slo probe denied {}", c.run_id);
-                post(
-                    c,
-                    &admin(c, &format!("/admin/requests/{id}/deny")),
-                    &admin_jwt,
-                    json!({ "note": note }),
-                )
-                .await
-                .context("the deny was refused")?;
-                let seen = get(c, &api(c, &format!("/v1/requests/{id}")), &other)
+                post(c, &admin(c, &format!("/admin/requests/{id}/deny")), &admin_jwt, json!({ "note": note }))
                     .await
-                    .context("the asker cannot read it back")?;
+                    .context("the deny was refused")?;
+                let seen = get(c, &api(c, &format!("/v1/requests/{id}")), &other).await.context("the asker cannot read it back")?;
                 denied_with(&seen, &note)
             };
             undoing(DECIDE_CEILING - Duration::from_secs(20), both, drop_team).await
@@ -1499,18 +1216,13 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
 /// A denied request reads back as denied AND carries the reason. A state with no note is a
 /// decision the asker cannot act on, which is the half a status check would miss.
 fn denied_with(request: &Value, note: &str) -> Result<()> {
-    let state = request
-        .get("state")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let state = request.get("state").and_then(Value::as_str).unwrap_or_default();
     if state != "denied" {
         return Err(anyhow!("the request reads back as `{state}`, not denied"));
     }
     let carried = request.to_string();
     if !carried.contains(note) {
-        return Err(anyhow!(
-            "the denied request carries no reason the asker can read"
-        ));
+        return Err(anyhow!("the denied request carries no reason the asker can read"));
     }
     Ok(())
 }
@@ -1530,15 +1242,11 @@ pub(super) async fn legacy_union(c: &mut Ctx) {
         async move {
             // Reading the retired queue must ANSWER; an empty list is the ordinary state and is
             // not a failure — the CRD may legitimately hold nothing left to migrate.
-            let rows = get(c, &legacy, &jwt)
-                .await
-                .context("the retired quota-request queue")?;
+            let rows = get(c, &legacy, &jwt).await.context("the retired quota-request queue")?;
             if !rows.is_array() {
                 return Err(anyhow!("the retired queue did not answer a list"));
             }
-            post(c, &migrate, &jwt, json!({ "note": NOTE }))
-                .await
-                .context("the migration was refused")?;
+            post(c, &migrate, &jwt, json!({ "note": NOTE })).await.context("the migration was refused")?;
             let unioned = get(c, &queue, &jwt).await.context("the admin queue")?;
             unioned
                 .as_array()
@@ -1564,9 +1272,7 @@ pub(super) async fn region_status(c: &mut Ctx) {
         let list = api(c, "/v1/regions");
         let detail = admin(c, &format!("/admin/clusters/{region}"));
         async move {
-            let rows = get(c, &list, &jwt)
-                .await
-                .context("could not list the regions")?;
+            let rows = get(c, &list, &jwt).await.context("could not list the regions")?;
             let there = rows.as_array().is_some_and(|rows| {
                 rows.iter().any(|r| {
                     [r.get("id"), r.get("name")]
@@ -1576,14 +1282,9 @@ pub(super) async fn region_status(c: &mut Ctx) {
                 })
             });
             if !there {
-                return Err(anyhow!(
-                    "`{region}` — the region this run is in — is not listed"
-                ));
+                return Err(anyhow!("`{region}` — the region this run is in — is not listed"));
             }
-            get(c, &detail, &admin_jwt)
-                .await
-                .context("the cluster's own status")
-                .map(|_| ())
+            get(c, &detail, &admin_jwt).await.context("the cluster's own status").map(|_| ())
         }
         .boxed()
     })
@@ -1648,11 +1349,7 @@ mod tests {
     fn a_deny_has_to_carry_its_reason() {
         let note = "slo probe denied fast-1";
         assert!(denied_with(&json!({ "state": "denied", "note": note }), note).is_ok());
-        assert!(denied_with(
-            &json!({ "state": "denied", "decision": { "note": note } }),
-            note
-        )
-        .is_ok());
+        assert!(denied_with(&json!({ "state": "denied", "decision": { "note": note } }), note).is_ok());
         assert!(denied_with(&json!({ "state": "denied" }), note).is_err());
         assert!(denied_with(&json!({ "state": "approved", "note": note }), note).is_err());
         assert!(denied_with(&json!({ "state": "pending", "note": note }), note).is_err());
@@ -1689,17 +1386,10 @@ mod tests {
         for id in IDS {
             assert_eq!(c.steps.iter().filter(|s| s.slo_id == id).count(), 1, "{id}");
         }
-        assert_eq!(
-            c.steps.len(),
-            IDS.len(),
-            "an id nobody asked for was reported"
-        );
+        assert_eq!(c.steps.len(), IDS.len(), "an id nobody asked for was reported");
         // Nothing anywhere carries a credential: these steps mint CLI tokens and read invitations.
         for s in &c.steps {
-            assert!(
-                !s.detail.contains(&c.probe_jwt),
-                "a jwt reached a detail: {s:?}"
-            );
+            assert!(!s.detail.contains(&c.probe_jwt), "a jwt reached a detail: {s:?}");
         }
     }
 

@@ -55,12 +55,7 @@ const IDS: [&str; 7] = [
 
 /// The environment twins, in journey order. A separate list because they stand on stage 6's
 /// environment, not on stage 5's workspace: one half being absent must not cost the other its ids.
-const ENV_IDS: [&str; 4] = [
-    "env.stop.p95",
-    "env.replicated",
-    "env.start.p95",
-    "env.restore",
-];
+const ENV_IDS: [&str; 4] = ["env.stop.p95", "env.replicated", "env.start.p95", "env.restore"];
 
 /// The two delete verbs, last: they take the objects the halves above measured, so nothing runs
 /// after them that could want one back.
@@ -93,8 +88,7 @@ pub async fn run(c: &mut Ctx) {
 /// workspace's. That is also why they run here rather than in either half: they are the end of the
 /// stage by construction, and there is nothing left to measure afterwards.
 async fn deletes(c: &mut Ctx) {
-    let (Some(env), Some(volume)) = (c.state.environment.clone(), c.state.env_volume.clone())
-    else {
+    let (Some(env), Some(volume)) = (c.state.environment.clone(), c.state.env_volume.clone()) else {
         for id in DELETE_IDS {
             c.skip(id, "no environment");
         }
@@ -151,14 +145,7 @@ async fn wt_delete(c: &mut Ctx, env: &str, volume: &str, clone: &Option<String>)
             for id in environments(c).await {
                 let url = api(c, &format!("/v1/environments/{id}"));
                 let _ = super::call(c, reqwest::Method::DELETE, &url, &jwt, None).await;
-                gone(
-                    c,
-                    &url,
-                    &jwt,
-                    WAIT,
-                    "a leftover environment on this run's volume",
-                )
-                .await?;
+                gone(c, &url, &jwt, WAIT, "a leftover environment on this run's volume").await?;
             }
             match volume_listed(c, &jwt, &volume).await? {
                 true => Ok(()),
@@ -188,14 +175,7 @@ async fn snap_delete(c: &mut Ctx, volume: &str, snapshot: &str) {
                 .await
                 .context("could not delete the snapshot")?;
             // The volume goes with its last snapshot.
-            volume_gone(
-                c,
-                &jwt,
-                &volume,
-                SNAP_DELETE_CEILING,
-                "the detached volume's last snapshot",
-            )
-            .await
+            volume_gone(c, &jwt, &volume, SNAP_DELETE_CEILING, "the detached volume's last snapshot").await
         }
         .boxed()
     })
@@ -210,13 +190,10 @@ async fn snap_delete(c: &mut Ctx, volume: &str, snapshot: &str) {
 /// budget asking. A volume's `name` in the listing is its ws/env id, which is what every caller
 /// here holds (`display_name` is the caller-chosen one teardown matches on).
 async fn volume_listed(c: &Ctx, jwt: &str, name: &str) -> Result<bool> {
-    let rows = get(c, &api(c, "/v1/volumes"), jwt)
-        .await
-        .context("could not list the volumes")?;
-    Ok(rows.as_array().is_some_and(|rows| {
-        rows.iter()
-            .any(|r| r.get("name").and_then(Value::as_str) == Some(name))
-    }))
+    let rows = get(c, &api(c, "/v1/volumes"), jwt).await.context("could not list the volumes")?;
+    Ok(rows
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(Value::as_str) == Some(name))))
 }
 
 /// Poll the listing until the volume is no longer in it.
@@ -227,10 +204,7 @@ async fn volume_gone(c: &Ctx, jwt: &str, name: &str, cap: Duration, what: &str) 
             return Ok(());
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!(
-                "{what} is still listed after {} ms",
-                cap.as_millis()
-            ));
+            return Err(anyhow!("{what} is still listed after {} ms", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -246,10 +220,7 @@ async fn gone(c: &Ctx, url: &str, jwt: &str, cap: Duration, what: &str) -> Resul
             return Ok(());
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!(
-                "{what} still answers {status} after {} ms",
-                cap.as_millis()
-            ));
+            return Err(anyhow!("{what} still answers {status} after {} ms", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -320,9 +291,7 @@ async fn env_stop(c: &mut Ctx, env: &str) -> bool {
         let url = api(c, &format!("/v1/environments/{env}/stop"));
         let doc = api(c, &format!("/v1/environments/{env}"));
         async move {
-            post(c, &url, &jwt, Value::Null)
-                .await
-                .context("could not stop")?;
+            post(c, &url, &jwt, Value::Null).await.context("could not stop")?;
             poll_json(c, &doc, &jwt, ENV_STOP_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
             })
@@ -362,9 +331,7 @@ async fn env_start(c: &mut Ctx, env: &str) {
         let url = api(c, &format!("/v1/environments/{env}/start"));
         let doc = api(c, &format!("/v1/environments/{env}"));
         async move {
-            post(c, &url, &jwt, Value::Null)
-                .await
-                .context("could not start")?;
+            post(c, &url, &jwt, Value::Null).await.context("could not start")?;
             poll_json(c, &doc, &jwt, ENV_START_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("running")
             })
@@ -393,9 +360,7 @@ async fn env_restore(c: &mut Ctx, snapshot: &str) {
         let url = api(c, "/v1/environments/restore");
         let body = serde_json::json!({ "name": name, "snapshot_id": snapshot });
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not restore the environment")?;
+            let doc = post(c, &url, &jwt, body).await.context("could not restore the environment")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -428,9 +393,7 @@ async fn stop(c: &mut Ctx, ws: &str) {
         let url = api(c, &format!("/v1/workspaces/{ws}/stop"));
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
         async move {
-            post(c, &url, &jwt, Value::Null)
-                .await
-                .context("could not stop")?;
+            post(c, &url, &jwt, Value::Null).await.context("could not stop")?;
             poll_json(c, &doc, &jwt, STOP_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
             })
@@ -476,9 +439,7 @@ async fn replicated(c: &mut Ctx, ws: &str) {
 /// Without a kubeconfig there is nothing to read — a deployment gap, not a breach — so the
 /// condition the step already checked stands alone and this adds nothing.
 async fn named_by_a_replica(c: &Ctx, ws: &str) -> Result<()> {
-    let Some(k) = c.kube.as_ref() else {
-        return Ok(());
-    };
+    let Some(k) = c.kube.as_ref() else { return Ok(()) };
     let api: kube::Api<crd::VolumeReplica> = kube::Api::all(k.clone());
     let list = api
         .list(&kube::api::ListParams::default())
@@ -501,9 +462,7 @@ async fn start(c: &mut Ctx, ws: &str) {
         let url = api(c, &format!("/v1/workspaces/{ws}/start"));
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
         async move {
-            post(c, &url, &jwt, Value::Null)
-                .await
-                .context("could not start")?;
+            post(c, &url, &jwt, Value::Null).await.context("could not start")?;
             poll_json(c, &doc, &jwt, START_CEILING, |v| {
                 v.get("state").and_then(Value::as_str) == Some("ready")
             })
@@ -523,9 +482,7 @@ async fn restore(c: &mut Ctx, snapshot: &str) {
         let url = api(c, "/v1/workspaces/restore");
         let body = serde_json::json!({ "name": name, "snapshot_id": snapshot });
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not restore")?;
+            let doc = post(c, &url, &jwt, body).await.context("could not restore")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -555,9 +512,7 @@ pub(crate) async fn park(c: &Ctx, id: &str) {
     let url = api(c, &format!("/v1/workspaces/{id}/stop"));
     match post(c, &url, &c.probe_jwt.clone(), Value::Null).await {
         Ok(_) => tracing::info!(name = %id, "slo.workspace.parked"),
-        Err(e) => {
-            tracing::warn!(name = %id, error = %format!("{e:#}"), "slo.workspace.park.failed")
-        }
+        Err(e) => tracing::warn!(name = %id, error = %format!("{e:#}"), "slo.workspace.park.failed"),
     }
 }
 
@@ -569,10 +524,7 @@ pub(crate) async fn park(c: &Ctx, id: &str) {
 /// kubeconfig this skips rather than testing two thirds of an id.
 async fn refusals(c: &mut Ctx, volume: &str, snapshot: &str) {
     let Some(k) = c.kube.clone() else {
-        return c.skip(
-            "vol.refusals",
-            "no kubeconfig: a sync point cannot be named",
-        );
+        return c.skip("vol.refusals", "no kubeconfig: a sync point cannot be named");
     };
     let sync = match sync_point(&k, volume).await {
         Ok(s) => s,
@@ -586,13 +538,7 @@ async fn refusals(c: &mut Ctx, volume: &str, snapshot: &str) {
             // The agent's own cut: deleting one by hand removes a replica's send parent.
             refused(c, &format!("{base}/snapshots/{sync}"), &jwt, "a sync point").await?;
             // The base a running worktree is standing on.
-            refused(
-                c,
-                &format!("{base}/snapshots/{snapshot}"),
-                &jwt,
-                "a running worktree's base",
-            )
-            .await?;
+            refused(c, &format!("{base}/snapshots/{snapshot}"), &jwt, "a running worktree's base").await?;
             // The volume itself, while working copies are still on it.
             refused(c, &base, &jwt, "a volume with a working copy").await
         }
@@ -614,11 +560,7 @@ async fn detach_all(c: &Ctx, cap: Duration) -> Result<()> {
             let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!(
-                "{} working copies were still on the volume after {} ms",
-                live.len(),
-                cap.as_millis()
-            ));
+            return Err(anyhow!("{} working copies were still on the volume after {} ms", live.len(), cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -630,10 +572,7 @@ async fn refused(c: &Ctx, url: &str, jwt: &str, what: &str) -> Result<()> {
     if status == reqwest::StatusCode::CONFLICT {
         return Ok(());
     }
-    Err(anyhow!(
-        "deleting {what} answered {status}: {}",
-        body.chars().take(200).collect::<String>()
-    ))
+    Err(anyhow!("deleting {what} answered {status}: {}", body.chars().take(200).collect::<String>()))
 }
 
 /// The newest sync point on `volume` — the agent's own cut, which no `/v1` listing shows.
@@ -673,9 +612,7 @@ async fn detached_restorable(c: &mut Ctx, snapshot: &str) {
         let url = api(c, "/v1/workspaces/restore");
         let body = serde_json::json!({ "name": name, "snapshot_id": snapshot });
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("the detached snapshot would not restore")?;
+            let doc = post(c, &url, &jwt, body).await.context("the detached snapshot would not restore")?;
             // The id is not kept: teardown finds it by the `run-{id}` name prefix like every other
             // object, and the next step re-reads the volume's worktrees anyway.
             doc.get("id")
@@ -696,10 +633,7 @@ async fn detached_restorable(c: &mut Ctx, snapshot: &str) {
 /// order the fleet converges in is the order this retries in.
 async fn orphan_collected(c: &mut Ctx, volume: &str) {
     let Some(k) = c.kube.clone() else {
-        return c.skip(
-            "vol.orphan.collected",
-            "no kubeconfig: the Volume cannot be watched",
-        );
+        return c.skip("vol.orphan.collected", "no kubeconfig: the Volume cannot be watched");
     };
     let volume = volume.to_string();
     c.step("vol.orphan.collected", ORPHAN_CEILING, move |c| {
@@ -708,15 +642,11 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
             loop {
                 for id in worktrees(c).await {
                     let url = api(c, &format!("/v1/workspaces/{id}"));
-                    let _ =
-                        super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None)
-                            .await;
+                    let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
                 }
                 for id in snapshots(c, &volume).await {
                     let url = api(c, &format!("/v1/volumes/{volume}/snapshots/{id}"));
-                    let _ =
-                        super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None)
-                            .await;
+                    let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
                 }
                 // `retire_pass` deletes a Volume with no owner entry AND no snapshot, so the
                 // detach is the half that has to happen first — a Volume that still lists its
@@ -725,22 +655,14 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
                 // still-owned Volume is named as that rather than as a slow sweep.
                 still_owned(&k, &volume).await?;
                 let left = ORPHAN_CEILING.saturating_sub(start.elapsed());
-                if crate::kube::wait_for::<crd::Volume>(
-                    &k,
-                    &volume,
-                    left.min(Duration::from_secs(5)),
-                    |v| v.is_none(),
-                )
-                .await
-                .is_ok()
+                if crate::kube::wait_for::<crd::Volume>(&k, &volume, left.min(Duration::from_secs(5)), |v| v.is_none())
+                    .await
+                    .is_ok()
                 {
                     return Ok(());
                 }
                 if start.elapsed() >= ORPHAN_CEILING {
-                    return Err(anyhow!(
-                        "the Volume was still there after {} ms",
-                        ORPHAN_CEILING.as_millis()
-                    ));
+                    return Err(anyhow!("the Volume was still there after {} ms", ORPHAN_CEILING.as_millis()));
                 }
             }
         }
@@ -755,14 +677,10 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
 /// is reported as that, so a sweep that took an OWNED volume cannot pass as a collection.
 async fn still_owned(k: &kube::Client, volume: &str) -> Result<()> {
     let api: kube::Api<crd::Volume> = kube::Api::all(k.clone());
-    let Ok(Some(v)) = api.get_opt(volume).await else {
-        return Ok(());
-    };
+    let Ok(Some(v)) = api.get_opt(volume).await else { return Ok(()) };
     match v.metadata.owner_references.as_ref().map_or(0, Vec::len) {
         0 => Ok(()),
-        n => Err(anyhow!(
-            "the Volume still lists {n} owner(s): the finalizer has not detached it"
-        )),
+        n => Err(anyhow!("the Volume still lists {n} owner(s): the finalizer has not detached it")),
     }
 }
 
@@ -780,11 +698,7 @@ async fn worktrees(c: &Ctx) -> Vec<String> {
     rows.as_array()
         .map(|rows| {
             rows.iter()
-                .filter(|r| {
-                    r.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|n| n.starts_with(&prefix))
-                })
+                .filter(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix)))
                 .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
                 .collect()
         })
@@ -794,17 +708,11 @@ async fn worktrees(c: &Ctx) -> Vec<String> {
 /// Every environment THIS RUN created, by name prefix — `worktrees`' twin for the other kind.
 async fn environments(c: &Ctx) -> Vec<String> {
     let prefix = c.prefix();
-    let rows = get(c, &api(c, "/v1/environments"), &c.probe_jwt)
-        .await
-        .unwrap_or(Value::Null);
+    let rows = get(c, &api(c, "/v1/environments"), &c.probe_jwt).await.unwrap_or(Value::Null);
     rows.as_array()
         .map(|rows| {
             rows.iter()
-                .filter(|r| {
-                    r.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|n| n.starts_with(&prefix))
-                })
+                .filter(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&prefix)))
                 .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
                 .collect()
         })
@@ -817,11 +725,7 @@ async fn snapshots(c: &Ctx, volume: &str) -> Vec<String> {
     let url = api(c, &format!("/v1/volumes/{volume}/history"));
     let rows = get(c, &url, &c.probe_jwt).await.unwrap_or(Value::Null);
     rows.as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
-                .collect()
-        })
+        .map(|rows| rows.iter().filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string)).collect())
         .unwrap_or_default()
 }
 
@@ -847,21 +751,11 @@ mod tests {
         let jwt = c.probe_jwt.clone();
         assert!(volume_listed(&c, &jwt, "ws-kept").await.expect("listed"));
         // The caller-chosen name is NOT what these match on.
-        assert!(!volume_listed(&c, &jwt, "run-fast-1-clone")
-            .await
-            .expect("listed"));
+        assert!(!volume_listed(&c, &jwt, "run-fast-1-clone").await.expect("listed"));
         assert!(!volume_listed(&c, &jwt, "ws-gone").await.expect("listed"));
         // And "gone" converges on absence rather than on a status.
-        assert!(
-            volume_gone(&c, &jwt, "ws-gone", Duration::from_millis(50), "x")
-                .await
-                .is_ok()
-        );
-        assert!(
-            volume_gone(&c, &jwt, "ws-kept", Duration::from_millis(50), "x")
-                .await
-                .is_err()
-        );
+        assert!(volume_gone(&c, &jwt, "ws-gone", Duration::from_millis(50), "x").await.is_ok());
+        assert!(volume_gone(&c, &jwt, "ws-kept", Duration::from_millis(50), "x").await.is_err());
     }
 
     /// Stage 5 failing must not cost stage 7 its ids: every one is produced exactly once, skipped
@@ -872,31 +766,19 @@ mod tests {
         run(&mut c).await;
         assert_eq!(c.steps.len(), IDS.len() + ENV_IDS.len() + DELETE_IDS.len());
         for id in IDS {
-            let s = c
-                .steps
-                .iter()
-                .find(|s| s.slo_id == id)
-                .unwrap_or_else(|| panic!("{id}"));
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no workspace", "{s:?}");
         }
         // The two halves are independent: no environment costs the env ids nothing but their own
         // reason, and every id in the stage is still produced exactly once.
         for id in ENV_IDS {
-            let s = c
-                .steps
-                .iter()
-                .find(|s| s.slo_id == id)
-                .unwrap_or_else(|| panic!("{id}"));
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no environment", "{s:?}");
         }
         // The two delete ids stand on the environment like the four above them, and skip with
         // their own reason rather than the workspace half's.
         for id in DELETE_IDS {
-            let s = c
-                .steps
-                .iter()
-                .find(|s| s.slo_id == id)
-                .unwrap_or_else(|| panic!("{id}"));
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no environment", "{s:?}");
         }
         assert_eq!(c.failed(), 0, "a skip is not a failure");

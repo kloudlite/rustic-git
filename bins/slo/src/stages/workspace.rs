@@ -106,9 +106,7 @@ async fn create(c: &mut Ctx) -> bool {
         let jwt = c.probe_jwt.clone();
         let url = api(c, "/v1/workspaces");
         async move {
-            let doc = post(c, &url, &jwt, body)
-                .await
-                .context("could not create the workspace")?;
+            let doc = post(c, &url, &jwt, body).await.context("could not create the workspace")?;
             let id = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -185,10 +183,7 @@ awk '$2 == "/home/kl" { print $3 }' /proc/mounts 2>/dev/null || true"#;
 fn home_is_shared(out: &str) -> Result<()> {
     let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
     if lines.next() != Some("slo") {
-        return Err(anyhow!(
-            "the exec printed {:?}, not its command's output",
-            out.trim()
-        ));
+        return Err(anyhow!("the exec printed {:?}, not its command's output", out.trim()));
     }
     let rest: Vec<&str> = lines.collect();
     if rest.is_empty() {
@@ -198,18 +193,14 @@ fn home_is_shared(out: &str) -> Result<()> {
     // should have covered.
     const LOCAL: [&str; 5] = ["overlay", "tmpfs", "rootfs", "ext4", "btrfs"];
     if rest.iter().any(|l| LOCAL.contains(l)) {
-        return Err(anyhow!(
-            "/home/kl is {rest:?} — the container's own filesystem, not a mount"
-        ));
+        return Err(anyhow!("/home/kl is {rest:?} — the container's own filesystem, not a mount"));
     }
     // A mount of its own, whatever the sandbox calls it.
     const MOUNTED: [&str; 4] = ["nfs", "nfs4", "v9fs", "9p"];
     if rest.iter().any(|l| MOUNTED.contains(l)) {
         return Ok(());
     }
-    Err(anyhow!(
-        "/home/kl is {rest:?}, which is not a mounted export"
-    ))
+    Err(anyhow!("/home/kl is {rest:?}, which is not a mounted export"))
 }
 
 /// `homes.rw.p95`:/// `homes.rw.p95`: write, `sync`, read back on the shared NFS home, timed INSIDE the pod.
@@ -276,12 +267,7 @@ echo $(( (e - s) * 10 ))"#
     )
 }
 
-pub(crate) async fn ws_exec(
-    c: &Ctx,
-    id: &str,
-    script: &str,
-    cap: Duration,
-) -> Result<(i32, String, String)> {
+pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> Result<(i32, String, String)> {
     let probe = c.probe_user.clone();
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     // The probe's workspaces are personal, never a team's, so the namespace is `ws-slo-probe`.
@@ -294,15 +280,7 @@ pub(crate) async fn ws_exec(
     // sets (`k8s::login_env`), not a profile's. That is what `cache_is_local` is reading back, and
     // calling it "the login shell" was wrong.
     let user = kloudlite_workspaces::k8s::SSH_USER;
-    crate::kube::exec(
-        k,
-        &ns,
-        id,
-        Some(WS_CONTAINER),
-        &["su", user, "-s", "/bin/sh", "-c", script],
-        cap,
-    )
-    .await
+    crate::kube::exec(k, &ns, id, Some(WS_CONTAINER), &["su", user, "-s", "/bin/sh", "-c", script], cap).await
 }
 
 /// `gw.tunnel.p95`: the whole `kl ssh` path — mint a session, then let `ssh` reach the pod through
@@ -321,14 +299,7 @@ async fn tunnel(c: &mut Ctx, id: &str) {
             let start = std::time::Instant::now();
             loop {
                 let session = ssh_session(c, &id).await?;
-                let out = tools::run(
-                    &ssh,
-                    &ssh_args(&kl, &key, &id),
-                    &session_env(&session),
-                    None,
-                    TUNNEL_CEILING,
-                )
-                .await;
+                let out = tools::run(&ssh, &ssh_args(&kl, &key, &id), &session_env(&session), None, TUNNEL_CEILING).await;
                 match out {
                     Ok(_) => return Ok(()),
                     Err(e) if start.elapsed() < KEY_PROPAGATION => {
@@ -356,25 +327,12 @@ async fn unregistered_refused(c: &mut Ctx, id: &str) {
     let _ = std::fs::remove_file(junk.with_extension("pub"));
     if let Err(e) = tools::plain(
         &c.programs.ssh_keygen,
-        &[
-            "-q",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-C",
-            "unregistered",
-            "-f",
-            &junk.display().to_string(),
-        ],
+        &["-q", "-t", "ed25519", "-N", "", "-C", "unregistered", "-f", &junk.display().to_string()],
         Duration::from_secs(20),
     )
     .await
     {
-        return c.skip(
-            "gw.unregistered.refused",
-            &format!("no throwaway key: {e:#}"),
-        );
+        return c.skip("gw.unregistered.refused", &format!("no throwaway key: {e:#}"));
     }
     let id = id.to_string();
     c.step("gw.unregistered.refused", TUNNEL_CEILING, move |c| {
@@ -389,9 +347,7 @@ async fn unregistered_refused(c: &mut Ctx, id: &str) {
                     if detail.contains("Permission denied") {
                         Ok(())
                     } else {
-                        Err(anyhow!(
-                            "ssh failed for some other reason than a refusal: {detail}"
-                        ))
+                        Err(anyhow!("ssh failed for some other reason than a refusal: {detail}"))
                     }
                 }
             }
@@ -462,9 +418,7 @@ async fn push(c: &mut Ctx, id: &str) {
         let url = api(c, &format!("/v1/workspaces/{id}/push"));
         let history = api(c, &format!("/v1/volumes/{volume}/history"));
         async move {
-            let doc = post(c, &url, &jwt, serde_json::json!({}))
-                .await
-                .context("could not push")?;
+            let doc = post(c, &url, &jwt, serde_json::json!({})).await.context("could not push")?;
             let snap = doc
                 .get("id")
                 .and_then(Value::as_str)
@@ -533,19 +487,8 @@ async fn quota_refused(c: &mut Ctx) {
             "quota_gb": u32::MAX,
             "packages": [],
         });
-        async move {
-            refused_over(
-                c,
-                reqwest::Method::POST,
-                &url,
-                &jwt,
-                Some(body),
-                "diskGb",
-                "a create",
-            )
-            .await
-        }
-        .boxed()
+        async move { refused_over(c, reqwest::Method::POST, &url, &jwt, Some(body), "diskGb", "a create").await }
+            .boxed()
     })
     .await;
 }
@@ -571,9 +514,7 @@ async fn refused_over(
         return Err(anyhow!("an over-quota {what} answered {status}: {clipped}"));
     }
     if !text.starts_with(&format!("{dim}: ")) || !text.contains(REFUSAL_TAIL) {
-        return Err(anyhow!(
-            "the refusal of {what} does not name {dim} and its usage: {clipped}"
-        ));
+        return Err(anyhow!("the refusal of {what} does not name {dim} and its usage: {clipped}"));
     }
     Ok(())
 }
@@ -643,23 +584,14 @@ async fn env_quota_refused(c: &mut Ctx, ws: &str) {
 /// the next clone and the next push are each one over. Everything else is left as the yaml has it
 /// — a probe that pinched disk as well would refuse things the rest of the stage still needs.
 async fn pinched(c: &Ctx, jwt: &str) -> Result<Value> {
-    let seen = super::get(c, &api(c, "/v1/quota"), jwt)
-        .await
-        .context("could not read the quota")?;
-    let used = |dim: &str| {
-        seen.pointer(&format!("/used/{dim}"))
-            .and_then(Value::as_u64)
-    };
+    let seen = super::get(c, &api(c, "/v1/quota"), jwt).await.context("could not read the quota")?;
+    let used = |dim: &str| seen.pointer(&format!("/used/{dim}")).and_then(Value::as_u64);
     let (ws, snaps) = (used("workspaces"), used("snapshots"));
     let (Some(ws), Some(snaps)) = (ws, snaps) else {
-        return Err(anyhow!(
-            "the quota answer carries no live counts to pinch against"
-        ));
+        return Err(anyhow!("the quota answer carries no live counts to pinch against"));
     };
     let mut spec = super::experience_admin::probe_quota();
-    let o = spec
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("the quota spec is not an object"))?;
+    let o = spec.as_object_mut().ok_or_else(|| anyhow!("the quota spec is not an object"))?;
     o.insert("workspaces".into(), ws.into());
     o.insert("snapshots".into(), snaps.into());
     Ok(spec)
@@ -682,15 +614,9 @@ mod tests {
         );
         assert!(args.iter().any(|a| a == "kl@ws-abc"), "{args:?}");
         // Nothing to pin: the pod's host key is minted with the pod.
-        assert!(
-            args.iter().any(|a| a == "StrictHostKeyChecking=no"),
-            "{args:?}"
-        );
+        assert!(args.iter().any(|a| a == "StrictHostKeyChecking=no"), "{args:?}");
         let env = session_env(r#"{"id":"ws-abc"}"#);
-        assert_eq!(
-            env.get("KL_SSH_SESSION").map(String::as_str),
-            Some(r#"{"id":"ws-abc"}"#)
-        );
+        assert_eq!(env.get("KL_SSH_SESSION").map(String::as_str), Some(r#"{"id":"ws-abc"}"#));
     }
 
     /// The one judgement `ws.exec.ok` turns on. A pod that came up before its node's NFS mount
@@ -732,40 +658,25 @@ mod tests {
     /// reason, and every other id in the stage is still produced.
     #[tokio::test]
     async fn the_exec_ids_skip_without_a_kubeconfig() {
-        let app = axum::Router::new()
-            .route(
-                "/v1/workspaces",
-                axum::routing::post(|| async {
-                    (
-                        axum::http::StatusCode::ACCEPTED,
-                        axum::Json(serde_json::json!({"id": "ws-1", "state": "ready"})),
-                    )
-                }),
-            )
-            .route(
-                "/v1/workspaces/{id}",
-                axum::routing::get(|| async {
-                    axum::Json(serde_json::json!({"id": "ws-1", "state": "ready"}))
-                }),
-            );
+        let app = axum::Router::new().route(
+            "/v1/workspaces",
+            axum::routing::post(|| async {
+                (axum::http::StatusCode::ACCEPTED, axum::Json(serde_json::json!({"id": "ws-1", "state": "ready"})))
+            }),
+        )
+        .route("/v1/workspaces/{id}", axum::routing::get(|| async {
+            axum::Json(serde_json::json!({"id": "ws-1", "state": "ready"}))
+        }));
         let mut c = testkit::ctx_against(app).await;
         c.kube = None;
         run(&mut c).await;
         for id in ["ws.exec.ok", "homes.rw.p95"] {
-            let s = c
-                .steps
-                .iter()
-                .find(|s| s.slo_id == id)
-                .unwrap_or_else(|| panic!("{id}"));
+            let s = c.steps.iter().find(|s| s.slo_id == id).unwrap_or_else(|| panic!("{id}"));
             assert!(s.skipped && s.detail == "no kubeconfig", "{s:?}");
         }
         // Every id, exactly once, whatever path the stage took.
         for id in AFTER_CREATE.iter().chain(["ws.create.p95"].iter()) {
-            assert_eq!(
-                c.steps.iter().filter(|s| s.slo_id == *id).count(),
-                1,
-                "{id}"
-            );
+            assert_eq!(c.steps.iter().filter(|s| s.slo_id == *id).count(), 1, "{id}");
         }
     }
 }

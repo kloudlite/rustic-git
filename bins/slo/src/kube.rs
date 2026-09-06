@@ -32,10 +32,7 @@ pub async fn exec(
         ..Default::default()
     };
     tokio::time::timeout(timeout, async {
-        let mut p = api
-            .exec(pod, argv.iter().copied(), &params)
-            .await
-            .context("could not exec")?;
+        let mut p = api.exec(pod, argv.iter().copied(), &params).await.context("could not exec")?;
         let mut out = p.stdout().ok_or_else(|| anyhow!("no stdout"))?;
         let mut err = p.stderr().ok_or_else(|| anyhow!("no stderr"))?;
         let status = p.take_status().ok_or_else(|| anyhow!("no status"))?;
@@ -97,10 +94,7 @@ where
             Err(e) => why = format!("{e}"),
         }
         if start.elapsed() >= cap {
-            return Err(anyhow!(
-                "{name} was not there after {} ms: {why}",
-                cap.as_millis()
-            ));
+            return Err(anyhow!("{name} was not there after {} ms: {why}", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
@@ -114,13 +108,7 @@ mod tests {
     /// A status nobody can read must never be reported as a command that worked.
     #[test]
     fn only_an_explicit_success_is_exit_zero() {
-        assert_eq!(
-            code(Some(Status {
-                status: Some("Success".into()),
-                ..Default::default()
-            })),
-            0
-        );
+        assert_eq!(code(Some(Status { status: Some("Success".into()), ..Default::default() })), 0);
         assert_eq!(code(None), 1);
         let failed = Status {
             status: Some("Failure".into()),
