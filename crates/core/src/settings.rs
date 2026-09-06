@@ -585,9 +585,13 @@ mod tests {
 
     /// `LiveSettings::load`/`store` round-trip: last good wins is the CALLER's job (nothing here
     /// enforces it), so this only proves the handle itself swaps and reads correctly.
+    ///
+    /// Built from an explicit struct, never `from_env()`: the env is process-wide and a sibling
+    /// test in this binary sets `KLOUDLITE_SSH_PORT`, so reading it here made this test's answer
+    /// depend on which test ran first — it failed in CI with 2222 for 22 and passed locally.
     #[test]
     fn live_settings_round_trips() {
-        let live = LiveSettings::new(CentralSettings::from_env());
+        let live = LiveSettings::new(CentralSettings { ssh_port: 22, ..CentralSettings::from_env() });
         assert_eq!(live.load().ssh_port, 22);
         let mut next = (*live.load()).clone();
         next.ssh_port = 2200;
