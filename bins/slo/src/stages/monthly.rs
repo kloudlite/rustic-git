@@ -328,10 +328,13 @@ async fn daily_slots(c: &mut Ctx) {
     }
     c.step("bak.daily.slots", READ_CEILING, |_| {
         async move {
-            let have: Vec<String> = slots().await?.into_iter().map(|(n, _)| n).collect();
-            let missing: Vec<String> = DAYS
-                .iter()
-                .map(|d| format!("daily-{d}{SLOT_SUFFIX}"))
+            let rows = slots().await?;
+            let have: Vec<String> = rows.iter().map(|(n, _)| n.clone()).collect();
+            // The encrypted unit fills one slot a day, so in its first week the slots from before
+            // it existed cannot hold anything: only days at or after its oldest blob are due.
+            let since = rows.iter().filter(|(n, _)| n.ends_with(SLOT_SUFFIX)).map(|(_, t)| *t).min();
+            let missing: Vec<String> = slots_due(Utc::now(), since)
+                .into_iter()
                 .filter(|want| !have.contains(want))
                 .collect();
             if !missing.is_empty() {
@@ -355,8 +358,16 @@ async fn daily_slots(c: &mut Ctx) {
     .await;
 }
 
-/// `date +%a`'s output, which is what the backup script names the daily slots with.
-const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+/// The daily slots that must be present at `now`: the last seven days' weekdays, minus any day
+/// before `since` — the first encrypted blob's time, i.e. when the encrypted unit was installed.
+/// `None` (no encrypted blob at all) leaves every slot due, which the caller then reports.
+fn slots_due(now: chrono::DateTime<Utc>, since: Option<chrono::DateTime<Utc>>) -> Vec<String> {
+    (0..7)
+        .map(|back| now - chrono::Duration::days(back))
+        .filter(|day| since.is_none_or(|s| day.date_naive() >= s.date_naive()))
+        .map(|day| format!("daily-{}{SLOT_SUFFIX}", day.format("%a")))
+        .collect()
+}
 
 /// `bak.versioning`: blob versioning is on for the account the whole product's data lives in.
 ///
@@ -918,13 +929,23 @@ mod tests {
     /// a missing weekday means a whole day's run has never succeeded, which "the newest backup is
     /// recent" cannot see.
     #[test]
+    fn slots_before_the_encrypted_unit_existed_are_not_due_yet() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T20:38:00Z").unwrap().with_timezone(&Utc);
+        assert_eq!(slots_due(now, None).len(), 7, "no encrypted blob: everything is due, and reported");
+        let a_month = Some(now - chrono::Duration::days(30));
+        assert_eq!(slots_due(now, a_month).len(), 7);
+        let today = Some(now - chrono::Duration::hours(1));
+        assert_eq!(slots_due(now, today), vec!["daily-Sun.tgz.enc".to_string()], "installed today: only today");
+        let two_days = Some(now - chrono::Duration::days(2));
+        assert_eq!(slots_due(now, two_days), ["daily-Sun", "daily-Sat", "daily-Fri"].map(|d| format!("{d}.tgz.enc")));
+    }
+
+    #[test]
     fn the_daily_slots_are_the_seven_the_backup_script_writes() {
-        let have: Vec<String> = DAYS.iter().map(|d| format!("daily-{d}{SLOT_SUFFIX}")).collect();
+        let have = slots_due(Utc::now(), None);
         assert_eq!(have.len(), 7);
         assert!(have.contains(&"daily-Mon.tgz.enc".to_string()));
-        // `date +%a`'s own answer for today has to be one of them, or the daily check is asking
-        // for slot names the script never writes.
-        assert!(DAYS.contains(&Utc::now().format("%a").to_string().as_str()));
+        assert!(have.contains(&format!("daily-{}{SLOT_SUFFIX}", Utc::now().format("%a"))), "today's weekday is one of them");
     }
 
     /// A policy built from a hostname denies nothing: `ipBlock` takes CIDRs, and `dig +short` on a
