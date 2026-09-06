@@ -36,9 +36,14 @@ wait_for_probes
 # for the fast and hourly probes, so a plain apply would switch them back on — and a CronJob that
 # missed a tick fires the moment it is unsuspended, i.e. straight into the rollout, which is a
 # failed sample that measured this script rather than the platform.
+# Set IN the manifest before the apply, not patched back after it: the CronJob controller fires a
+# missed tick within the second between the two, straight into the rollout (seen 18:41 on
+# 2026-09-06 with the patch-after version).
 suspended=$(kubectl -n kloudlite get cronjobs -o jsonpath='{range .items[?(@.spec.suspend==true)]}{.metadata.name}{" "}{end}')
-kubectl apply -f kloudlite.yaml -f kloudlite-web.yaml
-for c in $suspended; do kubectl -n kloudlite patch cronjob "$c" -p '{"spec":{"suspend":true}}' >/dev/null && echo "kept $c suspended"; done
+kubectl apply --dry-run=client -o json -f kloudlite.yaml -f kloudlite-web.yaml \
+  | jq --arg keep "$suspended" '(.items[] | select(.kind=="CronJob" and (.metadata.name as $n | $keep | split(" ") | index($n))) | .spec.suspend) = true' \
+  | kubectl apply -f -
+for c in $suspended; do echo "kept $c suspended"; done
 kubectl -n kloudlite rollout status statefulset/kloudlite-srv --timeout=900s
 for d in kloudlite-api kloudlite-worker kloudlite-web; do
   kubectl -n kloudlite rollout status "deployment/$d" --timeout=300s
