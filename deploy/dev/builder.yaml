@@ -54,7 +54,7 @@ spec:
               apt-get update -qq && apt-get install -y -qq --no-install-recommends \
                 bash ca-certificates git rsync openssh-client curl openssl bind9-dnsutils \
                 pkg-config libssl-dev clang cmake python3 tini procps jq tmux lnav less nodejs npm >/dev/null
-              rustup component add clippy rustfmt >/dev/null 2>&1 || true
+              rustup component add clippy rustfmt 2>&1 | tail -1
               # HOME on the disk: gh's login, the git identity, safe.directory and ssh known_hosts
               # all live under it and must outlive a pod restart.
               mkdir -p /work/home /work/bin

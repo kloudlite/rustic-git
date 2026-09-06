@@ -13,8 +13,10 @@ git fetch -q origin master
 
 if [ "${1:-}" != "--no-gate" ]; then
   echo "==> gate: clippy + tests (CI's exact commands)"
-  cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | grep -E '^(warning|error)' -A6 | head -40 && exit 1 || true
-  cargo test --locked 2>&1 | grep -E '^test result|FAILED|panicked' | tee /tmp/ship-test.log | grep -v '^test result: ok' && exit 1 || true
+  cargo clippy --workspace --all-targets --locked -- -D warnings 2>&1 | grep -E '^(warning|error)' -A6 | head -40
+  [ "${PIPESTATUS[0]}" = 0 ] || exit 1
+  cargo test --locked 2>&1 | grep -E '^test result|FAILED|panicked' > /tmp/ship-test.log
+  [ "${PIPESTATUS[0]}" = 0 ] || { grep -v ': ok' /tmp/ship-test.log; exit 1; }
   echo "gate passed: $(grep -c '^test result: ok' /tmp/ship-test.log) test binaries green"
 fi
 
