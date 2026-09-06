@@ -81,21 +81,21 @@ first destructive stage.
 | `env.exec.ok` | Environments | Exec into a running service pod of the environment succeeds | 99.9 % | fast | 6 · Environment |
 | `env.clone.p95` | Environments | Cloning a running environment completes with its services ready | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `ws.stop.p95` | Workspace lifecycle | Stopping a workspace completes | 95 % ≤ 15000 ms | fast | 7 · Lifecycle |
-| `ws.replicated` | Workspace lifecycle | A stopped workspace's final sync point reaches a replica, named by that replica | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
+| `ws.replicated` | Workspace lifecycle | A stopped workspace's final sync point reaches a replica, named by that replica | 99.9 % ≤ 60000 ms | fast | 7 · Lifecycle |
 | `ws.start.p95` | Workspace lifecycle | Starting a workspace completes | 95 % ≤ 30000 ms | fast | 7 · Lifecycle |
 | `ws.restore` | Workspace lifecycle | Restoring a workspace from a past snapshot succeeds | 99.9 % | fast | 7 · Lifecycle |
 | `env.stop.p95` | Environments | Stopping an environment completes | 95 % ≤ 30000 ms | fast | 7 · Lifecycle |
-| `env.replicated` | Environments | A stopped environment's final sync point reaches a replica | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
+| `env.replicated` | Environments | A stopped environment's final sync point reaches a replica | 99.9 % ≤ 30000 ms | fast | 7 · Lifecycle |
 | `env.start.p95` | Environments | Starting an environment completes | 95 % ≤ 60000 ms | fast | 7 · Lifecycle |
 | `env.restore` | Environments | Restoring an environment from a past snapshot succeeds | 99.9 % | fast | 7 · Lifecycle |
 | `vol.refusals` | Workspace lifecycle | Deleting a sync point or a running worktree's base snapshot is refused | 99.9 % | fast | 7 · Lifecycle |
 | `vol.detached.restorable` | Workspace lifecycle | A detached volume's snapshot can still be restored | 99.9 % | fast | 7 · Lifecycle |
-| `vol.orphan.collected` | Workspace lifecycle | An orphaned volume directory is collected, and a Volume with no owner entry and no snapshot is deleted | 99.9 % ≤ 300000 ms | fast | 7 · Lifecycle |
+| `vol.orphan.collected` | Workspace lifecycle | An orphaned volume directory is collected, and a Volume with no owner entry and no snapshot is deleted | 99.9 % ≤ 60000 ms | fast | 7 · Lifecycle |
 | `wt.delete` | Workspace lifecycle | Deleting a workspace or environment drops the worktree and leaves the volume iff a snapshot remains | 99.9 % ≤ 60000 ms | fast | 7 · Lifecycle |
 | `snap.delete` | Workspace lifecycle | Deleting a snapshot removes it from history, and the last one of a detached volume takes the volume with it | 99.9 % | fast | 7 · Lifecycle |
 | `req.queue` | Admin | A Request CR is queued and answerable by an admin | 99.9 % ≤ 5000 ms | fast | 8 · Admin |
 | `audit.row` | Admin | Every admin write produces an audit row, and the same write reaches `kloudlite.events` as `admin.<action>` | 99.9 % | fast | 8 · Admin |
-| `signals.fresh` | Admin | The Signals table reflects a rule transition, and a rule with no covering samples reads `unknown` rather than `ok` | 99.9 % ≤ 120000 ms | fast | 8 · Admin |
+| `signals.fresh` | Admin | Every recorded signal carries the timestamp it transitioned at, and a rule with no covering samples reads `unknown` rather than `ok` | 99.9 % | fast | 8 · Admin |
 | `history.api` | Admin | The history API answers a chart query | 99.9 % | fast | 8 · Admin |
 | `sec.private.repo` | Security | A private repo is unreadable to a non-collaborator | 100 % | fast | 9 · Security |
 | `sec.cross.owner` | Security | One owner's objects are invisible to another owner | 100 % | fast | 9 · Security |
@@ -106,6 +106,7 @@ first destructive stage.
 | `repo.visibility` | Security | A repo flipped private is hidden from a non-collaborator, and is hidden again after being flipped back | 100 % | fast | 9 · Security |
 | `repo.visibility.public` | Git hosting | A repo flipped public becomes readable to another owner | 99.9 % | fast | 9 · Security |
 | `agent.spec.allowed` | Security | The two spec writes the agent's ClusterRole grants are still admitted | 99.9 % | fast | 9 · Security |
+| `sec.peer.listener` | Security | The git tier's public listener refuses `/api/`, on a repo that exists and one that does not | 100 % | fast | 9 · Security |
 | `edge.dns` | Edge and pipeline | The public hostname resolves | 99.99 % | fast | 10 · Edge |
 | `edge.cert` | Edge and pipeline | The TLS certificate is valid for the public hostname | 99.9 % | fast | 10 · Edge |
 | `edge.origin` | Edge and pipeline | Cloudflare reaches the origin | 99.9 % | fast | 10 · Edge |
@@ -114,26 +115,8 @@ first destructive stage.
 | `tel.pod.coverage` | Edge and pipeline | Every pod is scraped by the region's collector | 99.9 % ≤ 60000 ms | fast | 10 · Edge |
 | `tel.stream.lag` | Edge and pipeline | The Redis events stream consumer lag stays low | 99.9 % ≤ 60000 ms | fast | 10 · Edge |
 | `tel.ch.disk` | Edge and pipeline | ClickHouse disk usage is reported | 99.9 % ≤ 60000 ms | fast | 10 · Edge |
-| `git.push.large` | Git hosting | Push of a large commit over HTTP succeeds | 99.9 % | weekly | 12 · Weekly |
-| `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |
-| `ws.cold.profile` | Workspaces | A cold package profile builds successfully | 99.9 % | weekly | 12 · Weekly |
-| `ws.profile.reuse` | Workspaces | A repeat package set is published from the profile index, not rebuilt | 99.9 % | weekly | 12 · Weekly |
-| `ws.cross.node` | Workspaces | A workspace started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
-| `homes.cross.node` | Workspaces | The shared home is consistent across nodes | 99.9 % | weekly | 12 · Weekly |
-| `env.cross.node` | Environments | An environment started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
-| `cp.failover` | Control plane | The leader lease fails over to another pod | 99.9 % ≤ 30000 ms | weekly | 12 · Weekly |
-| `settings.live` | Control plane | A live settings change takes effect on the next beat | 99.9 % ≤ 60000 ms | weekly | 12 · Weekly |
-| `settings.revert` | Control plane | Reverting to a stored settings version restores it | 99.9 % ≤ 60000 ms | weekly | 12 · Weekly |
-| `settings.roll` | Control plane | A Boot-marked save is refused with 409 while one of its readers is mid-rollout, and nothing is written | 99.9 % | weekly | 12 · Weekly |
-| `reg.gc.sweep` | Container registry | A blob a sibling image still references survives that image's deletion and a GC pass | 99.9 % | weekly | 12 · Weekly |
-| `bak.tarball.age` | Backups | The latest backup tarball is recent | 99.9 % | monthly | 13 · Monthly |
-| `bak.daily.slots` | Backups | Every daily backup slot is present | 99.9 % | monthly | 13 · Monthly |
-| `bak.versioning` | Backups | Backup versioning is enabled and retains history | 99.9 % | monthly | 13 · Monthly |
-| `bak.cosmos` | Backups | The Cosmos backup for HyperDX succeeds | 99.9 % | monthly | 13 · Monthly |
-| `drill.dead.node` | Resilience drills | A dead-node drill heals every replica onto a live node | 99.9 % | monthly | 13 · Monthly |
-| `drill.drain` | Resilience drills | A drain drill succeeds without interrupting a running worktree | 99.9 % | monthly | 13 · Monthly |
-| `drill.redis.down` | Resilience drills | The system keeps operating correctly with Redis down | 99.9 % | monthly | 13 · Monthly |
-| `cluster.decommission` | Resilience drills | A decommission is refused until the agent stamps `drained`, then cordons the node | 99.9 % | monthly | 13 · Monthly |
+| `worker.lane.health` | Control plane | Every worker lane's heartbeat is fresh, counted against the concurrency the liveness probe counts | 99.9 % | fast | 10 · Edge |
+| `agent.heartbeat` | Control plane | Every region agent's heartbeat file is fresh and its DaemonSet is fully ready | 99.9 % | fast | 10 · Edge |
 | `ws.packages.add` | Workspaces | Adding a package to a running workspace makes it runnable (`which`) | 95 % ≤ 180000 ms | hourly | 14 · Experience |
 | `ws.packages.remove` | Workspaces | Removing it makes it disappear from the profile | 95 % ≤ 120000 ms | hourly | 14 · Experience |
 | `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out | 95 % ≤ 180000 ms | hourly | 14 · Experience |
@@ -182,6 +165,49 @@ first destructive stage.
 | `req.decide.kinds` | Admin | An access request grants membership and a denied request is closed with its reason | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
 | `req.legacy.union` | Admin | The retired quota-request queue is unioned into the admin queue and migrates | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `region.status` | Admin | The region list and this run's cluster status answer | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
+| `ws.quota.namespace` | Workspaces | The owner's namespace carries an `owner-quota` matching the effective Quota, and Kubernetes reports it as the hard stop | 99.9 % | hourly | 14 · Experience |
+| `env.services.policies` | Environments | An owner's namespace carries the OwnerBinding NetworkPolicies | 99.9 % | hourly | 14 · Experience |
+| `web.pages` | Web app | Every page route in the app's fixed list loads, each within 1500 ms | 99.9 % | hourly | 14 · Experience |
+| `repo.metadata` | Git hosting | A repo PATCH of its non-description fields is saved, and the browse `lastmod` route answers | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `id.session.reads` | Identity | The passkey `used` mark, the legacy quota-request create and the api's own settings read all answer | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `kl.commands` | Identity | `kl ws`, `kl ws list --team` and `kl logout` answer | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
+| `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
+| `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |
+| `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |
+| `ws.cold.profile` | Workspaces | A cold package profile builds successfully | 99.9 % | weekly | 12 · Weekly |
+| `ws.profile.reuse` | Workspaces | A repeat package set is published from the profile index, not rebuilt | 99.9 % | weekly | 12 · Weekly |
+| `ws.cross.node` | Workspaces | A workspace started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
+| `homes.cross.node` | Workspaces | The shared home is consistent across nodes | 99.9 % | weekly | 12 · Weekly |
+| `env.cross.node` | Environments | An environment started on a peer node reads its replica correctly | 99.9 % | weekly | 12 · Weekly |
+| `cp.failover` | Control plane | The leader lease fails over to another pod | 99.9 % ≤ 30000 ms | weekly | 12 · Weekly |
+| `settings.live` | Control plane | A live settings change takes effect on the next beat | 99.9 % ≤ 60000 ms | weekly | 12 · Weekly |
+| `settings.revert` | Control plane | Reverting to a stored settings version restores it | 99.9 % ≤ 60000 ms | weekly | 12 · Weekly |
+| `settings.roll` | Control plane | A Boot-marked save is refused with 409 while one of its readers is mid-rollout, and nothing is written | 99.9 % | weekly | 12 · Weekly |
+| `reg.gc.sweep` | Container registry | A blob a sibling image still references survives that image's deletion and a GC pass | 99.9 % | weekly | 12 · Weekly |
+| `roll.zero.errors` | Control plane | A rolling restart of the srv tier lands with zero non-2xx on a concurrent push and pull loop, and every pod that left logged `ownership.drained` | 99.9 % | weekly | 12 · Weekly |
+| `srv.drain.handover` | Control plane | A drained pod reports `draining` on `/healthz` and its repos are served by a live peer | 99.9 % ≤ 30000 ms | weekly | 12 · Weekly |
+| `reg.moved.image` | Container registry | The first pull of an image whose database has just moved nodes succeeds | 99.9 % | weekly | 12 · Weekly |
+| `reg.blob.session` | Container registry | A chunked upload resumes and completes, a cancelled session is gone, a deleted blob 404s and referrers answers for a pushed manifest | 99.9 % | weekly | 12 · Weekly |
+| `git.gc.packs` | Git hosting | After a push and a consolidation pass the repo still clones to the same tree and its index markers still list it | 99.9 % | weekly | 12 · Weekly |
+| `git.limits` | Git hosting | A body over the git and the registry limit is refused 413 by the limit that owns it | 99.9 % | weekly | 12 · Weekly |
+| `gw.caps` | Workspaces | The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open | 99.9 % | weekly | 12 · Weekly |
+| `admin.workload.roll` | Admin | A roll of one reader restarts exactly that workload and it returns ready | 99.9 % ≤ 180000 ms | weekly | 12 · Weekly |
+| `ws.spread` | Workspaces | An idle volume whose preferred node is not its owner is handed over and the workspace starts there | 99.9 % | weekly | 12 · Weekly |
+| `snap.retain` | Workspace lifecycle | After several sync beats exactly one Ready sync point per worktree remains and every push is still in history | 99.9 % | weekly | 12 · Weekly |
+| `agent.janitor` | Workspaces | The janitor leaves no attach directory, profile-index entry or snapshot record behind for an object this run deleted | 99.9 % | weekly | 12 · Weekly |
+| `srv.lanes` | Control plane | The registry pull counter is flushed to the image row, and the ownership map is checkpointed and pruned | 99.9 % | weekly | 12 · Weekly |
+| `bak.tarball.age` | Backups | The latest backup tarball is recent | 99.9 % | monthly | 13 · Monthly |
+| `bak.daily.slots` | Backups | Every daily backup slot is present | 99.9 % | monthly | 13 · Monthly |
+| `bak.versioning` | Backups | Backup versioning is enabled and retains history | 99.9 % | monthly | 13 · Monthly |
+| `bak.cosmos` | Backups | The Cosmos backup for HyperDX succeeds | 99.9 % | monthly | 13 · Monthly |
+| `drill.dead.node` | Resilience drills | A dead-node drill heals every replica onto a live node | 99.9 % | monthly | 13 · Monthly |
+| `drill.drain` | Resilience drills | A drain of the node holding a running worktree keeps that worktree running and releases the idle volumes beside it | 99.9 % | monthly | 13 · Monthly |
+| `drill.redis.down` | Resilience drills | The system keeps operating correctly with Redis down | 99.9 % | monthly | 13 · Monthly |
+| `cluster.decommission` | Resilience drills | A decommission is refused until the agent stamps `drained`, then cordons the node | 99.9 % | monthly | 13 · Monthly |
+| `drill.clickhouse.down` | Resilience drills | With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500 | 99.9 % | monthly | 13 · Monthly |
+| `ws.interrupted` | Workspace lifecycle | Starting a workspace whose node is down is refused with the sentence naming the node, and a clone of it names the cut it grafted onto | 99.9 % | monthly | 13 · Monthly |
+| `env.clone.interrupted` | Environments | Cloning an environment whose node is down is refused with 409 — there are no live bytes to copy | 99.9 % | monthly | 13 · Monthly |
 | — | Identity | A person can reset access via the email magic link | — | manual | manual · email link |
 | — | Identity | A person can register a new passkey | — | manual | manual · passkey registration |
+| — | Identity | A `kloudlite-jwt` rotation is honoured by every tier | — | manual | manual · jwt rotation |
 | — | Backups | A full backup restore rebuilds a working cluster | — | manual | manual · restore drill |

@@ -89,7 +89,7 @@ async fn queue(c: &mut Ctx) -> Option<String> {
 /// step where the interesting failure is a write that SUCCEEDED and left no trace.
 async fn audit_row(c: &mut Ctx, id: &str) {
     let id = id.to_string();
-    c.step("audit.row", AUDIT_CEILING, move |c| {
+    let ok = c.step("audit.row", AUDIT_CEILING, move |c| {
         let jwt = c.admin_jwt.clone();
         let deny = admin(c, &format!("/admin/requests/{id}/deny"));
         // `action` and `target` are exactly what `deny_request` records, so a row that comes back
@@ -116,6 +116,17 @@ async fn audit_row(c: &mut Ctx, id: &str) {
         .boxed()
     })
     .await;
+    if !ok {
+        // The step is already recorded; a 503 turns that sample into a skip, which is no sample.
+        // Rewriting the row rather than checking first keeps the DENY — the write whose row this
+        // id is about — on exactly one path.
+        if let Some(step) = c.steps.iter_mut().rev().find(|s| s.slo_id == "audit.row") {
+            if step.detail.contains(NO_HISTORY) {
+                step.skipped = true;
+                step.detail = NO_HISTORY.to_string();
+            }
+        }
+    }
 }
 
 /// The same write, in `kloudlite.events` as `admin.request.denied`.
@@ -127,11 +138,16 @@ async fn audit_row(c: &mut Ctx, id: &str) {
 ///
 /// A 503 is `KLOUDLITE_CLICKHOUSE_URL` being unset, which is a supported deployment and not an SLO
 /// breach; every other answer is judged.
+///
+/// It is a SKIP, not a pass: an outage and an undeployed history layer answer identically here, so
+/// a pass would have reported the per-write invariant as HELD exactly when half of it could not be
+/// seen. `NO_HISTORY` is the marker `audit_row` turns into one — the deny itself has already
+/// happened by then, and a skip is no sample rather than a green one.
 async fn dual_written(c: &Ctx, url: &str, jwt: &str, target: &str) -> Result<()> {
     let (status, body) = super::raw(c, reqwest::Method::GET, url, jwt, None, &[]).await?;
     if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
         tracing::info!(reason = "no clickhouse", "slo.admin.degraded");
-        return Ok(());
+        return Err(anyhow!("{NO_HISTORY}"));
     }
     if !status.is_success() {
         return Err(anyhow!("the history events read answered {status}"));
@@ -191,17 +207,27 @@ async fn history(c: &mut Ctx) {
         let url = admin(c, "/admin/history/audit_events?range=7d&step=1d");
         async move {
             let v = get(c, &url, &jwt).await.context("the history API would not answer")?;
-            // An empty series is fine — a quiet week is not a broken pipeline. The `series` key
-            // being there at all is the answer this SLI is about.
-            v.get("series")
+            // At least one bucket, not merely the key: `audit.row` writes an `admin.request.denied`
+            // event every five minutes, so a seven-day window over audit events is empty only when
+            // the migration never ran or the consumer stopped — the two failures an empty array
+            // used to report as green.
+            let series = v
+                .get("series")
                 .and_then(Value::as_array)
-                .map(|_| ())
-                .ok_or_else(|| anyhow!("the answer carried no series"))
+                .ok_or_else(|| anyhow!("the answer carried no series"))?;
+            if series.is_empty() {
+                return Err(anyhow!("seven days of audit events is empty, and this run writes one every five minutes"));
+            }
+            Ok(())
         }
         .boxed()
     })
     .await;
 }
+
+/// What `dual_written` answers when there is no ClickHouse to dual-write into, and the reason
+/// `audit_row` files a skip instead of a sample.
+const NO_HISTORY: &str = "the history read answers 503: no ClickHouse to dual-write into";
 
 /// The reason nothing is filled in for this region, as the fill writes it. A row carrying it is a
 /// rule the evaluator has never recorded a transition for.
@@ -239,6 +265,19 @@ fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
     if rows.iter().all(|r| state(r) == "unknown") {
         return Err(anyhow!("every rule in {region} is unknown: nothing is evaluating"));
     }
+    // Every RECORDED row names the moment it transitioned. A row with no `ts` is one the API filled
+    // in for a rule that has never been recorded, and that row must carry the fill's own reason —
+    // anything else is a state the console renders with no age against it at all.
+    if let Some(bad) = rows.iter().find(|r| {
+        r.get("ts").and_then(Value::as_str).is_none()
+            && !r.get("detail").and_then(Value::as_str).is_some_and(|d| d.contains(NO_SAMPLES))
+    }) {
+        return Err(anyhow!(
+            "`{}` reports `{}` with no timestamp: nothing says when it was recorded",
+            bad.get("alert").and_then(Value::as_str).unwrap_or("a rule"),
+            state(bad)
+        ));
+    }
     Ok(())
 }
 
@@ -262,6 +301,14 @@ mod tests {
         let row = |alert: &str, state: &str, detail: &str| {
             serde_json::json!({ "alert": alert, "region": "r", "state": state, "detail": detail })
         };
+        let row = |alert: &str, state: &str, detail: &str| {
+            let mut v = row(alert, state, detail);
+            // Every recorded row carries one; the fill's does not, which is the pair below.
+            if !detail.contains("no collector reporting") {
+                v["ts"] = serde_json::json!("2026-09-06 00:00:00");
+            }
+            v
+        };
         let ok = [row("A", "ok", ""), row("B", "unknown", "no collector reporting for this region")];
         let rows: Vec<&Value> = ok.iter().collect();
         assert!(evaluating(&rows, "r").is_ok());
@@ -280,6 +327,10 @@ mod tests {
         let odd = [row("A", "degraded", "")];
         let rows: Vec<&Value> = odd.iter().collect();
         assert!(evaluating(&rows, "r").is_err());
+        // And a recorded row with no timestamp: the weakness the ms bound used to paper over.
+        let undated = [serde_json::json!({ "alert": "A", "region": "r", "state": "ok", "detail": "" })];
+        let rows: Vec<&Value> = undated.iter().collect();
+        assert!(evaluating(&rows, "r").unwrap_err().to_string().contains("no timestamp"));
     }
 
     /// Nothing reachable: every id is still produced exactly once, as a failure with a reason,

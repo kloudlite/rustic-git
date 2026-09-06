@@ -71,6 +71,8 @@ pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, 
                     state: "unknown".into(),
                     why: rule.why.to_string(),
                     detail: Some("no collector reporting for this region".into()),
+                    // No `ts`: nothing was recorded, so there is no moment to name.
+                    ts: None,
                 });
             }
         }

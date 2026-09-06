@@ -712,6 +712,11 @@ pub struct SignalRow {
     pub state: String,
     pub why: String,
     pub detail: Option<String>,
+    /// When this state was RECORDED. `None` only on the rows the caller fills in for a rule that
+    /// has never transitioned — which is what makes a row with no `ts` readable as "nothing has
+    /// been recorded here" rather than as a row whose age nobody can see.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ts: Option<String>,
 }
 
 /// The latest state per `(region, rule)` — what the Signals table renders. A rule with no row at
@@ -720,7 +725,7 @@ pub struct SignalRow {
 pub async fn current_signals(h: &History) -> Result<Vec<SignalRow>, HistoryError> {
     let rows = h
         .query(
-            "SELECT region, rule, argMax(state, ts), argMax(detail, ts) \
+            "SELECT region, rule, argMax(state, ts), argMax(detail, ts), toString(max(ts)) \
              FROM kloudlite.alerts FINAL GROUP BY region, rule",
         )
         .await?;
@@ -735,6 +740,7 @@ pub async fn current_signals(h: &History) -> Result<Vec<SignalRow>, HistoryError
                 region: s(0),
                 state: s(2),
                 detail: Some(s(3)).filter(|d| !d.is_empty()),
+                ts: Some(s(4)).filter(|t| !t.is_empty()),
                 alert: rule,
             }
         })

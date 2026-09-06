@@ -77,6 +77,44 @@ pub async fn run(c: &mut Ctx) {
     agent_spec(c).await;
     token_revoked(c).await;
     visibility(c).await;
+    peer_listener(c).await;
+}
+
+/// `sec.peer.listener`: the git tier's PUBLIC listener has no browse API on it.
+///
+/// The twin of `sec.user.process` for the git tier, and the one CLAUDE.md calls load-bearing: the
+/// browse API mounts on the peer listener only, so a listener wired to the wrong router would put
+/// every repo's tree, blob and log on the internet with every other SLO green. Only a 404 passes —
+/// a 401 or a 403 would mean the routes ARE mounted and merely guarded, which is a different
+/// system from the one that is deployed, and the peer secret is the only thing that would then
+/// stand between the internet and them.
+///
+/// Both a repo that exists and one that does not, because a router that answered 404 only for
+/// missing repos would be mounted after all.
+async fn peer_listener(c: &mut Ctx) {
+    let repo = c.state.repo.clone().unwrap_or_else(|| "no-such-repo".into());
+    let probe = c.probe_user.clone();
+    c.step("sec.peer.listener", REFUSAL_CEILING, move |c| {
+        let git = c.cfg.git_url.trim_end_matches('/').to_string();
+        let jwt = c.probe_jwt.clone();
+        async move {
+            for path in [
+                format!("/api/{probe}/{repo}/refs"),
+                format!("/api/{probe}/{repo}/tree/main"),
+                "/api/no-such-owner/no-such-repo/refs".to_string(),
+                format!("/api/{probe}/images"),
+            ] {
+                let (status, _) =
+                    raw(c, reqwest::Method::GET, &format!("{git}{path}"), &jwt, None, &[]).await?;
+                // The probe's own credential is sent on purpose: a route that answers 404 to an
+                // authenticated owner is a route that is not there.
+                refused_with(&format!("`{path}` on the public listener"), status, &[404])?;
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `repo.visibility`: the FLIP, in both directions.

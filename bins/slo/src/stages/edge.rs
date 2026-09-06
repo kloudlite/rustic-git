@@ -51,7 +51,149 @@ pub async fn run(c: &mut Ctx) {
     log_latency(c).await;
     pod_coverage(c).await;
     pipeline(c).await;
+    worker_lanes(c).await;
+    agent_heartbeat(c).await;
 }
+
+/// `worker.lane.health`: every worker lane's heartbeat is fresh.
+///
+/// The worker's liveness contract is "N fresh `worker-alive.*` files" — a WEDGED lane beside a
+/// live sibling keeps the pod alive and its jobs unclaimed, which is exactly the failure the file
+/// count exists to catch and the one nothing was watching. The number is read off the worker's own
+/// `/metrics` (`worker_lane_heartbeat_age_seconds`, a gauge per lane, port 9464 on every worker
+/// pod), because the files themselves live inside a pod this probe has no exec grant on.
+///
+/// The threshold is the liveness probe's own window (`-mmin -30`), not something tighter: a lane
+/// draining a long merge touches its heartbeat per entry, and inventing a stricter ceiling here
+/// would page for a fleet Kubernetes itself calls healthy.
+async fn worker_lanes(c: &mut Ctx) {
+    let aks = match crate::drill::incluster() {
+        Ok(k) => k,
+        Err(e) => return c.skip("worker.lane.health", &format!("no in-cluster client: {e:#}")),
+    };
+    c.step("worker.lane.health", READ_CEILING, move |c| {
+        async move {
+            let ages = lane_ages(c, &aks).await?;
+            if ages.is_empty() {
+                return Err(anyhow!("no worker lane reports a heartbeat at all"));
+            }
+            let stale: Vec<String> = ages
+                .iter()
+                .filter(|(_, age)| *age > LANE_MAX_AGE_SECS)
+                .map(|(lane, age)| format!("{lane} at {age:.0} s"))
+                .collect();
+            if !stale.is_empty() {
+                return Err(anyhow!("a lane has stopped beating: {}", stale.join(", ")));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The worker's liveness window (`find … -mmin -30` in deploy/kloudlite.yaml), in seconds.
+const LANE_MAX_AGE_SECS: f64 = 1800.0;
+
+/// `(pod/lane, age)` for every lane of every worker pod, from their own `/metrics`.
+async fn lane_ages(c: &Ctx, aks: &kube::Client) -> Result<Vec<(String, f64)>> {
+    use k8s_openapi::api::core::v1::Pod;
+    let api: kube::Api<Pod> = kube::Api::namespaced(aks.clone(), "kloudlite");
+    let pods = api
+        .list(&kube::api::ListParams::default().labels("app=kloudlite-worker"))
+        .await
+        .map_err(|e| anyhow!("could not list the worker pods: {e}"))?;
+    let mut out = vec![];
+    for pod in &pods.items {
+        let name = kube::ResourceExt::name_any(pod);
+        let Some(ip) = pod.status.as_ref().and_then(|s| s.pod_ip.clone()) else { continue };
+        let body = c
+            .http
+            .get(format!("http://{ip}:9464/metrics"))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| anyhow!("{name} would not answer /metrics: {}", e.without_url()))?
+            .text()
+            .await
+            .unwrap_or_default();
+        out.extend(parse_lane_ages(&body).into_iter().map(|(lane, age)| (format!("{name}/{lane}"), age)));
+    }
+    Ok(out)
+}
+
+/// `worker_lane_heartbeat_age_seconds{lane="0"} 3.2` -> `("0", 3.2)`. A pure function so the
+/// judgement is testable without a worker: the exposition format is the contract here.
+fn parse_lane_ages(body: &str) -> Vec<(String, f64)> {
+    body.lines()
+        .filter(|l| l.starts_with("worker_lane_heartbeat_age_seconds{"))
+        .filter_map(|l| {
+            let lane = l.split("lane=\"").nth(1)?.split('"').next()?.to_string();
+            let age = l.rsplit(' ').next()?.trim().parse().ok()?;
+            Some((lane, age))
+        })
+        .collect()
+}
+
+/// `agent.heartbeat`: every node's agent is beating, and the DaemonSet is whole.
+///
+/// The agent is a controller with no queue and no registration: nothing else notices when one
+/// wedges, and a node whose agent stopped reconciling looks exactly like a node with nothing to
+/// do. Its own liveness file (`{pool}/.agent-heartbeat`, written on a beat) is the one number that
+/// says otherwise, read through the same exec grant the workspace steps use.
+async fn agent_heartbeat(c: &mut Ctx) {
+    let Some(k) = c.kube.clone() else { return c.skip("agent.heartbeat", "no kubeconfig") };
+    c.step("agent.heartbeat", Duration::from_secs(30), move |_| {
+        async move {
+            use k8s_openapi::api::apps::v1::DaemonSet;
+            use k8s_openapi::api::core::v1::Pod;
+            let ds: kube::Api<DaemonSet> = kube::Api::namespaced(k.clone(), "kube-system");
+            let agent = ds.get("kloudlite-agent").await.map_err(|e| anyhow!("no agent DaemonSet: {e}"))?;
+            let st = agent.status.ok_or_else(|| anyhow!("the agent DaemonSet reports no status"))?;
+            if st.number_ready < st.desired_number_scheduled {
+                return Err(anyhow!(
+                    "the agent DaemonSet is {}/{} ready",
+                    st.number_ready,
+                    st.desired_number_scheduled
+                ));
+            }
+            let pods: kube::Api<Pod> = kube::Api::namespaced(k.clone(), "kube-system");
+            let list = pods
+                .list(&kube::api::ListParams::default().labels("app=kloudlite-agent"))
+                .await
+                .map_err(|e| anyhow!("could not list the agent pods: {e}"))?;
+            if list.items.is_empty() {
+                return Err(anyhow!("the agent DaemonSet has no pods"));
+            }
+            for pod in &list.items {
+                let name = kube::ResourceExt::name_any(pod);
+                // `WS_POOL` comes from the container's own env, which an exec inherits — a path
+                // repeated here would go stale the day a region moved its pool.
+                let script = "stat -c %Y \"${WS_POOL:-/mnt/wspool}/.agent-heartbeat\"; date +%s";
+                let (code, out, err) =
+                    crate::kube::exec(&k, "kube-system", &name, None, &["sh", "-c", script], Duration::from_secs(15)).await?;
+                if code != 0 {
+                    return Err(anyhow!("{name} has no heartbeat file: exit {code}: {}", err.trim()));
+                }
+                let nums: Vec<i64> = out.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                let [wrote, now] = nums[..] else {
+                    return Err(anyhow!("{name} answered {out:?}, which is not a timestamp pair"));
+                };
+                if now - wrote > AGENT_MAX_AGE_SECS {
+                    return Err(anyhow!("{name}'s heartbeat is {} s old", now - wrote));
+                }
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Five minutes: the agent beats far more often than that, and the DaemonSet's own probe is what
+/// restarts a pod that stopped — this is the window in which that restart should already have
+/// happened.
+const AGENT_MAX_AGE_SECS: i64 = 300;
 
 /// `edge.dns`: every public hostname resolves. One step for all of them — a fleet with one
 /// unresolvable hostname is one broken front door, not a fraction of one.
@@ -117,8 +259,20 @@ async fn cert(c: &mut Ctx) {
 /// ANY status is a pass — a 404 from the origin is still the origin answering, and only a
 /// connection failure is the outage this SLI is about.
 async fn origin(c: &mut Ctx) {
-    let (Some(ip), Some(host)) = (c.cfg.origin_ip.clone(), c.cfg.hosts.first().cloned()) else {
-        return c.skip("edge.origin", "no KLOUDLITE_SLO_ORIGIN_IP, or no hostname to pin");
+    let Some(host) = c.cfg.hosts.first().cloned() else {
+        return c.skip("edge.origin", "no hostname to pin");
+    };
+    // The env is the override, not the source: left empty it used to skip on EVERY run, so this id
+    // has produced no sample since it shipped and its 30-day attainment was undefined. The address
+    // is a fact the cluster already publishes — the Ingress's own `status.loadBalancer` — so it is
+    // read from there. `cf-sync.sh` allow-lists Cloudflare's ranges on the ingress, so a direct
+    // dial is very likely REFUSED: that is still the origin answering, which is all this SLI is.
+    let ip = match c.cfg.origin_ip.clone() {
+        Some(ip) => ip,
+        None => match ingress_ip().await {
+            Ok(ip) => ip,
+            Err(e) => return c.skip("edge.origin", &format!("no origin address: {e:#}")),
+        },
     };
     c.step("edge.origin", ORIGIN_CEILING, move |_| {
         async move {
@@ -142,6 +296,25 @@ async fn origin(c: &mut Ctx) {
         .boxed()
     })
     .await;
+}
+
+/// The address the region's ingress controller publishes for our own Ingress objects.
+///
+/// From the Ingress rather than from the ingress-controller Service: the probe's AKS grants are
+/// namespaced to `kloudlite`, and the object that names OUR front door is the one in it.
+async fn ingress_ip() -> Result<String> {
+    use k8s_openapi::api::networking::v1::Ingress;
+    let aks = crate::drill::incluster()?;
+    let api: kube::Api<Ingress> = kube::Api::namespaced(aks, "kloudlite");
+    let list = api
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(|e| anyhow!("could not list the ingresses: {e}"))?;
+    list.items
+        .iter()
+        .filter_map(|i| i.status.as_ref()?.load_balancer.as_ref()?.ingress.as_ref()?.first()?.ip.clone())
+        .next()
+        .ok_or_else(|| anyhow!("no Ingress in `kloudlite` publishes a load balancer address"))
 }
 
 /// `edge.ssh.lb`: the SSH load balancer accepts a TCP connection.
@@ -203,6 +376,9 @@ async fn pod_coverage(c: &mut Ctx) {
         async move {
             let rows = get(c, &workloads, &jwt).await.context("could not list the workloads")?;
             let seen = get(c, &coverage, &jwt).await.context("could not read the coverage")?;
+            // `/admin/workloads` is the CENTRAL list, so coverage judged over it alone was really
+            // "every central workload is scraped" — the region's own two DaemonSets, the agent and
+            // the collector that scrapes everything else, were the two nothing checked.
             let instances: Vec<String> = seen
                 .get("instances")
                 .and_then(Value::as_array)
@@ -218,6 +394,12 @@ async fn pod_coverage(c: &mut Ctx) {
                 .filter(|name| !instances.iter().any(|i| i.starts_with(&format!("{name}-"))))
                 .map(str::to_string)
                 .collect();
+            let region: Vec<String> = REGION_SCRAPED
+                .iter()
+                .filter(|name| !instances.iter().any(|i| i.starts_with(&format!("{name}-"))))
+                .map(|n| (*n).to_string())
+                .collect();
+            let missing: Vec<String> = missing.into_iter().chain(region).collect();
             if !missing.is_empty() {
                 return Err(anyhow!("nothing is scraping {}", missing.join(", ")));
             }
@@ -227,6 +409,10 @@ async fn pod_coverage(c: &mut Ctx) {
     })
     .await;
 }
+
+/// The region's own scrape targets, which `/admin/workloads` does not list: the agent DaemonSet
+/// and the collector DaemonSet that scrapes every annotated pod on the node.
+const REGION_SCRAPED: [&str; 2] = ["kloudlite-agent", "kloudlite-otel-agent"];
 
 /// `tel.stream.lag` and `tel.ch.disk`: the two pipeline numbers, from one route.
 ///
@@ -263,6 +449,19 @@ async fn pipeline(c: &mut Ctx) {
 
 #[cfg(test)]
 mod tests {
+    /// The exposition line the whole `worker.lane.health` judgement rests on. A worker that stopped
+    /// exporting the gauge must read as "no lane reports", never as "every lane is fresh".
+    #[test]
+    fn lane_ages_are_read_off_the_exposition_or_not_at_all() {
+        let body = "# HELP worker_lane_heartbeat_age_seconds age\n\
+                    worker_lane_heartbeat_age_seconds{lane=\"0\"} 3.5\n\
+                    worker_lane_heartbeat_age_seconds{lane=\"1\"} 2400\n\
+                    worker_jobs_total 7\n";
+        let ages = super::parse_lane_ages(body);
+        assert_eq!(ages, vec![("0".to_string(), 3.5), ("1".to_string(), 2400.0)]);
+        assert!(super::parse_lane_ages("worker_jobs_total 7\n").is_empty());
+    }
+
     use super::*;
 
     /// With no hosts configured and nothing reachable, every id is still produced exactly once.
@@ -288,6 +487,8 @@ mod tests {
                 "tel.pod.coverage",
                 "tel.stream.lag",
                 "tel.ch.disk",
+                "worker.lane.health",
+                "agent.heartbeat",
             ]
         );
     }

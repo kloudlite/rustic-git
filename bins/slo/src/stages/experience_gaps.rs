@@ -1056,13 +1056,34 @@ pub(super) async fn workloads(c: &mut Ctx) {
         async move {
             let rows = get(c, &url, &jwt).await.context("could not read the workloads")?;
             let rows = rows.get("workloads").and_then(Value::as_array).or_else(|| rows.as_array()).cloned();
-            match rows {
-                Some(rows) if !rows.is_empty() => Ok(()),
+            let rows = match rows {
+                Some(rows) if !rows.is_empty() => rows,
                 // Empty is the failure, not a quiet fleet: `KNOWN` is compiled in, so a list with
                 // nothing on it means the reader could not see the cluster at all.
-                Some(_) => Err(anyhow!("the workloads list names no roll target at all")),
-                None => Err(anyhow!("the answer carried no workloads")),
+                Some(_) => return Err(anyhow!("the workloads list names no roll target at all")),
+                None => return Err(anyhow!("the answer carried no workloads")),
+            };
+            // Non-empty was never the thing that mattered: a `Mark::Boot` save prechecks EVERY
+            // reader, so a list missing one names a workload nothing will ever wait for — and the
+            // save would go out ahead of the pods that read it. So the whole `KNOWN` list, with
+            // `ready` and `desired` on each, which is what the precheck reads.
+            let named: Vec<&str> = rows.iter().filter_map(|r| r.get("name").and_then(Value::as_str)).collect();
+            let missing: Vec<&str> = kloudlite_workspaces::api::workloads::KNOWN_CENTRAL
+                .iter()
+                .chain(kloudlite_workspaces::api::workloads::KNOWN_PER_REGION)
+                .map(|(name, _)| *name)
+                .filter(|name| !named.contains(name))
+                .collect();
+            if !missing.is_empty() {
+                return Err(anyhow!("the workloads list does not name {}", missing.join(", ")));
             }
+            if let Some(bad) = rows.iter().find(|r| r.get("ready").is_none() || r.get("desired").is_none()) {
+                return Err(anyhow!(
+                    "`{}` is listed without ready/desired, which is what a Boot save prechecks",
+                    bad.get("name").and_then(Value::as_str).unwrap_or("a workload")
+                ));
+            }
+            Ok(())
         }
         .boxed()
     })

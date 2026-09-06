@@ -72,6 +72,14 @@ pub const IDS: &[&str] = &[
     "req.legacy.union",
     "region.status",
     "superadmin.grant",
+    // The 2026-09-06 coverage review's batch, in `experience_gaps2`.
+    "ws.quota.namespace",
+    "env.services.policies",
+    "web.pages",
+    "repo.metadata",
+    "id.session.reads",
+    "kl.commands",
+    "admin.reads",
     "feed.experience",
     "home.persists",
 ];
@@ -134,6 +142,14 @@ pub async fn run(c: &mut Ctx) {
             "req.decide.kinds" => super::experience_gaps::decide_kinds(c).await,
             "req.legacy.union" => super::experience_gaps::legacy_union(c).await,
             "region.status" => super::experience_gaps::region_status(c).await,
+            // The 2026-09-06 coverage review's batch.
+            "ws.quota.namespace" => super::experience_gaps2::quota_namespace(c).await,
+            "env.services.policies" => super::experience_gaps2::services_policies(c).await,
+            "web.pages" => super::experience_gaps2::pages(c).await,
+            "repo.metadata" => super::experience_gaps2::metadata(c).await,
+            "id.session.reads" => super::experience_gaps2::session_reads(c).await,
+            "kl.commands" => super::experience_gaps2::kl_commands(c).await,
+            "admin.reads" => super::experience_gaps2::reads(c).await,
             _ => c.skip(id, "not implemented yet"),
         }
     }

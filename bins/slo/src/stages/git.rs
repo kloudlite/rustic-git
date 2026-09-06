@@ -212,7 +212,7 @@ async fn web_pages(c: &mut Ctx) {
 /// The final URL is the assertion that makes this more than "the origin is up": a rewrite that
 /// dropped the route would land on the app's 404 with a 200 from plenty of frameworks, and a
 /// redirect anywhere but `/login` is the app sending people somewhere nobody asked for.
-async fn renders(c: &Ctx, url: &str, path: &str) -> Result<()> {
+pub(crate) async fn renders(c: &Ctx, url: &str, path: &str) -> Result<()> {
     let r = c.http.get(url).send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
     let landed = r.url().path().to_string();

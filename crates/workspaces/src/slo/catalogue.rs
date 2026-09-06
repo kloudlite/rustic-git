@@ -245,21 +245,25 @@ pub const CATALOGUE: &[Slo] = &[
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
-    Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica, named by that replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    // 60 s, not 300: the step's own ceiling is 60 s (lifecycle.rs), so a target of five minutes
+    // filed a BREACH for behaviour the probe never waited for. The target is the ceiling the probe
+    // actually enforces — the bytes themselves are proved weekly by `ws.cross.node`.
+    Slo { id: "ws.replicated", feature: "Workspace lifecycle", sli: "A stopped workspace's final sync point reaches a replica, named by that replica", target: bound(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.start.p95", feature: "Workspace lifecycle", sli: "Starting a workspace completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "ws.restore", feature: "Workspace lifecycle", sli: "Restoring a workspace from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     // The environment twin of the four ids above — the owner's rule is that every workspace SLO
     // has an environment counterpart at the same cadence, because the two control planes converge
     // through different reconcilers and a green workspace says nothing about an environment.
     Slo { id: "env.stop.p95", feature: "Environments", sli: "Stopping an environment completes", target: p95(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
-    Slo { id: "env.replicated", feature: "Environments", sli: "A stopped environment's final sync point reaches a replica", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    // 30 s for the same reason as `ws.replicated`: that is this step's ceiling.
+    Slo { id: "env.replicated", feature: "Environments", sli: "A stopped environment's final sync point reaches a replica", target: bound(30_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "env.start.p95", feature: "Environments", sli: "Starting an environment completes", target: p95(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "env.restore", feature: "Environments", sli: "Restoring an environment from a past snapshot succeeds", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.refusals", feature: "Workspace lifecycle", sli: "Deleting a sync point or a running worktree's base snapshot is refused", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     Slo { id: "vol.detached.restorable", feature: "Workspace lifecycle", sli: "A detached volume's snapshot can still be restored", target: avail(99.9), suite: Suite::Fast, stage: "7 · Lifecycle" },
     // `retire_pass` is the rule at BOTH ends, so the SLI names both: the sweep that takes an
     // orphaned tree, and the Volume with no owner entry and no snapshot behind it.
-    Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected, and a Volume with no owner entry and no snapshot is deleted", target: bound(300_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
+    Slo { id: "vol.orphan.collected", feature: "Workspace lifecycle", sli: "An orphaned volume directory is collected, and a Volume with no owner entry and no snapshot is deleted", target: bound(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
     // `cleanup_parent`'s detach-or-keep rule, which is exactly where a lost detach strands bytes
     // nothing on any tier can find again. Both directions, or neither says anything.
     Slo { id: "wt.delete", feature: "Workspace lifecycle", sli: "Deleting a workspace or environment drops the worktree and leaves the volume iff a snapshot remains", target: bound(60_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
@@ -268,7 +272,11 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 8 · admin
     Slo { id: "req.queue", feature: "Admin", sli: "A Request CR is queued and answerable by an admin", target: bound(5_000), suite: Suite::Fast, stage: "8 · Admin" },
     Slo { id: "audit.row", feature: "Admin", sli: "Every admin write produces an audit row, and the same write reaches `kloudlite.events` as `admin.<action>`", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
-    Slo { id: "signals.fresh", feature: "Admin", sli: "The Signals table reflects a rule transition, and a rule with no covering samples reads `unknown` rather than `ok`", target: bound(120_000), suite: Suite::Fast, stage: "8 · Admin" },
+    // No millisecond bound any more, and the SLI no longer promises freshness in time: the table
+    // is TRANSITIONS, and a stable fleet writes none for days — the newest row's age says nothing
+    // about whether the evaluator is running. What a reader can honestly assert is that every
+    // recorded row carries the timestamp it transitioned at, which is the assertion added here.
+    Slo { id: "signals.fresh", feature: "Admin", sli: "Every recorded signal carries the timestamp it transitioned at, and a rule with no covering samples reads `unknown` rather than `ok`", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
     Slo { id: "history.api", feature: "Admin", sli: "The history API answers a chart query", target: avail(99.9), suite: Suite::Fast, stage: "8 · Admin" },
 
     // Stage 9 · security
@@ -287,6 +295,10 @@ pub const CATALOGUE: &[Slo] = &[
     // that allows no failures at all.
     Slo { id: "repo.visibility.public", feature: "Git hosting", sli: "A repo flipped public becomes readable to another owner", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
     Slo { id: "agent.spec.allowed", feature: "Security", sli: "The two spec writes the agent's ClusterRole grants are still admitted", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
+    // The git tier's twin of `sec.user.process`: the browse API mounts on the PEER listener only,
+    // and a misconfigured listener would put every browse route on the internet with every other
+    // SLO green. Refusal-only, so 100 % like the rest of `sec.*`.
+    Slo { id: "sec.peer.listener", feature: "Security", sli: "The git tier's public listener refuses `/api/`, on a repo that exists and one that does not", target: avail(100.0), suite: Suite::Fast, stage: "9 · Security" },
 
     // Stage 10 · edge and pipeline
     Slo { id: "edge.dns", feature: "Edge and pipeline", sli: "The public hostname resolves", target: avail(99.99), suite: Suite::Fast, stage: "10 · Edge" },
@@ -297,6 +309,11 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "tel.pod.coverage", feature: "Edge and pipeline", sli: "Every pod is scraped by the region's collector", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.stream.lag", feature: "Edge and pipeline", sli: "The Redis events stream consumer lag stays low", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
     Slo { id: "tel.ch.disk", feature: "Edge and pipeline", sli: "ClickHouse disk usage is reported", target: bound(60_000), suite: Suite::Fast, stage: "10 · Edge" },
+    // The two liveness files nothing else watches. Availability, not a millisecond bound: what is
+    // being judged is the AGE OF A HEARTBEAT read inside the step, and a bound would have measured
+    // how long the read took instead — a fast pod with a dead lane would have passed it.
+    Slo { id: "worker.lane.health", feature: "Control plane", sli: "Every worker lane's heartbeat is fresh, counted against the concurrency the liveness probe counts", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
+    Slo { id: "agent.heartbeat", feature: "Control plane", sli: "Every region agent's heartbeat file is fresh and its DaemonSet is fully ready", target: avail(99.9), suite: Suite::Fast, stage: "10 · Edge" },
 
     // Hourly · Experience. The owner's addendum: every remaining verb a person can perform, walked
     // once an hour on top of the fast journey — so an hourly run is also a fast sample.
@@ -353,8 +370,25 @@ pub const CATALOGUE: &[Slo] = &[
     // second POST only retires or renames one — so a probe region would be permanent shared state.
     Slo { id: "region.status", feature: "Admin", sli: "The region list and this run's cluster status answer", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
+    // The 2026-09-06 coverage review's batch. Same rule as the batch above: one id per gap, in the
+    // Experience stage when the thing it walks is a whole flow rather than a request.
+    Slo { id: "ws.quota.namespace", feature: "Workspaces", sli: "The owner's namespace carries an `owner-quota` matching the effective Quota, and Kubernetes reports it as the hard stop", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.services.policies", feature: "Environments", sli: "An owner's namespace carries the OwnerBinding NetworkPolicies", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // One id over a fixed list, as `admin.screens` does for the API: 26 of 30 page routes had no
+    // load SLO, and 26 ids for one Next.js deployment would be 26 samples of the same fact. Each
+    // page is timed individually inside the step against 1500 ms, which is why the target is
+    // availability rather than a p95 over the whole walk.
+    Slo { id: "web.pages", feature: "Web app", sli: "Every page route in the app's fixed list loads, each within 1500 ms", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The LOW rows of the review, grouped by the tier that answers them rather than one id per
+    // route: each is a single read whose failure is the same failure, and a per-route id would be
+    // a catalogue nobody reads.
+    Slo { id: "repo.metadata", feature: "Git hosting", sli: "A repo PATCH of its non-description fields is saved, and the browse `lastmod` route answers", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark, the legacy quota-request create and the api's own settings read all answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "kl.commands", feature: "Identity", sli: "`kl ws`, `kl ws list --team` and `kl logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "admin.reads", feature: "Admin", sli: "`/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+
     // Weekly
-    Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit over HTTP succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "reg.push.large", feature: "Container registry", sli: "Pushing a large image layer succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "ws.cold.profile", feature: "Workspaces", sli: "A cold package profile builds successfully", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "ws.profile.reuse", feature: "Workspaces", sli: "A repeat package set is published from the profile index, not rebuilt", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -371,15 +405,35 @@ pub const CATALOGUE: &[Slo] = &[
     // survives a delete — which is the failure that loses somebody's image.
     Slo { id: "reg.gc.sweep", feature: "Container registry", sli: "A blob a sibling image still references survives that image's deletion and a GC pass", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
 
+    // The deploy the owner actually worries about, and the one event the fast suite is designed to
+    // yield through — which is why it has to be a drill of its own rather than a fast sample.
+    Slo { id: "roll.zero.errors", feature: "Control plane", sli: "A rolling restart of the srv tier lands with zero non-2xx on a concurrent push and pull loop, and every pod that left logged `ownership.drained`", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "srv.drain.handover", feature: "Control plane", sli: "A drained pod reports `draining` on `/healthz` and its repos are served by a live peer", target: bound(30_000), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "reg.moved.image", feature: "Container registry", sli: "The first pull of an image whose database has just moved nodes succeeds", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "reg.blob.session", feature: "Container registry", sli: "A chunked upload resumes and completes, a cancelled session is gone, a deleted blob 404s and referrers answers for a pushed manifest", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "git.gc.packs", feature: "Git hosting", sli: "After a push and a consolidation pass the repo still clones to the same tree and its index markers still list it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "git.limits", feature: "Git hosting", sli: "A body over the git and the registry limit is refused 413 by the limit that owns it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "gw.caps", feature: "Workspaces", sli: "The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "admin.workload.roll", feature: "Admin", sli: "A roll of one reader restarts exactly that workload and it returns ready", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "ws.spread", feature: "Workspaces", sli: "An idle volume whose preferred node is not its owner is handed over and the workspace starts there", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "agent.janitor", feature: "Workspaces", sli: "The janitor leaves no attach directory, profile-index entry or snapshot record behind for an object this run deleted", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "srv.lanes", feature: "Control plane", sli: "The registry pull counter is flushed to the image row, and the ownership map is checkpointed and pruned", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "bak.daily.slots", feature: "Backups", sli: "Every daily backup slot is present", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "bak.versioning", feature: "Backups", sli: "Backup versioning is enabled and retains history", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "bak.cosmos", feature: "Backups", sli: "The Cosmos backup for HyperDX succeeds", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.dead.node", feature: "Resilience drills", sli: "A dead-node drill heals every replica onto a live node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
-    Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain drill succeeds without interrupting a running worktree", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "drill.drain", feature: "Resilience drills", sli: "A drain of the node holding a running worktree keeps that worktree running and releases the idle volumes beside it", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "drill.redis.down", feature: "Resilience drills", sli: "The system keeps operating correctly with Redis down", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "cluster.decommission", feature: "Resilience drills", sli: "A decommission is refused until the agent stamps `drained`, then cordons the node", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "drill.clickhouse.down", feature: "Resilience drills", sli: "With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    // Both are REFUSALS, so 99.9 % rather than 100 %: only `sec.*` spends no budget at all, and a
+    // 409 that never came because the api was down is an availability failure like any other.
+    Slo { id: "ws.interrupted", feature: "Workspace lifecycle", sli: "Starting a workspace whose node is down is refused with the sentence naming the node, and a clone of it names the cut it grafted onto", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    Slo { id: "env.clone.interrupted", feature: "Environments", sli: "Cloning an environment whose node is down is refused with 409 — there are no live bytes to copy", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
 ];
 
 #[cfg(test)]
