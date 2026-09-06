@@ -13,7 +13,7 @@ use crate::crd::{PodResources, WorkspaceSpec};
 use crate::model;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerPort, EnvVar, HostPathVolumeSource, LimitRange, LimitRangeItem, LimitRangeSpec,
+    Capabilities, Container, ContainerPort, EnvVar, HostPathVolumeSource, LimitRange, LimitRangeItem, LimitRangeSpec, Probe, TCPSocketAction,
     KeyToPath, LocalObjectReference, Namespace, ResourceQuota, ResourceQuotaSpec, SeccompProfile, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, Secret, SecretVolumeSource,
     SecurityContext, Service as CoreService,
@@ -934,6 +934,19 @@ pub fn workspace_pod(
             ports: default_image.then(|| {
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
             }),
+            // Ready means a person can get in, not that the container started. Without a probe
+            // the pod's Ready condition flipped the instant the process ran, `/v1` said `ready`,
+            // and a command run in that same second failed in a sandbox that could not yet run
+            // `su`: the weekly's `homes.cross.node` read the moved home and got exit 1 with
+            // nothing printed, where the same read a moment later succeeded. sshd listening is
+            // the one signal that covers every way in — ssh, the gateway tunnel, the probe's exec
+            // — and only the default image is known to run it, so only it is gated on it.
+            readiness_probe: default_image.then(|| Probe {
+                tcp_socket: Some(TCPSocketAction { port: IntOrString::Int(22), ..Default::default() }),
+                period_seconds: Some(2),
+                failure_threshold: Some(3),
+                ..Default::default()
+            }),
             volume_mounts: Some(vec![
                 // Listed before the workspace mount for the reader; the kubelet orders by path
                 // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
@@ -1544,6 +1557,23 @@ mod tests {
 
     /// The pod's three hostPath mounts point at the paths the agent actually manages on disk.
     #[test]
+    /// `ready` has to mean a person can get in. The default image is gated on sshd accepting a
+    /// connection; a user's own image, whose entrypoint we do not know, is not gated at all rather
+    /// than held NotReady forever behind a port it may never open.
+    #[test]
+    fn the_default_image_is_ready_only_once_sshd_listens() {
+        let spec = ws_spec();
+        let p = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).unwrap();
+        let c = &p.spec.unwrap().containers[0];
+        let probe = c.readiness_probe.as_ref().expect("the default image carries a readiness probe");
+        assert_eq!(probe.tcp_socket.as_ref().unwrap().port, IntOrString::Int(22));
+
+        let mut own = ws_spec();
+        own.image = "ghcr.io/acme/devbox:1".into();
+        let p = workspace_pod(&own, "ws-2", "ws-2", &ctx(), None).unwrap();
+        assert!(p.spec.unwrap().containers[0].readiness_probe.is_none(), "an unknown image is not gated on a port it may never open");
+    }
+
     fn a_workspace_pods_host_paths_match_the_agents_layout() {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).unwrap();
         let vols = p.spec.as_ref().unwrap().volumes.as_ref().unwrap();
