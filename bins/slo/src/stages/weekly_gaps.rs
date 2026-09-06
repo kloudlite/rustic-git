@@ -757,13 +757,7 @@ async fn retain(c: &mut Ctx, cold: Option<&str>) {
             // matters — it is the cut retain must never prune.
             // The push comes first: the doc names its volume only once a snapshot exists.
             let pushes = Some(super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
-            let volume = get(c, &doc, &jwt)
-                .await
-                .context("could not read the workspace")?
-                .get("volume")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the workspace names no volume after a push"))?
-                .to_string();
+            let volume = volume_id(&get(c, &doc, &jwt).await.context("could not read the workspace")?)?;
             let history = api(c, &format!("/v1/volumes/{volume}/history"));
             // Long enough that several sync beats have certainly cut and pruned.
             tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
@@ -933,11 +927,7 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
             super::experience_env::push_once(c, &ws, "spread").await.context("could not push")?;
             let before = get(c, &doc, &jwt).await.context("could not read the workspace")?;
             let was = before.get("placement").and_then(Value::as_str).unwrap_or_default().to_string();
-            let volume = before
-                .get("volume")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the workspace names no volume after a push"))?
-                .to_string();
+            let volume = volume_id(&before)?;
             post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
             poll_json(c, &doc, &jwt, Duration::from_secs(60), |v| {
                 v.get("state").and_then(Value::as_str) == Some("stopped")
@@ -968,6 +958,17 @@ async fn spread(c: &mut Ctx, cold: Option<&str>) {
 }
 
 /// Nodes placement may choose: Ready, not cordoned, not being decommissioned. Fewer than two and
+/// The Volume CR's name from a workspace doc. The doc's `volume` is the registry-style pointer
+/// `vol/{owner}/{id}`; the CR, the replica rows, the field selector and `/v1/volumes/{name}` all
+/// key on the bare id — the pointer used whole matches nothing and reads as "no replicas".
+fn volume_id(doc: &Value) -> Result<String> {
+    let pointer = doc
+        .get("volume")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("the workspace names no volume after a push"))?;
+    Ok(pointer.rsplit('/').next().unwrap_or(pointer).to_string())
+}
+
 /// The node the agent's own spread rule picks for `volume`'s next start: rendezvous over
 /// `{owner} ∪ {nodes up to date for the worktree}`, exactly `peer::preferred_node` — the same
 /// hash (`replicate::targets`) and the same up-to-date test (`VolumeReplica.status.branches`
