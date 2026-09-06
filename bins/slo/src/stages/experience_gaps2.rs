@@ -296,7 +296,18 @@ pub(super) async fn session_reads(c: &mut Ctx) {
             // The retired create, which the console still unions in. One pending per owner per
             // kind, so a 409 here is the previous run's row and not a failure of the route.
             let (status, body) =
-                raw(c, reqwest::Method::POST, &legacy, &jwt, Some(json!({ "reason": "slo probe legacy create", "diskGb": 1 })), &[]).await?;
+                raw(
+                    c,
+                    reqwest::Method::POST,
+                    &legacy,
+                    &jwt,
+                    // `NewQuotaRequest` nests the dimensions under `requested` (a
+                    // `RequestedQuota`, crates/workspaces/src/crd/mod.rs:935) — a flat `diskGb`
+                    // is a 422 before the handler ever runs.
+                    Some(json!({ "reason": "slo probe legacy create", "requested": { "diskGb": 1 } })),
+                    &[],
+                )
+                .await?;
             if !status.is_success() && status.as_u16() != 409 {
                 return Err(anyhow!("the legacy quota-request create answered {status}: {}", body.chars().take(200).collect::<String>()));
             }

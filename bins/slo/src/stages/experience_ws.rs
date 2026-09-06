@@ -23,11 +23,11 @@ use crate::ctx::Ctx;
 /// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
 /// availability SLOs with no target latency; theirs is a whole seeded create plus an exec, which
 /// is the same 180 s the seeded step itself is given, plus room for the second create.
-const ADD_CEILING: Duration = Duration::from_secs(200);
+const ADD_CEILING: Duration = Duration::from_secs(290);
 const REMOVE_CEILING: Duration = Duration::from_secs(90);
-const SEEDED_CEILING: Duration = Duration::from_secs(200);
-const KEY_CEILING: Duration = Duration::from_secs(200);
-const HOME_CEILING: Duration = Duration::from_secs(200);
+const SEEDED_CEILING: Duration = Duration::from_secs(290);
+const KEY_CEILING: Duration = Duration::from_secs(290);
+const HOME_CEILING: Duration = Duration::from_secs(290);
 
 /// How long a create is given to reach `ready` INSIDE a step. Below every ceiling above, so a
 /// workspace that never starts leaves room for the step to say so.
@@ -37,7 +37,12 @@ const HOME_CEILING: Duration = Duration::from_secs(200);
 /// key is expected to be picked up inside — `key.platform.regenerate` was cut off at 108 s and
 /// reported the fleet doing exactly what it is written to do. Every ceiling above it moved with
 /// it, so a step still gets to say WHY rather than timing out on its own.
-const READY: Duration = Duration::from_secs(150);
+/// Long enough for the WHOLE seeded path after a platform-key rotation: the pod has to be
+/// scheduled and pull its image (tens of seconds) and only then does the git-seed container start
+/// retrying its clone for 24×5 s while the kubelet's secret cache still serves the pre-rotation
+/// key (crates/workspaces/src/k8s.rs's seed command). 150 s covered the retries alone and expired
+/// before the pod's own start, so `key.platform.regenerate` failed on a workspace that was fine.
+const READY: Duration = Duration::from_secs(240);
 
 /// One exec's own ceiling. The polls below repeat it, so this bounds a single API-server round
 /// trip, not the wait.

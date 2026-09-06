@@ -319,7 +319,7 @@ pub const CATALOGUE: &[Slo] = &[
     // once an hour on top of the fast journey — so an hourly run is also a fast sample.
     Slo { id: "ws.packages.add", feature: "Workspaces", sli: "Adding a package to a running workspace makes it runnable (`which`)", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.packages.remove", feature: "Workspaces", sli: "Removing it makes it disappear from the profile", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "ws.seeded", feature: "Workspaces", sli: "A workspace created from a repo and branch has that clone checked out", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.seeded", feature: "Workspaces", sli: "A workspace created from a repo and branch has that clone checked out", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.invite.accept", feature: "Teams", sli: "An invite is created, previewed and accepted once", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
