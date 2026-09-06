@@ -86,6 +86,15 @@ pub const WEEKLY_IN_FLIGHT: &str = "a weekly drill is in flight";
 pub const MONTHLY_IN_FLIGHT: &str = "a monthly drill is in flight";
 /// The detail on every id a fast run skips because the fleet is mid-roll.
 pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
+/// The detail every id carries when a run of the SAME suite is already going.
+///
+/// `concurrencyPolicy: Forbid` stops a CronJob overlapping its own jobs and nothing else: a Job
+/// created by hand (`kubectl create job --from=cronjob/…`, which is how a drill or a debug run is
+/// started) is a different Job object that Forbid never sees. Two runs of one suite share the
+/// tenant, its key, its quota and its `run-{id}` objects, so they corrupt each other exactly as
+/// fast-vs-hourly did before the yield. Every suite yields here, the drills included — a drill
+/// that WAITED for its twin would only hold the tenant longer.
+pub const SAME_SUITE_IN_FLIGHT: &str = "another run of this suite is in flight";
 
 /// The namespace every `KNOWN_CENTRAL` workload lives in on AKS.
 const CENTRAL_NS: &str = "kloudlite";
@@ -144,6 +153,11 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
         Suite::Monthly => 7_200,
     };
     rows.iter().any(|r| {
+        // Never THIS run: the parent files a `running` row before the child walks, so a run
+        // asking "is my suite busy?" would always find itself and yield forever.
+        if r.get("run_id").and_then(|s| s.as_str()) == Some(c.run_id.as_str()) {
+            return false;
+        }
         let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
         let fresh = r
             .get("started")
@@ -269,8 +283,12 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages = suite(kind);
-    let mut yield_to = None;
+    // Its own suite FIRST, and for every suite: a twin is the one collision no ladder covers.
+    let mut yield_to = suite_in_flight(c, kind).await.then_some(SAME_SUITE_IN_FLIGHT);
     for (longer, why) in yields_to(kind) {
+        if yield_to.is_some() {
+            break;
+        }
         if suite_in_flight(c, *longer).await {
             yield_to = Some(*why);
             break;
@@ -377,6 +395,39 @@ mod tests {
         let c = crate::testkit::ctx().await;
         assert!(!over_budget(&c, Duration::from_secs(3600)));
         assert!(over_budget(&c, Duration::ZERO));
+    }
+
+    /// A run must never see ITSELF as a reason to yield. The parent files a `running` row before
+    /// the child walks, so without the exclusion every run of every suite would skip every id
+    /// forever — and a run of the same suite that is NOT this one must still stop it, which is the
+    /// collision `concurrencyPolicy: Forbid` cannot see (a hand-created Job is a different Job).
+    #[tokio::test]
+    async fn a_run_yields_to_its_twin_and_never_to_itself() {
+        use axum::routing::get;
+        use std::sync::Arc;
+        let seen: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        let rows = seen.clone();
+        let app = axum::Router::new().route(
+            "/admin/slo/runs",
+            get(move || {
+                let id = rows.lock().expect("lock").clone();
+                async move {
+                    axum::Json(serde_json::json!({ "runs": [{
+                        "run_id": id,
+                        "state": "running",
+                        "started": chrono::Utc::now().to_rfc3339(),
+                    }]}))
+                }
+            }),
+        );
+        let mut c = crate::testkit::ctx_against(app).await;
+        c.cfg.admin_url = c.cfg.api_url.clone();
+        // The only row running is this run's own: not a reason to yield.
+        *seen.lock().expect("lock") = c.run_id.clone();
+        assert!(!suite_in_flight(&c, c.suite).await, "a run saw itself");
+        // Somebody else's run of the same suite: it is.
+        *seen.lock().expect("lock") = format!("{}-999", c.suite.as_str());
+        assert!(suite_in_flight(&c, c.suite).await, "a twin was not seen");
     }
 
     /// The yield's whole judgement, over the three status shapes a roll actually moves. A status

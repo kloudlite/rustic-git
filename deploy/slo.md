@@ -21,6 +21,13 @@ cannot fill a five-minute window. It runs as its own tenant pair (`slo-hourly`/`
 and the drills as `slo-drill*`) with its own SSH key, so a ~50-minute run never shares an SSH key,
 a superadmin grant or a quota with the five-minute suite underneath it.
 
+A run first refuses to start beside ANOTHER RUN OF ITS OWN SUITE — every id skipped with "another
+run of this suite is in flight", the drills included. `concurrencyPolicy: Forbid` stops a CronJob
+overlapping its own jobs and nothing else, so a Job created by hand (`kubectl create job
+--from=cronjob/…`, how a drill or a debug run is started) is invisible to it, and two runs of one
+suite share the tenant, its key, its quota and its `run-{id}` objects. A run never sees itself: the
+check skips its own run id, which the parent has already filed a `running` row under.
+
 A shorter run YIELDS to a longer one rather than filing a bad sample: a fast run skips every id
 with "an hourly run is in flight", "a weekly drill is in flight" or "a monthly drill is in flight"
 when that suite is mid-journey (they share the region's nodes, and the drills cordon and
