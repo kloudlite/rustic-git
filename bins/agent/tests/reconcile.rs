@@ -5434,6 +5434,42 @@ async fn a_retiring_owner_hands_a_movable_volume_to_an_up_to_date_peer() {
     assert_eq!(to.as_deref(), Some("node-b"), "the owner is being retired, so the up-to-date peer takes it");
 }
 
+/// The same retiring owner, a beat EARLIER: the stop cut is seconds old and no peer has pulled it
+/// yet. The live drill lost exactly this race — start followed stop at once, both replicas were
+/// Synced five seconds after the pod was already back on the draining node. A retiring owner with
+/// nobody up to date must release with no target rather than start, so the first peer to hold the
+/// cut claims it.
+#[tokio::test]
+async fn a_retiring_owner_with_no_peer_ready_releases_rather_than_starting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let behind = serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
+        "metadata": {"name": "vol-3.node-b"}, "spec": {"volume": "vol-3", "node": "node-b"},
+        "status": {"phase": "Syncing", "branches": {}},
+    });
+    let retiring = serde_json::json!({"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "node-a", "labels": {"kloudlite.io/decommission": "true"}},
+        "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": rfc3339_ago(60)}]}});
+    let routes = vec![
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/volumereplicas".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "VolumeReplicaList", "items": [behind]}) },
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/snapshots".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "SnapshotList", "items": [transient("stop-ws-1-3", "vol-3", "ws-1", 7)]}) },
+        Route { method: "GET", path: "/api/v1/nodes".into(), status: 200,
+                body: serde_json::json!({"apiVersion": "v1", "kind": "NodeList", "items": [retiring, node_ready("node-b")]}) },
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/vol-3".into(), status: 200, body: vol_owned("vol-3", "") },
+        Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: placed_ws("ws-1", "node-a") },
+        Route { method: "PUT", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status".into(), status: 200, body: placed_ws("ws-1", "") },
+    ];
+    let (ctx, rec) = ctx_with_node(tmp.path(), "node-a", routes);
+    let parents = vec![stopped_parent("ws-1", "vol-3")];
+    let out = kloudlite_agent::controller::start_placement(&ctx, &vol_obj("vol-3", "node-a"), &parents).await.unwrap();
+    assert!(out.is_some(), "a retiring owner does not start the parent on itself");
+    let ops = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/vol-3").remove(0);
+    assert_eq!(ops[1], serde_json::json!({"op": "replace", "path": "/spec/nodeName", "value": ""}), "released with no target");
+    assert_eq!(rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status").len(), 1, "the parent is un-placed for a peer to claim");
+}
+
 /// F5 (drill, 2026-09-03): a workspace stopped on a node that then died kept the sweep's
 /// `Degraded=True/NodeDead` after the node came back Ready — nothing cleared it, so `/v1` went on
 /// answering `start` with 409 "interrupted" for as long as the object lived. The owner reconciling

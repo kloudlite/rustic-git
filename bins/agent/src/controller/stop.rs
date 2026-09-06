@@ -199,8 +199,20 @@ pub async fn start_placement(
     // a running parent pins its volume, and the drain could not finish until somebody stopped it
     // by hand. With no up-to-date peer the owner stays: bytes only here is the one case where the
     // draining node is still the right answer, and the decommission beat releases it later.
-    let owner_placeable =
-        !crate::peer::unplaceable(nodes.iter().find(|n| n.name_any() == ctx.node), floor, now);
+    // `unplaceable(None)` is "dead" — right for a peer nobody can read, wrong for THIS node, which
+    // is running this code. An owner whose own Node object is missing from the list is placeable.
+    let owner_placeable = nodes
+        .iter()
+        .find(|n| n.name_any() == ctx.node)
+        .is_none_or(|n| !crate::peer::unplaceable(Some(n), floor, now));
+    // A retiring owner with NO up-to-date peer yet. The stop cut is seconds old (this start
+    // followed the stop at once) and the peers are mid-pull; starting here anyway would pin the
+    // volume to the node being drained until somebody stopped it by hand — the exact race
+    // `ws.cross.node` lost. So the volume is released with no target: the parent waits unplaced
+    // (`Placed=False/Moving`), and the first peer whose replica holds the cut claims it, which the
+    // claim's `Later` retry sees within seconds. Only when the bytes really are nowhere else and
+    // the node is NOT retiring does the owner stay the answer.
+    let retiring_alone = !owner_placeable && set.is_empty();
     if owner_placeable || set.is_empty() {
         set.push(ctx.node.clone());
     }
@@ -217,7 +229,7 @@ pub async fn start_placement(
     let with_room = crate::claim::nodes_with_room(ctx, &set, want).await?;
     let set = draw_pool(set, with_room);
     let Some(preferred) = crate::peer::preferred_node(&id, &set) else { return Ok(None) };
-    if preferred == ctx.node {
+    if preferred == ctx.node && !retiring_alone {
         return Ok(None);
     }
     // The two-step move, deliberately kept over an owner-writes-the-target handoff: a handoff
@@ -234,8 +246,18 @@ pub async fn start_placement(
     for p in parents {
         crate::peer::unplace_parent(ctx, p).await;
     }
-    tracing::info!(volume = %id, node = %preferred, reason = "spread", "volume.moved");
-    Ok(Some(preferred))
+    match retiring_alone {
+        // Nobody named: whichever peer is first up to date takes it. The string is for the log
+        // and the caller's `is_some()`, never a node a claim could be routed to.
+        true => {
+            tracing::info!(volume = %id, reason = "retiring", "volume.released");
+            Ok(Some("the first up-to-date peer".to_string()))
+        }
+        false => {
+            tracing::info!(volume = %id, node = %preferred, reason = "spread", "volume.moved");
+            Ok(Some(preferred))
+        }
+    }
 }
 
 /// THE "is it replicated" truth, computed in exactly one place — the owner's reconcile of a
