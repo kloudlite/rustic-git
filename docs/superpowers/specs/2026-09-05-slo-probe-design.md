@@ -449,3 +449,84 @@ the parity test holds equal. `deploy/k3s/quotas-slo.yaml` is applied BY HAND on 
   under the step's own ceiling and a slow beat is a verdict rather than a lost sample.
 - Two LOWs: `slug()` collapsed onto `team_slug`, and the `su` comment corrected — it is not a login
   shell, and the environment it reads is the container spec's.
+
+### Coverage batch 2 (review `coverage-review-2.md`, 2026-09-06)
+
+**Twenty-five ids and one manual row**, taking the catalogue 150 → 175 probed. Every gap the
+review ranked gets one, and the LOW rows are grouped by the tier that answers them rather than one
+id per route — `admin.reads`, `id.session.reads`, `kl.commands`, `repo.metadata` — the same shape
+`admin.screens` already had, because 21 catalogue rows for 21 single GETs is a catalogue nobody
+reads. Fast: `sec.peer.listener` (the git tier's twin of `sec.user.process`), `worker.lane.health`,
+`agent.heartbeat`. Hourly: `ws.quota.namespace`, `env.services.policies`, `web.pages` (one id over
+a fixed list of routes, each timed against 1500 ms) and the four grouped reads. Weekly:
+`roll.zero.errors`, `srv.drain.handover`, `reg.moved.image`, `reg.blob.session`, `git.gc.packs`,
+`git.limits`, `admin.workload.roll`, `ws.spread`, `snap.retain`, `agent.janitor`, `srv.lanes`,
+`gw.caps`. Monthly: `drill.clickhouse.down`, `ws.interrupted`, `env.clone.interrupted`. Manual:
+`key.jwt.rotation`, which needs a rotation nobody can safely perform from a probe.
+
+**`roll.zero.errors` is a WEEKLY drill, not a fast sample**, because the fast suite yields while a
+rollout is in flight — the more reliable that yield, the less the fast suite says about deploys. It
+patches `kloudlite.io/restarted-at` on the srv StatefulSet (the settings machinery's own
+mechanism), reads through the roll, and requires zero non-2xx plus an `ownership.drained` line from
+every pod that left. **That line is read from the Kubernetes log API while the pod is
+terminating**: neither `/admin/history/*` nor `/admin/slo` exposes pod logs, and once the pod is
+gone so is its log. It restores nothing — a roll onto the same image is its own undo — but it waits
+for the tier to settle on every path out.
+
+**The four weak SLIs that could be strengthened were.** `audit.row` now SKIPS on a 503 instead of
+passing (an outage and an undeployed history layer answered identically). `history.api` requires at
+least one bucket. `admin.workloads.read` requires the whole `KNOWN` list with `ready`/`desired` on
+each, which is what a `Mark::Boot` precheck reads. `tel.pod.coverage` adds the region's two
+DaemonSets, which `/admin/workloads` does not list. `drill.drain` now drains the node holding this
+run's RUNNING workspace and asserts the pod survives — the old drill picked an idle node, so its
+own "without interrupting a running worktree" was vacuous. `signals.fresh` is the one that could
+NOT be met as written: `kloudlite.alerts` holds transitions, and a stable fleet writes none for
+days, so no row's age says whether the evaluator is running. `SignalRow` gains the `ts` it
+transitioned at, the step asserts every recorded row carries one, and the catalogue drops the
+`≤ 120000 ms` it could not honour.
+
+**Four targets sat above their step's ceiling** and are lowered to it, with the reason inline:
+`ws.replicated` 300 → 60 s, `env.replicated` 300 → 30 s, `vol.orphan.collected` 300 → 60 s, and
+`signals.fresh` loses its bound entirely. `ws.replicated`/`env.replicated` still prove the
+condition only; the bytes are `ws.cross.node`'s weekly job, which is recorded rather than fixed.
+
+**`edge.origin` produces a sample again.** `KLOUDLITE_SLO_ORIGIN_IP` was empty on purpose and the
+id had therefore never filed one. The address is now read from the Ingress's own
+`status.loadBalancer` through the in-cluster client; the env stays as an override. `cf-sync.sh`
+allow-lists Cloudflare's ranges, so the direct dial is very likely refused — which is still the
+origin answering, and all this SLI ever claimed.
+
+**Two gaps are NOT probed, deliberately.** `ws.quota.namespace` asserts the `owner-quota` exists,
+matches the effective `Quota` and is tracked by Kubernetes, but does not create a pod over the
+ceiling: `pods: create` in a workspace namespace is a bigger hole than proving a Kubernetes
+primitive is worth. The PR merge-state routes (`claim`/`outcome`) stay covered only implicitly by a
+successful merge — they are peer-only, and `sec.peer.listener` is the id that says the probe cannot
+reach that listener at all.
+
+**From the first hand-run weekly (`slo-weekly-0318`).** `settings.roll` picked a Boot field from
+what the document STORED, and a fresh cluster stores none — it now picks from
+`CLUSTER_SETTING_META` regardless. `git.push.large` was answered `413` by CLOUDFLARE at 100 MiB
+(the app host is proxied, ingress `proxy-body-size: 0`), so the HTTP half sends 90 MiB and the SSH
+half keeps 100; **an HTTP push above 100 MB needs SSH on this edge**, which is worth knowing before
+somebody debugs `max_body`. `ws.cross.node` cordoned a node and watched nothing reschedule for
+148 s: a cordon is invisible to placement (`peer::unplaceable` reads node death and the
+decommission LABEL), so both cross-node drills now set that label through `drill::with_decommission`
+and teardown sweeps it beside the cordon. `gw.tunnel.p95` retries its ssh for 30 s, because a
+workspace's `authorized_keys` Secret reaches the pod on the kubelet's own beat.
+
+**From the first hand-run monthly (`slo-monthly-0329`).** `drill.dead.node` failed by
+CONSTRUCTION: deleting the agent pod and tainting the node never makes the `Node` object NotReady,
+which is the product's whole definition of dead — and a node death cannot be produced from inside
+the cluster without node-level access the probe must not have. It, `ws.interrupted` and
+`env.clone.interrupted` now file a SKIP naming the operator's recipe, which `deploy/k3s/README.md`
+now carries; the ids stay in the catalogue so the console shows "not automated" rather than
+nothing. `drill.drain` (the decommission label) is the automated monthly path. The two backup ids
+were RIGHT — the node runs an older unencrypted `k3s-backup.service` — and now name the
+`hourly-03.tgz` they found instead of reporting an absence.
+
+**Budget and quota.** The three added fast ceilings sum to 60 s (10 + 20 + 30) against the fast
+suite's 840 s budget and a ~4 min run. No quota change: nothing in this batch holds a workspace or
+an environment the previous batch did not, so `deploy/k3s/quotas-slo.yaml` and `probe_quota()` are
+untouched. **RBAC does change and is applied by hand**: on AKS, `statefulsets: patch` pinned to
+`kloudlite-srv`, `pods/log: get`, `ingresses: get,list`, and `slo-drill-clickhouse` added to the
+NetworkPolicy delete names; on k3s, `resourcequotas: get,list`.

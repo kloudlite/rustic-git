@@ -1546,9 +1546,28 @@ rules:
     verbs: ["get", "list", "delete"]
   # The fast suite's rollout yield: a run that starts mid-roll measures the roll, not the service,
   # so it reads `api::workloads::KNOWN_CENTRAL`'s updated/ready against desired and skips every id
-  # rather than filing a sample. Read-only — the probe never rolls anything.
+  # rather than filing a sample.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list"]
+  # `roll.zero.errors` (weekly) patches ONE annotation on ONE pod template — the same
+  # `kloudlite.io/restarted-at` the settings machinery writes, onto the same image, which is why
+  # the drill needs no undo. Pinned to the srv StatefulSet by name: it is the tier whose roll moves
+  # database ownership, and the only deploy event worth measuring.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames: ["kloudlite-srv"]
+    verbs: ["patch"]
+  # The `ownership.drained` evidence for that same id. A pod's log exists nowhere else — neither
+  # `/admin/history/*` nor `/admin/slo` carries one — and it has to be read WHILE the pod is
+  # terminating, which is why this is a grant and not a query.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # `edge.origin` reads the ingress address the cluster already publishes, instead of the env that
+  # was left empty and made the id skip on every run since it shipped.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
     verbs: ["get", "list"]
   # `drill.redis.down` only: the monthly drill writes ONE NetworkPolicy named `slo-drill-redis`
   # that denies the srv and worker pods egress to Redis for five minutes, and deletes it again on
@@ -1563,7 +1582,9 @@ rules:
     verbs: ["create"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    resourceNames: ["slo-drill-redis"]
+    # `slo-drill-clickhouse` is the same shape for `drill.clickhouse.down`: one policy, deleted on
+    # every path out of the drill and again blind in every run's teardown.
+    resourceNames: ["slo-drill-redis", "slo-drill-clickhouse"]
     verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1630,7 +1651,12 @@ data:
   # Empty: that id skips. `kubectl -n ingress-nginx get svc` shows it.
   # Left empty on purpose: cf-sync.sh allow-lists Cloudflare's ranges on the ingress, so a direct
   # dial from the probe pod is refused by design and the id skips rather than lies.
+  # Left empty on purpose, and no longer a skip: with nothing here the probe reads the address off
+  # the Ingress's own `status.loadBalancer`. Set it only to pin a different one.
   KLOUDLITE_SLO_ORIGIN_IP: ""
+  # The ClickHouse host `drill.clickhouse.down` (monthly) denies the admin process egress to.
+  # Empty: that drill skips, like `drill.redis.down` does without its own host.
+  KLOUDLITE_SLO_CLICKHOUSE_HOST: ""
 ---
 # The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.

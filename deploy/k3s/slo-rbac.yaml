@@ -13,6 +13,7 @@
 # | ws.replicated names the peer that holds a cut | volumereplicas: get, list                          |
 # | env.attach.pair reads the attach-{ws} policy  | networkpolicies: get, list                         |
 # | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
+# | the namespace quota `owner-quota` is projected| resourcequotas: get, list                          |
 # | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
 #
@@ -44,7 +45,10 @@ rules:
     resources: ["workspaces"]
     verbs: ["patch"]
   - apiGroups: [""]
-    resources: ["pods"]
+    # `resourcequotas`: `ws.quota.namespace` reads the `owner-quota` the OwnerBinding projects into
+    # the owner's namespace — the documented HARD stop for cpu and memory, which nothing proved
+    # existed, let alone matched the owner's `Quota`.
+    resources: ["pods", "resourcequotas"]
     verbs: ["get", "list"]
   # An environment's service is a StatefulSet; `env.create.p95` is done when its replica is ready,
   # which the probe reads from the StatefulSet's status rather than guessing from the pod.
