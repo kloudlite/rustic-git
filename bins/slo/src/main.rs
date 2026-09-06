@@ -197,7 +197,7 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
         true
     });
     let failed = c.failed();
-    let state = if failed == 0 && !c.run_failed { "passed" } else { "failed" };
+    let state = kloudlite_slo::report::run_state(true, failed > 0 || c.run_failed, &c.steps).as_str();
     tracing::info!(run_id = %c.run_id, state, failed, "slo.run.finished");
     match () {
         // Report first: an unstored run is the failure a human must act on, even if it also had

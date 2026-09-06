@@ -24,6 +24,20 @@ fn backoff(attempt: u32, unit: std::time::Duration) -> Option<std::time::Duratio
     BACKOFF.get(attempt as usize - 1).map(|n| unit * *n as u32)
 }
 
+/// A finished run that skipped EVERY id for an in-flight reason yielded — it measured nothing.
+/// Steps skipped for any other reason (a missing kubeconfig, a one-node region) still count as a
+/// pass: those are the platform's shape, not another run in the way.
+pub fn run_state(finished: bool, failed: bool, steps: &[kloudlite_workspaces::history::slo::StepReport]) -> RunState {
+    match (finished, failed) {
+        (false, _) => RunState::Running,
+        (true, true) => RunState::Failed,
+        (true, false) if !steps.is_empty() && steps.iter().all(|s| s.skipped && s.detail.contains("in flight")) => {
+            RunState::Yielded
+        }
+        (true, false) => RunState::Passed,
+    }
+}
+
 impl Ctx {
     pub async fn report(&mut self, stage: &str, finished: bool) -> anyhow::Result<()> {
         let report = RunReport {
@@ -32,11 +46,7 @@ impl Ctx {
             region: self.cfg.region.clone(),
             started: self.started,
             finished: finished.then(chrono::Utc::now),
-            state: match (finished, self.failed() > 0 || self.run_failed) {
-                (false, _) => RunState::Running,
-                (true, false) => RunState::Passed,
-                (true, true) => RunState::Failed,
-            },
+            state: run_state(finished, self.failed() > 0 || self.run_failed, &self.steps),
             stage: stage.to_string(),
             steps: self.steps.clone(),
         };
@@ -107,8 +117,35 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
+    use super::run_state;
     use crate::testkit::{ctx, stub};
     use axum::http::StatusCode;
+    use kloudlite_workspaces::history::slo::{RunState, StepReport};
+
+    fn step(ok: bool, skipped: bool, detail: &str) -> StepReport {
+        StepReport {
+            slo_id: "x".into(),
+            ts: chrono::Utc::now(),
+            ok,
+            ms: 0,
+            skipped,
+            detail: detail.into(),
+            stage: "1".into(),
+        }
+    }
+
+    #[test]
+    fn a_run_that_only_yielded_is_not_a_pass() {
+        let yielded = vec![step(true, true, "an hourly run is in flight"), step(true, true, "a monthly drill is in flight")];
+        assert_eq!(run_state(true, false, &yielded), RunState::Yielded);
+        assert_eq!(run_state(false, false, &yielded), RunState::Running, "still running while it reports");
+        let mixed = vec![step(true, true, "an hourly run is in flight"), step(true, false, "")];
+        assert_eq!(run_state(true, false, &mixed), RunState::Passed, "one measured id is a sample");
+        let shape = vec![step(true, true, "no kubeconfig")];
+        assert_eq!(run_state(true, false, &shape), RunState::Passed, "a skip for the platform's shape still passes");
+        assert_eq!(run_state(true, true, &yielded), RunState::Failed);
+        assert_eq!(run_state(true, false, &[]), RunState::Passed, "no steps at all is the old behaviour");
+    }
 
     #[tokio::test]
     async fn report_retries_six_times_then_errors() {

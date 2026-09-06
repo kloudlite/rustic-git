@@ -1504,7 +1504,7 @@ export function removeSuperadmin(user: string, token: string, note: string) {
 // ── SLO probe (`crates/workspaces/src/history/slo.rs`) ────────────────────────
 // None of these structs carry `rename_all`, so every field below is the wire name verbatim.
 
-export type SloRunState = "running" | "passed" | "failed";
+export type SloRunState = "running" | "passed" | "failed" | "yielded";
 
 /** One row of `slo_runs`. `finished` is `null` while the run is in flight, and `duration_ms` is
  *  then the elapsed time so far — the probe recomputes it on every report. */

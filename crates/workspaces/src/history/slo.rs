@@ -36,6 +36,10 @@ pub enum RunState {
     Running,
     Passed,
     Failed,
+    /// Every id skipped because another run held the platform ("… is in flight"). Not a sample:
+    /// a run that measured nothing must not read as a pass — two of these in a row looked like a
+    /// green fast suite while the platform was never touched.
+    Yielded,
 }
 
 impl RunState {
@@ -44,6 +48,7 @@ impl RunState {
             RunState::Running => "running",
             RunState::Passed => "passed",
             RunState::Failed => "failed",
+            RunState::Yielded => "yielded",
         }
     }
 
@@ -53,6 +58,7 @@ impl RunState {
         match s {
             "passed" => RunState::Passed,
             "failed" => RunState::Failed,
+            "yielded" => RunState::Yielded,
             _ => RunState::Running,
         }
     }
