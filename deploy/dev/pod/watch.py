@@ -65,8 +65,8 @@ def cleanup(rid):
     try:
         rows = json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/volumes?owner={tenant}", headers=H), timeout=20))
         for r in (rows if isinstance(rows, list) else rows.get("items") or []):
-            if r.get("deleted") and r.get("volume"):
-                try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/volumes/{r['volume']}", headers=H, method="DELETE"), timeout=30); gone += 1
+            if r.get("deleted") and r.get("name"):
+                try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/volumes/{r['name']}", headers=H, method="DELETE"), timeout=30); gone += 1
                 except Exception as e: print("delete volume", r.get("name"), "failed:", e)
     except Exception as e: print("list volumes failed:", e)
     print(f"cleanup: {gone} objects of {prefix} (and detached volumes) deleted")
