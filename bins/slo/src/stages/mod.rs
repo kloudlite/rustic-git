@@ -208,8 +208,10 @@ async fn undo_drills(c: &mut Ctx) {
     match crate::drill::incluster() {
         Ok(k) => {
             use crate::drill::Cluster;
-            if let Err(e) = k.netpol("kloudlite", crate::stages::monthly::NETPOL, None).await {
-                tracing::warn!(kind = "netpol", error = %format!("{e:#}"), "slo.drill.sweep.failed");
+            for name in [crate::stages::monthly::NETPOL, crate::stages::monthly::CH_NETPOL] {
+                if let Err(e) = k.netpol("kloudlite", name, None).await {
+                    tracing::warn!(kind = "netpol", name = %name, error = %format!("{e:#}"), "slo.drill.sweep.failed");
+                }
             }
         }
         Err(e) => tracing::debug!(error = %format!("{e:#}"), "slo.drill.sweep.skipped"),

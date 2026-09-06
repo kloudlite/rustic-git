@@ -27,6 +27,7 @@ pub async fn ctx() -> Ctx {
         canary_digest: None,
         azure: None,
         redis_host: None,
+        clickhouse_host: None,
         probe_user: crate::ctx::PROBE_USER.into(),
         other_user: crate::ctx::OTHER_USER.into(),
     };

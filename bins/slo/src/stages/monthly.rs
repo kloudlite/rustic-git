@@ -56,9 +56,185 @@ fn step_cap(body: Duration) -> Duration {
 pub async fn run(c: &mut Ctx) {
     backups(c).await;
     dead_node(c).await;
+    interrupted(c).await;
     drain(c).await;
     decommission(c).await;
     redis_down(c).await;
+    clickhouse_down(c).await;
+}
+
+/// `ws.interrupted` and `env.clone.interrupted`: the two refusals a node going down owes a person.
+///
+/// A running worktree on a dead node is INTERRUPTED, never moved — `/v1` refuses to start it with
+/// a sentence naming why, and the documented way forward is a clone, which grafts onto the newest
+/// cut an up-to-date node already holds and says in `based_on` how old that is. An environment has
+/// no such fallback (its clone copies live bytes from the node that holds it), so its clone is a
+/// 409. All three assertions share one taint window because they share one dead node — waiting out
+/// `nodeDeadSecs` twice would cost the monthly run six minutes for nothing.
+async fn interrupted(c: &mut Ctx) {
+    let (Some(k), Some(ws)) = (c.kube.clone(), probe_workspace(c).await) else {
+        let why = "no kubeconfig, or no probe workspace to interrupt";
+        c.skip("ws.interrupted", why);
+        return c.skip("env.clone.interrupted", why);
+    };
+    // RUNNING, deliberately: a stopped worktree is placeable elsewhere, and the refusal this id is
+    // about only exists for one a person is typing into.
+    let Some(owner) = node_of(c, &ws).await else {
+        c.skip("ws.interrupted", "the workspace names no node");
+        return c.skip("env.clone.interrupted", "the workspace names no node");
+    };
+    let env = probe_environment(c).await;
+    let wait = Duration::from_secs(node_dead_secs(c).await + DEAD_SLACK);
+    let body_cap = wait + DRAIN_CAP;
+    let seen: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let env_out = seen.clone();
+    {
+        let (ws, owner, env) = (ws.clone(), owner.clone(), env.clone());
+        c.step("ws.interrupted", step_cap(body_cap), move |c| {
+            let jwt = c.probe_jwt.clone();
+            let start = api(c, &format!("/v1/workspaces/{ws}/start"));
+            let clone = api(c, &format!("/v1/workspaces/{ws}/clone"));
+            let name = format!("{}-int", c.prefix());
+            async move {
+                let body = async {
+                    kill_agent(&k, &owner).await?;
+                    tokio::time::sleep(wait).await;
+                    // The refusal, and its sentence: a 409 that named something else would leave
+                    // the person with no way forward at all.
+                    let (status, text) =
+                        super::raw(c, reqwest::Method::POST, &start, &jwt, Some(Value::Null), &[]).await?;
+                    if status.as_u16() != 409 {
+                        return Err(anyhow!("starting an interrupted workspace answered {status}, not 409"));
+                    }
+                    if !text.contains("its node is down") {
+                        return Err(anyhow!("the refusal does not say why: {}", text.chars().take(160).collect::<String>()));
+                    }
+                    // The way forward: a clone that says what it grafted onto.
+                    let made = post(c, &clone, &jwt, json!({ "name": name })).await.context("the clone of an interrupted workspace was refused")?;
+                    let based = made.get("based_on").ok_or_else(|| anyhow!("the clone named no `based_on`"))?;
+                    if based.get("age_seconds").and_then(Value::as_u64).is_none() {
+                        return Err(anyhow!("`based_on` does not say how old the cut it grafted onto is"));
+                    }
+                    if let Some(id) = made.get("id").and_then(Value::as_str) {
+                        // Named `run-…`, so teardown's prefix sweep takes it either way; recorded
+                        // so the volume goes with it.
+                        c.state.extra_volumes.push(id.to_string());
+                    }
+                    // And the environment's own answer, recorded here rather than judged: the two
+                    // are different SLIs, and one taint window is all they share.
+                    if let Some(env) = &env {
+                        let url = api(c, &format!("/v1/environments/{env}/clone"));
+                        let (status, text) = super::raw(c, reqwest::Method::POST, &url, &jwt, Some(json!({ "name": format!("{name}-e") })), &[]).await?;
+                        *env_out.lock().expect("lock") = Some(format!("{status} {}", text.chars().take(160).collect::<String>()));
+                    }
+                    Ok(())
+                };
+                drill::with_taint(&k, &owner, body_cap, body).await
+            }
+            .boxed()
+        })
+        .await;
+    }
+    let out = seen.lock().expect("lock").clone();
+    let Some(answer) = out else {
+        return c.skip("env.clone.interrupted", "no environment was cloned while its node was down");
+    };
+    c.step("env.clone.interrupted", Duration::from_secs(5), move |_| {
+        async move {
+            if answer.starts_with("409") {
+                return Ok(());
+            }
+            Err(anyhow!("cloning an environment whose node is down answered {answer}"))
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The environment stage 6 left, by this run's own name.
+async fn probe_environment(c: &Ctx) -> Option<String> {
+    let rows = get(c, &api(c, "/v1/environments"), &c.probe_jwt).await.ok()?;
+    rows.as_array()?
+        .iter()
+        .find(|r| r.get("name").and_then(Value::as_str).is_some_and(|n| n.starts_with(&c.prefix())))
+        .and_then(|r| r.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// `drill.clickhouse.down`: the history layer is optional, and the fleet must behave as if it is.
+///
+/// `KLOUDLITE_CLICKHOUSE_URL` unset is a supported deployment answered with `503 history
+/// unavailable`, which the console renders as a flat placeholder — but an OUTAGE is a different
+/// thing wearing the same shape, and nothing proved the tiers behave the same way through one. So
+/// egress to ClickHouse is denied for the admin process, and what must hold is that every /v1 verb
+/// still works and `/admin/history/*` answers 503 rather than 500.
+async fn clickhouse_down(c: &mut Ctx) {
+    let Some(host) = c.cfg.clickhouse_host.clone() else {
+        return c.skip("drill.clickhouse.down", "no KLOUDLITE_SLO_CLICKHOUSE_HOST to deny");
+    };
+    let k = match drill::incluster() {
+        Ok(k) => k,
+        Err(e) => return c.skip("drill.clickhouse.down", &format!("no in-cluster client: {e:#}")),
+    };
+    let ips = match resolve(c, &host).await {
+        Ok(ips) => ips,
+        Err(e) => return c.skip("drill.clickhouse.down", &format!("{e:#}")),
+    };
+    let body_cap = Duration::from_secs(180);
+    c.step("drill.clickhouse.down", step_cap(body_cap), move |c| {
+        let jwt = c.probe_jwt.clone();
+        let admin_jwt = c.admin_jwt.clone();
+        let repos = api(c, "/v1/repos");
+        let quota = api(c, "/v1/quota");
+        let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
+        let name = format!("{}-chd", c.prefix());
+        async move {
+            let body = async {
+                // Long enough that a pooled connection has certainly failed over.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                // Ordinary work, unaffected: the history layer is a reader, never the record.
+                get(c, &quota, &jwt).await.context("`/v1/quota` stopped answering with ClickHouse down")?;
+                let owner = c.probe_user.clone();
+                post(c, &repos, &jwt, json!({ "owner": owner, "name": name, "visibility": "private" }))
+                    .await
+                    .context("a repo could not be created with ClickHouse down")?;
+                let _ = super::call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/repos/{owner}/{name}")), &jwt, None).await;
+                // And the history reads degrade rather than break: 503 is the contract the web
+                // renders a placeholder for, and a 500 is the page falling over.
+                let (status, text) = super::raw(c, reqwest::Method::GET, &history, &admin_jwt, None, &[]).await?;
+                match status.as_u16() {
+                    503 => Ok(()),
+                    // Still answering is fine too: a replica may have taken over, and this drill
+                    // is about what happens when it does NOT.
+                    code if (200..300).contains(&code) => Ok(()),
+                    code => Err(anyhow!("`/admin/history/*` answered {code} with ClickHouse down, not 503: {}", text.chars().take(160).collect::<String>())),
+                }
+            };
+            drill::with_netpol(&k, "kloudlite", CH_NETPOL, deny_clickhouse(&ips), body_cap, body).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The second policy this probe ever writes, deleted on every path out and blind in teardown.
+pub const CH_NETPOL: &str = "slo-drill-clickhouse";
+
+/// Everywhere but ClickHouse, for the one process that writes the `kloudlite` database.
+fn deny_clickhouse(ips: &[String]) -> Value {
+    json!({
+        "podSelector": { "matchExpressions": [
+            { "key": "app", "operator": "In", "values": ["kloudlite-admin", "kloudlite-api"] }
+        ]},
+        "policyTypes": ["Egress"],
+        "egress": [
+            { "to": [{ "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": ips.iter().map(|ip| format!("{ip}/32")).collect::<Vec<_>>(),
+            }}]},
+            { "ports": [{ "protocol": "UDP", "port": 53 }, { "protocol": "TCP", "port": 53 }] },
+        ],
+    })
 }
 
 /// `cluster.decommission`: the 409 gate, and the cordon behind it.
@@ -444,38 +620,92 @@ async fn node_dead_secs(c: &Ctx) -> u64 {
         .unwrap_or(NODE_DEAD_FALLBACK)
 }
 
-/// `drill.drain`: a planned retirement finishes, and nothing of ours was running on it.
+/// `drill.drain`: a drain does NOT interrupt what is running on the node.
 ///
-/// A drain is not a cordon: it only sets the label the node's own agent watches, and the agent's
-/// beat is what releases volumes and eventually stamps the sticky `drained …`. That stamp is the
-/// gate an operator deletes a VM on, so it is the only thing worth waiting for. The undrain is in
+/// The SLI says "without interrupting a running worktree" and the drill used to pick an IDLE node
+/// on purpose, so that clause was vacuously true on every run: the documented guarantee — a
+/// decommissioning node keeps running whatever it holds while releasing the rest — was the one
+/// thing untested. So the node drained is the one holding this run's own RUNNING workspace, and
+/// what is asserted is that the workspace is still running afterwards with the same pod, and that
+/// the node's own beat stamped `draining` counting it.
+///
+/// It never waits for `drained`: a node with a running worktree on it must NOT reach that stamp,
+/// and `cluster.decommission` is the id that walks the stamp on a node that can. The undrain is in
 /// the undo path — a node left labelled is a node placement will not use again.
 async fn drain(c: &mut Ctx) {
     let (Some(k), region) = (c.kube.clone(), c.cfg.region.clone()) else {
         return c.skip("drill.drain", "no kubeconfig");
     };
-    let busy = match probe_workspace(c).await {
-        Some(ws) => node_of(c, &ws).await,
-        None => None,
+    let Some(ws) = probe_workspace(c).await else {
+        return c.skip("drill.drain", "no probe workspace to keep running through a drain");
     };
-    let node = match idle_node(&k, busy.as_deref()).await {
-        Ok(n) => n,
-        Err(e) => return c.skip("drill.drain", &format!("{e:#}")),
+    let Some(node) = node_of(c, &ws).await else {
+        return c.skip("drill.drain", "the workspace names no node");
     };
+    let before = pod_uid(&k, c, &ws).await;
     c.step("drill.drain", step_cap(DRAIN_CAP), move |c| {
         let jwt = c.admin_jwt.clone();
+        let probe_jwt = c.probe_jwt.clone();
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
+        let doc = api(c, &format!("/v1/workspaces/{ws}"));
         let reason = json!({ "reason": format!("slo probe drill {}", c.run_id) });
         async move {
             verb(c, &base, "drain", &jwt, &reason).await.context("the drain was refused")?;
             let body = async {
-                stamped(&k, &node, DRAIN_CAP).await.context("the node never finished draining")
+                // The agent's own beat is `WS_DECOMMISSION_SECS` (30); two of them, so the stamp
+                // below is a decision it made rather than one it has not reached yet.
+                draining_stamp(&k, &node, DRAIN_CAP / 2).await?;
+                let now = get(c, &doc, &probe_jwt).await.context("could not read the workspace")?;
+                let state = now.get("state").and_then(Value::as_str).unwrap_or_default();
+                if !matches!(state, "ready" | "running") {
+                    return Err(anyhow!("a running workspace on a draining node went to `{state}`"));
+                }
+                // The pod itself, not only the phase: a controller that deleted and recreated it
+                // has interrupted the person at the keyboard whatever the status says afterwards.
+                let after = pod_uid(&k, c, &ws).await;
+                if before.is_some() && after != before {
+                    return Err(anyhow!("the workspace's pod was replaced while its node drained"));
+                }
+                Ok(())
             };
             drill::undoing(DRAIN_CAP, body, || verb(c, &base, "undrain", &jwt, &reason)).await
         }
         .boxed()
     })
     .await;
+}
+
+/// The workspace pod's uid, or `None` when it cannot be read — in which case the comparison above
+/// is skipped rather than guessed at.
+async fn pod_uid(k: &kube::Client, c: &Ctx, ws: &str) -> Option<String> {
+    let ns = kloudlite_workspaces::crd::ws_namespace(&c.probe_user, "");
+    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), &ns);
+    pods.get_opt(ws).await.ok()??.metadata.uid
+}
+
+/// Wait for the agent's `draining running=N …` stamp — the beat's own record that it is retiring
+/// the node WITHOUT stopping what runs there. `drained` is a different stamp and a different id.
+async fn draining_stamp(k: &kube::Client, node: &str, cap: Duration) -> Result<()> {
+    use kloudlite_workspaces::crd;
+    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
+    let at = std::time::Instant::now();
+    loop {
+        let obj = api.get(node).await.map_err(|e| anyhow!("could not read {node}: {e}"))?;
+        let stamp = obj
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(crd::DECOMMISSION_STATUS))
+            .cloned()
+            .unwrap_or_default();
+        if stamp.starts_with("draining") || stamp.starts_with(crd::DRAINED_PREFIX) {
+            return Ok(());
+        }
+        if at.elapsed() >= cap {
+            return Err(anyhow!("the node's agent never stamped its drain: it reports {stamp:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 /// One node verb on the admin API. Both halves take the same reason, which is what the audit row
@@ -625,7 +855,10 @@ pub const NETPOL: &str = "slo-drill-redis";
 fn deny_egress(ips: &[String]) -> Value {
     json!({
         "podSelector": { "matchExpressions": [
-            { "key": "app", "operator": "In", "values": ["kloudlite-srv", "kloudlite-worker"] }
+            // `kloudlite-admin` too: it is the `history` consumer group, and the claim about it is
+            // that it IDLES with Redis down — which nothing was measuring, because the policy did
+            // not reach it.
+            { "key": "app", "operator": "In", "values": ["kloudlite-srv", "kloudlite-worker", "kloudlite-admin"] }
         ]},
         "policyTypes": ["Egress"],
         "egress": [
@@ -710,7 +943,18 @@ async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     let want = format!("{probe}/{name}");
     poll_json(c, &feed, &jwt, Duration::from_secs(60), |v| created(v, &want))
         .await
-        .context("the activity feed never showed the repo")
+        .context("the activity feed never showed the repo")?;
+
+    // The admin process is the `history` consumer group, and the claim is that it IDLES: with the
+    // stream unreachable it must keep answering its own reads rather than wedging on the consumer.
+    // A 503 is the no-ClickHouse deployment and is fine; a 500 or a hang is the claim being false.
+    let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
+    let (status, text) = super::raw(c, reqwest::Method::GET, &history, &c.admin_jwt, None, &[]).await?;
+    match status.as_u16() {
+        503 => Ok(()),
+        code if (200..300).contains(&code) => Ok(()),
+        code => Err(anyhow!("the admin process answered {code} with Redis down: {}", text.chars().take(160).collect::<String>())),
+    }
 }
 
 fn created(feed: &Value, repo: &str) -> bool {
@@ -769,9 +1013,12 @@ mod tests {
                 "bak.versioning",
                 "bak.cosmos",
                 "drill.dead.node",
+                "ws.interrupted",
+                "env.clone.interrupted",
                 "drill.drain",
                 "cluster.decommission",
                 "drill.redis.down",
+                "drill.clickhouse.down",
             ]
         );
         assert_eq!(c.failed(), 0, "an unconfigured probe skips; it does not breach");

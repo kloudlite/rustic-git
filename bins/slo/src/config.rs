@@ -53,6 +53,10 @@ pub struct Config {
     /// The Redis host `drill.redis.down` cuts the fleet off from. Unset skips the drill: a probe
     /// that guessed an address would write a NetworkPolicy denying nothing and report a pass.
     pub redis_host: Option<String>,
+    /// The ClickHouse host `drill.clickhouse.down` cuts the admin process off from. Unset skips
+    /// the drill, for the same reason `redis_host` does: a policy built from a guess denies
+    /// nothing and reports a pass.
+    pub clickhouse_host: Option<String>,
 }
 
 /// What the ARM reads need beyond the service principal (which is `AZURE_TENANT_ID`/`_CLIENT_ID`/
@@ -103,6 +107,7 @@ impl Config {
             canary_digest: Some(opt("KLOUDLITE_SLO_CANARY_DIGEST", "")).filter(|d| !d.is_empty()),
             azure: azure(),
             redis_host: Some(opt("KLOUDLITE_SLO_REDIS_HOST", "")).filter(|v| !v.is_empty()),
+            clickhouse_host: Some(opt("KLOUDLITE_SLO_CLICKHOUSE_HOST", "")).filter(|v| !v.is_empty()),
         })
     }
 }
