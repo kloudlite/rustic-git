@@ -376,13 +376,16 @@ mod tests {
         // the deadline. Only a process-group kill reaps both, which is what this proves.
         // A 20 s grandchild against a 10 s bound: a leaked grandchild still fails the test, and a
         // loaded CI runner (two slots, a release build beside it) no longer trips a 3 s bound.
-        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 20 &\nwait\n").unwrap();
+        std::fs::write(bin.join("nix"), "#!/bin/sh\nsleep 40 &\nwait\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin };
         let started = std::time::Instant::now();
         let err = nix.build("1", Duration::from_millis(300)).await.unwrap_err();
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        // The bound is the grandchild's own lifetime, halved — not a guess at how fast a runner
+        // reaps: if the process GROUP is not killed this waits out the full 40 s, and anything
+        // under 20 s can only mean the kill worked. A tighter bound measures CI's load instead.
+        assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
         assert!(err.contains("timed out"), "{err}");
     }
 
