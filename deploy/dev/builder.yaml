@@ -60,6 +60,9 @@ spec:
               # pm2 on the disk: `pm2 logs <suite>` / `pm2 monit` are the interactive view of a run;
               # its state and logs live under PM2_HOME=/work/home/.pm2 and outlive a restart.
               if [ ! -x /work/npm/bin/pm2 ]; then npm install -g --prefix /work/npm pm2 >/dev/null 2>&1; fi
+              # Bring back whatever `pm2 save` recorded (a tier served from here); probe runs are
+              # one-shot and are not saved, so a restart never resumes one.
+              /work/npm/bin/pm2 resurrect >/dev/null 2>&1 || true
               if [ ! -x /work/bin/crane ]; then
                 mkdir -p /work/bin
                 curl -fsSL -o /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz
