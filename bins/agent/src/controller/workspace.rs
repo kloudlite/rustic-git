@@ -1167,7 +1167,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // clone `id` is the source VOLUME, and reading readiness or reporting `podRef` by `id`
             // would point this workspace at its source's pod — the gateway dials `podRef`, so an
             // ssh to the clone would land in the source's shell.
-            if !pod_is_ready(&pods, &pod_name).await? {
+            if !pod_is_ready(&pods, &pod_name, &ctx.node).await? {
                 let st = crd::WorkspaceStatus {
                     phase: crd::Phase::Creating,
                     observed_generation: None,
@@ -1244,14 +1244,23 @@ async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<boo
 
 /// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
 /// error: that is the normal state between applying it and the kubelet creating it.
-async fn pod_is_ready(pods: &Api<Pod>, name: &str) -> Result<bool, ReconcileErr> {
-    let Some(pod) = pods.get_opt(name).await? else {
-        return Ok(false);
-    };
-    Ok(pod
-        .status
-        .and_then(|s| s.conditions)
-        .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True")))
+async fn pod_is_ready(pods: &Api<Pod>, name: &str, me: &str) -> Result<bool, ReconcileErr> {
+    Ok(pods.get_opt(name).await?.is_some_and(|pod| own_ready_pod(&pod, me)))
+}
+
+/// Ready, and THIS node's. The pod is named after the workspace on every node, so right after a
+/// handover the new owner reads the previous node's pod by that name — still Ready, already
+/// terminating — and reported `Ready` on itself two seconds before its own pod existed. `/v1`
+/// said "ready on session-1", the gateway dialled a dying pod, and an exec into it exited 1.
+/// A pod on another node or on its way out is nobody's answer.
+fn own_ready_pod(pod: &Pod, me: &str) -> bool {
+    pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(me)
+        && pod.metadata.deletion_timestamp.is_none()
+        && pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
 }
 
 pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
@@ -1268,4 +1277,28 @@ pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus
             && conditions_eq(&a.conditions, &b.conditions)
     })
     .await
+}
+
+#[cfg(test)]
+mod own_pod_tests {
+    use super::*;
+
+    fn pod(node: Option<&str>, ready: bool, deleting: bool) -> Pod {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "ws-1", "deletionTimestamp": if deleting { serde_json::json!("2026-09-06T18:26:25Z") } else { serde_json::Value::Null }},
+            "spec": {"nodeName": node, "containers": []},
+            "status": {"conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}]},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_ready_pod_counts_only_on_this_node_and_only_while_it_stays() {
+        assert!(own_ready_pod(&pod(Some("node-a"), true, false), "node-a"));
+        assert!(!own_ready_pod(&pod(Some("node-a"), false, false), "node-a"), "not ready");
+        assert!(!own_ready_pod(&pod(Some("node-b"), true, false), "node-a"), "the previous owner's pod");
+        assert!(!own_ready_pod(&pod(Some("node-a"), true, true), "node-a"), "terminating");
+        assert!(!own_ready_pod(&pod(None, true, false), "node-a"), "unscheduled");
+    }
 }

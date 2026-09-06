@@ -42,7 +42,14 @@ pub async fn exec(
         let (a, b) = tokio::join!(out.read_to_string(&mut o), err.read_to_string(&mut e));
         a.context("reading stdout")?;
         b.context("reading stderr")?;
-        Ok((code(status.await), o, e))
+        let status = status.await;
+        // An exec the API server refused ("container not found", "pod is terminating") carries
+        // no ExitCode; without its message a refusal read as `exited 1:` with nothing after it.
+        let refusal = status.as_ref().filter(|s| s.status.as_deref() != Some("Success")).and_then(|s| s.message.clone());
+        if let Some(m) = refusal.filter(|_| e.trim().is_empty()) {
+            e = m;
+        }
+        Ok((code(status), o, e))
     })
     .await
     .map_err(|_| anyhow!("exec timed out after {} ms", timeout.as_millis()))?
