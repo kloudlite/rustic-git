@@ -671,6 +671,27 @@ where
     // parent (so `may_claim` already proved its replica is Synced): take the pin. Losing the race
     // is not an error — the next pass meets the winner's pin and the guard below refuses as usual.
     if vol.spec.node_name.is_empty() {
+        // Never while THIS node is being retired. `start_placement` releases a retiring owner's
+        // volume with no target so a peer can take it — and the parent's own reconcile, running in
+        // the same second with `status.nodeName` still naming this node, arrived here and took the
+        // pin straight back (`volume.released` then `volume.taken` on the same node, 13:20:15 in
+        // the drill that found this). The un-place that follows the release clears the parent
+        // for a peer's claim; this node's part is only to stay out of the way until it lands.
+        let me = Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&ctx.node).await?;
+        if crate::peer::decommissioning(me.as_ref()) {
+            return Ok(Resolved::Wait {
+                volume_ref: None,
+                phase: crd::Phase::Creating,
+                cond: crd::condition(
+                    "Ready",
+                    false,
+                    "NodeLeaving",
+                    "this node is being retired; a peer takes the volume once it holds the final sync point",
+                    gen,
+                ),
+                action: Action::requeue(std::time::Duration::from_secs(5)),
+            });
+        }
         if take_volume(ctx, &id, node_name).await? {
             tracing::info!(volume = %id, node = %node_name, "volume.taken");
         }
@@ -823,6 +844,54 @@ mod tests {
             {"op": "test", "path": "/spec/nodeName", "value": ""},
             {"op": "replace", "path": "/spec/nodeName", "value": "node-a"},
         ]));
+    }
+
+    /// A retiring node must not take a released pin back. `start_placement` releases the volume
+    /// with no target so a peer can claim it, and the parent's reconcile on the SAME node — its
+    /// `status.nodeName` not yet cleared — used to arrive here and take the pin straight back.
+    #[tokio::test]
+    async fn a_retiring_node_leaves_a_released_pin_for_a_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_json = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-1", "uid": "uid-ws-1", "generation": 1, "resourceVersion": "9"},
+            "spec": {"owner": "alice", "name": "cold", "region": "r1", "image": "img", "desiredState": "running", "packages": []},
+            "status": {"phase": "stopped", "nodeName": "node-a", "volumeRef": "ws-1"},
+        });
+        let routes = vec![
+            get(
+                "/apis/kloudlite.io/v1alpha1/volumes/ws-1",
+                serde_json::json!({
+                    "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+                    "metadata": {"name": "ws-1", "uid": "uid-vol-1", "generation": 1, "resourceVersion": "9"},
+                    "spec": {"owner": "alice", "team": "", "nodeName": "", "region": "r1", "quotaGb": 5, "replicas": 2},
+                    "status": {"phase": "ready"},
+                }),
+            ),
+            get(
+                "/api/v1/nodes/node-a",
+                serde_json::json!({
+                    "apiVersion": "v1", "kind": "Node",
+                    "metadata": {"name": "node-a", "labels": {kloudlite_workspaces::crd::DECOMMISSION_LABEL: "true"}},
+                    "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
+                }),
+            ),
+        ];
+        let mut routes = routes;
+        routes.push(Route {
+            method: "PATCH",
+            path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1/status".into(),
+            status: 200,
+            body: parent_json.clone(),
+        });
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        let parent: crd::Workspace = serde_json::from_value(parent_json).unwrap();
+        let out = resolve_volume(&parent, "alice", "", "r1", &None, "node-a", &[], 1, &ctx).await.unwrap();
+        assert!(matches!(out, Resolved::Wait { .. }), "a retiring node waits rather than resolving the volume here");
+        assert!(
+            !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/kloudlite.io/v1alpha1/volumes/")),
+            "the released pin is left for a peer: {:?}", rec.calls()
+        );
     }
 
     /// A DECOMMISSIONING owner is ALIVE: it is draining at its people's pace and will reclaim this
