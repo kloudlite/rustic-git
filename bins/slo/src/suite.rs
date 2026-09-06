@@ -177,10 +177,15 @@ pub async fn hourly_in_flight(c: &Ctx) -> bool {
 /// A drill waits for a fast or hourly run already in flight to finish before its first
 /// destructive stage, bounded by one fast deadline: cancelling a run mid-journey would file a
 /// failed sample for the drill's reason, and a drill that starts a minute late loses nothing.
-pub async fn wait_for_shorter_runs(c: &Ctx) {
+pub async fn wait_for_shorter_runs(c: &Ctx, me: Suite) {
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(900) {
-        let busy = suite_in_flight(c, Suite::Fast).await || suite_in_flight(c, Suite::Hourly).await;
+        // The other drill too: weekly and monthly share the drill tenant and both touch nodes,
+        // so two of them at once would undo each other's undo.
+        let other = if me == Suite::Weekly { Suite::Monthly } else { Suite::Weekly };
+        let busy = suite_in_flight(c, Suite::Fast).await
+            || suite_in_flight(c, Suite::Hourly).await
+            || suite_in_flight(c, other).await;
         if !busy {
             return;
         }
@@ -275,7 +280,7 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
         yield_to = Some(ROLLOUT_IN_FLIGHT);
     }
     if yields_to(kind).is_empty() {
-        wait_for_shorter_runs(c).await;
+        wait_for_shorter_runs(c, kind).await;
     }
     if let Some(why) = yield_to {
         let skipped = skip_remaining_because(c, kind, &stages, why);
