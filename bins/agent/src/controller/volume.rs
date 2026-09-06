@@ -886,8 +886,12 @@ mod tests {
         });
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let parent: crd::Workspace = serde_json::from_value(parent_json).unwrap();
-        let out = resolve_volume(&parent, "alice", "", "r1", &None, "node-a", &[], 1, &ctx).await.unwrap();
-        assert!(matches!(out, Resolved::Wait { .. }), "a retiring node waits rather than resolving the volume here");
+        let storage = Some(crd::WorkspaceStorage { quota_gb: 5, source: None });
+        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-a", &[], 1, &ctx).await.unwrap();
+        match &out {
+            Resolved::Wait { cond, .. } => assert_eq!(cond.reason, "NodeLeaving"),
+            _ => panic!("a retiring node waits rather than resolving the volume here: {:?}", rec.calls()),
+        }
         assert!(
             !rec.calls().iter().any(|c| c.starts_with("PATCH /apis/kloudlite.io/v1alpha1/volumes/")),
             "the released pin is left for a peer: {:?}", rec.calls()
