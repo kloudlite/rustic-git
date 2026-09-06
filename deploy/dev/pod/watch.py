@@ -62,18 +62,20 @@ def cleanup(rid):
                 except Exception as e: print("delete", kind, r.get("name"), "failed:", e)
     print(f"cleanup: {gone} objects of {prefix} deleted")
 
+seen = 0
 for _ in range(720):
     s = summarise()
     if s is None: time.sleep(15); continue
     done, fails, n, skipped, run, last = s
     line = f"{'DONE' if done else 'RUN'} | run: {run} | steps: {n} | skipped: {skipped} | last: {last} | fails: {len(fails)}"
+    if n != seen: print(line, flush=True); seen = n
     if fails and fail_fast:
-        print(line); [print("  FAIL", *f) for f in fails]
+        print(line, flush=True); [print("  FAIL", *f, flush=True) for f in fails]
         subprocess.run(["pm2", "stop", suite], capture_output=True); subprocess.run(["pkill", "-x", "kloudlite-slo"])
-        print("FAIL FAST: killed the run")
+        print("FAIL FAST: killed the run", flush=True)
         if run: close_row(run); cleanup(run)
         sys.exit(1)
     if done:
-        print(line); [print("  FAIL", *f) for f in fails]; sys.exit(1 if fails else 0)
+        print(line, flush=True); [print("  FAIL", *f, flush=True) for f in fails]; sys.exit(1 if fails else 0)
     time.sleep(15)
 print("gave up waiting"); sys.exit(4)

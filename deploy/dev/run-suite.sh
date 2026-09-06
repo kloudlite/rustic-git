@@ -32,5 +32,5 @@ kubectl -n kloudlite exec "$POD" -- bash -c "mkdir -p /work/runs; pm2 describe $
 # deploy/dev/pod/watch.py stops the suite on the first failed step, closes its row and deletes its
 # objects. This script returns as soon as both are started.
 FFARG=""; [ "$FF" = 0 ] && FFARG="--no-fail-fast"
-kubectl -n kloudlite exec "$POD" -- bash -c "pm2 delete watch-$SUITE >/dev/null 2>&1; pm2 start --name watch-$SUITE --no-autorestart --time --merge-logs python3 -- /work/src/deploy/dev/pod/watch.py $SUITE $U $LOG $FFARG >/dev/null && echo watcher started as watch-$SUITE"
+kubectl -n kloudlite exec "$POD" -- bash -c "pm2 delete watch-$SUITE >/dev/null 2>&1; pm2 start --name watch-$SUITE --no-autorestart --time --merge-logs python3 -- -u /work/src/deploy/dev/pod/watch.py $SUITE $U $LOG $FFARG >/dev/null && echo watcher started as watch-$SUITE"
 echo "follow with: deploy/dev/attach.sh $SUITE   (or: deploy/dev/attach.sh watch-$SUITE)"
