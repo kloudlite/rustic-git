@@ -17,6 +17,10 @@ const nextConfig: NextConfig = {
      so the runtime image carries the app and its runtime deps, not the toolchain. */
   output: "standalone",
   poweredByHeader: false,
+  /* Dev only (ignored by `next build`): the dev server is served through the real ingress from
+     the dev pod, and Next refuses its own HMR/chunk requests from any origin but localhost
+     unless the host is named here — one warning per chunk otherwise. */
+  allowedDevOrigins: ["dev.kloudlite.io"],
   headers: async () => [{ source: "/(.*)", headers: SECURITY_HEADERS }],
   experimental: {
     // The radix-ui monopackage re-exports everything; without this, one import
