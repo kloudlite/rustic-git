@@ -10,7 +10,8 @@
 //!    a Nixhub lock costs the agent one `nix copy`, no nixpkgs evaluation at all.
 //! 3. **The mirror** (`index/pkgs/versions.json`, refreshed by the admin tier). It has `rev` and
 //!    `attr_path` but no store path, so a mirror lock costs the agent a full nixpkgs evaluation
-//!    (~28 s cold) on every node that builds it. Correct, just slower — hence second.
+//!    (~28 s cold) on every node that builds it. Correct, just slower — hence second, and hence
+//!    never cached (see `Resolver::store`).
 //!
 //! Nothing here guesses. Unknown everywhere is a refusal naming the nearest versions; unavailable
 //! everywhere is a refusal to write at all, because a workspace with a wrong lock is worse than a
@@ -64,6 +65,9 @@ pub trait Index: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
+    /// The entry is not something we can resolve at all — bad grammar, or no `@version` on an
+    /// entry only pinned entries may reach. The caller's bug or the person's typo: a 400.
+    Malformed(String),
     /// Nobody published this. `nearest` is the three closest versions that DO exist.
     Unknown { entry: String, nearest: Vec<String> },
     /// Every index failed and no cache entry covered it. Nothing is written.
@@ -73,11 +77,16 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Refusal::Malformed(e) => write!(f, "{e} is not a package pinned to a version"),
             Refusal::Unknown { entry, nearest } if nearest.is_empty() => {
                 write!(f, "{entry} is not a version anyone published")
             }
             Refusal::Unknown { entry, nearest } => {
-                write!(f, "{entry} is not a version anyone published; nearest: {}", nearest.join(", "))
+                write!(
+                    f,
+                    "{entry} is not a version anyone published; nearest: {}",
+                    nearest.join(", ")
+                )
             }
             Refusal::Unavailable => write!(f, "the package index is unavailable; try again"),
         }
@@ -111,7 +120,7 @@ impl Index for Nixhub {
             return Err(format!("nixhub answered {}", r.status()));
         }
         let body: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
-        Ok(nixhub_lock(attr, version, &body))
+        nixhub_lock(attr, version, &body)
     }
 
     async fn versions(&self, attr: &str) -> Result<Vec<String>, String> {
@@ -133,32 +142,59 @@ impl Index for Nixhub {
         // scrambled by our numeric comparison.
         Ok(body["releases"]
             .as_array()
-            .map(|rs| rs.iter().filter_map(|r| r["version"].as_str().map(str::to_string)).collect())
+            .map(|rs| {
+                rs.iter()
+                    .filter_map(|r| r["version"].as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default())
     }
 }
 
-/// The shape verified against the live API on 2026-09-08. A body that does not carry our system
-/// is `None` — the version exists, just not for us, which is "unknown" from here.
-fn nixhub_lock(attr: &str, version: &VersionReq, body: &serde_json::Value) -> Option<Lock> {
-    let sys = body["systems"].get(SYSTEM)?;
+/// The shape verified against the live API on 2026-09-08.
+///
+/// Two different failures, deliberately kept apart: a body that simply does not carry OUR system
+/// is `Ok(None)` — the version exists, just not for x86_64-linux, which is "unknown" from here —
+/// while a body that carries the system but is missing a field we need is `Err`. A broken upstream
+/// response is not the person's typo, and answering it with "nobody published that" would send
+/// them hunting for a version that exists.
+fn nixhub_lock(
+    attr: &str,
+    version: &VersionReq,
+    body: &serde_json::Value,
+) -> Result<Option<Lock>, String> {
+    let Some(sys) = body["systems"].get(SYSTEM) else {
+        return Ok(None);
+    };
     let inst = &sys["flake_installable"];
-    let outputs = sys["outputs"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let outputs = sys["outputs"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let store_path = outputs
         .iter()
         .find(|o| o["default"].as_bool() == Some(true))
         .or(outputs.first())
-        .and_then(|o| o["path"].as_str())
-        .unwrap_or_default();
-    Some(Lock {
+        .and_then(|o| o["path"].as_str());
+    let (Some(v), Some(attr_path), Some(rev), Some(store_path)) = (
+        body["version"].as_str(),
+        inst["attr_path"].as_str(),
+        inst["ref"]["rev"].as_str(),
+        store_path,
+    ) else {
+        return Err(format!(
+            "nixhub answered for {attr} without version, attr_path, rev or an output path"
+        ));
+    };
+    Ok(Some(Lock {
         entry: entry_string(attr, version),
-        version: body["version"].as_str()?.to_string(),
-        attr_path: inst["attr_path"].as_str()?.to_string(),
-        rev: inst["ref"]["rev"].as_str()?.to_string(),
+        version: v.to_string(),
+        attr_path: attr_path.to_string(),
+        rev: rev.to_string(),
         store_path: store_path.to_string(),
         resolved_at: String::new(), // stamped by the Resolver, the one holder of the clock
         source: LockSource::Nixhub,
-    })
+    }))
 }
 
 fn entry_string(attr: &str, version: &VersionReq) -> String {
@@ -196,7 +232,10 @@ impl Mirror {
                 .filter(|r| r.version == *p || r.version.starts_with(&format!("{p}.")))
                 .collect(),
         };
-        under.into_iter().max_by_key(|r| numeric(&r.version)).cloned()
+        under
+            .into_iter()
+            .max_by_key(|r| numeric(&r.version))
+            .cloned()
     }
 
     async fn index(&self) -> Result<MirrorIndex, String> {
@@ -253,16 +292,24 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    pub async fn lock_one(&self, entry: &str) -> Result<Lock, Refusal> {
-        // Callers pass entries that already parsed and already carry a version (`pinned`), so a
-        // failure here is a bug upstream, not something to guess a lock for.
-        let Some(req) = parse_entry(entry).ok().and_then(|e| e.version.map(|v| (e.attr, v))) else {
-            return Err(Refusal::Unknown { entry: entry.to_string(), nearest: vec![] });
+    /// One entry. `skip_cache` is the update route's whole point: the cache is what makes an
+    /// ordinary write cheap, and it is exactly what would make "update my packages" a no-op for
+    /// the next 24 h.
+    pub async fn lock_one(&self, entry: &str, skip_cache: bool) -> Result<Lock, Refusal> {
+        // Callers pass entries that already parsed and already carry a version (`pinned`), so
+        // anything else is a bug upstream or a typo — never something to guess a lock for, and
+        // never "nobody published that", which would send a person hunting for a version.
+        let Some((attr, req)) = parse_entry(entry)
+            .ok()
+            .and_then(|e| e.version.map(|v| (e.attr, v)))
+        else {
+            return Err(Refusal::Malformed(entry.to_string()));
         };
-        let (attr, req) = req;
 
-        if let Some(lock) = self.cached(&attr, &req).await {
-            return Ok(lock);
+        if !skip_cache {
+            if let Some(lock) = self.cached(&attr, &req).await {
+                return Ok(lock);
+            }
         }
 
         let mut unavailable = false;
@@ -281,13 +328,16 @@ impl Resolver {
             // At least one index could not answer, so "unknown" would be a lie.
             return Err(Refusal::Unavailable);
         }
-        Err(Refusal::Unknown { entry: entry.to_string(), nearest: self.nearest(&attr, &req).await })
+        Err(Refusal::Unknown {
+            entry: entry.to_string(),
+            nearest: self.nearest(&attr, &req).await,
+        })
     }
 
     /// Locks for `packages`. Entries whose string is unchanged keep their existing lock — editing
     /// one entry must never move another one's version. `refresh_all` is the update route: every
-    /// `@` entry is re-resolved, exact pins included, since a newer nixpkgs revision can build the
-    /// same version.
+    /// `@` entry is re-resolved, exact pins included (a newer nixpkgs revision can build the same
+    /// version), and it bypasses the cache so the answer is actually new.
     pub async fn lock_all(
         &self,
         packages: &[String],
@@ -298,7 +348,7 @@ impl Resolver {
         for p in packages.iter().filter(|p| p.contains('@')) {
             match prev.iter().find(|l| l.entry == *p) {
                 Some(l) if !refresh_all => out.push(l.clone()),
-                _ => out.push(self.lock_one(p).await?),
+                _ => out.push(self.lock_one(p, refresh_all).await?),
             }
         }
         Ok(out)
@@ -314,7 +364,17 @@ impl Resolver {
     }
 
     /// A cache write that fails costs one extra index call later — never the resolution itself.
+    ///
+    /// A MIRROR lock is not written at all: it is a degraded answer (no store path, so every node
+    /// that builds it pays a full nixpkgs evaluation) produced by a Nixhub outage, and caching it
+    /// would outlive the outage by a day. Not caching it means Nixhub is retried on the very next
+    /// resolve, at the cost of re-reading the mirror index while the outage lasts.
+    // ponytail: all-or-nothing by source; give mirror locks their own short TTL if the mirror read
+    // ever shows up as a cost.
     async fn store(&self, attr: &str, req: &VersionReq, lock: &Lock) {
+        if lock.source == LockSource::Mirror {
+            return;
+        }
         let key = OsPath::from(cache_key(attr, req));
         if let Ok(bytes) = serde_json::to_vec(lock) {
             let _ = self.cache.put(&key, PutPayload::from(bytes)).await;
@@ -327,11 +387,19 @@ impl Resolver {
             Ok(v) if !v.is_empty() => v,
             _ => self.mirror.versions(attr).await.unwrap_or_default(),
         };
-        let want = req_str(req);
+        let VersionReq::Prefix(want) = req else {
+            // `@latest` is not near anything in particular: the newest three ARE the answer, in
+            // the order the index gave them.
+            all.truncate(3);
+            return all;
+        };
         // Shared prefix first (`20.99` is nearer 20.x than 18.x whatever the arithmetic says),
         // then numeric distance component by component.
         all.sort_by_key(|v| {
-            (std::cmp::Reverse(shared_prefix(want, v)), distance(&numeric(want), &numeric(v)))
+            (
+                std::cmp::Reverse(shared_prefix(want, v)),
+                distance(&numeric(want), &numeric(v)),
+            )
         });
         all.truncate(3);
         all
@@ -344,7 +412,12 @@ fn shared_prefix(a: &str, b: &str) -> usize {
 
 fn distance(a: &[u64], b: &[u64]) -> Vec<u64> {
     (0..a.len().max(b.len()))
-        .map(|i| a.get(i).copied().unwrap_or(0).abs_diff(b.get(i).copied().unwrap_or(0)))
+        .map(|i| {
+            a.get(i)
+                .copied()
+                .unwrap_or(0)
+                .abs_diff(b.get(i).copied().unwrap_or(0))
+        })
         .collect()
 }
 
@@ -360,7 +433,11 @@ mod tests {
             version: version.into(),
             attr_path: "nodejs_20".into(),
             rev: "389ed853".into(),
-            store_path: if source == LockSource::Nixhub { "/nix/store/x-nodejs".into() } else { String::new() },
+            store_path: if source == LockSource::Nixhub {
+                "/nix/store/x-nodejs".into()
+            } else {
+                String::new()
+            },
             resolved_at: String::new(),
             source,
         }
@@ -373,6 +450,7 @@ mod tests {
         /// Everything fails — an index that is up but knows nothing is `answers` returning None.
         down: bool,
         panic_on_call: bool,
+        /// Every call, `resolve` and `versions` alike, so a test can pin which index was asked.
         calls: AtomicUsize,
     }
 
@@ -387,27 +465,43 @@ mod tests {
             }
         }
         fn down() -> Self {
-            FakeIndex { down: true, ..Default::default() }
+            FakeIndex {
+                down: true,
+                ..Default::default()
+            }
+        }
+        fn knows(mut self, attr: &str, versions: &[&str]) -> Self {
+            self.versions.insert(
+                attr.into(),
+                versions.iter().map(|s| s.to_string()).collect(),
+            );
+            self
         }
         fn count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+        fn enter(&self) -> Result<(), String> {
+            assert!(!self.panic_on_call, "this index must not be asked");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.down {
+                return Err("down".into());
+            }
+            Ok(())
         }
     }
 
     #[async_trait]
     impl Index for FakeIndex {
         async fn resolve(&self, attr: &str, version: &VersionReq) -> Result<Option<Lock>, String> {
-            assert!(!self.panic_on_call, "this index must not be asked");
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.down {
-                return Err("down".into());
-            }
-            Ok(self.answers.get(&(attr.to_string(), req_str(version).to_string())).cloned().flatten())
+            self.enter()?;
+            Ok(self
+                .answers
+                .get(&(attr.to_string(), req_str(version).to_string()))
+                .cloned()
+                .flatten())
         }
         async fn versions(&self, attr: &str) -> Result<Vec<String>, String> {
-            if self.down {
-                return Err("down".into());
-            }
+            self.enter()?;
             Ok(self.versions.get(attr).cloned().unwrap_or_default())
         }
     }
@@ -420,25 +514,36 @@ mod tests {
     }
 
     fn resolver(nixhub: Arc<dyn Index>, mirror: Arc<dyn Index>) -> Resolver {
-        Resolver { cache: Arc::new(InMemory::new()), nixhub, mirror, now }
+        Resolver {
+            cache: Arc::new(InMemory::new()),
+            nixhub,
+            mirror,
+            now,
+        }
     }
 
     async fn put_cache(r: &Resolver, attr: &str, req: &VersionReq, l: &Lock) {
         r.cache
-            .put(&OsPath::from(cache_key(attr, req)), PutPayload::from(serde_json::to_vec(l).unwrap()))
+            .put(
+                &OsPath::from(cache_key(attr, req)),
+                PutPayload::from(serde_json::to_vec(l).unwrap()),
+            )
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn a_hit_in_the_cache_asks_nobody() {
-        let never = Arc::new(FakeIndex { panic_on_call: true, ..Default::default() });
+        let never = Arc::new(FakeIndex {
+            panic_on_call: true,
+            ..Default::default()
+        });
         let r = resolver(never.clone(), never);
         let mut cached = lock("nodejs@20", "20.20.2", LockSource::Nixhub);
         cached.resolved_at = at("2026-09-08T09:00:00Z").to_rfc3339();
         put_cache(&r, "nodejs", &VersionReq::Prefix("20".into()), &cached).await;
 
-        assert_eq!(r.lock_one("nodejs@20").await.unwrap(), cached);
+        assert_eq!(r.lock_one("nodejs@20", false).await.unwrap(), cached);
     }
 
     #[tokio::test]
@@ -450,11 +555,36 @@ mod tests {
         )]));
         let r = resolver(nix.clone(), Arc::new(FakeIndex::default()));
 
-        let first = r.lock_one("nodejs@20").await.unwrap();
+        let first = r.lock_one("nodejs@20", false).await.unwrap();
         assert_eq!(first.version, "20.20.2");
         assert_eq!(first.resolved_at, now().to_rfc3339());
-        assert_eq!(r.lock_one("nodejs@20").await.unwrap(), first);
+        assert_eq!(r.lock_one("nodejs@20", false).await.unwrap(), first);
         assert_eq!(nix.count(), 1, "the second answer came from the cache");
+    }
+
+    #[tokio::test]
+    async fn skipping_the_cache_re_resolves_and_refreshes_it() {
+        let nix = Arc::new(FakeIndex::with(&[(
+            "nodejs",
+            "20",
+            Some(lock("nodejs@20", "20.20.2", LockSource::Nixhub)),
+        )]));
+        let r = resolver(nix.clone(), Arc::new(FakeIndex::default()));
+        let mut stale = lock("nodejs@20", "20.5.0", LockSource::Nixhub);
+        stale.resolved_at = at("2026-09-08T11:00:00Z").to_rfc3339(); // fresh, an hour old
+        put_cache(&r, "nodejs", &VersionReq::Prefix("20".into()), &stale).await;
+
+        assert_eq!(
+            r.lock_one("nodejs@20", true).await.unwrap().version,
+            "20.20.2"
+        );
+        assert_eq!(nix.count(), 1);
+        // and the fresh answer replaced the cached one, so the next ordinary read sees it too
+        assert_eq!(
+            r.lock_one("nodejs@20", false).await.unwrap().version,
+            "20.20.2"
+        );
+        assert_eq!(nix.count(), 1);
     }
 
     #[tokio::test]
@@ -466,22 +596,37 @@ mod tests {
         )]));
         let r = resolver(Arc::new(FakeIndex::down()), mirror);
 
-        let l = r.lock_one("python3@3.11").await.unwrap();
+        let l = r.lock_one("python3@3.11", false).await.unwrap();
         assert_eq!(l.source, LockSource::Mirror);
         assert_eq!(l.store_path, "");
     }
 
     #[tokio::test]
-    async fn unknown_everywhere_is_a_refusal_naming_the_nearest_versions() {
-        let mut nix = FakeIndex::with(&[("nodejs", "20.99", None)]);
-        nix.versions.insert(
-            "nodejs".into(),
-            ["20.20.2", "20.19.5", "20.18.3", "18.1.0"].iter().map(|s| s.to_string()).collect(),
+    async fn a_mirror_lock_is_never_cached_so_nixhub_is_retried() {
+        let mirror = Arc::new(FakeIndex::with(&[(
+            "python3",
+            "3.11",
+            Some(lock("python3@3.11", "3.11.9", LockSource::Mirror)),
+        )]));
+        let r = resolver(Arc::new(FakeIndex::down()), mirror.clone());
+
+        r.lock_one("python3@3.11", false).await.unwrap();
+        r.lock_one("python3@3.11", false).await.unwrap();
+        assert_eq!(
+            mirror.count(),
+            2,
+            "a degraded answer must not outlive the outage"
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_everywhere_is_a_refusal_naming_the_nearest_versions() {
+        let nix = FakeIndex::with(&[("nodejs", "20.99", None)])
+            .knows("nodejs", &["20.20.2", "20.19.5", "20.18.3", "18.1.0"]);
         let r = resolver(Arc::new(nix), Arc::new(FakeIndex::default()));
 
         assert_eq!(
-            r.lock_one("nodejs@20.99").await.unwrap_err(),
+            r.lock_one("nodejs@20.99", false).await.unwrap_err(),
             Refusal::Unknown {
                 entry: "nodejs@20.99".into(),
                 nearest: vec!["20.20.2".into(), "20.19.5".into(), "20.18.3".into()],
@@ -490,9 +635,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nearest_for_latest_is_the_index_order_untouched() {
+        let nix = FakeIndex::with(&[("nodejs", "latest", None)])
+            .knows("nodejs", &["26.8.1", "24.2.0", "22.1.0", "20.20.2"]);
+        let r = resolver(Arc::new(nix), Arc::new(FakeIndex::default()));
+
+        let Refusal::Unknown { nearest, .. } =
+            r.lock_one("nodejs@latest", false).await.unwrap_err()
+        else {
+            panic!("expected Unknown")
+        };
+        assert_eq!(nearest, vec!["26.8.1", "24.2.0", "22.1.0"]);
+    }
+
+    #[tokio::test]
+    async fn nearest_asks_nixhub_and_falls_back_to_the_mirror() {
+        // nixhub knows the versions: the mirror is asked to RESOLVE and nothing more.
+        let mirror = Arc::new(FakeIndex::with(&[("nodejs", "20.99", None)]));
+        let nix = FakeIndex::with(&[("nodejs", "20.99", None)]).knows("nodejs", &["20.20.2"]);
+        let r = resolver(Arc::new(nix), mirror.clone());
+        r.lock_one("nodejs@20.99", false).await.unwrap_err();
+        assert_eq!(
+            mirror.count(),
+            1,
+            "nixhub answered nearest, so the mirror was only resolved"
+        );
+
+        // nixhub knows none: the mirror answers nearest too.
+        let mirror = Arc::new(
+            FakeIndex::with(&[("nodejs", "20.99", None)]).knows("nodejs", &["20.20.2", "18.1.0"]),
+        );
+        let r = resolver(
+            Arc::new(FakeIndex::with(&[("nodejs", "20.99", None)])),
+            mirror.clone(),
+        );
+        assert_eq!(
+            r.lock_one("nodejs@20.99", false).await.unwrap_err(),
+            Refusal::Unknown {
+                entry: "nodejs@20.99".into(),
+                nearest: vec!["20.20.2".into(), "18.1.0".into()],
+            }
+        );
+        assert_eq!(mirror.count(), 2, "resolve, then versions");
+    }
+
+    #[tokio::test]
     async fn unavailable_everywhere_with_no_cache_is_unavailable() {
         let r = resolver(Arc::new(FakeIndex::down()), Arc::new(FakeIndex::down()));
-        assert_eq!(r.lock_one("nodejs@20").await.unwrap_err(), Refusal::Unavailable);
+        assert_eq!(
+            r.lock_one("nodejs@20", false).await.unwrap_err(),
+            Refusal::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entry_that_is_not_a_pinned_package_is_malformed_not_unknown() {
+        let never = Arc::new(FakeIndex {
+            panic_on_call: true,
+            ..Default::default()
+        });
+        let r = resolver(never.clone(), never);
+
+        assert_eq!(
+            r.lock_one("nodejs", false).await.unwrap_err(),
+            Refusal::Malformed("nodejs".into()),
+            "no version to resolve"
+        );
+        assert_eq!(
+            r.lock_one("nodejs@^20", false).await.unwrap_err(),
+            Refusal::Malformed("nodejs@^20".into()),
+        );
     }
 
     #[tokio::test]
@@ -508,32 +720,56 @@ mod tests {
         stale.resolved_at = at("2026-09-07T11:00:00Z").to_rfc3339(); // 25 h old
         put_cache(&r, "nodejs", &VersionReq::Prefix("20".into()), &stale).await;
 
-        assert_eq!(r.lock_one("nodejs@20").await.unwrap().version, "20.20.2");
+        assert_eq!(
+            r.lock_one("nodejs@20", false).await.unwrap().version,
+            "20.20.2"
+        );
         assert_eq!(nix.count(), 1);
     }
 
     #[tokio::test]
     async fn lock_all_keeps_untouched_locks_and_resolves_only_new_entries() {
         let nix = Arc::new(FakeIndex::with(&[
-            ("nodejs", "20", Some(lock("nodejs@20", "20.20.2", LockSource::Nixhub))),
-            ("python3", "3.11", Some(lock("python3@3.11", "3.11.9", LockSource::Nixhub))),
+            (
+                "nodejs",
+                "20",
+                Some(lock("nodejs@20", "20.20.2", LockSource::Nixhub)),
+            ),
+            (
+                "python3",
+                "3.11",
+                Some(lock("python3@3.11", "3.11.9", LockSource::Nixhub)),
+            ),
         ]));
         let r = resolver(nix.clone(), Arc::new(FakeIndex::default()));
 
         let mut prev = lock("nodejs@20", "20.5.0", LockSource::Nixhub);
         prev.resolved_at = at("2026-01-01T00:00:00Z").to_rfc3339();
-        let packages: Vec<String> =
-            ["nodejs@20", "jq", "python3@3.11"].iter().map(|s| s.to_string()).collect();
+        let packages: Vec<String> = ["nodejs@20", "jq", "python3@3.11"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
-        let locks = r.lock_all(&packages, std::slice::from_ref(&prev), false).await.unwrap();
+        let locks = r
+            .lock_all(&packages, std::slice::from_ref(&prev), false)
+            .await
+            .unwrap();
         assert_eq!(locks.len(), 2, "the bare entry gets no lock");
-        assert_eq!(locks[0], prev, "an untouched entry keeps its lock, however old");
+        assert_eq!(
+            locks[0], prev,
+            "an untouched entry keeps its lock, however old"
+        );
         assert_eq!(locks[1].version, "3.11.9");
         assert_eq!(nix.count(), 1);
 
-        let refreshed = r.lock_all(&packages, std::slice::from_ref(&prev), true).await.unwrap();
+        let refreshed = r
+            .lock_all(&packages, std::slice::from_ref(&prev), true)
+            .await
+            .unwrap();
         assert_eq!(refreshed[0].version, "20.20.2");
-        assert_eq!(nix.count(), 2, "python3 came from the cache, nodejs was re-resolved");
+        // BOTH went to the index: an update that answered from the cache would be a no-op for a
+        // day, which is exactly what the update route exists not to be.
+        assert_eq!(nix.count(), 3);
     }
 
     #[test]
@@ -548,26 +784,52 @@ mod tests {
         .unwrap();
 
         let got = Mirror::pick(&index, "nodejs", &VersionReq::Prefix("20".into())).unwrap();
-        assert_eq!((got.version.as_str(), got.rev.as_str(), got.attr_path.as_str()), ("20.20.2", "bbb", "nodejs_20"));
-        assert_eq!(Mirror::pick(&index, "nodejs", &VersionReq::Latest).unwrap().version, "200.0.1");
+        assert_eq!(
+            (
+                got.version.as_str(),
+                got.rev.as_str(),
+                got.attr_path.as_str()
+            ),
+            ("20.20.2", "bbb", "nodejs_20")
+        );
+        assert_eq!(
+            Mirror::pick(&index, "nodejs", &VersionReq::Latest)
+                .unwrap()
+                .version,
+            "200.0.1"
+        );
         assert_eq!(Mirror::pick(&index, "ruby", &VersionReq::Latest), None);
     }
 
     #[test]
-    fn a_nixhub_body_without_our_system_is_unknown() {
+    fn a_nixhub_body_without_our_system_is_unknown_but_a_broken_one_is_an_error() {
+        let req = VersionReq::Prefix("20".into());
         let body: serde_json::Value = serde_json::from_str(
             r#"{"name":"nodejs","version":"20.20.2","systems":{"aarch64-darwin":{}}}"#,
         )
         .unwrap();
-        assert_eq!(nixhub_lock("nodejs", &VersionReq::Prefix("20".into()), &body), None);
+        assert_eq!(nixhub_lock("nodejs", &req, &body), Ok(None));
+
+        // our system, but no revision: upstream is broken, not the person's version
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"version":"20.20.2","systems":{"x86_64-linux":{
+                 "flake_installable":{"ref":{},"attr_path":"nodejs_20"},
+                 "outputs":[{"name":"out","path":"/nix/store/o","default":true}]}}}"#,
+        )
+        .unwrap();
+        assert!(nixhub_lock("nodejs", &req, &body).is_err());
 
         let body: serde_json::Value = serde_json::from_str(
             r#"{"version":"20.20.2","systems":{"x86_64-linux":{
                  "flake_installable":{"ref":{"rev":"389ed85"},"attr_path":"nodejs_20"},
-                 "outputs":[{"name":"lib","path":"/nix/store/l"},{"name":"out","path":"/nix/store/o","default":true}]}}}"#,
+                 "outputs":[{"name":"lib","path":"/nix/store/l"},
+                            {"name":"out","path":"/nix/store/o","default":true}]}}}"#,
         )
         .unwrap();
-        let l = nixhub_lock("nodejs", &VersionReq::Prefix("20".into()), &body).unwrap();
-        assert_eq!((l.entry.as_str(), l.rev.as_str(), l.store_path.as_str()), ("nodejs@20", "389ed85", "/nix/store/o"));
+        let l = nixhub_lock("nodejs", &req, &body).unwrap().unwrap();
+        assert_eq!(
+            (l.entry.as_str(), l.rev.as_str(), l.store_path.as_str()),
+            ("nodejs@20", "389ed85", "/nix/store/o")
+        );
     }
 }
