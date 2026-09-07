@@ -434,8 +434,10 @@ every caller-shaped value (range, step, region, owner, dimension) through an all
 **The SLO probe is a synthetic user, not a metric.** `bins/slo` (`kloudlite-slo`, its own
 image) walks one tenant's whole day — sign in, push over HTTP and SSH, a PR, the registry, a
 workspace, an environment, the lifecycle verbs, the admin queue, the security refusals, the edge —
-as three `CronJob`s in `deploy/kloudlite.yaml`: `*/5 * * * *` (`Forbid`, 900 s), weekly and
-monthly, all `restartPolicy: Never` / `backoffLimit: 0`, because a failed journey is a SAMPLE
+as four `CronJob`s in `deploy/kloudlite.yaml` on one calendar — fast every 5 min except :05
+(`Forbid`, 900 s), hourly at :02, weekly Sunday 02:12, monthly first Sunday 04:12, each with a
+`startingDeadlineSeconds` so a missed tick is dropped rather than fired into another suite's
+window — all `restartPolicy: Never` / `backoffLimit: 0`, because a failed journey is a SAMPLE
 already counted and a retry would file a second run under a second id. It reports WHILE IT RUNS —
 a `PUT /admin/slo/runs/{id}` after every stage — to the admin process, which stays the single
 writer of the `kloudlite` database; the probe writes no ClickHouse row itself and holds no

@@ -1656,7 +1656,15 @@ data:
   # Empty: that drill skips, like `drill.redis.down` does without its own host.
   KLOUDLITE_SLO_CLICKHOUSE_HOST: ""
 ---
-# The fast suite, every five minutes. `Forbid`: a run that overshoots its window is a symptom, and
+# The fast suite, every five minutes EXCEPT :05 — that minute list is the calendar the four suites
+# share (measured 2026-09-06: fast 50 s, hourly 2.5 min, weekly 15 min, monthly 25 min):
+#   fast    :00 :10 :15 … :55        hourly :02  (owns :02–:10, three times its runtime)
+#   weekly  Sunday 02:12            monthly Sunday 04:12 (first Sunday; the binary no-ops the rest)
+# so on a normal day no two suites are ever up together; the fast ticks that fall inside a
+# weekly or monthly YIELD (a `yielded` run, not a sample), which no calendar can avoid for a
+# 5-minute cron. `startingDeadlineSeconds`: a tick missed under a suspend or a roll is dropped,
+# never fired late into another suite's window — an un-suspend fired a missed tick straight into
+# a rollout on 2026-09-06. `Forbid`: a run that overshoots its window is a symptom, and
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
 # `activeDeadlineSeconds: 900`: every step's ceiling sits at or above its catalogue target so a
 # slow answer is recorded as a breach with a number rather than cut off, and those ceilings sum
@@ -1672,7 +1680,8 @@ spec:
   # otherwise never undone by `deploy/roll.sh` (a field absent from the yaml is a field apply
   # leaves alone), and the five-minute probe stayed off for three hours on 2026-09-06.
   suspend: false
-  schedule: "*/5 * * * *"
+  schedule: "0,10,15,20,25,30,35,40,45,50,55 * * * *"
+  startingDeadlineSeconds: 60
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
@@ -1771,7 +1780,8 @@ spec:
 ---
 # The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
 # person can perform (packages, teams, invitations, branch protection, a two-service environment,
-# an approved quota request). `:07` so it never shares a minute with the fast suite's own tick.
+# an approved quota request). `:02`, inside the :02–:10 hole the fast suite's minute list leaves,
+# so the two never run together on a normal day (see the fast CronJob for the whole calendar).
 # `activeDeadlineSeconds: 3540`: the fast journey plus ~25 more steps, several of which wait out a
 # workspace start or an environment with two services.
 # two probes racing would delete each other's `run-{id}` objects and report both as broken.
@@ -1789,7 +1799,8 @@ spec:
   # team, two environments and a seeded workspace at once; a fast run that starts while it is in
   # flight yields (`suite::hourly_in_flight`) rather than fight it for a node's cpu.
   suspend: false
-  schedule: "7 * * * *"
+  schedule: "2 * * * *"
+  startingDeadlineSeconds: 240
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
@@ -1892,8 +1903,8 @@ spec:
                 defaultMode: 0400
 ---
 # The weekly suite: the fast journey plus the heavy checks (large push, cold nix profile,
-# cross-node start) and the control-plane failover drill. 02:00 Sunday UTC — off the fast suite's
-# :00 slot by a schedule Kubernetes will not overlap anyway, and outside anyone's working hours.
+# cross-node start) and the control-plane failover drill. 02:12 Sunday UTC: after the 02:02 hourly
+# has finished and long before the 03:02 one starts (15 min measured), outside working hours.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -1904,7 +1915,8 @@ spec:
   # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
   # unsuspends it by hand once the fast suite has run green for a week.
   suspend: true
-  schedule: "0 2 * * 0"
+  schedule: "12 2 * * 0"
+  startingDeadlineSeconds: 900
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5
@@ -1990,7 +2002,7 @@ spec:
 ---
 # The monthly suite: the backup checks and the destructive drills (dead node, drain, Redis down).
 # Also a SUNDAY schedule, not a day-of-month one — cron cannot say "the first Sunday", so this
-# fires every Sunday at 03:00 and the binary itself returns 0 without running anything when the
+# fires every Sunday at 04:12 and the binary itself returns 0 without running anything when the
 # day of month is past 7 (`parent` in bins/slo/src/main.rs). Three of four firings are a no-op
 # pod, which is far cheaper than a `0 3 1 * *` that runs the drills on a Tuesday afternoon.
 apiVersion: batch/v1
@@ -2003,10 +2015,12 @@ spec:
   # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
   # unsuspends it by hand once the fast suite has run green for a week.
   suspend: true
-  # 04:00, not 03:00: the weekly suite's deadline is now two hours, so an 03:00 monthly could start
-  # while a slow weekly was still holding a node. The drills also wait for each other, and that
-  # stays — this is the belt to that pair of braces.
-  schedule: "0 4 * * 0"
+  # 04:12, two hours after the weekly's 02:12: the weekly's deadline is two hours, so an earlier
+  # monthly could start while a slow weekly was still holding a node; and :12, after the 04:02
+  # hourly. The drills also wait for each other, and that stays — this is the belt to that pair
+  # of braces. A monthly past 50 min makes the 05:02 hourly yield, which is a `yielded` row.
+  schedule: "12 4 * * 0"
+  startingDeadlineSeconds: 900
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 5

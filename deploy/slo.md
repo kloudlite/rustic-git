@@ -1,7 +1,9 @@
 # SLOs
 
 One synthetic user, `kloudlite-slo`, walks this whole table as a Kubernetes `CronJob` — fast
-every 5 min, weekly and monthly add the heavy checks and the resilience drills — and reports each
+every 5 min (except :05), hourly at :02, weekly Sunday 02:12, monthly first Sunday 04:12, a
+calendar on which no two suites run together on a normal day (the fast ticks inside a weekly or
+monthly yield); weekly and monthly add the heavy checks and the resilience drills — and reports each
 step while it runs to the admin process, which computes 30-day attainment, error budget and burn
 rate per row. The catalogue lives in Rust (`crates/workspaces/src/slo/catalogue.rs`); this file is
 its human twin, held equal by `the_catalogue_matches_deploy_slo_md`, exactly as `deploy/alerts.md`
