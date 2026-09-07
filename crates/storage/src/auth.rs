@@ -216,7 +216,10 @@ impl Store {
         self.lookup(token_key(token)).await
     }
 
-    /// Registers a public key's fingerprint against `owner`. The caller (`bins/server`, which alone
+    /// Registers a public key's fingerprint against `owner` — the PERSON the key belongs to, an
+    /// email under a directory (a handle only on a solo node with none). What that person may act
+    /// under is a membership question the git tier asks per connection (`App::may_act`), never
+    /// something this row states. The caller (`bins/server`, which alone
     /// has the ssh dependency — see `bins/server/src/boot.rs::ssh_fingerprint`) has already parsed the
     /// OpenSSH line and computed the fingerprint; `storage` never parses an ssh key itself, so it
     /// stays free of the ssh-key-parsing dependency.
@@ -228,6 +231,7 @@ impl Store {
         Ok(())
     }
 
+    /// The person a fingerprint belongs to; see `add_ssh_key` for why that is not a namespace.
     pub async fn owner_for_fingerprint(&self, fp: &str) -> Result<Option<String>> {
         self.lookup(sshkey_key(fp)).await
     }

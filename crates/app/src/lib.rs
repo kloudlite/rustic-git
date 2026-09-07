@@ -110,7 +110,15 @@ pub struct App {
     /// `cluster/settings` and stores the merged result before serving anything, so the very
     /// first request already sees an admin-set value rather than waiting out the first beat.
     pub central: kloudlite_core::settings::LiveSettings<kloudlite_core::settings::CentralSettings>,
+    /// `may_act` answers, so a fetch or a push is not a directory round trip per connection.
+    /// ponytail: cleared wholesale at the cap, no LRU — same shape and the same numbers as
+    /// `kloudlite_api::browse::Membership`, which explains why a minute of grace is tolerable.
+    membership: std::sync::Mutex<std::collections::HashMap<(String, String), (bool, std::time::Instant)>>,
 }
+
+/// How long a membership answer is believed. Matches `kloudlite_api::browse`.
+const MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MEMBERSHIP_CAP: usize = 10_000;
 
 /// How long after asking the leader about a repo this node will not ask again for the same repo.
 pub const RECOVERY_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -196,6 +204,47 @@ impl App {
             central: kloudlite_core::settings::LiveSettings::new(
                 kloudlite_core::settings::CentralSettings::from_env(),
             ),
+            membership: Default::default(),
+        }
+    }
+
+    /// May `user` (an email) act under `owner` (a handle)? Their own handle, or a team they
+    /// belong to. `Err` when the directory is configured but cannot answer — the caller refuses,
+    /// never falls open. With no directory at all (single-node, `Source::Absent`) only the user's
+    /// own handle matches, and "own handle" is then the fingerprint row's value itself: a solo
+    /// deploy registers keys by handle and has no memberships to check.
+    pub async fn may_act(&self, user: &str, owner: &str) -> Result<bool> {
+        match &self.dir {
+            pulls::Source::Absent => Ok(user == owner),
+            pulls::Source::Unavailable => Err(err("directory unavailable")),
+            pulls::Source::Directory(d) => {
+                let key = (user.to_string(), owner.to_string());
+                if let Some(yes) = self
+                    .membership
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&key)
+                    .filter(|(_, at)| at.elapsed() < MEMBERSHIP_TTL)
+                    .map(|(yes, _)| *yes)
+                {
+                    return Ok(yes);
+                }
+                let own = d
+                    .user(user)
+                    .await
+                    .map_err(|e| err(format!("directory: {e}")))?
+                    .is_some_and(|u| u.username.as_deref() == Some(owner));
+                let yes = own
+                    || d.is_member(user, owner)
+                        .await
+                        .map_err(|e| err(format!("directory: {e}")))?;
+                let mut m = self.membership.lock().unwrap_or_else(|e| e.into_inner());
+                if m.len() >= MEMBERSHIP_CAP {
+                    m.retain(|_, (_, at)| at.elapsed() < MEMBERSHIP_TTL);
+                }
+                m.insert(key, (yes, std::time::Instant::now()));
+                Ok(yes)
+            }
         }
     }
 

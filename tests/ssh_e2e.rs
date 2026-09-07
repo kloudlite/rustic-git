@@ -199,3 +199,60 @@ fn gen_host_key(dir: &tempfile::TempDir) -> russh::keys::PrivateKey {
         .success());
     russh::keys::PrivateKey::from_openssh(std::fs::read_to_string(&p).unwrap()).unwrap()
 }
+
+/// A key belongs to a PERSON. Their own namespace and every team they are a member of accept
+/// it; a namespace they are a stranger to refuses it — decided per connection from the
+/// directory, with nothing copied into the object store but the fingerprint → email row.
+#[tokio::test(flavor = "multi_thread")]
+async fn ssh_admits_a_member_and_refuses_a_stranger() {
+    if !common::have_git() || !common::have_ssh() {
+        eprintln!("skip: git/ssh missing");
+        return;
+    }
+    let e = common::env().await;
+    let s = e.store.clone();
+    s.create_repo("acme", "proj").await.unwrap();
+    s.create_repo("other", "proj").await.unwrap();
+
+    let dir = std::sync::Arc::new(kloudlite_pulls::directory::Directory::in_memory());
+    dir.upsert_user("alice@example.com", "Alice").await.unwrap();
+    dir.claim_username("alice@example.com", "alice").await.unwrap();
+    dir.create("acme", "Acme", "alice@example.com").await.unwrap();
+    dir.upsert_user("bob@example.com", "Bob").await.unwrap();
+    dir.claim_username("bob@example.com", "other").await.unwrap();
+
+    let kd = tempfile::tempdir().unwrap();
+    let key = kd.path().join("id_ed25519");
+    assert!(std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f", key.to_str().unwrap()])
+        .status()
+        .unwrap()
+        .success());
+    let pubkey = std::fs::read_to_string(kd.path().join("id_ed25519.pub")).unwrap();
+    let fp = common::ssh_fingerprint(&pubkey).unwrap();
+    // The row's value is the PERSON, never a namespace.
+    s.add_ssh_key("alice@example.com", &fp).await.unwrap();
+
+    let host_key = gen_host_key(&kd);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let app =
+        common::app_with_directory(s.clone(), kloudlite_pulls::pulls::Source::Directory(dir)).await;
+    tokio::spawn(async move { kloudlite_vcs::ssh::serve(app, l, host_key).await.unwrap() });
+
+    let ssh_cmd = format!(
+        "ssh -i {} -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes",
+        key.display()
+    );
+    let clone = |repo: &str| {
+        std::process::Command::new("git")
+            .args(["clone", &format!("ssh://git@127.0.0.1:{port}/{repo}.git")])
+            .arg(tempfile::tempdir().unwrap().keep())
+            .env("GIT_SSH_COMMAND", &ssh_cmd)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(clone("acme/proj"), "a member's key opens the team's repo");
+    assert!(!clone("other/proj"), "a stranger's key is refused");
+}

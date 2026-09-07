@@ -31,7 +31,7 @@ impl Server for SshServer {
     fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Conn {
         Conn {
             app: self.app.clone(),
-            owner: None,
+            user: None,
             channels: HashMap::new(),
             env_v2: HashMap::new(),
         }
@@ -40,7 +40,8 @@ impl Server for SshServer {
 
 struct Conn {
     app: Arc<App>,
-    owner: Option<String>,
+    /// The person the key belongs to — an email under a directory, a handle on a solo node.
+    user: Option<String>,
     channels: HashMap<ChannelId, Channel<Msg>>,
     /// GIT_PROTOCOL=version=2 is per-channel: one channel setting it must not make a later
     /// channel on the same connection look v2-capable.
@@ -57,7 +58,7 @@ impl Handler for Conn {
         let fp = key.fingerprint(HashAlg::Sha256).to_string();
         match self.app.store.owner_for_fingerprint(&fp).await? {
             Some(o) => {
-                self.owner = Some(o);
+                self.user = Some(o);
                 Ok(Auth::Accept)
             }
             None => Ok(Auth::reject()),
@@ -131,10 +132,10 @@ impl Handler for Conn {
         let handle = session.handle();
         let cmd = String::from_utf8_lossy(data).to_string();
         let app = self.app.clone();
-        let auth_owner = self.owner.clone();
+        let auth_user = self.user.clone();
         let v2 = self.env_v2.remove(&id).unwrap_or(false);
         tokio::spawn(async move {
-            if let Err(e) = run(app, auth_owner, &cmd, v2, channel, &handle, id).await {
+            if let Err(e) = run(app, auth_user, &cmd, v2, channel, &handle, id).await {
                 let _ = handle
                     .extended_data(id, 1, format!("kloudlite: {e}\n").into_bytes())
                     .await;
@@ -158,7 +159,7 @@ fn parse_cmd(cmd: &str) -> Option<(&str, &str)> {
 
 async fn run(
     app: Arc<App>,
-    auth_owner: Option<String>,
+    auth_user: Option<String>,
     cmd: &str,
     v2: bool,
     channel: Channel<Msg>,
@@ -168,9 +169,17 @@ async fn run(
     let (service, path) = parse_cmd(cmd).ok_or_else(|| crate::err("unsupported command"))?;
     let (owner, name) =
         crate::protocol::parse_repo_path(path).ok_or_else(|| crate::err("invalid repo path"))?;
-    // SSH always authenticates a key, so there is no anonymous SSH to admit; `false` here keeps
-    // that true regardless of visibility, which is what lets the `.expect` below stay sound.
-    if !crate::auth::authorize(auth_owner.as_deref(), &owner, false) {
+    // The key names a PERSON; whether they may act under this namespace is a directory answer,
+    // made per connection and cached a minute in `App::may_act`. A directory error refuses:
+    // SSH always authenticates a key, so there is no anonymous path to fall back to.
+    let Some(user) = auth_user.as_deref() else {
+        return Err(crate::err("access denied"));
+    };
+    if !app
+        .may_act(user, &owner)
+        .await
+        .map_err(|_| crate::err("directory unavailable"))?
+    {
         return Err(crate::err("access denied"));
     }
     if service == "git-upload-pack" && !v2 {
@@ -188,7 +197,9 @@ async fn run(
         // repo that was deleted. `open_repo` checks the prefix, so nothing is opened.
         crate::ownership::Route::Missing => {}
         crate::ownership::Route::Peer(peer) => {
-            let authed = auth_owner.clone().expect("authorize() passed, so the owner is set");
+            // Membership was verified here, so the repo's own owner is the identity to forward:
+            // the peer's HTTP path authorizes `trusted == repo_owner`, not a person.
+            let authed = owner.clone();
             // The stream lives until after the exit status is sent: dropping it closes the channel.
             let mut stream = channel.into_stream();
             let piped = crate::proxy::stream_to_peer(

@@ -71,6 +71,13 @@ pub async fn env_cached() -> TestEnv {
 /// An App for tests that are not about routing: this node takes the lease on its first beat, so
 /// it is the leader and every claim is decided locally against its own ownership database.
 pub async fn app(store: Arc<Store>) -> Arc<kloudlite_app::App> {
+    app_with_directory(store, kloudlite_pulls::pulls::Source::Absent).await
+}
+
+pub async fn app_with_directory(
+    store: Arc<Store>,
+    dir: kloudlite_pulls::pulls::Source,
+) -> Arc<kloudlite_app::App> {
     let ownership = kloudlite_storage::ownership::OwnershipStore::open(store.os.clone());
     let app = kloudlite_app::App::new(
         store,
@@ -79,7 +86,7 @@ pub async fn app(store: Arc<Store>) -> Arc<kloudlite_app::App> {
         // Nothing is ever forwarded here: this node owns whatever it claims.
         Arc::new(|_| "127.0.0.1:1".to_string()),
         "test-peer-secret".into(),
-        kloudlite_pulls::pulls::Source::Absent,
+        dir,
     );
     // One beat: with nobody else on this store the node takes the lease and every claim is local.
     app.election_tick().await.unwrap();

@@ -154,6 +154,12 @@ impl Directory {
         }
     }
 
+    /// Is `email` a member of team `slug`, at any role. One read, no cache: the callers that need
+    /// one (the git tier's ssh path) keep their own, so this stays the truth.
+    pub async fn is_member(&self, email: &str, slug: &str) -> Result<bool> {
+        Ok(self.get(slug).await?.is_some_and(|t| Self::role_of(&t, email).is_some()))
+    }
+
     /// Every team `user` belongs to, newest first.
     pub async fn for_user(&self, user: &str) -> Result<Vec<Team>> {
         use futures::TryStreamExt;
