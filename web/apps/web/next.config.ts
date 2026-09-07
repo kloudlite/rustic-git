@@ -17,6 +17,11 @@ const nextConfig: NextConfig = {
      so the runtime image carries the app and its runtime deps, not the toolchain. */
   output: "standalone",
   poweredByHeader: false,
+  /* Dev only: chunk URLs under a prefix the browser has never seen. Dev chunk names are
+     stable across rebuilds, and copies cached before `/_next` became no-store (below) sit
+     in browsers with a four-hour TTL; a new prefix sidesteps them without anyone clearing
+     a cache. Production chunk names are content-hashed and need no prefix. */
+  ...(process.env.NODE_ENV === "development" ? { assetPrefix: "/dev-assets" } : {}),
   /* Dev only (ignored by `next build`): the dev server is served through the real ingress from
      the dev pod, and Next refuses its own HMR/chunk requests from any origin but localhost
      unless the host is named here — one warning per chunk otherwise. */
@@ -32,7 +37,7 @@ const nextConfig: NextConfig = {
        factory is not available"). `no-store` is the one directive every layer honours.
        Production chunk names are content-hashed and keep their long TTL. */
     ...(process.env.NODE_ENV === "development"
-      ? [{ source: "/_next/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] }]
+      ? [{ source: "/(dev-assets/)?_next/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] }]
       : []),
   ],
   experimental: {
