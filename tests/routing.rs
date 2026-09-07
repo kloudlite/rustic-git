@@ -46,6 +46,13 @@ async fn node(
                 .find(|(x, _)| x == n)
                 .map(|(_, a)| a.clone())
                 .unwrap_or_else(|| "127.0.0.1:1".into());
+            // A fleet member the test never started is still PARKED: its listeners are bound
+            // (that is what reserves the port) and the kernel completes a handshake into their
+            // backlog, so a forward to it would wait for an answer nobody serves — the zero-CPU
+            // 45-minute stalls of 2026-09-07. A parked address is a node that is down: refused.
+            if park().lock().unwrap().contains_key(&addr) {
+                return "127.0.0.1:1".into();
+            }
             // A blackholed address resolves to a refused port: how a test takes a node off the
             // network without stopping a listener other tests may be sharing the port space with.
             if blackholed().lock().unwrap().contains(&addr) {
