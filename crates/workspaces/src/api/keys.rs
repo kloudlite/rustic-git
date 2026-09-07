@@ -37,27 +37,46 @@ pub async fn project(s: &ApiState, owner: &str) -> Result<(), String> {
     .map_err(|e| format!("writing OwnerKeys/{owner}: {e}"))
 }
 
-/// Every owner that has a namespace in this region — the owner label is what the controller
-/// stamps, so a team the api never heard of is still covered.
+/// The owner set the beat projects, from the truth rather than from a label: a TEAM workspace's
+/// namespace is stamped with the PERSON's handle, so the namespace labels never name a team and a
+/// team's projection would never be healed.
+///
+/// Every `OwnerKeys` that already exists is unioned in, so an object stays synced after the last
+/// workspace that justified it is gone — revoking a key must still reach the file on disk.
+fn owner_set(workspaces: impl IntoIterator<Item = (String, String)>, existing: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = existing;
+    for (owner, team) in workspaces {
+        out.push(owner);
+        if !team.is_empty() {
+            out.push(team);
+        }
+    }
+    out.retain(|o| !o.is_empty());
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub async fn project_all(s: &ApiState) {
     let Some(c) = s.kube.as_ref() else { return };
-    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
-    let sel = format!("{}=workspace", crate::k8s::KIND_LABEL);
-    let list = match api.list(&kube::api::ListParams::default().labels(&sel)).await {
-        Ok(l) => l,
+    // A failed list SKIPS that source rather than projecting a smaller set: this beat only ever
+    // rewrites objects, so missing one is a late projection, while guessing at the set is not
+    // something a lost list can make safe.
+    let pairs = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => l.items.into_iter().map(|w| (w.spec.owner, w.spec.team)).collect(),
         Err(e) => {
-            tracing::warn!(kind = "Namespace", error = %e, "listing.failed");
-            return;
+            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
+            Vec::new()
         }
     };
-    let mut owners: Vec<String> = list
-        .items
-        .iter()
-        .filter_map(|n| n.metadata.labels.as_ref()?.get(crate::k8s::OWNER_LABEL).cloned())
-        .collect();
-    owners.sort();
-    owners.dedup();
-    for o in owners {
+    let existing = match Api::<crd::OwnerKeys>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => l.items.iter().filter_map(|o| o.metadata.name.clone()).collect(),
+        Err(e) => {
+            tracing::warn!(kind = "OwnerKeys", error = %e, "listing.failed");
+            Vec::new()
+        }
+    };
+    for o in owner_set(pairs, existing) {
         if let Err(e) = project(s, &o).await {
             tracing::warn!(owner = %o, error = %e, "keys.project.failed");
         }
@@ -86,5 +105,22 @@ mod tests {
         assert_eq!(o.spec.generation, 1_700_000_000_000);
         assert_eq!(o.spec.authorized_keys, "ssh-ed25519 AAAA a\n");
         assert!(o.metadata.owner_references.is_none());
+    }
+
+    /// A team workspace's namespace wears its OWNER's handle, so the beat's set has to come from
+    /// `spec.owner`/`spec.team` — and from every object that already exists, or a key revoked
+    /// after the last workspace went away would never reach the file.
+    #[test]
+    fn the_beat_projects_every_person_every_team_and_everything_already_written() {
+        let ws = [
+            ("karthik".to_string(), String::new()),
+            ("karthik".to_string(), "acme".to_string()),
+            ("meera".to_string(), "acme".to_string()),
+        ];
+        assert_eq!(
+            owner_set(ws, vec!["gone".into(), "karthik".into()]),
+            vec!["acme", "gone", "karthik", "meera"]
+        );
+        assert!(owner_set([(String::new(), String::new())], vec![]).is_empty());
     }
 }

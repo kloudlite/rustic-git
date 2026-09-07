@@ -287,7 +287,13 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
 /// namespace and every team they are in.
 pub async fn keys_changed(s: &ApiState, email: &str) {
     let Some(dir) = s.directory.as_ref() else { return };
-    for o in dir.owners_of(email).await {
+    let owners = dir.owners_of(email).await;
+    // Worth a line: a key change that reaches nothing is either an unclaimed handle or a
+    // directory read that failed, and both look identical from the outside otherwise.
+    if owners.is_empty() {
+        tracing::warn!(%email, reason = "no-owners", "keys.project.skipped");
+    }
+    for o in owners {
         if let Err(e) = super::keys::project(s, &o).await {
             tracing::warn!(owner = %o, error = %e, "keys.project.failed");
         }
