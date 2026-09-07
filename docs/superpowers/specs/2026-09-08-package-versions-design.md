@@ -107,7 +107,7 @@ in pkgs.buildEnv {
 ```
 
 Before evaluating, the agent runs `nix copy --from https://cache.nixos.org <storePath>` for every
-lock that has one (in parallel, bounded by `nix_timeout_secs`). A path the cache does not hold
+lock that has one (one after another — a single substituter, so a parallel pull only moves the wait — each bounded by `nix_timeout_secs`). A path the cache does not hold
 ends the reconcile with `PackagesReady=False/NotCached` — message
 `"nodejs@20.20.2 has no binary in cache.nixos.org; pick a version that does"` — and no source
 build is attempted: the locked paths are copied from cache.nixos.org before the build, so a
