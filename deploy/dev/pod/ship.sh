@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI, in the pod: the gate CI runs, a release build, and the four images pushed under CI's tag
+# CI, in the pod: the gate CI runs, a release build, and every image (the web's too) pushed under CI's tag
 # shape. Runs under pm2 as `ship` (`pm2 logs ship`). Refuses a dirty or unpushed tree: the tag is
 # the commit SHA, and a tag must mean exactly the code GitHub has under that SHA.
 #   pod/ship.sh            # test + clippy + build + push
@@ -22,6 +22,11 @@ if [ "${1:-}" != "--no-gate" ]; then
     || { grep -E '^(warning|error)' -A6 /tmp/ship-clippy.log | head -40; exit 1; }
   cargo test --locked > /tmp/ship-test.log 2>&1 \
     || { grep -E '^test result|FAILED|panicked|^error' /tmp/ship-test.log | grep -v ': ok' | head -20; exit 1; }
+  # The web's own gate (web.yml's exact steps), since the web image ships from here too.
+  ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
+    && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \
+    && bun run typecheck >> /tmp/ship-web.log 2>&1 && bun run lint >> /tmp/ship-web.log 2>&1 && bun run test >> /tmp/ship-web.log 2>&1 ) \
+    || { tail -30 /tmp/ship-web.log; exit 1; }
   echo "gate passed: $(grep -c '^test result: ok' /tmp/ship-test.log || true) test binaries green"
 fi
 
@@ -44,4 +49,11 @@ for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway slo:kl
     --output "type=image,\"name=ghcr.io/kloudlite/$image:$SHA,ghcr.io/kloudlite/$image:latest\",push=true" \
     --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
 done
-echo "shipped $SHA — on the laptop: deploy/pin.sh $SHA && git commit -am 'Pin every tier to ${SHA:0:8}' && deploy/roll.sh"
+# The web image too, from `web/` as its own context (its Dockerfile runs bun install + next build
+# inside the build, so nothing from the pod's node_modules leaks in). CI's web.yml still builds it
+# on master; this is the same image under the same SHA tag, so either may land first.
+echo "==> kloudlite-web:$SHA"
+buildctl build --frontend dockerfile.v0 --local context=web --local dockerfile=web \
+  --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-web:$SHA,ghcr.io/kloudlite/kloudlite-web:latest\",push=true" \
+  --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
+echo "shipped $SHA — on the laptop: deploy/pin.sh $SHA $SHA && git commit -am 'Pin every tier to ${SHA:0:8}' && deploy/roll.sh"
