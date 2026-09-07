@@ -43,7 +43,7 @@ export function MermaidBlock({ source }: { source: string }) {
 
   return (
     <>
-      {state !== "drawn" && <pre className="overflow-x-auto px-4 py-3 font-mono text-caption">{source}</pre>}
+      {state !== "drawn" && <pre className="max-h-96 overflow-auto px-4 py-3 font-mono text-caption">{source}</pre>}
       <div ref={ref} className="mermaid-block overflow-x-auto px-4 py-3" hidden={state !== "drawn"} />
     </>
   );
