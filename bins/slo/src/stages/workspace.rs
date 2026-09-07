@@ -43,13 +43,12 @@ const QUOTA_GB: u64 = 1;
 pub(crate) const WS_CONTAINER: &str = "workspace";
 
 /// Every id this stage owns after the create, in journey order.
-const AFTER_CREATE: [&str; 11] = [
+const AFTER_CREATE: [&str; 10] = [
     "ws.exec.ok",
     "homes.rw.p95",
     "gw.tunnel.p95",
     "key.projected",
     "key.live",
-    "key.revoked",
     "gw.unregistered.refused",
     "ws.push.p95",
     "ws.clone.p95",
@@ -88,7 +87,6 @@ pub async fn run(c: &mut Ctx) {
     tunnel(c, &id).await;
     key_projected(c).await;
     key_live(c, &id).await;
-    key_revoked(c, &id).await;
     unregistered_refused(c, &id).await;
     push(c, &id).await;
     clone(c, &id).await;
@@ -425,7 +423,11 @@ async fn key_live(c: &mut Ctx, id: &str) {
 ///
 /// The re-registration is the compensation, not an afterthought: the probe mounts one key, and a
 /// run that removed it and stopped there would leave every later run with no way in.
-async fn key_revoked(c: &mut Ctx, id: &str) {
+///
+/// Walked by the HOURLY suite's Experience stage against its own workspace, not by stage 5: the
+/// wait for a resync beat is 330 s of the fast suite's 900 s deadline for a single refusal. It
+/// still lives here because every other user of `ssh_session`/`ssh_args` does.
+pub(crate) async fn key_revoked(c: &mut Ctx, id: &str) {
     if c.kube.is_none() {
         return c.skip("key.revoked", "no kubeconfig");
     }

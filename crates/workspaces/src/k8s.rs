@@ -216,7 +216,13 @@ pub const USER_KEY_PATH: &str = "/etc/kloudlite/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
-pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, m: &crate::api::OwnerMaterial) -> Secret {
+pub fn user_key_secret(
+    owner: &str,
+    namespace: &str,
+    private_openssh: &str,
+    m: &crate::api::OwnerMaterial,
+    authorized_keys: &str,
+) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
         // the workspace that happened to trigger its creation must not take it with them.
@@ -226,11 +232,14 @@ pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, m: &
             labels: Some(labels(owner, "workspace")),
             ..Default::default()
         },
-        // The private half only: the public keys sshd admits are a CLUSTER fact now, projected
-        // per owner namespace as `OwnerKeys` and rendered to disk by every node's agent, so a
-        // key added in the UI reaches a running pod without a Secret rewrite per namespace.
+        // The public keys sshd admits are a CLUSTER fact now, projected per owner namespace as
+        // `OwnerKeys` and rendered to disk by every node's agent, so a key added in the UI reaches
+        // a running pod without a Secret rewrite per namespace. The entry below is TRANSITIONAL:
+        // pods of an agent that has not been upgraded yet still mount it, and it goes away in the
+        // release after every region's agent is on this build (spec §5 step 4).
         string_data: Some(BTreeMap::from([
             ("id_ed25519".to_string(), private_openssh.to_string()),
+            ("authorized_keys".to_string(), authorized_keys.to_string()),
             // Read by git as its SYSTEM config (`GIT_CONFIG_SYSTEM`), so `~/.gitconfig` still
             // overrides it and a changed display name reaches running workspaces with the next
             // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
@@ -1713,16 +1722,17 @@ mod tests {
     }
 
     #[test]
-    fn the_user_key_secret_carries_only_the_private_key_and_git_identity() {
+    fn the_user_key_secret_carries_the_private_key_the_git_identity_and_the_old_keys_entry() {
         let m = crate::api::OwnerMaterial {
             git_name: "Alice \"Al\" Liddell".into(),
             git_email: "alice@example.com".into(),
         };
-        let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m);
+        let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n");
         let data = s.string_data.unwrap();
         assert_eq!(data["id_ed25519"], "PRIVATE");
-        // Who may ssh in is `OwnerKeys` now, rendered by each node's agent — never this Secret.
-        assert!(!data.contains_key("authorized_keys"));
+        // Who may ssh in is `OwnerKeys` now; this entry only keeps an old agent's pods working
+        // through the rollout, and carries the same union the projection does.
+        assert_eq!(data["authorized_keys"], "ssh-ed25519 AAAA alice\n");
         // A quote in a name must not end git's string early.
         assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
     }

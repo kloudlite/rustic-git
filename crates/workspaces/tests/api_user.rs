@@ -1084,6 +1084,10 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
         calls.iter().any(|c| c == "PATCH /api/v1/namespaces/ws-karthik/secrets/user-key"),
         "the absent Secret is re-installed on list: {calls:?}"
     );
+    // Transitional: the Secret still carries the union `OwnerKeys` carries, so a pod of an agent
+    // that has not been upgraded yet admits the same keys. Dropped a release from now.
+    let body = rec.sent("PATCH", "/api/v1/namespaces/ws-karthik/secrets/user-key").pop().unwrap();
+    assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop\n");
 }
 
 /// The API is one of the two places `spec.packages` is checked (the reconciler is the other, and

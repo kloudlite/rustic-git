@@ -34,6 +34,7 @@ pub const IDS: &[&str] = &[
     "id.profile.upsert",
     "id.cli.tokens",
     "id.cli.sshconfig",
+    "key.revoked",
     "key.ssh.lifecycle",
     "team.create",
     "team.invite.accept",
@@ -126,6 +127,12 @@ pub async fn run(c: &mut Ctx) {
             "id.profile.upsert" => super::experience_gaps::profile_upsert(c).await,
             "id.cli.tokens" => super::experience_gaps::cli_tokens(c).await,
             "id.cli.sshconfig" => super::experience_gaps::sshconfig(c).await,
+            // Stage 5's step, walked here: its 330 s wait belongs to the hourly window. It runs
+            // against the workspace `ws.packages.add` created, the one live pod this stage keeps.
+            "key.revoked" => match c.state.ux_workspace.clone() {
+                Some(ws) => super::workspace::key_revoked(c, &ws).await,
+                None => c.skip("key.revoked", "the stage's workspace was never created"),
+            },
             "key.ssh.lifecycle" => super::experience_gaps::key_lifecycle(c).await,
             "repo.description" => super::experience_gaps::description(c).await,
             "pr.merge.strategies" => super::experience_gaps::merge_strategies(c).await,

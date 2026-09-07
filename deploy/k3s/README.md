@@ -956,9 +956,12 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy
 KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml -f deploy/k3s/slo-rbac.yaml
 ```
 
-Rollout order: server tier first (the migration that rewrites team-owned key rows to
-`created_by` and writes the directory's `meta` collection marker (`{_id: "keys_v2"}`) runs at server boot), then the five manifests
-above, then the agent DaemonSet, then the api Deployment — an api that projects `OwnerKeys` before
+Rollout order: server tier first (it reads a fingerprint row that still names a handle exactly as
+it did before this branch, so it is safe ahead of the migration), then the five manifests
+above, then the agent DaemonSet, then the api Deployment — whose BOOT runs the migration
+(`bins/api/src/main.rs`, never the server's) that rewrites team-owned key rows to `created_by`,
+re-indexes every fingerprint row onto the person's email and writes the directory's `meta`
+collection marker (`{_id: "keys_v2"}`). An api that projects `OwnerKeys` before
 any agent watches it just means the first resync beat (`KEYS_RESYNC_SECS`, 300 s) is wasted work,
 never a wrong file; an agent watching before the api exists sees nothing and writes nothing, which
 is the same fail-closed empty-file state as a deleted object.

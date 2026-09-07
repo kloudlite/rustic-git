@@ -40,7 +40,10 @@ for a namespace, not an identity, and `bins/server` authorizes tokens by owner t
 
 The fingerprint index `auth/sshkey/{fp}` maps to the person's email. On `auth_publickey`, `Conn`
 records the **user**, not an owner. Authorization for `owner/name` becomes: `user == owner`, or
-`user` is a member of team `owner` with a role that permits the verb. The server tier already
+`user` is a member of team `owner`. The directory has three roles — Owner, Admin, Member — and
+no read-only one, so membership at ANY role permits both git verbs and there is nothing to gate
+here; the day a read-only role exists it needs a verb gate in `App::may_act`, which today takes no
+verb at all. The server tier already
 holds the directory URI (the pull-request migration read); it gains a `Membership` reader with
 the same one-minute cache `crates/api/src/browse.rs` uses, and refuses on a directory error
 (never falls open). Removing a key deletes its fingerprint row in the same request as the
@@ -101,8 +104,9 @@ per owner by design; its `authorized_keys` entry and `authorized_keys_volume()` 
 
 `/settings` lists and adds SSH and signing keys under the person, with no owner picker. A team's
 settings page shows nothing about keys: what a team has is members, and their keys follow them.
-`OwnerKeys.status` surfaces on the superadmin Clusters tab as one row per owner per region
-(`Synced`, generation, age), which is the operator's answer to "is this key live everywhere".
+`OwnerKeys.status` on the superadmin Clusters tab — one row per owner per region (`Synced`,
+generation, age) — is DEFERRED to a follow-up: `kubectl get ownerkeys` prints the same three
+columns, and an operator view nobody is blocked on is not worth holding the rollout for.
 
 ### 5. Migration
 

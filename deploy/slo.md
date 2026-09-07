@@ -80,7 +80,6 @@ first destructive stage.
 | `gw.unregistered.refused` | Workspaces | The gateway refuses an unregistered key | 99.9 % | fast | 5 · Workspace |
 | `key.projected` | Workspaces | A registered key reaches the owner's OwnerKeys projection as Synced | 99.9 % ≤ 30000 ms | fast | 5 · Workspace |
 | `key.live` | Workspaces | A registered key opens the workspace over the gateway | 99.9 % | fast | 5 · Workspace |
-| `key.revoked` | Workspaces | A removed key is refused by git and by the workspace | 99.9 % ≤ 330000 ms | fast | 5 · Workspace |
 | `ws.push.p95` | Workspaces | Pushing a workspace snapshot completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `quota.refused` | Workspaces | An over-quota create is refused with 409 naming the dimension, what is used and the limit | 99.9 % | fast | 5 · Workspace |
@@ -161,6 +160,7 @@ first destructive stage.
 | `id.cli.tokens` | Identity | A CLI token is listed and, once revoked, is refused | 99.9 % | hourly | 14 · Experience |
 | `id.profile.upsert` | Identity | A profile upsert is saved and read back | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
 | `id.cli.sshconfig` | Identity | `kl ws sshconfig` writes a host block naming a running workspace | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
+| `key.revoked` | Workspaces | A removed key is refused by git and by the workspace | 99.9 % ≤ 330000 ms | hourly | 14 · Experience |
 | `key.ssh.lifecycle` | Identity | A newly added SSH key clones, and after removal the same key is refused at once | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `repo.description` | Git hosting | A repo description is saved and read back | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |
 | `pr.merge.strategies` | Pull requests | Each merge strategy — merge, squash, rebase, fast-forward — lands the expected tree | 99.9 % | hourly | 14 · Experience |

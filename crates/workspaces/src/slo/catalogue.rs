@@ -229,7 +229,6 @@ pub const CATALOGUE: &[Slo] = &[
     // 330 s, not the git listener's 10: git authenticates from the directory on every request, but
     // a workspace pod only learns of the removal when the api's resync beat (`KEYS_RESYNC_SECS`,
     // 300 s) rewrites the projection.
-    Slo { id: "key.revoked", feature: "Workspaces", sli: "A removed key is refused by git and by the workspace", target: bound(330_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.push.p95", feature: "Workspaces", sli: "Pushing a workspace snapshot completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.clone.p95", feature: "Workspaces", sli: "Cloning a workspace completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     // The sentence, not merely the status: `quota::refuse` answers `"{dimension}: {used} of
@@ -364,6 +363,9 @@ pub const CATALOGUE: &[Slo] = &[
     // Strict, and it can be: credential HITS are not cached at all (`crates/storage/src/auth.rs`,
     // `CACHE_TTL` — only misses are, because the cache is per process while the revocation happens
     // in another one), so a removed key stops working on the very next request, fleet-wide.
+    // Hourly, not fast: waiting out a resync beat is 330 s of the fast suite's 900 s deadline
+    // for one refusal, and `journey` is keyed by stage — so the row moves stage with its suite.
+    Slo { id: "key.revoked", feature: "Workspaces", sli: "A removed key is refused by git and by the workspace", target: bound(330_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.ssh.lifecycle", feature: "Identity", sli: "A newly added SSH key clones, and after removal the same key is refused at once", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.description", feature: "Git hosting", sli: "A repo description is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "pr.merge.strategies", feature: "Pull requests", sli: "Each merge strategy — merge, squash, rebase, fast-forward — lands the expected tree", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },

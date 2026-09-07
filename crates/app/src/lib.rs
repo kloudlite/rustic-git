@@ -214,6 +214,14 @@ impl App {
     /// own handle matches, and "own handle" is then the fingerprint row's value itself: a solo
     /// deploy registers keys by handle and has no memberships to check.
     pub async fn may_act(&self, user: &str, owner: &str) -> Result<bool> {
+        // The server tier rolls BEFORE the api, and the api's boot migration is what re-indexes
+        // `auth/sshkey/{fp}` from handles to emails. Until it has run, a fingerprint row still
+        // names a handle — which no directory lookup can resolve to a person — so a handle
+        // principal is judged by exactly the rule that stood before this branch: its own
+        // namespace and nothing else. The branch dies on its own once every row is an email.
+        if !user.contains('@') {
+            return Ok(user == owner);
+        }
         match &self.dir {
             pulls::Source::Absent => Ok(user == owner),
             pulls::Source::Unavailable => Err(err("directory unavailable")),
@@ -1434,6 +1442,30 @@ mod tests {
         assert!(b.claim_to_recover("alice/web").await.is_err());
         assert_eq!(b.leader().as_deref(), Some("kloudlite-srv-0"), "re-read on the failed connect");
         assert!(b.leader_live());
+    }
+
+    /// A fingerprint row the api's migration has not reached yet names a HANDLE, not an email.
+    /// With a directory configured it is still admitted for its own namespace and refused for
+    /// anyone else's — the pre-migration rule — without a membership lookup, which is why an empty
+    /// directory answers both.
+    #[tokio::test]
+    async fn a_handle_principal_acts_only_under_its_own_namespace() {
+        let os = mem();
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
+        std::mem::forget(tmp);
+        let dir = Arc::new(kloudlite_pulls::directory::Directory::in_memory());
+        let a = App::new(
+            store,
+            Arc::new(OwnershipStore::open(os.clone())),
+            "kloudlite-srv-0".into(),
+            Arc::new(|_: &str| "127.0.0.1:1".into()),
+            "test-secret".into(),
+            pulls::Source::Directory(dir),
+        );
+        assert!(a.may_act("alice", "alice").await.unwrap(), "its own namespace");
+        assert!(!a.may_act("alice", "acme").await.unwrap(), "somebody else's");
     }
 
     /// Solo: one node, no lease, no store traffic. It leads by construction.

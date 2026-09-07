@@ -237,6 +237,18 @@ pub(crate) async fn create_ws(
         let (s, c, owner, team, id) = (s.clone(), c.clone(), owner.clone(), team.clone(), id.clone());
         async move { install_user_key_after_placed(&s, &c, &owner, &team, &id).await }
     });
+    // The pod mounts the projected file, so a FIRST workspace whose owner has no `OwnerKeys` yet
+    // would park in `KeysNotReady` until the resync beat (300 s) noticed it. Projecting here makes
+    // that seconds. Fire and forget: the beat is still the guarantee, so a failure is a log line,
+    // never a failed create.
+    tokio::spawn({
+        let (s, keys_owner) = (s.clone(), crate::k8s::keys_owner(&w.spec).to_string());
+        async move {
+            if let Err(e) = super::keys::project(&s, &keys_owner).await {
+                tracing::warn!(owner = %keys_owner, error = %e, "keys.project.failed");
+            }
+        }
+    });
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
 }
 
@@ -320,7 +332,14 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
         tracing::warn!(%owner, reason = "owner-keys", "key.read.failed");
         return;
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material);
+    // Transitional, same rule: a failed lookup writes NOTHING. The Secret carries the union
+    // `OwnerKeys` carries so a pod of a not-yet-upgraded agent keeps admitting the same keys;
+    // dropped in the release after every region's agent is on this build (spec §5 step 4).
+    let Some(authorized) = lookup.authorized_keys_for_owner(owner).await else {
+        tracing::warn!(%owner, reason = "authorized-keys", "key.read.failed");
+        return;
+    };
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
