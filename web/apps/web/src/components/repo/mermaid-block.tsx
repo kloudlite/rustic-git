@@ -27,7 +27,10 @@ export function MermaidBlock({ source }: { source: string }) {
           theme: resolvedTheme === "dark" ? "dark" : "neutral",
           fontFamily: "inherit",
         });
-        const { svg } = await mermaid.render(`mmd-${Math.random().toString(36).slice(2)}`, source);
+        // Rendered inside our own block: without a container mermaid measures the SVG in a
+        // temporary element appended to <body>, which for one frame makes the document taller
+        // than the app frame and flashes a window scrollbar beside the header.
+        const { svg } = await mermaid.render(`mmd-${Math.random().toString(36).slice(2)}`, source, ref.current ?? undefined);
         if (live && ref.current) {
           ref.current.innerHTML = svg;
           setState("drawn");
