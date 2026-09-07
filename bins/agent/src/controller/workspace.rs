@@ -115,7 +115,17 @@ async fn ensure_profile(
         let msg = format!("base packages: {e}");
         return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &msg), Action::await_change()).await;
     }
-    let hash = packages::hash(&pin, &all);
+    // A pinned entry is built from its LOCK, never from the pinned nixpkgs, so it leaves the list
+    // the expression evaluates and comes back as a store path (or a revision) below.
+    let bare = packages::bare(&all);
+    // `/v1` writes a lock for every `@` entry it accepts. One missing means the object did not
+    // come through `/v1` — a restored backup, a `kubectl edit` — and guessing a version here is
+    // the one thing this design refuses: say so and wait for a spec that carries the answer.
+    if let Some((raw, _)) = packages::pinned(&all).into_iter().find(|(raw, _)| !w.spec.locks.iter().any(|l| &l.entry == raw)) {
+        let msg = format!("{raw} has no resolved version; set the packages again to resolve it");
+        return profile_failed(w, id, gen, prev, ctx, (crd::PKG_UNRESOLVED, &msg), Action::await_change()).await;
+    }
+    let hash = packages::hash(&pin, &bare, &w.spec.locks);
     let observed = crd::PackagesStatus {
         base,
         observed: w.spec.packages.clone(),
@@ -177,11 +187,15 @@ async fn ensure_profile(
                 tracing::info!(workspace = %id, reason = "superseded", "workspace.rebuilding");
             }
             Err(e) => {
+                // A path the public cache does not have is not a broken list: it is a version this
+                // node cannot install without building it, which `--max-jobs 0` refuses. Its own
+                // reason, so the web can say which entry and offer an update rather than "failed".
+                let reason = if e.starts_with(crate::nix::NOT_CACHED) { crd::PKG_NOT_CACHED } else { "BuildFailed" };
                 // The OLD packages, not the ones that failed (`profile_failed` keeps them):
                 // recording the new hash here makes the next pass see hash-match plus a directory
                 // on disk and never retry the build.
                 let backoff = build_failed_backoff(prev);
-                return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e), Action::requeue(backoff)).await;
+                return profile_failed(w, id, gen, prev, ctx, (reason, &e), Action::requeue(backoff)).await;
             }
         }
     }
@@ -238,14 +252,38 @@ async fn ensure_profile(
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
     // made here rather than by `nix -o`: an out-link's auto GC root points at the `.building`
     // path, so the publish rename would orphan it and leave the live profile collectable.
-    let expr = packages::expression(&pin, &all);
+    let expr = match packages::expression(&pin, &bare, &w.spec.locks) {
+        Ok(e) => e,
+        // A lock whose store path, revision or attribute is not the shape nix writes never reaches
+        // an expression — only a spec edit fixes it, and that is an event.
+        Err(e) => return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e.to_string()), Action::await_change()).await,
+    };
     let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout(&ctx.settings);
     // `nix.build` is async (it drives the child through tokio), so this is a plain task; the fs
     // calls after it are a symlink and a mkdir, not the substituter's minutes.
+    // The locks' own bytes, pulled BEFORE the build: `nix build --max-jobs 0` will not build them
+    // locally, so a path the cache does not have has to fail here, where we still know which entry
+    // and version it was. Sequential — one substituter, and a parallel pull only moves the wait.
+    let copies: Vec<(String, String, String)> = w
+        .spec
+        .locks
+        .iter()
+        .filter(|l| !l.store_path.is_empty())
+        .map(|l| (l.entry.clone(), l.version.clone(), l.store_path.clone()))
+        .collect();
     let handle = tokio::spawn(async move {
+        for (entry, version, path) in copies {
+            if let Err(e) = nix.copy_from_cache(&path, timeout).await {
+                return Err(if e.starts_with(crate::nix::NOT_CACHED) {
+                    format!("{}: {entry} ({version}) is not in {}", crate::nix::NOT_CACHED, crate::nix::CACHE)
+                } else {
+                    format!("{entry} ({version}): {e}")
+                });
+            }
+        }
         let store_path = nix.build(&expr, timeout).await?;
         // A node that ran the old flat-link layout has `{id}` as a SYMLINK into the store, and
         // `create_dir_all` would happily accept it — every write below then lands inside a

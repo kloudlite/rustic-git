@@ -14,6 +14,15 @@ use tokio::process::Command;
 
 pub const PROFILES_DIR: &str = "/nix/var/kloudlite/profiles";
 
+/// The only substituter a profile build may use. A locked package is a store path somebody else
+/// already built; if the public cache does not have it we say so and stop, because the fallback —
+/// building it from source on a workspace node — is hours of CPU nobody asked for.
+pub const CACHE: &str = "https://cache.nixos.org";
+
+/// The marker `copy_from_cache` puts in front of its error when the substituter simply has no such
+/// path, so the reconciler can report `NotCached` rather than a build failure.
+pub const NOT_CACHED: &str = "NotCached";
+
 // The root is always passed in (`Ctx::profiles_dir`) rather than read from a global: a process-wide
 // override is a test that can reach the node's real /nix, and one that races every other test.
 //
@@ -84,6 +93,10 @@ pub trait Nix: Send + Sync {
     /// `nix build --expr <expr> --no-link --print-out-paths`; the store path it realised. No
     /// out-link, because the caller makes the symlink and renames it into place itself.
     async fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String>;
+    /// `nix copy --from <cache> <store path>`: pull one already-built path into this node's store.
+    /// `Err` starting with `NOT_CACHED` means the substituter does not have it — a different thing
+    /// from a broken daemon or a timeout, and the only one a person can act on.
+    async fn copy_from_cache(&self, store_path: &str, timeout: Duration) -> Result<(), String>;
     /// `nix store ping`.
     async fn ping(&self) -> Result<(), String>;
     /// `nix-collect-garbage`; returns bytes freed as nix reports them (0 if unparseable).
@@ -148,12 +161,33 @@ impl RealNix {
 impl Nix for RealNix {
     async fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String> {
         // `--impure` for `builtins.getFlake` on a pinned ref; the expression is ONE argv element.
-        let c = self.cmd(&["build", "--impure", "--expr", expr, "--no-link", "--print-out-paths"]);
+        // `--max-jobs 0` is the load-bearing flag: it makes nix REFUSE to build anything locally,
+        // so a lock whose path is not in the cache fails fast instead of compiling a toolchain on
+        // a workspace node. The single substituter is the same rule stated positively.
+        let c = self.cmd(&[
+            "build",
+            "--impure",
+            "--expr",
+            expr,
+            "--no-link",
+            "--print-out-paths",
+            "--option",
+            "substituters",
+            CACHE,
+            "--max-jobs",
+            "0",
+        ]);
         let out = self.run(c, timeout).await?;
         match out.split_whitespace().next() {
             Some(p) => Ok(PathBuf::from(p)),
             None => Err("nix build printed no store path".into()),
         }
+    }
+    async fn copy_from_cache(&self, store_path: &str, timeout: Duration) -> Result<(), String> {
+        let c = self.cmd(&["copy", "--from", CACHE, store_path]);
+        self.run(c, timeout).await.map(|_| ()).map_err(|e| {
+            if is_not_cached(&e) { format!("{NOT_CACHED}: {e}") } else { e }
+        })
     }
     async fn ping(&self) -> Result<(), String> {
         self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).await.map(|_| ())
@@ -169,6 +203,21 @@ impl Nix for RealNix {
         let out = self.run(c, Duration::from_secs(3600)).await?;
         Ok(freed_bytes(&out))
     }
+}
+
+/// Whether a failed `nix copy` failed because the substituter has no such path, as opposed to a
+/// network or daemon problem. nix has no exit code for it, so this reads the message; these are
+/// the four wordings nix 2.24 uses for a path the cache cannot give us:
+///   `path '...' does not exist and cannot be created`
+///   `cannot substitute path '...'` / `unable to substitute path '...'`
+///   `path '...' is not valid`
+/// A wording we do not recognise stays a plain error, which retries — the safe direction, since
+/// calling a network blip `NotCached` would tell a person to change a version that is fine.
+fn is_not_cached(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    ["does not exist", "cannot substitute", "unable to substitute", "is not valid"]
+        .iter()
+        .any(|m| e.contains(m))
 }
 
 /// Parses `nix-collect-garbage`'s summary line, e.g. `1935 store paths deleted, 3423.35 MiB
@@ -432,6 +481,42 @@ mod tests {
         }
         last.unwrap();
         assert!(started.elapsed() < Duration::from_secs(5), "child blocked writing stderr");
+    }
+
+    #[tokio::test]
+    async fn copying_a_path_the_cache_does_not_have_is_not_cached_not_a_build_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        // What nix prints for a path no substituter can give: the message is the only signal.
+        std::fs::write(
+            bin.join("nix"),
+            "#!/bin/sh\necho \"error: path '/nix/store/x-y' does not exist and cannot be created\" 1>&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let nix = RealNix { bin };
+        let mut err = String::new();
+        for _ in 0..10 {
+            err = nix.copy_from_cache("/nix/store/x-y", Duration::from_secs(10)).await.unwrap_err();
+            if !err.contains("Text file busy") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(err.starts_with(NOT_CACHED), "{err}");
+    }
+
+    #[test]
+    fn only_the_wordings_that_mean_the_cache_lacks_the_path_are_not_cached() {
+        assert!(is_not_cached("error: path '/nix/store/x' does not exist and cannot be created"));
+        assert!(is_not_cached("error: cannot substitute path '/nix/store/x'"));
+        assert!(is_not_cached("error: unable to substitute path '/nix/store/x'"));
+        assert!(is_not_cached("error: path '/nix/store/x' is not valid"));
+        // A network problem must retry, not tell a person their version is unavailable.
+        assert!(!is_not_cached("error: unable to download 'https://cache.nixos.org': timeout"));
+        assert!(!is_not_cached("nix timed out after 600s"));
     }
 
     #[test]
