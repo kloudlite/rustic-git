@@ -43,6 +43,12 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
     verbs: ["get", "list"]
+  # The api is the ONLY writer of a key set — it projects the directory into one object per owner
+  # namespace by server-side apply, which the apiserver authorizes as `create` + `patch`. No
+  # `delete`: an owner losing their last key is an empty file, not a missing object.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["ownerkeys"]
+    verbs: ["get", "list", "create", "patch"]
   # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
   - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]

@@ -45,7 +45,8 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
         let v = &crd.spec.versions[0];
         assert!(v.subresources.as_ref().is_some_and(|s| s.status.is_some()), "{}", crd.spec.names.kind);
         let want: &[&str] = match crd.spec.names.kind.as_str() {
-            "OwnerBinding" | "Region" => &[],
+            // `OwnerKeys` is per owner, not per node: every agent reconciles every object.
+            "OwnerBinding" | "OwnerKeys" | "Region" => &[],
             "Volume" => &[".spec.nodeName"],
             "Workspace" | "Environment" => &[".status.nodeName", ".status.volumeRef"],
             "Snapshot" => &[".spec.volume"],
@@ -119,7 +120,9 @@ fn every_phase_is_a_schema_enum() {
         // a phase, so it has none.
         if matches!(
             crd.spec.names.kind.as_str(),
-            "OwnerBinding" | "VolumeReplica" | "Region" | "Quota" | "QuotaRequest" | "Request" | "ClusterSettings"
+            // OwnerKeys' whole state is `Synced` — a condition, like OwnerBinding's.
+            "OwnerBinding" | "OwnerKeys" | "VolumeReplica" | "Region" | "Quota" | "QuotaRequest" | "Request"
+                | "ClusterSettings"
         ) {
             continue;
         }
