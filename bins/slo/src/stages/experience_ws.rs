@@ -605,7 +605,10 @@ async fn lock_shape(c: &Ctx, id: &str) -> Result<()> {
         .iter()
         .find(|l| l.entry == PINNED)
         .ok_or_else(|| anyhow!("the spec carries no lock for {PINNED}"))?;
-    if !lock.store_path.starts_with("/nix/store/") {
+    // Only a Nixhub lock carries a store path; a mirror lock's is evaluated by the agent at build
+    // time, so a day the index answered from the mirror is not a broken lock.
+    let nixhub = lock.source == kloudlite_workspaces::crd::LockSource::Nixhub;
+    if nixhub && !lock.store_path.starts_with("/nix/store/") {
         return Err(anyhow!("the lock's store path is {:?}, not a /nix/store one", lock.store_path));
     }
     Ok(())
