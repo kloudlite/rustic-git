@@ -24,7 +24,17 @@ const nextConfig: NextConfig = {
   /* Dev only: the probes (readiness, the collector's scrape, the SLO probe's edge check) hit
      these every few seconds and would be most of the request log. */
   logging: { incomingRequests: { ignore: [/^\/api\/(health|metrics)/, /^\/_next\//] } },
-  headers: async () => [{ source: "/(.*)", headers: SECURITY_HEADERS }],
+  headers: async () => [
+    { source: "/(.*)", headers: SECURITY_HEADERS },
+    /* Dev only: dev chunk names do not change between rebuilds, and the proxy in front turns
+       the dev server's `no-cache` into a four-hour browser TTL, so after every rebuild a
+       browser kept executing the previous build's chunks against the new server ("module
+       factory is not available"). `no-store` is the one directive every layer honours.
+       Production chunk names are content-hashed and keep their long TTL. */
+    ...(process.env.NODE_ENV === "development"
+      ? [{ source: "/_next/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] }]
+      : []),
+  ],
   experimental: {
     // The radix-ui monopackage re-exports everything; without this, one import
     // pulls the whole barrel into every chunk that touches a UI primitive.
