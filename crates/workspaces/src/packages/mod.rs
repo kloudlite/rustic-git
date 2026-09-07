@@ -83,7 +83,10 @@ pub fn parse_entry(s: &str) -> Result<Entry, PackageError> {
         validate_attr(s)?;
         return Ok(Entry { attr: s.to_string(), version: None });
     };
-    validate_attr(attr)?;
+    // The WHOLE entry, not the empty half before the `@`: `"@20" is not a package attribute name`
+    // is the sentence `web/.../packages-field.ts` shows for the same input, and two different
+    // sentences for one typo is how a person ends up doubting which half is wrong.
+    validate_attr(attr).map_err(|_| PackageError::Attr(s.to_string()))?;
     let req = if version == "latest" {
         VersionReq::Latest
     } else {
@@ -259,6 +262,8 @@ mod tests {
         for bad in ["nodejs@", "nodejs@^20", "nodejs@20.x", "nodejs@20-rc1", "nodejs@>=20", "nodejs@1.2.3.4", "@20", "a@b@c"] {
             assert!(matches!(parse_entry(bad), Err(PackageError::Version(_)) | Err(PackageError::Attr(_))), "{bad:?} must be refused");
         }
+        // Same sentence as the web field's, which names the entry the person typed.
+        assert_eq!(parse_entry("@20").unwrap_err().to_string(), r#""@20" is not a package attribute name"#);
     }
 
     #[test]

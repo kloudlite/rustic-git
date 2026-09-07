@@ -18,6 +18,9 @@ agents writes locks an old agent ignores — the pin takes effect on the agent r
 | resolution cache | object store `pkgs/x86_64-linux/{attr}/{version}` | 24 h |
 | mirror | object store `index/pkgs/versions.json`, refreshed daily by the api's `user` role from `fzakaria/nixpkgs-multiverse` (`index/versions.json` + `revisions.json`) | first tick at boot |
 
+The agent's `nix build` passes `--option substituters https://cache.nixos.org`, so a node's own
+extra substituters in `nix.conf` are not consulted for workspace profiles.
+
 ## How to verify
 
 ```sh

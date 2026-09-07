@@ -4562,6 +4562,26 @@ async fn a_pinned_entry_with_no_lock_is_unresolved_not_built() {
     assert_eq!(c["reason"], "Unresolved");
 }
 
+/// A pin in the platform's BASE list is nobody's spec edit to fix: `/v1` locks `spec.packages`
+/// and nothing else, so blaming the workspace's own list would send a person hunting through
+/// entries that are all fine.
+#[tokio::test]
+async fn a_pinned_base_entry_is_the_operators_error_not_an_unresolved_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    let mut s = (*ctx.settings.load()).clone();
+    s.base_packages = "nodejs@20".into();
+    ctx.settings.store(s);
+
+    apply_until_settled(&ready_workspace("ws-1", vec!["jq".into()]), &ctx).await;
+
+    assert!(fake.builds.lock().unwrap().is_empty());
+    let c = packages_condition(&rec.sent("PATCH", WS_STATUS).last().unwrap().clone());
+    assert_eq!(c["reason"], "BuildFailed", "{c}");
+    assert_ne!(c["reason"], "Unresolved");
+    assert!(c["message"].as_str().unwrap().starts_with("base packages: "), "{c}");
+}
+
 /// A dangling entry must not short-circuit the build, or the pod gets a profile with no bin.
 #[tokio::test]
 async fn an_index_entry_pointing_at_nothing_still_builds() {

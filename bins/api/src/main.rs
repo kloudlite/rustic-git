@@ -458,9 +458,11 @@ async fn run() -> Result<()> {
         }
     }
     // The nixpkgs-multiverse mirror the packages resolver falls back to when Nixhub has no
-    // answer (Task 3's `resolve::Mirror`). User role only, same reasoning as the keys beat above.
+    // answer (Task 3's `resolve::Mirror`). User role only, same reasoning as the keys beat above,
+    // and only with an object store to write it to — a dev api has none, and the beat would do
+    // nothing but warn once a day.
     if role != "admin" {
-        if let Some(ws) = workspaces.clone() {
+        if let Some(ws) = workspaces.clone().filter(|ws| ws.keys.is_some()) {
             tokio::spawn(kloudlite_workspaces::packages::mirror_beat::run_beat(ws));
         }
     }

@@ -216,9 +216,20 @@ pub type MirrorIndex = HashMap<String, Vec<MirrorRow>>;
 
 pub struct Mirror {
     pub os: Arc<dyn ObjectStore>,
+    /// The parsed index, good for `CACHE_TTL`. Every `@` entry of every write asks for it, and it
+    /// is one multi-megabyte file refreshed once a day — re-fetching and re-parsing it per entry
+    /// was pure load.
+    cached: tokio::sync::Mutex<Option<(std::time::Instant, Arc<MirrorIndex>)>>,
 }
 
 impl Mirror {
+    pub fn new(os: Arc<dyn ObjectStore>) -> Self {
+        Mirror {
+            os,
+            cached: tokio::sync::Mutex::new(None),
+        }
+    }
+
     /// The newest row for `attr` under the request. `None` = the attribute or the prefix is not in
     /// the mirror at all.
     pub fn pick(index: &MirrorIndex, attr: &str, version: &VersionReq) -> Option<MirrorRow> {
@@ -238,25 +249,50 @@ impl Mirror {
             .cloned()
     }
 
-    async fn index(&self) -> Result<MirrorIndex, String> {
-        let bytes = self
-            .os
-            .get(&OsPath::from(MIRROR_KEY))
-            .await
-            .map_err(|e| e.to_string())?
-            .bytes()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    /// `Ok(None)` = there is no index at all. A region whose refresh beat has never run knows
+    /// nothing; it has not FAILED to tell us, so a typo there is still the person's 422 with
+    /// Nixhub's nearest versions rather than a 503 blaming the platform.
+    ///
+    /// A not-found or a failed refresh keeps the copy already parsed, if there is one: a stale
+    /// index resolves an older revision, which is slower to build and never wrong.
+    async fn index(&self) -> Result<Option<Arc<MirrorIndex>>, String> {
+        let mut slot = self.cached.lock().await;
+        if let Some((at, idx)) = slot.as_ref() {
+            if at.elapsed() < CACHE_TTL {
+                return Ok(Some(idx.clone()));
+            }
+        }
+        let previous = || slot.as_ref().map(|(_, i)| i.clone());
+        match self.fetch().await {
+            Ok(Some(idx)) => {
+                let idx = Arc::new(idx);
+                *slot = Some((std::time::Instant::now(), idx.clone()));
+                Ok(Some(idx))
+            }
+            Ok(None) => Ok(previous()),
+            Err(e) => previous().map(Some).ok_or(e),
+        }
+    }
+
+    async fn fetch(&self) -> Result<Option<MirrorIndex>, String> {
+        let got = match self.os.get(&OsPath::from(MIRROR_KEY)).await {
+            Ok(g) => g,
+            Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+        };
+        let bytes = got.bytes().await.map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string())
     }
 }
 
 #[async_trait]
 impl Index for Mirror {
     async fn resolve(&self, attr: &str, version: &VersionReq) -> Result<Option<Lock>, String> {
-        // A missing or unparsable index is UNAVAILABLE, never "unknown": treating an absent file
-        // as "no such package" would turn a missed refresh beat into a 422 blaming the person.
-        let index = self.index().await?;
+        // An UNPARSABLE index is unavailable (see `index`); an absent one is simply a mirror with
+        // nothing in it, which is an answer.
+        let Some(index) = self.index().await? else {
+            return Ok(None);
+        };
         Ok(Mirror::pick(&index, attr, version).map(|row| Lock {
             entry: entry_string(attr, version),
             version: row.version,
@@ -269,7 +305,10 @@ impl Index for Mirror {
     }
 
     async fn versions(&self, attr: &str) -> Result<Vec<String>, String> {
-        let mut rows = self.index().await?.remove(attr).unwrap_or_default();
+        let Some(index) = self.index().await? else {
+            return Ok(Vec::new());
+        };
+        let mut rows = index.get(attr).cloned().unwrap_or_default();
         rows.sort_by_key(|a| std::cmp::Reverse(numeric(&a.version)));
         Ok(rows.into_iter().map(|r| r.version).collect())
     }
@@ -303,7 +342,7 @@ impl Resolver {
                 base: std::env::var("KLOUDLITE_NIXHUB_URL")
                     .unwrap_or_else(|_| "https://search.devbox.sh".to_string()),
             }),
-            mirror: Arc::new(Mirror { os }),
+            mirror: Arc::new(Mirror::new(os)),
             now: Utc::now,
         }
     }
@@ -833,6 +872,55 @@ mod tests {
             r.lock_all(&packages, &[], true).await.unwrap_err(),
             Refusal::Unavailable
         );
+    }
+
+    const INDEX: &str = r#"{"nodejs":[{"version":"20.9.0","rev":"aaa","attr_path":"nodejs_20"}]}"#;
+
+    async fn mirror_over(body: Option<&str>) -> (Arc<InMemory>, Mirror) {
+        let os = Arc::new(InMemory::new());
+        if let Some(b) = body {
+            os.put(&OsPath::from(MIRROR_KEY), PutPayload::from(b.as_bytes().to_vec()))
+                .await
+                .unwrap();
+        }
+        let m = Mirror::new(os.clone());
+        (os, m)
+    }
+
+    #[tokio::test]
+    async fn a_mirror_with_no_index_knows_nothing_rather_than_failing() {
+        let (_os, m) = mirror_over(None).await;
+        assert_eq!(m.resolve("nodejs", &VersionReq::Prefix("20".into())).await, Ok(None));
+        assert_eq!(m.versions("nodejs").await, Ok(vec![]));
+
+        // ...and end to end: a typo on a region whose mirror has never been written is the
+        // person's 422 with nearest versions, never a 503.
+        let nix = FakeIndex::with(&[("nodejs", "20.99", None)]).knows("nodejs", &["20.20.2"]);
+        let r = resolver(Arc::new(nix), Arc::new(m));
+        assert_eq!(
+            r.lock_one("nodejs@20.99", false).await.unwrap_err(),
+            Refusal::Unknown {
+                entry: "nodejs@20.99".into(),
+                nearest: vec!["20.20.2".into()],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_index_is_read_once_and_then_served_from_memory() {
+        let (os, m) = mirror_over(Some(INDEX)).await;
+        let req = VersionReq::Prefix("20".into());
+        assert_eq!(m.resolve("nodejs", &req).await.unwrap().unwrap().version, "20.9.0");
+
+        // A changed file the reader never sees is the proof there was no second GET.
+        os.put(
+            &OsPath::from(MIRROR_KEY),
+            PutPayload::from(r#"{"nodejs":[{"version":"20.99.0","rev":"bbb","attr_path":"nodejs_20"}]}"#.as_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(m.resolve("nodejs", &req).await.unwrap().unwrap().version, "20.9.0");
+        assert_eq!(m.versions("nodejs").await.unwrap(), vec!["20.9.0"]);
     }
 
     #[test]

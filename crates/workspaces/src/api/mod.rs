@@ -68,8 +68,8 @@ use environments::{
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
-    attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages, update_ws_packages,
-    restore_ws, ssh_session, start_ws, stop_ws,
+    attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
+    ssh_session, start_ws, stop_ws, update_ws_packages,
 };
 
 /// Who is calling, and whether they hold the platform-administrator claim.

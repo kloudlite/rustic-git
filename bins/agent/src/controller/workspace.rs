@@ -108,6 +108,12 @@ async fn ensure_profile(
     // The platform's base set first, then the workspace's own, deduplicated: the hash covers
     // both, so rolling the base rebuilds every profile, and a name in both lists is one package.
     let base = crate::nix::base_packages(&ctx.settings);
+    // Only `spec.packages` is ever resolved — `/v1` writes no lock for a base entry — so a pinned
+    // base entry could never be built and is the operator's mistake, reported as one.
+    if let Some(p) = base.iter().find(|p| p.contains('@')) {
+        let msg = format!("base packages: {p} is pinned to a version; base packages carry none");
+        return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &msg), Action::await_change()).await;
+    }
     let mut all: Vec<String> = base.clone();
     all.extend(w.spec.packages.iter().filter(|p| !base.contains(p)).cloned());
     if let Err(e) = packages::validate_list(&all) {
@@ -125,7 +131,7 @@ async fn ensure_profile(
     // `/v1` writes a lock for every `@` entry it accepts. One missing means the object did not
     // come through `/v1` — a restored backup, a `kubectl edit` — and guessing a version here is
     // the one thing this design refuses: say so and wait for a spec that carries the answer.
-    if let Some((raw, _)) = packages::pinned(&all).into_iter().find(|(raw, _)| !locks.iter().any(|l| &l.entry == raw)) {
+    if let Some((raw, _)) = packages::pinned(&w.spec.packages).into_iter().find(|(raw, _)| !locks.iter().any(|l| &l.entry == raw)) {
         let msg = format!("{raw} has no resolved version; set the packages again to resolve it");
         return profile_failed(w, id, gen, prev, ctx, (crd::PKG_UNRESOLVED, &msg), Action::await_change()).await;
     }

@@ -166,9 +166,6 @@ impl RealNix {
 impl Nix for RealNix {
     async fn build(&self, expr: &str, timeout: Duration) -> Result<PathBuf, String> {
         // `--impure` for `builtins.getFlake` on a pinned ref; the expression is ONE argv element.
-        // `--max-jobs 0` is the load-bearing flag: it makes nix REFUSE to build anything locally,
-        // so a lock whose path is not in the cache fails fast instead of compiling a toolchain on
-        // a workspace node. The single substituter is the same rule stated positively.
         // One substituter, the public cache. NOT `--max-jobs 0`: the `buildEnv` symlink tree is a
         // derivation nobody has ever built, so it is always realised locally — what keeps a PINNED
         // package from being compiled here is the copy that ran before this, not a jobs limit.
