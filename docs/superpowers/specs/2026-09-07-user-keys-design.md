@@ -133,6 +133,21 @@ state, so a half-rolled fleet is never locked out.
 | `OwnerKeys` deleted by hand | agent writes an empty file, `Synced=False/NoKeys`; the next beat recreates it |
 | Region added after a key | the beat writes the projection into the new region within `KEYS_RESYNC_SECS` |
 
+## The SLO probe
+
+The probe is a synthetic user and must keep telling the truth about keys, so it changes with them:
+
+- Every step that registers a key under an owner (`id.key.usable`, the SSH push steps, the
+  workspace SSH step through the gateway) uses the per-person `/v1/keys` route with no `owner`.
+- Three new steps, in the fast suite because they are the ones a stale projection would break:
+  `key.projected` (add a key; `OwnerKeys` for the probe's owner reports `Synced` with the new
+  `observedGeneration` within the target), `key.live` (an SSH login to the probe's workspace with
+  that key succeeds), and `key.revoked` (remove the key; git over SSH refuses the fingerprint on
+  the next connection, and the workspace login is refused within one `KEYS_RESYNC_SECS`).
+- The catalogue (`crates/workspaces/src/slo/catalogue.rs`) gains the three ids with their targets
+  and `deploy/slo.md` is updated to match, held equal by the existing test. The probe's
+  ServiceAccount (`deploy/k3s/slo-rbac.yaml`) gains `get/list/watch` on `OwnerKeys`.
+
 ## Out of scope
 
 Tokens per person (would need the same membership check on the server; a later spec), key
