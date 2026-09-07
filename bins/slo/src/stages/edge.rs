@@ -37,7 +37,11 @@ const PIPELINE_CEILING: Duration = Duration::from_secs(10);
 /// A certificate this close to expiring is a page, not a surprise: two weeks is longer than any
 /// renewal cycle here and longer than a weekend nobody is on call for.
 // Cloudflare's edge certificates are renewed about ten days out, so 14 pages on every rotation.
-const CERT_MIN_DAYS: i64 = 7;
+/// 3, not 7: Cloudflare renews its Universal SSL certificates about seven days before expiry
+/// (`cr.khost.dev`, 2026-09-07: the check fired at "7 days" at 06:00 and the new certificate was
+/// live at 06:25), so a seven-day floor is a failed sample every 90 days for the renewal window.
+/// Three days is still four days of warning if a renewal actually does not happen.
+const CERT_MIN_DAYS: i64 = 3;
 /// Above this the consumer is keeping up; a real backlog is orders of magnitude larger.
 const MAX_STREAM_PENDING: f64 = 1000.0;
 /// ClickHouse holds 400-day rollups; under a fifth free is the point somebody must act.
