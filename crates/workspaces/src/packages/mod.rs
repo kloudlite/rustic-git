@@ -8,6 +8,7 @@
 //! grammar is checked twice: once by the API before it writes, again by the reconciler before it
 //! ever renders a name into a Nix expression.
 
+pub mod mirror_beat;
 pub mod resolve;
 
 use crate::crd::Lock;

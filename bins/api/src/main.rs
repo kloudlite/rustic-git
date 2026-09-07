@@ -457,6 +457,13 @@ async fn run() -> Result<()> {
             tokio::spawn(kloudlite_workspaces::api::keys::run_beat(ws));
         }
     }
+    // The nixpkgs-multiverse mirror the packages resolver falls back to when Nixhub has no
+    // answer (Task 3's `resolve::Mirror`). User role only, same reasoning as the keys beat above.
+    if role != "admin" {
+        if let Some(ws) = workspaces.clone() {
+            tokio::spawn(kloudlite_workspaces::packages::mirror_beat::run_beat(ws));
+        }
+    }
     // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with
     // ClickHouse configured — the fold itself is a cluster-wide list, and running either for
     // nowhere to write it would be pure load on the API server.
