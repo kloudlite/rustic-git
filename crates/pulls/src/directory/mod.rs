@@ -347,6 +347,9 @@ pub(crate) struct MongoCollections {
     signins: Collection<SignInLink>,
     cli_logins: Collection<CliLogin>,
     superadmins: Collection<SuperAdmin>,
+    /// One row per one-shot migration that has run, keyed by its name. Not a schema version:
+    /// the migrations here are independent of each other and land in any order.
+    meta: Collection<mongodb::bson::Document>,
 }
 
 /// The same rows, keyed the way Mongo keys them (`_id`), under one lock.
@@ -364,6 +367,7 @@ pub(crate) struct MemoryState {
     signins: std::collections::BTreeMap<String, SignInLink>,
     cli_logins: std::collections::BTreeMap<String, CliLogin>,
     superadmins: std::collections::BTreeMap<String, SuperAdmin>,
+    meta: std::collections::BTreeMap<String, String>,
     // `repos` and `pulls` have no in-memory arm on purpose: both Mongo collections are
     // read-only migration leftovers that nothing writes any more, so the answers are
     // "no repos" and "no pull rows" — which is exactly what an empty collection gives.
@@ -439,6 +443,7 @@ impl Directory {
             signins: db.collection("signins"),
             cli_logins: db.collection("cli_logins"),
             superadmins: db.collection("superadmins"),
+            meta: db.collection("meta"),
         };
         m.ensure_indexes().await?;
         match m.lowercase_signing_fingerprints().await {
@@ -951,6 +956,108 @@ impl Directory {
         }
     }
 
+    /// Re-file every key registered against a team onto the person who added it, once.
+    ///
+    /// A key is the PERSON's now, so a row whose `owner` is a team handle is filed where its
+    /// holder can no longer see or revoke it. Marker-guarded rather than run every boot because
+    /// the move is a judgement about rows written by an older build — once it has run, a row
+    /// under a team handle is a bug to look at, not something to silently rewrite.
+    ///
+    /// Returns `(email, fingerprint)` for every ssh key, moved or not: the object store's
+    /// fingerprint index is a separate store that this cannot write, and re-adding a pair it
+    /// already holds costs one PUT.
+    ///
+    /// Does NOT write the marker — `mark_keys_migrated` does, and only the caller knows whether
+    /// the index it is handed these pairs for actually took them. Running the pass twice is
+    /// harmless (a moved row is skipped by the same test that selected it, and re-indexing a
+    /// pair is one PUT), so the safe order is: pass, index, then mark.
+    pub async fn migrate_keys_to_people(&self) -> Result<Vec<(String, String)>> {
+        // A row whose `created_by` is not an address cannot be re-filed onto a person, and a
+        // fingerprint indexed under a team handle would authenticate the wrong namespace — so
+        // both the move and the returned pair insist on one.
+        let person = |s: &str| s.contains('@');
+        let mut keys = Vec::new();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                use futures::TryStreamExt;
+                if m.meta
+                    .find_one(doc! { "_id": KEYS_V2 })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?
+                    .is_some()
+                {
+                    return Ok(vec![]);
+                }
+                let kinds = [CredentialKind::SshKey, CredentialKind::SigningKey]
+                    .iter()
+                    .map(|k| mongodb::bson::to_bson(k).map_err(|e| err(format!("bson: {e}"))))
+                    .collect::<Result<Vec<_>>>()?;
+                // Drained before a single update: writing to the collection a cursor is
+                // streaming lets the server skip or re-yield a rewritten document.
+                let rows: Vec<Credential> = m
+                    .credentials
+                    .find(doc! { "kind": { "$in": kinds } })
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?
+                    .try_collect()
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                for c in rows {
+                    let mut owner = c.owner;
+                    if !person(&owner) && person(&c.created_by) {
+                        m.credentials
+                            .update_one(doc! { "_id": &c.id }, doc! { "$set": { "owner": &c.created_by } })
+                            .await
+                            .map_err(|e| err(format!("mongo: {e}")))?;
+                        owner = c.created_by;
+                    }
+                    if c.kind == CredentialKind::SshKey && person(&owner) {
+                        keys.push((owner, c.id));
+                    }
+                }
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                if s.meta.contains_key(KEYS_V2) {
+                    return Ok(vec![]);
+                }
+                for c in s.credentials.values_mut() {
+                    if !matches!(c.kind, CredentialKind::SshKey | CredentialKind::SigningKey) {
+                        continue;
+                    }
+                    if !person(&c.owner) && person(&c.created_by) {
+                        c.owner = c.created_by.clone();
+                    }
+                    if c.kind == CredentialKind::SshKey && person(&c.owner) {
+                        keys.push((c.owner.clone(), c.id.clone()));
+                    }
+                }
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Records that `migrate_keys_to_people`'s pairs have been indexed, so it stops returning
+    /// them. Separate from the pass on purpose: until the caller has written every pair into the
+    /// fingerprint index, a marker would strand the ones it never got to.
+    pub async fn mark_keys_migrated(&self) -> Result<()> {
+        match &self.backend {
+            // An upsert because two replicas booting together both run the pass, and the loser
+            // of that race must not fail a duplicate key into an abandoned boot.
+            Backend::Mongo(m) => m
+                .meta
+                .replace_one(doc! { "_id": KEYS_V2 }, doc! { "_id": KEYS_V2, "at": DateTime::now() })
+                .upsert(true)
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().meta.insert(KEYS_V2.to_string(), String::new());
+                Ok(())
+            }
+        }
+    }
+
     // ── passkeys ────────────────────────────────────────────────────────────
 
     /// `Ok(None)` means this credential id is already registered — which means the
@@ -1194,6 +1301,8 @@ impl MongoCollections {
                 // Verifying a signature looks a key up by any fingerprint it
                 // answers to; without this that is a scan of every credential.
                 IndexModel::builder().keys(doc! { "fingerprints": 1 }).build(),
+                // `migrate_keys_to_people` filters on kind alone; Cosmos will not scan for it.
+                IndexModel::builder().keys(doc! { "kind": 1 }).build(),
             ])
             .await
             .map_err(|e| err(format!("mongo: creating indexes: {e}")))?;
@@ -1260,6 +1369,9 @@ pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
     let lower: Vec<String> = fingerprints.iter().map(|f| f.to_lowercase()).collect();
     (lower != fingerprints).then_some(lower)
 }
+
+/// The `meta` row saying keys have been re-filed onto people and indexed under them.
+const KEYS_V2: &str = "keys_v2";
 
 const DEP: &str = "mongo";
 
@@ -1333,7 +1445,40 @@ pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check_handle;
+    use super::{check_handle, Credential, CredentialKind, Directory};
+
+    /// A key registered under a team moves to the person who added it; only ssh keys reach the
+    /// fingerprint index; and the pass keeps returning its pairs until the caller says it has
+    /// indexed them, so a boot that dies mid-index re-does the whole list rather than half of it.
+    #[tokio::test]
+    async fn team_keys_move_to_their_creator_once() {
+        let row = |id: &str, kind, owner: &str| Credential {
+            id: id.into(),
+            kind,
+            owner: owner.into(),
+            created_by: "alice@example.com".into(),
+            name: "k".into(),
+            material: "ssh-ed25519 AAAA".into(),
+            fingerprints: vec![],
+            created_at: mongodb::bson::DateTime::now(),
+        };
+        let d = Directory::in_memory();
+        d.add_credential(&row("SHA256:a", CredentialKind::SshKey, "acme")).await.unwrap();
+        // A team's signing key moves too, but signatures are not authentication: its id must
+        // never be handed to the caller to put in the ssh fingerprint index.
+        d.add_credential(&row("gpg:b", CredentialKind::SigningKey, "acme")).await.unwrap();
+
+        let moved = d.migrate_keys_to_people().await.unwrap();
+        assert_eq!(moved, vec![("alice@example.com".to_string(), "SHA256:a".to_string())]);
+        for id in ["SHA256:a", "gpg:b"] {
+            assert_eq!(d.credential(id).await.unwrap().unwrap().owner, "alice@example.com");
+        }
+
+        // Unmarked, so the pairs come back: the caller has not said the index took them.
+        assert_eq!(d.migrate_keys_to_people().await.unwrap(), moved);
+        d.mark_keys_migrated().await.unwrap();
+        assert!(d.migrate_keys_to_people().await.unwrap().is_empty());
+    }
 
     /// The classifier is what a rule filters on: total, and never the error's text.
     #[test]
