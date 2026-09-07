@@ -8,6 +8,8 @@
 //! grammar is checked twice: once by the API before it writes, again by the reconciler before it
 //! ever renders a name into a Nix expression.
 
+pub mod resolve;
+
 use sha2::{Digest, Sha256};
 
 pub const MAX_PACKAGES: usize = 100;
