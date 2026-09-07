@@ -1074,6 +1074,13 @@ pub fn workspace_pod(
     // only the namespace would reach all of them; this label is what keeps it to one.
     if let Some(l) = m.labels.as_mut() {
         l.insert(WORKSPACE_LABEL.to_string(), ws_id.to_string());
+        // A team pod mounts the TEAM's keys file, and the pod fence (workspace-admission.yaml)
+        // admits that path only against this label: the owner label is the person, the file is
+        // the team's, and a pod naming a team it does not carry is refused by design.
+        let team = keys_owner(spec);
+        if team != spec.owner {
+            l.insert(TEAM_LABEL.to_string(), team.to_string());
+        }
     }
     Ok(Pod { metadata: m, spec: Some(pod_spec), ..Default::default() })
 }
@@ -1750,9 +1757,12 @@ mod tests {
         let mut spec = ws_spec();
         spec.image = crate::model::DEFAULT_WS_IMAGE.into();
         spec.team = "acme".into();
-        let s = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).unwrap().spec.unwrap();
+        let pod = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).unwrap();
+        let s = pod.spec.unwrap();
         let v = s.volumes.unwrap().into_iter().find(|v| v.name == "authorized-keys").unwrap();
         assert_eq!(v.host_path.unwrap().path, keys_file(ctx().pool, "acme"));
+        // The fence admits `keys/acme/…` only when the pod says it is acme's.
+        assert_eq!(pod.metadata.labels.unwrap().get(TEAM_LABEL).map(String::as_str), Some("acme"));
     }
 
     #[test]
