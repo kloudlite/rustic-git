@@ -328,6 +328,10 @@ pub const CATALOGUE: &[Slo] = &[
     // once an hour on top of the fast journey — so an hourly run is also a fast sample.
     Slo { id: "ws.packages.add", feature: "Workspaces", sli: "Adding a package to a running workspace makes it runnable (`which`)", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.packages.remove", feature: "Workspaces", sli: "Removing it makes it disappear from the profile", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.packages.pin", feature: "Workspaces", sli: "A workspace created with `jq@1.7` locks a 1.7.x, and `jq --version` in the pod says so", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.packages.pin.unknown", feature: "Workspaces", sli: "`jq@0.0.99` is refused with the nearest versions named", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.packages.update", feature: "Workspaces", sli: "`POST …/packages/update` answers with the lock unchanged for an exact pin", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.packages.pin.lockshape", feature: "Workspaces", sli: "The lock names a nixpkgs revision and a store path", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.seeded", feature: "Workspaces", sli: "A workspace created from a repo and branch has that clone checked out", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
