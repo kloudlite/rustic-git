@@ -338,6 +338,10 @@ impl Resolver {
     /// one entry must never move another one's version. `refresh_all` is the update route: every
     /// `@` entry is re-resolved, exact pins included (a newer nixpkgs revision can build the same
     /// version), and it bypasses the cache so the answer is actually new.
+    ///
+    /// An update that runs during an index outage KEEPS the locks it already had rather than
+    /// failing the whole write: "I could not check" is not a reason to take a working version away
+    /// from a workspace. `Unknown` and `Malformed` still refuse — those are answers, not outages.
     pub async fn lock_all(
         &self,
         packages: &[String],
@@ -345,11 +349,30 @@ impl Resolver {
         refresh_all: bool,
     ) -> Result<Vec<Lock>, Refusal> {
         let mut out = Vec::new();
+        let mut kept_on_outage = 0usize;
         for p in packages.iter().filter(|p| p.contains('@')) {
-            match prev.iter().find(|l| l.entry == *p) {
-                Some(l) if !refresh_all => out.push(l.clone()),
-                _ => out.push(self.lock_one(p, refresh_all).await?),
+            let existing = prev.iter().find(|l| l.entry == *p);
+            if let Some(l) = existing.filter(|_| !refresh_all) {
+                out.push(l.clone());
+                continue;
             }
+            match (self.lock_one(p, refresh_all).await, existing) {
+                (Ok(lock), _) => out.push(lock),
+                (Err(Refusal::Unavailable), Some(l)) => {
+                    out.push(l.clone());
+                    kept_on_outage += 1;
+                }
+                (Err(e), _) => return Err(e),
+            }
+        }
+        // Once per call, not per entry: an outage hits every entry and one line per package would
+        // bury the fact that the update silently did nothing.
+        if kept_on_outage > 0 {
+            tracing::warn!(
+                reason = "index-unavailable",
+                kept = kept_on_outage,
+                "package update kept existing locks"
+            );
         }
         Ok(out)
     }
@@ -770,6 +793,30 @@ mod tests {
         // BOTH went to the index: an update that answered from the cache would be a no-op for a
         // day, which is exactly what the update route exists not to be.
         assert_eq!(nix.count(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_during_an_outage_keeps_the_locks_it_had() {
+        let r = resolver(Arc::new(FakeIndex::down()), Arc::new(FakeIndex::down()));
+        let mut prev = lock("nodejs@20", "20.5.0", LockSource::Nixhub);
+        prev.resolved_at = at("2026-01-01T00:00:00Z").to_rfc3339();
+        let packages = vec!["nodejs@20".to_string()];
+
+        let locks = r
+            .lock_all(&packages, std::slice::from_ref(&prev), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            locks,
+            vec![prev],
+            "an outage must not take a working version away"
+        );
+
+        // ...but with nothing to keep there is no lock to write, and the write must not proceed
+        assert_eq!(
+            r.lock_all(&packages, &[], true).await.unwrap_err(),
+            Refusal::Unavailable
+        );
     }
 
     #[test]
