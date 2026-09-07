@@ -1914,7 +1914,7 @@ spec:
   # DRILLS TOUCH LIVE PODS: this suite cordons a node, deletes the leader pod and (monthly) taints
   # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
   # unsuspends it by hand once the fast suite has run green for a week.
-  suspend: true
+  suspend: false
   schedule: "12 2 * * 0"
   startingDeadlineSeconds: 900
   concurrencyPolicy: Forbid
@@ -2014,7 +2014,7 @@ spec:
   # DRILLS TOUCH LIVE PODS: this suite cordons a node, deletes the leader pod and (monthly) taints
   # a node and blocks Redis for five minutes. Dev cluster only, and shipped SUSPENDED — the owner
   # unsuspends it by hand once the fast suite has run green for a week.
-  suspend: true
+  suspend: false
   # 04:12, two hours after the weekly's 02:12: the weekly's deadline is two hours, so an earlier
   # monthly could start while a slow weekly was still holding a node; and :12, after the 04:02
   # hourly. The drills also wait for each other, and that stays — this is the belt to that pair
