@@ -957,7 +957,7 @@ KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml -f deploy/k
 ```
 
 Rollout order: server tier first (the migration that rewrites team-owned key rows to
-`created_by` and writes the `meta/keys_v2` marker runs at server boot), then the five manifests
+`created_by` and writes the directory's `meta` collection marker (`{_id: "keys_v2"}`) runs at server boot), then the five manifests
 above, then the agent DaemonSet, then the api Deployment — an api that projects `OwnerKeys` before
 any agent watches it just means the first resync beat (`KEYS_RESYNC_SECS`, 300 s) is wasted work,
 never a wrong file; an agent watching before the api exists sees nothing and writes nothing, which

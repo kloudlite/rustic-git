@@ -376,7 +376,10 @@ IN PLACE (0600, uid 1000) — pods mount it as a hostPath `type: File` at
 — and stamps `status.observedGeneration` plus a `Synced` condition (`Applied`/`NoKeys`/`WriteFailed`).
 Fail-closed both ways: a deleted `OwnerKeys` becomes an empty file, not a stale one, and a
 default-image workspace parks `Ready=False/KeysNotReady` until the file exists (a custom-image
-workspace mounts none). The `user-key` Secret no longer carries `authorized_keys`.
+workspace mounts none). The agent also revokes on the CR's own Delete event and, as a backstop,
+sweeps stale key directories on its own 600 s tick — so a missed delete is caught within ten
+minutes rather than never — and the api's resync beat runs only in its `user` role (`admin` never
+touches `OwnerKeys`). The `user-key` Secret no longer carries `authorized_keys`.
 
 A profile is keyed by `packages::hash(pin, base + spec.packages)` and indexed per node at
 `{PROFILES_DIR}/by-inputs/{hash}` → the store path, so a second workspace or a clone with the same
