@@ -343,6 +343,12 @@ pub trait ImageExt {
     async fn set_image_visibility(&self, owner: &str, name: &str, public: bool) -> Result<()>;
     async fn delete_image_rows(&self, owner: &str, name: &str) -> Result<()>;
     async fn delete_image(&self, owner: &str, name: &str) -> Result<()>;
+    /// The storage half of `delete_image` alone — evict the handle, drop the manifest cache,
+    /// delete the database's own objects — for an image whose rows cannot be read at all: a
+    /// database whose compacted file is gone answers every read with an error, so `delete_image`
+    /// can never get past its first step, the marker lane warns on it every 30 s forever, and
+    /// the owner's `imagedelete` had no way to make it go (`run-fast-1788620401-a`, 2026-09-06).
+    async fn purge_image_storage(&self, owner: &str, name: &str) -> Result<()>;
 }
 
 impl ImageExt for Store {
@@ -694,8 +700,12 @@ impl ImageExt for Store {
     /// routing (the delete is forwarded to that owning node, see `http::repo_of`), add a release
     /// through `ReleaseHook` if a second node can ever hold the same image warm at once.
     async fn delete_image(&self, owner: &str, name: &str) -> Result<()> {
-        use slatedb::object_store::ObjectStore;
         self.delete_image_rows(owner, name).await?;
+        self.purge_image_storage(owner, name).await
+    }
+
+    async fn purge_image_storage(&self, owner: &str, name: &str) -> Result<()> {
+        use slatedb::object_store::ObjectStore;
         // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before
         // delete keeps serving stale bytes for this image until byte-cap eviction reaches it.
         let cache_prefix = format!("{owner}/{name}/");

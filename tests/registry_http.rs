@@ -427,6 +427,7 @@ async fn imagedelete_clears_a_ghost_marker_with_no_image_behind_it() {
     let r = common::peer_post_as(&peer_base, "acme", "/api/acme/ghost/imagedelete", "").await;
     assert_eq!(r.status(), StatusCode::NO_CONTENT);
     assert!(index::read(&e.store.os, Kind::Img, "acme", "ghost").await.is_none(), "the ghost marker is gone");
+    assert!(!e.store.pool.exists("img", "acme/ghost").await.unwrap(), "no database is left behind either");
 }
 
 /// `imagedelete` removes the listing-index marker FIRST, unconditionally — before it even lists

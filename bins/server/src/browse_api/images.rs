@@ -245,6 +245,23 @@ pub(super) async fn imagedelete(
         if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Img, &owner, &name).await {
             return internal(e);
         }
+        // And whatever storage the ghost still has: a database whose rows cannot be read (a
+        // missing compacted file) is `image_exists == Err`, lands here, and would otherwise keep
+        // its objects, its pool entry and a marker-lane warning every 30 s for good.
+        use slatedb::object_store::ObjectStore;
+        use futures::{StreamExt, TryStreamExt};
+        let prefix = kloudlite_registry::store::manifest_prefix(&owner, &name);
+        let doomed = app.store.os.list(Some(&prefix)).map_ok(|m| m.location).boxed();
+        let mut results = app.store.os.delete_stream(doomed);
+        while let Some(r) = results.next().await {
+            match r {
+                Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
+                Err(e) => return internal(e.into()),
+            }
+        }
+        if let Err(e) = app.store.purge_image_storage(&owner, &name).await {
+            return internal(e);
+        }
         return StatusCode::NO_CONTENT.into_response();
     }
     // Marker first: a crash after this point leaves orphaned manifest/db bytes for GC to sweep,
