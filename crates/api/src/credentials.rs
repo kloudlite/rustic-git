@@ -2,18 +2,24 @@ use super::*;
 
 // ── credentials ─────────────────────────────────────────────────────────────
 //
-// A credential acts in exactly ONE namespace, chosen when it is made, because
+// A KEY belongs to the person, not to a namespace: its row's owner is their email, the git tier
+// resolves that to their memberships per connection, and a namespace's `authorized_keys` is only
+// ever a projection of its members' keys. Everything below about namespaces is about TOKENS.
+//
+// A token acts in exactly ONE namespace, chosen when it is made, because
 // that is what the git fleet enforces: `auth::authorize` compares the credential's
 // owner to the repo's owner, with no membership lookup — the nodes have no
 // directory. Scoping here to a namespace the caller belongs to keeps the two ends
-// saying the same thing, and means a leaked laptop key cannot reach a team's repos
-// unless it was made for them.
+// saying the same thing.
 
 use kloudlite_core::Result;
 use kloudlite_pulls::directory::{CliLogin, Credential, CredentialKind};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NewCredential {
+    /// Tokens only. A key is the caller's, so naming a namespace here is an old client asking
+    /// for something that no longer exists and is refused rather than quietly ignored.
+    #[serde(default)]
     owner: String,
     #[serde(default)]
     name: String,
@@ -207,8 +213,14 @@ pub(crate) async fn revoke(
             return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
         }
     };
-    // Authorized against the credential's OWNER, never against holding its id.
-    match may_act_under(db, &user, &found.owner).await {
+    // Authorized against the credential's OWNER, never against holding its id. For a key that
+    // owner IS a person, so membership does not enter into it — a teammate must not revoke the
+    // key on somebody else's laptop.
+    let authorized = match kind {
+        CredentialKind::SshKey | CredentialKind::SigningKey => Ok(found.owner.eq_ignore_ascii_case(&user)),
+        _ => may_act_under(db, &user, &found.owner).await,
+    };
+    match authorized {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such credential").into_response(),
         Err(e) => {
@@ -270,23 +282,35 @@ fn key_material(key: &str, is_gpg: bool) -> String {
     key.split_whitespace().take(3).collect::<Vec<_>>().join(" ")
 }
 
-/// One `authorized_keys` line per access key the owner has.
+/// One `authorized_keys` line per distinct access key across `sets`, sorted.
 ///
-/// Keys registered before material was kept contribute nothing — there is no way back from a
-/// fingerprint — so they are skipped rather than emitted as a blank line, which sshd would
-/// read as a syntax error and refuse the whole file over.
-fn authorized_keys_lines(keys: &[Credential]) -> String {
-    keys.iter()
-        .map(|c| c.material.trim())
-        .filter(|m| !m.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Sorted and deduplicated so the file is byte-stable across resyncs — a changed byte is what
+/// makes the agent rewrite it — and so two members sharing a laptop key are one line. Keys
+/// registered before material was kept contribute nothing (there is no way back from a
+/// fingerprint) and are skipped rather than emitted as a blank line, which sshd reads as a
+/// syntax error and refuses the whole file over.
+pub fn authorized_keys_union(sets: &[&[Credential]]) -> String {
+    let mut lines: Vec<&str> =
+        sets.iter().flat_map(|s| s.iter()).map(|c| c.material.trim()).filter(|m| !m.is_empty()).collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines.iter().map(|l| format!("{l}\n")).collect()
 }
 
-/// The `authorized_keys` file for an owner: every ssh key they have registered for access.
+/// The `authorized_keys` file for an owner namespace: a person's own keys, or every member's
+/// keys for a team. Keys belong to people; a namespace only ever sees a projection of them.
 pub async fn authorized_keys_for(db: &kloudlite_pulls::directory::Directory, owner: &str) -> Result<String> {
-    let keys = db.credentials_for(owner, CredentialKind::SshKey).await?;
-    Ok(authorized_keys_lines(&keys))
+    if let Some(u) = db.user_by_handle(owner).await? {
+        let keys = db.credentials_for(&u.email, CredentialKind::SshKey).await?;
+        return Ok(authorized_keys_union(&[&keys]));
+    }
+    let Some(team) = db.get(owner).await? else { return Ok(String::new()) };
+    let mut sets = Vec::with_capacity(team.members.len());
+    for m in &team.members {
+        sets.push(db.credentials_for(&m.user, CredentialKind::SshKey).await?);
+    }
+    let refs: Vec<&[Credential]> = sets.iter().map(Vec::as_slice).collect();
+    Ok(authorized_keys_union(&refs))
 }
 
 /// `(name, email)` for git to commit as inside the owner's workspaces. A handle that is not a
@@ -300,11 +324,22 @@ pub(crate) async fn add_key(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<NewCredential>,
 ) -> Response {
-    let owner = body.owner.trim().to_string();
-    let (user, db) = match credential_caller(&api, &headers, &owner).await {
-        Ok(v) => v,
+    // Identity first, like every credential route: what the body says is only worth answering
+    // to somebody we know. A key is then the PERSON's — the row's owner is their email, the
+    // identity the JWT `sub`, the fingerprint index and the directory all agree on — and a body
+    // that names a namespace is an old client registering a team key, which no longer exists.
+    let user = match user_identity(&api, &headers).await {
+        Ok(i) => i.email,
         Err(r) => return r,
     };
+    if !body.owner.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "keys belong to you, not to a namespace").into_response();
+    }
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let owner = user.clone();
     // An armoured OpenPGP block is a signing key and nothing else — it cannot
     // authenticate an ssh connection, so it is only accepted for signing.
     let is_gpg = body.key.contains("BEGIN PGP PUBLIC KEY BLOCK");
@@ -392,12 +427,13 @@ pub(crate) async fn list_keys(
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let owner = match owner_param(&q) {
-        Ok(o) => o,
+    // The caller's own keys, whatever namespace they may be asking from: there is no other set.
+    let owner = match user_identity(&api, &headers).await {
+        Ok(i) => i.email,
         Err(r) => return r,
     };
-    let (_, db) = match credential_caller(&api, &headers, &owner).await {
-        Ok(v) => v,
+    let db = match directory(&api) {
+        Ok(d) => d,
         Err(r) => return r,
     };
     let kind = match q.get("kind").map(String::as_str) {
@@ -962,10 +998,24 @@ mod tests {
             cred("newer", "ssh-rsa BBBB alice@desktop"),
         ];
         assert_eq!(
-            authorized_keys_lines(&keys),
-            "ssh-ed25519 AAAA alice@laptop\nssh-rsa BBBB alice@desktop"
+            authorized_keys_union(&[&keys[..]]),
+            "ssh-ed25519 AAAA alice@laptop\nssh-rsa BBBB alice@desktop\n"
         );
-        assert_eq!(authorized_keys_lines(&[cred("old", "  ")]), "");
+        assert_eq!(authorized_keys_union(&[&[cred("old", "  ")][..]]), "");
+    }
+
+    /// A team's file is the union of its members' keys — one line per distinct key, sorted, so
+    /// two members sharing a laptop key do not produce a duplicate line, and the projection is
+    /// byte-stable across resyncs (a changed byte is what makes the agent rewrite the file).
+    #[test]
+    fn a_teams_authorized_keys_is_the_sorted_union_of_its_members() {
+        let alice = [cred("a1", "ssh-ed25519 AAAA alice@laptop")];
+        let bob =
+            [cred("b1", "ssh-ed25519 BBBB bob@desk"), cred("b2", "ssh-ed25519 AAAA alice@laptop")];
+        assert_eq!(
+            authorized_keys_union(&[&alice[..], &bob[..]]),
+            "ssh-ed25519 AAAA alice@laptop\nssh-ed25519 BBBB bob@desk\n"
+        );
     }
 
     async fn cli_api() -> Arc<Api> {

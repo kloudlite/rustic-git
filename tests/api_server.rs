@@ -1052,6 +1052,54 @@ async fn a_public_team_profile_is_readable_and_nothing_else_is() {
     assert_eq!(up.hits.load(Ordering::SeqCst), 0, "the profile never asks the fleet");
 }
 
+/// A key is the caller's own, not a namespace's: the row lands under their EMAIL, a body that
+/// names an owner is refused outright, and revoking it takes the fingerprint the git fleet
+/// authenticates against with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_belongs_to_the_person_who_added_it() {
+    let Some(d) = common::mongo("a_key_belongs_to_the_person_who_added_it").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let base = api_with_dir(&e, &up, &d).await;
+    d.dir.upsert_user("k@example.com", "K").await.unwrap();
+    d.dir.claim_username("k@example.com", "kay").await.unwrap().unwrap();
+    let token = token_for("k@example.com", Some("kay"));
+    let c = reqwest::Client::new();
+    let line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN0Xi1RRuKuPGDLNPRTGKG6VkNKlbLPmH1PWUUY1CqQe test@host";
+    let fp = common::ssh_fingerprint(line).unwrap();
+
+    let r = c
+        .post(format!("{base}/v1/keys"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "key": line }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201);
+    let made: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(made["owner"], "k@example.com", "the row is the person's, not a namespace's");
+    let id = made["_id"].as_str().unwrap().to_string();
+    assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap().as_deref(), Some("k@example.com"));
+
+    let r = c
+        .post(format!("{base}/v1/keys"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "owner": "acme", "key": line }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400, "an old client naming a namespace is told, not quietly obeyed");
+
+    let listed: serde_json::Value =
+        c.get(format!("{base}/v1/keys")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["_id"], id.as_str());
+
+    let r = c.delete(format!("{base}/v1/keys/{id}")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(r.status(), 204);
+    assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap(), None, "revoking takes the fleet's row too");
+}
+
 /// Create, list, revoke, list again — the whole life of a token, through the routes rather than
 /// through the directory, so the digest the store keeps and the row the list reads stay the same
 /// id at every step.
