@@ -37,7 +37,12 @@ const nextConfig: NextConfig = {
        factory is not available"). `no-store` is the one directive every layer honours.
        Production chunk names are content-hashed and keep their long TTL. */
     ...(process.env.NODE_ENV === "development"
-      ? [{ source: "/(dev-assets/)?_next/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] }]
+      ? [
+          // Chunks and stylesheets only: font files under /_next/static/media are content-hashed,
+          // and re-fetching them every load showed the fallback face until they arrived.
+          { source: "/(dev-assets/)?_next/static/chunks/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
+          { source: "/(dev-assets/)?_next/static/:path*.css", headers: [{ key: "Cache-Control", value: "no-store" }] },
+        ]
       : []),
   ],
   experimental: {
