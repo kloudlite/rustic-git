@@ -11,16 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { addSshKey, type AddKeyState } from "@/app/(shell)/settings/actions";
-import { OwnerSelect } from "@/components/app/owner-select";
-import type { SwitcherOwner } from "@/components/app/team-switcher";
 
 export function AddKeyDialog({
-  owners,
-  defaultOwner,
   signing = false,
 }: {
-  owners: SwitcherOwner[];
-  defaultOwner: string;
   /** A signing key proves authorship and grants no access — a different thing
    *  from an access key, so it is a different button rather than a checkbox. */
   signing?: boolean;
@@ -43,19 +37,10 @@ export function AddKeyDialog({
                 : "Paste the public half. The private key never leaves your machine."}
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 sm:grid-cols-field-pair">
-            <div className="grid gap-2">
-              <FieldLabel htmlFor="key-title">Title</FieldLabel>
-              <Input id="key-title" name="title" defaultValue={state?.values?.title} placeholder="Work laptop" autoFocus className="h-9" />
-            </div>
-            {owners.length > 1 && (
-              <div className="grid gap-2">
-                <FieldLabel htmlFor="key-owner">Namespace</FieldLabel>
-                <OwnerSelect id="key-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />
-              </div>
-            )}
+          <div className="grid gap-2">
+            <FieldLabel htmlFor="key-title">Title</FieldLabel>
+            <Input id="key-title" name="title" defaultValue={state?.values?.title} placeholder="Work laptop" autoFocus className="h-9" />
           </div>
-          {owners.length < 2 && <OwnerSelect id="key-owner" owners={owners} defaultValue={state?.values?.owner ?? defaultOwner} />}
           {signing && <input type="hidden" name="signing" value="1" />}
           <div className="grid gap-2">
             <FieldLabel htmlFor="key">Public key</FieldLabel>

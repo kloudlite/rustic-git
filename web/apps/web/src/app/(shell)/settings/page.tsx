@@ -12,7 +12,7 @@ export default async function Page() {
 
   // Nothing below needs another's answer, so it is one round trip deep, not seven: this page
   // was `owners → passkeys → cli → platform → (keys → signing → tokens) × owners` in sequence.
-  const [owners, passkeys, cliTokens, platform] = await Promise.all([
+  const [owners, passkeys, cliTokens, platform, keys, signing] = await Promise.all([
     ownersFor(session),
     // Passkeys are the person's, not a namespace's: one call, no owner.
     listPasskeys(token),
@@ -21,32 +21,25 @@ export default async function Page() {
     // The platform key is the person's own, never a team's — a team has no workspaces to carry it.
     // Reading it is what generates it, so opening this page is how an account first gets one.
     platformKey(token, session.user.owner),
+    // Keys are the person's too — one call each, no owner, and every namespace accepts them.
+    listKeys(token),
+    listKeys(token, "signing"),
   ]);
-  // Credentials are per namespace, so the page asks for every namespace this
+  // Tokens are still per namespace, so the page asks for every namespace this
   // person can act in and shows them as one list — which namespace each belongs
   // to is a column, not a separate page to navigate between.
-  const per = await Promise.all(
-    owners.map(async (o) => {
-      const [keys, signing, tokens] = await Promise.all([
-        listKeys(token, o.slug),
-        listKeys(token, o.slug, "signing"),
-        listTokens(token, o.slug),
-      ]);
-      return { keys, signing, tokens };
-    }),
-  );
+  const perOwnerTokens = await Promise.all(owners.map((o) => listTokens(token, o.slug)));
   // `listOrSignIn`, not `?? []`: an expired token must send the person to sign in
   // rather than render their credentials as gone.
-  const gather = (pick: (p: (typeof per)[number]) => ApiResult<ApiCredential[]>) =>
-    per.flatMap((p) => listOrSignIn(pick(p)));
+  const gather = (rs: ApiResult<ApiCredential[]>[]) => rs.flatMap((r) => listOrSignIn(r));
 
   return (
     <UserSettings
       session={session}
       owners={owners}
-      keys={gather((p) => p.keys)}
-      signingKeys={gather((p) => p.signing)}
-      tokens={gather((p) => p.tokens)}
+      keys={listOrSignIn(keys)}
+      signingKeys={listOrSignIn(signing)}
+      tokens={gather(perOwnerTokens)}
       passkeys={listOrSignIn(passkeys)}
       cliTokens={listOrSignIn(cliTokens)}
       platformKey={platform.ok ? platform.value : undefined}
