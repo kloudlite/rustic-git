@@ -177,6 +177,15 @@ async fn ensure_profile(
     let current = prev.packages.as_ref().and_then(|p| p.observed_hash.as_deref()) == Some(hash.as_str())
         && crate::nix::profile_exists(&ctx.profiles_dir, id);
     if current {
+        // Built and recorded, but the CONDITION can still say `Building`: a workspace that moved
+        // nodes mid-build carries the old node's `Building` with this same hash, and this node
+        // found the profile in its index without building. The tools are there; say so, or the
+        // UI shows a build that never ends.
+        let ready = prev.conditions.iter().any(|c| c.type_ == crd::PACKAGES_READY && c.status == "True");
+        if !ready {
+            let st = packages_status(prev, Some(observed), "Built", "profile is on disk", true, gen);
+            write_ws_status_tracking(w, st, prev, ctx).await?;
+        }
         return Ok(None);
     }
     // Another workspace on this node already built exactly these inputs. The hash covers the pin,

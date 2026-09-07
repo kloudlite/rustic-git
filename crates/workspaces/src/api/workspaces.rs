@@ -8,7 +8,7 @@ use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
 use crate::model::*;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::{Resource, ResourceExt};
 use axum::{
     extract::{Path, State},
@@ -295,20 +295,48 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
     tracing::info!(%owner, workspace = %id, reason = "not-placed", "workspace.keys.deferred");
 }
 
-/// A key or membership change names an EMAIL; the projections it touches are the person's own
-/// namespace and every team they are in.
-pub async fn keys_changed(s: &ApiState, email: &str) {
-    let Some(dir) = s.directory.as_ref() else { return };
-    let owners = dir.owners_of(email).await;
+/// A key or membership change names a PERSON (their email: the namespaces touched are their own
+/// handle and every team they are in) — or, from a platform-key rotation, one OWNER handle. Both
+/// do the same two things per owner: re-project `OwnerKeys`, and rewrite the `user-key` Secret in
+/// every namespace of that owner, because the platform PRIVATE key lives only in that Secret and a
+/// rotation has just revoked the one every running pod is mounting.
+pub async fn keys_changed(s: &ApiState, principal: &str) {
+    let owners = if principal.contains('@') {
+        let Some(dir) = s.directory.as_ref() else { return };
+        dir.owners_of(principal).await
+    } else {
+        vec![principal.to_string()]
+    };
     // Worth a line: a key change that reaches nothing is either an unclaimed handle or a
     // directory read that failed, and both look identical from the outside otherwise.
     if owners.is_empty() {
-        tracing::warn!(%email, reason = "no-owners", "keys.project.skipped");
+        tracing::warn!(%principal, reason = "no-owners", "keys.project.skipped");
     }
     for o in owners {
         if let Err(e) = super::keys::project(s, &o).await {
             tracing::warn!(owner = %o, error = %e, "keys.project.failed");
         }
+        refresh_user_key_secrets(s, &o).await;
+    }
+}
+
+/// Rewrite the owner's `user-key` Secret in EVERY workspace namespace they have. The namespaces
+/// are found by the owner label the controller stamps, so a team the api tier has never heard of
+/// is still covered. Transitional with the Secret's `authorized_keys` entry (spec §5 step 4); the
+/// private-key half stays for as long as workspaces push git with a platform key.
+async fn refresh_user_key_secrets(s: &ApiState, owner: &str) {
+    let Some(c) = s.kube.as_ref() else { return };
+    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
+    let sel = format!("{}={owner},{}=workspace", crate::k8s::OWNER_LABEL, crate::k8s::KIND_LABEL);
+    let list = match api.list(&ListParams::default().labels(&sel)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(kind = "Namespace", %owner, error = %e, "listing.failed");
+            return;
+        }
+    };
+    for ns in list.items.iter().map(|n| n.name_any()) {
+        write_user_key(s, c, &ns, owner).await;
     }
 }
 
