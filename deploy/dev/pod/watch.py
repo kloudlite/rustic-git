@@ -53,13 +53,25 @@ def close_row(rid):
 def cleanup(rid):
     H = {"authorization": "Bearer " + token(f"{tenant}@kloudlite.io", tenant, False)}
     base = os.environ["KLOUDLITE_API_URL"].rstrip("/"); prefix = "run-" + rid; gone = 0
-    for kind in ("workspaces", "environments"):
-        try: rows = json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}?owner={tenant}", headers=H), timeout=20))
-        except Exception as e: print("list", kind, "failed:", e); continue
-        for r in (rows if isinstance(rows, list) else rows.get("items") or []):
-            if str(r.get("name", "")).startswith(prefix):
-                try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}/{r['id']}", headers=H, method="DELETE"), timeout=30); gone += 1
-                except Exception as e: print("delete", kind, r.get("name"), "failed:", e)
+    # The run's TEAMS too: a team workspace is owned by the team slug, so `?owner={tenant}` never
+    # lists it, and one left behind by a killed run holds 2 CPU / 4 Gi of a node's admission
+    # budget forever (it was what parked every later run's team workspace at NoCapacity).
+    owners = [tenant]
+    try:
+        teams = json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/teams", headers=H), timeout=20))
+        owners += [t["_id"] for t in (teams if isinstance(teams, list) else teams.get("items") or []) if str(t.get("_id", "")).startswith(prefix)]
+    except Exception as e: print("list teams failed:", e)
+    for owner in owners:
+        for kind in ("workspaces", "environments"):
+            try: rows = json.load(urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}?owner={owner}", headers=H), timeout=20))
+            except Exception as e: print("list", kind, owner, "failed:", e); continue
+            for r in (rows if isinstance(rows, list) else rows.get("items") or []):
+                if owner != tenant or str(r.get("name", "")).startswith(prefix):
+                    try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/{kind}/{r['id']}", headers=H, method="DELETE"), timeout=30); gone += 1
+                    except Exception as e: print("delete", kind, r.get("name"), "failed:", e)
+    for slug in owners[1:]:
+        try: urllib.request.urlopen(urllib.request.Request(f"{base}/v1/teams/{slug}", headers=H, method="DELETE"), timeout=30); gone += 1
+        except Exception as e: print("delete team", slug, "failed:", e)
     # A volume is named by its workspace id, not the run prefix; every detached one a probe
     # tenant still owns is a killed run's leftover and counts against the tenant's diskGb.
     try:

@@ -41,20 +41,26 @@ pub async fn project(s: &ApiState, owner: &str) -> Result<(), String> {
 /// namespace is stamped with the PERSON's handle, so the namespace labels never name a team and a
 /// team's projection would never be healed.
 ///
-/// Every `OwnerKeys` that already exists is unioned in, so an object stays synced after the last
-/// workspace that justified it is gone — revoking a key must still reach the file on disk.
-fn owner_set(workspaces: impl IntoIterator<Item = (String, String)>, existing: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = existing;
+/// Returns `(project, prune)`: every owner a Workspace names, and every existing `OwnerKeys`
+/// that no Workspace names any more. A projection with no workspace behind it has no pod reading
+/// its file, so deleting it loses nothing — while keeping it meant every team a probe run ever
+/// created lived on as an object re-projected every beat. The next workspace create projects it
+/// again (`create_ws`), so a person who adds a key before their first workspace is not affected.
+fn owner_set(workspaces: impl IntoIterator<Item = (String, String)>, existing: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut live: Vec<String> = Vec::new();
     for (owner, team) in workspaces {
-        out.push(owner);
+        live.push(owner);
         if !team.is_empty() {
-            out.push(team);
+            live.push(team);
         }
     }
-    out.retain(|o| !o.is_empty());
-    out.sort();
-    out.dedup();
-    out
+    live.retain(|o| !o.is_empty());
+    live.sort();
+    live.dedup();
+    let mut stale: Vec<String> = existing.into_iter().filter(|e| !live.contains(e)).collect();
+    stale.sort();
+    stale.dedup();
+    (live, stale)
 }
 
 pub async fn project_all(s: &ApiState) {
@@ -62,11 +68,13 @@ pub async fn project_all(s: &ApiState) {
     // A failed list SKIPS that source rather than projecting a smaller set: this beat only ever
     // rewrites objects, so missing one is a late projection, while guessing at the set is not
     // something a lost list can make safe.
-    let pairs = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => l.items.into_iter().map(|w| (w.spec.owner, w.spec.team)).collect(),
+    // Pruning needs the Workspace list to have SUCCEEDED: a failed list would make every
+    // projection look stale, and this beat must never delete on a guess.
+    let (pairs, listed) = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => (l.items.into_iter().map(|w| (w.spec.owner, w.spec.team)).collect(), true),
         Err(e) => {
             tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
-            Vec::new()
+            (Vec::new(), false)
         }
     };
     let existing = match Api::<crd::OwnerKeys>::all(c.clone()).list(&Default::default()).await {
@@ -76,9 +84,20 @@ pub async fn project_all(s: &ApiState) {
             Vec::new()
         }
     };
-    for o in owner_set(pairs, existing) {
+    let (live, stale) = owner_set(pairs, existing);
+    for o in live {
         if let Err(e) = project(s, &o).await {
             tracing::warn!(owner = %o, error = %e, "keys.project.failed");
+        }
+    }
+    if listed {
+        let api: Api<crd::OwnerKeys> = Api::all(c.clone());
+        for o in stale {
+            match api.delete(&o, &Default::default()).await {
+                Ok(_) => tracing::info!(owner = %o, "keys.projection.pruned"),
+                Err(kube::Error::Api(e)) if e.code == 404 => {}
+                Err(e) => tracing::warn!(owner = %o, error = %e, "keys.prune.failed"),
+            }
         }
     }
 }
@@ -111,16 +130,15 @@ mod tests {
     /// `spec.owner`/`spec.team` — and from every object that already exists, or a key revoked
     /// after the last workspace went away would never reach the file.
     #[test]
-    fn the_beat_projects_every_person_every_team_and_everything_already_written() {
+    fn the_beat_projects_every_person_and_team_and_prunes_what_nothing_names() {
         let ws = [
             ("karthik".to_string(), String::new()),
             ("karthik".to_string(), "acme".to_string()),
             ("meera".to_string(), "acme".to_string()),
         ];
-        assert_eq!(
-            owner_set(ws, vec!["gone".into(), "karthik".into()]),
-            vec!["acme", "gone", "karthik", "meera"]
-        );
-        assert!(owner_set([(String::new(), String::new())], vec![]).is_empty());
+        let (live, stale) = owner_set(ws, vec!["gone".into(), "karthik".into()]);
+        assert_eq!(live, vec!["acme", "karthik", "meera"]);
+        assert_eq!(stale, vec!["gone"]);
+        assert_eq!(owner_set([(String::new(), String::new())], vec![]), (vec![], vec![]));
     }
 }
