@@ -8,8 +8,11 @@ set -euo pipefail
 cd /work/src
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
-git fetch -q origin master
-[ "$(git rev-parse origin/master)" = "$SHA" ] || { echo "HEAD is not origin/master; push first" >&2; exit 2; }
+# Any origin branch, not only master: a feature branch is verified on the fleet BEFORE it merges
+# (fixed means verified on the carrying build), and the invariant is only that GitHub holds
+# exactly this code under this SHA.
+git fetch -q origin
+git branch -r --contains "$SHA" | grep -q '^ *origin/' || { echo "HEAD is on no origin branch; push first" >&2; exit 2; }
 
 if [ "${1:-}" != "--no-gate" ]; then
   echo "==> gate: clippy + tests (CI's exact commands)"
