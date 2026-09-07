@@ -324,6 +324,11 @@ async fn run() -> Result<()> {
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
             state = state.with_slo_webhook(std::env::var("KLOUDLITE_SLO_WEBHOOK").ok());
+            // The package index: Nixhub, the mirrored index in our own object store, and that
+            // same object store as the day-long resolution cache.
+            state = state.with_resolver(Arc::new(
+                kloudlite_workspaces::packages::resolve::Resolver::from_env(store.os.clone()),
+            ));
             if let Some(dir) = directory.clone() {
                 state = state.with_directory(Arc::new(Dir(dir)));
             }

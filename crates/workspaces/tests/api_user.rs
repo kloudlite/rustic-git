@@ -1167,9 +1167,10 @@ async fn patch_merges_the_package_list_and_echoes_the_doc() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let doc: Value = resp.json().await.unwrap();
     assert_eq!(doc["packages"], json!(["hello", "jq"]));
-    // A merge patch, not an apply: it must touch `spec.packages` and nothing else.
+    // A merge patch, not an apply: it must touch the package list and its locks, nothing else.
+    // Neither entry is pinned, so the locks it writes are empty — see `api_packages.rs`.
     let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
-    assert_eq!(p, json!({"spec": {"packages": ["hello", "jq"]}}));
+    assert_eq!(p, json!({"spec": {"packages": ["hello", "jq"], "locks": []}}));
 }
 
 /// A CLI login authenticates the workspace routes exactly like a browser session — and stops

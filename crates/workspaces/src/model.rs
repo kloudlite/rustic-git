@@ -96,6 +96,25 @@ pub struct Workspace {
     /// already say, and `Moving` is a routine hand-off nobody needs told about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<ConditionDoc>,
+    /// What each `name@version` entry currently resolves to. Only the four fields a person is
+    /// shown; the store path and the resolution time are the agent's business, not the web's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<LockDoc>,
+}
+
+/// A `crd::Lock` as the web sees it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockDoc {
+    pub entry: String,
+    pub version: String,
+    pub rev: String,
+    pub source: crate::crd::LockSource,
+}
+
+impl From<&crate::crd::Lock> for LockDoc {
+    fn from(l: &crate::crd::Lock) -> Self {
+        LockDoc { entry: l.entry.clone(), version: l.version.clone(), rev: l.rev.clone(), source: l.source }
+    }
 }
 
 /// A `meta/v1.Condition` flattened for the web — the shape `packages_status` and `replicated`

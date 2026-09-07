@@ -292,6 +292,22 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// The production wiring: the tier's own object store as both cache and mirror, Nixhub at
+    /// `KLOUDLITE_NIXHUB_URL` (default `https://search.devbox.sh`). Here rather than in
+    /// `bins/api` so the http client and the clock stay this crate's dependencies.
+    pub fn from_env(os: Arc<dyn ObjectStore>) -> Self {
+        Resolver {
+            cache: os.clone(),
+            nixhub: Arc::new(Nixhub {
+                client: reqwest::Client::new(),
+                base: std::env::var("KLOUDLITE_NIXHUB_URL")
+                    .unwrap_or_else(|_| "https://search.devbox.sh".to_string()),
+            }),
+            mirror: Arc::new(Mirror { os }),
+            now: Utc::now,
+        }
+    }
+
     /// One entry. `skip_cache` is the update route's whole point: the cache is what makes an
     /// ordinary write cheap, and it is exactly what would make "update my packages" a no-op for
     /// the next 24 h.
