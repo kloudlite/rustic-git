@@ -264,6 +264,13 @@ async fn run() -> Result<()> {
                     Err(e) => tracing::warn!(error = %e, "directory.superadmins.seed.failed"),
                 }
             }
+            // Keys became the person's, so rows filed under a team handle move to whoever
+            // added them and the object store's fingerprint index is rebuilt from the result.
+            // Fatal on purpose: an index that is half rebuilt authenticates some of a person's
+            // keys and not others, which is worse than a restart.
+            for (email, fingerprint) in d.migrate_keys_to_people().await? {
+                store.add_ssh_key(&email, &fingerprint).await?;
+            }
             Some(Arc::new(d))
         }
         _ => {
