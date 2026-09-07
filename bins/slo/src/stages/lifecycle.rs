@@ -583,11 +583,15 @@ async fn sync_point(k: &kube::Client, volume: &str) -> Result<String> {
         .list(&kube::api::ListParams::default().fields(&format!("spec.volume={volume}")))
         .await
         .context("could not list the volume's snapshots")?;
+    // The NEWEST Ready one: retain keeps exactly one Ready sync point per worktree and prunes the
+    // rest on the agent's next beat, so an older one named here is deleted from under the probe
+    // and the refusal comes back as a 404 instead of the 409 this step is measuring.
     list.items
         .iter()
-        .find(|s| !s.is_snapshot())
+        .filter(|s| !s.is_snapshot() && s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .max_by_key(|s| s.status.as_ref().and_then(|st| st.ready_at.clone()))
         .map(|s| s.name_any())
-        .ok_or_else(|| anyhow!("the volume has no sync point to try deleting"))
+        .ok_or_else(|| anyhow!("the volume has no Ready sync point to try deleting"))
 }
 
 /// `vol.detached.restorable`: the snapshots outlive every working copy, and one of them still
