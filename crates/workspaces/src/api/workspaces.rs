@@ -227,6 +227,7 @@ pub(crate) async fn create_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: body.packages,
+            locks: Vec::new(),
             attached_environment: None,
         },
     )
@@ -836,6 +837,7 @@ pub(crate) async fn clone_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: src.spec.packages.clone(),
+            locks: src.spec.locks.clone(),
             attached_environment: None,
         },
     )
@@ -924,8 +926,8 @@ pub(crate) async fn restore_ws(
     // and every reader keeps its fallback for it. Checked before any other lookup so the refusal
     // costs nothing beyond the snapshot fetch already made.
     let frozen = match &snap.spec.state {
-        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
-            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
+        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment, locks }) => {
+            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone(), locks.clone()))
         }
         Some(crd::SnapshotState::Environment { .. }) => {
             return Err((
@@ -962,6 +964,12 @@ pub(crate) async fn restore_ws(
         .or_else(|| src.as_ref().map(|w| w.spec.packages.clone()))
         .unwrap_or_default();
     crate::packages::validate_list(&packages).map_err(bad_packages)?;
+    // The frozen locks belong to the frozen list. A request that names its own packages has asked
+    // for a different list, and those locks are not answers to it — dropped rather than mixed.
+    let locks = match (&body.packages, &frozen) {
+        (None, Some(f)) => f.5.clone(),
+        _ => Vec::new(),
+    };
     let resources = frozen
         .as_ref()
         .map(|f| f.2.clone())
@@ -1021,6 +1029,7 @@ pub(crate) async fn restore_ws(
             desired_state: DesiredState::Running,
             resources,
             packages,
+            locks,
             attached_environment,
         },
     )
@@ -1049,6 +1058,7 @@ mod tests {
                 desired_state: crd::DesiredState::Running,
                 resources: Default::default(),
                 packages: vec![],
+                locks: vec![],
                 attached_environment: None,
             },
         )

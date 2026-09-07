@@ -2271,6 +2271,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
         desired_state: crd::DesiredState::Running,
         resources: Default::default(),
         packages: vec![],
+        locks: vec![],
         attached_environment: None,
     };
     let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
@@ -3743,6 +3744,7 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
         observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
         profile: None,
         nixpkgs: Some(pin),
+        locked: vec![],
     });
     plant_profile(&ctx, "ws-1");
     let _ = kloudlite_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
@@ -3884,6 +3886,7 @@ async fn a_build_interrupted_by_a_restart_is_started_again() {
         observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
         profile: None,
         nixpkgs: Some(pin),
+        locked: vec![],
     });
     st.conditions = vec![crd::condition(crd::PACKAGES_READY, false, "Building", "taking the profile through nix", 1)];
     assert!(ctx.running.lock().unwrap().is_empty());
@@ -5229,6 +5232,7 @@ fn parent_at(name: &str, volume: &str, phase: crd::Phase, pod: Option<&str>) -> 
         state: crd::SnapshotState::Workspace {
             image: "alpine:3.20".into(),
             packages: vec![],
+            locks: vec![],
             resources: Default::default(),
             quota_gb: 5,
             attached_environment: None,

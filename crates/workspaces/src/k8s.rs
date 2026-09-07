@@ -1700,6 +1700,7 @@ mod tests {
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
             packages: vec![],
+            locks: vec![],
             attached_environment: None,
         }
     }
