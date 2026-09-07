@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use super::git::BASE_BRANCH;
 use super::workspace::ws_exec;
-use super::{api, call, get, poll_json, post};
+use super::{api, call, get, poll_json, post, raw};
 use crate::tools;
 use crate::ctx::Ctx;
 
@@ -55,6 +55,28 @@ const QUOTA_GB: u64 = 1;
 /// The package the two `ws.packages.*` steps add and remove. Small, has a binary of its own name,
 /// and is in nixpkgs on every channel — the step measures the profile rebuild, not a build.
 const PKG: &str = "cowsay";
+
+/// The pinned entry the four `ws.packages.pin*` steps run against, and the prefix its lock must
+/// carry. `jq@1.7` because jq is tiny, is on cache.nixos.org for every channel, and prints its own
+/// version — so the pod itself can be asked whether the resolved version is the one that got
+/// installed, which is the whole point of a pin.
+const PINNED: &str = "jq@1.7";
+const PINNED_PREFIX: &str = "1.7.";
+
+/// A version nobody published. The refusal names the nearest ones, which is the assertion.
+const UNKNOWN: &str = "jq@0.0.99";
+
+/// The four ids `pin` reports, in catalogue order.
+const PIN_IDS: [&str; 4] =
+    ["ws.packages.pin", "ws.packages.pin.unknown", "ws.packages.update", "ws.packages.pin.lockshape"];
+
+/// The pin step is a whole create — schedule, pull, `nix copy` jq from cache.nixos.org, buildEnv —
+/// plus an exec, which is `ws.packages.add`'s shape, so it gets `ws.packages.add`'s ceiling: at or
+/// above the catalogue's 180 s target, with room for the step to say WHY rather than be cut off.
+const PIN_CEILING: Duration = Duration::from_secs(290);
+
+/// The other three are one API call each against a workspace that is already up.
+const PIN_READ_CEILING: Duration = Duration::from_secs(60);
 
 /// `ws.packages.add` and `ws.packages.remove`: the workspace they run against is created here and
 /// kept for `home.persists`, which writes through it.
@@ -439,6 +461,156 @@ async fn which(c: &Ctx, id: &str, want: bool, cap: Duration) -> Result<()> {
     }
 }
 
+/// `ws.packages.pin`, `ws.packages.pin.unknown`, `ws.packages.update` and
+/// `ws.packages.pin.lockshape`: one pinned workspace, four assertions about it.
+///
+/// One journey rather than four creates: the pin is the expensive part (a real substitution from
+/// cache.nixos.org), and the other three read or PATCH the workspace it left running. The create
+/// is inside the first step, as `packages` does it, so a workspace that never becomes ready fails
+/// `ws.packages.pin` with the reason and the rest skip.
+pub async fn pin(c: &mut Ctx) {
+    if c.kube.is_none() {
+        for id in PIN_IDS {
+            c.skip(id, "no kubeconfig");
+        }
+        return;
+    }
+    let name = format!("{}-pin", c.prefix());
+    let pinned = c
+        .step("ws.packages.pin", PIN_CEILING, move |c| {
+            async move {
+                let id = create(c, &name, json!({ "packages": [PINNED] })).await?;
+                // Recorded before the assertion: the workspace exists whatever the lock says, and
+                // teardown finds it by name either way.
+                c.state.pin_workspace = Some(id.clone());
+                let version = locked_version(c, &id).await?;
+                if !version.starts_with(PINNED_PREFIX) {
+                    return Err(anyhow!("{PINNED} locked {version}, which is not a {PINNED_PREFIX}x"));
+                }
+                // The pod, not the lock: a lock nobody installed is a row in an object. `jq
+                // --version` prints `jq-1.7.1`, so the locked version has to be IN it.
+                let (code, out, err) = ws_exec(c, &id, "jq --version", EXEC).await?;
+                if code != 0 {
+                    return Err(anyhow!("`jq --version` exits {code}: {}", err.trim()));
+                }
+                if !out.contains(&version) {
+                    return Err(anyhow!("the lock says {version} but the pod says {}", out.trim()));
+                }
+                Ok(())
+            }
+            .boxed()
+        })
+        .await;
+    let Some(id) = c.state.pin_workspace.clone() else {
+        for id in PIN_IDS.iter().skip(1) {
+            c.skip(id, "the pinned workspace was never created");
+        }
+        return;
+    };
+
+    // A refusal, so it does not need the pin to have succeeded — only the workspace to exist.
+    let refused = id.clone();
+    c.step("ws.packages.pin.unknown", PIN_READ_CEILING, move |c| {
+        async move {
+            let url = api(c, &format!("/v1/workspaces/{refused}"));
+            let body = json!({ "packages": [UNKNOWN] });
+            let (status, text) =
+                raw(c, reqwest::Method::PATCH, &url, &c.probe_jwt.clone(), Some(body), &[]).await?;
+            if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+                return Err(anyhow!("{UNKNOWN} answered {status}, not 422: {}", text.trim()));
+            }
+            // The nearest versions are the whole point of the refusal: "no" without them leaves a
+            // person guessing what to type instead.
+            if !text.contains("nearest:") {
+                return Err(anyhow!("the refusal names no nearer version: {}", text.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+
+    if pinned {
+        let updated = id.clone();
+        c.step("ws.packages.update", PIN_READ_CEILING, move |c| {
+            async move {
+                let before = locked_version(c, &updated).await?;
+                let url = api(c, &format!("/v1/workspaces/{updated}/packages/update"));
+                post(c, &url, &c.probe_jwt.clone(), Value::Null)
+                    .await
+                    .context("the update pass was refused")?;
+                let after = locked_version(c, &updated).await?;
+                // An exact pin has one answer: a re-resolution that moved it would rebuild a
+                // workspace nobody asked to change.
+                if before != after {
+                    return Err(anyhow!("the update moved {PINNED} from {before} to {after}"));
+                }
+                Ok(())
+            }
+            .boxed()
+        })
+        .await;
+
+        let shaped = id.clone();
+        c.step("ws.packages.pin.lockshape", PIN_READ_CEILING, move |c| {
+            async move { lock_shape(c, &shaped).await }.boxed()
+        })
+        .await;
+    } else {
+        for id in ["ws.packages.update", "ws.packages.pin.lockshape"] {
+            c.skip(id, "the pin never resolved");
+        }
+    }
+
+    // The assertions are made; the pod is 2 vCPU of a pool node the rest of the stage needs.
+    super::lifecycle::park(c, &id).await;
+}
+
+/// What `PINNED` currently resolves to, read from the workspace doc.
+async fn locked_version(c: &Ctx, id: &str) -> Result<String> {
+    let doc = get(c, &api(c, &format!("/v1/workspaces/{id}")), &c.probe_jwt).await.context("could not read the workspace")?;
+    let lock = doc
+        .get("locks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|l| l.get("entry").and_then(Value::as_str) == Some(PINNED))
+        .ok_or_else(|| anyhow!("the workspace carries no lock for {PINNED}"))?;
+    let version = lock.get("version").and_then(Value::as_str).unwrap_or_default();
+    if version.is_empty() {
+        return Err(anyhow!("the lock for {PINNED} names no version"));
+    }
+    // The doc's `rev` is the nixpkgs commit every node rebuilds from, so its shape is an
+    // assertion, not a formality: a short or non-hex rev is not a revision anyone can fetch.
+    let rev = lock.get("rev").and_then(Value::as_str).unwrap_or_default();
+    if rev.len() != 40 || !rev.chars().all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch)) {
+        return Err(anyhow!("the lock's rev is {rev:?}, not a 40-character nixpkgs revision"));
+    }
+    Ok(version.to_string())
+}
+
+/// `ws.packages.pin.lockshape`: the lock names a revision AND a store path.
+///
+/// The store path is deliberately not in the doc — it is the agent's business — so this reads the
+/// `Workspace` CR, which is where the agent reads it from too.
+async fn lock_shape(c: &Ctx, id: &str) -> Result<()> {
+    // The rev half is `locked_version`'s, so both halves are asserted in one place.
+    locked_version(c, id).await?;
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    let ws: kube::Api<kloudlite_workspaces::crd::Workspace> = kube::Api::all(k.clone());
+    let w = ws.get(id).await.map_err(|e| anyhow!("could not read the Workspace {id}: {e}"))?;
+    let lock = w
+        .spec
+        .locks
+        .iter()
+        .find(|l| l.entry == PINNED)
+        .ok_or_else(|| anyhow!("the spec carries no lock for {PINNED}"))?;
+    if !lock.store_path.starts_with("/nix/store/") {
+        return Err(anyhow!("the lock's store path is {:?}, not a /nix/store one", lock.store_path));
+    }
+    Ok(())
+}
+
 /// Delete a workspace this stage is done with, best effort.
 ///
 /// Best effort on purpose: teardown's `run-{run_id}` prefix sweep finds every one of these by name
@@ -457,12 +629,22 @@ mod tests {
     use crate::testkit;
     use axum::routing::{get, patch, post as apost};
 
-    /// The five ids this file owns, in the order `experience.rs` calls them.
-    const MINE: [&str; 5] =
-        ["ws.packages.add", "ws.packages.remove", "ws.seeded", "key.platform.regenerate", "home.persists"];
+    /// The nine ids this file owns, in the order `experience.rs` calls them.
+    const MINE: [&str; 9] = [
+        "ws.packages.add",
+        "ws.packages.remove",
+        "ws.packages.pin",
+        "ws.packages.pin.unknown",
+        "ws.packages.update",
+        "ws.packages.pin.lockshape",
+        "ws.seeded",
+        "key.platform.regenerate",
+        "home.persists",
+    ];
 
     async fn all(c: &mut Ctx) {
         packages(c).await;
+        pin(c).await;
         seeded(c).await;
         platform_key(c).await;
         home_persists(c).await;
@@ -504,12 +686,12 @@ mod tests {
         c.kube = Some(kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).expect("client"));
         c.state.repo = Some("run-fast-1".into());
         all(&mut c).await;
-        for id in ["ws.packages.add", "ws.seeded", "key.platform.regenerate"] {
+        for id in ["ws.packages.add", "ws.packages.pin", "ws.seeded", "key.platform.regenerate"] {
             let s = once(&c, id);
             assert!(!s.ok && !s.skipped, "{s:?}");
             assert!(s.detail.contains("409"), "the refusal is in the detail: {s:?}");
         }
-        for id in ["ws.packages.remove", "home.persists"] {
+        for id in ["ws.packages.remove", "ws.packages.pin.unknown", "ws.packages.update", "ws.packages.pin.lockshape", "home.persists"] {
             let s = once(&c, id);
             assert!(s.skipped, "{s:?}");
         }
