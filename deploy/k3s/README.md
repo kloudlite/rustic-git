@@ -48,7 +48,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f api-rbac.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
 ```
 
 ### The SLO probe's six owners
@@ -934,3 +934,36 @@ CRs (tenant NetworkPolicies, ResourceQuotas) were garbage-collected with the old
 recreated by the new agent on its next reconcile; the four live CRs (Region, OwnerBindings) were
 re-created by hand under the new group with the same names and specs. The api tier's k3s
 kubeconfigs were re-minted for the new ServiceAccounts (`kloudlite-api`, `-admin`).
+
+
+## Release: user keys (2026-09-07)
+
+Keys move off the fixed `user-key` Secret and onto `OwnerKeys`, a per-owner CRD the api projects
+and the agent converges — see CLAUDE.md's "Workspaces and environments" paragraph for the shape.
+No new binary; `crds.yaml` gains `OwnerKeys` and RBAC widens on both agent and api.
+
+```sh
+# crds.yaml: adds OwnerKeys.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/crds.yaml
+
+# agent-rbac.yaml: get/list/watch on OwnerKeys, patch on ownerkeys/status.
+# agent-admission.yaml: unchanged in spirit (still refuses the agent any spec write), regenerated
+# because OwnerKeys is a new type the policy must recognize.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-rbac.yaml -f deploy/k3s/agent-admission.yaml
+
+# api-rbac.yaml: get/list/create/patch on OwnerKeys for kloudlite-api.
+# slo-rbac.yaml: get/list/watch on OwnerKeys for the probe's read-only checks.
+KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/api-rbac.yaml -f deploy/k3s/slo-rbac.yaml
+```
+
+Rollout order: server tier first (the migration that rewrites team-owned key rows to
+`created_by` and writes the directory's `meta` collection marker (`{_id: "keys_v2"}`) runs at server boot), then the five manifests
+above, then the agent DaemonSet, then the api Deployment — an api that projects `OwnerKeys` before
+any agent watches it just means the first resync beat (`KEYS_RESYNC_SECS`, 300 s) is wasted work,
+never a wrong file; an agent watching before the api exists sees nothing and writes nothing, which
+is the same fail-closed empty-file state as a deleted object.
+
+*Check:* `kubectl get ownerkeys` lists `Generation`/`Synced` per owner (a fresh cluster or one
+mid-rollout shows `Synced=False` until the agent catches up); `GET /v1/keys` as the person confirms
+their own key set unaffected by the migration. `deploy/k3s/README.md`'s Clusters admin row for
+this is deferred — see `docs/migrations/2026-09-07-user-keys.md`.
