@@ -292,23 +292,11 @@
   }
   html {
     font-family: var(--font-sans-brand), ui-sans-serif, system-ui, sans-serif;
-    /* The window scrolls, natively. Wrapping the page in a ScrollArea to restyle
-       its bar cost the page its scrolling entirely — Radix sets the viewport to
-       overflow:hidden until it decides otherwise, and it is built for a bounded
-       region, not a document.
-
-       Nothing restyles the scrollbar. Setting scrollbar-width or
-       ::-webkit-scrollbar turns the platform's OVERLAY scrollbar into a classic
-       one that occupies layout width — which is what put an empty strip down the
-       right that full-bleed borders stopped short of. Left alone, the bar floats
-       over the content.
-
-       The document itself does not scroll: the page lives in a ScrollArea
-       (page-scroll.tsx) whose bar overlays the content, so it takes no layout
-       width. That is what removes both problems at once — no gutter to reserve
-       and leave empty, and no width change between a short page and a long one.
-       Nothing here restyles a scrollbar; doing so is what turned the platform's
-       overlay bar into a classic one that took space. */
+    /* Nothing restyles a scrollbar. Setting scrollbar-width or ::-webkit-scrollbar turns the
+       platform's OVERLAY scrollbar into a classic one that occupies layout width, which is what
+       once put an empty strip down the right that full-bleed borders stopped short of. Scrolling
+       is native everywhere: the shell's content region overflows on its own, full-page layouts
+       let the document scroll. */
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;

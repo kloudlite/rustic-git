@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Icon } from "@/components/brand/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { ScrollArea } from "@/components/ui/scroll-area";
 
 const NAV_LINK = "nav-link";
 
@@ -10,7 +9,7 @@ const NAV_LINK = "nav-link";
  *  The mark sits above the card rather than in a corner so the page has one axis. */
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ScrollArea className="h-screen">
+    <div className="min-h-screen">
       <div className="flex min-h-screen flex-col">
       <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
         <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
@@ -26,6 +25,6 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
         <ThemeToggle className="ml-auto" />
       </footer>
       </div>
-    </ScrollArea>
+    </div>
   );
 }

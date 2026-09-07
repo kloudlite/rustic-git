@@ -6,7 +6,6 @@ import { GlobalSearch } from "@/components/app/global-search";
 import { ShellState } from "@/components/app/shell-context";
 import { ShellCrumb, ShellHeaderRow, ShellTabs, type RepoTabSpec } from "@/components/app/shell-nav";
 import { ownersFor } from "@/lib/owners";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Session } from "@/lib/session";
 
 /** The repo's tabs, as suffixes — which repo they belong to is a fact about the
@@ -91,10 +90,10 @@ export async function AppShell({
           />
         </header>
 
-        {/* min-h-0: a flex child defaults to min-height:auto, so before Radix hydrates and sets
-            overflow on its viewport this region grows to the content and the DOCUMENT scrolls —
-            a window scrollbar that flashes on every reload and vanishes at hydration. */}
-        <ScrollArea className="min-h-0 flex-1">{children}</ScrollArea>
+        {/* Native overflow, not a scroll-area component: pure CSS is settled in the first paint,
+            so nothing changes at hydration. min-h-0 because a flex child defaults to
+            min-height:auto and would grow to the content instead of scrolling. */}
+        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </div>
     </ShellState>
   );

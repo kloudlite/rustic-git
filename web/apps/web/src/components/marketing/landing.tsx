@@ -4,7 +4,6 @@ import { MarketingHeader, NAV_LINK } from "@/components/marketing/marketing-head
 import { EnvironmentPanel } from "@/components/marketing/environment-panel";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 
 /** Bodies are deliberately one short line each: the whole page is one screen, so
  *  anything that wraps to a third line pushes the strip past the fold. */
@@ -23,7 +22,7 @@ export function Landing() {
     /* Sized to one screen. min-h rather than h + overflow-hidden: at normal heights
        there is nothing to scroll, and on a short laptop viewport the strip becomes
        reachable instead of silently clipped. */
-    <ScrollArea className="h-screen">
+    <div className="min-h-screen">
       <div className="flex min-h-screen flex-col">
       <MarketingHeader />
 
@@ -93,6 +92,6 @@ export function Landing() {
         </div>
       </footer>
       </div>
-    </ScrollArea>
+    </div>
   );
 }
