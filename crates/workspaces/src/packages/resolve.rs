@@ -8,7 +8,7 @@
 //!    package per day per region instead of once per workspace write.
 //! 2. **Nixhub** (`search.devbox.sh`), because it is the only source that carries a store path —
 //!    a Nixhub lock costs the agent one `nix copy`, no nixpkgs evaluation at all.
-//! 3. **The mirror** (`index/pkgs/versions.json`, refreshed by the admin tier). It has `rev` and
+//! 3. **The mirror** (`index/pkgs/versions.json`, refreshed daily by the api's `user` role). It has `rev` and
 //!    `attr_path` but no store path, so a mirror lock costs the agent a full nixpkgs evaluation
 //!    (~28 s cold) on every node that builds it. Correct, just slower — hence second, and hence
 //!    never cached (see `Resolver::store`).
