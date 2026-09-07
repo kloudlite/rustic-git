@@ -507,5 +507,4 @@ with a read-only root — anything new that writes to disk needs a mount.
 Comments explain WHY, never what; match the density of `bins/server/src/router/route.rs`. Deliberate shortcuts are
 marked `// ponytail: <ceiling and upgrade path>` — keep the marker when editing near one.
 Commit subjects are imperative sentence case with no tool attribution. The design docs code still cites
-live in `docs/superpowers/` (three specs and the logging review — the rest was pruned 2026-09-07); the README's deep sections (ownership, write throughput, container
-images) are accurate and worth reading before touching those areas.
+live in `docs/superpowers/`. The README is deliberately short; the deep material is this file.

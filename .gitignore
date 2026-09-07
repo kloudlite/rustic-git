@@ -9,8 +9,6 @@
 # Older runs wrote these at the root; keep ignoring strays — at the root only.
 /cache*
 /host_key*
-/.superpowers
-/.claude/worktrees
 
 # web
 web/node_modules
@@ -18,7 +16,6 @@ web/**/node_modules
 web/**/.next
 web/.turbo
 /.turbo
-/.worktrees/
 
 # k3s provisioning parameters (may name an operator IP; never secrets)
 deploy/k3s/env.sh
