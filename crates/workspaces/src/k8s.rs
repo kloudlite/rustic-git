@@ -439,7 +439,7 @@ fn prelude(name: &str) -> String {
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
          chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
          mkdir -p /etc/fish/conf.d\n\
-         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' > /etc/zshrc\n\
+         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
          printf '%s\\n' 'format = \"$directory$git_branch$git_status$cmd_duration$line_break$character\"' > /etc/starship.toml\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
@@ -2253,6 +2253,11 @@ mod tests {
         assert!(line.contains("\"KL_WORKSPACE=/home/kl/workspaces/dev\"") && line.contains("\"KL_WORKSPACE_NAME=dev\""), "{line}");
         // The platform rc files: interactive-only cd into the workspace, starship names it.
         assert!(prelude.contains("> /etc/zshrc") && prelude.contains("> /etc/fish/conf.d/kl.fish") && prelude.contains("> /etc/starship.toml"), "{prelude}");
+        // In the platform file, not the seeded `.zshrc`: a home seeded before this line existed
+        // never gets a second seed, and without `compinit` zsh falls back to its primitive
+        // completer, which appends the match to the word instead of replacing it ("cacargo").
+        // The dump goes to the per-node cache dir, never the shared home.
+        assert!(prelude.contains("autoload -Uz compinit && compinit -d"), "{prelude}");
         assert!(prelude.contains("[[ -o interactive ]] || return 0"), "{prelude}");
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.
