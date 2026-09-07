@@ -205,7 +205,7 @@ pub async fn serve_public_and_peer() -> (String, String, TestEnv) {
 }
 
 pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap()
         .get(format!("{base}{path}"))
         .header(kloudlite_core::peer::PEER_HEADER, "test-peer-secret")
         .send()
@@ -217,7 +217,7 @@ pub async fn peer_get(base: &str, path: &str) -> reqwest::Response {
 /// asking (see `browse_caller` in `src/api.rs`). The owner-scoped browse routes (`images`) check
 /// this identity themselves, so a direct peer test must present it exactly as the api tier would.
 pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap()
         .get(format!("{base}{path}"))
         .header(kloudlite_core::peer::PEER_HEADER, "test-peer-secret")
         .header(kloudlite_core::peer::OWNER_HEADER, owner)
@@ -229,7 +229,7 @@ pub async fn peer_get_as(base: &str, owner: &str, path: &str) -> reqwest::Respon
 /// Like `peer_get_as`, for the browse WRITES (`imagetagdelete`, `imagedelete`): same identity
 /// headers, POST instead of GET, and a body the caller (a tag name, or nothing) supplies.
 pub async fn peer_post_as(base: &str, owner: &str, path: &str, body: &str) -> reqwest::Response {
-    reqwest::Client::new()
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap()
         .post(format!("{base}{path}"))
         .header(kloudlite_core::peer::PEER_HEADER, "test-peer-secret")
         .header(kloudlite_core::peer::OWNER_HEADER, owner)

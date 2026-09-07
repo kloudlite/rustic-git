@@ -186,7 +186,10 @@ fn fleet(n: usize) -> Vec<(String, String)> {
 }
 
 async fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    // A bound, so a request the fleet never answers fails this test with its URL instead of
+    // holding the whole suite: two different tests sat 45 minutes each on 2026-09-07 with no
+    // CPU, and the gate behind them had no way to say which request had gone quiet.
+    reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap()
 }
 
 /// A claimed identity on the public port must be ignored: this is the bypass a client would try.

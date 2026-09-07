@@ -1827,7 +1827,7 @@ async fn a_large_fetch_streams_its_pack() {
     let token = e.store.create_token("a").await.unwrap();
     let port = common::serve(common::app(e.store.clone()).await).await;
     let post = |req: Vec<u8>| {
-        reqwest::Client::new()
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap()
             .post(format!("http://127.0.0.1:{port}/a/big.git/git-upload-pack"))
             .basic_auth("x", Some(&token))
             .header("git-protocol", "version=2")
