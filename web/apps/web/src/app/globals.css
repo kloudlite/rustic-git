@@ -296,7 +296,13 @@
        platform's OVERLAY scrollbar into a classic one that occupies layout width, which is what
        once put an empty strip down the right that full-bleed borders stopped short of. Scrolling
        is native everywhere: the shell's content region overflows on its own, full-page layouts
-       let the document scroll. */
+       let the document scroll.
+
+       scrollbar-gutter: on a classic (non-overlay) scrollbar the bar takes 15 px of layout
+       width, so a short page and a long one laid out at different widths and the header's
+       contents shifted on every navigation between them. Reserving the gutter always keeps
+       the width constant; an overlay scrollbar reserves nothing, so this costs it nothing. */
+    scrollbar-gutter: stable;
   }
   code, kbd, samp, pre, .font-mono {
     font-family: var(--font-mono-brand), ui-monospace, SFMono-Regular, monospace;
