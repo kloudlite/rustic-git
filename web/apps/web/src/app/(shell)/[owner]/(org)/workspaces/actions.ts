@@ -11,7 +11,7 @@ import * as api from "@/lib/api";
 import { safeSegment } from "@/lib/slug";
 import { cloneResult } from "@/lib/ws-status";
 import { getSession } from "@/lib/session";
-import { packagesField } from "@/lib/packages-field";
+import { packageListError, packagesField } from "@/lib/packages-field";
 import { dimFromRefusal, type QuotaDim } from "@/lib/quota";
 
 /** `ok` is what lets a dialog close on success — see `useDialogUntilSuccess`. */
@@ -225,12 +225,32 @@ export async function setPackages(_prev: WsActionState, formData: FormData): Pro
   const packages = String(formData.get("packages") ?? "")
     .split(/[\s,]+/)
     .filter(Boolean);
+  const bad = packageListError(packages);
+  if (bad) return { error: bad };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
   const r = await api.setWorkspacePackages(token, id, packages);
+  // Verbatim: the api's 422 names the entry and the nearest published versions, and its 503 says
+  // the index is down — both are the whole answer, and a house sentence would throw them away.
   if (!r.ok) return { error: r.message || "Could not set the packages." };
+  revalidatePath(`/${owner}/workspaces`);
+  return { ok: true };
+}
+
+/** Re-resolve the pins. The list does not change, so there is no field to validate: this is
+ *  "what does `nodejs@20` mean today", and the api's message is again shown verbatim. */
+export async function updatePackages(_prev: WsActionState, formData: FormData): Promise<WsActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = String(formData.get("id") ?? "");
+
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+
+  const r = await api.updateWorkspacePackages(token, id);
+  if (!r.ok) return { error: r.message || "Could not update the pinned packages." };
   revalidatePath(`/${owner}/workspaces`);
   return { ok: true };
 }
