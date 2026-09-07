@@ -249,9 +249,9 @@ pub struct ApiState {
     /// run and a firing `SloBurn` are recorded and shown on the console like every other fact, and
     /// nothing is posted anywhere: the webhook is a nudge, never the record.
     pub slo_webhook: Option<String>,
-    /// Turns a `name@version` entry into a `crd::Lock` before the CR is written. `None` means no
-    /// package index is configured (dev, tests): a list with a `@` entry is refused 503 rather
-    /// than written unlocked, and a list without one never asks.
+    /// Turns a `name@version` entry into a `crd::Lock` before the CR is written. The api always wires one
+    /// (`Resolver::from_env`); `None` is the test harness, where a list with a `@` entry is
+    /// refused 503 rather than written unlocked, and a list without one never asks.
     pub resolver: Option<Arc<crate::packages::resolve::Resolver>>,
 }
 
