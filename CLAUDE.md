@@ -70,7 +70,10 @@ served on any node (that is why `/api/{owner}/images` and `_catalog` are excepti
 Registry layout in the object store: blobs `blobs/{owner}/{algo}/{hex}` (per-owner, shared
 across that owner's images), manifest bytes `manifests/{owner}/{name}/{algo}/{hex}`. Tags,
 upload sessions, referrer rows, pull counters live in the image's own DB (single writer ⇒
-atomic tag updates).
+atomic tag updates). Git over SSH resolves identity from the fingerprint, not the URL: the row
+`auth/sshkey/{fp}` maps to the signing person's email, and `App::may_act(user, owner)` then checks
+own handle or team membership through the directory (cached 60 s, refused on `Source::Unavailable`;
+a solo node with `Source::Absent` just requires `user == owner`).
 
 ## Load-bearing rules (violations have all been real bugs)
 
@@ -359,6 +362,21 @@ hit would cross the network — so they are redirected (`login_env`'s `XDG_CACHE
 `~/.local/state` (`k8s::HOME_STATE_DIR`) are local for the same reason — one file, many terminals,
 many nodes — and share that same `homecache` volume via a separate subPath. Cross-region: each
 region has its own export and nothing syncs them.
+
+**Keys belong to the person, not a team or workspace.** `Credential.owner` is the email, ssh and
+signing alike, and `/v1/keys` refuses a body carrying `owner` (400) — tokens stay per owner the
+same way. `OwnerKeys` (`kloudlite.io/v1alpha1`, cluster-scoped, one per owner namespace, named by
+the handle) is a PROJECTION of that: `spec.generation` (unix millis at the write) and
+`spec.authorizedKeys` (the file, sorted, `\n`-terminated; empty means nobody admitted). `bins/api`
+is its only writer, via server-side apply (field manager `kloudlite-api`) on every key or
+membership change and again on a resync beat every `KEYS_RESYNC_SECS` (300), so a missed watch
+event self-heals. The agent watches it and converges: writes `{pool}/keys/{owner}/authorized_keys`
+IN PLACE (0600, uid 1000) — pods mount it as a hostPath `type: File` at
+`/home/kl/.ssh/authorized_keys`, same rename-is-unsafe reasoning as the attach `resolv.conf` above
+— and stamps `status.observedGeneration` plus a `Synced` condition (`Applied`/`NoKeys`/`WriteFailed`).
+Fail-closed both ways: a deleted `OwnerKeys` becomes an empty file, not a stale one, and a
+default-image workspace parks `Ready=False/KeysNotReady` until the file exists (a custom-image
+workspace mounts none). The `user-key` Secret no longer carries `authorized_keys`.
 
 A profile is keyed by `packages::hash(pin, base + spec.packages)` and indexed per node at
 `{PROFILES_DIR}/by-inputs/{hash}` → the store path, so a second workspace or a clone with the same
