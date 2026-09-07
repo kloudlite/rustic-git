@@ -220,6 +220,16 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "homes.rw.p95", feature: "Workspaces", sli: "A read/write round trip on the shared home completes", target: p95(200), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "gw.tunnel.p95", feature: "Workspaces", sli: "Opening a gateway SSH tunnel completes", target: p95(3_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "gw.unregistered.refused", feature: "Workspaces", sli: "The gateway refuses an unregistered key", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // Keys belong to the PERSON and reach a pod only through the `OwnerKeys` projection, so the
+    // three halves are probed apart: the projection is Synced, the key opens the workspace, and a
+    // removal is honoured by both listeners. A green tunnel with a stale projection is the failure
+    // mode a single "ssh works" step would keep quiet about.
+    Slo { id: "key.projected", feature: "Workspaces", sli: "A registered key reaches the owner's OwnerKeys projection as Synced", target: bound(30_000), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "key.live", feature: "Workspaces", sli: "A registered key opens the workspace over the gateway", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // 330 s, not the git listener's 10: git authenticates from the directory on every request, but
+    // a workspace pod only learns of the removal when the api's resync beat (`KEYS_RESYNC_SECS`,
+    // 300 s) rewrites the projection.
+    Slo { id: "key.revoked", feature: "Workspaces", sli: "A removed key is refused by git and by the workspace", target: bound(330_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.push.p95", feature: "Workspaces", sli: "Pushing a workspace snapshot completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "ws.clone.p95", feature: "Workspaces", sli: "Cloning a workspace completes", target: p95(60_000), suite: Suite::Fast, stage: "5 · Workspace" },
     // The sentence, not merely the status: `quota::refuse` answers `"{dimension}: {used} of

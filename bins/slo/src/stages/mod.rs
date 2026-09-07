@@ -681,7 +681,12 @@ async fn images<M: Fn(&str) -> bool + ?Sized>(c: &Ctx, owner: &str, jwt: &str, m
 /// `(name, id)` for every object of one kind under the probe's owner. A list that fails is an
 /// empty list: teardown cannot fix an unreachable API, and the next run tries again.
 async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)> {
-    let url = format!("{}{}?owner={owner}", c.cfg.api_url.trim_end_matches('/'), k.list);
+    // Keys are the signed-in person's, so `/v1/keys` takes no owner and 400s on one; every
+    // other kind here is still owned.
+    let url = match k.kind {
+        "key" => format!("{}{}", c.cfg.api_url.trim_end_matches('/'), k.list),
+        _ => format!("{}{}?owner={owner}", c.cfg.api_url.trim_end_matches('/'), k.list),
+    };
     let rows: Vec<serde_json::Value> = match c
         .http
         .get(&url)
