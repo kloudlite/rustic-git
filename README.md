@@ -232,7 +232,7 @@ NetworkPolicies open the path; detaching, or attaching elsewhere, removes them.
 | `web/` | turborepo; the Next.js app in `web/apps/web` |
 | `deploy/` | `kloudlite.yaml`, `kloudlite-web.yaml` (AKS) and `deploy/k3s/*` (CRDs, agent, RBAC, provisioning) |
 | `tests/` | integration suite hosted by the near-empty root package, plus `registry_e2e.sh`, `ws_e2e.sh` |
-| `docs/` | design docs and plans under `docs/superpowers/`, benchmarks and reviews alongside |
+| `docs/` | the capacity model, migrations, and the few design docs the code still cites under `docs/superpowers/` |
 
 ## Run it
 
