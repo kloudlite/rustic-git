@@ -182,12 +182,6 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: 
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
     let _ = std::fs::create_dir_all(&profiles);
-    // `controller::keys` has already converged for the owners this suite uses: a pod is gated on
-    // the file existing, and every test but the KeysNotReady one is about what happens after.
-    for owner in ["alice", "acme"] {
-        // Ignored, not unwrapped: one test hands a FILE as the pool on purpose.
-        let _ = kloudlite_agent::controller::write_keys_file(&pool.to_string_lossy(), owner, "ssh-ed25519 AAAA a\n");
-    }
     let engine = Engine::new(Pool::new(pool));
     // Ctx::new reads the pinned default image from the environment, as the agent does.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
@@ -4066,15 +4060,34 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
 async fn a_node_without_the_owners_keys_parks_the_workspace_instead_of_starting_a_pod() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _) = ws_ctx_with_nix(tmp.path());
-    // The one test the fixture's rendered file is not true for: this node has not converged yet.
-    std::fs::remove_file(kloudlite_workspaces::k8s::keys_file(&ctx.pool, "alice")).unwrap();
-    let w = ready_workspace("ws-1", vec![]);
+    // The default image is the only one that runs sshd, and so the only one that mounts the file.
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.spec.image = kloudlite_workspaces::model::DEFAULT_WS_IMAGE.into();
 
-    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let action = apply_until_settled(&w, &ctx).await;
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
     let st = rec.sent("PATCH", WS_STATUS);
-    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "KeysNotReady");
+    let last = st.last().unwrap()["status"]["conditions"].as_array().unwrap().clone();
+    let ready = last.iter().find(|c| c["type"] == "Ready").expect("a Ready condition");
+    assert_eq!(ready["reason"], "KeysNotReady", "{last:?}");
     assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod without keys: {:?}", rec.calls());
+}
+
+/// The mirror of the above: only the DEFAULT image mounts the keys file (it is the only one that
+/// runs sshd), so a user's own image must not be held behind a projection it never reads.
+#[tokio::test]
+async fn a_custom_image_workspace_is_not_parked_on_keys_it_never_mounts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _) = ws_ctx_with_nix(tmp.path());
+    let w = ready_workspace("ws-1", vec![]);
+
+    let _ = apply_until_settled(&w, &ctx).await;
+    let reasons: Vec<_> = rec
+        .sent("PATCH", WS_STATUS)
+        .iter()
+        .filter_map(|s| s["status"]["conditions"][0]["reason"].as_str().map(str::to_string))
+        .collect();
+    assert!(!reasons.iter().any(|r| r == "KeysNotReady"), "{reasons:?}");
 }
 
 // ── attachment ───────────────────────────────────────────────────────────

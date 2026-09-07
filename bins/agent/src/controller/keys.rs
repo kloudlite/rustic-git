@@ -4,12 +4,18 @@
 use super::{status::patch_status, Ctx};
 use kloudlite_workspaces::{crd, k8s};
 use kube::{Api, ResourceExt};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// In place, never by rename: pods hold the inode through their hostPath mount.
+///
+// ponytail: between the `O_TRUNC` and the `write_all` the file is empty, so a login racing the
+// write is refused. Sub-millisecond, and the next attempt succeeds. Upgrade path if that ever
+// matters: keep the file open, write from offset 0 and `set_len` after, or stage the bytes in a
+// temp file and `copy_file_range` them into the same inode.
 pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let path = k8s::keys_file(pool, owner);
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap())?;
     let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
@@ -19,9 +25,30 @@ pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Resu
     // it had, so the mode is restated unconditionally.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     // sshd reads the file as the login user (`kl`), through StrictModes off; the uid is what lets
-    // the read succeed at all.
-    std::os::unix::fs::chown(&path, Some(k8s::SSH_UID as u32), Some(k8s::SSH_UID as u32))?;
+    // the read succeed at all. Only when it is not already right — the agent runs as root in the
+    // pod, but `cargo test` runs as an ordinary user who may not give a file away, and a chown
+    // that cannot change anything must not be the reason a test fails.
+    if f.metadata()?.uid() != k8s::SSH_UID as u32 {
+        match std::os::unix::fs::chown(&path, Some(k8s::SSH_UID as u32), Some(k8s::SSH_UID as u32)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && unsafe { libc::geteuid() } != 0 => {
+                tracing::debug!(%path, "keys.chown.skipped");
+            }
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
+}
+
+/// Owner directories under `keys_root` with no live `OwnerKeys` behind them. Their file is blanked
+/// rather than removed: a pod already running holds the inode, and an empty file is "nobody is
+/// admitted" where a deleted one would be a mount the kubelet refuses on the next start.
+fn stale_owners(pool: &str, live: &HashSet<String>) -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir(k8s::keys_root(pool)) else { return vec![] };
+    dir.flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|owner| !live.contains(owner))
+        .collect()
 }
 
 /// The write is unconditional — no read-back compare first: it is idempotent and cheap, and
@@ -42,34 +69,54 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
             (false, "WriteFailed", "could not write this node's keys file")
         }
     };
-    let status = serde_json::json!({
-        "observedGeneration": ok.then_some(generation),
+    let mut status = serde_json::json!({
         "conditions": [crd::condition_since(prev, crd::KEYS_SYNCED, ok, reason, msg, generation)],
     });
+    // Only on success, and by ABSENCE on failure: this is a forced server-side apply, so a null
+    // here would clear the last generation that did land rather than leave it standing.
+    if ok {
+        status["observedGeneration"] = generation.into();
+    }
     if let Err(e) = patch_status(api, &owner, "OwnerKeys", status).await {
         tracing::warn!(%owner, error = %e, "keys.status.failed");
     }
 }
 
+/// An owner whose projection is gone is an owner nobody may log in as. No status patch — the
+/// object it would be written to is what just disappeared.
+fn revoke(pool: &str, owner: &str) {
+    if let Err(e) = write_keys_file(pool, owner, "") {
+        tracing::warn!(%owner, error = %e, "keys.revoke.failed");
+    }
+}
+
 /// Every `OwnerKeys` in the cluster, converged on every event and on a ten-minute tick — the tick
-/// is what heals a file deleted by hand or a write that failed transiently.
+/// is what heals a file deleted by hand, a write that failed transiently, and a deletion this node
+/// was not watching for (a watch drops events it was disconnected across; the disk must not).
 pub async fn run(ctx: Arc<Ctx>) {
     use futures::StreamExt;
     use kube::runtime::{watcher, WatchStreamExt};
     let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
-    let mut events =
-        std::pin::pin!(watcher(api.clone(), watcher::Config::default()).default_backoff().applied_objects());
+    // The RAW event stream, not `applied_objects()`: a deletion has to reach the disk, and that
+    // helper drops exactly the event that says so.
+    let mut events = std::pin::pin!(watcher(api.clone(), watcher::Config::default()).default_backoff());
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             event = events.next() => match event {
-                Some(Ok(obj)) => converge(&ctx, &api, obj).await,
+                Some(Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj))) => converge(&ctx, &api, obj).await,
+                Some(Ok(watcher::Event::Delete(obj))) => revoke(&ctx.pool, &obj.name_any()),
+                Some(Ok(watcher::Event::Init | watcher::Event::InitDone)) => {}
                 Some(Err(e)) => tracing::warn!(error = %e, "keys.watch.failed"),
                 None => return,
             },
             _ = tick.tick() => {
                 if let Ok(list) = api.list(&Default::default()).await {
+                    let live: HashSet<String> = list.items.iter().map(|o| o.name_any()).collect();
+                    for owner in stale_owners(&ctx.pool, &live) {
+                        revoke(&ctx.pool, &owner);
+                    }
                     for obj in list.items {
                         converge(&ctx, &api, obj).await;
                     }
@@ -108,5 +155,30 @@ mod tests {
         let pool = pool.path().to_str().unwrap();
         write_keys_file(pool, "acme", "").unwrap();
         assert_eq!(std::fs::read_to_string(kloudlite_workspaces::k8s::keys_file(pool, "acme")).unwrap(), "");
+    }
+
+    /// A deletion this node missed is caught by the tick instead: a file with no `OwnerKeys` left
+    /// behind it would admit whoever it last named, forever.
+    #[test]
+    fn an_owner_with_no_object_left_is_stale_and_is_blanked() {
+        let pool = tempfile::tempdir().unwrap();
+        let pool = pool.path().to_str().unwrap();
+        for owner in ["alice", "acme"] {
+            write_keys_file(pool, owner, "ssh-ed25519 AAAA a\n").unwrap();
+        }
+        let live = HashSet::from(["alice".to_string()]);
+        assert_eq!(stale_owners(pool, &live), ["acme"]);
+        revoke(pool, "acme");
+        assert_eq!(std::fs::read_to_string(kloudlite_workspaces::k8s::keys_file(pool, "acme")).unwrap(), "");
+        assert_eq!(stale_owners(pool, &live), ["acme"], "still stale: the file stays, blanked");
+        // The live owner is untouched.
+        assert!(!std::fs::read_to_string(kloudlite_workspaces::k8s::keys_file(pool, "alice")).unwrap().is_empty());
+    }
+
+    /// No `keys/` directory yet (a node that has never converged) is not an error.
+    #[test]
+    fn a_pool_with_no_keys_directory_has_nothing_stale() {
+        let pool = tempfile::tempdir().unwrap();
+        assert!(stale_owners(pool.path().to_str().unwrap(), &HashSet::new()).is_empty());
     }
 }
