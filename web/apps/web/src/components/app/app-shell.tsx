@@ -63,12 +63,13 @@ export async function AppShell({
 
   return (
     <ShellState>
-      <div className="flex min-h-screen flex-col">
-        {/* The DOCUMENT is the only scroller: a bounded inner region meant a second scrollbar
-            whenever the outer box and the viewport disagreed for a frame (fonts, hydration,
-            a late stylesheet), which read as a flicker on every reload. Sticky keeps the
-            chrome in place without owning the scroll. */}
-        <header className="sticky top-0 z-30 shrink-0 border-b border-border bg-card">
+      <div className="flex h-dvh flex-col overflow-hidden">
+        {/* An app frame, the way Linear lays out: the frame is exactly the viewport and never
+            scrolls, the chrome is a flex sibling of ONE native scroll region below it, so the
+            scrollbar lives under the header and can come and go without the header's width
+            ever depending on the page's length. Native overflow, not a scroll component:
+            plain CSS is right in the first frame, with nothing to settle at hydration. */}
+        <header className="shrink-0 border-b border-border bg-card">
           <ShellHeaderRow me={me}>
             <Link href="/" aria-label="kloudlite home" className="inline-flex">
               <Logo className="h-5" />
@@ -92,7 +93,11 @@ export async function AppShell({
           />
         </header>
 
-        <div className="flex-1">{children}</div>
+        {/* min-h-0: a flex child's min-height is auto, which would grow it past the frame
+            instead of scrolling. scrollbar-gutter: a classic bar is 15 px of layout width, so
+            reserving it keeps this region's content width the same on a short page and a long
+            one; an overlay bar reserves nothing. */}
+        <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">{children}</div>
       </div>
     </ShellState>
   );
