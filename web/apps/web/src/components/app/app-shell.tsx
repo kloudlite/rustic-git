@@ -91,7 +91,10 @@ export async function AppShell({
           />
         </header>
 
-        <ScrollArea className="flex-1">{children}</ScrollArea>
+        {/* min-h-0: a flex child defaults to min-height:auto, so before Radix hydrates and sets
+            overflow on its viewport this region grows to the content and the DOCUMENT scrolls —
+            a window scrollbar that flashes on every reload and vanishes at hydration. */}
+        <ScrollArea className="min-h-0 flex-1">{children}</ScrollArea>
       </div>
     </ShellState>
   );
