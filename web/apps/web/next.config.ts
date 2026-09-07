@@ -21,6 +21,9 @@ const nextConfig: NextConfig = {
      the dev pod, and Next refuses its own HMR/chunk requests from any origin but localhost
      unless the host is named here — one warning per chunk otherwise. */
   allowedDevOrigins: ["dev.kloudlite.io"],
+  /* Dev only: the probes (readiness, the collector's scrape, the SLO probe's edge check) hit
+     these every few seconds and would be most of the request log. */
+  logging: { incomingRequests: { ignore: [/^\/api\/(health|metrics)/, /^\/_next\//] } },
   headers: async () => [{ source: "/(.*)", headers: SECURITY_HEADERS }],
   experimental: {
     // The radix-ui monopackage re-exports everything; without this, one import
