@@ -122,6 +122,18 @@ async fn ensure_profile(
         observed_hash: Some(hash.clone()),
         profile: Some(crate::nix::profile_path(&ctx.profiles_dir, id).to_string_lossy().into_owned()),
         nixpkgs: Some(pin.clone()),
+        // The observed half of `spec.locks`: reported alongside the profile so a reader can tell a
+        // lock the node has actually built from one the api only just wrote.
+        locked: w
+            .spec
+            .locks
+            .iter()
+            .map(|l| crd::LockedStatus {
+                entry: l.entry.clone(),
+                version: l.version.clone(),
+                rev: l.rev.clone(),
+            })
+            .collect(),
     };
 
     let started_from = ctx.profile_builds.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);

@@ -35,6 +35,7 @@ fn ws(uid: &str, rv: &str, phase: Phase) -> crd::Workspace {
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: Vec::new(),
+            locks: vec![],
             attached_environment: None,
         },
     );

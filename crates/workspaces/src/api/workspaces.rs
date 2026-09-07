@@ -227,6 +227,7 @@ pub(crate) async fn create_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: body.packages,
+            locks: Vec::new(),
             attached_environment: None,
         },
     )
@@ -836,6 +837,7 @@ pub(crate) async fn clone_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: src.spec.packages.clone(),
+            locks: src.spec.locks.clone(),
             attached_environment: None,
         },
     )
@@ -924,8 +926,8 @@ pub(crate) async fn restore_ws(
     // and every reader keeps its fallback for it. Checked before any other lookup so the refusal
     // costs nothing beyond the snapshot fetch already made.
     let frozen = match &snap.spec.state {
-        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
-            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
+        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment, locks }) => {
+            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone(), locks.clone()))
         }
         Some(crd::SnapshotState::Environment { .. }) => {
             return Err((
@@ -962,6 +964,16 @@ pub(crate) async fn restore_ws(
         .or_else(|| src.as_ref().map(|w| w.spec.packages.clone()))
         .unwrap_or_default();
     crate::packages::validate_list(&packages).map_err(bad_packages)?;
+    // Same precedence as `packages` above, from the same source, so the two never disagree about
+    // which cut they came from.
+    let locks = locks_for(
+        frozen
+            .as_ref()
+            .map(|f| f.5.clone())
+            .or_else(|| src.as_ref().map(|w| w.spec.locks.clone()))
+            .unwrap_or_default(),
+        &packages,
+    );
     let resources = frozen
         .as_ref()
         .map(|f| f.2.clone())
@@ -1021,12 +1033,21 @@ pub(crate) async fn restore_ws(
             desired_state: DesiredState::Running,
             resources,
             packages,
+            locks,
             attached_environment,
         },
     )
     .await?;
     let pushed = pushed_volumes(&s, c, &owner).await?;
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &pushed))).into_response())
+}
+
+/// A lock answers ONE entry string, not a list: `nodejs@20 -> 20.20.2` stays true however the rest
+/// of the list changed. So a restore carries every lock whose entry the new list still names, and
+/// drops the rest — a request that swapped one entry does not invalidate the others' versions.
+fn locks_for(mut locks: Vec<crd::Lock>, packages: &[String]) -> Vec<crd::Lock> {
+    locks.retain(|l| packages.contains(&l.entry));
+    locks
 }
 
 // ── environments ─────────────────────────────────────────────────────────
@@ -1049,9 +1070,33 @@ mod tests {
                 desired_state: crd::DesiredState::Running,
                 resources: Default::default(),
                 packages: vec![],
+                locks: vec![],
                 attached_environment: None,
             },
         )
+    }
+
+    fn lock(entry: &str) -> crd::Lock {
+        crd::Lock {
+            entry: entry.into(),
+            version: "20.20.2".into(),
+            attr_path: "nodejs_20".into(),
+            rev: "abc".into(),
+            store_path: String::new(),
+            resolved_at: "2026-09-08T00:00:00Z".into(),
+            source: crd::LockSource::Nixhub,
+        }
+    }
+
+    #[test]
+    fn a_restore_keeps_the_locks_for_entries_the_new_list_still_names() {
+        // Frozen: ["jq", "nodejs@20"] with the one lock that list needed.
+        let frozen = vec![lock("nodejs@20")];
+        let kept = super::locks_for(frozen.clone(), &["nodejs@20".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].version, "20.20.2");
+        // The entry is gone from the list, so its lock answers nothing.
+        assert!(super::locks_for(frozen, &["jq".to_string()]).is_empty());
     }
 
     #[test]
