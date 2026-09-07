@@ -443,6 +443,7 @@ fn prelude(name: &str) -> String {
          H=/home/{SSH_USER}\n\
          chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
          chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
+         chown {SSH_UID}:{SSH_UID} $H/.local\n\
          mkdir -p /etc/fish/conf.d\n\
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
@@ -2200,8 +2201,8 @@ mod tests {
         // closed list below — not a prefix, so a new path cannot be smuggled onto an existing
         // line — is every path root may touch: mountpoints and the `.cargo` parent the kubelet
         // makes root-owned for one. Adding to it is the moment to re-read `prelude`'s doc comment.
-        const ROOT_CHOWNS: [&str; 2] =
-            ["chown 1000:1000 $H $H/workspaces", "chown -h 1000:1000 $H/.cargo $H/.cargo/registry"];
+        const ROOT_CHOWNS: [&str; 3] =
+            ["chown 1000:1000 $H $H/workspaces", "chown -h 1000:1000 $H/.cargo $H/.cargo/registry", "chown 1000:1000 $H/.local"];
         let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
         let root: Vec<&str> = prelude.lines().take(su_at).collect();
         // Both must actually be there: dropping the second leaves `~/.cargo` unwritable by kl.
@@ -2263,6 +2264,10 @@ mod tests {
         // completer, which appends the match to the word instead of replacing it ("cacargo").
         // The dump goes to the per-node cache dir, never the shared home.
         assert!(prelude.contains("autoload -Uz compinit && compinit -d"), "{prelude}");
+        // `~/.local` is created ROOT-owned by the kubelet as the parent of the `.local/state`
+        // mount point, so without this fish cannot create `.local/share` and refuses to save
+        // history ("Permission denied"); the same for anything else that keeps XDG data.
+        assert!(prelude.contains("chown 1000:1000 $H/.local\n"), "{prelude}");
         assert!(prelude.contains("[[ -o interactive ]] || return 0"), "{prelude}");
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.

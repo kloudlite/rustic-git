@@ -27,7 +27,8 @@
 # mounts `NIX_ROOT` itself and picks the store and the profile out of it by `subPath` — a
 # `startsWith('/nix/')` rule alone rejects every workspace pod this cluster builds. `/wspool-prod`
 # is NOT allowed exactly, only its four known subtrees: `vol/` (worktrees), `attach/` (the rendered
-# resolv.conf), `homes/` and `homecache/`. The last two are additionally scoped to the pod's own
+# resolv.conf), `homes/`, `homecache/` and `keys/` (the projected `authorized_keys`, one FILE per
+# owner namespace, keyed by the pod's owner label or its team label). The last three are additionally scoped to the pod's own
 # `kloudlite.io/owner` label, because those two paths are keyed BY OWNER — a builder bug naming
 # another owner is a whole other person's dotfiles and shell history. `vol/` and `attach/` are keyed
 # by volume and workspace id, not by owner, so CEL has nothing to compare there and the pod builders
@@ -85,8 +86,11 @@ spec:
                             || v.hostPath.path == '/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner']
                             || v.hostPath.path.startsWith('/wspool-prod/homes/' + object.metadata.labels['kloudlite.io/owner'] + '/')
                             || v.hostPath.path == '/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner']
-                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner'] + '/'))))
-      message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, or this owner's own homes/homecache directory"
+                            || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner'] + '/')
+                            || v.hostPath.path == '/wspool-prod/keys/' + object.metadata.labels['kloudlite.io/owner'] + '/authorized_keys'
+                            || ('kloudlite.io/team' in object.metadata.labels
+                                && v.hostPath.path == '/wspool-prod/keys/' + object.metadata.labels['kloudlite.io/team'] + '/authorized_keys'))))
+      message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, this owner's own homes/homecache directory, or this owner's or team's keys file"
     # gVisor is what makes tenant isolation three independent things instead of two. It is live —
     # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-agent` Secret, read into `PodContext.runtime_class`
     # — but until this validation existed the kernel boundary rested on that one env var: unset it
