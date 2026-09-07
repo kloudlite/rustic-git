@@ -88,7 +88,7 @@ spec:
           env:
             - { name: CARGO_HOME, value: /work/cargo }
             - { name: CARGO_TARGET_DIR, value: /work/target }
-            - { name: PATH, value: /work/bin:/work/npm/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
+            - { name: PATH, value: /work/node/bin:/work/bun/bin:/work/bin:/work/npm/bin:/work/target/dev-image:/work/target/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin }
             - { name: PM2_HOME, value: /work/home/.pm2 }
             - { name: HOME, value: /work/home }
             - { name: DOCKER_CONFIG, value: /work/home/.docker }

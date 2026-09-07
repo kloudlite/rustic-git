@@ -499,7 +499,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["sec.peer.listener", "Security", "The git tier's public listener refuses `/api/`, on a repo that exists and one that does not", "100 %", "fast", "9 · Security"],
   ["edge.dns", "Edge and pipeline", "The public hostname resolves", "99.99 %", "fast", "10 · Edge"],
   ["edge.cert", "Edge and pipeline", "The TLS certificate is valid for the public hostname", "99.9 %", "fast", "10 · Edge"],
-  ["edge.origin", "Edge and pipeline", "The origin answers a direct request on the address its ingress publishes", "99.9 %", "fast", "10 · Edge"],
+  ["edge.origin", "Edge and pipeline", "The origin answers a direct HTTP request on its ingress, the way the proxy reaches it", "99.9 %", "fast", "10 · Edge"],
   ["edge.ssh.lb", "Edge and pipeline", "The SSH load balancer accepts a connection", "99.9 %", "fast", "10 · Edge"],
   ["tel.log.latency", "Edge and pipeline", "A structured log line reaches HyperDX", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],
   ["tel.pod.coverage", "Edge and pipeline", "Every pod is scraped by the region's collector", "99.9 % ≤ 60000 ms", "fast", "10 · Edge"],

@@ -6,6 +6,7 @@ import { File, Folder, CornerLeftUp } from "lucide-react";
 import { CloneMenu } from "@/components/repo/clone-menu";
 import { cloneUrls } from "@/lib/clone";
 import { CodeBlock } from "@/components/repo/code-block";
+import { MermaidBlock } from "@/components/repo/mermaid-block";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { FileSearch } from "@/components/repo/file-search";
 import { RepoAbout } from "@/components/repo/repo-about";
@@ -26,11 +27,21 @@ import { pathHref } from "@/lib/utils";
  *  highlighter as a source file, and inline code (a bare `code` with no `pre`) is untouched. */
 function Fence({ children }: { children?: React.ReactNode }) {
   const inner = isValidElement<{ className?: string; children?: React.ReactNode }>(children) ? children.props : {};
+  const word = /language-(\w+)/.exec(inner.className ?? "")?.[1];
+  const code = String(inner.children ?? "").replace(/\n$/, "");
+  // A diagram, not code: drawn client-side, the fence's own source as the fallback.
+  if (word?.toLowerCase() === "mermaid") {
+    return (
+      <div className="border border-border bg-muted/30">
+        <MermaidBlock source={code} />
+      </div>
+    );
+  }
   // A bare ``` fence has no language word and renders as text.
-  const lang = fenceLang(/language-(\w+)/.exec(inner.className ?? "")?.[1]);
+  const lang = fenceLang(word);
   return (
     <div className="border border-border bg-muted/30">
-      <CodeBlock code={String(inner.children ?? "").replace(/\n$/, "")} lang={lang} />
+      <CodeBlock code={code} lang={lang} />
     </div>
   );
 }
@@ -66,7 +77,10 @@ const README: Components = {
  *  `urlTransform` keeps http, https, mailto, tel and relative). Nothing here touches innerHTML. */
 export function Markdown({ source }: { source: string }) {
   return (
-    <div className="grid gap-4 text-sm2 leading-relaxed">
+    // `grid-cols-1` is `minmax(0, 1fr)`: a bare `grid` sizes its one implicit column to the
+    // widest item's max-content — a fence's longest line — and the whole README, prose
+    // included, ran past the card's edge on any long code line (2026-09-07).
+    <div className="grid min-w-0 grid-cols-1 gap-4 text-sm2 leading-relaxed">
       <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={README}>{source}</ReactMarkdown>
     </div>
   );

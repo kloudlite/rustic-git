@@ -81,3 +81,11 @@ the real env) and follows it. On the first failed step it force-kills the probe 
 and label a node — closes the run's row, sweeps its objects (`pod/close-run.py`) and removes any
 decommission label a drill left behind. pm2 runs (`run-suite.sh`) are for code in the pod; a Job is
 the verdict on what is pinned.
+
+## Web changes
+
+Bun and Node 20 live on the disk too (`/work/bun`, `/work/node`, on the pod's PATH; install once
+with `curl -fsSL https://bun.sh/install | BUN_INSTALL=/work/bun bash` and the Node 20 tarball into
+`/work/node`). `cd /work/src/web && bun install && bun run typecheck && bun run lint && bun run
+test && bun run build` is the gate `web.yml` runs; the web image itself is CI's (`web.yml` on a
+push touching `web/**`), then `deploy/pin.sh <sha> <web-sha>` and `deploy/roll.sh`.
