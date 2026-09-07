@@ -51,7 +51,17 @@ export function NavTabs({
   // Passing it in meant every page that rendered this row had to name its own tab,
   // and a page that named the wrong one — or none — quietly highlighted nothing.
   const pathname = usePathname();
+  // The tab just clicked, until the URL catches up. The underline used to move only when
+  // `usePathname` changed, which is also the instant the new page's render starts; that
+  // render held the main thread for the whole 260 ms slide, so the bar landed as a cut.
+  // Moving on click, the slide runs during the fetch, while the thread is idle.
+  // Remembered with the path it was clicked from: once the path is anything else, the
+  // click has landed (or gone elsewhere) and the URL is the truth again, with no effect to
+  // clear it.
+  const [clicked, setClicked] = useState<{ href: string; from: string } | null>(null);
+  const pending = clicked && clicked.from === pathname ? clicked.href : null;
   const active = useMemo(() => {
+    if (pending !== null) return tabs.find((t) => t.href === pending)?.label;
     if (activeHref !== undefined) return tabs.find((t) => t.href === activeHref)?.label;
     const matches = tabs
       .filter((t) => pathname === t.href || (!t.end && !t.exact && pathname.startsWith(`${t.href}/`)))
@@ -59,7 +69,7 @@ export function NavTabs({
       // than the `/o/r` tab that is also a prefix of it.
       .sort((a, b) => b.href.length - a.href.length);
     return matches[0]?.label;
-  }, [pathname, tabs, activeHref]);
+  }, [pathname, tabs, activeHref, pending]);
 
   const nav = useRef<HTMLElement>(null);
   const [bar, setBar] = useState<{ left: number; width: number } | null>(null);
@@ -107,6 +117,10 @@ export function NavTabs({
           <Link
             key={href}
             href={href}
+            onClick={(e) => {
+              if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+              setClicked({ href, from: pathname });
+            }}
             data-active={isActive}
             aria-current={isActive ? "page" : undefined}
             className={cn(
