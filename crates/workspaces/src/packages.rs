@@ -25,6 +25,19 @@ pub enum PackageError {
     Attr(String),
     TooMany(usize),
     Duplicate(String),
+    Version(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionReq {
+    Latest,
+    Prefix(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub attr: String,
+    pub version: Option<VersionReq>,
 }
 
 impl std::fmt::Display for PackageError {
@@ -33,6 +46,7 @@ impl std::fmt::Display for PackageError {
             PackageError::Attr(a) => write!(f, "{a:?} is not a package attribute name"),
             PackageError::TooMany(n) => write!(f, "{n} packages; the limit is {MAX_PACKAGES}"),
             PackageError::Duplicate(a) => write!(f, "{a:?} is listed twice"),
+            PackageError::Version(e) => write!(f, "{e:?} is not a version: use latest, N, N.N or N.N.N"),
         }
     }
 }
@@ -48,19 +62,64 @@ pub fn validate_attr(s: &str) -> Result<(), PackageError> {
     }
 }
 
+/// `attr` or `attr@version`. The version grammar is devbox's: `latest`, or one to three dotted
+/// numbers, digits only — a prefix, resolved to the newest release under it. Anything with an
+/// operator or a pre-release tag is refused: there is exactly one way to write a pin, so a list is
+/// never ambiguous about what it asked for.
+pub fn parse_entry(s: &str) -> Result<Entry, PackageError> {
+    if s.len() > MAX_ATTR_LEN {
+        return Err(PackageError::Attr(s.to_string()));
+    }
+    let Some((attr, version)) = s.split_once('@') else {
+        validate_attr(s)?;
+        return Ok(Entry { attr: s.to_string(), version: None });
+    };
+    validate_attr(attr)?;
+    let req = if version == "latest" {
+        VersionReq::Latest
+    } else {
+        let parts: Vec<&str> = version.split('.').collect();
+        let ok = (1..=3).contains(&parts.len())
+            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !ok {
+            return Err(PackageError::Version(s.to_string()));
+        }
+        VersionReq::Prefix(version.to_string())
+    };
+    Ok(Entry { attr: attr.to_string(), version: Some(req) })
+}
+
 /// Validates a whole list: size, grammar of every entry, and no duplicates.
+///
+/// Duplicates are keyed on the ATTRIBUTE, not the entry string: `nodejs` and `nodejs@20` are two
+/// requests for one profile entry, and Nix has no way to install both.
 pub fn validate_list(list: &[String]) -> Result<(), PackageError> {
     if list.len() > MAX_PACKAGES {
         return Err(PackageError::TooMany(list.len()));
     }
     let mut seen = std::collections::HashSet::new();
     for p in list {
-        validate_attr(p)?;
-        if !seen.insert(p.as_str()) {
-            return Err(PackageError::Duplicate(p.clone()));
+        let entry = parse_entry(p)?;
+        if !seen.insert(entry.attr.clone()) {
+            return Err(PackageError::Duplicate(entry.attr));
         }
     }
     Ok(())
+}
+
+/// The entries that name no version: they come straight from the pinned nixpkgs, so they need no
+/// resolution and no lock row.
+pub fn bare(list: &[String]) -> Vec<String> {
+    list.iter().filter(|p| !p.contains('@')).cloned().collect()
+}
+
+/// The entries that DO name a version, each with its parsed form. Unparsable entries are dropped
+/// rather than reported — every caller here has already run `validate_list`.
+pub fn pinned(list: &[String]) -> Vec<(String, Entry)> {
+    list.iter()
+        .filter(|p| p.contains('@'))
+        .filter_map(|p| parse_entry(p).ok().map(|e| (p.clone(), e)))
+        .collect()
 }
 
 /// What the profile on disk IS: the pin and the sorted list. Sorted so a reordered file is not a
@@ -121,6 +180,30 @@ mod tests {
         let many: Vec<String> = (0..101).map(|i| format!("p{i}")).collect();
         assert!(matches!(validate_list(&many), Err(PackageError::TooMany(101))));
         assert!(matches!(validate_list(&["$(id)".into()]), Err(PackageError::Attr(_))));
+    }
+
+    #[test]
+    fn an_entry_is_an_attr_or_an_attr_at_a_version() {
+        assert_eq!(parse_entry("jq").unwrap(), Entry { attr: "jq".into(), version: None });
+        assert_eq!(parse_entry("nodejs@latest").unwrap().version, Some(VersionReq::Latest));
+        assert_eq!(parse_entry("nodejs@20").unwrap().version, Some(VersionReq::Prefix("20".into())));
+        assert_eq!(parse_entry("python3@3.11.4").unwrap().version, Some(VersionReq::Prefix("3.11.4".into())));
+        for bad in ["nodejs@", "nodejs@^20", "nodejs@20.x", "nodejs@20-rc1", "nodejs@>=20", "nodejs@1.2.3.4", "@20", "a@b@c"] {
+            assert!(matches!(parse_entry(bad), Err(PackageError::Version(_)) | Err(PackageError::Attr(_))), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn duplicates_are_keyed_on_the_attr_not_the_entry() {
+        assert!(matches!(validate_list(&["nodejs".into(), "nodejs@20".into()]), Err(PackageError::Duplicate(a)) if a == "nodejs"));
+        assert!(validate_list(&["nodejs@20".into(), "jq".into()]).is_ok());
+    }
+
+    #[test]
+    fn bare_and_pinned_split_a_list() {
+        let l = ["jq".to_string(), "nodejs@20".to_string(), "python3@latest".to_string()];
+        assert_eq!(bare(&l), vec!["jq"]);
+        assert_eq!(pinned(&l).iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["nodejs@20", "python3@latest"]);
     }
 
     #[test]
