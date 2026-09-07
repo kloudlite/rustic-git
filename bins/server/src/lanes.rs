@@ -149,7 +149,24 @@ pub async fn reconcile_owned_markers(app: &App) {
     for key in app.store.pool.warm_repos() {
         let Some((kind, owner, name)) = kind_of(&key) else { continue };
         let db_public = match kind {
-            crate::index::Kind::Repo => app.store.is_public(owner, name).await,
+            crate::index::Kind::Repo => {
+                // The same guard the image arm has: `warm_repos()` is a snapshot, and a repo
+                // deleted after it was taken is still in it. `is_public` would then reopen the
+                // dropped database (an empty one, which `pool.get` creates on demand) and answer
+                // "private", and the reconcile below would write a fresh private marker for a
+                // repo that no longer exists — a ghost the fast suite found listed after its
+                // delete (2026-09-07 03:00, `run-fast-1788750001-l`). `repo_exists` reads the
+                // object store first and never reopens.
+                match app.store.repo_exists(owner, name).await {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(owner = %owner, repo = %name, reason = "read", error = %e, "index.marker.reconcile.failed");
+                        continue;
+                    }
+                }
+                app.store.is_public(owner, name).await
+            }
             crate::index::Kind::Img => {
                 use crate::registry::store::ImageExt;
                 // A marker is a view of the DB, and an image whose `image` row is gone has nothing

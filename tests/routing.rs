@@ -2191,6 +2191,37 @@ async fn the_marker_lane_leaves_an_image_mid_delete_alone() {
     );
 }
 
+/// The repo twin of the image case above. `warm_repos()` is a snapshot; a repo deleted after it
+/// was taken is still in it, and `is_public` on it REOPENS the dropped database (an empty one,
+/// created on demand), so the lane wrote a fresh private marker with no creator for a repo that
+/// was gone — the fast suite found `run-fast-1788750001-l` listed after its delete, and it stayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_marker_lane_leaves_a_deleted_repo_alone() {
+    use kloudlite_storage::index::{self, Kind, Marker};
+    let e = common::env().await;
+    let f = fleet(2);
+    let _leader = node(e.store.os.clone(), LEADER, &f).await;
+    let a = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    a.store.create_repo("alice", "web").await.unwrap();
+    index::write(&a.store, Kind::Repo, "alice", &Marker {
+        name: "web".into(), public: false, created_by: "alice@example.com".into(),
+        created_ms: 1, description: String::new(), manifests: 0, updated_ms: 1,
+    }).await.unwrap();
+
+    // The delete, then the late touch the lane's own `is_public` used to make: the handle is warm
+    // again, over an empty database.
+    index::remove(&a.store, Kind::Repo, "alice", "web").await.unwrap();
+    a.store.delete_repo("alice", "web").await.unwrap();
+    a.store.db_for("alice", "web").await.unwrap();
+    assert!(a.store.pool.warm_repos().iter().any(|r| r == "alice/web"), "warm, as the lane sees it");
+
+    kloudlite_server::lanes::reconcile_owned_markers(&a.app).await;
+    assert!(
+        index::read(&a.store.os, Kind::Repo, "alice", "web").await.is_none(),
+        "the lane must not write a marker for a repo whose row is gone"
+    );
+}
+
 /// A draining node that holds the leader lease resigns it FIRST. Every reassignment is a write to
 /// the ownership map, and the map's writer is this process — so handing repos over before giving
 /// the lease up would write them through a writer that is about to close, and the last of them

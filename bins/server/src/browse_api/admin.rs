@@ -238,6 +238,14 @@ pub(super) async fn api_delete(
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
     if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+        // No database, but the listing may still name it: a ghost marker (a reconcile that ran
+        // between a delete's two halves) is exactly what a person deleting the entry expects to
+        // clear. Under the same lock the live path takes, so it cannot undo a concurrent create.
+        let lock = app.store.keyed_lock(&crate::index::lock_key(crate::index::Kind::Repo, &owner, &name));
+        let _guard = lock.lock().await;
+        if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Repo, &owner, &name).await {
+            tracing::warn!(owner = %owner, repo = %name, reason = "remove", error = %e, "index.write.failed");
+        }
         return StatusCode::NO_CONTENT.into_response();
     }
     // Same lock key, and for the same reason as `api_create`/`api_visibility`: held across BOTH
