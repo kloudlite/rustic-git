@@ -18,17 +18,15 @@ export type DeleteState = { error?: string } | null;
 /** Adds an access key, or — with `signing` set — a key that only proves who wrote
  *  a commit. The same key may be added both ways; they grant different things. */
 export async function addSshKey(_prev: AddKeyState, formData: FormData): Promise<AddKeyState> {
-  const owner = String(formData.get("owner") ?? "").trim();
   const title = String(formData.get("title") ?? "").trim();
   const key = String(formData.get("key") ?? "").trim();
-  const values = { owner, title, key };
-  if (!owner) return { error: "Pick which namespace this key is for.", values };
+  const values = { title, key };
   if (!key) return { error: "Paste the public key.", values };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
-  const r = await api.addKey(token, owner, title, key, formData.get("signing") !== null);
+  const r = await api.addKey(token, title, key, formData.get("signing") !== null);
   if (!r.ok) {
     if (r.kind === "conflict") return { error: "That key is already added.", values };
     // The api names what is wrong with a key it could not parse; that message is

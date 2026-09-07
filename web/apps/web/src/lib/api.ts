@@ -417,25 +417,19 @@ export function approveCliCode(token: string, code: string) {
   return call<void>("/v1/cli/approve", { method: "POST", token, body: JSON.stringify({ code }) });
 }
 
-export function listKeys(token: string, owner: string, kind: "ssh" | "signing" = "ssh") {
-  const k = kind === "signing" ? "&kind=signing" : "";
-  return call<ApiCredential[]>(`/v1/keys?owner=${encodeURIComponent(owner)}${k}`, {
+/** Keys are the person's, not a namespace's: no owner on either call. */
+export function listKeys(token: string, kind: "ssh" | "signing" = "ssh") {
+  return call<ApiCredential[]>(`/v1/keys${kind === "signing" ? "?kind=signing" : ""}`, {
     method: "GET",
     token,
   });
 }
 
-export function addKey(
-  token: string,
-  owner: string,
-  name: string,
-  key: string,
-  signing = false,
-) {
+export function addKey(token: string, name: string, key: string, signing = false) {
   return call<ApiCredential>("/v1/keys", {
     method: "POST",
     token,
-    body: JSON.stringify({ owner, name, key, signing }),
+    body: JSON.stringify({ name, key, signing }),
   });
 }
 

@@ -77,17 +77,13 @@ export function UserSettings({
 
           <Section
             title="SSH keys"
-            description={
-              many
-                ? "Keys you push and pull with over SSH. A key works in the one namespace it was added for, so a key for a team is a separate entry."
-                : "Keys you push and pull with over SSH. Add a public key from each machine; the private half never leaves it."
-            }
+            description="Keys you push and pull with over SSH. Add a public key from each machine; the private half never leaves it. Keys are yours: every namespace you belong to accepts them."
           >
             <div className="flex items-center justify-between">
               <p className="text-sm2 text-muted-foreground">
                 {keys.length} {keys.length === 1 ? "key" : "keys"}
               </p>
-              <AddKeyDialog owners={owners} defaultOwner={session.user.owner} />
+              <AddKeyDialog />
             </div>
             {keys.length === 0 ? (
               <p className="mt-3 border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
@@ -101,7 +97,6 @@ export function UserSettings({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 text-sm2 font-medium">
                         {k.name}
-                        {many && <Badge variant="outline" className="font-mono">{k.owner}</Badge>}
                         {/* Keys added before the public line was kept cannot be written into a
                             workspace's authorized_keys — git over ssh still works, ssh to a
                             workspace does not, and re-adding the same key fixes it. */}
@@ -172,7 +167,7 @@ export function UserSettings({
               <p className="text-sm2 text-muted-foreground">
                 {signingKeys.length} {signingKeys.length === 1 ? "key" : "keys"}
               </p>
-              <AddKeyDialog owners={owners} defaultOwner={session.user.owner} signing />
+              <AddKeyDialog signing />
             </div>
             {signingKeys.length === 0 ? (
               <p className="mt-3 border border-border bg-card px-4 py-8 text-center text-sm2 text-muted-foreground">
