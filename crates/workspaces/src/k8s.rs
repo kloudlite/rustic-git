@@ -358,6 +358,11 @@ fn login_env(name: &str) -> Vec<EnvVar> {
         // zsh's rc lives under `~/.config` with fish's, so the persistent home carries every shell's
         // config in one tree; without this zsh reads `~/.zshrc` and finds nothing.
         var("ZDOTDIR", format!("{HOME_DIR}/.config/zsh")),
+        // No locale at all leaves zsh with MULTIBYTE off: starship's `❯` then counts as three
+        // columns, every completion redraw lands two columns right of the word, and the person
+        // sees "cacargo" for a buffer that reads "cargo". musl ships C.UTF-8 with no locale files
+        // to install, so it is the one value every image can honour.
+        var("LANG", "C.UTF-8".into()),
         var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
         var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
         // Every tool cache redirected off the shared NFS home and onto the node-local `homecache`
@@ -2262,6 +2267,7 @@ mod tests {
         // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
         // does not reach an ssh session.
         assert!(line.contains("\"ZDOTDIR=/home/kl/.config/zsh\""), "{line}");
+        assert!(line.contains("\"LANG=C.UTF-8\""), "{line}");
         assert!(line.contains("\"GIT_SSH_COMMAND=ssh -i /etc/kloudlite/ssh/id_ed25519 "), "{line}");
         assert!(line.contains("\"GIT_CONFIG_SYSTEM=/etc/kloudlite/ssh/gitconfig\""), "{line}");
         // ...and the pod entrypoint sees the identical list.
