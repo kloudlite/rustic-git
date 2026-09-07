@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { packagesField } from "./packages-field";
+import { packageListError, packagesField } from "./packages-field";
 
 const fd = (v?: string) => {
   const f = new FormData();
@@ -20,5 +20,36 @@ describe("packagesField", () => {
 
   test("a list is split, trimmed, and blanks dropped", () => {
     expect(packagesField(fd(" ripgrep ,, fd,"))).toEqual(["ripgrep", "fd"]);
+  });
+});
+
+// Mirrors `crates/workspaces/src/packages.rs`'s own tests: the two grammars have to agree, or
+// the field refuses what the api would accept (or worse, the other way round).
+describe("packageListError", () => {
+  test("a bare attr, and every shape of pin, pass", () => {
+    for (const ok of ["jq", "nodejs@latest", "nodejs@20", "python3@3.11.4", "python3Packages.requests", "gcc-wrapper", "libc++", "nodejs_20"]) {
+      expect(packageListError([ok])).toBeNull();
+    }
+  });
+
+  test("a bad version names the entry", () => {
+    for (const bad of ["nodejs@", "nodejs@^20", "nodejs@20.x", "nodejs@20-rc1", "nodejs@>=20", "nodejs@1.2.3.4", "a@b@c"]) {
+      expect(packageListError([bad])).toBe(`"${bad}" is not a version: use latest, N, N.N or N.N.N`);
+    }
+  });
+
+  test("a bad attr is refused before anything is sent", () => {
+    for (const bad of ["$(id)", "a b", "-lead", "@20", "x".repeat(65)]) {
+      expect(packageListError([bad])).toBe(`"${bad}" is not a package attribute name`);
+    }
+  });
+
+  test("duplicates are keyed on the attr, not the entry", () => {
+    expect(packageListError(["nodejs", "nodejs@20"])).toBe(`"nodejs" is listed twice`);
+    expect(packageListError(["nodejs@20", "jq"])).toBeNull();
+  });
+
+  test("the list has a ceiling", () => {
+    expect(packageListError(Array.from({ length: 101 }, (_, i) => `p${i}`))).toBe("101 packages; the limit is 100");
   });
 });

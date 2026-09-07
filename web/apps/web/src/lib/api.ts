@@ -760,6 +760,11 @@ export type ApiWorkspace = {
   base_packages?: string[];
   /** The `PackagesReady` condition; absent until the reconciler has reported on the list. */
   packages_status?: { ready: boolean; reason: string; message: string } | null;
+  /** What each `attr@version` entry in `packages` resolved to. Desired state, written by the
+   *  api when it resolved the pin — a bare entry has no lock, so this is never 1:1 with
+   *  `packages`. `source` is `crd::LockSource` (serde lowercase) — which index answered, and
+   *  therefore whether a store path came with it. */
+  locks?: { entry: string; version: string; rev: string; source: "nixhub" | "mirror" }[];
   /** Present once the workspace has an sshd with a host key — i.e. once it can be reached.
    *  Absent while it is coming up, and for a stopped one. */
   ssh?: { gateway: string; host_key: string } | null;
@@ -844,6 +849,16 @@ export function setWorkspacePackages(token: string, id: string, packages: string
     method: "PATCH",
     token,
     body: JSON.stringify({ packages }),
+  });
+}
+
+/** Re-resolve every pinned entry against the package index and return the workspace with its
+ *  new `locks`. The list itself is untouched — only what the pins point at moves. */
+export function updateWorkspacePackages(token: string, id: string) {
+  return call<ApiWorkspace>(`/v1/workspaces/${encodeURIComponent(id)}/packages/update`, {
+    method: "POST",
+    token,
+    body: "{}",
   });
 }
 
