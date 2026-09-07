@@ -267,10 +267,13 @@ async fn run() -> Result<()> {
             // Keys became the person's, so rows filed under a team handle move to whoever
             // added them and the object store's fingerprint index is rebuilt from the result.
             // Fatal on purpose: an index that is half rebuilt authenticates some of a person's
-            // keys and not others, which is worse than a restart.
+            // keys and not others, which is worse than a restart. Marked only once every pair
+            // has landed, so that restart re-does the whole list rather than skipping the tail
+            // it never reached.
             for (email, fingerprint) in d.migrate_keys_to_people().await? {
                 store.add_ssh_key(&email, &fingerprint).await?;
             }
+            d.mark_keys_migrated().await?;
             Some(Arc::new(d))
         }
         _ => {

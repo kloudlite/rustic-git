@@ -966,8 +966,12 @@ impl Directory {
     /// Returns `(email, fingerprint)` for every ssh key, moved or not: the object store's
     /// fingerprint index is a separate store that this cannot write, and re-adding a pair it
     /// already holds costs one PUT.
+    ///
+    /// Does NOT write the marker — `mark_keys_migrated` does, and only the caller knows whether
+    /// the index it is handed these pairs for actually took them. Running the pass twice is
+    /// harmless (a moved row is skipped by the same test that selected it, and re-indexing a
+    /// pair is one PUT), so the safe order is: pass, index, then mark.
     pub async fn migrate_keys_to_people(&self) -> Result<Vec<(String, String)>> {
-        const MARKER: &str = "keys_v2";
         // A row whose `created_by` is not an address cannot be re-filed onto a person, and a
         // fingerprint indexed under a team handle would authenticate the wrong namespace — so
         // both the move and the returned pair insist on one.
@@ -977,7 +981,7 @@ impl Directory {
             Backend::Mongo(m) => {
                 use futures::TryStreamExt;
                 if m.meta
-                    .find_one(doc! { "_id": MARKER })
+                    .find_one(doc! { "_id": KEYS_V2 })
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?
                     .is_some()
@@ -988,37 +992,33 @@ impl Directory {
                     .iter()
                     .map(|k| mongodb::bson::to_bson(k).map_err(|e| err(format!("bson: {e}"))))
                     .collect::<Result<Vec<_>>>()?;
-                let mut cursor = m
+                // Drained before a single update: writing to the collection a cursor is
+                // streaming lets the server skip or re-yield a rewritten document.
+                let rows: Vec<Credential> = m
                     .credentials
                     .find(doc! { "kind": { "$in": kinds } })
                     .await
+                    .map_err(|e| err(format!("mongo: {e}")))?
+                    .try_collect()
+                    .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
-                while let Some(c) = cursor.try_next().await.map_err(|e| err(format!("mongo: {e}")))? {
-                    let mut owner = c.owner.clone();
+                for c in rows {
+                    let mut owner = c.owner;
                     if !person(&owner) && person(&c.created_by) {
                         m.credentials
                             .update_one(doc! { "_id": &c.id }, doc! { "$set": { "owner": &c.created_by } })
                             .await
                             .map_err(|e| err(format!("mongo: {e}")))?;
-                        owner = c.created_by.clone();
+                        owner = c.created_by;
                     }
                     if c.kind == CredentialKind::SshKey && person(&owner) {
-                        keys.push((owner, c.id.clone()));
+                        keys.push((owner, c.id));
                     }
                 }
-                // Last, so a crash mid-pass simply re-runs: an already-moved row is skipped by
-                // the same `person` test that selected it. An upsert because two replicas
-                // booting together both pass the check above, and the loser of that race must
-                // not fail a duplicate key into an abandoned boot.
-                m.meta
-                    .replace_one(doc! { "_id": MARKER }, doc! { "_id": MARKER, "at": DateTime::now() })
-                    .upsert(true)
-                    .await
-                    .map_err(|e| err(format!("mongo: {e}")))?;
             }
             Backend::Memory(s) => {
                 let mut s = s.lock().unwrap();
-                if s.meta.contains_key(MARKER) {
+                if s.meta.contains_key(KEYS_V2) {
                     return Ok(vec![]);
                 }
                 for c in s.credentials.values_mut() {
@@ -1032,10 +1032,30 @@ impl Directory {
                         keys.push((c.owner.clone(), c.id.clone()));
                     }
                 }
-                s.meta.insert(MARKER.to_string(), String::new());
             }
         }
         Ok(keys)
+    }
+
+    /// Records that `migrate_keys_to_people`'s pairs have been indexed, so it stops returning
+    /// them. Separate from the pass on purpose: until the caller has written every pair into the
+    /// fingerprint index, a marker would strand the ones it never got to.
+    pub async fn mark_keys_migrated(&self) -> Result<()> {
+        match &self.backend {
+            // An upsert because two replicas booting together both run the pass, and the loser
+            // of that race must not fail a duplicate key into an abandoned boot.
+            Backend::Mongo(m) => m
+                .meta
+                .replace_one(doc! { "_id": KEYS_V2 }, doc! { "_id": KEYS_V2, "at": DateTime::now() })
+                .upsert(true)
+                .await
+                .map(|_| ())
+                .map_err(|e| err(format!("mongo: {e}"))),
+            Backend::Memory(s) => {
+                s.lock().unwrap().meta.insert(KEYS_V2.to_string(), String::new());
+                Ok(())
+            }
+        }
     }
 
     // ── passkeys ────────────────────────────────────────────────────────────
@@ -1350,6 +1370,9 @@ pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
     (lower != fingerprints).then_some(lower)
 }
 
+/// The `meta` row saying keys have been re-filed onto people and indexed under them.
+const KEYS_V2: &str = "keys_v2";
+
 const DEP: &str = "mongo";
 
 /// Every op `mongo_op` can answer, for `metrics::register_dependency` at boot.
@@ -1424,15 +1447,36 @@ pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 mod tests {
     use super::{check_handle, Credential, CredentialKind, Directory};
 
-    /// A key registered under a team moves to the person who added it; a key already under a
-    /// person is untouched; a second run is a no-op.
+    /// A key registered under a team moves to the person who added it; only ssh keys reach the
+    /// fingerprint index; and the pass keeps returning its pairs until the caller says it has
+    /// indexed them, so a boot that dies mid-index re-does the whole list rather than half of it.
     #[tokio::test]
     async fn team_keys_move_to_their_creator_once() {
+        let row = |id: &str, kind, owner: &str| Credential {
+            id: id.into(),
+            kind,
+            owner: owner.into(),
+            created_by: "alice@example.com".into(),
+            name: "k".into(),
+            material: "ssh-ed25519 AAAA".into(),
+            fingerprints: vec![],
+            created_at: mongodb::bson::DateTime::now(),
+        };
         let d = Directory::in_memory();
-        d.add_credential(&Credential { id: "SHA256:a".into(), kind: CredentialKind::SshKey, owner: "acme".into(), created_by: "alice@example.com".into(), name: "k".into(), material: "ssh-ed25519 AAAA".into(), fingerprints: vec![], created_at: mongodb::bson::DateTime::now() }).await.unwrap();
+        d.add_credential(&row("SHA256:a", CredentialKind::SshKey, "acme")).await.unwrap();
+        // A team's signing key moves too, but signatures are not authentication: its id must
+        // never be handed to the caller to put in the ssh fingerprint index.
+        d.add_credential(&row("gpg:b", CredentialKind::SigningKey, "acme")).await.unwrap();
+
         let moved = d.migrate_keys_to_people().await.unwrap();
         assert_eq!(moved, vec![("alice@example.com".to_string(), "SHA256:a".to_string())]);
-        assert_eq!(d.credential("SHA256:a").await.unwrap().unwrap().owner, "alice@example.com");
+        for id in ["SHA256:a", "gpg:b"] {
+            assert_eq!(d.credential(id).await.unwrap().unwrap().owner, "alice@example.com");
+        }
+
+        // Unmarked, so the pairs come back: the caller has not said the index took them.
+        assert_eq!(d.migrate_keys_to_people().await.unwrap(), moved);
+        d.mark_keys_migrated().await.unwrap();
         assert!(d.migrate_keys_to_people().await.unwrap().is_empty());
     }
 
