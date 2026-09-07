@@ -44,6 +44,9 @@ pub const AGENT_FIELD_MANAGER: &str = "kloudlite-agent";
 /// `AGENT_FIELD_MANAGER` so a settings write and the agent's own status writes are never
 /// attributed to the same manager in a server-side-apply conflict.
 pub const AGENT_FIELD_MANAGER_ADMIN: &str = "kloudlite-admin";
+/// `bins/api`'s field manager: the api owns spec on the objects it applies, so a conflict against
+/// it is another writer of DESIRED state, never a controller's status write.
+pub const API_FIELD_MANAGER: &str = "kloudlite-api";
 /// `ClusterSettings`' history annotation: the previous ten specs, newest first, JSON — parallel to
 /// `StoredCentralSettings.history` but as an annotation rather than a struct field, since the CRD
 /// spec is what server-side apply owns field-by-field and a growing history array there would be a
@@ -835,6 +838,47 @@ pub struct OwnerBindingStatus {
     pub team: bool,
 }
 
+/// One owner namespace's `authorized_keys`, PROJECTED from the directory: keys belong to people,
+/// a namespace sees the union of its members' keys. Cluster-scoped, named by the owner handle,
+/// written only by `bins/api` (server-side apply, on every key or membership change and on a
+/// resync beat), read by every node's agent, which converges it into the file its pods mount
+/// and reports `Synced`. Never the record: deleting it locks the owner out until the next beat
+/// rewrites it, and nothing in a cluster can add a key.
+#[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "kloudlite.io",
+    version = "v1alpha1",
+    kind = "OwnerKeys",
+    plural = "ownerkeys",
+    shortname = "ok",
+    status = "OwnerKeysStatus",
+    printcolumn = r#"{"name":"Generation","type":"integer","jsonPath":".spec.generation"}"#,
+    printcolumn = r#"{"name":"Synced","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].status"}"#,
+    derive = "PartialEq"
+)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerKeysSpec {
+    /// The directory's version of this set: monotonic, so a reader can tell "same bytes,
+    /// rewritten" from "changed". Unix millis at the api's write.
+    pub generation: i64,
+    /// The file, verbatim: one OpenSSH public line per key, sorted, `\n`-terminated. Empty is a
+    /// namespace whose members have no keys — written as an empty file, never skipped.
+    #[serde(default)]
+    pub authorized_keys: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerKeysStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+/// `OwnerKeys` condition: this node has written `spec.generation` to the file its pods mount.
+pub const KEYS_SYNCED: &str = "Synced";
+
 /// What ONE owner — a person or a team slug — may allocate. Cluster-scoped, named by the owner
 /// slug, written only by a superadmin through `/v1`.
 ///
@@ -1369,6 +1413,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         Workspace::crd(),
         Environment::crd(),
         OwnerBinding::crd(),
+        OwnerKeys::crd(),
         Snapshot::crd(),
         VolumeReplica::crd(),
         Region::crd(),

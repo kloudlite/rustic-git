@@ -48,7 +48,8 @@ spec:
       - apiGroups: ["kloudlite.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["workspaces", "environments", "volumes", "ownerbindings", "snapshots", "volumereplicas"]
+        resources: ["workspaces", "environments", "volumes", "ownerbindings", "ownerkeys", "snapshots",
+                    "volumereplicas"]
   matchConditions:
     - name: from-the-agent
       expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-agent'"

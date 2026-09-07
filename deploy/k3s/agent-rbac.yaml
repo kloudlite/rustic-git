@@ -42,6 +42,9 @@
 #                                                                       ownerReference left to GC it)
 #   ownerbindings (kloudlite.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
+#   ownerkeys (kloudlite.io)              get,list,watch               Controller; the authorized_keys
+#                                                                       file this node's pods mount
+#   ownerkeys/status                      patch                        the keys-sync ack
 #   quotas (kloudlite.io)                 get,list,watch               binding/environment reconcile:
 #                                                                       the owner's effective ceiling,
 #                                                                       written into the namespace as
@@ -174,6 +177,15 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["ownerbindings"]
     verbs: ["get", "list", "watch", "create"]
+  # Read-only on the spec for the same reason as `quotas`: the key set is PROJECTED from the
+  # directory by `bins/api`, and no cluster can add a key. Status is the node's ack that the file
+  # it mounts carries `spec.generation`.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["ownerkeys"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kloudlite.io"]
+    resources: ["ownerkeys/status"]
+    verbs: ["patch"]
   # Read-only, and deliberately so: a `Quota` is DESIRED state, written by a superadmin through
   # /v1. The agent only projects it into the namespace as a `ResourceQuota`, which is why
   # agent-admission.yaml gains nothing for this feature — there is no agent spec write to refuse.
