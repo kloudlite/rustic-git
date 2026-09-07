@@ -239,7 +239,13 @@ pub(super) async fn imagedelete(
         Err(r) => return r,
     }
     if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
-        return hidden();
+        // No rows, but the listing may still name it: a ghost marker (a reconcile that ran
+        // between a delete's halves) is exactly what the owner deleting the entry expects to
+        // clear. The owner is already established above, so this hides nothing from a stranger.
+        if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Img, &owner, &name).await {
+            return internal(e);
+        }
+        return StatusCode::NO_CONTENT.into_response();
     }
     // Marker first: a crash after this point leaves orphaned manifest/db bytes for GC to sweep,
     // never a listing entry for storage that's (partly) gone.

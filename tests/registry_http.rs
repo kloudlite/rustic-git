@@ -406,6 +406,29 @@ async fn imagedelete_evicts_the_manifest_cache() {
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }
 
+/// A marker with no image behind it — the ghost a marker reconcile writes when it races a delete —
+/// is cleared by the owner's ordinary `imagedelete`, which used to answer 404 and leave it listed
+/// (`run-fast-1788620401-a` sat in the probe tenant's catalogue for a day). A stranger still gets
+/// the same 404 as before: the marker is private to the owner.
+#[tokio::test]
+async fn imagedelete_clears_a_ghost_marker_with_no_image_behind_it() {
+    let (_pub_base, peer_base, e) = common::serve_public_and_peer().await;
+    use kloudlite_storage::index::{self, Kind, Marker};
+    index::write(&e.store, Kind::Img, "acme", &Marker {
+        name: "ghost".into(), public: false, created_by: String::new(),
+        created_ms: 1, description: String::new(), manifests: 0, updated_ms: 1,
+    }).await.unwrap();
+    assert!(!e.store.image_exists("acme", "ghost").await.unwrap(), "no rows: a pure ghost");
+
+    let r = common::peer_post_as(&peer_base, "bob", "/api/acme/ghost/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NOT_FOUND, "a stranger learns nothing");
+    assert!(index::read(&e.store.os, Kind::Img, "acme", "ghost").await.is_some());
+
+    let r = common::peer_post_as(&peer_base, "acme", "/api/acme/ghost/imagedelete", "").await;
+    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert!(index::read(&e.store.os, Kind::Img, "acme", "ghost").await.is_none(), "the ghost marker is gone");
+}
+
 /// `imagedelete` removes the listing-index marker FIRST, unconditionally — before it even lists
 /// `manifests/{owner}/{name}` to find objects to delete. Proven by giving the image zero
 /// manifests (an empty prefix listing, the case that would otherwise make "marker removal" a

@@ -224,6 +224,21 @@ pub(crate) async fn push_env(
 
 /// A `Snapshot` CR, created `Working` so the agent's `reconcile_snapshot` can act on the very first
 /// pass — CR-first (module doc).
+/// The parent a push chains on: the newest READY push of this worktree, by `readyAt`. Not the
+/// worktree's `status.head` alone — the agent marks a push Ready and advances `head` in two
+/// writes, and a push landing in that window (a person pushing twice, the hourly probe's
+/// `vol.history`) named the previous head as its parent, so two pushes sat side by side at one
+/// depth and the history read back in timestamp order, arbitrary inside a second. The listing
+/// is already in hand; `head` is only the answer when this worktree has no Ready push yet (a
+/// fresh restore or clone, whose head is the snapshot it grafted onto).
+fn newest_ready_push(all: &[crd::Snapshot], worktree: &str) -> Option<String> {
+    all.iter()
+        .filter(|s| s.is_snapshot() && s.spec.worktree == worktree)
+        .filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready))
+        .max_by_key(|s| s.status.as_ref().and_then(|st| st.ready_at.clone()))
+        .map(|s| s.name_any())
+}
+
 async fn create_snapshot(
     c: &kube::Client,
     volume: &str,
@@ -243,6 +258,7 @@ async fn create_snapshot(
     let api: Api<crd::Snapshot> = Api::all(c.clone());
     let all = api.list(&ListParams::default().fields(&format!("spec.volume={volume}"))).await.map_err(kube_err)?.items;
     refuse_cut_in_flight(&all, worktree)?;
+    let parent = newest_ready_push(&all, worktree).or(parent);
     let name = crd::snapshot_name(volume);
     let mut snap = crd::Snapshot::new(
         &name,
@@ -278,4 +294,31 @@ async fn create_snapshot(
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+
+    fn push(name: &str, worktree: &str, parent: &str, phase: &str, ready_at: Option<&str>) -> crd::Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name},
+            "spec": {"volume": "v1", "owner": "alice", "worktree": worktree, "parent": parent, "transient": false},
+            "status": {"phase": phase, "readyAt": ready_at},
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_push_chains_on_the_newest_ready_push_not_the_lagging_head() {
+        let all = vec![
+            push("v1-a", "ws-1", "", "ready", Some("2026-09-07T02:07:30Z")),
+            push("v1-b", "ws-1", "v1-a", "ready", Some("2026-09-07T02:07:31Z")),
+            push("v1-c", "ws-1", "v1-b", "working", None),
+            push("v1-x", "ws-other", "", "ready", Some("2026-09-07T02:09:00Z")),
+        ];
+        assert_eq!(newest_ready_push(&all, "ws-1").as_deref(), Some("v1-b"), "head still says v1-a; the chain says v1-b");
+        assert_eq!(newest_ready_push(&all, "ws-new"), None, "a fresh worktree falls back to its head");
+    }
 }
