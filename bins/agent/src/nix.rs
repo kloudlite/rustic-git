@@ -97,6 +97,11 @@ pub trait Nix: Send + Sync {
     /// `Err` starting with `NOT_CACHED` means the substituter does not have it — a different thing
     /// from a broken daemon or a timeout, and the only one a person can act on.
     async fn copy_from_cache(&self, store_path: &str, timeout: Duration) -> Result<(), String>;
+    /// `nix eval` of `<rev>#<attr_path>`'s `outPath`: what a MIRROR lock (one with no store path
+    /// of its own) resolves to. Its own step so the path can be copied from the cache like any
+    /// other lock — an expression that evaluated the foreign nixpkgs at build time would instead
+    /// build whatever it found there from source.
+    async fn eval_out_path(&self, rev: &str, attr_path: &str, timeout: Duration) -> Result<String, String>;
     /// `nix store ping`.
     async fn ping(&self) -> Result<(), String>;
     /// `nix-collect-garbage`; returns bytes freed as nix reports them (0 if unparseable).
@@ -164,24 +169,26 @@ impl Nix for RealNix {
         // `--max-jobs 0` is the load-bearing flag: it makes nix REFUSE to build anything locally,
         // so a lock whose path is not in the cache fails fast instead of compiling a toolchain on
         // a workspace node. The single substituter is the same rule stated positively.
-        let c = self.cmd(&[
-            "build",
-            "--impure",
-            "--expr",
-            expr,
-            "--no-link",
-            "--print-out-paths",
-            "--option",
-            "substituters",
-            CACHE,
-            "--max-jobs",
-            "0",
-        ]);
+        // One substituter, the public cache. NOT `--max-jobs 0`: the `buildEnv` symlink tree is a
+        // derivation nobody has ever built, so it is always realised locally — what keeps a PINNED
+        // package from being compiled here is the copy that ran before this, not a jobs limit.
+        let c = self.cmd(&["build", "--impure", "--expr", expr, "--no-link", "--print-out-paths", "--option", "substituters", CACHE]);
         let out = self.run(c, timeout).await?;
         match out.split_whitespace().next() {
             Some(p) => Ok(PathBuf::from(p)),
             None => Err("nix build printed no store path".into()),
         }
+    }
+    async fn eval_out_path(&self, rev: &str, attr_path: &str, timeout: Duration) -> Result<String, String> {
+        // Re-checked here, not trusted from the caller: this is the one place a lock's fields
+        // become part of an expression, and an expression is code.
+        if !kloudlite_workspaces::packages::valid_rev(rev) {
+            return Err(format!("{rev:?} is not a nixpkgs revision"));
+        }
+        kloudlite_workspaces::packages::validate_attr(attr_path).map_err(|e| e.to_string())?;
+        let expr = format!("(import (builtins.getFlake \"github:NixOS/nixpkgs/{rev}\") {{ }}).{attr_path}.outPath");
+        let c = self.cmd(&["eval", "--impure", "--raw", "--expr", &expr]);
+        Ok(self.run(c, timeout).await?.trim().to_string())
     }
     async fn copy_from_cache(&self, store_path: &str, timeout: Duration) -> Result<(), String> {
         let c = self.cmd(&["copy", "--from", CACHE, store_path]);
@@ -215,7 +222,7 @@ impl Nix for RealNix {
 /// calling a network blip `NotCached` would tell a person to change a version that is fine.
 fn is_not_cached(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
-    ["does not exist", "cannot substitute", "unable to substitute", "is not valid"]
+    ["does not exist and cannot be created", "cannot substitute", "unable to substitute", "is not valid"]
         .iter()
         .any(|m| e.contains(m))
 }
@@ -511,6 +518,8 @@ mod tests {
     #[test]
     fn only_the_wordings_that_mean_the_cache_lacks_the_path_are_not_cached() {
         assert!(is_not_cached("error: path '/nix/store/x' does not exist and cannot be created"));
+        // A file we simply cannot read is not "the cache lacks this path".
+        assert!(!is_not_cached("error: file '/etc/nix/nix.conf' does not exist"));
         assert!(is_not_cached("error: cannot substitute path '/nix/store/x'"));
         assert!(is_not_cached("error: unable to substitute path '/nix/store/x'"));
         assert!(is_not_cached("error: path '/nix/store/x' is not valid"));

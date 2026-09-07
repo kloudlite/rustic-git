@@ -27,6 +27,9 @@ struct FakeNix {
     /// The store paths `copy_from_cache` was asked for, and the answer it gives.
     copies: std::sync::Mutex<Vec<String>>,
     copy_answer: std::sync::Mutex<Result<(), String>>,
+    /// The `(rev, attr)` pairs a mirror lock was evaluated for, and the path it answers with.
+    evals: std::sync::Mutex<Vec<(String, String)>>,
+    eval_answer: std::sync::Mutex<Result<String, String>>,
     answer: std::sync::Mutex<Result<(), String>>,
     ping: std::sync::Mutex<Result<(), String>>,
     /// Run while a build is "in flight", so a test can change the spec mid-build.
@@ -38,6 +41,8 @@ impl Default for FakeNix {
             builds: std::sync::Mutex::new(Vec::new()),
             copies: std::sync::Mutex::new(Vec::new()),
             copy_answer: std::sync::Mutex::new(Ok(())),
+            evals: std::sync::Mutex::new(Vec::new()),
+            eval_answer: std::sync::Mutex::new(Ok(MIRROR_PATH.into())),
             answer: std::sync::Mutex::new(Ok(())),
             ping: std::sync::Mutex::new(Ok(())),
             on_build: std::sync::Mutex::new(None),
@@ -53,6 +58,10 @@ impl kloudlite_agent::nix::Nix for FakeNix {
         }
         let r = self.answer.lock().unwrap().clone();
         r.map(|()| std::path::PathBuf::from("/tmp"))
+    }
+    async fn eval_out_path(&self, rev: &str, attr: &str, _: std::time::Duration) -> Result<String, String> {
+        self.evals.lock().unwrap().push((rev.to_string(), attr.to_string()));
+        self.eval_answer.lock().unwrap().clone()
     }
     async fn copy_from_cache(&self, store_path: &str, _: std::time::Duration) -> Result<(), String> {
         self.copies.lock().unwrap().push(store_path.to_string());
@@ -3530,6 +3539,7 @@ fn ready_workspace(id: &str, packages: Vec<String>) -> crd::Workspace {
     serde_json::from_value(o).unwrap()
 }
 
+const MIRROR_PATH: &str = "/nix/store/11111111111111111111111111111111-nodejs-20.20.2";
 const LOCKED_PATH: &str = "/nix/store/00000000000000000000000000000000-nodejs-20.20.2";
 
 /// A workspace with one pinned entry and the lock `/v1` would have written for it.
@@ -4473,8 +4483,44 @@ async fn a_locked_package_is_copied_from_the_cache_and_built_from_its_store_path
     );
 }
 
-/// `--max-jobs 0` means there is no fallback: a path the cache lacks is a sentence to the person,
-/// under its own reason, and nix is never asked to build anything.
+/// A mirror lock names a revision, not a path. It is evaluated to one and then copied like any
+/// other lock — leaving the `getFlake` in the build expression would let nix build whatever it
+/// found in that nixpkgs from source, which is the whole thing this design refuses.
+#[tokio::test]
+async fn a_mirror_lock_is_evaluated_to_a_path_copied_and_then_substituted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    apply_until_settled(&locked_workspace(""), &ctx).await;
+
+    assert_eq!(fake.evals.lock().unwrap().as_slice(), [("a".repeat(40), "nodejs_20".to_string())]);
+    assert_eq!(fake.copies.lock().unwrap().as_slice(), [MIRROR_PATH.to_string()], "the evaluated path is pulled");
+    let builds = fake.builds.lock().unwrap().clone();
+    assert!(builds[0].contains(&format!("(builtins.storePath \"{MIRROR_PATH}\")")), "{builds:?}");
+    assert!(!builds[0].contains("getFlake \"github:NixOS/nixpkgs/aaaa"), "no second nixpkgs in the build: {builds:?}");
+}
+
+/// A lock outlives the entry that made it. Dropping `nodejs@20` from the list must drop nodejs,
+/// not keep installing it from a lock nobody asked for any more.
+#[tokio::test]
+async fn a_lock_for_an_entry_no_longer_in_the_list_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    let mut w = locked_workspace(LOCKED_PATH);
+    w.spec.packages = vec!["hello".into()]; // the pin is gone; its lock is not
+    apply_until_settled(&w, &ctx).await;
+
+    assert!(fake.copies.lock().unwrap().is_empty(), "a stale lock is not pulled");
+    let builds = fake.builds.lock().unwrap().clone();
+    assert!(!builds[0].contains("storePath"), "nor built: {builds:?}");
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(st["status"]["packages"]["observedHash"], kloudlite_workspaces::packages::hash(
+        &kloudlite_agent::nix::nixpkgs_pin(&test_settings()), &with_base(&["hello".into()]), &[]),
+        "the hash is the one a workspace that never had the lock would have: {st}");
+    assert!(st["status"]["packages"]["locked"].is_null(), "and status does not report it: {st}");
+}
+
+/// There is no source-build fallback for a locked path: a path the cache lacks is a sentence to
+/// the person, under its own reason, and nix is never asked to build anything.
 #[tokio::test]
 async fn a_lock_the_cache_does_not_have_is_reported_and_never_built() {
     let tmp = tempfile::tempdir().unwrap();
@@ -4489,6 +4535,17 @@ async fn a_lock_the_cache_does_not_have_is_reported_and_never_built() {
     assert_eq!(c["reason"], "NotCached", "{st}");
     let msg = c["message"].as_str().unwrap();
     assert!(msg.contains("nodejs@20") && msg.contains("20.20.2"), "names the entry and version: {msg}");
+}
+
+/// Nothing but a spec edit can make the cache hold that path, so retrying on a timer is load for
+/// nothing — the workspace waits for a change, as an unresolved entry does.
+#[tokio::test]
+async fn a_not_cached_lock_waits_for_a_spec_edit_rather_than_retrying() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    *fake.copy_answer.lock().unwrap() = Err("NotCached: path does not exist".into());
+    let action = apply_until_settled(&locked_workspace(LOCKED_PATH), &ctx).await;
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
 }
 
 /// Only `/v1` resolves a version — the agent has no internet. An `@` entry that arrived without

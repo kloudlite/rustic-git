@@ -19,6 +19,9 @@ impl crate::nix::Nix for NoopNix {
     async fn copy_from_cache(&self, _p: &str, _timeout: std::time::Duration) -> Result<(), String> {
         Ok(())
     }
+    async fn eval_out_path(&self, _rev: &str, _attr: &str, _t: std::time::Duration) -> Result<String, String> {
+        Ok("/tmp".into())
+    }
     async fn ping(&self) -> Result<(), String> {
         Ok(())
     }

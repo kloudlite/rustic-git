@@ -140,7 +140,8 @@ fn valid_store_path(p: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"+._?=-".contains(&b))
 }
 
-fn valid_rev(rev: &str) -> bool {
+/// A full nixpkgs revision. `pub` because `Nix::eval_out_path` interpolates one too.
+pub fn valid_rev(rev: &str) -> bool {
     rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
