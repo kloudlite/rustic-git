@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useTheme } from "next-themes";
+import { useTheme } from "@/components/theme-provider";
 
 /** A ```mermaid fence, drawn. The library is loaded on first use only (it is ~2 MB and most
  *  READMEs have no diagram), rendered with `securityLevel: "strict"` — labels are sanitized and

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
-import { ThemeProvider } from "@/components/theme-provider";
+import { THEME_SCRIPT, ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
@@ -49,6 +49,9 @@ export default function RootLayout({
     // suppressHydrationWarning: the theme script sets `class` on <html> before React
     // hydrates, which is the whole point — it prevents a flash of the wrong theme.
     <html lang="en" className={`${sans.variable} ${heading.variable} ${mono.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="antialiased">
         <ThemeProvider>
           <TooltipProvider delayDuration={300}>{children}</TooltipProvider>
