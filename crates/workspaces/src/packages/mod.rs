@@ -10,6 +10,7 @@
 
 pub mod resolve;
 
+use crate::crd::Lock;
 use sha2::{Digest, Sha256};
 
 pub const MAX_PACKAGES: usize = 100;
@@ -28,6 +29,10 @@ pub enum PackageError {
     TooMany(usize),
     Duplicate(String),
     Version(String),
+    /// A lock that cannot be rendered: a store path, revision or attribute that does not match
+    /// the shape the expression may quote. The api writes locks, but the CR is not a trust
+    /// boundary the api alone controls — see the module doc.
+    Lock(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +54,7 @@ impl std::fmt::Display for PackageError {
             PackageError::TooMany(n) => write!(f, "{n} packages; the limit is {MAX_PACKAGES}"),
             PackageError::Duplicate(a) => write!(f, "{a:?} is listed twice"),
             PackageError::Version(e) => write!(f, "{e:?} is not a version: use latest, N, N.N or N.N.N"),
+            PackageError::Lock(e) => write!(f, "{e} is not a lock this node can build"),
         }
     }
 }
@@ -124,16 +130,51 @@ pub fn pinned(list: &[String]) -> Vec<(String, Entry)> {
         .collect()
 }
 
-/// What the profile on disk IS: the pin and the sorted list. Sorted so a reordered file is not a
-/// rebuild; pinned so a rolled nixpkgs is.
-pub fn hash(pin: &str, packages: &[String]) -> String {
-    let mut sorted: Vec<&str> = packages.iter().map(String::as_str).collect();
+/// A store path exactly as nix writes one: `/nix/store/<32 base32 chars>-<name>`. Checked before
+/// the path is quoted into an expression — `builtins.storePath` takes a string, and a string is
+/// the one place in a Nix expression arbitrary bytes could become something other than a path.
+fn valid_store_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/nix/store/") else { return false };
+    let Some((hash, name)) = rest.split_once('-') else { return false };
+    hash.len() == 32
+        && hash.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"+._?=-".contains(&b))
+}
+
+/// A full nixpkgs revision. `pub` because `Nix::eval_out_path` interpolates one too.
+pub fn valid_rev(rev: &str) -> bool {
+    rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// What a lock contributes to the hash and to the expression: the store path it pins, or the
+/// revision and attribute to evaluate when the index gave no path (a mirror lock).
+fn lock_key(l: &Lock) -> String {
+    if l.store_path.is_empty() {
+        format!("{}#{}", l.rev, l.attr_path)
+    } else {
+        l.store_path.clone()
+    }
+}
+
+/// What the profile on disk IS: the pin, the sorted bare list, and what every lock resolved to.
+/// Sorted so a reordered file is not a rebuild; pinned so a rolled nixpkgs is; keyed on the lock's
+/// OUTPUT (a store path, or `rev#attr`) so re-resolving `nodejs@20` to a new version rebuilds and
+/// re-resolving it to the same one does not.
+pub fn hash(pin: &str, bare: &[String], locks: &[Lock]) -> String {
+    let mut sorted: Vec<&str> = bare.iter().map(String::as_str).collect();
     sorted.sort_unstable();
+    let mut keys: Vec<String> = locks.iter().map(|l| format!("{}={}", l.entry, lock_key(l))).collect();
+    keys.sort_unstable();
     let mut h = Sha256::new();
     h.update(pin.as_bytes());
     for p in sorted {
         h.update(b"\n");
         h.update(p.as_bytes());
+    }
+    for k in keys {
+        h.update(b"\n@");
+        h.update(k.as_bytes());
     }
     format!("sha256:{:x}", h.finalize())
 }
@@ -146,12 +187,36 @@ pub fn hash(pin: &str, packages: &[String]) -> String {
 /// derivation and therefore in the store path, so two workspaces with identical inputs built two
 /// identical-but-separate profiles and a clone could never reuse its source's. Keyed only on what
 /// it contains, one store path serves every workspace that asks for the same set.
-pub fn expression(pin: &str, packages: &[String]) -> String {
-    let paths: Vec<String> = packages.iter().map(|p| format!("pkgs.{p}")).collect();
-    format!(
+/// A locked entry is NOT `pkgs.<attr>`: the pin has whatever version it has. A lock with a store
+/// path is taken verbatim from the binary cache (`builtins.storePath`, nothing to evaluate or
+/// build); a mirror lock — no store path — evaluates the attribute at the revision the index named.
+/// Every one of the three quoted fields is validated first: `Err` rather than a rendered
+/// expression, because a name that reaches nix has already escaped.
+pub fn expression(pin: &str, bare: &[String], locks: &[Lock]) -> Result<String, PackageError> {
+    let mut paths: Vec<String> = bare.iter().map(|p| format!("pkgs.{p}")).collect();
+    for l in locks {
+        if l.store_path.is_empty() {
+            if !valid_rev(&l.rev) {
+                return Err(PackageError::Lock(format!("{}: {:?} is not a nixpkgs revision", l.entry, l.rev)));
+            }
+            validate_attr(&l.attr_path)?;
+            paths.push(format!(
+                "(import (builtins.getFlake \"github:NixOS/nixpkgs/{}\") {{ }}).{}",
+                l.rev, l.attr_path
+            ));
+        } else {
+            if !valid_store_path(&l.store_path) {
+                return Err(PackageError::Lock(format!("{}: {:?} is not a store path", l.entry, l.store_path)));
+            }
+            // Parenthesised: a bare `builtins.storePath "..."` inside a list literal is TWO
+            // elements, and nix would take the function itself as one of the profile's paths.
+            paths.push(format!("(builtins.storePath \"{}\")", l.store_path));
+        }
+    }
+    Ok(format!(
         "let pkgs = import (builtins.getFlake \"{pin}\") {{ }}; in pkgs.buildEnv {{ name = \"kloudlite-workspace-env\"; paths = [ {} ]; }}",
         paths.join(" ")
-    )
+    ))
 }
 
 /// The image's own PATH is unknown to us at apply time — the kubelet only merges env on top of
@@ -208,11 +273,41 @@ mod tests {
         assert_eq!(pinned(&l).iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["nodejs@20", "python3@latest"]);
     }
 
+    fn lock(entry: &str, store_path: &str) -> Lock {
+        Lock {
+            entry: entry.into(),
+            version: "20.20.2".into(),
+            attr_path: "nodejs_20".into(),
+            rev: "a".repeat(40),
+            store_path: store_path.into(),
+            resolved_at: "2026-09-08T00:00:00Z".into(),
+            source: crate::crd::LockSource::Nixhub,
+        }
+    }
+
+    const STORE: &str = "/nix/store/00000000000000000000000000000000-nodejs-20.20.2";
+
+    /// A re-resolve that lands on the same output must NOT rebuild; one that lands elsewhere must.
+    #[test]
+    fn the_hash_covers_what_each_lock_resolved_to() {
+        let pin = "github:NixOS/nixpkgs/aaaa";
+        let same = hash(pin, &["jq".into()], &[lock("nodejs@20", STORE)]);
+        assert_eq!(same, hash(pin, &["jq".into()], &[lock("nodejs@20", STORE)]));
+        let other = hash(pin, &["jq".into()], &[lock("nodejs@20", &STORE.replace("00000", "11111"))]);
+        assert_ne!(same, other, "a new store path is a new profile");
+        // A mirror lock has no store path, so `rev#attr` is what it contributes.
+        let mut mirror = lock("nodejs@20", "");
+        let a = hash(pin, &[], std::slice::from_ref(&mirror));
+        mirror.rev = "b".repeat(40);
+        assert_ne!(a, hash(pin, &[], &[mirror]));
+        assert_ne!(same, hash(pin, &["jq".into()], &[]), "a lock is part of the inputs");
+    }
+
     #[test]
     fn the_hash_is_order_independent_and_pin_sensitive() {
-        let a = hash("github:NixOS/nixpkgs/aaaa", &["go".into(), "jq".into()]);
-        let b = hash("github:NixOS/nixpkgs/aaaa", &["jq".into(), "go".into()]);
-        let c = hash("github:NixOS/nixpkgs/bbbb", &["go".into(), "jq".into()]);
+        let a = hash("github:NixOS/nixpkgs/aaaa", &["go".into(), "jq".into()], &[]);
+        let b = hash("github:NixOS/nixpkgs/aaaa", &["jq".into(), "go".into()], &[]);
+        let c = hash("github:NixOS/nixpkgs/bbbb", &["go".into(), "jq".into()], &[]);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert!(a.starts_with("sha256:"));
@@ -220,21 +315,53 @@ mod tests {
 
     #[test]
     fn the_expression_is_a_list_literal_never_interpolated_text() {
-        let e = expression("github:NixOS/nixpkgs/aaaa", &["go".into(), "python3Packages.requests".into()]);
+        let e = expression("github:NixOS/nixpkgs/aaaa", &["go".into(), "python3Packages.requests".into()], &[]).unwrap();
         assert_eq!(
             e,
             "let pkgs = import (builtins.getFlake \"github:NixOS/nixpkgs/aaaa\") { }; in pkgs.buildEnv { name = \"kloudlite-workspace-env\"; paths = [ pkgs.go pkgs.python3Packages.requests ]; }"
         );
-        let empty = expression("github:NixOS/nixpkgs/aaaa", &[]);
+        let empty = expression("github:NixOS/nixpkgs/aaaa", &[], &[]).unwrap();
         assert!(empty.contains("paths = [  ];"));
+    }
+
+    /// The two lock shapes, and the refusal that keeps either from becoming a quoting hole.
+    #[test]
+    fn a_lock_is_substituted_or_evaluated_never_taken_from_the_pin() {
+        let cached = expression("github:NixOS/nixpkgs/aaaa", &["jq".into()], &[lock("nodejs@20", STORE)]).unwrap();
+        assert!(cached.contains(&format!("paths = [ pkgs.jq (builtins.storePath \"{STORE}\") ]")), "{cached}");
+
+        let mirror = expression("github:NixOS/nixpkgs/aaaa", &[], &[lock("nodejs@20", "")]).unwrap();
+        let rev = "a".repeat(40);
+        assert!(
+            mirror.contains(&format!("(import (builtins.getFlake \"github:NixOS/nixpkgs/{rev}\") {{ }}).nodejs_20")),
+            "{mirror}"
+        );
+
+        for bad in [
+            "/nix/store/../../etc/passwd",
+            "/nix/store/00000000000000000000000000000000-a\" ]; x = builtins.exec [\"id\"]; y = [ \"",
+            "/etc/passwd",
+            "/nix/store/short-nodejs",
+            "",
+        ] {
+            let mut l = lock("nodejs@20", bad);
+            if bad.is_empty() {
+                // An empty store path is a MIRROR lock — refuse it on the revision instead.
+                l.rev = "not-a-revision".into();
+            }
+            assert!(expression("github:NixOS/nixpkgs/aaaa", &[], &[l]).is_err(), "{bad:?} must be refused");
+        }
+        let mut bad_attr = lock("nodejs@20", "");
+        bad_attr.attr_path = "nodejs; rm -rf /".into();
+        assert!(expression("github:NixOS/nixpkgs/aaaa", &[], &[bad_attr]).is_err());
     }
 
     /// Two workspaces with the same inputs must produce the SAME derivation, or the store cannot
     /// share it and a clone rebuilds what its source already has.
     #[test]
     fn the_expression_does_not_depend_on_which_workspace_asked() {
-        let a = expression("github:NixOS/nixpkgs/aaaa", &["go".into()]);
-        let b = expression("github:NixOS/nixpkgs/aaaa", &["go".into()]);
+        let a = expression("github:NixOS/nixpkgs/aaaa", &["go".into()], &[]).unwrap();
+        let b = expression("github:NixOS/nixpkgs/aaaa", &["go".into()], &[]).unwrap();
         assert_eq!(a, b);
         assert!(!a.contains("ws-"), "the workspace id must not reach the derivation name: {a}");
     }
