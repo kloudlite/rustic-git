@@ -257,6 +257,9 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
     let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, roles, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);
+    // Not a Controller: `OwnerKeys` is cluster-wide, every node converges every object, and there
+    // is no per-node sharding to reconcile against.
+    tokio::spawn(controller::keys::run(ctx.clone()));
     // Fail closed: no `WS_PEER_SECRET` means no listener at all, never one guarded by an empty
     // secret that would compare-equal to a missing header.
     if let Ok(secret) = std::env::var("WS_PEER_SECRET") {

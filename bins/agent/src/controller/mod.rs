@@ -35,6 +35,8 @@ pub use workspace::write_resolv_conf;
 // pub so kept_conditions' keep-list is assertable from the integration suite — see reconcile.rs.
 pub use workspace::kept_conditions;
 pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status};
+pub(crate) mod keys;
+pub use keys::write_keys_file;
 pub(crate) mod volume;
 pub use volume::{apply_volume, cleanup_volume};
 pub(crate) use volume::{heal_labels, owner_ref_of_kind, reconcile_volume, resolve_volume, Resolved};

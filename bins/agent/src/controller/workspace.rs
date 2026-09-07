@@ -863,6 +863,23 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
+    // Who may ssh in arrives as `OwnerKeys`, rendered to this node by `controller::keys`. The pod
+    // mounts that file as a `type: File` hostPath, so starting one before it exists is a pod the
+    // kubelet refuses with an opaque mount error; park until the projection has reached this node.
+    if !std::path::Path::new(&k8s::keys_file(&ctx.pool, k8s::keys_owner(&w.spec))).exists() {
+        let st = crd::WorkspaceStatus {
+            phase: crd::Phase::Creating,
+            observed_generation: None,
+            volume_ref: Some(id),
+            conditions: ws_conditions(
+                &prev,
+                crd::condition("Ready", false, "KeysNotReady", "this owner's keys projection has not reached this node yet", gen),
+            ),
+            ..prev
+        };
+        write_ws_status(w, st, ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
     // The shared home replaces the home Volume (spec 2026-09-01): the agent makes the two mount
     // sources exist before kubelet needs them. `{pool}/homes/{owner}` is NFS — mkdir is the whole
     // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile

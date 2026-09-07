@@ -182,6 +182,12 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: 
     // Best effort: one test hands a plain file as its "pool" on purpose.
     let profiles = pool.join("profiles");
     let _ = std::fs::create_dir_all(&profiles);
+    // `controller::keys` has already converged for the owners this suite uses: a pod is gated on
+    // the file existing, and every test but the KeysNotReady one is about what happens after.
+    for owner in ["alice", "acme"] {
+        // Ignored, not unwrapped: one test hands a FILE as the pool on purpose.
+        let _ = kloudlite_agent::controller::write_keys_file(&pool.to_string_lossy(), owner, "ssh-ed25519 AAAA a\n");
+    }
     let engine = Engine::new(Pool::new(pool));
     // Ctx::new reads the pinned default image from the environment, as the agent does.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
@@ -4051,6 +4057,24 @@ async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a
     let st = rec.sent("PATCH", WS_STATUS);
     assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "HomeNotReady");
     assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod while unmounted: {:?}", rec.calls());
+}
+
+/// Who may ssh in is a cluster fact (`OwnerKeys`) the api writes and every node's agent renders.
+/// The pod mounts that file as a `type: File` hostPath, so a pod started before the projection
+/// reaches this node is an opaque kubelet mount failure; park until the file is there.
+#[tokio::test]
+async fn a_node_without_the_owners_keys_parks_the_workspace_instead_of_starting_a_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _) = ws_ctx_with_nix(tmp.path());
+    // The one test the fixture's rendered file is not true for: this node has not converged yet.
+    std::fs::remove_file(kloudlite_workspaces::k8s::keys_file(&ctx.pool, "alice")).unwrap();
+    let w = ready_workspace("ws-1", vec![]);
+
+    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    let st = rec.sent("PATCH", WS_STATUS);
+    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "KeysNotReady");
+    assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod without keys: {:?}", rec.calls());
 }
 
 // ── attachment ───────────────────────────────────────────────────────────

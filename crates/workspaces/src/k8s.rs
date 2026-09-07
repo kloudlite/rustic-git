@@ -226,12 +226,11 @@ pub fn user_key_secret(owner: &str, namespace: &str, private_openssh: &str, m: &
             labels: Some(labels(owner, "workspace")),
             ..Default::default()
         },
-        // Both halves in ONE Secret: the private key the workspace pushes git with, and the
-        // public keys sshd lets in. They are rewritten together, so splitting them would only add
-        // a second object that can be half-written.
+        // The private half only: the public keys sshd admits are a CLUSTER fact now, projected
+        // per owner namespace as `OwnerKeys` and rendered to disk by every node's agent, so a
+        // key added in the UI reaches a running pod without a Secret rewrite per namespace.
         string_data: Some(BTreeMap::from([
             ("id_ed25519".to_string(), private_openssh.to_string()),
-            ("authorized_keys".to_string(), m.authorized_keys.clone()),
             // Read by git as its SYSTEM config (`GIT_CONFIG_SYSTEM`), so `~/.gitconfig` still
             // overrides it and a changed display name reaches running workspaces with the next
             // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
@@ -287,7 +286,6 @@ pub const HOME_CACHE_DIR: &str = "/home/kl/.local-cache";
 /// every terminal on every node would otherwise interleave writes to the same file.
 pub const HOME_STATE_DIR: &str = "/home/kl/.local/state";
 pub const SSH_UID: i64 = 1000;
-const SSH_HOME: &str = "/home/kl/.ssh";
 const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
 
 /// The per-workspace host key Secret's name.
@@ -299,9 +297,10 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// drift apart.
 ///
 /// `PermitRootLogin no` and `AllowUsers kl`: the only way in is a key the owner registered, and
-/// it opens a shell as `kl`, never as the root the container itself runs as. `StrictModes no` because `authorized_keys` is a Secret mount, and a
-/// Secret mount is a world-writable tmpfs (`drwxrwxrwt`) — sshd would refuse every key in it as
-/// "bad ownership or modes" otherwise; the mount is read-only, so the mode guards nothing.
+/// it opens a shell as `kl`, never as the root the container itself runs as. `StrictModes no` because the file arrives as a
+/// hostPath mount whose parent directories are the node's, not `kl`'s — sshd would refuse every
+/// key in it as "bad ownership or modes" otherwise. The mode it would have checked is enforced
+/// where the file is written instead (`agent::controller::keys`: 0600, owned by `kl`).
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
 pub fn sshd_config(name: &str) -> String {
@@ -492,39 +491,6 @@ fn ws_ssh_volume(id: &str) -> Volume {
     }
 }
 
-/// The owner's public keys, from the SAME Secret the git key lives in — the API rewrites both
-/// halves together. A second volume rather than a second mount of `user-key` because sshd refuses
-/// an `authorized_keys` wider than 0600, and the mode is a property of the volume.
-///
-/// `items` names ONLY the public half: the whole Secret at `/home/kl/.ssh` would put the owner's
-/// private git key where ssh picks identities up by default, and it already has a home at
-/// `USER_KEY_PATH`.
-///
-/// Mounted as a DIRECTORY, never as a `subPath` of this file. A `subPath` of an OPTIONAL Secret
-/// wedges the pod in ContainerCreating with "failed to prepare subPath" when the Secret is not
-/// there yet, and a `subPath` mount never sees later writes — so a key added in the UI would need
-/// a pod recreate to take effect. As a directory the kubelet fills it in when the Secret appears
-/// and refreshes it when the API rewrites it, which is what "sshd reads the file per login" needs.
-fn authorized_keys_volume() -> Volume {
-    Volume {
-        name: "authorized-keys".to_string(),
-        secret: Some(SecretVolumeSource {
-            secret_name: Some(USER_KEY_SECRET.to_string()),
-            items: Some(vec![KeyToPath {
-                key: "authorized_keys".into(),
-                path: "authorized_keys".into(),
-                mode: Some(0o444),
-            }]),
-            // Same reason as `user_key_volume`: the API writes this after the namespace exists, so
-            // a workspace can be scheduled before its keys are there. A pod that waits for it is a
-            // workspace that never starts because its owner has registered no key.
-            optional: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
 fn user_key_volume(required: bool) -> Volume {
     Volume {
         name: "user-key".to_string(),
@@ -656,6 +622,29 @@ fn attach_volume(pool: &str, ws_id: &str) -> Volume {
     Volume {
         name: "attach".to_string(),
         host_path: Some(HostPathVolumeSource { path: attach_file(pool, ws_id), type_: Some("File".into()) }),
+        ..Default::default()
+    }
+}
+
+/// Where the agent renders each owner namespace's `authorized_keys` from its `OwnerKeys`
+/// projection. Platform state like `attach_root`: outside any user volume, so it is never
+/// snapshotted and never pushed.
+pub fn keys_root(pool: &str) -> String {
+    format!("{pool}/keys")
+}
+
+pub fn keys_file(pool: &str, owner: &str) -> String {
+    format!("{}/{owner}/authorized_keys", keys_root(pool))
+}
+
+/// The owner's `authorized_keys`, a FILE the agent rewrites in place for `attach_volume`'s
+/// reason: the pod holds the inode, so a rename would leave sshd reading the old file forever.
+/// `type: File` is also what parks the pod until the agent has written it — a missing file is
+/// "keys not ready", never "no keys" (that is an empty file).
+fn keys_volume(pool: &str, owner: &str) -> Volume {
+    Volume {
+        name: "authorized-keys".to_string(),
+        host_path: Some(HostPathVolumeSource { path: keys_file(pool, owner), type_: Some("File".into()) }),
         ..Default::default()
     }
 }
@@ -892,6 +881,18 @@ pub fn git_init_container(
     }))
 }
 
+/// The handle whose `OwnerKeys` this pod's namespace sees — the same pair `ws_namespace` is keyed
+/// by, since the namespace is what a key set is scoped to: a team's members share one file.
+pub fn keys_owner(spec: &WorkspaceSpec) -> &str {
+    // `team == owner` is the personal namespace spelled the long way — `ws_namespace` folds it,
+    // and a second file under the same name written by two handles would be one node's race.
+    if spec.team.is_empty() || spec.team.eq_ignore_ascii_case(&spec.owner) {
+        &spec.owner
+    } else {
+        &spec.team
+    }
+}
+
 /// The workspace's one pod.
 /// `ws_id` names the pod and every per-workspace resource on it. `id` is the VOLUME (`volumeRef`)
 /// and is used only for the worktree path's root — the two differ for a shared-volume clone
@@ -917,7 +918,7 @@ pub fn workspace_pod(
     if default_image {
         ssh_mounts = vec![
             VolumeMount { name: "ws-ssh".into(), mount_path: SSHD_DIR.into(), read_only: Some(true), ..Default::default() },
-            VolumeMount { name: "authorized-keys".into(), mount_path: SSH_HOME.into(), read_only: Some(true), ..Default::default() },
+            VolumeMount { name: "authorized-keys".into(), mount_path: AUTHORIZED_KEYS_PATH.into(), read_only: Some(true), ..Default::default() },
         ];
     }
     let mut pod_spec = PodSpec {
@@ -1025,7 +1026,7 @@ pub fn workspace_pod(
                 user_key_volume(init.is_some()),
             ];
             if default_image {
-                v.extend([ws_ssh_volume(ws_id), authorized_keys_volume()]);
+                v.extend([ws_ssh_volume(ws_id), keys_volume(ctx.pool, keys_owner(spec))]);
             }
             v
         }),
@@ -1712,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn the_user_key_secret_carries_authorized_keys() {
+    fn the_user_key_secret_carries_only_the_private_key_and_git_identity() {
         let m = crate::api::OwnerMaterial {
             authorized_keys: "ssh-ed25519 AAAA alice@laptop".into(),
             git_name: "Alice \"Al\" Liddell".into(),
@@ -1721,10 +1722,22 @@ mod tests {
         let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m);
         let data = s.string_data.unwrap();
         assert_eq!(data["id_ed25519"], "PRIVATE");
-        // sshd inside the workspace reads this file; it is the whole of "who may ssh in".
-        assert_eq!(data["authorized_keys"], "ssh-ed25519 AAAA alice@laptop");
+        // Who may ssh in is `OwnerKeys` now, rendered by each node's agent — never this Secret.
+        assert!(!data.contains_key("authorized_keys"));
         // A quote in a name must not end git's string early.
         assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
+    }
+
+    /// A team's members share one namespace and therefore ONE keys file — the pod must mount the
+    /// team's, not the individual's, or a teammate's key would not open the workspace they share.
+    #[test]
+    fn a_teams_pod_mounts_the_teams_keys() {
+        let mut spec = ws_spec();
+        spec.image = crate::model::DEFAULT_WS_IMAGE.into();
+        spec.team = "acme".into();
+        let s = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None).unwrap().spec.unwrap();
+        let v = s.volumes.unwrap().into_iter().find(|v| v.name == "authorized-keys").unwrap();
+        assert_eq!(v.host_path.unwrap().path, keys_file(ctx().pool, "acme"));
     }
 
     #[test]
@@ -2037,7 +2050,7 @@ mod tests {
         assert_eq!(home_mount.mount_propagation.as_deref(), Some("HostToContainer"));
         let live = mounts.iter().find(|m| m.name == "live").unwrap();
         assert!(live.mount_path.starts_with(&format!("{HOME_DIR}/")), "the workspace is INSIDE the home: {}", live.mount_path);
-        assert!(SSH_HOME.starts_with(HOME_DIR));
+        assert!(AUTHORIZED_KEYS_PATH.starts_with(HOME_DIR));
         // A custom image gets the home too: it is the person's, not the image's.
         let mut custom = ws_spec();
         custom.image = "ghcr.io/someone/theirs:1".into();
@@ -2138,29 +2151,26 @@ mod tests {
         let config_item = host.items.as_ref().unwrap().iter().find(|i| i.key == "sshd_config").expect("config item");
         assert_eq!(config_item.mode, Some(0o444));
 
-        let keys = vols.iter().find(|v| v.name == "authorized-keys").expect("authorized_keys volume").secret.clone().unwrap();
-        assert_eq!(keys.secret_name.as_deref(), Some(USER_KEY_SECRET), "the same Secret the API already rewrites");
-        let items = keys.items.as_ref().unwrap();
-        assert_eq!(items.len(), 1, "only the public half: the private git key must not land in /home/kl/.ssh");
-        assert_eq!(items[0].key, "authorized_keys");
-        // Root's file (the kubelet writes it), read by sshd AS kl: 0600 would be "Permission
-        // denied" on every login. StrictModes is off, so sshd does not mind the width.
-        assert_eq!(items[0].mode, Some(0o444));
-        assert_eq!(keys.optional, Some(true), "an owner who has registered no key still gets a pod");
+        let keys = vols.iter().find(|v| v.name == "authorized-keys").expect("authorized_keys volume").host_path.clone().unwrap();
+        assert_eq!(keys.path, keys_file(ctx().pool, "alice"), "the agent's rendered file for this pod's namespace");
+        // `File`, so the kubelet refuses the pod rather than inventing an empty directory where
+        // the owner's keys should be — the reconcile parks it on `KeysNotReady` before that.
+        assert_eq!(keys.type_.as_deref(), Some("File"));
 
         let mounts = c.volume_mounts.as_ref().unwrap();
         let ssh = mounts.iter().find(|m| m.name == "ws-ssh").unwrap();
         assert_eq!(ssh.mount_path, SSHD_DIR);
         assert_eq!(ssh.read_only, Some(true));
         let ak = mounts.iter().find(|m| m.name == "authorized-keys").unwrap();
-        // The DIRECTORY, not a subPath of the file: a subPath of an optional Secret wedges the pod
-        // in ContainerCreating, and never picks up a key added later.
-        assert_eq!(ak.mount_path, SSH_HOME);
+        // The volume IS the file, so no subPath: a subPath mount would never see the agent's
+        // in-place rewrite, and a key added in the UI would need a pod recreate to take effect.
+        assert_eq!(ak.mount_path, AUTHORIZED_KEYS_PATH);
         assert_eq!(ak.sub_path, None);
         assert_eq!(ak.read_only, Some(true));
         // Where sshd is told to look has to be where the mount actually puts it.
-        assert!(sshd_config("dev").contains(&format!("AuthorizedKeysFile {SSH_HOME}/authorized_keys")));
-        // The Secret mount's tmpfs is 1777; without this every registered key is refused.
+        assert!(sshd_config("dev").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
+        // The mount's parent directories are the node's, not `kl`'s; without this every key is
+        // refused as "bad ownership or modes".
         assert!(sshd_config("dev").contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];

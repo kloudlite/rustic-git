@@ -1482,7 +1482,8 @@ async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
     want.sort();
     assert_eq!(patches, want, "{patches:?}");
     let body = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/secrets/user-key", kloudlite_workspaces::crd::ws_namespace("karthik", "team1"))).pop().unwrap();
-    assert_eq!(body["stringData"]["authorized_keys"], "ssh-ed25519 AAAA karthik@laptop");
+    // The public half left this Secret with `OwnerKeys`: the agent renders it per node now.
+    assert!(body["stringData"]["authorized_keys"].is_null());
     assert_eq!(body["stringData"]["gitconfig"], "[user]\n\tname = \"Karthik\"\n\temail = \"karthik@example.com\"\n");
 }
 
