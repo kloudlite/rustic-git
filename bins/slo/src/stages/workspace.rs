@@ -43,10 +43,13 @@ const QUOTA_GB: u64 = 1;
 pub(crate) const WS_CONTAINER: &str = "workspace";
 
 /// Every id this stage owns after the create, in journey order.
-const AFTER_CREATE: [&str; 8] = [
+const AFTER_CREATE: [&str; 11] = [
     "ws.exec.ok",
     "homes.rw.p95",
     "gw.tunnel.p95",
+    "key.projected",
+    "key.live",
+    "key.revoked",
     "gw.unregistered.refused",
     "ws.push.p95",
     "ws.clone.p95",
@@ -83,6 +86,9 @@ pub async fn run(c: &mut Ctx) {
     exec_ok(c, &id).await;
     home_round_trip(c, &id).await;
     tunnel(c, &id).await;
+    key_projected(c).await;
+    key_live(c, &id).await;
+    key_revoked(c, &id).await;
     unregistered_refused(c, &id).await;
     push(c, &id).await;
     clone(c, &id).await;
@@ -318,6 +324,184 @@ async fn tunnel(c: &mut Ctx, id: &str) {
 /// How long a workspace's `authorized_keys` Secret gets to reach its pod. The kubelet's own
 /// propagation beat, not a guess about the gateway: everything else in this step is one request.
 const KEY_PROPAGATION: Duration = Duration::from_secs(30);
+
+/// How long the `OwnerKeys` projection gets to carry a key the directory already has, and the
+/// ceiling on the step that waits for it.
+const PROJECTION_BODY: Duration = Duration::from_secs(45);
+const PROJECTION_CEILING: Duration = Duration::from_secs(60);
+
+/// `KEYS_RESYNC_SECS` (300 s) plus a beat: a pod learns of a removal only when the api rewrites
+/// the projection, and the catalogue bounds `key.revoked` at exactly this.
+const REVOCATION_BODY: Duration = Duration::from_secs(330);
+/// The re-registration runs after the body's own cap, and `Ctx::step`'s timeout drops the whole
+/// future — a probe left with no key would take every later run's tunnel down with it.
+const REVOCATION_CEILING: Duration =
+    Duration::from_secs(REVOCATION_BODY.as_secs() + crate::drill::UNDO_SLACK);
+
+/// The probe's public key, derived from the private half it mounts — never a `.pub` beside it,
+/// which is a second file that can disagree with the first.
+async fn probe_public(c: &Ctx) -> Result<String> {
+    let out = tools::plain(&c.programs.ssh_keygen, &["-y", "-f", &c.cfg.ssh_key_path], Duration::from_secs(10))
+        .await
+        .context("could not read the probe's public key")?;
+    Ok(out.trim().to_string())
+}
+
+/// The base64 field of an OpenSSH public line: what a projected `authorized_keys` is searched for,
+/// because the type prefix is shared by every ed25519 key and the trailing comment is not carried.
+fn key_material(public: &str) -> Result<&str> {
+    public.split_whitespace().nth(1).ok_or_else(|| anyhow!("the probe's public key has no key field"))
+}
+
+/// `key.projected`: the key `id.key.usable` registered is in the owner's `OwnerKeys` AND the node
+/// has acked that generation. The api writing the object is only half the path — the file a pod
+/// mounts is written by the agent, and a projection nobody converged is a key nobody can use.
+async fn key_projected(c: &mut Ctx) {
+    let Some(k) = c.kube.clone() else {
+        return c.skip("key.projected", "no kubeconfig");
+    };
+    let public = match probe_public(c).await {
+        Ok(p) => p,
+        Err(e) => return c.skip("key.projected", &format!("{e:#}")),
+    };
+    let material = match key_material(&public) {
+        Ok(m) => m.to_string(),
+        Err(e) => return c.skip("key.projected", &format!("{e:#}")),
+    };
+    // The probe's workspaces are personal, so the owner namespace `OwnerKeys` is named for is the
+    // probe's own handle.
+    let owner = c.probe_user.clone();
+    c.step("key.projected", PROJECTION_CEILING, move |_| {
+        async move {
+            let api: kube::Api<kloudlite_workspaces::crd::OwnerKeys> = kube::Api::all(k);
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(o) = api.get_opt(&owner).await.context("could not read the OwnerKeys projection")? {
+                    let synced = o.status.as_ref().is_some_and(|s| {
+                        s.observed_generation == Some(o.spec.generation)
+                            && s.conditions.iter().any(|c| {
+                                c.type_ == kloudlite_workspaces::crd::KEYS_SYNCED && c.status == "True"
+                            })
+                    });
+                    if synced && o.spec.authorized_keys.contains(&material) {
+                        return Ok(());
+                    }
+                }
+                if start.elapsed() >= PROJECTION_BODY {
+                    return Err(anyhow!("OwnerKeys/{owner} did not carry the probe's key as Synced"));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `key.live`: the registered key opens the workspace. `gw.tunnel.p95` measures the same path but
+/// RETRIES through `KEY_PROPAGATION`, so it stays green for a projection that takes half a minute;
+/// this one call, with no retry, is what says the key was already live.
+async fn key_live(c: &mut Ctx, id: &str) {
+    if c.kube.is_none() {
+        return c.skip("key.live", "no kubeconfig");
+    }
+    let (key, id) = (c.cfg.ssh_key_path.clone(), id.to_string());
+    c.step("key.live", TUNNEL_CEILING, move |c| {
+        async move {
+            let session = ssh_session(c, &id).await?;
+            let (ssh, kl) = (c.programs.ssh.clone(), c.programs.kl.clone());
+            tools::run(&ssh, &ssh_args(&kl, &key, &id), &session_env(&session), None, TUNNEL_CEILING)
+                .await
+                .map(|_| ())
+                .context("a registered key was refused by the workspace")
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `key.revoked`: removing the key locks BOTH listeners out — git immediately, because it
+/// authenticates from the directory on every request, and the workspace within a resync beat.
+///
+/// The re-registration is the compensation, not an afterthought: the probe mounts one key, and a
+/// run that removed it and stopped there would leave every later run with no way in.
+async fn key_revoked(c: &mut Ctx, id: &str) {
+    if c.kube.is_none() {
+        return c.skip("key.revoked", "no kubeconfig");
+    }
+    let Some(repo) = c.state.repo.clone() else {
+        return c.skip("key.revoked", "no repo to check the git listener with");
+    };
+    let Some(name) = c.state.key.clone() else {
+        return c.skip("key.revoked", "the probe's key was never registered");
+    };
+    let hosts = match super::git::known_hosts(c).await {
+        Ok(p) => p,
+        Err(e) => return c.skip("key.revoked", &format!("{e:#}")),
+    };
+    let public = match probe_public(c).await {
+        Ok(p) => p,
+        Err(e) => return c.skip("key.revoked", &format!("{e:#}")),
+    };
+    let fp = match tools::plain(&c.programs.ssh_keygen, &["-lf", &c.cfg.ssh_key_path], Duration::from_secs(10)).await {
+        Ok(out) => match out.split_whitespace().nth(1) {
+            Some(f) => f.to_string(),
+            None => return c.skip("key.revoked", "ssh-keygen printed no fingerprint"),
+        },
+        Err(e) => return c.skip("key.revoked", &format!("could not fingerprint the probe's key: {e:#}")),
+    };
+    let (key_path, id) = (c.cfg.ssh_key_path.clone(), id.to_string());
+    c.step("key.revoked", REVOCATION_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let del = api(c, &format!("/v1/keys/{}", super::experience_gaps::path_seg(&fp)));
+        let keys = api(c, "/v1/keys");
+        let url = super::git::ssh_url(c, &repo);
+        let mut env = super::git::git_env(c);
+        env.insert("GIT_SSH_COMMAND".into(), super::git::ssh_command(c, &key_path, &hosts));
+        let git_bin = c.programs.git.clone();
+        async move {
+            super::call(c, reqwest::Method::DELETE, &del, &jwt, None).await.context("could not remove the probe's key")?;
+            let restore = || async {
+                post(c, &keys, &jwt, serde_json::json!({ "name": name, "key": public }))
+                    .await
+                    .map(|_| ())
+                    .context("the probe's key was left REMOVED")
+            };
+            let body = async {
+                // STRICT for git: credential hits are not cached, so the very next request must be
+                // refused. Only `Permission denied` counts — a DNS or host-key failure makes `ssh`
+                // fail too, and reading that as a revocation keeps this green through an outage.
+                let argv = vec!["ls-remote".to_string(), url];
+                match tools::run(&git_bin, &argv, &env, None, Duration::from_secs(30)).await {
+                    Ok(_) => return Err(anyhow!("a removed key could still read the repo over SSH")),
+                    Err(e) if format!("{e:#}").contains("Permission denied") => {}
+                    Err(e) => return Err(anyhow!("git failed for some other reason than a refusal: {e:#}")),
+                }
+                let start = std::time::Instant::now();
+                loop {
+                    let session = ssh_session(c, &id).await?;
+                    let (ssh, kl) = (c.programs.ssh.clone(), c.programs.kl.clone());
+                    let out = tools::run(&ssh, &ssh_args(&kl, &key_path, &id), &session_env(&session), None, TUNNEL_CEILING).await;
+                    match out {
+                        Err(e) if format!("{e:#}").contains("Permission denied") => return Ok(()),
+                        Ok(_) => {}
+                        Err(e) => tracing::info!(error = %format!("{e:#}"), "slo.key.revoked.waiting"),
+                    }
+                    if start.elapsed() >= REVOCATION_BODY {
+                        return Err(anyhow!(
+                            "a removed key still opened the workspace {} s after it was deleted",
+                            REVOCATION_BODY.as_secs()
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            };
+            crate::drill::undoing(REVOCATION_BODY, body, restore).await
+        }
+        .boxed()
+    })
+    .await;
+}
 
 /// `gw.unregistered.refused`: the same tunnel with a key the fleet has never seen. Only a REFUSAL
 /// passes — a tunnel that failed to open at all is the outage this exists to catch, not a pass.

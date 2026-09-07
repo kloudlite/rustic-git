@@ -142,7 +142,6 @@ async fn passkey(c: &mut Ctx, name: &str) {
 /// object store's `authorized_keys` view, which is built from these rows, so a key that was
 /// accepted but never listed is one `ssh.clone.ok` would fail on with no clue why.
 async fn key(c: &mut Ctx, name: &str) {
-    let probe = c.probe_user.clone();
     c.step("id.key.usable", KEY_TIMEOUT, |c| {
             let (name, jwt) = (name.to_string(), c.probe_jwt.clone());
             let (key_path, keygen) = (c.cfg.ssh_key_path.clone(), c.programs.ssh_keygen.clone());
@@ -153,7 +152,8 @@ async fn key(c: &mut Ctx, name: &str) {
                     .await
                     .context("could not read the probe's public key")?;
                 let public = public.trim().to_string();
-                let body = serde_json::json!({ "owner": probe, "name": name, "key": public });
+                // No `owner`: a key is the PERSON's, and the api answers 400 to a body that names one.
+                let body = serde_json::json!({ "name": name, "key": public });
                 // The probe's key is ONE key per tenant, registered under this run's name and
                 // removed at teardown — so a run that died before teardown (a deadline, a killed
                 // pod) leaves it registered under the dead run's name, and the api refuses the
@@ -174,7 +174,7 @@ async fn key(c: &mut Ctx, name: &str) {
                         .context("could not remove the leftover key a dead run left registered")?;
                     post(c, &api(c, "/v1/keys"), &jwt, body).await.context("could not register the key after replacing the leftover")?;
                 }
-                let listed = get(c, &api(c, &format!("/v1/keys?owner={probe}")), &jwt).await?;
+                let listed = get(c, &api(c, "/v1/keys"), &jwt).await?;
                 let found = listed
                     .as_array()
                     .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(&name)));

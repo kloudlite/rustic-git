@@ -78,6 +78,9 @@ first destructive stage.
 | `homes.rw.p95` | Workspaces | A read/write round trip on the shared home completes | 95 % ≤ 200 ms | fast | 5 · Workspace |
 | `gw.tunnel.p95` | Workspaces | Opening a gateway SSH tunnel completes | 95 % ≤ 3000 ms | fast | 5 · Workspace |
 | `gw.unregistered.refused` | Workspaces | The gateway refuses an unregistered key | 99.9 % | fast | 5 · Workspace |
+| `key.projected` | Workspaces | A registered key reaches the owner's OwnerKeys projection as Synced | 99.9 % ≤ 30000 ms | fast | 5 · Workspace |
+| `key.live` | Workspaces | A registered key opens the workspace over the gateway | 99.9 % | fast | 5 · Workspace |
+| `key.revoked` | Workspaces | A removed key is refused by git and by the workspace | 99.9 % ≤ 330000 ms | fast | 5 · Workspace |
 | `ws.push.p95` | Workspaces | Pushing a workspace snapshot completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `quota.refused` | Workspaces | An over-quota create is refused with 409 naming the dimension, what is used and the limit | 99.9 % | fast | 5 · Workspace |

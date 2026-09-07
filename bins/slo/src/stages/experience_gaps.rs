@@ -293,7 +293,6 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
         Ok(p) => p.trim().to_string(),
         Err(e) => return c.skip("key.ssh.lifecycle", &format!("could not read the throwaway key: {e:#}")),
     };
-    let probe = c.probe_user.clone();
     let name = format!("{}-lifecycle", c.prefix());
     c.step("key.ssh.lifecycle", KEY_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
@@ -304,7 +303,7 @@ pub(super) async fn key_lifecycle(c: &mut Ctx) {
         let git_bin = c.programs.git.clone();
         let keys = api(c, "/v1/keys");
         async move {
-            let added = post(c, &keys, &jwt, json!({ "owner": probe, "name": name, "key": public }))
+            let added = post(c, &keys, &jwt, json!({ "name": name, "key": public }))
                 .await
                 .context("could not add the key")?;
             let id = added
