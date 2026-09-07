@@ -717,7 +717,12 @@ pub(crate) async fn accept_invite(
     };
     let id = invite_id(&token);
     match db.accept_invite(&id, &user).await {
-        Ok(AcceptInvite::Joined(team)) => axum::Json(serde_json::json!({ "team": team })).into_response(),
+        Ok(AcceptInvite::Joined(team)) => {
+            // A new member's keys belong in the team's namespace from now on, and a removed one's
+            // must stop being admitted there — the same projection an ssh key add nudges.
+            crate::credentials::spawn_keys_changed(&api, &user);
+            axum::Json(serde_json::json!({ "team": team })).into_response()
+        }
         // Signed in as someone else. Said plainly, because the fix is on their side: sign in
         // with the address the invitation was sent to.
         Ok(AcceptInvite::WrongEmail) => (
@@ -785,6 +790,7 @@ pub(crate) async fn remove_member(
     match db.remove_member(&slug, &email).await {
         Ok(Membership::Done) => {
             api.membership.forget(&email, &slug);
+            crate::credentials::spawn_keys_changed(&api, &email);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(Membership::NotAMember) => (StatusCode::NOT_FOUND, "not a member").into_response(),

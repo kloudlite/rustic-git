@@ -1,14 +1,14 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
-use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, owners_namespaces, refuse_taken_name};
+use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
 use super::{caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
 use crate::model::*;
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
 use kube::{Resource, ResourceExt};
 use axum::{
     extract::{Path, State},
@@ -283,28 +283,14 @@ async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &s
     tracing::info!(%owner, workspace = %id, reason = "not-placed", "workspace.keys.deferred");
 }
 
-/// Rewrite the owner's key Secret in EVERY workspace namespace they have — what an ssh key add or
-/// remove has to do for the change to reach a running workspace. The namespaces are found by the
-/// owner label rather than by enumerating teams: the label is what the controller stamps on the
-/// namespace it creates, so a team the api tier has never heard of is still covered.
-pub async fn refresh_user_keys(s: &ApiState, owner: &str) {
-    let Some(c) = s.kube.as_ref() else { return };
-    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
-    let sel = format!("{}={owner},{}=workspace", crate::k8s::OWNER_LABEL, crate::k8s::KIND_LABEL);
-    let list = match api.list(&ListParams::default().labels(&sel)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(kind = "Namespace", %owner, error = %e, "listing.failed");
-            return;
+/// A key or membership change names an EMAIL; the projections it touches are the person's own
+/// namespace and every team they are in.
+pub async fn keys_changed(s: &ApiState, email: &str) {
+    let Some(dir) = s.directory.as_ref() else { return };
+    for o in dir.owners_of(email).await {
+        if let Err(e) = super::keys::project(s, &o).await {
+            tracing::warn!(owner = %o, error = %e, "keys.project.failed");
         }
-    };
-    let mine = owners_namespaces(s, owner).await;
-    for ns in list.items.iter().map(|n| n.name_any()) {
-        if !mine.contains(&ns) {
-            tracing::warn!(%owner, name = %ns, reason = "owner-label-mismatch", "namespace.skipped");
-            continue;
-        }
-        write_user_key(s, c, &ns, owner).await;
     }
 }
 

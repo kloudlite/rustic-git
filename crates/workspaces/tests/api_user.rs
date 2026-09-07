@@ -179,6 +179,16 @@ impl Directory for StubMembership {
         None
     }
 
+    // Not exercised here — the key projection is not part of this stub's case, and `None` is the
+    // failed lookup an unwired directory is.
+    async fn authorized_keys_for_owner(&self, _owner: &str) -> Option<String> {
+        None
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     // Not exercised here — this file's snapshot case is about membership, not rank.
     async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
@@ -1178,6 +1188,16 @@ impl Directory for StubCliTokens {
         None
     }
 
+    // Not exercised here — the key projection is not part of this stub's case, and `None` is the
+    // failed lookup an unwired directory is.
+    async fn authorized_keys_for_owner(&self, _owner: &str) -> Option<String> {
+        None
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     // Not exercised here — this stub is about CLI-token liveness only.
     async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None
@@ -1347,10 +1367,17 @@ struct StubKeys;
 impl Directory for StubKeys {
     async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         Some(kloudlite_workspaces::api::OwnerMaterial {
-            authorized_keys: "ssh-ed25519 AAAA karthik@laptop".into(),
             git_name: "Karthik".into(),
             git_email: "karthik@example.com".into(),
         })
+    }
+
+    async fn authorized_keys_for_owner(&self, _owner: &str) -> Option<String> {
+        Some("ssh-ed25519 AAAA karthik@laptop\n".into())
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        vec!["karthik".into()]
     }
 
     // This stub exercises ssh key material only; team membership is not part of its case.
@@ -1381,12 +1408,6 @@ impl Directory for StubKeys {
     }
 }
 
-fn ns_obj(name: &str, owner: &str) -> Value {
-    json!({
-        "apiVersion": "v1", "kind": "Namespace",
-        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner, "kloudlite.io/kind": "workspace"}}
-    })
-}
 
 /// `karthik` is in `team1` and in a team whose name is long enough that the personal form of the
 /// name would have to be DNS-hashed. Carries `StubKeys`' material too: one directory, so one stub.
@@ -1400,6 +1421,14 @@ impl Directory for KeyTeams {
 
     async fn for_owner(&self, owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         StubKeys.for_owner(owner).await
+    }
+
+    async fn authorized_keys_for_owner(&self, owner: &str) -> Option<String> {
+        StubKeys.authorized_keys_for_owner(owner).await
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        vec!["karthik".into(), "team1".into(), self.0.clone()]
     }
 
     // This stub exercises team membership and ssh keys; CLI tokens are not part of its case, and
@@ -1425,66 +1454,40 @@ impl Directory for KeyTeams {
     }
 }
 
-/// The owner LABEL is what the listing selects on, and a label is a view — a namespace wearing
-/// someone else's name must not get this owner's keys, whatever its labels say. The owner's own
-/// namespaces are RECOMPUTED rather than pattern-matched, so a hashed one is refreshed too.
+/// A key or membership change names an EMAIL, and the projection it touches is one `OwnerKeys`
+/// per namespace that email's keys reach: their own handle and every team. Nothing is written per
+/// workspace namespace any more — the agent renders the file from these objects.
 #[tokio::test]
-async fn refreshing_keys_writes_only_namespaces_named_for_the_owner() {
-    let tmp = tempfile::tempdir().unwrap();
-    let keys = Arc::new(
-        kloudlite_storage::store::Store::open(
-            Arc::new(object_store::memory::InMemory::new()),
-            tmp.path().join("cache"),
-            false,
-        )
-        .await
-        .unwrap(),
-    );
-    keys.rotate_user_key("karthik", "PRIVATE KEY", "SHA256:abc", None).await.unwrap();
-
+async fn a_key_change_projects_owner_keys_for_the_person_and_every_team() {
     let long_team = "a".repeat(60);
-    let long_ns = kloudlite_workspaces::crd::ws_namespace("karthik", &long_team);
-    assert!(!long_ns.ends_with("-karthik"), "this team must be DNS-hashed: {long_ns}");
-
-    let ok = |ns: &str| Route {
+    let ok = |name: &str| Route {
         method: "PATCH",
-        path: format!("/api/v1/namespaces/{ns}/secrets/user-key"),
+        path: format!("/apis/kloudlite.io/v1alpha1/ownerkeys/{name}"),
         status: 200,
-        body: json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-key"}}),
+        body: json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeys", "metadata": {"name": name}, "spec": {"generation": 1, "authorizedKeys": ""}}),
     };
-    let (client, rec) = mock_client(vec![
-        get(
-            "/api/v1/namespaces",
-            json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": [
-                ns_obj(&kloudlite_workspaces::crd::ws_namespace("karthik", "team1"), "karthik"),
-                ns_obj(&long_ns, "karthik"),
-                ns_obj("ws-someoneelse", "karthik")
-            ]}),
-        ),
-        ok(&kloudlite_workspaces::crd::ws_namespace("karthik", "team1")),
-        ok(&long_ns),
-    ]);
+    let (client, rec) = mock_client(vec![ok("karthik"), ok("team1"), ok(&long_team)]);
     let state = ApiState::new(
         Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
     )
     .with_kube(client)
-    .with_keys(keys)
-    .with_directory(Arc::new(KeyTeams(long_team)));
+    .with_directory(Arc::new(KeyTeams(long_team.clone())));
 
-    kloudlite_workspaces::api::refresh_user_keys(&state, "karthik").await;
+    kloudlite_workspaces::api::keys_changed(&state, "karthik@example.com").await;
 
     let mut patches: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("PATCH")).collect();
     patches.sort();
     let mut want = vec![
-        format!("PATCH /api/v1/namespaces/{}/secrets/user-key", kloudlite_workspaces::crd::ws_namespace("karthik", "team1")),
-        format!("PATCH /api/v1/namespaces/{long_ns}/secrets/user-key"),
+        "PATCH /apis/kloudlite.io/v1alpha1/ownerkeys/karthik".to_string(),
+        "PATCH /apis/kloudlite.io/v1alpha1/ownerkeys/team1".to_string(),
+        format!("PATCH /apis/kloudlite.io/v1alpha1/ownerkeys/{long_team}"),
     ];
     want.sort();
     assert_eq!(patches, want, "{patches:?}");
-    let body = rec.sent("PATCH", &format!("/api/v1/namespaces/{}/secrets/user-key", kloudlite_workspaces::crd::ws_namespace("karthik", "team1"))).pop().unwrap();
-    // The public half left this Secret with `OwnerKeys`: the agent renders it per node now.
-    assert!(body["stringData"]["authorized_keys"].is_null());
-    assert_eq!(body["stringData"]["gitconfig"], "[user]\n\tname = \"Karthik\"\n\temail = \"karthik@example.com\"\n");
+    let body = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/ownerkeys/team1").pop().unwrap();
+    assert_eq!(body["spec"]["authorizedKeys"], "ssh-ed25519 AAAA karthik@laptop\n");
+    assert!(body["spec"]["generation"].as_i64().unwrap() > 0);
+    assert!(body["metadata"]["ownerReferences"].is_null());
 }
 
 // ── admission ─────────────────────────────────────────────────────────────

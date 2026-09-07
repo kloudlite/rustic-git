@@ -31,6 +31,16 @@ impl Directory for StubMembership {
         None
     }
 
+    // Not exercised here — the key projection is not part of this stub's case, and `None` is the
+    // failed lookup an unwired directory is.
+    async fn authorized_keys_for_owner(&self, _owner: &str) -> Option<String> {
+        None
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     // Not exercised here — this file's cases are about membership, not rank.
     async fn team_role(&self, _user: &str, _team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
         None

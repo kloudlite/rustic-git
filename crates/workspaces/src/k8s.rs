@@ -1715,7 +1715,6 @@ mod tests {
     #[test]
     fn the_user_key_secret_carries_only_the_private_key_and_git_identity() {
         let m = crate::api::OwnerMaterial {
-            authorized_keys: "ssh-ed25519 AAAA alice@laptop".into(),
             git_name: "Alice \"Al\" Liddell".into(),
             git_email: "alice@example.com".into(),
         };

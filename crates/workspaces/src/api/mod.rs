@@ -45,6 +45,7 @@ use std::sync::Arc;
 
 pub mod admin;
 mod environments;
+pub mod keys;
 mod push;
 pub(crate) mod scope;
 mod volumes;
@@ -58,7 +59,7 @@ mod workspaces;
 // siblings) because its handlers are reached from `bins/api/src/main.rs` choosing which router to
 // mount, not only through `router()` here.
 pub use scope::{owner_set_selector, Owned};
-pub use workspaces::refresh_user_keys;
+pub use workspaces::keys_changed;
 
 use environments::{
     clone_env, create_env, delete_env, get_env, list_env, restore_env,
@@ -100,8 +101,6 @@ impl std::fmt::Display for Caller {
 /// What every workspace of an owner carries about them, from the directory the api tier owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OwnerMaterial {
-    /// The `authorized_keys` file sshd reads. Empty is a user with no keys.
-    pub authorized_keys: String,
     /// What git commits as. Empty when the handle is nobody's, and git will ask.
     pub git_name: String,
     pub git_email: String,
@@ -141,10 +140,16 @@ pub trait Directory: Send + Sync {
     /// cancel is the worse failure.
     async fn is_live(&self, jti: &str) -> bool;
 
-    /// The owner's ssh keys and git identity. `None` when the lookup FAILED — distinct from `Some`
-    /// with an empty `authorized_keys`, which is a user with no keys and is written as an empty
-    /// file.
+    /// The owner's git identity. `None` when the lookup FAILED — the Secret is then left alone
+    /// rather than rewritten with empty strings.
     async fn for_owner(&self, owner: &str) -> Option<OwnerMaterial>;
+
+    /// The `authorized_keys` file for an owner namespace — the union of its members' keys. `None`
+    /// when the lookup FAILED; an owner with no keys is `Some("")`.
+    async fn authorized_keys_for_owner(&self, owner: &str) -> Option<String>;
+
+    /// Every namespace `email`'s keys project into: their own handle and each team they belong to.
+    async fn owners_of(&self, email: &str) -> Vec<String>;
 
     /// The caller's role in `team`, or `None` when they are not a member — or when the lookup
     /// could not be made. Both answer "no" here, which is the safe direction for the one decision
@@ -967,6 +972,12 @@ mod tests {
             }
             async fn for_owner(&self, _o: &str) -> Option<super::OwnerMaterial> {
                 None
+            }
+            async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+                None
+            }
+            async fn owners_of(&self, _e: &str) -> Vec<String> {
+                Vec::new()
             }
             async fn team_role(&self, _u: &str, _t: &str) -> Option<super::TeamRole> {
                 None

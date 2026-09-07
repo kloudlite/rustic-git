@@ -60,16 +60,36 @@ impl kloudlite_workspaces::api::Directory for Dir {
         )
     }
 
-    async fn for_owner(&self, owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
-        let authorized_keys = kloudlite_api::authorized_keys_for(&self.0, owner)
+    async fn authorized_keys_for_owner(&self, owner: &str) -> Option<String> {
+        kloudlite_api::authorized_keys_for(&self.0, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "ssh-keys", %owner, error = %e, "directory.read.failed"))
-            .ok()?;
+            .ok()
+    }
+
+    /// A person's keys reach their own namespace and every team's — the same fan-out
+    /// `authorized_keys_for` unions on the team side, read from the other end.
+    async fn owners_of(&self, email: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .0
+            .user(email)
+            .await
+            .inspect_err(|e| tracing::warn!(reason = "user", %email, error = %e, "directory.read.failed"))
+            .ok()
+            .flatten()
+            .and_then(|u| u.username)
+            .into_iter()
+            .collect();
+        out.extend(self.0.slugs_for(email).await.unwrap_or_default());
+        out
+    }
+
+    async fn for_owner(&self, owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         let (git_name, git_email) = kloudlite_api::git_identity_for(&self.0, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "git-identity", %owner, error = %e, "directory.read.failed"))
             .ok()?;
-        Some(kloudlite_workspaces::api::OwnerMaterial { authorized_keys, git_name, git_email })
+        Some(kloudlite_workspaces::api::OwnerMaterial { git_name, git_email })
     }
 
     async fn team_role(&self, user: &str, team: &str) -> Option<kloudlite_workspaces::api::TeamRole> {
@@ -413,15 +433,25 @@ async fn run() -> Result<()> {
 
     let l = tokio::net::TcpListener::bind(env("KLOUDLITE_API_ADDR", "0.0.0.0:8090")).await?;
     tracing::info!(listener = "api", addr = %l.local_addr()?, %upstream, "listener.started");
-    // Adding or removing an ssh key has to reach every running workspace of that owner, and the
-    // Secret it lands in is the workspaces tier's to write — so the hook is just that call.
+    // Adding or removing an ssh key — or a member — has to reach every running workspace it
+    // touches, and the `OwnerKeys` it lands in is the workspaces tier's to write. The hook is
+    // handed an EMAIL, because that is the only identity a membership change has in common with a
+    // key row; `keys_changed` resolves it to the namespaces.
     let on_keys_changed: Option<kloudlite_api::KeysChanged> = workspaces.clone().map(|ws| {
-        Arc::new(move |owner: String| {
+        Arc::new(move |email: String| {
             let ws = ws.clone();
-            Box::pin(async move { kloudlite_workspaces::api::refresh_user_keys(&ws, &owner).await })
+            Box::pin(async move { kloudlite_workspaces::api::keys_changed(&ws, &email).await })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as kloudlite_api::KeysChanged
     });
+    // The hook is best effort and a cluster write can be lost; the beat is what makes a missed
+    // projection at most `KEYS_RESYNC_SECS` old. Only on the user role, the one that mounts `/v1`
+    // and owns the projection.
+    if role != "admin" {
+        if let Some(ws) = workspaces.clone() {
+            tokio::spawn(kloudlite_workspaces::api::keys::run_beat(ws));
+        }
+    }
     // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with
     // ClickHouse configured — the fold itself is a cluster-wide list, and running either for
     // nowhere to write it would be pure load on the API server.

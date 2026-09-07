@@ -10,7 +10,6 @@ use crate::crd;
 use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
 use kube::api::{Api, ListParams};
 use axum::{http::StatusCode, response::{IntoResponse, Response}};
-use std::collections::HashSet;
 
 pub(crate) async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
     match &s.directory {
@@ -115,20 +114,6 @@ pub(crate) async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str,
     Ok(())
 }
 
-/// Every namespace name the platform would derive for this owner: their personal one, plus one
-/// per team they are in.
-///
-/// The label is a VIEW and never authority (CLAUDE.md) — the NAME is what says whose namespace
-/// this is, so it is checked by RECOMPUTING it rather than by picking the owner back out of the
-/// string. `crd::ws_namespace` hashes any name over 63 characters into a DNS label, which no
-/// prefix/suffix test can invert: the earlier `ends_with("-{owner}")` heuristic skipped exactly
-/// those, so an ssh key add never reached a workspace in a long-named team.
-pub(crate) async fn owners_namespaces(s: &ApiState, owner: &str) -> HashSet<String> {
-    let mut out = HashSet::from([crd::ws_namespace(owner, "")]);
-    out.extend(teams_for(s, owner).await.iter().map(|t| crd::ws_namespace(owner, t)));
-    out
-}
-
 /// Workspaces are strictly personal — no team ownership — so ownership is a field comparison, and
 /// someone else's workspace is a 404, never a 403.
 /// Workspaces are strictly personal — no team ownership — but a platform administrator may still
@@ -193,67 +178,4 @@ pub fn owner_set_selector(owners: &[String]) -> String {
     let safe: Vec<&str> =
         owners.iter().filter(|o| kloudlite_storage::store::valid_owner(o)).map(String::as_str).collect();
     format!("{OWNER_LABEL} in ({})", safe.join(","))
-}
-
-#[cfg(test)]
-mod tests {
-    /// A team namespace is `wt-{owner}-{hash}` (and a long personal one is DNS-hashed), so it is
-    /// exactly the case the old `ends_with("-{owner}")` heuristic dropped — and dropping it meant
-    /// an ssh key add never reached that team's workspaces.
-    #[tokio::test]
-    async fn a_dns_truncated_team_namespace_is_still_the_owners() {
-        use super::{owners_namespaces, ApiState};
-        use crate::api::Directory;
-        use crate::crd;
-        use std::sync::Arc;
-
-        let long = "a".repeat(60);
-        struct Stub(String);
-        #[async_trait::async_trait]
-        impl Directory for Stub {
-            async fn teams_for(&self, _user: &str) -> Vec<String> {
-                vec![self.0.clone()]
-            }
-
-            // This stub exercises namespace-to-owner matching only; CLI tokens and ssh keys are
-            // not part of its case, and an unwired revocation list must refuse rather than admit.
-            async fn is_live(&self, _jti: &str) -> bool {
-                false
-            }
-
-            // No keys in this case: `None` is "the lookup failed", which is what an unwired
-            // directory is.
-            async fn for_owner(&self, _owner: &str) -> Option<crate::api::OwnerMaterial> {
-                None
-            }
-
-            // Not exercised here — this test is about namespace hashing, not rank.
-            async fn team_role(&self, _user: &str, _team: &str) -> Option<crate::api::TeamRole> {
-                None
-            }
-
-            // Not exercised here either.
-            async fn is_team(&self, _slug: &str) -> bool {
-                false
-            }
-
-            async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
-                Err("no directory".into())
-            }
-            async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
-                Err("no directory".into())
-            }
-        }
-        let state = ApiState::new(
-            Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap()),
-        )
-        .with_directory(Arc::new(Stub(long.clone())));
-
-        let ns = crd::ws_namespace("karthik", &long);
-        assert!(ns.len() <= 63 && !ns.ends_with("-karthik"), "this team must be hashed: {ns}");
-        let mine = owners_namespaces(&state, "karthik").await;
-        assert!(mine.contains(&ns), "{ns} must be recognised as karthik's");
-        assert!(mine.contains(&crd::ws_namespace("karthik", "")));
-        assert!(!mine.contains(&crd::ws_namespace("someone-else", "")));
-    }
 }

@@ -43,6 +43,16 @@ impl Directory for StubMembership {
     async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
     }
+
+    // Not exercised here — the key projection is not part of this stub's case, and `None` is the
+    // failed lookup an unwired directory is.
+    async fn authorized_keys_for_owner(&self, _owner: &str) -> Option<String> {
+        None
+    }
+
+    async fn owners_of(&self, _email: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 struct Server {

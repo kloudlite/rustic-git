@@ -177,12 +177,15 @@ pub(crate) async fn remove_key(
     revoke(api, headers, id, CredentialKind::SshKey).await
 }
 
-/// Push the owner's keys out to their workspaces, off the request path: the rows are already
+/// Re-project the namespaces this PERSON's keys reach, off the request path: the rows are already
 /// written (or forgotten), so the answer does not depend on a cluster this tier only nudges.
-fn spawn_keys_changed(api: &Arc<Api>, owner: &str) {
+///
+/// An EMAIL, not a handle: a membership change and a key row have only that identity in common,
+/// and the workspaces tier is the one that knows which namespaces it fans out to.
+pub(crate) fn spawn_keys_changed(api: &Arc<Api>, email: &str) {
     let Some(hook) = api.on_keys_changed.clone() else { return };
-    let owner = owner.to_string();
-    tokio::spawn(async move { hook(owner).await });
+    let email = email.to_string();
+    tokio::spawn(async move { hook(email).await });
 }
 
 pub(crate) async fn revoke(
