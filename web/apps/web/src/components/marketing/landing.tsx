@@ -22,8 +22,7 @@ export function Landing() {
     /* Sized to one screen. min-h rather than h + overflow-hidden: at normal heights
        there is nothing to scroll, and on a short laptop viewport the strip becomes
        reachable instead of silently clipped. */
-    <div className="min-h-screen">
-      <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col">
       <MarketingHeader />
 
       <main className="mx-auto flex w-full max-w-page flex-1 flex-col justify-center px-6 py-8">
@@ -91,7 +90,6 @@ export function Landing() {
           <ThemeToggle className="ml-auto" />
         </div>
       </footer>
-      </div>
     </div>
   );
 }

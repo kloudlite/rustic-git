@@ -4,8 +4,7 @@ import { Button } from "@/components/ui/button";
 
 export default function NotFound() {
   return (
-    <div className="min-h-screen">
-      <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col">
       <header className="flex h-14 items-center px-6">
         <Link href="/" aria-label="kloudlite home" className="inline-flex">
           <Logo className="h-5" />
@@ -27,7 +26,6 @@ export default function NotFound() {
           </Button>
         </div>
       </main>
-      </div>
     </div>
   );
 }

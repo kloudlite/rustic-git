@@ -63,10 +63,12 @@ export async function AppShell({
 
   return (
     <ShellState>
-      <div className="flex h-screen flex-col">
-        {/* Chrome is a flex sibling of the scroll region, not sticky inside it: the
-            header never scrolls, and the scrollbar belongs to the content alone. */}
-        <header className="shrink-0 border-b border-border bg-card">
+      <div className="flex min-h-screen flex-col">
+        {/* The DOCUMENT is the only scroller: a bounded inner region meant a second scrollbar
+            whenever the outer box and the viewport disagreed for a frame (fonts, hydration,
+            a late stylesheet), which read as a flicker on every reload. Sticky keeps the
+            chrome in place without owning the scroll. */}
+        <header className="sticky top-0 z-30 shrink-0 border-b border-border bg-card">
           <ShellHeaderRow me={me}>
             <Link href="/" aria-label="kloudlite home" className="inline-flex">
               <Logo className="h-5" />
@@ -90,10 +92,7 @@ export async function AppShell({
           />
         </header>
 
-        {/* Native overflow, not a scroll-area component: pure CSS is settled in the first paint,
-            so nothing changes at hydration. min-h-0 because a flex child defaults to
-            min-height:auto and would grow to the content instead of scrolling. */}
-        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+        <div className="flex-1">{children}</div>
       </div>
     </ShellState>
   );

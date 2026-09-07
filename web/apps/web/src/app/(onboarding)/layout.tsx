@@ -6,15 +6,13 @@ import { Icon } from "@/components/brand/logo";
  *  landing somewhere else. */
 export default function OnboardingLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen">
-      <div className="flex min-h-screen flex-col">
-        <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
-          <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
-            <Icon className="size-9" />
-          </Link>
-          {children}
-        </main>
-      </div>
+    <div className="flex min-h-screen flex-col">
+      <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
+        <Link href="/" aria-label="kloudlite home" className="mb-8 inline-flex">
+          <Icon className="size-9" />
+        </Link>
+        {children}
+      </main>
     </div>
   );
 }
