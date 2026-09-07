@@ -762,8 +762,9 @@ export type ApiWorkspace = {
   packages_status?: { ready: boolean; reason: string; message: string } | null;
   /** What each `attr@version` entry in `packages` resolved to. Desired state, written by the
    *  api when it resolved the pin — a bare entry has no lock, so this is never 1:1 with
-   *  `packages`. `source` is where the answer came from: `"nixhub"` or `"mirror"`. */
-  locks?: { entry: string; version: string; rev: string; source: string }[];
+   *  `packages`. `source` is `crd::LockSource` (serde lowercase) — which index answered, and
+   *  therefore whether a store path came with it. */
+  locks?: { entry: string; version: string; rev: string; source: "nixhub" | "mirror" }[];
   /** Present once the workspace has an sshd with a host key — i.e. once it can be reached.
    *  Absent while it is coming up, and for a stopped one. */
   ssh?: { gateway: string; host_key: string } | null;
