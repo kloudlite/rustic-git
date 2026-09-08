@@ -45,9 +45,13 @@ pub(crate) async fn ask_owner(api: &Api, path: String) -> std::result::Result<u1
 /// to them.
 pub(crate) async fn ask_owner_verbatim(
     api: &Api,
+    owner: &str,
     path: String,
 ) -> std::result::Result<(u16, String), Response> {
-    let r = to_owner(api, api.client.post(format!("{}{path}", api.upstream)), None).await?;
+    // As `owner`: the node opens the repo through its visibility gate (`open_ro`), and a
+    // private repo asked about anonymously is a 401 — which the hourly probe filed as a 502
+    // the first time this ran on the fleet.
+    let r = to_owner(api, api.client.post(format!("{}{path}", api.upstream)), Some(owner)).await?;
     let status = r.status().as_u16();
     Ok((status, text_bounded(r).await))
 }

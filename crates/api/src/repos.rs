@@ -558,7 +558,7 @@ pub(crate) async fn branch_delete(api: &Api, owner: &str, name: &str, branch: &s
         encode(branch),
         encode(oid)
     );
-    match ask_owner_verbatim(api, path).await {
+    match ask_owner_verbatim(api, owner, path).await {
         Ok((200..=299, _)) => StatusCode::NO_CONTENT.into_response(),
         Ok((400, _)) => (StatusCode::BAD_REQUEST, "that is not a branch this repository can delete").into_response(),
         Ok((404, _)) => (StatusCode::NOT_FOUND, "no such branch").into_response(),
@@ -770,7 +770,12 @@ mod tests {
             .route("/api/{owner}/{name}/pulls", get(move || async move { axum::Json(pulls) }))
             .route(
                 "/api/{owner}/{name}/branchdelete",
-                post(move |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                post(move |headers: axum::http::HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    // The node opens a private repo only as its owner; a forward without the
+                    // owner header is refused there, so the fake refuses it too.
+                    if headers.get(kloudlite_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) != Some("alice") {
+                        return (StatusCode::UNAUTHORIZED, "no owner");
+                    }
                     // Axum has decoded the query, so this is the branch name the node would act on.
                     a.lock().unwrap().push((
                         q.get("branch").cloned().unwrap_or_default(),
