@@ -22,8 +22,15 @@ use std::os::unix::fs::PermissionsExt;
 use tower::util::ServiceExt;
 
 fn state(pool: &std::path::Path, btrfs_bin: String, routes: Vec<Route>) -> (PeerState, Recorder) {
+    state_with(pool, btrfs_bin, routes, test_settings())
+}
+
+/// Settings are handed in, never set through the process environment: the tests in this binary
+/// run in parallel threads, and a `set_var` from one of them (a one-second serve timeout) was
+/// read by another mid-stream and turned its clean send into a 500 — the flake of 2026-09-08.
+fn state_with(pool: &std::path::Path, btrfs_bin: String, routes: Vec<Route>, settings: LiveSettings<AgentSettings>) -> (PeerState, Recorder) {
     let (client, rec) = mock_client(routes);
-    (PeerState::new(client, pool.to_string_lossy().into(), "node-b".into(), "s3cret".into(), btrfs_bin, test_settings()), rec)
+    (PeerState::new(client, pool.to_string_lossy().into(), "node-b".into(), "s3cret".into(), btrfs_bin, settings), rec)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -157,11 +164,11 @@ fi
 /// behind it, fleet-wide. With a one-second serve timeout, the second request must be served.
 #[tokio::test]
 async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
-    std::env::set_var("WS_PEER_SERVE_TIMEOUT_SECS", "1");
     let tmp = tempfile::tempdir().unwrap();
     let bin = fake_btrfs_send_slow(tmp.path());
     std::fs::create_dir_all(tmp.path().join("vol/v1/snap/c1")).unwrap();
-    let (state, _rec) = state(tmp.path(), bin, vec![]);
+    let settings = LiveSettings::new(AgentSettings { peer_serve_timeout_secs: 1, ..AgentSettings::from_env() });
+    let (state, _rec) = state_with(tmp.path(), bin, vec![], settings);
     let app = router(state);
 
     // Drives the body to completion (a stalled real puller keeps the connection's write side
