@@ -395,7 +395,11 @@ evaluation for the whole list. A pinned entry is LOCKED before the workspace is 
 object store (`pkgs/x86_64-linux/{attr}/{version}`), then Nixhub (`KLOUDLITE_NIXHUB_URL`, default
 `https://search.devbox.sh`), then the mirrored nixpkgs-multiverse index at `index/pkgs/versions.json`
 that the api's `user` role refreshes daily (`packages::mirror_beat`, two upstream files joined so
-every row carries a real nixpkgs commit). `spec.locks` — entry, version, attrPath, rev, storePath,
+every row carries a real nixpkgs commit). A lock with a store path is checked against
+`cache.nixos.org` (`KLOUDLITE_BINARY_CACHE_URL`) before it is written — Hydra never builds a
+release marked insecure (nodejs 20.20.2 past its EOL), so an index's path is not a binary: a prefix
+request walks down to the newest release the cache holds, an exact uncached pin is a 422 naming
+the versions that are. `spec.locks` — entry, version, attrPath, rev, storePath,
 source — is written ONLY by the api, beside `spec.packages`, and an unresolvable list never reaches
 the cluster: unknown everywhere is a 422 naming the three nearest versions, every index down with no
 cache is a 503, and nothing is written either way. An unchanged entry keeps its lock through every

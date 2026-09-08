@@ -10,7 +10,7 @@ use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState};
 use kloudlite_workspaces::crd::{Lock, LockSource};
 use kloudlite_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
-use kloudlite_workspaces::packages::resolve::{Index, Resolver};
+use kloudlite_workspaces::packages::resolve::{BinaryCache, Index, Resolver};
 use kloudlite_workspaces::packages::VersionReq;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -130,6 +130,15 @@ fn ws_obj(name: &str, packages: &[&str], locks: &[Value]) -> Value {
 }
 
 /// `with_index: false` is the dev deployment that has no package index wired at all.
+/// The cache holds whatever the fake index names: cache misses are the resolver's own tests.
+struct EveryPathCached;
+#[async_trait::async_trait]
+impl BinaryCache for EveryPathCached {
+    async fn has(&self, _: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
 async fn server_with(routes: Vec<Route>, with_index: bool) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let (client, rec) = mock_client(routes);
@@ -143,6 +152,7 @@ async fn server_with(routes: Vec<Route>, with_index: bool) -> Server {
             // an index that agrees with itself keeps every assertion here about the API's own
             // behaviour rather than about which of the two answered.
             mirror: Arc::new(FakeIndex(fake.clone())),
+            binaries: Arc::new(EveryPathCached),
             now: chrono::Utc::now,
         }));
     }

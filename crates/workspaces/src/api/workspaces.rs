@@ -138,7 +138,7 @@ fn bad_packages(e: crate::packages::PackageError) -> Response {
 fn refuse(r: Refusal) -> Response {
     let code = match r {
         Refusal::Malformed(_) => StatusCode::BAD_REQUEST,
-        Refusal::Unknown { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Refusal::Unknown { .. } | Refusal::NotCached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     (code, Json(serde_json::json!({"error": r.to_string()}))).into_response()

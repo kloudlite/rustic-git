@@ -183,7 +183,10 @@ impl Nix for RealNix {
             return Err(format!("{rev:?} is not a nixpkgs revision"));
         }
         kloudlite_workspaces::packages::validate_attr(attr_path).map_err(|e| e.to_string())?;
-        let expr = format!("(import (builtins.getFlake \"github:NixOS/nixpkgs/{rev}\") {{ }}).{attr_path}.outPath");
+        // A pinned release is often an old one, and nixpkgs marks a release past its EOL
+        // insecure, which refuses the evaluation outright. Pinning it is the person's decision;
+        // whether a binary exists for it is the copy's to answer, not the evaluator's.
+        let expr = format!("(import (builtins.getFlake \"github:NixOS/nixpkgs/{rev}\") {{ config.allowInsecurePredicate = _: true; }}).{attr_path}.outPath");
         let c = self.cmd(&["eval", "--impure", "--raw", "--expr", &expr]);
         Ok(self.run(c, timeout).await?.trim().to_string())
     }
@@ -219,7 +222,15 @@ impl Nix for RealNix {
 /// calling a network blip `NotCached` would tell a person to change a version that is fine.
 fn is_not_cached(err: &str) -> bool {
     let e = err.to_ascii_lowercase();
-    ["does not exist and cannot be created", "cannot substitute", "unable to substitute", "is not valid"]
+    // The last two are what `nix copy --from` says on 2026-09-08 for a path the cache never held.
+    [
+        "does not exist and cannot be created",
+        "cannot substitute",
+        "unable to substitute",
+        "is not valid",
+        "no substituter that can build it",
+        "don't know how to build these paths",
+    ]
         .iter()
         .any(|m| e.contains(m))
 }

@@ -17,6 +17,13 @@
 //! everywhere is a refusal to write at all, because a workspace with a wrong lock is worse than a
 //! workspace that could not be created.
 //!
+//! A store path an index names is not a store path anyone BUILT: Hydra skips a release marked
+//! insecure (nodejs 20.20.2, past its EOL, on 2026-09-08), and Nixhub evaluates commits Hydra never
+//! saw. So every lock with a store path is checked against the binary cache (`BinaryCache`) here,
+//! at write time, where the person can act on it: a prefix request walks down to the newest release
+//! that IS cached, an exact pin with no cached build is a refusal naming the versions that have one.
+//! The agent's `NotCached` stays as the backstop for a path that leaves the cache later.
+//!
 //! Version requests are matched as STRING prefixes, deliberately: a leading-zero request like
 //! `@01` is legal grammar and is passed through as typed, so it matches a release literally named
 //! `01…` and nothing else. There is no numeric normalisation of the request — only of the
@@ -63,6 +70,47 @@ pub trait Index: Send + Sync {
     async fn versions(&self, attr: &str) -> Result<Vec<String>, String>;
 }
 
+/// Whether the binary cache holds a store path. `has` is one HEAD of the narinfo; an answer
+/// other than 200/404 is an outage, not a verdict.
+#[async_trait]
+pub trait BinaryCache: Send + Sync {
+    async fn has(&self, store_path: &str) -> Result<bool, String>;
+}
+
+pub struct NixosCache {
+    pub client: reqwest::Client,
+    /// `https://cache.nixos.org`, no trailing slash.
+    pub base: String,
+}
+
+#[async_trait]
+impl BinaryCache for NixosCache {
+    async fn has(&self, store_path: &str) -> Result<bool, String> {
+        let hash = store_path
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.split('-').next())
+            .filter(|h| h.len() == 32)
+            .ok_or_else(|| format!("{store_path} is not a store path"))?;
+        let r = self
+            .client
+            .head(format!("{}/{hash}.narinfo", self.base))
+            .timeout(HTTP_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        match r.status() {
+            reqwest::StatusCode::OK => Ok(true),
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            s => Err(format!("the binary cache answered {s}")),
+        }
+    }
+}
+
+/// How many releases under a prefix to try before giving up — bounds the index calls one write
+/// can cost when a whole line is uncached.
+const WALK_LIMIT: usize = 6;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The entry is not something we can resolve at all — bad grammar, or no `@version` on an
@@ -72,6 +120,8 @@ pub enum Refusal {
     Unknown { entry: String, nearest: Vec<String> },
     /// Every index failed and no cache entry covered it. Nothing is written.
     Unavailable,
+    /// The version exists but nobody built a binary for it; `cached` names releases that have one.
+    NotCached { entry: String, cached: Vec<String> },
 }
 
 impl std::fmt::Display for Refusal {
@@ -89,6 +139,14 @@ impl std::fmt::Display for Refusal {
                 )
             }
             Refusal::Unavailable => write!(f, "the package index is unavailable; try again"),
+            Refusal::NotCached { entry, cached } if cached.is_empty() => {
+                write!(f, "{entry} has no cached build in cache.nixos.org; pick a version that does")
+            }
+            Refusal::NotCached { entry, cached } => write!(
+                f,
+                "{entry} has no cached build in cache.nixos.org; nearest cached: {}",
+                cached.join(", ")
+            ),
         }
     }
 }
@@ -326,6 +384,7 @@ pub struct Resolver {
     pub cache: Arc<dyn ObjectStore>,
     pub nixhub: Arc<dyn Index>,
     pub mirror: Arc<dyn Index>,
+    pub binaries: Arc<dyn BinaryCache>,
     /// Injected so tests own the clock; production passes `Utc::now`.
     pub now: fn() -> DateTime<Utc>,
 }
@@ -343,6 +402,11 @@ impl Resolver {
                     .unwrap_or_else(|_| "https://search.devbox.sh".to_string()),
             }),
             mirror: Arc::new(Mirror::new(os)),
+            binaries: Arc::new(NixosCache {
+                client: reqwest::Client::new(),
+                base: std::env::var("KLOUDLITE_BINARY_CACHE_URL")
+                    .unwrap_or_else(|_| "https://cache.nixos.org".to_string()),
+            }),
             now: Utc::now,
         }
     }
@@ -370,7 +434,8 @@ impl Resolver {
         let mut unavailable = false;
         for index in [&self.nixhub, &self.mirror] {
             match index.resolve(&attr, &req).await {
-                Ok(Some(mut lock)) => {
+                Ok(Some(lock)) => {
+                    let mut lock = self.cached_build(index, entry, &attr, &req, lock).await?;
                     lock.resolved_at = (self.now)().to_rfc3339();
                     self.store(&attr, &req, &lock).await;
                     return Ok(lock);
@@ -387,6 +452,62 @@ impl Resolver {
             entry: entry.to_string(),
             nearest: self.nearest(&attr, &req).await,
         })
+    }
+
+    /// The lock an index answered, or an older release under the same prefix that the binary
+    /// cache actually holds. A mirror lock has no store path to check and passes through: the
+    /// agent evaluates and copies it, and reports `NotCached` itself.
+    async fn cached_build(
+        &self,
+        index: &Arc<dyn Index>,
+        entry: &str,
+        attr: &str,
+        req: &VersionReq,
+        lock: Lock,
+    ) -> Result<Lock, Refusal> {
+        if lock.store_path.is_empty() {
+            return Ok(lock);
+        }
+        let has = |p: String| async move { self.binaries.has(&p).await.map_err(|_| Refusal::Unavailable) };
+        if has(lock.store_path.clone()).await? {
+            return Ok(lock);
+        }
+        // Older releases under the prefix, newest first, the one just refused excluded. An exact
+        // pin walks too — not to substitute (the person named a version) but to NAME what they
+        // could pin instead.
+        let exact = matches!(req, VersionReq::Prefix(p) if p.matches('.').count() >= 2);
+        // An exact pin names its major line as the neighbourhood: "20.19.5 is cached" is the
+        // useful answer to an uncached 20.20.2, and nothing under "20.20.2." ever could be.
+        let prefix = match req {
+            VersionReq::Latest => String::new(),
+            VersionReq::Prefix(p) if exact => format!("{}.", p.split('.').next().unwrap_or(p)),
+            VersionReq::Prefix(p) => format!("{p}."),
+        };
+        let candidates: Vec<String> = index
+            .versions(attr)
+            .await
+            .map_err(|_| Refusal::Unavailable)?
+            .into_iter()
+            .filter(|v| v != &lock.version && (prefix.is_empty() || v.starts_with(&prefix)))
+            .take(WALK_LIMIT)
+            .collect();
+        let mut cached = Vec::new();
+        for v in candidates {
+            let Ok(Some(l)) = index.resolve(attr, &VersionReq::Prefix(v.clone())).await else {
+                continue;
+            };
+            if l.store_path.is_empty() || !has(l.store_path.clone()).await? {
+                continue;
+            }
+            if !exact {
+                return Ok(Lock { entry: entry.to_string(), ..l });
+            }
+            cached.push(v);
+            if cached.len() == 3 {
+                break;
+            }
+        }
+        Err(Refusal::NotCached { entry: entry.to_string(), cached })
     }
 
     /// Locks for `packages`. Entries whose string is unchanged keep their existing lock — editing
@@ -591,13 +712,65 @@ mod tests {
         at("2026-09-08T12:00:00Z")
     }
 
+    /// Holds every path except the ones named — the cache is the common case.
+    struct FakeCache(Vec<String>);
+    #[async_trait]
+    impl BinaryCache for FakeCache {
+        async fn has(&self, store_path: &str) -> Result<bool, String> {
+            Ok(!self.0.iter().any(|p| p == store_path))
+        }
+    }
+
     fn resolver(nixhub: Arc<dyn Index>, mirror: Arc<dyn Index>) -> Resolver {
+        resolver_missing(nixhub, mirror, &[])
+    }
+
+    fn resolver_missing(nixhub: Arc<dyn Index>, mirror: Arc<dyn Index>, missing: &[&str]) -> Resolver {
         Resolver {
             cache: Arc::new(InMemory::new()),
             nixhub,
             mirror,
+            binaries: Arc::new(FakeCache(missing.iter().map(|s| s.to_string()).collect())),
             now,
         }
+    }
+
+    fn lock_at(entry: &str, version: &str, path: &str) -> Lock {
+        Lock {
+            store_path: path.into(),
+            ..lock(entry, version, LockSource::Nixhub)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prefix_walks_down_to_the_newest_release_the_cache_holds() {
+        // nodejs 20.20.2 on 2026-09-08: marked insecure, never built by Hydra, 20.19.5 was.
+        let nix = Arc::new(
+            FakeIndex::with(&[
+                ("nodejs", "20", Some(lock_at("nodejs@20", "20.20.2", "/nix/store/a-nodejs"))),
+                ("nodejs", "20.20.1", Some(lock_at("nodejs@20.20.1", "20.20.1", "/nix/store/b-nodejs"))),
+                ("nodejs", "20.19.5", Some(lock_at("nodejs@20.19.5", "20.19.5", "/nix/store/c-nodejs"))),
+            ])
+            .knows("nodejs", &["22.1.0", "20.20.2", "20.20.1", "20.19.5", "18.4.0"]),
+        );
+        let r = resolver_missing(nix, Arc::new(FakeIndex::default()), &["/nix/store/a-nodejs", "/nix/store/b-nodejs"]);
+        let l = r.lock_one("nodejs@20", false).await.unwrap();
+        assert_eq!((l.entry.as_str(), l.version.as_str(), l.store_path.as_str()), ("nodejs@20", "20.19.5", "/nix/store/c-nodejs"));
+    }
+
+    #[tokio::test]
+    async fn an_exact_pin_with_no_cached_build_names_the_ones_that_have() {
+        let nix = Arc::new(
+            FakeIndex::with(&[
+                ("nodejs", "20.20.2", Some(lock_at("nodejs@20.20.2", "20.20.2", "/nix/store/a-nodejs"))),
+                ("nodejs", "20.19.5", Some(lock_at("nodejs@20.19.5", "20.19.5", "/nix/store/c-nodejs"))),
+            ])
+            .knows("nodejs", &["20.20.2", "20.19.5"]),
+        );
+        let r = resolver_missing(nix, Arc::new(FakeIndex::default()), &["/nix/store/a-nodejs"]);
+        let e = r.lock_one("nodejs@20.20.2", false).await.unwrap_err();
+        assert_eq!(e, Refusal::NotCached { entry: "nodejs@20.20.2".into(), cached: vec!["20.19.5".into()] });
+        assert_eq!(e.to_string(), "nodejs@20.20.2 has no cached build in cache.nixos.org; nearest cached: 20.19.5");
     }
 
     async fn put_cache(r: &Resolver, attr: &str, req: &VersionReq, l: &Lock) {
