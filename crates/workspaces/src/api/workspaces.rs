@@ -88,6 +88,7 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
         locks: w.spec.locks.iter().map(LockDoc::from).collect(),
         repo: seed.as_ref().map(|(r, _)| r.clone()),
         branch: seed.map(|(_, b)| b),
+        attached_environment: crd::attached_environment(w),
         id,
     }
 }

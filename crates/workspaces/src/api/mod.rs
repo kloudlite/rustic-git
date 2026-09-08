@@ -62,8 +62,8 @@ pub use scope::{owner_set_selector, Owned};
 pub use workspaces::keys_changed;
 
 use environments::{
-    clone_env, create_env, delete_env, get_env, list_env, restore_env,
-    restore_env_in_place, start_env, stop_env,
+    clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
+    restore_env_in_place, set_intercept, start_env, stop_env,
 };
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
@@ -347,6 +347,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/clone", post(clone_env))
         .route("/v1/environments/{id}/push", post(push_env))
         .route("/v1/environments/{id}/restore-in-place", post(restore_env_in_place))
+        .route("/v1/environments/{id}/intercepts", post(set_intercept))
+        .route("/v1/environments/{id}/intercepts/{service}", axum::routing::delete(clear_intercept))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
         .route("/v1/volumes/{name}", axum::routing::delete(delete_volume))

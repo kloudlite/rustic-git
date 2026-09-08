@@ -1,13 +1,13 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
-use super::scope::{find_env, may_act_on, may_allocate_for, mine, owned_by, resolve_new_owner, teams_for};
+use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, teams_for};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
 };
-use super::{caller, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState};
+use super::{caller, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL};
 use crate::model::*;
@@ -55,6 +55,7 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Placed"))
             .filter(|c| c.status != "True" && c.reason == "NoCapacity")
             .map(ConditionDoc::from),
+        intercepts: e.spec.intercepts.clone(),
         id,
     }
 }
@@ -535,6 +536,114 @@ pub(crate) async fn restore_env_in_place(
     // appear, and a body that still reads "running" makes the click look like it did nothing.
     doc.restoring = Some("Requested".into());
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())
+}
+
+// ── intercepts ────────────────────────────────────────────────────────────────
+
+/// Every refusal `set_intercept` can give, in the order a person meets them. Returning the
+/// `Response` rather than an error type is what keeps each arm one sentence at the point it is
+/// decided.
+///
+/// The caller must be able to act on the ENVIRONMENT (`find_env`, already done) and on the
+/// WORKSPACE (`my_ws`, here): an intercept redirects other people's traffic INTO someone's
+/// workspace, so holding one half is not enough.
+async fn validate_intercept(
+    s: &ApiState,
+    caller: &Caller,
+    e: &crd::Environment,
+    want: &crd::Intercept,
+) -> Result<(), Response> {
+    let Some(svc) = e.spec.services.iter().find(|sv| sv.name == want.service) else {
+        return Err((StatusCode::NOT_FOUND, format!("this environment has no service named {:?}", want.service)).into_response());
+    };
+    // 404, not 403, exactly as everywhere else: a caller learns nothing about workspaces that are
+    // not theirs, not even that the id exists.
+    let w = my_ws(s, caller, &want.workspace).await?;
+    if crd::attached_environment(&w).as_deref() != Some(e.name_any().as_str()) {
+        return Err((StatusCode::CONFLICT, "that workspace is not attached to this environment; attach it first").into_response());
+    }
+    // `spec`, not `status`: desired state is what this tier owns, and a workspace whose pod is
+    // merely between restarts is still one the person means to serve. Whether an intercept is
+    // actually IN FORCE is the controller's answer, reported in status.
+    if w.spec.desired_state != DesiredState::Running {
+        return Err((StatusCode::CONFLICT, "that workspace is stopped; start it before it can answer for a service").into_response());
+    }
+    if let Some(held) = e.spec.intercepts.iter().find(|i| i.service == want.service && i.workspace != want.workspace) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("{} already intercepts this service; release that one first", held.workspace),
+        )
+            .into_response());
+    }
+    let mut seen = HashSet::new();
+    for p in &want.ports {
+        if !svc.ports.contains(&p.service) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("this service does not declare port {}, so nothing dials it", p.service),
+            )
+                .into_response());
+        }
+        if !seen.insert(p.service) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("port {} is mapped twice; one service port answers on one workspace port", p.service),
+            )
+                .into_response());
+        }
+    }
+    Ok(())
+}
+
+/// Write one workspace's wish to receive a service's traffic. Spec only — every visible effect
+/// is the environment controller's reconcile, which is why this is a 202.
+pub(crate) async fn set_intercept(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crd::Intercept>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers).await?;
+    let e = find_env(&s, &caller_id, &id).await?;
+    validate_intercept(&s, &caller_id, &e, &body).await?;
+    // At most one entry per service, held here rather than by the controller (which takes the
+    // first, so a hand-edited object cannot flap): the same workspace asking again with new ports
+    // REPLACES, and a different one was already refused above.
+    let mut want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.service != body.service).cloned().collect();
+    want.push(body);
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    // A merge patch on the one field, like every other spec write here: this handler was sent one
+    // wish and must not claim ownership of a spec the caller never wrote.
+    let e = api
+        .patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"intercepts": want}})))
+        .await
+        .map_err(kube_err)?;
+    let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
+    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &pushed))).into_response())
+}
+
+/// The ONLY thing that removes an intercept. Deliberately not called by `stop_ws`, `detach_ws` or
+/// `delete_ws`: the wish is the person's, and stopping a workspace for the night must not throw
+/// away what they asked for — the controller brings the real service back in the meantime, and
+/// the intercept takes hold again when the workspace returns, with nobody re-asking.
+///
+/// Idempotent: releasing one that is not there is the state being asked for.
+pub(crate) async fn clear_intercept(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path((id, service)): Path<(String, String)>,
+) -> Result<Response, Response> {
+    let caller_id = caller(&s, &headers).await?;
+    let e = find_env(&s, &caller_id, &id).await?;
+    if !e.spec.intercepts.iter().any(|i| i.service == service) {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.service != service).cloned().collect();
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    api.patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"intercepts": want}})))
+        .await
+        .map_err(kube_err)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

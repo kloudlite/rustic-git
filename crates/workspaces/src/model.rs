@@ -108,6 +108,10 @@ pub struct Workspace {
     pub repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The environment this workspace is attached to, if any. One field of state the person is
+    /// shown: without it the web could only learn "attached" from an intercept's own refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_environment: Option<String>,
 }
 
 /// A `crd::Lock` as the web sees it.
@@ -343,6 +347,10 @@ pub struct Environment {
     /// already say, and `Moving` is a routine hand-off nobody needs told about.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<ConditionDoc>,
+    /// The intercepts asked for, verbatim from spec — the WISH, not what is in force. What is
+    /// actually redirected is `ServiceStatus::intercepted_by`, which only the agent writes.
+    #[serde(default)]
+    pub intercepts: Vec<crate::crd::Intercept>,
 }
 
 
