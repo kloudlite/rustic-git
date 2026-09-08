@@ -6,6 +6,7 @@ use super::workspace::{cleared_node_dead, replaced};
 use super::{my_node, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, ResourceQuota, Service};
+use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
@@ -425,21 +426,63 @@ async fn run_environment(
         write_env_status(e, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
+    // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
+    // three states below, and the rendering is a straight read of that decision.
+    let (wishes, plan) = intercept_plan(e, ctx).await;
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
-        let set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
+        let decided = plan.get(svc.name.as_str());
+        let intercepted = match decided {
+            Some(Intercepting::Force { .. }) => true,
+            // Nothing is known, or the grace has not run out: render what the LAST pass rendered,
+            // which is exactly what `intercepted_by` records.
+            Some(Intercepting::Keep) => was_intercepted(&prev, &svc.name),
+            _ => false,
+        };
+        let mut set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
+        if intercepted {
+            // The real service is STOPPED while its traffic goes elsewhere. Leaving it running is
+            // wrong for anything that acts on its own rather than only answering — a queue consumer
+            // would take messages the workspace never sees, a scheduler would fire twice.
+            if let Some(spec) = set.spec.as_mut() {
+                spec.replicas = Some(0);
+            }
+        }
         ensure(deployments, &set, ctx).await?;
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
         // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
         // by an earlier definition that did have ports; `ensure` has no delete path of its own.
-        match k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref, false) {
+        match k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref, intercepted) {
             Some(cs) => ensure(&services, &cs, ctx).await?,
             None => {
                 delete_ignoring_404(&services, &svc.name).await?;
                 forget_applied(ctx, "Service", ns, &svc.name);
             }
         }
+        let slice = format!("{}-intercept", svc.name);
+        match decided {
+            Some(Intercepting::Force { pod_ip, .. }) => {
+                let ic = wishes[svc.name.as_str()];
+                ensure(&slices, &k8s::intercept_slice(svc, &e.name_any(), &e.spec.owner, owner_ref, ic, Some(pod_ip)), ctx).await?;
+            }
+            // Inside the grace, or with an unreadable answer: the slice is left exactly as it is.
+            Some(Intercepting::Keep) => {}
+            // Deleted only when this service has a wish that is not in force, or had one in force
+            // last pass — not on every reconcile of every environment that never intercepted
+            // anything, which would be one wasted DELETE per service per tick.
+            // ponytail: a slice whose wish AND whose status record are both gone is collected only
+            // by the Environment's own delete (it is ownerReferenced); a list of the namespace's
+            // slices per pass is the upgrade path if one is ever seen stranded.
+            _ => {
+                if decided.is_some() || was_intercepted(&prev, &svc.name) {
+                    forget_applied(ctx, "EndpointSlice", ns, &slice);
+                    delete_ignoring_404(&slices, &slice).await?;
+                }
+            }
+        }
     }
+    intercept_policies(e, ns, &prev, &plan, owner_ref, ctx).await?;
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
     // ready the instant its object existed — so `kubectl wait --for=condition=Ready
@@ -447,7 +490,14 @@ async fn run_environment(
     // connectivity check failing two steps later.
     let mut service_status = Vec::with_capacity(e.spec.services.len());
     for svc in &e.spec.services {
-        service_status.push(deployment_status(deployments, &svc.name).await?);
+        // What is actually IN FORCE, never the wish: a stopped workspace leaves its intercept in
+        // spec and this reports `None`, which is what the web and the CLI show.
+        let by = match plan.get(svc.name.as_str()) {
+            Some(Intercepting::Force { ws, .. }) => Some(ws.name_any()),
+            Some(Intercepting::Keep) => prev_intercepted_by(&prev, &svc.name),
+            _ => None,
+        };
+        service_status.push(deployment_status(deployments, &svc.name, by).await?);
     }
     let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
@@ -472,6 +522,12 @@ async fn run_environment(
             // other node is an option whatever the copies hold, and a stale `True` left over from
             // the last stop is exactly the answer placement must never read.
             c.push(running_condition(&prev.conditions, gen));
+            // Why an intercept is, or is not, in force. The wish itself is never touched here —
+            // a controller does not write spec, and a stopped workspace must not discard what
+            // somebody asked for.
+            if let Some(ic) = intercept_condition(&plan, gen) {
+                c.push(ic);
+            }
             // A retirement in progress is told HERE, on the running environment, and nowhere else:
             // this write is the wholesale rewrite that used to erase the decommission beat's mark
             // every 15 s.
@@ -481,7 +537,9 @@ async fn run_environment(
         ..prev
     };
     write_env_status(e, st, ctx).await?;
-    Ok(if all_ready { Action::await_change() } else { Action::requeue(TICK) })
+    // A held intercept has to be looked at again: nothing woke us for the grace running out.
+    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep));
+    Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
 }
 
 /// One service's observed readiness, from the StatefulSet's own status.
@@ -489,19 +547,228 @@ async fn run_environment(
 /// `readyReplicas >= 1`, not `replicas`: `replicas` is what was asked for, `readyReplicas` is what
 /// is actually serving. A missing StatefulSet reports not-ready rather than erroring — it is the
 /// ordinary gap between applying it and the API server materializing it.
-async fn deployment_status(deployments: &Api<StatefulSet>, name: &str) -> Result<crd::ServiceStatus, ReconcileErr> {
+async fn deployment_status(
+    deployments: &Api<StatefulSet>,
+    name: &str,
+    // Decided by `intercept_plan`, threaded in rather than recomputed: this function reconstructs
+    // the whole `ServiceStatus` every pass, so anything it defaults here is stomped every pass.
+    intercepted_by: Option<String>,
+) -> Result<crd::ServiceStatus, ReconcileErr> {
     let Some(d) = deployments.get_opt(name).await? else {
-        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()), intercepted_by: None });
+        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()), intercepted_by });
     };
     let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
+    // An intercepted service is scaled to zero BY US, so zero ready replicas is the converged
+    // state, not a fault — reporting it not-ready would park the environment at `ServicesNotReady`
+    // and requeue it forever for as long as somebody is debugging.
+    if let Some(ws) = &intercepted_by {
+        return Ok(crd::ServiceStatus {
+            name: name.into(),
+            ready: true,
+            message: Some(format!("intercepted by {ws}")),
+            intercepted_by: intercepted_by.clone(),
+        });
+    }
     Ok(crd::ServiceStatus {
         name: name.into(),
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
-        // This reconciler reports the service's own health; intercept ownership is written
-        // where the intercept is decided, not recomputed here.
-        intercepted_by: None,
+        intercepted_by,
     })
+}
+
+/// How long the intercepting workspace's pod may be unreachable before the real service comes
+/// back up.
+///
+/// A pod restarting is unreachable for a few seconds, and bouncing the real StatefulSet up and
+/// down around every restart would be worse than the gap. Stopped, deleted and detached are NOT
+/// graced: each is a deliberate act, observed as itself rather than as an absence.
+const INTERCEPT_GRACE_SECS: i64 = 30;
+
+/// What this pass decided about one intercept — the spec's three states, plus the one thing an
+/// unreadable API answer is allowed to do, which is nothing.
+enum Intercepting {
+    /// In force: the real service off, the slice pointing at this pod.
+    Force { ws: Box<crd::Workspace>, pod_ip: String },
+    /// Either nothing is known (an API error) or the pod has not been unreachable long enough.
+    /// Render what the last pass rendered and look again — a blip in the API server must never
+    /// flap a service, and an unreadable answer is not evidence of anything.
+    Keep,
+    /// Not in force. The wish STAYS in spec; the rendering goes back to the ordinary one and the
+    /// condition says why.
+    Off { reason: &'static str, message: String, ws: Option<Box<crd::Workspace>> },
+}
+
+/// The wish per service (first entry wins) and what this pass decided about each.
+///
+/// Keyed by service name, and a wish naming a service this environment does not declare is
+/// dropped: `/v1` refuses one, and a hand-edited object must not make the controller flap.
+#[allow(clippy::type_complexity)]
+async fn intercept_plan<'a>(
+    e: &'a crd::Environment,
+    ctx: &Arc<Ctx>,
+) -> (std::collections::HashMap<&'a str, &'a crd::Intercept>, std::collections::HashMap<&'a str, Intercepting>) {
+    let mut wishes: std::collections::HashMap<&str, &crd::Intercept> = std::collections::HashMap::new();
+    let mut plan: std::collections::HashMap<&str, Intercepting> = std::collections::HashMap::new();
+    for ic in &e.spec.intercepts {
+        if !e.spec.services.iter().any(|s| s.name == ic.service) || wishes.contains_key(ic.service.as_str()) {
+            continue;
+        }
+        wishes.insert(&ic.service, ic);
+        plan.insert(&ic.service, decide_intercept(ic, &e.name_any(), ctx).await);
+    }
+    (wishes, plan)
+}
+
+/// One intercept's fate, from the Workspace and its pod. Never errors: an unreadable answer is
+/// `Keep`, which changes nothing at all.
+async fn decide_intercept(ic: &crd::Intercept, env_name: &str, ctx: &Arc<Ctx>) -> Intercepting {
+    let off = |reason, message: String, w: Option<crd::Workspace>| Intercepting::Off { reason, message, ws: w.map(Box::new) };
+    let w = match Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&ic.workspace).await {
+        Ok(Some(w)) => w,
+        Ok(None) => return off("WorkspaceGone", format!("{} no longer exists", ic.workspace), None),
+        Err(_) => return Intercepting::Keep,
+    };
+    if w.spec.desired_state == DesiredState::Stopped {
+        return off("WorkspaceStopped", format!("{} is stopped", ic.workspace), Some(w));
+    }
+    // `spec` only, never `crd::attached_environment`'s condition fallback: that reads back a
+    // DETACHED workspace's last attachment, which is the one answer this must not accept.
+    if w.spec.attached_environment.as_deref() != Some(env_name) {
+        return off("WorkspaceDetached", format!("{} is not attached to this environment", ic.workspace), Some(w));
+    }
+    let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
+    let pod = match w.status.as_ref().and_then(|s| s.pod_ref.clone()) {
+        Some(name) => match Api::<Pod>::namespaced(ctx.client.clone(), &ns).get_opt(&name).await {
+            Ok(p) => p,
+            Err(_) => return Intercepting::Keep,
+        },
+        None => None,
+    };
+    let ready = pod.as_ref().map(pod_ready);
+    let ip = pod.as_ref().and_then(|p| p.status.as_ref()?.pod_ip.clone());
+    // Read live and never stored: a pod IP changes on every recreate, and a stale one in status is
+    // a wrong answer that looks right — the same rule `bins/gateway/src/resolve.rs` already states.
+    if let (Some((true, _)), Some(ip)) = (ready, ip) {
+        return Intercepting::Force { ws: Box::new(w), pod_ip: ip };
+    }
+    // The clock is the POD's own `Ready` condition, or — with no pod at all — the Workspace's.
+    // Neither is a field this controller invented, and both are stamped by whoever observed the
+    // transition, so the grace measures the real outage rather than this pass's first sight of it.
+    // No clock anywhere means we cannot call the outage recent, and the safe answer is the real
+    // service: fall back rather than hold traffic on a pod nobody can date.
+    let since = ready
+        .and_then(|(_, t)| t)
+        .or_else(|| w.status.as_ref().and_then(|s| condition_time(&s.conditions, "Ready")));
+    let waited = since.map_or(INTERCEPT_GRACE_SECS, |t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
+    if waited < INTERCEPT_GRACE_SECS {
+        return Intercepting::Keep;
+    }
+    off("PodUnreachable", format!("{}'s pod has been unreachable for {waited}s", ic.workspace), Some(w))
+}
+
+/// A pod's `Ready` truth and the instant it last changed, in one read.
+fn pod_ready(p: &Pod) -> (bool, Option<i64>) {
+    p.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .into_iter()
+        .flatten()
+        .find(|c| c.type_ == "Ready")
+        .map_or((false, None), |c| (c.status == "True", c.last_transition_time.as_ref().map(|t| t.0.as_second())))
+}
+
+fn condition_time(conds: &[Condition], kind: &str) -> Option<i64> {
+    conds.iter().find(|c| c.type_ == kind).map(|c| c.last_transition_time.0.as_second())
+}
+
+/// What the LAST pass rendered for this service, read off the one record of it.
+fn prev_intercepted_by(prev: &crd::EnvironmentStatus, svc: &str) -> Option<String> {
+    prev.service_status.iter().find(|s| s.name == svc)?.intercepted_by.clone()
+}
+
+fn was_intercepted(prev: &crd::EnvironmentStatus, svc: &str) -> bool {
+    prev_intercepted_by(prev, svc).is_some()
+}
+
+/// The environment → workspace direction, which `allow_internet_egress` denies by default: without
+/// this pair an in-force intercept renders perfectly and delivers nothing.
+///
+/// Written from HERE and not from the workspace's own pass because the wish is this object's, and
+/// this pass already holds the Workspace the workspace-side half needs.
+async fn intercept_policies(
+    e: &crd::Environment,
+    ns: &str,
+    prev: &crd::EnvironmentStatus,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+    owner_ref: &OwnerReference,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    let here: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
+    let mut in_force: std::collections::HashSet<String> = Default::default();
+    for d in plan.values() {
+        let Intercepting::Force { ws, .. } = d else { continue };
+        let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
+        in_force.insert(ws.name_any());
+        ensure(&here, &k8s::intercept_egress(ns, &ws_ns, &ws.name_any(), &e.spec.owner, owner_ref), ctx).await?;
+        // The workspace-side half cannot be owned by this Environment: an ownerReference may not
+        // cross namespaces. Owned by the Workspace instead, exactly as the attach pair splits.
+        let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
+        let ws_ref = owner_ref_of_kind(&**ws)?;
+        ensure(&in_ws, &k8s::intercept_ingress(&ws_ns, ns, &ws.name_any(), &e.spec.owner, &ws_ref), ctx).await?;
+    }
+    // Every workspace this environment could still be holding a grant open for: one it wishes for
+    // and is not serving, and one the last pass recorded as in force.
+    // ponytail: a grant whose wish AND whose status record are both gone (a release that raced a
+    // lost status write) is left until the Environment is deleted, which collects it; a label
+    // selector over the namespace's policies is the upgrade path.
+    let mut stale: Vec<(String, Option<&crd::Workspace>)> = Vec::new();
+    for d in plan.values() {
+        if let Intercepting::Off { ws: Some(w), .. } = d {
+            stale.push((w.name_any(), Some(&**w)));
+        }
+    }
+    for s in &prev.service_status {
+        if let Some(by) = &s.intercepted_by {
+            stale.push((by.clone(), None));
+        }
+    }
+    for (id, ws) in stale {
+        if in_force.contains(&id) {
+            continue;
+        }
+        delete_ignoring_404(&here, &k8s::intercept_policy_name(&id)).await?;
+        forget_applied(ctx, "NetworkPolicy", ns, &k8s::intercept_policy_name(&id));
+        // The workspace-side half only when its namespace is actually known. A workspace that is
+        // GONE takes it with it — it is ownerReferenced — and the egress half above is what the
+        // traffic needed anyway, so an inert ingress rule opens nothing.
+        if let Some(w) = ws {
+            let ws_ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
+            let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
+            delete_ignoring_404(&in_ws, &k8s::intercept_policy_name(&id)).await?;
+            forget_applied(ctx, "NetworkPolicy", &ws_ns, &k8s::intercept_policy_name(&id));
+        }
+    }
+    Ok(())
+}
+
+/// One `Intercepted` condition for the whole environment: the first intercept that is NOT in
+/// force, since that is the one somebody has to act on, and otherwise that they are.
+///
+/// ponytail: one condition for every intercept, so a second not-in-force intercept is invisible
+/// until the first is dealt with; a per-service condition type is the upgrade path.
+fn intercept_condition(plan: &std::collections::HashMap<&str, Intercepting>, gen: i64) -> Option<Condition> {
+    if plan.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&str> = plan.keys().copied().collect();
+    names.sort_unstable();
+    for n in &names {
+        if let Intercepting::Off { reason, message, .. } = &plan[n] {
+            return Some(crd::condition("Intercepted", false, reason, &format!("{n}: {message}"), gen));
+        }
+    }
+    Some(crd::condition("Intercepted", true, "InForce", &format!("intercepted: {}", names.join(", ")), gen))
 }
 
 /// Pods in `ns` that can still be WRITING. A Succeeded or Failed pod holds no file handles and is

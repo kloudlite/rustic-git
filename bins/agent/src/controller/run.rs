@@ -243,6 +243,18 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .watches(Api::<crd::Quota>::all(ctx.client.clone()), watcher::Config::default(), move |_: crd::Quota| {
             all_in_store(&env_store_for_quota)
         })
+        // An intercept is in force only while the workspace serving it is up, so the environment
+        // has to reconcile on the workspace's OWN transitions — stopping, losing its pod, being
+        // deleted — or the real service would stay at zero replicas until the next tick.
+        // `spec.attachedEnvironment` is a field read and costs no API call; a workspace attached to
+        // nothing maps to nothing. Deliberately not `crd::attached_environment`, whose condition
+        // fallback would keep waking an environment a workspace has already left.
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), |w: crd::Workspace| {
+            w.spec
+                .attached_environment
+                .as_deref()
+                .map(kube::runtime::reflector::ObjectRef::<crd::Environment>::new)
+        })
         .shutdown_on_signal()
         .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {
