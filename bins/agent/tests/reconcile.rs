@@ -6059,6 +6059,19 @@ fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
         kloudlite_workspaces::kube_test::get(WEB_STS, ready_sts),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
+    // The slice list an in-force intercept reads to find what Kubernetes abandoned. Only added
+    // when the test has not supplied its own — a test about the abandoned slices needs the list to
+    // answer with them, and the first route for a path is the one that answers first.
+    let slice_list = format!("/apis/discovery.k8s.io/v1/namespaces/{ns}/endpointslices");
+    if !extra.iter().any(|e| e.method == "GET" && e.path == slice_list) {
+        r.push(kloudlite_workspaces::kube_test::get(
+            slice_list,
+            serde_json::json!({
+                "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "metadata": {},
+                "items": [{"metadata": {"name": "web-intercept", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []}],
+            }),
+        ));
+    }
     r.extend(extra);
     r
 }
@@ -6339,6 +6352,45 @@ async fn a_held_pass_that_rendered_no_intercept_last_time_deletes_the_stale_slic
         rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")),
         "a slice beside a selectored Service splits the traffic: {:?}", rec.calls()
     );
+}
+
+/// Kubernetes does not clean up after a Service that loses its selector: the endpointslice
+/// controller's slice and the legacy `Endpoints` object both keep naming the stopped pod, and
+/// kube-proxy unions them with ours. Measured on the fleet before this: two dials in six reached
+/// nothing. Our own slice must survive — deleting it is the outage this feature exists to avoid.
+#[tokio::test]
+async fn an_intercept_deletes_the_endpoints_kubernetes_abandoned_and_keeps_its_own() {
+    let tmp = env_tmp();
+    let abandoned = "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/web-x9k2p";
+    let endpoints = "/api/v1/namespaces/env-1/endpoints/web";
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+        kloudlite_workspaces::kube_test::get(
+            "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices",
+            serde_json::json!({
+                "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "metadata": {},
+                "items": [
+                    {"metadata": {"name": "web-intercept", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []},
+                    {"metadata": {"name": "web-x9k2p", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []},
+                ],
+            }),
+        ),
+        Route { method: "DELETE", path: abandoned.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: endpoints.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
+
+    let calls = rec.calls();
+    assert!(calls.iter().any(|c| c == &format!("DELETE {abandoned}")), "the abandoned slice goes: {calls:?}");
+    assert!(calls.iter().any(|c| c == &format!("DELETE {endpoints}")), "the legacy Endpoints goes: {calls:?}");
+    assert!(!calls.iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "ours stays: {calls:?}");
+    // AFTER the selector is gone, or the controllers that own them write them straight back.
+    let svc = calls.iter().position(|c| c == &format!("PATCH {WEB_SVC}")).expect("the Service is written");
+    let gone = calls.iter().position(|c| c == &format!("DELETE {abandoned}")).unwrap();
+    assert!(svc < gone, "the selector goes first: {calls:?}");
 }
 
 /// The clock-less hold, BOUNDED. No pod, and a workspace whose own controller has stopped stamping

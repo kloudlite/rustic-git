@@ -118,6 +118,8 @@
 #                                                                       the intercepting workspace pod's
 #                                                                       IP for the service an attached
 #                                                                       workspace is intercepting
+#                                          list                         the slices Kubernetes abandoned
+#                                                                       for an intercepted service
 #                                          delete                       release: only a slice this
 #                                                                       controller wrote, for a service
 #                                                                       of an environment it reconciles,
@@ -274,7 +276,15 @@ rules:
   # a namespace it reconciles (agent-admission.yaml's DELETE fence pins the namespace).
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["create", "patch", "delete"]
+    verbs: ["create", "patch", "list", "delete"]
+  # `endpoints`: the legacy object beside the slices. Kubernetes abandons it — neither updating nor
+  # deleting it — when an intercepted Service loses its selector, and the mirroring controller
+  # rebuilds a slice from it, so an intercept that deletes only slices still splits the service's
+  # traffic between the workspace and the stopped pod. Deleted by the Service's own name, for a
+  # service of an environment this controller reconciles.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["delete"]
   # Namespaces are the one thing read back: `namespace_ready` GETs the workspace's own namespace
   # so a node that has never seen a team is gated on the namespace's existence, not on a
   # cluster-scoped condition another node wrote. `get`, never `list` — the agent has no reason to

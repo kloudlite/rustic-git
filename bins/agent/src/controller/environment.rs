@@ -5,7 +5,7 @@ use super::stop::{replicated_condition, running_condition, stop_name, stop_push,
 use super::workspace::{cleared_node_dead, replaced};
 use super::{my_node, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, ResourceQuota, Service};
+use k8s_openapi::api::core::v1::{Endpoints, LimitRange, Namespace, Pod, ResourceQuota, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;
@@ -471,6 +471,17 @@ async fn run_environment(
                 forget_applied(ctx, "Service", ns, &svc.name);
             }
         }
+        // Kubernetes ABANDONS what it built while the Service had a selector rather than deleting
+        // it: the endpointslice controller's own slice, and the legacy `Endpoints` object, both
+        // keep naming the stopped pod. kube-proxy unions every slice of a service, so the real
+        // pod's address survives beside ours — measured on the fleet as two of six connections
+        // going nowhere. Deleted AFTER the selector is gone, never before, or the controllers that
+        // own them write them straight back; and the `Endpoints` object is the load-bearing half,
+        // since the mirroring controller rebuilds a slice from it and deleting slices alone does
+        // not hold.
+        if intercepted {
+            drop_abandoned_endpoints(&slices, ns, &svc.name, &slice, ctx).await?;
+        }
         match decided {
             // Already written, above.
             Some(Intercepting::Force { .. }) => {}
@@ -562,6 +573,30 @@ async fn run_environment(
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
     let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. }));
     Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
+}
+
+/// Every endpoint object for `service` that this controller did not write, gone.
+///
+/// Bounded by the service's own label and by `ours`, so it can only ever remove what Kubernetes
+/// abandoned for the one service being intercepted, in a namespace this controller reconciles.
+async fn drop_abandoned_endpoints(
+    slices: &Api<EndpointSlice>,
+    ns: &str,
+    service: &str,
+    ours: &str,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    let lp = kube::api::ListParams::default().labels(&format!("kubernetes.io/service-name={service}"));
+    for s in slices.list(&lp).await?.items {
+        let name = s.name_any();
+        if name == ours {
+            continue;
+        }
+        forget_applied(ctx, "EndpointSlice", ns, &name);
+        delete_ignoring_404(slices, &name).await?;
+    }
+    // Named exactly for the Service, which is what makes this safe to delete by name.
+    delete_ignoring_404(&Api::<Endpoints>::namespaced(ctx.client.clone(), ns), service).await
 }
 
 /// One service's observed readiness, from the StatefulSet's own status.
