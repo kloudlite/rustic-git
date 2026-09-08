@@ -1052,6 +1052,12 @@ pub const DEFAULT_TEAM_QUOTA: &str = "default-team";
 /// The bootstrap table from the design doc, owner-approved 2026-09-03. In code rather than in a
 /// manifest so an owner with no `Quota` and a cluster with no `default-*` object still has a
 /// definite ceiling — a missing fallback object must not mean "unlimited".
+///
+/// `cpu` and `memoryGb` are DERIVED from the count dimensions, never picked independently: quota
+/// charges the LIMIT (`workspace_cost`, `environment_cost`), so a ceiling must cover
+/// `workspaces x PodResources::default()` plus `environments x 4 services x env_unit_resources()`
+/// (four being the environment size we plan for), or the counts are unreachable and cpu refuses
+/// first. Change a count or either limit and recompute this, or the dimensions drift apart again.
 pub fn default_quota(team: bool) -> QuotaSpec {
     if team {
         QuotaSpec {
@@ -1059,8 +1065,8 @@ pub fn default_quota(team: bool) -> QuotaSpec {
             environments: 8,
             snapshots: 80,
             disk_gb: 400,
-            cpu: 32,
-            memory_gb: 128,
+            cpu: 144,
+            memory_gb: 288,
             regions: Vec::new(),
         }
     } else {
@@ -1069,8 +1075,8 @@ pub fn default_quota(team: bool) -> QuotaSpec {
             environments: 2,
             snapshots: 20,
             disk_gb: 100,
-            cpu: 8,
-            memory_gb: 32,
+            cpu: 36,
+            memory_gb: 72,
             regions: Vec::new(),
         }
     }

@@ -2069,8 +2069,8 @@ mod tests {
     fn a_resource_quota_caps_the_namespaces_limits() {
         let rq = resource_quota("ws-alice", "alice", "workspace", &crate::crd::default_quota(false));
         let hard = rq.spec.unwrap().hard.unwrap();
-        assert_eq!(hard["limits.cpu"].0, "8");
-        assert_eq!(hard["limits.memory"].0, "32Gi");
+        assert_eq!(hard["limits.cpu"].0, "36");
+        assert_eq!(hard["limits.memory"].0, "72Gi");
         assert_eq!(rq.metadata.labels.unwrap()["kloudlite.io/owner"], "alice");
         // No ownerReference, the same reason the namespace and the LimitRange have none: the cap
         // is shared by every workspace in here and must not vanish with any one of them.

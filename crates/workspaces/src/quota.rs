@@ -244,6 +244,25 @@ mod tests {
         assert_eq!(crd::default_quota(false).workspaces, 5);
     }
 
+    /// cpu and memoryGb are derived from the counts, so the counts must actually be reachable:
+    /// every workspace plus every environment at the size we plan for has to fit under them. This
+    /// is the test that catches a raised count, or a changed pod limit, left out of the table.
+    #[test]
+    fn the_default_cpu_and_memory_cover_the_counts_they_promise() {
+        const SERVICES_PER_ENV: u64 = 4;
+        for team in [false, true] {
+            let q = crd::default_quota(team);
+            let ws = crate::api::workspace_cost(0, &crd::PodResources::default());
+            let env = crate::api::environment_cost(0, SERVICES_PER_ENV as usize);
+            for dim in [Dim::Cpu, Dim::MemoryGb] {
+                let of = |cost: &[(Dim, u64)]| cost.iter().find(|(d, _)| *d == dim).map_or(0, |(_, n)| *n);
+                let need = u64::from(q.workspaces) * of(&ws) + u64::from(q.environments) * of(&env);
+                let have = u64::from(if dim == Dim::Cpu { q.cpu } else { q.memory_gb });
+                assert!(have >= need, "{dim:?}: {have} does not cover {need} for team={team}");
+            }
+        }
+    }
+
     #[test]
     fn a_check_refuses_only_when_the_addition_would_cross_the_limit() {
         let limit = crate::crd::default_quota(false);
