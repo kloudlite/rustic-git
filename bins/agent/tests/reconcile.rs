@@ -4930,6 +4930,39 @@ async fn snapshot_model_clone_with_a_missing_snapshot_settles_as_no_such_snapsho
     assert_eq!(cond["reason"], "NoSuchSnapshot");
 }
 
+/// The same missing snapshot, but the clone's worktree is already on disk: the cut was consumed
+/// at checkout and retention pruned it once the clone was `Ready` (as it should), so a later pass
+/// must not re-judge it. The live failure: a clone ran, its source cut a newer sync point, and the
+/// clone's next reconcile settled `NoSuchSnapshot` over a worktree that was perfectly fine.
+#[tokio::test]
+async fn snapshot_model_a_materialised_clone_survives_its_pruned_graft_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
+    let routes = vec![
+        source_workspace_exists("ws-src"),
+        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
+        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
+        kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-gone"),
+        ready_binding(),
+        ready_namespace(),
+        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let w = cloned_workspace("ws-src-gone", None);
+
+    // Runs past the checkout arm and then fails on the next unmocked route — the point is what
+    // it did NOT write on the way.
+    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await;
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert!(
+        !sent.iter().any(|s| s["status"]["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["reason"] == "NoSuchSnapshot"))),
+        "a clone with its worktree must not be judged on a cut it no longer needs: {sent:?}"
+    );
+    assert!(!rec.calls().iter().any(|c| c.contains("snapshots/ws-src-gone")), "the cut is not even asked about: {:?}", rec.calls());
+}
+
 /// Restoring a snapshot of a DELETED workspace — the case durable snapshots exist for. No
 /// `Workspace` named by `cloneOf.volume` exists any more; the detached `Volume` does, and that is
 /// what `check_source` must look at. The live failure was a permanent `NoSuchSource` here.

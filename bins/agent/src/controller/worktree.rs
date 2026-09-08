@@ -100,7 +100,12 @@ pub(crate) async fn worktree_gate(
     // failing this parent on a swept snapshot it was never going to use would kill one that has
     // perfectly good state. Only a volume that would ACTUALLY resolve to the clone snapshot can be
     // permanently broken by that snapshot being gone.
-    if let Some(commit) = clone_commit {
+    // Only while the worktree is not there yet: the cut is what a clone is checked out FROM, and
+    // once the worktree exists retention is free to prune it (`seeded_from_cuts` keeps it only
+    // for an unmaterialised clone). Re-checking it on every later pass declared a running clone
+    // `NoSuchSnapshot` the moment its source cut a newer sync point — the live failure of
+    // 2026-09-08 (`main43`).
+    if let Some(commit) = clone_commit.filter(|_| !have_worktree) {
         let phase = if effective_head.as_deref() == Some(commit) {
             crate::claim::snapshot_phase(ctx, &id, commit).await?
         } else {
