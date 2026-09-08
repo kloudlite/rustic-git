@@ -680,6 +680,16 @@ export function listPulls(token: string, owner: string, name: string) {
   return call<ApiPull[]>(`${repoPath(owner, name)}/pulls?limit=100`, { method: "GET", token });
 }
 
+/** Delete a branch, compare-and-swap on the oid the page listed. A refusal (protected,
+ *  default, an open pull request's head, a branch that moved) is a 409 whose sentence is
+ *  the api's own and is shown as-is. */
+export function deleteBranch(token: string, owner: string, name: string, branch: string, oid: string) {
+  return call<void>(
+    `${repoPath(owner, name)}/branches/${encodeURIComponent(branch)}?oid=${encodeURIComponent(oid)}`,
+    { method: "DELETE", token },
+  );
+}
+
 export function getPull(token: string, owner: string, name: string, number: number) {
   return call<ApiPull>(`${repoPath(owner, name)}/pulls/${number}`, { method: "GET", token });
 }
