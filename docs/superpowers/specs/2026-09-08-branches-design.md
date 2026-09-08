@@ -48,7 +48,7 @@ mirrors the pattern grammar the server already documents (glob `*` only).
 
 ### 3. Web (`web/apps/web`)
 
-A `Branches` tab between Code and Pull requests (`REPO_TABS`, suffix `/branches`). The page,
+No tab: the Code tab's About rail already says "N branches", and that line links to the page (decided 2026-09-08 after seeing the tab). The page,
 `[owner]/[repo]/branches/page.tsx`, reads refs + protection + open pulls in parallel, filters
 `refs/heads/`, orders the default branch first then alphabetically, and renders one row per branch
 in the `repo-list.tsx` shape: name (links to `/{owner}/{repo}/tree?ref=`), short oid, pills

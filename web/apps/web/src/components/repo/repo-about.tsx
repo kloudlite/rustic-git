@@ -55,7 +55,7 @@ export function RepoAbout({
         </p>
         <div className="mt-3 grid">
           <Fact icon={History} href={`${base}/commits`}>History</Fact>
-          <Fact icon={GitBranch}>{branches === 1 ? "1 branch" : `${branches} branches`}</Fact>
+          <Fact icon={GitBranch} href={`${base}/branches`}>{branches === 1 ? "1 branch" : `${branches} branches`}</Fact>
           <Fact icon={Tag}>{tags === 1 ? "1 tag" : `${tags} tags`}</Fact>
           {isPrivate && <Fact icon={Lock}>Private</Fact>}
         </div>
