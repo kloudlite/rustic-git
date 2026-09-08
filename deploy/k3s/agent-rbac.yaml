@@ -114,6 +114,14 @@
 #   statefulsets (apps)                    get,list,watch               deployment_status; watch
 #                                          create,patch                 ensure; restore_gate scale
 #                                          delete                       stop
+#   endpointslices (discovery.k8s.io)     create,patch                 intercept controller: names
+#                                                                       the intercepting workspace pod's
+#                                                                       IP for the service an attached
+#                                                                       workspace is intercepting
+#                                          delete                       release: only a slice this
+#                                                                       controller wrote, for a service
+#                                                                       of an environment it reconciles,
+#                                                                       in a namespace it reconciles
 #   secrets                                get,create                   ensure_ssh — NOT here: bound
 #                                                                       per `ws-*` namespace by the
 #                                                                       agent itself (below)
@@ -258,6 +266,14 @@ rules:
   # is ever removed except by its owner's garbage collection.
   - apiGroups: [""]
     resources: ["services"]
+    verbs: ["create", "patch", "delete"]
+  # `endpointslices`: written only while an environment's service is intercepted by an attached
+  # workspace, naming the workspace pod's IP so traffic reaches it instead of the stopped service's
+  # own pods. `delete` releases the intercept — bounded the same way every other delete here is
+  # bounded: only a slice this controller wrote, for a service of an environment it reconciles, in
+  # a namespace it reconciles (agent-admission.yaml's DELETE fence pins the namespace).
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
     verbs: ["create", "patch", "delete"]
   # Namespaces are the one thing read back: `namespace_ready` GETs the workspace's own namespace
   # so a node that has never seen a team is gated on the namespace's existence, not on a
