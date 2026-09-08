@@ -25,5 +25,8 @@ export async function deleteBranch(_prev: DeleteState, formData: FormData): Prom
   const r = await api.deleteBranch(token, owner, repo, branch, oid);
   if (!r.ok) return { error: r.message || "Could not delete the branch." };
   revalidatePath(`/${owner}/${repo}/branches`);
+  // The Code tab's branch picker is rendered by the repo root, which would keep offering a branch
+  // that no longer exists until its own cache entry expired.
+  revalidatePath(`/${owner}/${repo}`);
   return null;
 }

@@ -534,8 +534,10 @@ pub(crate) async fn branch_delete(api: &Api, owner: &str, name: &str, branch: &s
     };
     // It becomes a ref update's `old` on the node, so it is checked as an object id HERE rather
     // than forwarded and refused a hop later — same rule as `Digest::parse` on the registry paths.
-    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-        return (StatusCode::BAD_REQUEST, "oid must be a 40-character commit id").into_response();
+    // 64 as well as 40: a sha256 repo's ids are 32 bytes, and refusing them here would make the
+    // branch page of such a repo undeletable for a reason no message could explain.
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return (StatusCode::BAD_REQUEST, "oid must be a 40- or 64-character commit id").into_response();
     }
     if branch == DEFAULT_BRANCH {
         return (StatusCode::CONFLICT, "the default branch cannot be deleted").into_response();
@@ -570,11 +572,18 @@ pub(crate) async fn branch_delete(api: &Api, owner: &str, name: &str, branch: &s
     }
 }
 
+/// How many open pull requests this tier will read before it stops trusting the answer. The node's
+/// `api_pulls` has no maximum of its own (an absent `limit` means unbounded), so the cap is ours:
+/// bounded so one repo's queue cannot become an unbounded body here, and asked for EXPLICITLY so a
+/// truncated page is recognisable by its length.
+const PULLS_CAP: usize = 1_000;
+
 /// The number of an OPEN pull request whose head is `branch`, if there is one. Read from the
 /// owning node rather than the directory: pull requests live in the repo's own database now
 /// (`kloudlite_pulls::pulls`), and this tier has no handle on it.
 async fn open_pull_on(api: &Api, owner: &str, name: &str, branch: &str) -> std::result::Result<Option<i64>, Response> {
-    let url = format!("{}/api/{}/{}/pulls?state=open", api.upstream, encode(owner), encode(name));
+    let url =
+        format!("{}/api/{}/{}/pulls?state=open&limit={PULLS_CAP}", api.upstream, encode(owner), encode(name));
     let r = to_owner(api, api.client.get(url), Some(owner)).await?;
     if !r.status().is_success() {
         tracing::error!(reason = "pulls", owner = %owner, name = %name, status = r.status().as_u16(), "upstream.request.failed");
@@ -589,10 +598,20 @@ async fn open_pull_on(api: &Api, owner: &str, name: &str, branch: &str) -> std::
             return Err((StatusCode::BAD_GATEWAY, "could not read the open pull requests").into_response());
         }
     };
-    Ok(list
-        .iter()
-        .find(|p| p["state"] == "open" && p["head"] == branch)
-        .and_then(|p| p["number"].as_i64()))
+    if let Some(n) = list.iter().find(|p| p["state"] == "open" && p["head"] == branch) {
+        return Ok(n["number"].as_i64());
+    }
+    // A full page means the listing was truncated, so "no pull request on this branch" is a
+    // guess and the one guess that lets the delete through. Refuse instead.
+    if list.len() >= PULLS_CAP {
+        tracing::error!(reason = "pulls", owner = %owner, name = %name, "upstream.listing.capped");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "too many open pull requests to check; close some first",
+        )
+            .into_response());
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -844,10 +863,10 @@ mod tests {
     /// `old` on the node.
     #[tokio::test]
     async fn an_oid_that_is_not_an_object_id_is_refused() {
-        for bad in ["abc123", "0123456789ABCDEF0123456789abcdef01234567", &"a".repeat(41), "../etc"] {
+        for bad in ["abc123", "0123456789ABCDEF0123456789abcdef01234567", &"a".repeat(41), &"a".repeat(63), &"a".repeat(65), "../etc"] {
             let (status, body, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(bad)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
-            assert_eq!(body, "oid must be a 40-character commit id");
+            assert_eq!(body, "oid must be a 40- or 64-character commit id");
             assert!(asked.is_empty(), "{bad} reached the node");
         }
     }
@@ -866,6 +885,61 @@ mod tests {
         let (status, body, _) = delete_against(serde_json::json!([]), (404, "nope"), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, "no such branch");
+    }
+
+    /// Catches: a sha256 repo's 64-character ids being refused at this tier.
+    #[tokio::test]
+    async fn a_sha256_oid_is_accepted() {
+        let oid = "a".repeat(64);
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(&oid)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked, vec![("x".into(), oid)]);
+    }
+
+    /// Catches: a truncated pull listing reading as "no open change" — the one answer that lets
+    /// the delete through.
+    #[tokio::test]
+    async fn a_capped_pulls_listing_refuses_the_delete() {
+        let pulls = serde_json::Value::Array(
+            (0..PULLS_CAP)
+                .map(|i| serde_json::json!({"number": i, "head": "other", "state": "open"}))
+                .collect(),
+        );
+        let (status, body, asked) = delete_against(pulls, (204, ""), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body, "too many open pull requests to check; close some first");
+        assert!(asked.is_empty(), "the node was asked to delete on a guess");
+    }
+
+    /// The proxy fallback is GET-only, so the write path is the `/v1` route and nothing else: a
+    /// POST to the node's own `branchdelete` path cannot be smuggled through this tier.
+    #[tokio::test]
+    async fn the_browse_fallback_will_not_carry_a_delete() {
+        let (upstream, asked) = branch_node(serde_json::json!([]), (204, "")).await;
+        let os: Arc<dyn slatedb::object_store::ObjectStore> =
+            Arc::new(slatedb::object_store::memory::InMemory::new());
+        let store = Arc::new(Store::open(os, std::env::temp_dir(), false).await.unwrap());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(crate::serve(
+            store,
+            Arc::new(Cache::memory()),
+            None,
+            None,
+            upstream,
+            "s".into(),
+            l,
+            None,
+            None,
+            false,
+        ));
+        let r = reqwest::Client::new()
+            .post(format!("{base}/api/alice/web/branchdelete?branch=x&oid={OID}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+        assert!(asked.lock().unwrap().is_empty(), "the fallback forwarded a POST");
     }
 
     #[tokio::test]

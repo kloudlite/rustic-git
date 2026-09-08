@@ -877,6 +877,27 @@ mod tests {
         }
     }
 
+    /// The gate above (`c.suite != Suite::Hourly`) and the catalogue's `walks()` are two
+    /// statements of one rule, and only one of them is what a report is checked against: an id the
+    /// journey lists but no stage walks reads as a hole, and one a stage walks but the journey does
+    /// not reads as a sample nobody asked for.
+    #[test]
+    fn the_catalogue_walks_the_branch_ids_in_exactly_the_hourly_journey() {
+        for suite in [Suite::Fast, Suite::Hourly, Suite::Weekly, Suite::Monthly] {
+            let ids: Vec<&str> = kloudlite_workspaces::slo::catalogue::journey(suite)
+                .into_iter()
+                .flat_map(|(_, ids)| ids)
+                .collect();
+            for id in BRANCH_IDS {
+                assert_eq!(
+                    ids.contains(&id),
+                    suite == Suite::Hourly,
+                    "{id} in {suite:?}'s journey disagrees with the stage's own gate"
+                );
+            }
+        }
+    }
+
     /// The one step whose polarity is inverted. An `ssh` that SUCCEEDS with a key the fleet has
     /// never seen is the refusal not happening, and must be recorded as a failure — the bug this
     /// guards against is the natural one, writing the step as "did the command run".
