@@ -1208,3 +1208,135 @@ async fn a_change_on_a_branch_name_git_will_not_accept_is_refused() {
     let (s, _) = open_pr(&router, "/api/alice/widget/pulls", "fine", "feature/ok-1.2").await;
     assert_eq!(s, StatusCode::CREATED);
 }
+
+/// A branch pushed by a person is deletable from the web, through the same `update_refs` a push
+/// goes through -- and it is gone from `refs` afterwards, not merely reported as gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_is_deleted_through_the_ref_write_path() {
+    use kloudlite_gitbase::refs::UpdateRefsExt;
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let tip = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    e.store
+        .update_refs(
+            &repo,
+            &[kloudlite_gitbase::refs::RefUpdate {
+                name: "refs/heads/feature".into(),
+                old: None,
+                new: Some(tip),
+            }],
+        )
+        .await
+        .unwrap();
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    let path = format!("/api/alice/web/branchdelete?branch=feature&oid={}", tip.to_hex());
+    assert_eq!(post_as(&router, "alice", &path).await, StatusCode::NO_CONTENT);
+    let (_, refs) = get_as(&router, "alice", "/api/alice/web/refs").await;
+    let names: Vec<&str> = refs.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(!names.contains(&"refs/heads/feature"), "still listed: {names:?}");
+}
+
+/// The default branch is never deletable from the web, whatever the caller sends.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_branch_cannot_be_deleted() {
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let tip = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    let path = format!("/api/alice/web/branchdelete?branch=main&oid={}", tip.to_hex());
+    let (status, body) = post_full_as(&router, "alice", &path).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "the default branch cannot be deleted");
+}
+
+/// The oid the page saw is a compare-and-swap: a branch that moved under the reader is refused,
+/// and still there. This is the case a plain delete would silently lose commits in.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_branch_is_not_deleted() {
+    use kloudlite_gitbase::refs::UpdateRefsExt;
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let tip = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    e.store
+        .update_refs(
+            &repo,
+            &[kloudlite_gitbase::refs::RefUpdate {
+                name: "refs/heads/feature".into(),
+                old: None,
+                new: Some(tip),
+            }],
+        )
+        .await
+        .unwrap();
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    let stale = "0".repeat(40);
+    let path = format!("/api/alice/web/branchdelete?branch=feature&oid={stale}");
+    let (status, body) = post_full_as(&router, "alice", &path).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, "the branch moved; reload");
+    let (_, refs) = get_as(&router, "alice", "/api/alice/web/refs").await;
+    let names: Vec<&str> = refs.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"refs/heads/feature"));
+}
+
+/// A protection rule refuses the delete in its own words -- the web route is not a way around the
+/// rule the push path obeys.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_protected_branch_is_not_deleted() {
+    use kloudlite_gitbase::refs::UpdateRefsExt;
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let tip = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    e.store
+        .update_refs(
+            &repo,
+            &[kloudlite_gitbase::refs::RefUpdate {
+                name: "refs/heads/feature".into(),
+                old: None,
+                new: Some(tip),
+            }],
+        )
+        .await
+        .unwrap();
+    e.store
+        .set_protection(
+            "alice",
+            "web",
+            &kloudlite_gitbase::refs::Protection {
+                pattern: "feature".into(),
+                no_force: true,
+                no_delete: true,
+            },
+        )
+        .await
+        .unwrap();
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    let path = format!("/api/alice/web/branchdelete?branch=feature&oid={}", tip.to_hex());
+    let (status, body) = post_full_as(&router, "alice", &path).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("cannot be deleted"), "{body}");
+}
+
+/// Somebody who may not see the repo may not learn which of its branches exist, and may not
+/// delete one: 404, the same answer every read here gives them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranger_cannot_delete_a_branch() {
+    let e = common::env().await;
+    let repo = common::push_fixture(&e, "alice", "web").await;
+    let tip = e.store.get_ref(&repo, "refs/heads/master").await.unwrap().unwrap();
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    let path = format!("/api/alice/web/branchdelete?branch=master&oid={}", tip.to_hex());
+    assert_eq!(post_as(&router, "bob", &path).await, StatusCode::NOT_FOUND);
+}
+
+/// A request with no branch is the caller's bug, answered before anything is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_delete_needs_a_branch() {
+    let e = common::env().await;
+    common::push_fixture(&e, "alice", "web").await;
+    let router = kloudlite_server::router::peer_router(common::app(e.store.clone()).await);
+    assert_eq!(
+        post_as(&router, "alice", "/api/alice/web/branchdelete?oid=deadbeef").await,
+        StatusCode::BAD_REQUEST
+    );
+}

@@ -94,7 +94,10 @@ pub(super) fn parse_oid(s: &str) -> Result<ObjectId, Response> {
     s.parse::<ObjectId>().map_err(|_| hidden())
 }
 
-use admin::{api_create, api_delete, api_description, api_protect, api_protections, api_visibility};
+use admin::{
+    api_branch_delete, api_create, api_delete, api_description, api_protect, api_protections,
+    api_visibility,
+};
 use images::{imagedelete, images, imagetagdelete, imagetags, imagevisibility};
 use merge::{api_compare, api_merge, api_patch};
 use pulls::{
@@ -201,6 +204,10 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route(
             "/api/{owner}/{name}/pulls/{number}/mergeability",
             post(api_pull_mergeability).layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/{owner}/{name}/branchdelete",
+            post(api_branch_delete).layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
             "/api/{owner}/{name}/protect",

@@ -221,9 +221,9 @@ pub(crate) const GIT_ROUTE_TAILS: [&str; 3] = ["info", "git-upload-pack", "git-r
 /// repo-scoped like the rest (though the first four route by the IMAGE key and the last by the
 /// VOLUME key — see `repo_of`). `images` and `volumes` are the two owner-scoped exceptions — see
 /// `api_route`.
-pub(crate) const BROWSE_TAILS: [&str; 24] = [
+pub(crate) const BROWSE_TAILS: [&str; 25] = [
     "refs", "tree", "blob", "log", "commit", "files", "lastmod", "compare", "signature",
-    "visibility", "create", "description", "delete", "protect", "merge", "patch", "images", "imagetags",
+    "visibility", "create", "description", "delete", "protect", "branchdelete", "merge", "patch", "images", "imagetags",
     "imagetagdelete", "imagedelete", "imagevisibility",
     // `volumes` is owner-scoped like `images` (two segments, no name); `volumehistory` names a
     // VOLUME and routes by the volume key, below.

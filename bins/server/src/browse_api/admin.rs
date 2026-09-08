@@ -267,6 +267,65 @@ pub(super) async fn api_delete(
     }
 }
 
+/// Delete a branch ON THE NODE THAT OWNS IT, through `update_refs` — the one ref-write path, so
+/// the protection rules, the ref-name rule and the ref-list cache invalidation all apply exactly
+/// as they do to a push. Nothing here deletes objects: the commits stay until gc decides.
+///
+/// The caller sends the oid it saw, and the delete is a compare-and-swap on it, so a branch that
+/// moved between the page render and the click is refused rather than silently dropped.
+///
+/// Read-gated with `open_ro` like the reads beside it rather than on the peer secret alone: it is
+/// the call that yields the `Repo` this needs anyway, and a caller who may not SEE the repo must
+/// not be told which of its branches exist. Whether they may WRITE is still the api tier's
+/// question (`settings_caller`), asked before it forwards.
+pub(super) async fn api_branch_delete(
+    State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(branch) = q.get("branch").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "a branch is required").into_response();
+    };
+    let refname = format!("refs/heads/{branch}");
+    if !crate::refs::valid_ref_name(&refname) {
+        return (StatusCode::BAD_REQUEST, "invalid branch name").into_response();
+    }
+    let Some(old) = q.get("oid").and_then(|v| gix_hash::ObjectId::from_hex(v.as_bytes()).ok()) else {
+        return (StatusCode::BAD_REQUEST, "a valid oid is required").into_response();
+    };
+    // Before the repo is even opened: the default branch is not deletable from anywhere, and
+    // saying so does not depend on whether it exists.
+    if branch == crate::refs::DEFAULT_BRANCH {
+        return (StatusCode::CONFLICT, "the default branch cannot be deleted").into_response();
+    }
+    let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match app.store.get_ref(&repo, &refname).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return hidden(),
+        Err(e) => return internal(e),
+    }
+    let update = [crate::refs::RefUpdate { name: refname, old: Some(old), new: None }];
+    match crate::refs::update_refs(&app.store, &repo, &update).await {
+        Ok(r) => match r.into_iter().next().flatten() {
+            None => StatusCode::NO_CONTENT.into_response(),
+            // `update_refs_txn` answers a compare-and-swap miss with push's own word ("fetch
+            // first") and a serialization conflict with "conflict: ..."; neither is an `Err`.
+            // Both mean the same thing to someone looking at a branch list.
+            Some(reason) if reason == "fetch first" || reason.starts_with("conflict:") => {
+                (StatusCode::CONFLICT, "the branch moved; reload").into_response()
+            }
+            // A protection rule refused it, in its own words.
+            Some(reason) => (StatusCode::CONFLICT, reason).into_response(),
+        },
+        Err(e) => internal(e),
+    }
+}
+
 /// Branch protection rules. GET lists them; POST sets one; POST with `remove`
 /// drops one. On the owning node because the rules live in the repo's own
 /// database — the same database the push path reads them from.
