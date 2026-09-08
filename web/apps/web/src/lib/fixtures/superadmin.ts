@@ -499,7 +499,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["id.token.revoked", "Security", "A revoked token is refused", "99.9 %", "fast", "9 · Security"],
   ["repo.visibility", "Security", "A repo flipped private is hidden from a non-collaborator, and is hidden again after being flipped back", "100 %", "fast", "9 · Security"],
   ["repo.visibility.public", "Git hosting", "A repo flipped public becomes readable to another owner", "99.9 %", "fast", "9 · Security"],
-  ["agent.spec.allowed", "Security", "The two spec writes the agent's ClusterRole grants are still admitted", "99.9 %", "fast", "9 · Security"],
+  ["agent.spec.allowed", "Security", "The spec write the agent's ClusterRole grants — `Volume.spec.restoreTo` — is still admitted", "99.9 %", "fast", "9 · Security"],
   ["sec.peer.listener", "Security", "The git tier's public listener refuses `/api/`, on a repo that exists and one that does not", "100 %", "fast", "9 · Security"],
   ["edge.dns", "Edge and pipeline", "The public hostname resolves", "99.99 %", "fast", "10 · Edge"],
   ["edge.cert", "Edge and pipeline", "The TLS certificate is valid for the public hostname", "99.9 %", "fast", "10 · Edge"],

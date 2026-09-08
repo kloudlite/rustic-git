@@ -147,8 +147,8 @@ node's controller writes **status** (observed) through the `/status` subresource
 the ValidatingAdmissionPolicy in `deploy/k3s/agent-admission.yaml` — not convention — is what
 stops a controller editing desired state: the agent's ClusterRole (`deploy/k3s/agent-rbac.yaml`,
 whose header table IS the role) keeps `patch` on the main resources only for labels, finalizers
-and the two spec fields a parent's reconciler copies into its own child (`Volume.spec.restoreTo`,
-and `Volume.spec.quotaGb` on the home volume an `OwnerBinding` owns),
+and the one spec field a parent's reconciler copies into its own child (`Volume.spec.restoreTo`;
+the `Volume.spec.quotaGb` exception went with the btrfs home, since an NFS home has no Volume),
 and the policy refuses it any other spec change. Apply both files.
 
 **Allocation is bounded by a `Quota` per owner.** A cluster-scoped `Quota` CR named by the owner

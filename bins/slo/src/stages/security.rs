@@ -398,7 +398,11 @@ async fn agent_spec_allowed(c: &mut Ctx, volume: Option<String>) {
                         "requestedAt": "2026-01-01T00:00:00Z",
                     }}}),
                 ),
-                ("spec.quotaGb", serde_json::json!({ "spec": { "quotaGb": 1 } })),
+                // `spec.quotaGb` USED to be the second one, on the home volume an `OwnerBinding`
+                // owned. That exception left the policy with the btrfs home itself — the shared
+                // NFS home has no Volume and no qgroup — so asserting it is admitted asserts a
+                // grant the design removed. It only ever passed because this step skips when the
+                // cluster holds no Volume, which an empty fleet usually does.
             ] {
                 match api.patch(&volume, &params, &kube::api::Patch::Merge(&patch)).await {
                     Ok(_) => {}

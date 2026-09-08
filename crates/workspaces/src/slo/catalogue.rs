@@ -325,7 +325,7 @@ pub const CATALOGUE: &[Slo] = &[
     // not read when public is an availability failure, not a leak, and neither belongs in a budget
     // that allows no failures at all.
     Slo { id: "repo.visibility.public", feature: "Git hosting", sli: "A repo flipped public becomes readable to another owner", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
-    Slo { id: "agent.spec.allowed", feature: "Security", sli: "The two spec writes the agent's ClusterRole grants are still admitted", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
+    Slo { id: "agent.spec.allowed", feature: "Security", sli: "The spec write the agent's ClusterRole grants — `Volume.spec.restoreTo` — is still admitted", target: avail(99.9), suite: Suite::Fast, stage: "9 · Security" },
     // The git tier's twin of `sec.user.process`: the browse API mounts on the PEER listener only,
     // and a misconfigured listener would put every browse route on the internet with every other
     // SLO green. Refusal-only, so 100 % like the rest of `sec.*`.
