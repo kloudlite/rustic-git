@@ -432,7 +432,7 @@ async fn run_environment(
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
         // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
         // by an earlier definition that did have ports; `ensure` has no delete path of its own.
-        match k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref) {
+        match k8s::service_clusterip(svc, &e.name_any(), &e.spec.owner, owner_ref, false) {
             Some(cs) => ensure(&services, &cs, ctx).await?,
             None => {
                 delete_ignoring_404(&services, &svc.name).await?;
