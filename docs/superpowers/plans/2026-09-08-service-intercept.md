@@ -201,6 +201,5 @@ Spec §1 → Task 1; §2 → Task 2; §3 → Tasks 3 and 4 (the mechanism is hel
 §9 → Task 7; §10's failure table → Task 2's refusals, Task 4's empty-slice and requeue arms, and
 Task 5's drop rules. Names consistent across tasks: `Intercept`, `PortMap`, `workspace_port`,
 `intercepts`, `intercepted_by`, `intercept_slice`, `intercept_egress`, `intercept_ingress`,
-`intercept_policy_name`, `clear_intercepts_of`, `release_dead_intercepts`, `intercepts_to_drop`,
-`setIntercept`, `clearIntercept`, `interceptSummary`, `env.intercept`, `env.intercept.fallback`,
+`intercept_policy_name`, `setIntercept`, `clearIntercept`, `interceptSummary`, `env.intercept`, `env.intercept.fallback`,
 `env.intercept.refused`, `INTERCEPT_GRACE_SECS`.
