@@ -532,6 +532,11 @@ pub(crate) async fn branch_delete(api: &Api, owner: &str, name: &str, branch: &s
     let Some(oid) = oid.filter(|s| !s.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "the branch's current commit is required").into_response();
     };
+    // It becomes a ref update's `old` on the node, so it is checked as an object id HERE rather
+    // than forwarded and refused a hop later — same rule as `Digest::parse` on the registry paths.
+    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return (StatusCode::BAD_REQUEST, "oid must be a 40-character commit id").into_response();
+    }
     if branch == DEFAULT_BRANCH {
         return (StatusCode::CONFLICT, "the default branch cannot be deleted").into_response();
     }
@@ -735,18 +740,23 @@ mod tests {
 
     /// A node that answers the open-pull listing with `pulls` and `branchdelete` with
     /// `(status, body)`, recording whether the delete was ever asked for.
-    async fn branch_node(pulls: serde_json::Value, del: (u16, &'static str)) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    async fn branch_node(
+        pulls: serde_json::Value,
+        del: (u16, &'static str),
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
         use axum::routing::{get, post};
-        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
         let a = asked.clone();
         let app = axum::Router::new()
             .route("/api/{owner}/{name}/pulls", get(move || async move { axum::Json(pulls) }))
             .route(
                 "/api/{owner}/{name}/branchdelete",
                 post(move |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-                    a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    assert_eq!(q.get("branch").map(String::as_str), Some("x"));
-                    assert_eq!(q.get("oid").map(String::as_str), Some("abc123"));
+                    // Axum has decoded the query, so this is the branch name the node would act on.
+                    a.lock().unwrap().push((
+                        q.get("branch").cloned().unwrap_or_default(),
+                        q.get("oid").cloned().unwrap_or_default(),
+                    ));
                     (StatusCode::from_u16(del.0).unwrap(), del.1)
                 }),
             );
@@ -761,38 +771,42 @@ mod tests {
         del: (u16, &'static str),
         branch: &str,
         oid: Option<&str>,
-    ) -> (StatusCode, String, usize) {
+    ) -> (StatusCode, String, Vec<(String, String)>) {
         let (url, asked) = branch_node(pulls, del).await;
         let mut api = test_api_with_secret("s").await;
         api.upstream = url;
         let r = branch_delete(&api, "alice", "web", branch, oid).await;
         let status = r.status();
         let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
-        (status, String::from_utf8_lossy(&body).into_owned(), asked.load(std::sync::atomic::Ordering::SeqCst))
+        let asked = asked.lock().unwrap().clone();
+        (status, String::from_utf8_lossy(&body).into_owned(), asked)
     }
+
+    /// A well-formed object id, so every case below fails for the reason it is about.
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
     #[tokio::test]
     async fn a_branch_delete_is_forwarded_with_its_oid() {
-        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some("abc123")).await;
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(asked, 1, "the node is the thing that deletes the ref");
+        assert_eq!(asked, vec![("x".into(), OID.into())], "the node is the thing that deletes the ref");
     }
 
     #[tokio::test]
     async fn a_delete_without_an_oid_is_refused() {
         let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(asked, 0);
+        assert!(asked.is_empty());
     }
 
     /// Catches: the default branch reaching the node at all — the refusal is this tier's too.
     #[tokio::test]
     async fn the_default_branch_is_refused_here() {
         let (status, body, asked) =
-            delete_against(serde_json::json!([]), (204, ""), DEFAULT_BRANCH, Some("abc123")).await;
+            delete_against(serde_json::json!([]), (204, ""), DEFAULT_BRANCH, Some(OID)).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, "the default branch cannot be deleted");
-        assert_eq!(asked, 0);
+        assert!(asked.is_empty());
     }
 
     /// Catches: deleting the head of an open change — the PR becomes unmergeable and nothing says why.
@@ -802,33 +816,54 @@ mod tests {
             {"number": 4, "head": "other", "state": "open"},
             {"number": 7, "head": "x", "state": "open"},
         ]);
-        let (status, body, asked) = delete_against(pulls, (204, ""), "x", Some("abc123")).await;
+        let (status, body, asked) = delete_against(pulls, (204, ""), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, "close or merge pull request #7 first");
-        assert_eq!(asked, 0);
+        assert!(asked.is_empty());
     }
 
     /// A closed change is no reason to keep the branch.
     #[tokio::test]
     async fn a_closed_pulls_head_is_deletable() {
         let pulls = serde_json::json!([{"number": 7, "head": "x", "state": "closed"}]);
-        let (status, _, asked) = delete_against(pulls, (204, ""), "x", Some("abc123")).await;
+        let (status, _, asked) = delete_against(pulls, (204, ""), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(asked, 1);
+        assert_eq!(asked.len(), 1);
     }
 
     /// Catches: replacing the node's sentence — only it knows the branch moved.
     #[tokio::test]
     async fn an_upstream_conflict_keeps_its_sentence() {
         let (status, body, _) =
-            delete_against(serde_json::json!([]), (409, "the branch moved; reload"), "x", Some("abc123")).await;
+            delete_against(serde_json::json!([]), (409, "the branch moved; reload"), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, "the branch moved; reload");
     }
 
+    /// Catches: a path segment or a raw ref forwarded as an oid — it becomes a ref update's
+    /// `old` on the node.
+    #[tokio::test]
+    async fn an_oid_that_is_not_an_object_id_is_refused() {
+        for bad in ["abc123", "0123456789ABCDEF0123456789abcdef01234567", &"a".repeat(41), "../etc"] {
+            let (status, body, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body, "oid must be a 40-character commit id");
+            assert!(asked.is_empty(), "{bad} reached the node");
+        }
+    }
+
+    /// Catches: a slash in a branch name escaping into the upstream URL as a path separator —
+    /// `feat/x` must arrive at the node as one query value, not two segments.
+    #[tokio::test]
+    async fn a_branch_with_a_slash_survives_the_forward() {
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "feat/x", Some(OID)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked, vec![("feat/x".into(), OID.into())]);
+    }
+
     #[tokio::test]
     async fn an_unknown_branch_is_a_404() {
-        let (status, body, _) = delete_against(serde_json::json!([]), (404, "nope"), "x", Some("abc123")).await;
+        let (status, body, _) = delete_against(serde_json::json!([]), (404, "nope"), "x", Some(OID)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, "no such branch");
     }
