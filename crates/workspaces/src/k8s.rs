@@ -19,6 +19,7 @@ use k8s_openapi::api::core::v1::{
     SecurityContext, Service as CoreService,
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
 };
+use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort, EndpointSlice};
 use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -1223,11 +1224,18 @@ pub fn service_statefulset(
 /// by the API server (`spec.ports: Required value`), so a worker that listens on nothing (e.g.
 /// `sleep 1d`) gets a StatefulSet but no ClusterIP — its bare name simply does not resolve, which
 /// is correct for something nothing can connect to.
+///
+/// `intercepted` drops the selector. Kubernetes maintains the endpoints of a Service that HAS one,
+/// and a selector can only ever match pods in the Service's own namespace — so it can never name a
+/// workspace. Selector-less is the supported way to say "these exact addresses", and
+/// `intercept_slice` supplies them; the ClusterIP, the DNS name and the ports callers dial are
+/// untouched either way.
 pub fn service_clusterip(
     svc: &model::Service,
     env_id: &str,
     owner: &str,
     owner_ref: &OwnerReference,
+    intercepted: bool,
 ) -> Option<CoreService> {
     if svc.ports.is_empty() {
         return None;
@@ -1243,7 +1251,7 @@ pub fn service_clusterip(
             owner_ref,
         ),
         spec: Some(ServiceSpec {
-            selector: Some(sel),
+            selector: (!intercepted).then_some(sel),
             ports: Some(
                 svc.ports
                     .iter()
@@ -1259,6 +1267,117 @@ pub fn service_clusterip(
         }),
         ..Default::default()
     })
+}
+
+/// The endpoints a selector-less intercepted Service is delivered to: the attached workspace's pod,
+/// in another namespace, which kube-proxy programs without caring where the address lives.
+///
+/// The Service's `ports[].port` stays what callers dial and the slice's `ports[].port` is where it
+/// lands; the two are matched BY NAME, so these entries must carry `service_clusterip`'s own
+/// `p{port}` names or the remap silently does nothing.
+///
+/// `pod_ip: None` renders the ports with no address rather than nothing at all: an empty
+/// `endpoints` list is a Service that refuses connections, which is what a workspace whose pod has
+/// gone should do — the alternative, leaving stale endpoints, sends traffic to whoever holds that
+/// IP next.
+pub fn intercept_slice(
+    svc: &model::Service,
+    env_id: &str,
+    owner: &str,
+    owner_ref: &OwnerReference,
+    ic: &crate::crd::Intercept,
+    pod_ip: Option<&str>,
+) -> EndpointSlice {
+    let mut meta = meta(
+        &format!("{}-intercept", svc.name),
+        Some(&crate::crd::env_namespace(env_id)),
+        owner,
+        "environment",
+        owner_ref,
+    );
+    // How kube-proxy joins a slice to its Service; without it the slice is inert.
+    meta.labels
+        .get_or_insert_with(BTreeMap::new)
+        .insert("kubernetes.io/service-name".to_string(), svc.name.clone());
+    EndpointSlice {
+        metadata: meta,
+        address_type: "IPv4".to_string(),
+        endpoints: pod_ip
+            .map(|ip| {
+                vec![Endpoint {
+                    addresses: vec![ip.to_string()],
+                    // Stated rather than left to default: an endpoint the controller only writes
+                    // once it has seen the pod Ready is ready, and a nil condition is a guess.
+                    conditions: Some(EndpointConditions {
+                        ready: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]
+            })
+            .unwrap_or_default(),
+        ports: Some(
+            svc.ports
+                .iter()
+                .map(|p| EndpointPort {
+                    name: Some(format!("p{p}")),
+                    port: Some(ic.workspace_port(*p) as i32),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// Both halves of an intercept grant share this name, one in each namespace, so a release can
+/// delete them by name without a lookup.
+pub fn intercept_policy_name(ws_id: &str) -> String {
+    format!("intercept-{ws_id}")
+}
+
+/// Lets the environment's pods reach the intercepting workspace pod — the attach pair's direction
+/// reversed, and needed for the same reason: `allow_internet_egress` excludes RFC 1918, so the
+/// workspace's pod IP is unreachable from an environment pod by default.
+///
+/// Namespace and pod selector sit in ONE element of `to`, which ANDs them; as two elements they
+/// would OR, opening the whole workspace namespace and every pod anywhere carrying that label.
+pub fn intercept_egress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        &intercept_policy_name(ws_id),
+        env_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": ws_ns } },
+                    "podSelector": { "matchLabels": { WORKSPACE_LABEL: ws_id } },
+                }],
+            }],
+        }),
+    )
+}
+
+/// Lets that one workspace pod accept the environment's namespace. Scoped to the pod by the
+/// policy's own `podSelector`: an owner's workspaces share a namespace, so a namespace-wide rule
+/// would open every workspace they have to this environment.
+pub fn intercept_ingress(ws_ns: &str, env_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        &intercept_policy_name(ws_id),
+        ws_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": { "matchLabels": { WORKSPACE_LABEL: ws_id } },
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": env_ns } } }],
+            }],
+        }),
+    )
 }
 
 /// The specs below are static JSON rather than nested `Some(vec![…])` structs: they never branch,
@@ -2468,7 +2587,7 @@ mod tests {
 
     #[test]
     fn a_service_gets_a_clusterip_for_each_declared_port() {
-        let s = service_clusterip(&svc("data", "/data"), "env-1", "team", &owner_ref()).unwrap();
+        let s = service_clusterip(&svc("data", "/data"), "env-1", "team", &owner_ref(), false).unwrap();
         let spec = s.spec.unwrap();
         let ports = spec.ports.unwrap();
         assert_eq!(ports.len(), 1);
@@ -2479,6 +2598,94 @@ mod tests {
         assert_eq!(spec.selector.unwrap().get(SERVICE_LABEL).map(String::as_str), Some("web"));
     }
 
+    fn intercept(ports: &[(u16, u16)]) -> crate::crd::Intercept {
+        crate::crd::Intercept {
+            service: "web".into(),
+            workspace: "ws-1".into(),
+            ports: ports.iter().map(|(s, w)| crate::crd::PortMap { service: *s, workspace: *w }).collect(),
+        }
+    }
+
+    fn two_port_svc() -> model::Service {
+        let mut s = svc("data", "/data");
+        s.ports = vec![80, 5432];
+        s
+    }
+
+    /// The Service keeps the dialled number and the slice carries the mapped one; they are joined
+    /// by the `p{port}` name, so a rename here breaks the remap silently.
+    #[test]
+    fn the_slice_delivers_a_mapped_port_and_the_service_still_dials_the_declared_one() {
+        let s = two_port_svc();
+        let ic = intercept(&[(80, 3000)]);
+        let sl = intercept_slice(&s, "env-1", "team", &owner_ref(), &ic, Some("10.42.3.231"));
+        assert_eq!(sl.metadata.name.as_deref(), Some("web-intercept"));
+        assert_eq!(sl.metadata.namespace.as_deref(), Some("env-1"));
+        assert_eq!(sl.metadata.labels.as_ref().unwrap()["kubernetes.io/service-name"], "web");
+        assert_eq!(sl.address_type, "IPv4");
+
+        let ports = sl.ports.unwrap();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].name.as_deref(), Some("p80"));
+        assert_eq!(ports[0].port, Some(3000), "the mapped port");
+        // Unmapped: answered on its own number.
+        assert_eq!(ports[1].name.as_deref(), Some("p5432"));
+        assert_eq!(ports[1].port, Some(5432));
+
+        assert_eq!(sl.endpoints[0].addresses, vec!["10.42.3.231".to_string()]);
+
+        let dialled = service_clusterip(&s, "env-1", "team", &owner_ref(), true).unwrap().spec.unwrap();
+        let dialled = dialled.ports.unwrap();
+        assert_eq!(dialled[0].name.as_deref(), Some("p80"), "the join is by NAME");
+        assert_eq!(dialled[0].port, 80, "what callers dial never changes");
+    }
+
+    /// No pod means no address, but the slice still has to exist with its ports: an intercepted
+    /// Service with no endpoints refuses connections, which is right, while a slice with stale
+    /// endpoints sends traffic to whoever holds that IP next.
+    #[test]
+    fn a_slice_with_no_pod_ip_has_ports_but_no_endpoints() {
+        let sl = intercept_slice(&two_port_svc(), "env-1", "team", &owner_ref(), &intercept(&[]), None);
+        assert!(sl.endpoints.is_empty());
+        assert_eq!(sl.ports.unwrap().len(), 2);
+    }
+
+    /// A Service that keeps its selector has its endpoints overwritten by Kubernetes, and the
+    /// selector can only match pods in the environment's own namespace — the intercept would
+    /// silently never take effect.
+    #[test]
+    fn an_intercepted_service_has_no_selector() {
+        let s = two_port_svc();
+        let on = service_clusterip(&s, "env-1", "team", &owner_ref(), true).unwrap();
+        assert!(on.spec.unwrap().selector.is_none());
+        let off = service_clusterip(&s, "env-1", "team", &owner_ref(), false).unwrap();
+        assert!(off.spec.unwrap().selector.is_some());
+    }
+
+    /// Same AND-not-OR rule as the attach pair: two peers would open the whole workspace namespace
+    /// to the environment, plus any pod anywhere carrying that workspace label.
+    #[test]
+    fn the_intercept_policies_name_one_peer_each() {
+        let r = owner_ref();
+        let eg = intercept_egress("env-abc", "ws-acme", "ws-1", "acme", &r);
+        assert_eq!(eg.metadata.name.as_deref(), Some("intercept-ws-1"));
+        assert_eq!(eg.metadata.namespace.as_deref(), Some("env-abc"));
+        let spec = serde_json::to_value(eg.spec.unwrap()).unwrap();
+        let to = spec["egress"][0]["to"].as_array().unwrap();
+        assert_eq!(to.len(), 1, "two peers is an OR, not an AND");
+        assert_eq!(to[0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"], "ws-acme");
+        assert_eq!(to[0]["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
+        assert_eq!(spec["policyTypes"], serde_json::json!(["Egress"]));
+
+        let ing = intercept_ingress("ws-acme", "env-abc", "ws-1", "acme", &r);
+        assert_eq!(ing.metadata.namespace.as_deref(), Some("ws-acme"));
+        let spec = serde_json::to_value(ing.spec.unwrap()).unwrap();
+        // Its peer is a whole namespace, so the scoping to this one pod is the top-level selector.
+        assert_eq!(spec["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
+        assert_eq!(spec["ingress"][0]["from"].as_array().unwrap().len(), 1);
+        assert_eq!(spec["policyTypes"], serde_json::json!(["Ingress"]));
+    }
+
     #[test]
     fn a_service_with_no_ports_gets_no_clusterip() {
         let mut s = svc("worker", "/data");
@@ -2486,7 +2693,7 @@ mod tests {
         // An empty `ports` list on a k8s Service is rejected by the API server, so a portless
         // service must not produce one at all — its StatefulSet still runs, it is just unreachable
         // by name, which is correct for something that listens on nothing.
-        assert!(service_clusterip(&s, "env-1", "team", &owner_ref()).is_none());
+        assert!(service_clusterip(&s, "env-1", "team", &owner_ref(), false).is_none());
     }
 
     /// `spec.name` is spliced into a root `/bin/sh -c` prelude, the sshd `SetEnv` list and the
