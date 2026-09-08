@@ -478,9 +478,10 @@ pub(super) async fn namespace_reaped(c: &mut Ctx) {
                 .collect();
             let namespaces: kube::Api<k8s_openapi::api::core::v1::Namespace> = kube::Api::all(client);
             let now = chrono::Utc::now().timestamp();
-            // Two beats: one for the namespace to age past the prune's own guard, one for the beat
-            // that then deletes it. Anything still here after that is a leak, not a lag.
-            let grace = 2 * kloudlite_workspaces::api::keys::KEYS_RESYNC_SECS as i64;
+            // THREE beats, not two: a namespace is only a candidate once it is a beat old, and the
+            // beat that then deletes it is up to a beat later again — so two is exactly the worst
+            // legitimate case and would alarm seconds after it. The third is the slack.
+            let grace = 3 * kloudlite_workspaces::api::keys::KEYS_RESYNC_SECS as i64;
             let leaked: Vec<String> = namespaces
                 .list(&kube::api::ListParams::default())
                 .await
@@ -490,13 +491,18 @@ pub(super) async fn namespace_reaped(c: &mut Ctx) {
                 .filter(|n| {
                     let name = n.name_any();
                     let age = n.metadata.creation_timestamp.as_ref().map_or(0, |t| now - t.0.as_second());
-                    name.starts_with("wt-") && !keep.contains(&name) && age > grace
+                    // A namespace already going is the prune working, not a leak.
+                    let terminating = n.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Terminating");
+                    name.starts_with("wt-") && !keep.contains(&name) && age > grace && !terminating
                 })
                 .map(|n| n.name_any())
-                .take(4)
                 .collect();
             if !leaked.is_empty() {
-                return Err(anyhow!("{} team namespace(s) nothing uses: {}", leaked.len(), leaked.join(", ")));
+                // The prune also spares a namespace that still holds a POD, and this step does not
+                // model that on purpose: a `wt-` namespace with a running pod and no Workspace CR
+                // behind it is a workspace nothing can find again, which is worth the page.
+                let shown: Vec<&str> = leaked.iter().take(4).map(String::as_str).collect();
+                return Err(anyhow!("{} team namespace(s) nothing uses: {}", leaked.len(), shown.join(", ")));
             }
             Ok(())
         }

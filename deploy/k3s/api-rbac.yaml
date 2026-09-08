@@ -95,7 +95,9 @@ rules:
     resources: ["namespaces"]
     verbs: ["list", "delete"]
   # The prune's last guard reads pods in the namespace it is about to delete; unreadable counts as
-  # occupied, so this is the verb that lets a delete be refused rather than waved through.
+  # occupied, so this is the verb that lets a delete be refused rather than waved through. RBAC
+  # cannot scope a list to a name prefix, so this IS cluster-wide pod read — every namespace,
+  # `kube-system` included. Only pod metadata is used (does this namespace hold any), never a spec.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list"]

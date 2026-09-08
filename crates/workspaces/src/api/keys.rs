@@ -141,20 +141,24 @@ fn stale_namespaces(keep: &BTreeSet<String>, seen: &[(String, i64)], max_age: i6
 /// and this one deletes rather than rewrites, so a failure prunes NOTHING.
 pub(crate) async fn prune_namespaces(s: &ApiState) {
     let Some(c) = s.kube.as_ref() else { return };
+    // Namespaces FIRST, then the workspaces that spare them: `keep` must never be older than the
+    // list it judges. The other order loses the workspace created between the two calls — its
+    // namespace is old, absent from a stale `keep`, and its pod not yet scheduled, so all three
+    // guards pass and a namespace a live Workspace needs is deleted.
+    let lp = ListParams::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+    let listed = match Api::<Namespace>::all(c.clone()).list(&lp).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Namespace", error = %e, "listing.failed");
+            return;
+        }
+    };
     let keep: BTreeSet<String> = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         // `ws_namespace` and not a hand-rolled name: the agent builds the namespace with this
         // exact function, so a second spelling here would prune what it just made.
         Ok(l) => l.items.iter().map(|w| crd::ws_namespace(&w.spec.owner, &w.spec.team)).collect(),
         Err(e) => {
             tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
-            return;
-        }
-    };
-    let lp = ListParams::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
-    let listed = match Api::<Namespace>::all(c.clone()).list(&lp).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            tracing::warn!(kind = "Namespace", error = %e, "listing.failed");
             return;
         }
     };
