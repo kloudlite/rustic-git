@@ -273,6 +273,15 @@ pub const CATALOGUE: &[Slo] = &[
     // a cut. `env.clone` (hourly) is the same verb on a STOPPED source; this one is the running
     // source, which is what a person actually clicks.
     Slo { id: "env.clone.p95", feature: "Environments", sli: "Cloning a running environment completes with its services ready", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
+    // Hourly, not fast: the journey stands up a SECOND environment (one service to dial from,
+    // one to intercept — an intercept scales the real service to 0) and a second workspace,
+    // which is too much to pay every five minutes.
+    Slo { id: "env.intercept", feature: "Environments", sli: "An intercepted service answers from the attached workspace on a remapped port", target: p95(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    // The one that matters most: the workspace is STOPPED, never released by hand, so this is
+    // the automatic path — and both halves are asserted, because a fallback that also cleared
+    // `spec.intercepts` would silently discard what the person asked for.
+    Slo { id: "env.intercept.fallback", feature: "Environments", sli: "Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
