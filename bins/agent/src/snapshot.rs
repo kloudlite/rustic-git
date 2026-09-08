@@ -283,6 +283,20 @@ pub(crate) async fn seeded_from_cuts(ctx: &Arc<Ctx>, volume: &str) -> Result<std
             }
         }
     }
+    // The environment twin of the loop above: `POST /v1/environments/restore` writes the very same
+    // `CloneOf { commit }` (api/environments.rs), so an unmaterialised environment restore holds its
+    // graft cut exactly as an unmaterialised workspace clone does. Only workspaces were listed here,
+    // which left the environment half of the 2026-09-08 case unprotected.
+    for e in Api::<crd::Environment>::all(ctx.client.clone()).list(&ListParams::default()).await?.items {
+        if e.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready) {
+            continue;
+        }
+        if let Some(VolumeSource::CloneOf { volume: src, commit: Some(cut) }) = e.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
+            if src == volume {
+                held.insert(cut.clone());
+            }
+        }
+    }
     Ok(held)
 }
 
@@ -385,6 +399,13 @@ mod snapshot_tests {
             status: 200,
             body: list_of("Workspace", vec![]),
         });
+        // And the Environment list: a restored environment names a graft cut the same way.
+        routes.push(Route {
+            method: "GET",
+            path: "/apis/kloudlite.io/v1alpha1/environments".into(),
+            status: 200,
+            body: list_of("Environment", vec![]),
+        });
         shared_test_ctx(pool, node, routes)
     }
 
@@ -423,6 +444,36 @@ mod snapshot_tests {
         let (ctx, rec) = test_ctx(tmp2.path(), "node-a", routes);
         retain(&ctx, "vol-1", "stop-ws-1-4").await;
         assert!(rec.calls().iter().any(|c| c == "DELETE /apis/kloudlite.io/v1alpha1/snapshots/clone-ws-1-cafe"), "unreferenced, it is pruned: {:?}", rec.calls());
+    }
+
+    /// The environment twin: `POST /v1/environments/restore` writes the same `CloneOf { commit }`,
+    /// so an unmaterialised restored ENVIRONMENT holds its graft cut too. Only workspaces were
+    /// listed, so this half of the 2026-09-08 case was still prunable — and a pruned graft cut is
+    /// a permanent `NoSuchSnapshot`.
+    #[tokio::test]
+    async fn retention_keeps_the_cut_an_unmaterialised_restored_environment_still_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cuts = vec![
+            serde_json::to_value(&*snapshot("clone-ws-1-cafe", "vol-1", "ws-1", "", true, crd::Phase::Ready)).unwrap(),
+            serde_json::to_value(&*snapshot("stop-ws-1-4", "vol-1", "ws-1", "clone-ws-1-cafe", true, crd::Phase::Ready)).unwrap(),
+        ];
+        let env = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
+            "metadata": {"name": "env-2", "uid": "env-2-uid", "generation": 1},
+            "spec": {"owner": "alice", "team": "", "name": "copy", "region": "r1", "services": [], "desiredState": "running",
+                     "storage": {"quotaGb": 5, "source": {"cloneOf": {"volume": "vol-1", "commit": "clone-ws-1-cafe"}}}},
+            "status": {"phase": "creating", "nodeName": "node-a"},
+        });
+        let routes = vec![
+            Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", cuts) },
+            Route { method: "GET", path: ENVIRONMENTS_LIST.into(), status: 200, body: list_of("Environment", vec![env]) },
+        ];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        retain(&ctx, "vol-1", "stop-ws-1-4").await;
+        assert!(
+            !rec.calls().iter().any(|c| c.contains("DELETE") && c.contains("clone-ws-1-cafe")),
+            "the restored environment's graft point must survive the stop cut: {:?}", rec.calls()
+        );
     }
 
     fn snapshot(name: &str, volume: &str, worktree: &str, parent: &str, transient: bool, phase: crd::Phase) -> Arc<crd::Snapshot> {

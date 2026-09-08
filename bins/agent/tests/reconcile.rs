@@ -5037,6 +5037,35 @@ async fn a_live_clone_of_a_deleted_workspace_still_settles_as_no_such_source() {
     assert_eq!(sent.last().expect("a status write")["status"]["conditions"][0]["reason"], "NoSuchSource");
 }
 
+/// The same deleted source, but this clone's OWN subvolume is already on disk: the bytes were
+/// copied at materialize and the source is never read again, so deleting the source workspace must
+/// not settle a healthy clone. The twin of the pruned-graft-cut case of 2026-09-08.
+#[tokio::test]
+async fn a_materialised_live_clone_survives_its_deleted_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The clone's own volume (`ws-1`, named after the parent) exists: the copy has happened.
+    std::fs::create_dir_all(tmp.path().join("vol/ws-1/live")).unwrap();
+    let routes = vec![Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) }];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
+    let mut w = workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a"}));
+    w.spec.storage = Some(crd::WorkspaceStorage {
+        quota_gb: 20,
+        source: Some(crd::VolumeSource::CloneOf { volume: "ws-src".into(), commit: None }),
+    });
+
+    // Runs past `check_source` and then fails on the next unmocked route — the point is what it
+    // did NOT write, and that the source was not even asked about.
+    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await;
+
+    let sent = rec.sent("PATCH", WS_STATUS);
+    assert!(
+        !sent.iter().any(|s| s["status"]["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["reason"] == "NoSuchSource"))),
+        "a clone that already holds its bytes must not be judged on its source: {sent:?}"
+    );
+    assert!(!rec.calls().iter().any(|c| c.contains("workspaces/ws-src")), "the source is not even asked about: {:?}", rec.calls());
+}
+
 /// F6: the interrupted clone. The source's Volume is pinned to the node that DIED, so the
 /// shared-worktree path settles `Degraded=NodeMismatch` on whichever peer holds the cut. A
 /// `seededFrom` parent instead authors its OWN child Volume on this node — pinned here, carrying

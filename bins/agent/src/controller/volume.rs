@@ -532,7 +532,9 @@ pub(crate) fn volume_is_ready(v: &crd::Volume) -> bool {
 /// exist, a restore naming a `Volume` that does not exist, a
 /// `cloneOf { commit }` whose snapshot id no `Ready` `Snapshot` carries. Without this branch each of
 /// them requeues at `RETRY` forever, and the log line is indistinguishable from a registry outage.
-async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
+/// `child` is the volume this parent would materialize (its own name): once that subvolume is on
+/// disk the copy has happened and the source is no longer read, so it is not re-judged.
+async fn check_source(source: Option<&VolumeSource>, child: &str, ctx: &Arc<Ctx>) -> Result<(), Outcome> {
     match source {
         None | Some(VolumeSource::GitRepo { .. }) => Ok(()),
         // Workspace THEN Environment: `clone_env` names an environment's id here, and checking only
@@ -552,6 +554,15 @@ async fn check_source(source: Option<&VolumeSource>, ctx: &Arc<Ctx>) -> Result<(
             }
         }
         Some(VolumeSource::CloneOf { volume, .. }) | Some(VolumeSource::SeededFrom { volume, .. }) => {
+            // Only BEFORE the copy. The source is what the bytes come from; once this parent's own
+            // subvolume exists it is never read again and the source workspace may legitimately be
+            // deleted. Re-judging it on a later pass settled a healthy clone `Permanent/NoSuchSource`
+            // — the same shape as the pruned graft cut of 2026-09-08 (`worktree_gate`). Disk, not the
+            // API: it is the same fact `subvolumePresent` reports, and it is true with the API server
+            // unreachable.
+            if ctx.engine.pool.live(child).exists() {
+                return Ok(());
+            }
             let ws: Api<crd::Workspace> = Api::all(ctx.client.clone());
             if ws.get_opt(volume).await.map_err(Outcome::from)?.is_some() {
                 return Ok(());
@@ -603,7 +614,7 @@ where
     // Before anything is created: a source that can never resolve is a permanent failure, and the
     // difference between "wrong forever" and "briefly unavailable" is what `settle` writes down.
     let outcome = match storage {
-        Some(s) => check_source(s.source.as_ref(), ctx).await.err(),
+        Some(s) => check_source(s.source.as_ref(), &parent.name_any(), ctx).await.err(),
         // No storage: nothing here can ever build a disk, and no retry adds a field.
         None => Some(Outcome::Permanent("spec.storage is required".into(), "NoStorage")),
     };
