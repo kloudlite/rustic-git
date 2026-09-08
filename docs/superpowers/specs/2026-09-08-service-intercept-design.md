@@ -45,8 +45,10 @@ protocol and adds nothing to run.
 | The real service while intercepted | **stopped**: its StatefulSet is scaled to 0. Leaving it running is wrong for anything that acts on its own rather than only answering — a queue consumer would take messages your workspace never sees, a scheduler would fire twice, two writers would race the same data. The cost is a cold start on release, and it is the right trade. |
 | How traffic is directed | endpoints, not DNS and not a proxy. See §3; verified on the cluster. |
 | Ports | **remappable**. The service's port stays what callers dial; each one names the port on the workspace that answers it, defaulting to the same number. `api:8080 → workspace:3000` is the ordinary case, because the process you are debugging listens where your dev server listens, not where the deployed image did. |
-| A stopped workspace | the intercept is **released**: the wish is cleared, the StatefulSet comes back, the Service gets its selector again. An intercept only exists while something is there to serve it. |
-| Who clears it | `/v1` clears it in the same request that stops, detaches or deletes the workspace, so the usual path is immediate. The api's resync beat is the backstop for every other way a workspace stops (a node dying, a crash loop): any intercept whose workspace is not running is dropped. A controller never writes spec — the admission policy forbids it. |
+| A stopped or unreachable workspace | the wish **stays**; the intercept simply stops being in force. Status says so, and the REAL service is brought back up — StatefulSet off 0, Service selector restored, slice deleted. When the workspace returns, the intercept takes hold again with nobody re-asking. |
+| What removes the wish | an explicit release (`DELETE …/intercepts/{service}`) and nothing else — not a stop, not a detach, not a delete of the workspace. The wish is the person's, and a transient blip must not silently discard what they asked for. A wish whose workspace is gone for good shows as `WorkspaceGone` with a Release button; it costs nothing but a line of spec. |
+| How fast the fallback is | seconds. The environment's controller WATCHES workspaces (mapped to the environment through `attachedEnvironment`), so it reconciles on the transition rather than waiting for a beat. |
+| Flapping | a fallback waits `INTERCEPT_GRACE_SECS` (30) of continuous unreachability before scaling the real service back up, so an ordinary pod restart does not bounce the StatefulSet up and down. |
 | Who may intercept | the caller must be able to act on the workspace AND on the environment, and the workspace must be attached to that environment. Acting on the environment alone is not enough: an intercept redirects traffic INTO someone's workspace. |
 | Two workspaces, one service | refused at `/v1` with 409 naming the holder. |
 | Quota | none. An intercept allocates nothing; it moves traffic and stops a StatefulSet. |
@@ -90,10 +92,10 @@ the CLI show the truth rather than the wish.
   workspace is not one the caller may act on; 409 if it is not attached to this environment; 409
   if it is not running; 409 if another workspace already intercepts that service, naming it; 422
   if a `ports` entry names a port the service does not declare, or names one twice.
-- `DELETE /v1/environments/{id}/intercepts/{service}` → 204, idempotent.
-- `stop_ws`, `detach_ws` and `delete_ws` clear any intercept the workspace holds, in the same
-  patch, before they touch the workspace itself. A workspace that is going away must not leave a
-  service pointing at it for even one reconcile.
+- `DELETE /v1/environments/{id}/intercepts/{service}` → 204, idempotent. This is the ONLY thing
+  that removes a wish. `stop_ws`, `detach_ws` and `delete_ws` deliberately do not touch
+  `intercepts`: stopping a workspace for the night must not throw away what you asked for, and a
+  controller bringing the real service back covers the traffic in the meantime.
 
 ### 3. How traffic is directed
 
@@ -129,35 +131,48 @@ moving parts.
 
 ### 4. The environment controller (`bins/agent/src/controller/environment.rs`)
 
-Everything it needs is in its own spec. For each service:
+Everything it needs is in its own spec. Each service is in one of THREE states, and the third is
+the one that makes the wish safe to keep:
 
 - **Not intercepted** — exactly today's rendering: the StatefulSet at its declared replicas and
-  `service_clusterip` with its selector. Any `EndpointSlice` this controller wrote for that
-  service is deleted.
-- **Intercepted** — the StatefulSet applied with `replicas: 0`, the `Service` written with
-  `selector: None` and the same ports, and an `EndpointSlice` named `{service}-intercept`,
-  labelled `kubernetes.io/service-name={service}`, holding one endpoint: the workspace pod's IP,
-  with a port entry per declared service port, named `p{service port}` and carrying the mapped
-  workspace port. The IP is read live — one GET of the Workspace for its `status.podRef`, one GET
-  of that pod — and never stored in status, for the reason `bins/gateway/src/resolve.rs` already
-  gives: a pod IP changes on every recreate, and a stale one in status is a wrong answer that
-  looks right.
+  `service_clusterip` with its selector. Any `EndpointSlice` this controller wrote for that service
+  is deleted.
+- **Intercepted and in force** — the workspace is running and its pod is `Ready`. The StatefulSet
+  is applied with `replicas: 0`, the `Service` is written with `selector: None` and the same ports,
+  and an `EndpointSlice` named `{service}-intercept`, labelled
+  `kubernetes.io/service-name={service}`, holds one endpoint: the workspace pod's IP, with a port
+  entry per declared service port, named `p{service port}` and carrying the mapped workspace port.
+  The IP is read live — one GET of the Workspace for its `status.podRef`, one GET of that pod — and
+  never stored in status, for the reason `bins/gateway/src/resolve.rs` already gives: a pod IP
+  changes on every recreate, and a stale one in status is a wrong answer that looks right.
+  `status.services[].intercepted_by` names the workspace.
+- **Intercepted but NOT in force** — the workspace is stopped, deleted, detached, or its pod has
+  been unreachable for `INTERCEPT_GRACE_SECS`. The wish stays in spec, untouched. The rendering
+  goes back to the first state entirely: the real StatefulSet at its declared replicas, the
+  selector restored, the slice deleted. `intercepted_by` is `None` and the `Intercepted` condition
+  says why — `WorkspaceStopped`, `WorkspaceGone`, `WorkspaceDetached`, `PodUnreachable`.
 
-If the pod is missing or not `Ready`, the slice is written with an empty `endpoints` list and the
-condition says so. That state is transient by construction: the beat in §5 releases an intercept
-whose workspace has stopped, so an empty slice means "starting", not "gone".
+The grace is what stops a flap: a workspace pod restarting is unreachable for a few seconds, and
+scaling the real service up and down around every restart would be worse than the gap. Inside the
+grace the slice is left as it is and the reconcile requeues; only sustained unreachability falls
+back.
 
-An `Intercepted` condition on the Environment carries the summary and, when a wish cannot be
-honoured yet, the reason (`WorkspaceNotReady`, `PodUnknown`).
+Coming back is the same path in reverse and needs nobody to re-ask: the workspace becomes `Ready`,
+the watch in §5 fires, and the service is intercepted again.
 
-### 5. The backstop (`crates/workspaces/src/api/keys.rs`'s beat)
+### 5. Reacting in seconds, not minutes (`bins/agent/src/controller/run.rs`)
 
-The same resync beat that prunes `OwnerKeys` and stale namespaces gains a third pass: for every
-environment with intercepts, drop any whose workspace is missing, not attached here, or not
-running. Keep-biased in the direction of the SERVICE working — a failed read changes nothing.
+The environment `Controller` gains one more `.watches(...)`: every `Workspace`, mapped to the
+environment named by its `attachedEnvironment`. A workspace stopping, starting, losing its pod or
+being deleted therefore reconciles the environment that intercepts it immediately, instead of
+waiting for a tick.
 
-This is what covers a workspace that stopped without `/v1` hearing about it: a node death, a crash
-loop, an operator with kubectl.
+The mapper is a field read and costs no API call, and the agent already holds `watch` on
+workspaces cluster-wide, so this needs no new grant. It is the same shape as the four `.watches`
+the environment controller already carries.
+
+There is no api-side beat and no api-side watch: nothing about an intercept needs `/v1` after the
+wish is written, and `crates/api`'s RBAC comment that "nothing in the API watches" stays true.
 
 ### 6. Network policy (`crates/workspaces/src/k8s.rs`)
 
@@ -224,14 +239,13 @@ transient by construction and cannot be held still long enough to sample.
 
 | Failure | Behaviour |
 | --- | --- |
-| Workspace pod restarting | empty `EndpointSlice`, callers fail fast, restored when it is `Ready` |
-| Workspace stopped through `/v1` | intercept cleared in that request; StatefulSet back up |
-| Workspace stopped any other way | the beat clears it within one interval; StatefulSet back up |
-| Workspace deleted or detached | same, and `/v1` clears it in the same patch |
+| Workspace pod restarting, briefly | inside `INTERCEPT_GRACE_SECS` nothing moves; the intercept resumes when the pod is `Ready` again |
+| Workspace stopped, deleted or detached | the wish STAYS; within seconds the real service is back up and answering, and status says why the intercept is not in force |
+| The workspace comes back | intercepted again automatically; nobody re-asks |
 | Two workspaces claim one service | `/v1` refuses the second, naming the holder |
 | A port mapping names a port the service does not declare | 422 at `/v1`; nothing written |
 | The environment is stopped | its StatefulSets and Services go as today; the wish survives and takes effect when it starts |
-| Agent cannot read the workspace pod | previous rendering left alone, requeued — never a silent restore of the real service |
+| Agent cannot read the workspace pod at all (API error, not a missing pod) | previous rendering left alone, requeued — an unreadable answer is not evidence of anything |
 | No NetworkPolicy engine on the cluster | the policies are inert and traffic flows anyway; already true of the attach pair |
 
 ## Out of scope
@@ -246,9 +260,9 @@ which `attachedEnvironment` already forbids.
 `crates/workspaces/src/crd/mod.rs` (`Intercept`, `PortMap`, `EnvironmentSpec.intercepts`,
 `ServiceStatus.intercepted_by`, regenerated `crds.yaml`),
 `crates/workspaces/src/api/environments.rs` (two routes),
-`crates/workspaces/src/api/workspaces.rs` (the stop/detach/delete clears),
-`crates/workspaces/src/api/mod.rs` (routes), `crates/workspaces/src/api/keys.rs` (the beat's third
-pass), `crates/workspaces/src/k8s.rs` (the selector-less Service, the `EndpointSlice`, the two
+`crates/workspaces/src/api/mod.rs` (routes),
+`bins/agent/src/controller/run.rs` (the Workspace watch on the environment controller),
+`crates/workspaces/src/k8s.rs` (the selector-less Service, the `EndpointSlice`, the two
 policies), `bins/agent/src/controller/environment.rs` (the per-service branch and the scale to 0),
 `deploy/k3s/agent-rbac.yaml`, `deploy/k3s/agent-admission.yaml`, `web/apps/web` (the two controls),
 `bins/slo/src/stages/environment.rs` + `crates/workspaces/src/slo/catalogue.rs` + `deploy/slo.md` +
