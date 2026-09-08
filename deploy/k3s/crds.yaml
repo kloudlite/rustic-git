@@ -791,6 +791,53 @@
                         ],
                         "type": "string"
                       },
+                      "intercepts": {
+                        "default": [],
+                        "description": "A workspace's wish to steal one service's traffic. Empty on every environment predating\nthis field, so `#[serde(default)]` is load-bearing, not decoration.",
+                        "items": {
+                          "description": "One workspace's wish to receive an environment service's traffic instead of the service\nitself.",
+                          "properties": {
+                            "ports": {
+                              "default": [],
+                              "items": {
+                                "description": "One port rewrite within an `Intercept`.",
+                                "properties": {
+                                  "service": {
+                                    "format": "uint16",
+                                    "maximum": 65535.0,
+                                    "minimum": 0.0,
+                                    "type": "integer"
+                                  },
+                                  "workspace": {
+                                    "format": "uint16",
+                                    "maximum": 65535.0,
+                                    "minimum": 0.0,
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "service",
+                                  "workspace"
+                                ],
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "service": {
+                              "type": "string"
+                            },
+                            "workspace": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "service",
+                            "workspace"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
                       "name": {
                         "type": "string"
                       },
@@ -1080,6 +1127,11 @@
                       "serviceStatus": {
                         "items": {
                           "properties": {
+                            "interceptedBy": {
+                              "description": "The workspace currently intercepting this service, if any — a view of `EnvironmentSpec`'s\nown `intercepts`, reported here so a browse of one service shows its own fate.",
+                              "nullable": true,
+                              "type": "string"
+                            },
                             "message": {
                               "nullable": true,
                               "type": "string"

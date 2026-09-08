@@ -777,6 +777,10 @@ pub struct ServiceStatus {
     pub ready: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The workspace currently intercepting this service, if any — a view of `EnvironmentSpec`'s
+    /// own `intercepts`, reported here so a browse of one service shows its own fate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercepted_by: Option<String>,
 }
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -818,6 +822,40 @@ pub struct EnvironmentSpec {
     /// into a new one. Additive and never cleared by a controller — see `RestoreWish`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restore: Option<RestoreWish>,
+    /// A workspace's wish to steal one service's traffic. Empty on every environment predating
+    /// this field, so `#[serde(default)]` is load-bearing, not decoration.
+    #[serde(default)]
+    pub intercepts: Vec<Intercept>,
+}
+
+/// One workspace's wish to receive an environment service's traffic instead of the service
+/// itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Intercept {
+    pub service: String,
+    pub workspace: String,
+    #[serde(default)]
+    pub ports: Vec<PortMap>,
+}
+
+impl Intercept {
+    /// The workspace port that answers for `service_port`, or the same number when nothing
+    /// names it — an intercept with no `ports` entry still forwards everything 1:1.
+    pub fn workspace_port(&self, service_port: u16) -> u16 {
+        self.ports
+            .iter()
+            .find(|p| p.service == service_port)
+            .map_or(service_port, |p| p.workspace)
+    }
+}
+
+/// One port rewrite within an `Intercept`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PortMap {
+    pub service: u16,
+    pub workspace: u16,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1938,5 +1976,24 @@ mod request_tests {
     fn an_empty_region_grant_is_omitted_from_a_quota_patch() {
         let v = serde_json::to_value(default_quota(false)).unwrap();
         assert!(v.get("regions").is_none());
+    }
+
+    #[test]
+    fn a_port_with_no_mapping_is_answered_on_the_same_number() {
+        let i = Intercept {
+            service: "api".into(),
+            workspace: "ws-1".into(),
+            ports: vec![PortMap { service: 8080, workspace: 3000 }],
+        };
+        assert_eq!(i.workspace_port(8080), 3000, "the mapped one");
+        assert_eq!(i.workspace_port(9090), 9090, "an unmapped port keeps its number");
+    }
+
+    /// Every stored Environment predates this field and must still parse.
+    #[test]
+    fn an_environment_without_intercepts_still_parses() {
+        let v = serde_json::json!({"owner":"a","team":"","name":"n","region":"r","services":[],"desiredState":"running"});
+        let s: EnvironmentSpec = serde_json::from_value(v).unwrap();
+        assert!(s.intercepts.is_empty());
     }
 }

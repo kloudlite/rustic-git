@@ -138,6 +138,7 @@ fn env(uid: &str, rv: &str, phase: Phase) -> crd::Environment {
             storage: None,
             desired_state: DesiredState::Running,
             restore: None,
+            intercepts: Vec::new(),
         },
     );
     e.metadata = meta("env-1", uid, rv);

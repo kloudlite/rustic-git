@@ -128,6 +128,7 @@ pub(crate) async fn create_env(
             storage: Some(crd::WorkspaceStorage { quota_gb, source: None }),
             desired_state: DesiredState::Running,
             restore: None,
+            intercepts: Vec::new(),
         },
     )
     .await?;
@@ -258,6 +259,7 @@ pub(crate) async fn restore_env(
             }),
             desired_state: DesiredState::Running,
             restore: None,
+            intercepts: Vec::new(),
         },
     )
     .await?;
@@ -476,6 +478,7 @@ pub(crate) async fn clone_env(
             }),
             desired_state: DesiredState::Running,
             restore: None,
+            intercepts: Vec::new(),
         },
     )
     .await?;
@@ -559,6 +562,7 @@ mod tests {
                 storage: None,
                 desired_state: crd::DesiredState::Running,
                 restore: None,
+                intercepts: Vec::new(),
             },
         );
         e.status = Some(crd::EnvironmentStatus {

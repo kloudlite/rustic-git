@@ -491,13 +491,16 @@ async fn run_environment(
 /// ordinary gap between applying it and the API server materializing it.
 async fn deployment_status(deployments: &Api<StatefulSet>, name: &str) -> Result<crd::ServiceStatus, ReconcileErr> {
     let Some(d) = deployments.get_opt(name).await? else {
-        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()) });
+        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()), intercepted_by: None });
     };
     let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
     Ok(crd::ServiceStatus {
         name: name.into(),
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
+        // This reconciler reports the service's own health; intercept ownership is written
+        // where the intercept is decided, not recomputed here.
+        intercepted_by: None,
     })
 }
 
