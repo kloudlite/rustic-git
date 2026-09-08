@@ -799,7 +799,21 @@ export type ApiWorkspace = {
 export type ApiMount = { folder: string; path: string };
 /** `model::Service`. `ports` is `#[serde(default)]` on the Rust side, so an environment document
  *  written before ports existed deserializes as an empty list — the wire always carries the key. */
-export type ApiService = { name: string; image: string; command: string[]; env: Record<string, string>; mounts: ApiMount[]; ports: number[] };
+export type ApiService = {
+  name: string;
+  image: string;
+  command: string[];
+  env: Record<string, string>;
+  mounts: ApiMount[];
+  ports: number[];
+  /** STATUS: the workspace traffic to this service is actually being delivered to, or null.
+   *  Null with a wish in `ApiEnvironment.intercepts` is its own state — the workspace is stopped
+   *  or unreachable and the real service is answering. Never infer one from the other. */
+  intercepted_by?: string | null;
+};
+
+/** One of the service's declared ports, and the port on the workspace that answers it. */
+export type ApiInterceptPort = { service: number; workspace: number };
 
 export type ApiEnvironment = {
   id: string;
@@ -810,6 +824,9 @@ export type ApiEnvironment = {
   placement: string | null;
   volume: string | null;
   services: ApiService[];
+  /** The WISH, `EnvironmentSpec.intercepts`, written only by `/v1`. What is in force is each
+   *  service's own `intercepted_by`. Absent on an environment stored before intercepts existed. */
+  intercepts?: { service: string; workspace: string; ports: ApiInterceptPort[] }[];
   /** The snapshot the volume last landed on, when an in-place restore put one there — only
    *  `GET /v1/environments/{id}` fills it in. Absent means "current" is simply the newest record. */
   restored_to?: string | null;
@@ -891,6 +908,30 @@ export function attachWorkspace(token: string, id: string, environment: string) 
   return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/attach`, {
     method: "POST", token, body: JSON.stringify({ environment }),
   });
+}
+
+/** Deliver the environment's traffic for one service to an attached workspace instead. 202 with
+ *  the environment; the controller stops the real service and points its endpoints at the
+ *  workspace pod. Refusals are one sentence: 404 unknown service or workspace, 409 not attached /
+ *  not running / already intercepted (naming the holder), 422 a port the service does not
+ *  declare or named twice. A `ports` entry may be omitted — the same number answers it. */
+export function setIntercept(
+  token: string,
+  id: string,
+  body: { service: string; workspace: string; ports: ApiInterceptPort[] },
+) {
+  return call<ApiEnvironment>(`/v1/environments/${encodeURIComponent(id)}/intercepts`, {
+    method: "POST", token, body: JSON.stringify(body),
+  });
+}
+
+/** Drop the wish. The ONLY thing that does: stopping, detaching or deleting the workspace leaves
+ *  it in place so the intercept takes hold again by itself. Idempotent. */
+export function clearIntercept(token: string, id: string, service: string) {
+  return call<void>(
+    `/v1/environments/${encodeURIComponent(id)}/intercepts/${encodeURIComponent(service)}`,
+    { method: "DELETE", token },
+  );
 }
 
 export function listEnvironments(token: string, owner?: string) {

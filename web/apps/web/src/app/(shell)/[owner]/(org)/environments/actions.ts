@@ -148,6 +148,63 @@ export async function cloneEnvironment(_prev: EnvActionState, formData: FormData
   return { ok: true };
 }
 
+/** Point one service's traffic at an attached workspace.
+ *
+ *  The port fields arrive as `port.{n}` — one per port the service declares, holding the port on
+ *  the workspace that answers it. A blank one is not sent: the api answers that service port on
+ *  the same number, and sending it explicitly would only be a second way to say the same thing.
+ *  Every refusal the api makes is one sentence written for a person, so it is shown verbatim. */
+export async function setIntercept(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
+  const service = String(formData.get("service") ?? "");
+  if (!service) return { error: "That service is not valid." };
+  const workspace = String(formData.get("workspace") ?? "");
+  if (!workspace) return { error: "Choose a workspace to intercept with." };
+
+  const ports: { service: number; workspace: number }[] = [];
+  for (const [key, value] of formData.entries()) {
+    if (!key.startsWith("port.")) continue;
+    const text = String(value).trim();
+    if (!text) continue;
+    const from = Number(key.slice("port.".length));
+    const to = Number(text);
+    if (!Number.isInteger(to) || to < 1 || to > 65535) {
+      return { error: `${to} is not a port the workspace could listen on.` };
+    }
+    ports.push({ service: from, workspace: to });
+  }
+
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+
+  const r = await api.setIntercept(token, id, { service, workspace, ports });
+  if (!r.ok) return { error: r.message || "Could not intercept." };
+  revalidatePath(`/${owner}/environments/${id}`);
+  return { ok: true };
+}
+
+/** Drop the wish — the one thing that does. Stopping the workspace only takes the intercept out
+ *  of force; the real service comes back by itself and the wish waits for the workspace. */
+export async function releaseIntercept(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
+  const service = String(formData.get("service") ?? "");
+  if (!service) return { error: "That service is not valid." };
+
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+
+  const r = await api.clearIntercept(token, id, service);
+  if (!r.ok) return { error: r.message || "Could not release." };
+  revalidatePath(`/${owner}/environments/${id}`);
+  return { ok: true };
+}
+
 /** Deleting an environment always leaves its snapshots: a snapshot is a point in time, outlives
  *  the thing it was taken of, and is kept until it is explicitly deleted. The environment then
  *  appears under Snapshots, which is where deleting them for good lives — one destructive choice
