@@ -672,12 +672,20 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::Envir
     if w.spec.attached_environment.as_deref() != Some(env_name) {
         return off("WorkspaceDetached", format!("{} is not attached to this environment", ic.workspace), Some(w));
     }
-    let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
+    // `podRef` is `{namespace}/{name}`, written that way by the workspace's own controller — the
+    // whole string is not a pod name, and passing it as one is a request the API server rejects
+    // outright, which reads here as an unreadable answer and holds forever. `bins/gateway`'s
+    // `resolve.rs` splits it the same way; it is the one shape this field ever has.
     let pod = match w.status.as_ref().and_then(|s| s.pod_ref.clone()) {
-        Some(name) => match Api::<Pod>::namespaced(ctx.client.clone(), &ns).get_opt(&name).await {
-            Ok(p) => p,
-            Err(_) => return Intercepting::Keep { since: None },
-        },
+        Some(pod_ref) => {
+            let Some((pod_ns, name)) = pod_ref.split_once('/') else {
+                return off("PodRefMalformed", format!("{}'s podRef is not namespace/name", ic.workspace), Some(w));
+            };
+            match Api::<Pod>::namespaced(ctx.client.clone(), pod_ns).get_opt(name).await {
+                Ok(p) => p,
+                Err(_) => return Intercepting::Keep { since: None },
+            }
+        }
         None => None,
     };
     let ready = pod.as_ref().map(pod_ready);

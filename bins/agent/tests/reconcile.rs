@@ -6070,9 +6070,12 @@ fn attached_ws(desired: &str, attached: Option<&str>, ready_since: i64) -> serde
 
 /// `ready`: what the WORKSPACE's own `Ready` condition says. `True` is not a clock — see
 /// `not_ready_since` — and a test that wants the grace measured has to say `False`.
+///
+/// `podRef` is `{namespace}/{name}`, the shape the workspace's controller really writes. A bare
+/// name here let every intercept test pass while the live decision could not find a pod at all.
 fn attached_ws_ready(desired: &str, attached: Option<&str>, ready_since: i64, ready: bool) -> serde_json::Value {
     let mut o = ws_json(serde_json::json!({
-        "phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1", "podRef": "ws-1-0",
+        "phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1", "podRef": "ws-alice/ws-1-0",
         "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" },
                         "reason": "PodNotReady", "message": "",
                         "lastTransitionTime": secs_ago(ready_since), "observedGeneration": 1}],
