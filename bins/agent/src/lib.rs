@@ -310,7 +310,10 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
         use kube::runtime::{watcher, WatchStreamExt};
         let api: kube::Api<crd::ClusterSettings> = kube::Api::all(client.clone());
         let cfg = watcher::Config::default().fields("metadata.name=default");
-        let mut events = std::pin::pin!(watcher(api.clone(), cfg).default_backoff().applied_objects());
+        let watched = api.clone();
+        let mut new_stream =
+            move || watcher(watched.clone(), cfg.clone()).default_backoff().applied_objects().boxed();
+        let mut events = new_stream();
         let mut tick = tokio::time::interval(settings_refresh_interval());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -321,7 +324,13 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
                         // A malformed spec never reaches here as `Ok` — kube-runtime's own
                         // decode failed first, which IS the "logged once, changes nothing" case.
                         Some(Err(e)) => tracing::warn!(scope = "cluster", error = %e, "settings.invalid"),
-                        None => return,
+                        // Rebuilt, never fatal — the same rule (and the same 2026-09-08 cause) as
+                        // `controller::keys::run_with`, whose test pins the shape.
+                        None => {
+                            tracing::warn!(scope = "cluster", "settings.watch.ended");
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            events = new_stream();
+                        }
                     }
                 }
                 _ = tick.tick() => {

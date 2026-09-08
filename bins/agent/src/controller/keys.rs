@@ -97,9 +97,30 @@ pub async fn run(ctx: Arc<Ctx>) {
     use futures::StreamExt;
     use kube::runtime::{watcher, WatchStreamExt};
     let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+    let watched = api.clone();
     // The RAW event stream, not `applied_objects()`: a deletion has to reach the disk, and that
     // helper drops exactly the event that says so.
-    let mut events = std::pin::pin!(watcher(api.clone(), watcher::Config::default()).default_backoff());
+    run_with(ctx, api, move || {
+        watcher(watched.clone(), watcher::Config::default()).default_backoff().boxed()
+    })
+    .await
+}
+
+type KeyEvents = futures::stream::BoxStream<'static, Result<kube::runtime::watcher::Event<crd::OwnerKeys>, kube::runtime::watcher::Error>>;
+
+/// The watch is a nudge; the tick is what makes this correct. So a stream that ENDS is rebuilt,
+/// never fatal: kube-runtime's backoff gives up after its elapsed limit, which a burst of
+/// `too old resource version … Expired` reached on 2026-09-08. This loop used to `return` there,
+/// and the ten-minute tick died with it — keys stopped converging on every node for two hours,
+/// `authorized_keys` went stale, and every default-image workspace started meanwhile parked at
+/// `KeysNotReady`. Nothing about a watch is allowed to end this task.
+async fn run_with<F>(ctx: Arc<Ctx>, api: Api<crd::OwnerKeys>, mut watch: F)
+where
+    F: FnMut() -> KeyEvents,
+{
+    use futures::StreamExt;
+    use kube::runtime::watcher;
+    let mut events = watch();
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -109,7 +130,13 @@ pub async fn run(ctx: Arc<Ctx>) {
                 Some(Ok(watcher::Event::Delete(obj))) => revoke(&ctx.pool, &obj.name_any()),
                 Some(Ok(watcher::Event::Init | watcher::Event::InitDone)) => {}
                 Some(Err(e)) => tracing::warn!(error = %e, "keys.watch.failed"),
-                None => return,
+                None => {
+                    // Paced so a stream that ends immediately cannot spin; the tick keeps
+                    // converging throughout, so the delay costs freshness and nothing else.
+                    tracing::warn!("keys.watch.ended");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    events = watch();
+                }
             },
             _ = tick.tick() => {
                 if let Ok(list) = api.list(&Default::default()).await {
@@ -129,6 +156,26 @@ pub async fn run(ctx: Arc<Ctx>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 2026-09-08 outage in one test: the watch stream ends, and the loop must build a new one
+    /// instead of returning and taking the ten-minute resync tick down with it.
+    #[tokio::test(start_paused = true)]
+    async fn a_watch_that_ends_is_rebuilt_rather_than_fatal() {
+        use futures::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rec) = crate::testsupport::test_ctx(tmp.path(), "node-a", vec![]);
+        let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+        let built = Arc::new(AtomicUsize::new(0));
+        let seen = built.clone();
+        let watch = move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            futures::stream::empty().boxed()
+        };
+        // `run_with` never returns by design, so the timeout is how the test ends.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), run_with(ctx, api, watch)).await;
+        assert!(built.load(Ordering::SeqCst) > 1, "the watch must be rebuilt, not returned from");
+    }
 
     /// Written IN PLACE: the pod holds the file's inode through its hostPath mount, so a rename
     /// would leave sshd reading the old file forever. Same inode before and after, and a shorter
