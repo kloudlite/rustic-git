@@ -289,7 +289,10 @@ pub(super) async fn api_branch_delete(
         return (StatusCode::BAD_REQUEST, "a branch is required").into_response();
     };
     let refname = format!("refs/heads/{branch}");
-    if !crate::refs::valid_ref_name(&refname) {
+    // `valid_ref_name` admits a leading `-`; git would too, but a name that reads as an option
+    // is refused here the way `git_init_container` refuses it — nothing downstream should have
+    // to remember that it is not one.
+    if branch.starts_with('-') || !crate::refs::valid_ref_name(&refname) {
         return (StatusCode::BAD_REQUEST, "invalid branch name").into_response();
     }
     let Some(old) = q.get("oid").and_then(|v| gix_hash::ObjectId::from_hex(v.as_bytes()).ok()) else {

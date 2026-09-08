@@ -1315,6 +1315,9 @@ async fn a_protected_branch_is_not_deleted() {
     let (status, body) = post_full_as(&router, "alice", &path).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(body.contains("cannot be deleted"), "{body}");
+    let (_, refs) = get_as(&router, "alice", "/api/alice/web/refs").await;
+    let names: Vec<&str> = refs.as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"refs/heads/feature"), "the protected branch must survive: {names:?}");
 }
 
 /// Somebody who may not see the repo may not learn which of its branches exist, and may not
