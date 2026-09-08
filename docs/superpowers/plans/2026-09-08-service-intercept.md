@@ -164,18 +164,27 @@ fn an_environment_without_intercepts_still_parses() {
 **Files:**
 - Modify: `bins/slo/src/stages/environment.rs`, its stage id list and dispatch, `crates/workspaces/src/slo/catalogue.rs`, `deploy/slo.md`, `web/apps/web/src/lib/fixtures/superadmin.ts`, `CLAUDE.md`
 
-**Catalogue row** (`Suite::Hourly`, stage `"6 · Environment"`, feature `"Environments"`):
+**Catalogue rows** (all `Suite::Hourly`, stage `"6 · Environment"`, feature `"Environments"`):
 
 | id | sli | target |
 | --- | --- | --- |
-| `env.intercept` | An intercepted service answers from the workspace on a remapped port, and answers from the real service again once released | `p95(120_000)` |
+| `env.intercept` | An intercepted service answers from the attached workspace on a remapped port | `p95(120_000)` |
+| `env.intercept.released` | Stopping the workspace releases the intercept on its own, and the real service answers again | `p95(180_000)` |
+| `env.intercept.refused` | An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused | `avail(99.9)` |
 
-- [ ] **Step 1:** read `environment.rs` for how it stands up its environment and what the workspace stage leaves in `c.state`. The step needs an environment service that echoes a known string and an attached workspace running a listener on a DIFFERENT port echoing another. Use the same `ws_exec` helper the workspace stage uses to start the listener; `bun` is on the workspace's PATH and `Bun.serve` is the shortest listener that stays up.
-- [ ] **Step 2:** the step: intercept with a port mapping, dial the service by its own name and port from inside the environment, assert the workspace's string; release; assert the original string returns. Skip with a reason when there is no kubeconfig, no environment, or no attached workspace.
-- [ ] **Step 3:** add the id to the stage's id list, its dispatch and its exactly-once test; add the row to all three catalogues, byte-identical.
-- [ ] **Step 4:** `CLAUDE.md`, one paragraph in "Workspaces and environments" after the attach paragraph: what an intercept is, that the StatefulSet is scaled to 0, that the Service goes selector-less with an agent-written `EndpointSlice`, that ports may be remapped, and that a stopped workspace releases it.
-- [ ] **Step 5:** `cargo test -p kloudlite-workspaces slo && cargo test -p kloudlite-slo-bin && cargo clippy --workspace --all-targets -- -D warnings && cd web && bun run test` → PASS.
-- [ ] **Step 6: Commit** `"Probe: a service can be intercepted and released"`.
+ONE journey reports all three — the environment, the attached workspace and the listener are the
+expensive part and are shared, and the release is only meaningful against an intercept that worked.
+Follow the shape `experience_ws.rs`'s pinned-package journey uses: the first id creates and the
+later ids skip with a reason when it did not.
+
+- [ ] **Step 1:** read `environment.rs` for how it stands up its environment and what the workspace stage leaves in `c.state`. The journey needs an environment service that echoes a known string and an attached workspace running a listener on a DIFFERENT port echoing another. Use the same `ws_exec` helper the workspace stage uses to start the listener; `bun` is on the workspace's PATH and `Bun.serve` is the shortest listener that stays up. Start it with `nohup … &` so it survives the exec returning.
+- [ ] **Step 2 (`env.intercept`):** intercept with a port mapping, dial the service by its OWN name and port from inside the environment (a sibling service's pod, the way `env.dns` already dials), assert the workspace's string. Skip with a reason when there is no kubeconfig, no environment, or no attached workspace.
+- [ ] **Step 3 (`env.intercept.released`):** STOP the workspace through `/v1` — never a hand release — then poll the same dial until the service answers its OWN string again, within the ceiling. This covers `/v1`'s clear, the StatefulSet coming back off 0, the Service regaining its selector and the slice being deleted. Assert the environment's `status` no longer reports `intercepted_by` for that service.
+- [ ] **Step 4 (`env.intercept.refused`):** against the same environment, two refusals — a workspace that is not attached (409) and a `ports` entry naming a port the service does not declare (422) — asserting the STATUS and that the body names what was wrong. Independent of the other two, so it runs even when the create failed.
+- [ ] **Step 5:** add the three ids to the stage's id list, its dispatch and its exactly-once test; add the rows to all three catalogues, byte-identical.
+- [ ] **Step 6:** `CLAUDE.md`, one paragraph in "Workspaces and environments" after the attach paragraph: what an intercept is, that the StatefulSet is scaled to 0, that the Service goes selector-less with an agent-written `EndpointSlice`, that ports may be remapped, and that a stopped workspace releases it.
+- [ ] **Step 7:** `cargo test -p kloudlite-workspaces slo && cargo test -p kloudlite-slo-bin && cargo clippy --workspace --all-targets -- -D warnings && cd web && bun run test` → PASS.
+- [ ] **Step 8: Commit** `"Probe: a service can be intercepted, released and refused"`.
 
 ## Self-review
 
@@ -185,4 +194,5 @@ Spec §1 → Task 1; §2 → Task 2; §3 → Tasks 3 and 4 (the mechanism is hel
 Task 5's drop rules. Names consistent across tasks: `Intercept`, `PortMap`, `workspace_port`,
 `intercepts`, `intercepted_by`, `intercept_slice`, `intercept_egress`, `intercept_ingress`,
 `intercept_policy_name`, `clear_intercepts_of`, `release_dead_intercepts`, `intercepts_to_drop`,
-`setIntercept`, `clearIntercept`, `interceptSummary`, `env.intercept`.
+`setIntercept`, `clearIntercept`, `interceptSummary`, `env.intercept`, `env.intercept.released`,
+`env.intercept.refused`.

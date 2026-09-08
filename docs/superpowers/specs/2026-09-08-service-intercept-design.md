@@ -192,19 +192,33 @@ shows what it is intercepting. Both read `status`, never the wish.
 
 ### 9. Probe
 
-One hourly id in stage "6 · Environment", feature "Environments":
+Three hourly ids in stage "6 · Environment", feature "Environments". One journey reports all
+three, because the expensive part — an environment, an attached workspace and a listener — is
+shared, and because the release path is only meaningful against an intercept that worked:
 
 | id | sli | target |
 | --- | --- | --- |
-| `env.intercept` | An intercepted service answers from the workspace on a remapped port, and answers from the real service again once released | `p95(120_000)` |
+| `env.intercept` | An intercepted service answers from the attached workspace on a remapped port | `p95(120_000)` |
+| `env.intercept.released` | Stopping the workspace releases the intercept on its own, and the real service answers again | `p95(180_000)` |
+| `env.intercept.refused` | An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused | `avail(99.9)` |
 
-The step: an environment whose one service echoes a known string; an attached workspace running a
-listener on a DIFFERENT port that echoes a different string; intercept with a port mapping; connect
-to the service by its own name and port from inside the environment and assert the workspace's
-string; release; assert the original string returns. Both halves matter — an intercept that never
-releases is a broken environment, and the release path is what a stale `EndpointSlice` or an
-un-scaled StatefulSet breaks. The remap is in the probe because it is the ordinary case, not an
-edge one.
+The journey: an environment whose one service echoes a known string; an attached workspace running
+a listener on a DIFFERENT port that echoes a different string.
+
+- `env.intercept` — intercept with a port mapping, dial the service by its own name and port from
+  inside the environment, assert the workspace's string. The remap is in the probe because it is
+  the ordinary case, not an edge one.
+- `env.intercept.released` — STOP the workspace rather than releasing by hand, then poll until the
+  service answers its own string again. This is the one that matters most: it covers `/v1`'s clear,
+  the StatefulSet coming back off 0, the Service regaining its selector and the `EndpointSlice`
+  being deleted — the whole path that, if it breaks, leaves an environment answering nothing with
+  no one having asked for that. A hand release would not exercise the automatic path at all.
+- `env.intercept.refused` — two refusals against the same environment: a workspace that is not
+  attached (409) and a port mapping naming a port the service does not declare (422). Cheap, and
+  they are the guards that stop an intercept pointing traffic somewhere nobody authorised.
+
+`NotCached`-style states are not probed: an intercept whose workspace pod is merely restarting is
+transient by construction and cannot be held still long enough to sample.
 
 ### 10. Failure modes
 
