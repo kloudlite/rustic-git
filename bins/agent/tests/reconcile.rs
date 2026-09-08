@@ -24,6 +24,12 @@ const VOL_STATUS: &str = "/apis/kloudlite.io/v1alpha1/volumes/vol-1/status";
 /// not nix's, because `nix -o`'s auto GC root does not survive the rename.
 struct FakeNix {
     builds: std::sync::Mutex<Vec<String>>,
+    /// The store paths `copy_from_cache` was asked for, and the answer it gives.
+    copies: std::sync::Mutex<Vec<String>>,
+    copy_answer: std::sync::Mutex<Result<(), String>>,
+    /// The `(rev, attr)` pairs a mirror lock was evaluated for, and the path it answers with.
+    evals: std::sync::Mutex<Vec<(String, String)>>,
+    eval_answer: std::sync::Mutex<Result<String, String>>,
     answer: std::sync::Mutex<Result<(), String>>,
     ping: std::sync::Mutex<Result<(), String>>,
     /// Run while a build is "in flight", so a test can change the spec mid-build.
@@ -33,6 +39,10 @@ impl Default for FakeNix {
     fn default() -> Self {
         FakeNix {
             builds: std::sync::Mutex::new(Vec::new()),
+            copies: std::sync::Mutex::new(Vec::new()),
+            copy_answer: std::sync::Mutex::new(Ok(())),
+            evals: std::sync::Mutex::new(Vec::new()),
+            eval_answer: std::sync::Mutex::new(Ok(MIRROR_PATH.into())),
             answer: std::sync::Mutex::new(Ok(())),
             ping: std::sync::Mutex::new(Ok(())),
             on_build: std::sync::Mutex::new(None),
@@ -48,6 +58,14 @@ impl kloudlite_agent::nix::Nix for FakeNix {
         }
         let r = self.answer.lock().unwrap().clone();
         r.map(|()| std::path::PathBuf::from("/tmp"))
+    }
+    async fn eval_out_path(&self, rev: &str, attr: &str, _: std::time::Duration) -> Result<String, String> {
+        self.evals.lock().unwrap().push((rev.to_string(), attr.to_string()));
+        self.eval_answer.lock().unwrap().clone()
+    }
+    async fn copy_from_cache(&self, store_path: &str, _: std::time::Duration) -> Result<(), String> {
+        self.copies.lock().unwrap().push(store_path.to_string());
+        self.copy_answer.lock().unwrap().clone()
     }
     async fn ping(&self) -> Result<(), String> { self.ping.lock().unwrap().clone() }
     async fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
@@ -2271,6 +2289,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
         desired_state: crd::DesiredState::Running,
         resources: Default::default(),
         packages: vec![],
+        locks: vec![],
         attached_environment: None,
     };
     let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
@@ -3520,6 +3539,24 @@ fn ready_workspace(id: &str, packages: Vec<String>) -> crd::Workspace {
     serde_json::from_value(o).unwrap()
 }
 
+const MIRROR_PATH: &str = "/nix/store/11111111111111111111111111111111-nodejs-20.20.2";
+const LOCKED_PATH: &str = "/nix/store/00000000000000000000000000000000-nodejs-20.20.2";
+
+/// A workspace with one pinned entry and the lock `/v1` would have written for it.
+fn locked_workspace(store_path: &str) -> crd::Workspace {
+    let mut w = ready_workspace("ws-1", vec!["nodejs@20".into()]);
+    w.spec.locks = vec![crd::Lock {
+        entry: "nodejs@20".into(),
+        version: "20.20.2".into(),
+        attr_path: "nodejs_20".into(),
+        rev: "a".repeat(40),
+        store_path: store_path.into(),
+        resolved_at: "2026-09-08T00:00:00Z".into(),
+        source: crd::LockSource::Nixhub,
+    }];
+    w
+}
+
 /// Apply until the profile step stops asking to be requeued: the build runs on its own thread, so
 /// the pass that observes it is a later one — as with every other long operation here.
 async fn apply_until_settled(w: &crd::Workspace, ctx: &Arc<Ctx>) -> kube::runtime::controller::Action {
@@ -3740,9 +3777,10 @@ async fn a_matching_hash_and_present_link_skip_the_build() {
     ws.status.as_mut().unwrap().packages = Some(kloudlite_workspaces::crd::PackagesStatus {
         base: vec![],
         observed: vec!["hello".into()],
-        observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
+        observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[])),
         profile: None,
         nixpkgs: Some(pin),
+        locked: vec![],
     });
     plant_profile(&ctx, "ws-1");
     let _ = kloudlite_agent::controller::apply_workspace(&ws, &ctx).await.unwrap();
@@ -3818,7 +3856,7 @@ async fn a_spec_change_during_a_build_is_rebuilt_not_published_under_the_new_has
     let pin = kloudlite_agent::nix::nixpkgs_pin(&test_settings());
     assert_eq!(
         st["status"]["packages"]["observedHash"],
-        kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into(), "jq".into()])),
+        kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into(), "jq".into()]), &[]),
         "the recorded hash is the one that was actually built"
     );
     assert_eq!(packages_condition(&st)["reason"], "Built");
@@ -3881,9 +3919,10 @@ async fn a_build_interrupted_by_a_restart_is_started_again() {
     st.packages = Some(kloudlite_workspaces::crd::PackagesStatus {
         base: vec![],
         observed: vec!["hello".into()],
-        observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]))),
+        observed_hash: Some(kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[])),
         profile: None,
         nixpkgs: Some(pin),
+        locked: vec![],
     });
     st.conditions = vec![crd::condition(crd::PACKAGES_READY, false, "Building", "taking the profile through nix", 1)];
     assert!(ctx.running.lock().unwrap().is_empty());
@@ -4405,7 +4444,7 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
     let store = ctx.profiles_dir.join("seeded-store-path");
     std::fs::create_dir_all(&store).unwrap();
     let pin = kloudlite_agent::nix::nixpkgs_pin(&test_settings());
-    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[]);
     kloudlite_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
 
     let ws = ready_workspace("ws-1", vec!["hello".into()]);
@@ -4422,13 +4461,134 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
     assert_eq!(st["status"]["packages"]["observedHash"], hash, "so the per-workspace skip hits next pass");
 }
 
+/// The lock's bytes come from the cache and the expression takes the path verbatim: the pinned
+/// nixpkgs has some other version of nodejs, and evaluating `pkgs.nodejs` would install that one.
+#[tokio::test]
+async fn a_locked_package_is_copied_from_the_cache_and_built_from_its_store_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    apply_until_settled(&locked_workspace(LOCKED_PATH), &ctx).await;
+
+    assert_eq!(fake.copies.lock().unwrap().as_slice(), [LOCKED_PATH.to_string()]);
+    let builds = fake.builds.lock().unwrap().clone();
+    assert!(builds[0].contains(&format!("(builtins.storePath \"{LOCKED_PATH}\")")), "{builds:?}");
+    assert!(!builds[0].contains("pkgs.nodejs@20"), "the raw entry must never reach nix: {builds:?}");
+
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(packages_condition(&st)["status"], "True", "{st}");
+    assert_eq!(
+        st["status"]["packages"]["locked"],
+        serde_json::json!([{"entry": "nodejs@20", "version": "20.20.2", "rev": "a".repeat(40)}]),
+        "the observed half of the lock: {st}"
+    );
+}
+
+/// A mirror lock names a revision, not a path. It is evaluated to one and then copied like any
+/// other lock — leaving the `getFlake` in the build expression would let nix build whatever it
+/// found in that nixpkgs from source, which is the whole thing this design refuses.
+#[tokio::test]
+async fn a_mirror_lock_is_evaluated_to_a_path_copied_and_then_substituted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    apply_until_settled(&locked_workspace(""), &ctx).await;
+
+    assert_eq!(fake.evals.lock().unwrap().as_slice(), [("a".repeat(40), "nodejs_20".to_string())]);
+    assert_eq!(fake.copies.lock().unwrap().as_slice(), [MIRROR_PATH.to_string()], "the evaluated path is pulled");
+    let builds = fake.builds.lock().unwrap().clone();
+    assert!(builds[0].contains(&format!("(builtins.storePath \"{MIRROR_PATH}\")")), "{builds:?}");
+    assert!(!builds[0].contains("getFlake \"github:NixOS/nixpkgs/aaaa"), "no second nixpkgs in the build: {builds:?}");
+}
+
+/// A lock outlives the entry that made it. Dropping `nodejs@20` from the list must drop nodejs,
+/// not keep installing it from a lock nobody asked for any more.
+#[tokio::test]
+async fn a_lock_for_an_entry_no_longer_in_the_list_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    let mut w = locked_workspace(LOCKED_PATH);
+    w.spec.packages = vec!["hello".into()]; // the pin is gone; its lock is not
+    apply_until_settled(&w, &ctx).await;
+
+    assert!(fake.copies.lock().unwrap().is_empty(), "a stale lock is not pulled");
+    let builds = fake.builds.lock().unwrap().clone();
+    assert!(!builds[0].contains("storePath"), "nor built: {builds:?}");
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    assert_eq!(st["status"]["packages"]["observedHash"], kloudlite_workspaces::packages::hash(
+        &kloudlite_agent::nix::nixpkgs_pin(&test_settings()), &with_base(&["hello".into()]), &[]),
+        "the hash is the one a workspace that never had the lock would have: {st}");
+    assert!(st["status"]["packages"]["locked"].is_null(), "and status does not report it: {st}");
+}
+
+/// There is no source-build fallback for a locked path: a path the cache lacks is a sentence to
+/// the person, under its own reason, and nix is never asked to build anything.
+#[tokio::test]
+async fn a_lock_the_cache_does_not_have_is_reported_and_never_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    *fake.copy_answer.lock().unwrap() = Err("NotCached: path does not exist".into());
+    apply_until_settled(&locked_workspace(LOCKED_PATH), &ctx).await;
+
+    assert!(fake.builds.lock().unwrap().is_empty(), "the copy failed, so nothing is built");
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
+    let c = packages_condition(&st);
+    assert_eq!(c["status"], "False");
+    assert_eq!(c["reason"], "NotCached", "{st}");
+    let msg = c["message"].as_str().unwrap();
+    assert!(msg.contains("nodejs@20") && msg.contains("20.20.2"), "names the entry and version: {msg}");
+}
+
+/// Nothing but a spec edit can make the cache hold that path, so retrying on a timer is load for
+/// nothing — the workspace waits for a change, as an unresolved entry does.
+#[tokio::test]
+async fn a_not_cached_lock_waits_for_a_spec_edit_rather_than_retrying() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    *fake.copy_answer.lock().unwrap() = Err("NotCached: path does not exist".into());
+    let action = apply_until_settled(&locked_workspace(LOCKED_PATH), &ctx).await;
+    assert_eq!(action, kube::runtime::controller::Action::await_change());
+}
+
+/// Only `/v1` resolves a version — the agent has no internet. An `@` entry that arrived without
+/// its lock (a restored backup, a `kubectl edit`) waits rather than guessing.
+#[tokio::test]
+async fn a_pinned_entry_with_no_lock_is_unresolved_not_built() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    apply_until_settled(&ready_workspace("ws-1", vec!["nodejs@20".into()]), &ctx).await;
+
+    assert!(fake.builds.lock().unwrap().is_empty());
+    assert!(fake.copies.lock().unwrap().is_empty());
+    let c = packages_condition(&rec.sent("PATCH", WS_STATUS).last().unwrap().clone());
+    assert_eq!(c["reason"], "Unresolved");
+}
+
+/// A pin in the platform's BASE list is nobody's spec edit to fix: `/v1` locks `spec.packages`
+/// and nothing else, so blaming the workspace's own list would send a person hunting through
+/// entries that are all fine.
+#[tokio::test]
+async fn a_pinned_base_entry_is_the_operators_error_not_an_unresolved_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
+    let mut s = (*ctx.settings.load()).clone();
+    s.base_packages = "nodejs@20".into();
+    ctx.settings.store(s);
+
+    apply_until_settled(&ready_workspace("ws-1", vec!["jq".into()]), &ctx).await;
+
+    assert!(fake.builds.lock().unwrap().is_empty());
+    let c = packages_condition(&rec.sent("PATCH", WS_STATUS).last().unwrap().clone());
+    assert_eq!(c["reason"], "BuildFailed", "{c}");
+    assert_ne!(c["reason"], "Unresolved");
+    assert!(c["message"].as_str().unwrap().starts_with("base packages: "), "{c}");
+}
+
 /// A dangling entry must not short-circuit the build, or the pod gets a profile with no bin.
 #[tokio::test]
 async fn an_index_entry_pointing_at_nothing_still_builds() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
     let pin = kloudlite_agent::nix::nixpkgs_pin(&test_settings());
-    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[]);
     kloudlite_agent::nix::record_index(&ctx.profiles_dir, &hash, &ctx.profiles_dir.join("gone")).unwrap();
 
     let ws = ready_workspace("ws-1", vec!["hello".into()]);
@@ -4446,7 +4606,7 @@ async fn a_finished_build_is_recorded_under_its_inputs() {
     apply_until_settled(&ws, &ctx).await;
 
     let pin = kloudlite_agent::nix::nixpkgs_pin(&test_settings());
-    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]));
+    let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[]);
     assert_eq!(
         kloudlite_agent::nix::indexed(&ctx.profiles_dir, &hash),
         Some(std::path::PathBuf::from("/tmp")),
@@ -5229,6 +5389,7 @@ fn parent_at(name: &str, volume: &str, phase: crd::Phase, pod: Option<&str>) -> 
         state: crd::SnapshotState::Workspace {
             image: "alpine:3.20".into(),
             packages: vec![],
+            locks: vec![],
             resources: Default::default(),
             quota_gb: 5,
             attached_environment: None,

@@ -388,6 +388,26 @@ inputs is published straight from the index and never invokes nix (an evaluation
 janitor sweeps entries no `{id}/current` resolves to. The derivation name carries no workspace id —
 it used to, which is what stopped two identical package sets sharing one store path.
 
+**A package may be pinned: `attr@version`** (`latest`, `N`, `N.N` or `N.N.N`; anything else is refused
+naming the entry — `packages::parse_entry`). A bare `attr` still means the region's nixpkgs pin, one
+evaluation for the whole list. A pinned entry is LOCKED before the workspace is written:
+`Resolver::lock_all` (`crates/workspaces/src/packages/resolve.rs`) answers from a 24 h cache in the
+object store (`pkgs/x86_64-linux/{attr}/{version}`), then Nixhub (`KLOUDLITE_NIXHUB_URL`, default
+`https://search.devbox.sh`), then the mirrored nixpkgs-multiverse index at `index/pkgs/versions.json`
+that the api's `user` role refreshes daily (`packages::mirror_beat`, two upstream files joined so
+every row carries a real nixpkgs commit). `spec.locks` — entry, version, attrPath, rev, storePath,
+source — is written ONLY by the api, beside `spec.packages`, and an unresolvable list never reaches
+the cluster: unknown everywhere is a 422 naming the three nearest versions, every index down with no
+cache is a 503, and nothing is written either way. An unchanged entry keeps its lock through every
+other edit; only `POST /v1/workspaces/{id}/packages/update` re-resolves (an outage during an update
+keeps the locks it had). Clone and restore carry the frozen `locks`. The agent hashes the locks into
+the profile key, `nix copy`s every lock's store path from cache.nixos.org BEFORE the build — a
+mirror lock (no store path) is first evaluated at its revision — and never source-builds a pin: a
+miss is `PackagesReady=False/NotCached` and waits for a spec edit, and a `@` entry that somehow
+reached the CR without a lock is `Unresolved` the same way. Four hourly probe ids
+(`ws.packages.pin*`, `ws.packages.update`) hold it on the fleet; `NotCached` is deliberately not
+probed, since no version can be made uncached without the source build the design forbids.
+
 ## Live settings
 
 Two scopes, two stores: per-region agent tunables live in `ClusterSettings/default`

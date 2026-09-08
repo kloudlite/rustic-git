@@ -995,6 +995,7 @@ mod tests {
         let state = crd::SnapshotState::Workspace {
             image: "alpine:3.20".into(),
             packages: vec![],
+            locks: vec![],
             resources: Default::default(),
             quota_gb: 5,
             attached_environment: None,

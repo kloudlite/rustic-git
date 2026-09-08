@@ -324,6 +324,11 @@ async fn run() -> Result<()> {
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
             state = state.with_slo_webhook(std::env::var("KLOUDLITE_SLO_WEBHOOK").ok());
+            // The package index: Nixhub, the mirrored index in our own object store, and that
+            // same object store as the day-long resolution cache.
+            state = state.with_resolver(Arc::new(
+                kloudlite_workspaces::packages::resolve::Resolver::from_env(store.os.clone()),
+            ));
             if let Some(dir) = directory.clone() {
                 state = state.with_directory(Arc::new(Dir(dir)));
             }
@@ -450,6 +455,15 @@ async fn run() -> Result<()> {
     if role != "admin" {
         if let Some(ws) = workspaces.clone() {
             tokio::spawn(kloudlite_workspaces::api::keys::run_beat(ws));
+        }
+    }
+    // The nixpkgs-multiverse mirror the packages resolver falls back to when Nixhub has no
+    // answer (Task 3's `resolve::Mirror`). User role only, same reasoning as the keys beat above,
+    // and only with an object store to write it to — a dev api has none, and the beat would do
+    // nothing but warn once a day.
+    if role != "admin" {
+        if let Some(ws) = workspaces.clone().filter(|ws| ws.keys.is_some()) {
+            tokio::spawn(kloudlite_workspaces::packages::mirror_beat::run_beat(ws));
         }
     }
     // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with

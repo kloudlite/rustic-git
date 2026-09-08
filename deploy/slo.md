@@ -130,6 +130,10 @@ first destructive stage.
 | `agent.heartbeat` | Control plane | Every region agent's heartbeat file is fresh and its DaemonSet is fully ready | 99.9 % | fast | 10 · Edge |
 | `ws.packages.add` | Workspaces | Adding a package to a running workspace makes it runnable (`which`) | 95 % ≤ 180000 ms | hourly | 14 · Experience |
 | `ws.packages.remove` | Workspaces | Removing it makes it disappear from the profile | 95 % ≤ 120000 ms | hourly | 14 · Experience |
+| `ws.packages.pin` | Workspaces | A workspace created with `jq@1.7` locks a 1.7.x, and `jq --version` in the pod says so | 95 % ≤ 180000 ms | hourly | 14 · Experience |
+| `ws.packages.pin.unknown` | Workspaces | `jq@0.0.99` is refused with the nearest versions named | 99.9 % | hourly | 14 · Experience |
+| `ws.packages.update` | Workspaces | `POST …/packages/update` answers with the lock unchanged for an exact pin | 99.9 % | hourly | 14 · Experience |
+| `ws.packages.pin.lockshape` | Workspaces | The lock names a nixpkgs revision and a store path | 99.9 % | hourly | 14 · Experience |
 | `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `key.platform.regenerate` | Identity | Regenerating the platform key keeps seeding working | 99.9 % | hourly | 14 · Experience |
 | `team.create` | Teams | A team can be created by a person | 99.9 % | hourly | 14 · Experience |

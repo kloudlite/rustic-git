@@ -19,7 +19,7 @@ import { sshConfigBlock, sshOneLiner } from "@/lib/ssh-config";
 import { ArchivedSnapshots } from "@/components/app/archived-snapshots";
 import { keptSnapshotsCopy, type ArchivedRow } from "@/lib/archived";
 import {
-  cloneWorkspace, deleteWorkspace, pushWorkspace, setPackages, startWorkspace, stopWorkspace,
+  cloneWorkspace, deleteWorkspace, pushWorkspace, setPackages, startWorkspace, stopWorkspace, updatePackages,
   type WsActionState,
 } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 
@@ -104,7 +104,10 @@ function CloneDialog({ owner, id }: { owner: string; id: string }) {
 
 function PackagesDialog({ owner, w }: { owner: string; w: ApiWorkspace }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(setPackages, null);
+  const [upState, upAction, upPending] = useActionState<WsActionState, FormData>(updatePackages, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
+  // Only a pinned list has anything to re-resolve; a bare one always means the pinned nixpkgs.
+  const pinned = w.packages.some((p) => p.includes("@"));
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -116,7 +119,8 @@ function PackagesDialog({ owner, w }: { owner: string; w: ApiWorkspace }) {
             <DialogTitle>Packages</DialogTitle>
             <DialogDescription>
               nixpkgs attribute names, installed into the workspace&rsquo;s profile. Search them at
-              search.nixos.org. This replaces the whole list.
+              search.nixos.org. Pin one with <code>nodejs@20</code> &mdash; <code>latest</code>, or one
+              to three numbers. This replaces the whole list.
             </DialogDescription>
           </DialogHeader>
           <input type="hidden" name="owner" value={owner} />
@@ -130,11 +134,23 @@ function PackagesDialog({ owner, w }: { owner: string; w: ApiWorkspace }) {
             className="h-9"
           />
           {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+          {upState?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{upState.error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
             <Button type="submit" disabled={pending}>{pending && <Loader2 className="animate-spin" />}Apply</Button>
           </DialogFooter>
         </form>
+        {/* Its own form, a sibling: a form inside a form is not valid HTML, and this one submits
+            no field — it asks what the pins mean today. */}
+        {pinned && (
+          <form action={upAction}>
+            <input type="hidden" name="owner" value={owner} />
+            <input type="hidden" name="id" value={w.id} />
+            <Button type="submit" variant="outline" size="sm" disabled={upPending}>
+              {upPending && <Loader2 className="animate-spin" />}Update pinned packages
+            </Button>
+          </form>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -152,9 +168,16 @@ function Packages({ w }: { w: ApiWorkspace }) {
       {(w.base_packages ?? []).map((p) => (
         <span key={`base-${p}`} className="border border-dashed border-border px-1.5 py-0.5 text-sm2 text-muted-foreground/60" title="base — on every workspace">{p}</span>
       ))}
-      {w.packages.map((p) => (
-        <span key={p} className="border border-border px-1.5 py-0.5 text-sm2 text-muted-foreground">{p}</span>
-      ))}
+      {/* A pinned entry shows what it RESOLVED to: `nodejs@20` is an ask, `20.20.2` is the
+          answer, and only the second one says what is actually installed. */}
+      {w.packages.map((p) => {
+        const lock = w.locks?.find((l) => l.entry === p);
+        return (
+          <span key={p} className="border border-border px-1.5 py-0.5 text-sm2 text-muted-foreground" title={lock ? `${lock.source} ${lock.rev}` : undefined}>
+            {p}{lock ? ` \u2192 ${lock.version}` : ""}
+          </span>
+        );
+      })}
       {st?.ready ? null : (
         <span
           title={st?.message}

@@ -361,6 +361,57 @@
                       "image": {
                         "type": "string"
                       },
+                      "locks": {
+                        "description": "What each `name@version` entry in `packages` resolved to. Desired state on purpose: the\nagent has no internet, so the api resolves once and the answer rides in the object — see\n`Lock`. A bare entry (no `@`) has no lock.",
+                        "items": {
+                          "description": "What a `name@version` package entry resolved to, frozen at the moment `/v1` wrote the spec.\n\nDESIRED state, not observed: only the api may write spec, and it is the only tier with\noutbound access — the agent has no internet and cannot ask an index what `nodejs@20` means.\nSo the answer travels in the object, and every node builds the same bytes forever after.\n\n`store_path` empty means \"mirror-resolved\": the mirror index carries a revision but no store\npath, so the agent evaluates `rev#attr_path` instead of substituting a path directly.",
+                          "properties": {
+                            "attrPath": {
+                              "description": "The nixpkgs attribute (`nodejs_20`) at `rev`.",
+                              "type": "string"
+                            },
+                            "entry": {
+                              "description": "The entry as the person typed it (`nodejs@20`) — the cache key and what the web shows.",
+                              "type": "string"
+                            },
+                            "resolvedAt": {
+                              "description": "When the index answered, RFC3339. Kept so an update pass can tell a stale lock from a fresh\none without asking the index again.",
+                              "type": "string"
+                            },
+                            "rev": {
+                              "description": "The nixpkgs revision that built this version.",
+                              "type": "string"
+                            },
+                            "source": {
+                              "description": "Which index answered. Recorded because the two differ in what they can give: Nixhub carries a\nstore path (substitute directly), the mirror does not (evaluate the revision).",
+                              "enum": [
+                                "nixhub",
+                                "mirror"
+                              ],
+                              "type": "string"
+                            },
+                            "storePath": {
+                              "default": "",
+                              "description": "The `/nix/store/...` output, or empty for a mirror lock — see the type doc. `default` so a\nlock written before this field existed still parses.",
+                              "type": "string"
+                            },
+                            "version": {
+                              "description": "The concrete version resolved to (`20.20.2`).",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "attrPath",
+                            "entry",
+                            "resolvedAt",
+                            "rev",
+                            "source",
+                            "version"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
                       "name": {
                         "type": "string"
                       },
@@ -576,6 +627,30 @@
                             "description": "The platform's base set the profile was built with, on top of `observed`. Reported so a\npage can show what every workspace gets without asking the node which env it runs with.",
                             "items": {
                               "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "locked": {
+                            "description": "What `spec.locks` was when this profile was built — the observed half of the lock, so the\nweb can show `nodejs@20 -> 20.20.2` without reading spec and guessing whether the node has\ncaught up with it yet.",
+                            "items": {
+                              "description": "The reported shape of a `Lock`: what the person asked for, what it became, and where from.\nDeliberately narrower than `Lock` — a store path is a build detail nobody reads off status.",
+                              "properties": {
+                                "entry": {
+                                  "type": "string"
+                                },
+                                "rev": {
+                                  "type": "string"
+                                },
+                                "version": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "entry",
+                                "rev",
+                                "version"
+                              ],
+                              "type": "object"
                             },
                             "type": "array"
                           },

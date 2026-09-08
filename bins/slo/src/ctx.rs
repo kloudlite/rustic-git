@@ -56,6 +56,9 @@ pub struct State {
     /// stage creates is named `run-{run_id}-…`, so teardown's prefix sweep finds them by name
     /// whether or not the stage got as far as deleting them itself.
     pub ux_workspace: Option<String>,
+    /// The pinned workspace (`run-{id}-pin`) the four `ws.packages.pin*` ids walk. Held for the
+    /// same reason as `ux_workspace`: the steps after the create need the id it answered.
+    pub pin_workspace: Option<String>,
     /// Stage 14's own environment (two services), its clone, and the workspace whose two pushes
     /// `vol.history` reads. Named `run-…`, so the prefix sweep finds them; held here because the
     /// four environment ids are one journey on one object.

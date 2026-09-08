@@ -68,8 +68,8 @@ use environments::{
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
-    attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages,
-    restore_ws, ssh_session, start_ws, stop_ws,
+    attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
+    ssh_session, start_ws, stop_ws, update_ws_packages,
 };
 
 /// Who is calling, and whether they hold the platform-administrator claim.
@@ -249,6 +249,10 @@ pub struct ApiState {
     /// run and a firing `SloBurn` are recorded and shown on the console like every other fact, and
     /// nothing is posted anywhere: the webhook is a nudge, never the record.
     pub slo_webhook: Option<String>,
+    /// Turns a `name@version` entry into a `crd::Lock` before the CR is written. The api always wires one
+    /// (`Resolver::from_env`); `None` is the test harness, where a list with a `@` entry is
+    /// refused 503 rather than written unlocked, and a list without one never asks.
+    pub resolver: Option<Arc<crate::packages::resolve::Resolver>>,
 }
 
 impl ApiState {
@@ -264,7 +268,13 @@ impl ApiState {
             history: None,
             cache: None,
             slo_webhook: None,
+            resolver: None,
         }
+    }
+
+    pub fn with_resolver(mut self, r: Arc<crate::packages::resolve::Resolver>) -> Self {
+        self.resolver = Some(r);
+        self
     }
 
     pub fn with_peer(mut self, peer: admin::PeerClient) -> Self {
@@ -320,6 +330,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
+        .route("/v1/workspaces/{id}/packages/update", post(update_ws_packages))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))

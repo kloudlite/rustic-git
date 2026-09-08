@@ -108,6 +108,12 @@ async fn ensure_profile(
     // The platform's base set first, then the workspace's own, deduplicated: the hash covers
     // both, so rolling the base rebuilds every profile, and a name in both lists is one package.
     let base = crate::nix::base_packages(&ctx.settings);
+    // Only `spec.packages` is ever resolved — `/v1` writes no lock for a base entry — so a pinned
+    // base entry could never be built and is the operator's mistake, reported as one.
+    if let Some(p) = base.iter().find(|p| p.contains('@')) {
+        let msg = format!("base packages: {p} is pinned to a version; base packages carry none");
+        return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &msg), Action::await_change()).await;
+    }
     let mut all: Vec<String> = base.clone();
     all.extend(w.spec.packages.iter().filter(|p| !base.contains(p)).cloned());
     if let Err(e) = packages::validate_list(&all) {
@@ -115,13 +121,37 @@ async fn ensure_profile(
         let msg = format!("base packages: {e}");
         return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &msg), Action::await_change()).await;
     }
-    let hash = packages::hash(&pin, &all);
+    // A pinned entry is built from its LOCK, never from the pinned nixpkgs, so it leaves the list
+    // the expression evaluates and comes back as a store path (or a revision) below.
+    let bare = packages::bare(&all);
+    // Only the locks the LIST still asks for. A lock outlives the entry that made it — dropping
+    // `nodejs@20` from `spec.packages` leaves its lock behind until the next resolve — and a stale
+    // one in the hash or the expression would keep installing a package nobody asked for.
+    let locks: Vec<crd::Lock> = w.spec.locks.iter().filter(|l| w.spec.packages.contains(&l.entry)).cloned().collect();
+    // `/v1` writes a lock for every `@` entry it accepts. One missing means the object did not
+    // come through `/v1` — a restored backup, a `kubectl edit` — and guessing a version here is
+    // the one thing this design refuses: say so and wait for a spec that carries the answer.
+    if let Some((raw, _)) = packages::pinned(&w.spec.packages).into_iter().find(|(raw, _)| !locks.iter().any(|l| &l.entry == raw)) {
+        let msg = format!("{raw} has no resolved version; set the packages again to resolve it");
+        return profile_failed(w, id, gen, prev, ctx, (crd::PKG_UNRESOLVED, &msg), Action::await_change()).await;
+    }
+    let hash = packages::hash(&pin, &bare, &locks);
     let observed = crd::PackagesStatus {
         base,
         observed: w.spec.packages.clone(),
         observed_hash: Some(hash.clone()),
         profile: Some(crate::nix::profile_path(&ctx.profiles_dir, id).to_string_lossy().into_owned()),
         nixpkgs: Some(pin.clone()),
+        // The observed half of `spec.locks`: reported alongside the profile so a reader can tell a
+        // lock the node has actually built from one the api only just wrote.
+        locked: locks
+            .iter()
+            .map(|l| crd::LockedStatus {
+                entry: l.entry.clone(),
+                version: l.version.clone(),
+                rev: l.rev.clone(),
+            })
+            .collect(),
     };
 
     let started_from = ctx.profile_builds.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
@@ -165,11 +195,21 @@ async fn ensure_profile(
                 tracing::info!(workspace = %id, reason = "superseded", "workspace.rebuilding");
             }
             Err(e) => {
+                // A path the public cache does not have is not a broken list: it is a version this
+                // node cannot install without building it, which `--max-jobs 0` refuses. Its own
+                // reason, so the web can say which entry and offer an update rather than "failed".
+                let reason = if e.starts_with(crate::nix::NOT_CACHED) { crd::PKG_NOT_CACHED } else { "BuildFailed" };
                 // The OLD packages, not the ones that failed (`profile_failed` keeps them):
                 // recording the new hash here makes the next pass see hash-match plus a directory
                 // on disk and never retry the build.
-                let backoff = build_failed_backoff(prev);
-                return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e), Action::requeue(backoff)).await;
+                // A cache that does not hold the path will not hold it a minute from now either:
+                // only a spec edit (a different version) fixes it, and that is an event.
+                let when = if reason == crd::PKG_NOT_CACHED {
+                    Action::await_change()
+                } else {
+                    Action::requeue(build_failed_backoff(prev))
+                };
+                return profile_failed(w, id, gen, prev, ctx, (reason, &e), when).await;
             }
         }
     }
@@ -226,14 +266,47 @@ async fn ensure_profile(
     // Build, on its own thread: `nix` blocks for as long as the substituter takes. The link is
     // made here rather than by `nix -o`: an out-link's auto GC root points at the `.building`
     // path, so the publish rename would orphan it and leave the live profile collectable.
-    let expr = packages::expression(&pin, &all);
+    // Rendered here only to VALIDATE: a lock whose store path, revision or attribute is not the
+    // shape nix writes never reaches an expression, and only a spec edit fixes that. The
+    // expression the build actually uses is rendered inside the task below, once every mirror
+    // lock has been resolved to a path.
+    if let Err(e) = packages::expression(&pin, &bare, &locks) {
+        return profile_failed(w, id, gen, prev, ctx, ("BuildFailed", &e.to_string()), Action::await_change()).await;
+    }
     let dir = crate::nix::profile_dir(&ctx.profiles_dir, id);
     let building = crate::nix::building_path(&ctx.profiles_dir, id);
     let nix = ctx.nix.clone();
     let timeout = crate::nix::build_timeout(&ctx.settings);
     // `nix.build` is async (it drives the child through tokio), so this is a plain task; the fs
     // calls after it are a symlink and a mkdir, not the substituter's minutes.
+    let (pin_c, bare_c, locks_c) = (pin.clone(), bare.clone(), locks.clone());
     let handle = tokio::spawn(async move {
+        // Every lock's bytes are pulled from the cache BEFORE the build, which is what keeps a
+        // pinned package from being compiled here: the build itself only realises the `buildEnv`
+        // symlink tree. Sequential — one substituter, and a parallel pull only moves the wait.
+        let mut resolved = Vec::with_capacity(locks_c.len());
+        for l in locks_c {
+            // A mirror lock carries a revision instead of a path, so ask nix what it evaluates to
+            // and treat the answer as any other lock. Resolving it HERE rather than leaving the
+            // `getFlake` in the build expression is the point: an expression that evaluated the
+            // foreign nixpkgs would happily build what it found there from source.
+            let path = if l.store_path.is_empty() {
+                nix.eval_out_path(&l.rev, &l.attr_path, timeout)
+                    .await
+                    .map_err(|e| format!("{} ({}): {e}", l.entry, l.version))?
+            } else {
+                l.store_path.clone()
+            };
+            if let Err(e) = nix.copy_from_cache(&path, timeout).await {
+                return Err(if e.starts_with(crate::nix::NOT_CACHED) {
+                    format!("{}: {} ({}) is not in {}", crate::nix::NOT_CACHED, l.entry, l.version, crate::nix::CACHE)
+                } else {
+                    format!("{} ({}): {e}", l.entry, l.version)
+                });
+            }
+            resolved.push(crd::Lock { store_path: path, ..l });
+        }
+        let expr = packages::expression(&pin_c, &bare_c, &resolved).map_err(|e| e.to_string())?;
         let store_path = nix.build(&expr, timeout).await?;
         // A node that ran the old flat-link layout has `{id}` as a SYMLINK into the store, and
         // `create_dir_all` would happily accept it — every write below then lands inside a

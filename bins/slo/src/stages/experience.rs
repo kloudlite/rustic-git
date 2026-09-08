@@ -28,6 +28,10 @@ pub const EXPERIENCE: &str = "14 · Experience";
 pub const IDS: &[&str] = &[
     "ws.packages.add",
     "ws.packages.remove",
+    "ws.packages.pin",
+    "ws.packages.pin.unknown",
+    "ws.packages.update",
+    "ws.packages.pin.lockshape",
     "ws.seeded",
     "key.platform.regenerate",
     "id.username",
@@ -95,6 +99,10 @@ pub async fn run(c: &mut Ctx) {
             // against and `ws.packages.remove` follows it, so one call covers both ids.
             "ws.packages.add" => super::experience_ws::packages(c).await,
             "ws.packages.remove" => {}
+            // The pin journey is one workspace and four assertions about it, so one call reports
+            // all four ids, in this order.
+            "ws.packages.pin" => super::experience_ws::pin(c).await,
+            "ws.packages.pin.unknown" | "ws.packages.update" | "ws.packages.pin.lockshape" => {}
             "ws.seeded" => super::experience_ws::seeded(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
             "home.persists" => super::experience_ws::home_persists(c).await,

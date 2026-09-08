@@ -107,13 +107,15 @@ in pkgs.buildEnv {
 ```
 
 Before evaluating, the agent runs `nix copy --from https://cache.nixos.org <storePath>` for every
-lock that has one (in parallel, bounded by `nix_timeout_secs`). A path the cache does not hold
+lock that has one (one after another — a single substituter, so a parallel pull only moves the wait — each bounded by `nix_timeout_secs`). A path the cache does not hold
 ends the reconcile with `PackagesReady=False/NotCached` — message
 `"nodejs@20.20.2 has no binary in cache.nixos.org; pick a version that does"` — and no source
-build is attempted: `nix build` runs with `--option substituters https://cache.nixos.org
---max-jobs 0`, so an uncached derivation fails instead of compiling. A mirror lock (no store
-path) evaluates its revision, costing one nixpkgs evaluation per distinct `rev` (~28 s cold,
-cached by the daemon after), and is subject to the same `--max-jobs 0` rule.
+build is attempted: the locked paths are copied from cache.nixos.org before the build, so a
+pinned package is never compiled; the `buildEnv` itself is a local symlink tree and is always
+built locally. A mirror lock (no store path) is first evaluated to its `outPath` — one nixpkgs
+evaluation per distinct `rev` (~28 s cold, cached by the daemon after) — and then copied and
+rendered as `builtins.storePath` exactly like a Nixhub lock, so the build never re-evaluates the
+foreign nixpkgs.
 
 The store paths are gcrooted by the profile as today (`ensure_gcroot`), so a lock whose binary
 later leaves the cache keeps working on every node that already holds it; only a first build on
@@ -157,7 +159,7 @@ exists); source builds on request.
 (`WorkspaceSpec.locks`, `SnapshotState.locks`, `PackagesStatus.locked`, regenerated `crds.yaml`),
 `crates/workspaces/src/api/workspaces.rs` (resolve before write; the update route),
 `crates/workspaces/src/history/beats.rs` (mirror refresh), `bins/agent/src/nix.rs` (`nix copy`
-substitution, `--max-jobs 0`), `bins/agent/src/controller/workspace.rs` (locks into the hash and
+substitution, `nix eval` of a mirror lock's `outPath`), `bins/agent/src/controller/workspace.rs` (locks into the hash and
 expression, `NotCached`/`Unresolved`), `web/apps/web` (grammar, resolved versions, update action),
 `deploy/slo.md` + `crates/workspaces/src/slo/catalogue.rs` (a `ws.packages.pin` step in the hourly
 suite: create with `jq@1.7` — a version cache.nixos.org holds — and assert the lock and the binary).

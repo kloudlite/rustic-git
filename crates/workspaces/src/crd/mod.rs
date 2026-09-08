@@ -347,6 +347,44 @@ pub const DEFAULT_WS_QUOTA_GB: u64 = 20;
 /// fallback for a legacy `spec.storage`-less object; was already `20`, named here to share it.
 pub const DEFAULT_ENV_QUOTA_GB: u64 = 20;
 
+/// What a `name@version` package entry resolved to, frozen at the moment `/v1` wrote the spec.
+///
+/// DESIRED state, not observed: only the api may write spec, and it is the only tier with
+/// outbound access — the agent has no internet and cannot ask an index what `nodejs@20` means.
+/// So the answer travels in the object, and every node builds the same bytes forever after.
+///
+/// `store_path` empty means "mirror-resolved": the mirror index carries a revision but no store
+/// path, so the agent evaluates `rev#attr_path` instead of substituting a path directly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Lock {
+    /// The entry as the person typed it (`nodejs@20`) — the cache key and what the web shows.
+    pub entry: String,
+    /// The concrete version resolved to (`20.20.2`).
+    pub version: String,
+    /// The nixpkgs attribute (`nodejs_20`) at `rev`.
+    pub attr_path: String,
+    /// The nixpkgs revision that built this version.
+    pub rev: String,
+    /// The `/nix/store/...` output, or empty for a mirror lock — see the type doc. `default` so a
+    /// lock written before this field existed still parses.
+    #[serde(default)]
+    pub store_path: String,
+    /// When the index answered, RFC3339. Kept so an update pass can tell a stale lock from a fresh
+    /// one without asking the index again.
+    pub resolved_at: String,
+    pub source: LockSource,
+}
+
+/// Which index answered. Recorded because the two differ in what they can give: Nixhub carries a
+/// store path (substitute directly), the mirror does not (evaluate the revision).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LockSource {
+    Nixhub,
+    Mirror,
+}
+
 /// What the parent WAS when this cut was taken, frozen beside the bytes. A restore defaults to
 /// it, which is the whole reason it exists: last month's files with today's image is not last
 /// month's workspace. A copy, never a reference — later edits to the parent leave it alone.
@@ -357,6 +395,11 @@ pub enum SnapshotState {
     Workspace {
         image: String,
         packages: Vec<String>,
+        /// The locks frozen with `packages`, so a restore rebuilds the exact versions this cut
+        /// ran, not whatever the index resolves to today. `default` — a cut taken before locks
+        /// existed simply has none.
+        #[serde(default)]
+        locks: Vec<Lock>,
         resources: PodResources,
         quota_gb: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -374,6 +417,7 @@ impl SnapshotState {
         SnapshotState::Workspace {
             image: w.spec.image.clone(),
             packages: w.spec.packages.clone(),
+            locks: w.spec.locks.clone(),
             resources: w.spec.resources.clone(),
             quota_gb: w.spec.storage.as_ref().map(|s| s.quota_gb).unwrap_or(DEFAULT_WS_QUOTA_GB),
             attached_environment: w.spec.attached_environment.clone(),
@@ -640,6 +684,11 @@ pub struct WorkspaceSpec {
     /// spec is not part of what a restore replaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub packages: Vec<String>,
+    /// What each `name@version` entry in `packages` resolved to. Desired state on purpose: the
+    /// agent has no internet, so the api resolves once and the answer rides in the object — see
+    /// `Lock`. A bare entry (no `@`) has no lock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locks: Vec<Lock>,
     /// The environment whose services this workspace resolves by bare name, or `None`.
     ///
     /// One, not a list: bare-name resolution has to be unambiguous, and two attached environments
@@ -704,6 +753,21 @@ pub struct PackagesStatus {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nixpkgs: Option<String>,
+    /// What `spec.locks` was when this profile was built — the observed half of the lock, so the
+    /// web can show `nodejs@20 -> 20.20.2` without reading spec and guessing whether the node has
+    /// caught up with it yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locked: Vec<LockedStatus>,
+}
+
+/// The reported shape of a `Lock`: what the person asked for, what it became, and where from.
+/// Deliberately narrower than `Lock` — a store path is a build detail nobody reads off status.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LockedStatus {
+    pub entry: String,
+    pub version: String,
+    pub rev: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1429,6 +1493,14 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
 /// a controller-local fact like `NAMESPACE_READY`.
 pub const PACKAGES_READY: &str = "PackagesReady";
 
+/// `PackagesReady=False` reason: a lock's store path is not in `cache.nixos.org`. The agent never
+/// builds from source, so this is terminal until somebody picks a version that has a binary.
+pub const PKG_NOT_CACHED: &str = "NotCached";
+
+/// `PackagesReady=False` reason: an `@` entry arrived with no lock. `/v1` never writes one — this
+/// is an operator having edited spec with kubectl, and the agent refuses to guess a version.
+pub const PKG_UNRESOLVED: &str = "Unresolved";
+
 /// Condition type carrying the environment a workspace is attached to, in its MESSAGE (the bare
 /// id). Named here rather than in the agent because `/v1` reads it back too: it is the only record
 /// of which environment's namespace holds a workspace's ingress half once `spec` has been cleared.
@@ -1559,6 +1631,7 @@ mod tests {
                 observed_hash: Some("sha256:x".into()),
                 profile: None,
                 nixpkgs: None,
+                locked: vec![],
             }),
             ..Default::default()
         };
@@ -1579,6 +1652,7 @@ mod tests {
             desired_state: DesiredState::Running,
             resources: PodResources::default(),
             packages: vec![],
+            locks: vec![],
             attached_environment: None,
         };
         assert!(!serde_json::to_string(&spec).unwrap().contains("packages"));
@@ -1666,6 +1740,7 @@ mod tests {
         let st = SnapshotState::Workspace {
             image: "alpine:3.20".into(),
             packages: vec!["ripgrep".into()],
+            locks: vec![],
             resources: PodResources::default(),
             quota_gb: 5,
             attached_environment: Some("env-1".into()),
@@ -1704,11 +1779,20 @@ mod tests {
         let mut w = Workspace::new("ws-1", WorkspaceSpec {
             owner: "o".into(), team: String::new(), name: "n".into(), region: "r".into(),
             image: "alpine:3.20".into(), storage: None, desired_state: DesiredState::Running,
-            resources: PodResources::default(), packages: vec!["jq".into()], attached_environment: None,
+            resources: PodResources::default(), packages: vec!["jq".into()],
+            locks: vec![Lock {
+                entry: "nodejs@20".into(), version: "20.20.2".into(), attr_path: "nodejs_20".into(),
+                rev: "abc".into(), store_path: "/nix/store/x".into(),
+                resolved_at: "2026-09-08T00:00:00Z".into(), source: LockSource::Nixhub,
+            }],
+            attached_environment: None,
         });
         match SnapshotState::of_workspace(&w) {
-            SnapshotState::Workspace { image, packages, quota_gb, attached_environment, .. } => {
+            SnapshotState::Workspace { image, packages, locks, quota_gb, attached_environment, .. } => {
                 assert_eq!(image, "alpine:3.20"); assert_eq!(packages, vec!["jq"]);
+                // The lock is frozen with the list; a restore that lost it would rebuild a
+                // different version of the same entry.
+                assert_eq!(locks.len(), 1); assert_eq!(locks[0].version, "20.20.2");
                 assert_eq!(quota_gb, DEFAULT_WS_QUOTA_GB); assert_eq!(attached_environment, None);
             }
             other => panic!("{other:?}"),

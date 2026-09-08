@@ -8,6 +8,7 @@ use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
 use crate::model::*;
+use crate::packages::resolve::Refusal;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::{Resource, ResourceExt};
 use axum::{
@@ -80,6 +81,7 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Placed"))
             .filter(|c| c.status != "True" && c.reason == "NoCapacity")
             .map(ConditionDoc::from),
+        locks: w.spec.locks.iter().map(LockDoc::from).collect(),
         id,
     }
 }
@@ -129,6 +131,37 @@ pub(crate) struct NewWorkspace {
 /// string to the caller who typed the name.
 fn bad_packages(e: crate::packages::PackageError) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+}
+
+/// The one place a `Refusal` becomes a status. `Malformed` is a caller bug (the entry never
+/// passed `validate_list`), `Unknown` is the person's typo, `Unavailable` is ours.
+fn refuse(r: Refusal) -> Response {
+    let code = match r {
+        Refusal::Malformed(_) => StatusCode::BAD_REQUEST,
+        Refusal::Unknown { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (code, Json(serde_json::json!({"error": r.to_string()}))).into_response()
+}
+
+/// Locks for `packages`, run BEFORE the quota gate and the CR write in every handler that writes
+/// a package list — a refusal must leave nothing behind.
+///
+/// A list with no `@` entry never touches the resolver, which is what keeps a dev deployment with
+/// no index configured working exactly as it did before pins existed.
+async fn lock_for(
+    s: &ApiState,
+    packages: &[String],
+    prev: &[crd::Lock],
+    refresh: bool,
+) -> Result<Vec<crd::Lock>, Response> {
+    if !packages.iter().any(|p| p.contains('@')) {
+        return Ok(Vec::new());
+    }
+    let Some(r) = s.resolver.as_ref() else {
+        return Err(refuse(Refusal::Unavailable));
+    };
+    r.lock_all(packages, prev, refresh).await.map_err(refuse)
 }
 
 /// The one gate on a workspace or environment name, on every route that accepts one. The name ends up verbatim
@@ -181,6 +214,7 @@ pub(crate) async fn create_ws(
         }
     };
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
+    let locks = lock_for(&s, &body.packages, &[], false).await?;
     refuse_taken_name(kube(&s)?, &owner, &team, &body.name).await?;
     let quota_gb = clamp_quota(&s, body.quota_gb);
     // The object's owner is the team when one is given — a team's workspaces count against the
@@ -227,6 +261,7 @@ pub(crate) async fn create_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: body.packages,
+            locks,
             attached_environment: None,
         },
     )
@@ -762,10 +797,36 @@ pub(crate) async fn patch_ws_packages(
     Json(body): Json<PackagesBody>,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
-    my_ws(&s, &owner, &id).await?;
+    let w = my_ws(&s, &owner, &id).await?;
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
+    let locks = lock_for(&s, &body.packages, &w.spec.locks, false).await?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
-    let patch = serde_json::json!({"spec": {"packages": body.packages}});
+    // `locks` moves with `packages` in ONE patch: a spec carrying a `@` entry with no lock, even
+    // for an instant, is a spec the agent would try to build.
+    let patch = serde_json::json!({"spec": {"packages": body.packages, "locks": locks}});
+    let w = api
+        .patch(&id, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(kube_err)?;
+    let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
+    Ok(Json(ws_doc(&w, &pushed)).into_response())
+}
+
+/// Re-resolve every pinned entry against the index, bypassing the cache. The declared list is
+/// untouched — only what the pins point at moves — so this takes no body.
+///
+/// An index outage keeps the locks it had (`lock_all`'s rule) and answers 200: "I could not
+/// check" is not a reason to take a working version away from a workspace.
+pub(crate) async fn update_ws_packages(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers).await?;
+    let w = my_ws(&s, &owner, &id).await?;
+    let locks = lock_for(&s, &w.spec.packages, &w.spec.locks, true).await?;
+    let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
+    let patch = serde_json::json!({"spec": {"locks": locks}});
     let w = api
         .patch(&id, &PatchParams::default(), &Patch::Merge(&patch))
         .await
@@ -795,6 +856,10 @@ pub(crate) async fn clone_ws(
     check_ws_name(&body.name)?;
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
+    // The source's own locks, carried whole: a clone copies a package list, it does not re-pick
+    // versions. Normally nothing is left to resolve — only a source written before pins existed
+    // has a `@` entry with no lock.
+    let locks = lock_for(&s, &src.spec.packages, &src.spec.locks, false).await?;
     let c = kube(&s)?;
     let new_id = rid("ws");
     let volume = ws_volume(&src).ok_or_else(not_ready)?.to_string();
@@ -836,6 +901,7 @@ pub(crate) async fn clone_ws(
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: src.spec.packages.clone(),
+            locks,
             attached_environment: None,
         },
     )
@@ -924,8 +990,8 @@ pub(crate) async fn restore_ws(
     // and every reader keeps its fallback for it. Checked before any other lookup so the refusal
     // costs nothing beyond the snapshot fetch already made.
     let frozen = match &snap.spec.state {
-        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment }) => {
-            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone()))
+        Some(crd::SnapshotState::Workspace { image, packages, resources, quota_gb, attached_environment, locks }) => {
+            Some((image.clone(), packages.clone(), resources.clone(), *quota_gb, attached_environment.clone(), locks.clone()))
         }
         Some(crd::SnapshotState::Environment { .. }) => {
             return Err((
@@ -962,6 +1028,19 @@ pub(crate) async fn restore_ws(
         .or_else(|| src.as_ref().map(|w| w.spec.packages.clone()))
         .unwrap_or_default();
     crate::packages::validate_list(&packages).map_err(bad_packages)?;
+    // Same precedence as `packages` above, from the same source, so the two never disagree about
+    // which cut they came from.
+    let prev = locks_for(
+        frozen
+            .as_ref()
+            .map(|f| f.5.clone())
+            .or_else(|| src.as_ref().map(|w| w.spec.locks.clone()))
+            .unwrap_or_default(),
+        &packages,
+    );
+    // The frozen locks are `prev`, so a restore of an unchanged list asks no index at all; an
+    // entry the request ADDED is resolved now.
+    let locks = lock_for(&s, &packages, &prev, false).await?;
     let resources = frozen
         .as_ref()
         .map(|f| f.2.clone())
@@ -1021,12 +1100,21 @@ pub(crate) async fn restore_ws(
             desired_state: DesiredState::Running,
             resources,
             packages,
+            locks,
             attached_environment,
         },
     )
     .await?;
     let pushed = pushed_volumes(&s, c, &owner).await?;
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &pushed))).into_response())
+}
+
+/// A lock answers ONE entry string, not a list: `nodejs@20 -> 20.20.2` stays true however the rest
+/// of the list changed. So a restore carries every lock whose entry the new list still names, and
+/// drops the rest — a request that swapped one entry does not invalidate the others' versions.
+fn locks_for(mut locks: Vec<crd::Lock>, packages: &[String]) -> Vec<crd::Lock> {
+    locks.retain(|l| packages.contains(&l.entry));
+    locks
 }
 
 // ── environments ─────────────────────────────────────────────────────────
@@ -1049,9 +1137,33 @@ mod tests {
                 desired_state: crd::DesiredState::Running,
                 resources: Default::default(),
                 packages: vec![],
+                locks: vec![],
                 attached_environment: None,
             },
         )
+    }
+
+    fn lock(entry: &str) -> crd::Lock {
+        crd::Lock {
+            entry: entry.into(),
+            version: "20.20.2".into(),
+            attr_path: "nodejs_20".into(),
+            rev: "abc".into(),
+            store_path: String::new(),
+            resolved_at: "2026-09-08T00:00:00Z".into(),
+            source: crd::LockSource::Nixhub,
+        }
+    }
+
+    #[test]
+    fn a_restore_keeps_the_locks_for_entries_the_new_list_still_names() {
+        // Frozen: ["jq", "nodejs@20"] with the one lock that list needed.
+        let frozen = vec![lock("nodejs@20")];
+        let kept = super::locks_for(frozen.clone(), &["nodejs@20".to_string()]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].version, "20.20.2");
+        // The entry is gone from the list, so its lock answers nothing.
+        assert!(super::locks_for(frozen, &["jq".to_string()]).is_empty());
     }
 
     #[test]
