@@ -82,11 +82,22 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["delete"]
-  # List only, and only to find which workspace namespaces an owner has: an ssh key add or remove
-  # must rewrite the `user-key` Secret in every one of them, and the namespaces themselves are the
-  # controller's to create. Namespace metadata carries no secrets.
+  # `list` to find which workspace namespaces an owner has: an ssh key add or remove must rewrite
+  # the `user-key` Secret in every one of them, and the namespaces themselves are the controller's
+  # to create. Namespace metadata carries no secrets.
+  #
+  # `delete` is the resync beat's namespace prune (`api::keys::prune_namespaces`), and the code is
+  # what bounds it — RBAC cannot express a name prefix: ONLY a `wt-` namespace (a person's own
+  # `ws-` one is never a candidate), only when no Workspace resolves to it, only when it is older
+  # than a beat, and only when it holds no pod. Without it a deleted team left its namespace
+  # behind forever — 101 empty ones by 2026-09-08, one per hourly probe run.
   - apiGroups: [""]
     resources: ["namespaces"]
+    verbs: ["list", "delete"]
+  # The prune's last guard reads pods in the namespace it is about to delete; unreadable counts as
+  # occupied, so this is the verb that lets a delete be refused rather than waved through.
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["list"]
 ---
 apiVersion: v1

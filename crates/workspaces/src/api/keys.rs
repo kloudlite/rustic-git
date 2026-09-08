@@ -4,7 +4,11 @@
 
 use super::ApiState;
 use crate::crd;
-use kube::api::{Api, Patch, PatchParams};
+use crate::k8s;
+use k8s_openapi::api::core::v1::{Namespace, Pod};
+use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::ResourceExt;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub const KEYS_RESYNC_SECS: u64 = 300;
@@ -108,12 +112,113 @@ pub async fn run_beat(s: Arc<ApiState>) {
     loop {
         tick.tick().await;
         project_all(&s).await;
+        prune_namespaces(&s).await;
+    }
+}
+
+/// Which of `seen` — `(name, age in seconds)` for every namespace labelled as a workspace one —
+/// no longer belongs to anybody.
+///
+/// A team namespace is `wt-{person}-{hash of team}` and is created by the agent's `apply_binding`
+/// for every team that person has a workspace in. Nothing ever deleted one: a region held 101 of
+/// them, every one empty, one per hourly probe run since 2026-09-05. The rule mirrors the
+/// `OwnerKeys` prune above — an object no Workspace resolves to has nothing reading it, and the
+/// next workspace create rebuilds it — with two extra guards, because a namespace delete cascades
+/// to everything inside it: `ws-` (a person's own, which holds their `user-key` Secret) is never
+/// a candidate whatever else is true, and one younger than a beat is left alone, which closes the
+/// window between `apply_binding` creating a namespace and the workspace that needed it becoming
+/// listable.
+fn stale_namespaces(keep: &BTreeSet<String>, seen: &[(String, i64)], max_age: i64) -> Vec<String> {
+    seen.iter()
+        .filter(|(name, age)| name.starts_with("wt-") && !keep.contains(name) && *age >= max_age)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// The namespace half of the same beat: see `stale_namespaces` for the rule and why it is safe.
+///
+/// Keep-biased exactly as `project_all` is — a lost list would make every namespace look stale,
+/// and this one deletes rather than rewrites, so a failure prunes NOTHING.
+pub(crate) async fn prune_namespaces(s: &ApiState) {
+    let Some(c) = s.kube.as_ref() else { return };
+    let keep: BTreeSet<String> = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        // `ws_namespace` and not a hand-rolled name: the agent builds the namespace with this
+        // exact function, so a second spelling here would prune what it just made.
+        Ok(l) => l.items.iter().map(|w| crd::ws_namespace(&w.spec.owner, &w.spec.team)).collect(),
+        Err(e) => {
+            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let lp = ListParams::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+    let listed = match Api::<Namespace>::all(c.clone()).list(&lp).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Namespace", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let now = chrono::Utc::now().timestamp();
+    let seen: Vec<(String, i64)> = listed
+        .iter()
+        .map(|n| {
+            // No timestamp reads as age 0 — too young to judge, which is the keeping answer.
+            let age = n.metadata.creation_timestamp.as_ref().map_or(0, |t| now - t.0.as_second());
+            (n.name_any(), age)
+        })
+        .collect();
+    let api: Api<Namespace> = Api::all(c.clone());
+    for name in stale_namespaces(&keep, &seen, KEYS_RESYNC_SECS as i64) {
+        // The last guard, and the reason it is here rather than in the rule above: a Workspace
+        // that lost its labels is invisible to the keep set but its POD is not, and a namespace
+        // delete would take the pod with it. Unreadable counts as occupied — a guard that cannot
+        // be checked must refuse the delete, never wave it through.
+        let pods: Api<Pod> = Api::namespaced(c.clone(), &name);
+        match pods.list(&ListParams::default().limit(1)).await {
+            Ok(p) if p.items.is_empty() => {}
+            Ok(_) => {
+                tracing::info!(namespace = %name, "keys.namespace.kept");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(namespace = %name, error = %e, "keys.namespace.pods.unreadable");
+                continue;
+            }
+        }
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => tracing::info!(namespace = %name, "keys.namespace.pruned"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => tracing::warn!(namespace = %name, error = %e, "keys.namespace.prune.failed"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole rule, and every way a namespace earns its keep. The `wt-bob-dead` case is the
+    /// 2026-09-08 leak; every other row is one that must survive it.
+    #[test]
+    fn only_an_unused_old_team_namespace_is_stale() {
+        let keep = BTreeSet::from(["wt-bob-abc".to_string(), "ws-bob".to_string()]);
+        let seen = vec![
+            ("wt-bob-abc".to_string(), 9999),   // a workspace resolves to it
+            ("ws-bob".to_string(), 9999),       // personal, and in use
+            ("ws-carol".to_string(), 9999),     // personal and unused — still never a candidate
+            ("wt-bob-dead".to_string(), 9999),  // the only stale one
+            ("wt-bob-young".to_string(), 10),   // too new to judge
+        ];
+        assert_eq!(stale_namespaces(&keep, &seen, 300), vec!["wt-bob-dead".to_string()]);
+    }
+
+    /// An empty keep set is the shape a region with no workspaces has, and it must NOT turn every
+    /// personal namespace into litter — only the team ones age out.
+    #[test]
+    fn an_empty_keep_set_still_spares_every_personal_namespace() {
+        let seen = vec![("ws-bob".to_string(), 9999), ("wt-bob-x".to_string(), 9999)];
+        assert_eq!(stale_namespaces(&BTreeSet::new(), &seen, 300), vec!["wt-bob-x".to_string()]);
+    }
 
     /// The object is the file plus a generation and nothing else: no ownerReference (it outlives
     /// every workspace), no node (every node converges it), the owner handle as its name.
