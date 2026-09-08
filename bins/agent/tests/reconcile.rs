@@ -6065,9 +6065,16 @@ fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
 
 /// A workspace attached to `env-1`, its pod named — `pod` decides what the pod GET answers.
 fn attached_ws(desired: &str, attached: Option<&str>, ready_since: i64) -> serde_json::Value {
+    attached_ws_ready(desired, attached, ready_since, false)
+}
+
+/// `ready`: what the WORKSPACE's own `Ready` condition says. `True` is not a clock — see
+/// `not_ready_since` — and a test that wants the grace measured has to say `False`.
+fn attached_ws_ready(desired: &str, attached: Option<&str>, ready_since: i64, ready: bool) -> serde_json::Value {
     let mut o = ws_json(serde_json::json!({
         "phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1", "podRef": "ws-1-0",
-        "conditions": [{"type": "Ready", "status": "False", "reason": "PodNotReady", "message": "",
+        "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" },
+                        "reason": "PodNotReady", "message": "",
                         "lastTransitionTime": secs_ago(ready_since), "observedGeneration": 1}],
     }));
     o["spec"]["desiredState"] = serde_json::json!(desired);
@@ -6125,7 +6132,12 @@ async fn an_intercept_in_force_stops_the_real_service_and_points_the_slice_at_th
 #[tokio::test]
 async fn removing_the_wish_restores_the_real_service_and_deletes_the_slice() {
     let tmp = env_tmp();
-    let (ctx, rec) = ctx(tmp.path(), intercept_routes(vec![]));
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(serde_json::json!([]), Some("ws-1")), &ctx).await.unwrap();
 
@@ -6135,6 +6147,11 @@ async fn removing_the_wish_restores_the_real_service_and_deletes_the_slice() {
     let svc = rec.sent("PATCH", WEB_SVC);
     assert!(!svc.last().unwrap()["spec"]["selector"].is_null(), "the selector is back: {:?}", svc.last());
     assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "the slice goes: {:?}", rec.calls());
+    // The ordinary release: the wish is out of spec and status is the only record of the grant, so
+    // BOTH halves have to be found from it — an ingress rule left behind opens this environment's
+    // namespace to that pod until somebody deletes the workspace.
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {ENV_POLICY}")), "env-side grant goes: {:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WS_POLICY}")), "workspace-side grant goes: {:?}", rec.calls());
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"].is_null());
 }
@@ -6154,6 +6171,9 @@ async fn a_stopped_workspace_releases_the_intercept_without_touching_the_wish() 
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
 
+    // Non-vacuous on purpose: `heal_labels` patches the object every pass, so an empty list here
+    // would mean the loop below proved nothing.
+    assert!(!rec.sent("PATCH", ENV_PATCH).is_empty(), "the object IS patched: {:?}", rec.calls());
     for body in rec.sent("PATCH", ENV_PATCH) {
         assert!(body.get("spec").is_none(), "a controller never writes an Environment's spec: {body}");
     }
@@ -6241,4 +6261,33 @@ async fn an_unreadable_workspace_changes_nothing_and_requeues() {
     );
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert_eq!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"], "ws-1");
+    assert!(
+        !st.last().unwrap()["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Intercepted"),
+        "an undecided pass states nothing: {:?}", st.last()
+    );
+}
+
+/// The grace's own trap: a workspace that has been `Ready=True` for ten minutes and has just lost
+/// its pod must be HELD, not dated from when it came up. Reading that transition time as an outage
+/// yields `waited = 600` and an immediate fallback — in exactly the ordinary pod restart the grace
+/// exists to ride out.
+#[tokio::test]
+async fn a_long_ready_workspace_that_has_just_lost_its_pod_is_held_not_dated_from_its_start() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws_ready("running", Some("env-1"), 600, true)),
+        kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0, "the real service stays down");
+    assert!(
+        !rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")),
+        "a ten-minute-old start time is not a ten-minute-old outage: {:?}", rec.calls()
+    );
 }

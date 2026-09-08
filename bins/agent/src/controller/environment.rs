@@ -652,16 +652,24 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, ctx: &Arc<Ctx>) -
     if let (Some((true, _)), Some(ip)) = (ready, ip) {
         return Intercepting::Force { ws: Box::new(w), pod_ip: ip };
     }
-    // The clock is the POD's own `Ready` condition, or — with no pod at all — the Workspace's.
-    // Neither is a field this controller invented, and both are stamped by whoever observed the
-    // transition, so the grace measures the real outage rather than this pass's first sight of it.
-    // No clock anywhere means we cannot call the outage recent, and the safe answer is the real
-    // service: fall back rather than hold traffic on a pod nobody can date.
+    // The clock is the POD's own `Ready` condition, or — with no pod at all — the Workspace's, and
+    // the workspace's only while it SAYS it is not ready. Neither is a field this controller
+    // invented, and both are stamped by whoever observed the transition, so the grace measures the
+    // real outage rather than this pass's first sight of it.
+    //
+    // The `Ready == "False"` guard is the whole grace. A workspace that has been `Ready=True` for
+    // ten minutes and has just lost its pod would otherwise date the outage from when it CAME UP,
+    // yielding `waited = 600` and an immediate fallback — in exactly the ordinary pod restart the
+    // grace exists to ride out. With no clock to trust the outage has, as far as anything here
+    // knows, only just started: hold, and look again on the requeue, by which time the workspace's
+    // own controller has stamped `Ready=False` and dated it.
     let since = ready
         .and_then(|(_, t)| t)
-        .or_else(|| w.status.as_ref().and_then(|s| condition_time(&s.conditions, "Ready")));
-    let waited = since.map_or(INTERCEPT_GRACE_SECS, |t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
-    if waited < INTERCEPT_GRACE_SECS {
+        .or_else(|| w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)));
+    let waited = since.map_or(0, |t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
+    // A NEGATIVE wait is a node whose clock runs ahead of whoever stamped the condition. Held, it
+    // would hold forever; expired, the real service comes back. Expired is the safe direction.
+    if (0..INTERCEPT_GRACE_SECS).contains(&waited) {
         return Intercepting::Keep;
     }
     off("PodUnreachable", format!("{}'s pod has been unreachable for {waited}s", ic.workspace), Some(w))
@@ -678,8 +686,11 @@ fn pod_ready(p: &Pod) -> (bool, Option<i64>) {
         .map_or((false, None), |c| (c.status == "True", c.last_transition_time.as_ref().map(|t| t.0.as_second())))
 }
 
-fn condition_time(conds: &[Condition], kind: &str) -> Option<i64> {
-    conds.iter().find(|c| c.type_ == kind).map(|c| c.last_transition_time.0.as_second())
+/// When the workspace itself last said it was NOT ready — never when it said it was. A `Ready=True`
+/// workspace whose pod has merely gone dates nothing about the outage; see `decide_intercept`.
+fn not_ready_since(conds: &[Condition]) -> Option<i64> {
+    let c = conds.iter().find(|c| c.type_ == "Ready")?;
+    (c.status == "False").then(|| c.last_transition_time.0.as_second())
 }
 
 /// What the LAST pass rendered for this service, read off the one record of it.
@@ -718,14 +729,15 @@ async fn intercept_policies(
         ensure(&in_ws, &k8s::intercept_ingress(&ws_ns, ns, &ws.name_any(), &e.spec.owner, &ws_ref), ctx).await?;
     }
     // Every workspace this environment could still be holding a grant open for: one it wishes for
-    // and is not serving, and one the last pass recorded as in force.
+    // and is not serving, and one the LAST pass recorded as in force — which is the ordinary
+    // release, where `/v1` has taken the wish out of spec and status is the only record left.
     // ponytail: a grant whose wish AND whose status record are both gone (a release that raced a
     // lost status write) is left until the Environment is deleted, which collects it; a label
     // selector over the namespace's policies is the upgrade path.
-    let mut stale: Vec<(String, Option<&crd::Workspace>)> = Vec::new();
+    let mut stale: Vec<(String, Option<crd::Workspace>)> = Vec::new();
     for d in plan.values() {
         if let Intercepting::Off { ws: Some(w), .. } = d {
-            stale.push((w.name_any(), Some(&**w)));
+            stale.push((w.name_any(), Some((**w).clone())));
         }
     }
     for s in &prev.service_status {
@@ -739,9 +751,15 @@ async fn intercept_policies(
         }
         delete_ignoring_404(&here, &k8s::intercept_policy_name(&id)).await?;
         forget_applied(ctx, "NetworkPolicy", ns, &k8s::intercept_policy_name(&id));
-        // The workspace-side half only when its namespace is actually known. A workspace that is
-        // GONE takes it with it — it is ownerReferenced — and the egress half above is what the
-        // traffic needed anyway, so an inert ingress rule opens nothing.
+        // The workspace-side half lives in a namespace only the Workspace itself can name, so a
+        // release recorded in status alone costs one GET to find it. Worth it: the ingress rule
+        // opens this environment's whole namespace to that pod, and it would otherwise sit there
+        // until somebody deleted the workspace. One pass only — the next has no record to clean.
+        let ws = match ws {
+            Some(w) => Some(w),
+            None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.unwrap_or(None),
+        };
+        // A workspace that is GONE takes its half with it: the policy is ownerReferenced.
         if let Some(w) = ws {
             let ws_ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
             let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
@@ -767,6 +785,13 @@ fn intercept_condition(plan: &std::collections::HashMap<&str, Intercepting>, gen
         if let Intercepting::Off { reason, message, .. } = &plan[n] {
             return Some(crd::condition("Intercepted", false, reason, &format!("{n}: {message}"), gen));
         }
+    }
+    // `Keep` is the absence of a decision — an unreadable answer, or a grace still running — so it
+    // states nothing. Claiming `InForce` there would be an affirmative falsehood on the very first
+    // pass over a fresh wish that hit an API error, when nothing has been rendered at all.
+    // `status.services[].intercepted_by` is the per-service truth and is correct either way.
+    if plan.values().any(|d| matches!(d, Intercepting::Keep)) {
+        return None;
     }
     Some(crd::condition("Intercepted", true, "InForce", &format!("intercepted: {}", names.join(", ")), gen))
 }
