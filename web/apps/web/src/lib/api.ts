@@ -885,6 +885,14 @@ export function listRegions(token: string) {
   return call<ApiRegion[]>("/v1/regions", { method: "GET", token });
 }
 
+/** Attach a workspace to one environment: its services resolve by bare name from then on.
+ *  409 when the environment is in another region; the message says so. */
+export function attachWorkspace(token: string, id: string, environment: string) {
+  return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/attach`, {
+    method: "POST", token, body: JSON.stringify({ environment }),
+  });
+}
+
 export function listEnvironments(token: string, owner?: string) {
   const qs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
   return call<ApiEnvironment[]>(`/v1/environments${qs}`, { method: "GET", token });
