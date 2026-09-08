@@ -100,6 +100,14 @@ pub struct Workspace {
     /// shown; the store path and the resolution time are the agent's business, not the web's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locks: Vec<LockDoc>,
+    /// The repository this workspace was seeded from, `owner/name`, and its branch — absent for
+    /// one created empty, cloned or restored. Shown so a reader can tell an unseeded workspace
+    /// from a clone that never landed, and so the web can match "open in a workspace" on the
+    /// repo rather than on a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// A `crd::Lock` as the web sees it.

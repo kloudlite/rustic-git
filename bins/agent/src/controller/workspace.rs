@@ -1281,7 +1281,15 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // clone `id` is the source VOLUME, and reading readiness or reporting `podRef` by `id`
             // would point this workspace at its source's pod — the gateway dials `podRef`, so an
             // ssh to the clone would land in the source's shell.
-            if !pod_is_ready(&pods, &pod_name, &ctx.node).await? {
+            let observed = pods.get_opt(&pod_name).await?;
+            if !observed.as_ref().is_some_and(|p| own_ready_pod(p, &ctx.node)) {
+                // A clone that keeps failing is the one pod fault a person can act on (a key not
+                // yet authorised, a repo this key may not read), and a bare `PodNotReady` hid it
+                // behind a workspace that simply never came up.
+                let (reason, message) = observed
+                    .as_ref()
+                    .and_then(seed_failure)
+                    .unwrap_or_else(|| ("PodNotReady".to_string(), "pod is not ready yet".to_string()));
                 let st = crd::WorkspaceStatus {
                     phase: crd::Phase::Creating,
                     observed_generation: None,
@@ -1295,7 +1303,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                         &prev.conditions,
                         replaced(
                             &with_attached(
-                                ws_conditions(&prev, crd::condition("Ready", false, "PodNotReady", "pod is not ready yet", gen)),
+                                ws_conditions(&prev, crd::condition("Ready", false, &reason, &message, gen)),
                                 attached.clone(),
                             ),
                             running_condition(&prev.conditions, gen),
@@ -1358,8 +1366,25 @@ async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) -> Result<boo
 
 /// Whether the pod exists AND its `Ready` condition is true. A missing pod is "not ready", never an
 /// error: that is the normal state between applying it and the kubelet creating it.
-async fn pod_is_ready(pods: &Api<Pod>, name: &str, me: &str) -> Result<bool, ReconcileErr> {
-    Ok(pods.get_opt(name).await?.is_some_and(|pod| own_ready_pod(&pod, me)))
+/// `Some((reason, message))` when the `git-seed` init container has failed at least once — the
+/// clone is retried in place for two minutes and then the pod restarts it, so a waiting
+/// `CrashLoopBackOff`/`Error` or a non-zero termination both mean "the repository did not come".
+fn seed_failure(pod: &Pod) -> Option<(String, String)> {
+    let st = pod.status.as_ref()?.init_container_statuses.as_ref()?.iter().find(|c| c.name == "git-seed")?;
+    let state = st.state.as_ref()?;
+    let why = if let Some(t) = state.terminated.as_ref().filter(|t| t.exit_code != 0) {
+        format!("exited {}", t.exit_code)
+    } else if let Some(w) = state.waiting.as_ref().filter(|w| w.reason.as_deref() != Some("PodInitializing")) {
+        w.reason.clone().unwrap_or_else(|| "waiting".to_string())
+    } else if st.restart_count > 0 {
+        format!("restarted {} times", st.restart_count)
+    } else {
+        return None;
+    };
+    Some((
+        "SeedFailed".to_string(),
+        format!("the repository clone has not succeeded ({why}); check that your platform key may read it — the pod's git-seed log has the server's answer"),
+    ))
 }
 
 /// Ready, and THIS node's. The pod is named after the workspace on every node, so right after a
@@ -1414,5 +1439,48 @@ mod own_pod_tests {
         assert!(!own_ready_pod(&pod(Some("node-b"), true, false), "node-a"), "the previous owner's pod");
         assert!(!own_ready_pod(&pod(Some("node-a"), true, true), "node-a"), "terminating");
         assert!(!own_ready_pod(&pod(None, true, false), "node-a"), "unscheduled");
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, PodStatus};
+
+    fn pod_with(name: &str, state: ContainerState, restarts: i32) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                init_container_statuses: Some(vec![ContainerStatus {
+                    name: name.into(),
+                    state: Some(state),
+                    restart_count: restarts,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_seed_still_initialising_is_not_a_failure() {
+        let p = pod_with("git-seed", ContainerState { waiting: Some(ContainerStateWaiting { reason: Some("PodInitializing".into()), ..Default::default() }), ..Default::default() }, 0);
+        assert_eq!(seed_failure(&p), None);
+    }
+
+    #[test]
+    fn a_crash_looping_seed_is_named() {
+        let p = pod_with("git-seed", ContainerState { waiting: Some(ContainerStateWaiting { reason: Some("CrashLoopBackOff".into()), ..Default::default() }), ..Default::default() }, 2);
+        let (r, m) = seed_failure(&p).unwrap();
+        assert_eq!(r, "SeedFailed");
+        assert!(m.contains("CrashLoopBackOff") && m.contains("git-seed"), "{m}");
+    }
+
+    #[test]
+    fn a_seed_that_exited_non_zero_is_named_and_another_init_container_is_not() {
+        let p = pod_with("git-seed", ContainerState { terminated: Some(ContainerStateTerminated { exit_code: 1, ..Default::default() }), ..Default::default() }, 0);
+        assert!(seed_failure(&p).unwrap().1.contains("exited 1"));
+        let other = pod_with("other", ContainerState { terminated: Some(ContainerStateTerminated { exit_code: 1, ..Default::default() }), ..Default::default() }, 0);
+        assert_eq!(seed_failure(&other), None);
     }
 }

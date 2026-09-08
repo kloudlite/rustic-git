@@ -187,7 +187,17 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
 
   const existing = await api.listWorkspaces(token, team);
   if (!existing.ok) return { error: existing.message || "Could not read your workspaces." };
-  if (!existing.value.some((w) => w.name === name)) {
+  // Reuse is by what the workspace HOLDS, never by its name: a workspace called `repo-branch`
+  // that was created empty, or seeded from a repo whose slug collides, opened as if it were
+  // this one and showed an empty home.
+  const full = `${owner}/${repo}`;
+  const mine = existing.value.find((w) => w.repo === full && w.branch === branch);
+  const clash = !mine && existing.value.find((w) => w.name === name);
+  if (clash) {
+    const holds = clash.repo ? `${clash.repo} at ${clash.branch}` : "no repository";
+    return { error: `A workspace named "${name}" already exists and holds ${holds}. Rename or delete it, then open again.` };
+  }
+  if (!mine) {
     const regions = await api.listRegions(token);
     if (!regions.ok) return { error: regions.message || "Could not read the regions." };
     // ponytail: first ACTIVE region; a picker when there is a second. A retired region stays in

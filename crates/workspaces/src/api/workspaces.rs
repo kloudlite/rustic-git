@@ -51,6 +51,10 @@ pub(crate) async fn pushed_volumes(_s: &ApiState, c: &kube::Client, owner: &str)
 fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
     let id = w.name_any();
     let st = w.status.as_ref();
+    let seed = match w.spec.storage.as_ref().and_then(|s| s.source.as_ref()) {
+        Some(crd::VolumeSource::GitRepo { repo, branch }) => Some((repo.clone(), branch.clone())),
+        _ => None,
+    };
     Workspace {
         owner: w.spec.owner.clone(),
         team: w.spec.team.clone(),
@@ -82,6 +86,8 @@ fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace {
             .filter(|c| c.status != "True" && c.reason == "NoCapacity")
             .map(ConditionDoc::from),
         locks: w.spec.locks.iter().map(LockDoc::from).collect(),
+        repo: seed.as_ref().map(|(r, _)| r.clone()),
+        branch: seed.map(|(_, b)| b),
         id,
     }
 }
