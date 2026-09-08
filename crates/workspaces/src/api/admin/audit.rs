@@ -1,7 +1,8 @@
 //! `GET /admin/audit` and `GET /admin/audit.csv` — the read side of `crate::audit`. Both share
 //! one filter (`?actor=&action=&target=&from=&to=`); the JSON route also pages
-//! (`&cursor=&limit=`), the CSV route does not (spec: a truly large export is an operator problem
-//! to solve with a narrower `from`/`to`, not this route's to solve with streaming).
+//! (`&cursor=&limit=`), the CSV route takes `limit` as a cap on the newest rows and no cursor
+//! (spec: a truly large export is an operator problem to solve with a narrower `from`/`to`, not
+//! this route's to solve with streaming).
 
 use super::*;
 use std::fmt::Write as _;
@@ -66,22 +67,26 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-/// No pagination: bounded by the same `from`/`to` window as the JSON route, walked once in full.
+/// No cursor: bounded by the same `from`/`to` window as the JSON route, walked once in full —
+/// or, with `limit`, the newest that many rows, which is what a screen's "export what I see"
+/// and the probe both ask for. It used to ignore `limit`, so a probe asking for 50 rows paid for
+/// every row since the log began (3,900 on 2026-09-08, 17 s) and timed out on the log's growth
+/// alone.
 ///
-/// ponytail: every row is held in memory and re-fetched one `GET` at a time through `list`'s own
-/// paging (1000 rows/page) rather than a bulk export path — fine at the volumes one admin's
-/// `from`/`to` window produces; if a truly large export ever needs this, narrow the window first,
-/// and only add streaming if that stops being enough.
+/// ponytail: every row is held in memory, re-fetched through `list`'s own paging (1000 rows/page)
+/// rather than a bulk export path — fine at the volumes one admin's `from`/`to` window
+/// produces; only add streaming if narrowing the window stops being enough.
 pub(crate) async fn audit_csv(State(s): State<Arc<ApiState>>, Query(q): Query<AuditQuery>) -> Result<Response, Response> {
     let os = object_store(&s)?;
+    let cap = q.limit.unwrap_or(usize::MAX);
     let mut rows = Vec::new();
     let mut cursor = None;
     loop {
-        let page = crate::audit::list(&os, q.filter(), cursor.clone(), 1000).await.map_err(list_err)?;
+        let page = crate::audit::list(&os, q.filter(), cursor.clone(), 1000.min(cap - rows.len())).await.map_err(list_err)?;
         let done = page.next_cursor.is_none();
         cursor = page.next_cursor.clone();
         rows.extend(page.rows);
-        if done {
+        if done || rows.len() >= cap {
             break;
         }
     }

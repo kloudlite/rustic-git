@@ -190,18 +190,33 @@ pub async fn list(
     let mut next_cursor = None;
     // The last key CONSUMED, filtered-out rows included: a resume must skip them too, or every
     // page would re-walk the same non-matching keys.
-    let mut last_consumed: Option<&String> = None;
-    for key in &keys[start.min(keys.len())..] {
+    let mut last_consumed: Option<String> = None;
+    // One object per row, so the fetch is what a page costs: `buffered` keeps the order the keys
+    // are in (newest first) while holding a batch of GETs in flight — one at a time was 4 ms a
+    // row against S3, 17 s for a quarter's export.
+    let tail: Vec<String> = keys.drain(start.min(keys.len())..).collect();
+    let mut fetched = futures::StreamExt::buffered(
+        futures::stream::iter(tail.into_iter().map(|key| {
+            let os = os.clone();
+            async move {
+                let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
+                Ok::<_, ListError>((key, bytes))
+            }
+        })),
+        32,
+    );
+    while let Some(next) = futures::StreamExt::next(&mut fetched).await {
         if rows.len() >= limit {
-            next_cursor = last_consumed.cloned();
+            next_cursor = last_consumed.clone();
             break;
         }
-        last_consumed = Some(key);
-        let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
+        let (key, bytes) = next?;
         let Some(entry) = parse_entry(&bytes) else {
-            tracing::warn!(name = key, "audit.read.failed");
+            tracing::warn!(name = %key, "audit.read.failed");
+            last_consumed = Some(key);
             continue;
         };
+        last_consumed = Some(key);
         if filter.actor.as_deref().is_some_and(|a| entry.actor != a) {
             continue;
         }

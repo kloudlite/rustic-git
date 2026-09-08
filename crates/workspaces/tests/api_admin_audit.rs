@@ -169,6 +169,39 @@ async fn audit_list_filters_by_actor_action_and_target() {
     assert_eq!(get_rows("actor=b@x.com".into(), &s).await, 2);
 }
 
+/// The CSV honours `limit` as a cap on the NEWEST rows: a probe asking for 50 must not pay for
+/// every row since the log began, and the rows it gets are the latest ones, in order.
+#[tokio::test]
+async fn audit_csv_limit_caps_the_export_at_the_newest_rows() {
+    let keys = keys_store().await;
+    for i in 0..7 {
+        let entry = kloudlite_workspaces::audit::AuditEntry {
+            ts: format!("2026-09-08T10:00:0{i}Z"),
+            actor: "a@x.com".into(),
+            action: format!("act{i}"),
+            target: "acme".into(),
+            reason: None,
+            result: "ok".into(),
+        };
+        kloudlite_workspaces::audit::record(&keys.os, &entry).await.unwrap();
+    }
+    let s = admin_server(vec![], keys).await;
+    let fetch = |query: &'static str, s: &Server| {
+        let base = s.base.clone();
+        let token = admin_token(&s.jwt);
+        async move {
+            let resp = reqwest::Client::new().get(format!("{base}/admin/audit.csv{query}")).bearer_auth(token).send().await.unwrap();
+            assert_eq!(resp.status(), 200);
+            resp.text().await.unwrap().lines().map(str::to_string).collect::<Vec<_>>()
+        }
+    };
+    let capped = fetch("?limit=3", &s).await;
+    assert_eq!(capped.len(), 1 + 3, "{capped:?}");
+    assert!(capped[1].contains(",act6,") && capped[3].contains(",act4,"), "newest first: {capped:?}");
+    let all = fetch("", &s).await;
+    assert_eq!(all.len(), 1 + 7, "{all:?}");
+}
+
 /// The dual write: a successful admin write copies the audit row into `kloudlite.events` too, with
 /// `kind = "admin.<action>"` — the shape `crate::history::events::audit_event` promises.
 #[tokio::test]
