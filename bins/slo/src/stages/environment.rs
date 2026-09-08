@@ -385,7 +385,14 @@ const MARKER: &str = "slo-intercept";
 ///
 /// `bun` twice rather than curl or `/dev/tcp`: it is the one runtime the workspace image is
 /// guaranteed to have, and `sh` here is not necessarily bash.
-const LISTENER: &str = r#"nohup bun -e 'Bun.serve({ port: 3000, hostname: "0.0.0.0", fetch: () => new Response("slo-intercept") })' > /tmp/slo-intercept.log 2>&1 &
+///
+/// The PATH is set explicitly because it is NOT inherited here: `bun` lives in the workspace's nix
+/// profile, which the login shell puts on the path and a `pods/exec` of `sh -c` does not — so
+/// every intercept step skipped on the fleet with "failed to run command 'bun'" while bun sat in
+/// the image all along.
+const LISTENER: &str = r#"PATH=/nix/profile/current/bin:$PATH
+export PATH
+nohup bun -e 'Bun.serve({ port: 3000, hostname: "0.0.0.0", fetch: () => new Response("slo-intercept") })' > /tmp/slo-intercept.log 2>&1 &
 i=0
 while [ $i -lt 20 ]; do
   if bun -e 'const r = await fetch("http://127.0.0.1:3000"); process.exit((await r.text()) === "slo-intercept" ? 0 : 1)' > /dev/null 2>&1; then
