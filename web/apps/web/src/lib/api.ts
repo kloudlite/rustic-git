@@ -806,10 +806,6 @@ export type ApiService = {
   env: Record<string, string>;
   mounts: ApiMount[];
   ports: number[];
-  /** STATUS: the workspace traffic to this service is actually being delivered to, or null.
-   *  Null with a wish in `ApiEnvironment.intercepts` is its own state — the workspace is stopped
-   *  or unreachable and the real service is answering. Never infer one from the other. */
-  intercepted_by?: string | null;
 };
 
 /** One of the service's declared ports, and the port on the workspace that answers it. */
@@ -824,9 +820,15 @@ export type ApiEnvironment = {
   placement: string | null;
   volume: string | null;
   services: ApiService[];
-  /** The WISH, `EnvironmentSpec.intercepts`, written only by `/v1`. What is in force is each
-   *  service's own `intercepted_by`. Absent on an environment stored before intercepts existed. */
+  /** The WISH, `EnvironmentSpec.intercepts`, written only by `/v1`. What is in force is
+   *  `service_status` below. Absent on an environment stored before intercepts existed. */
   intercepts?: { service: string; workspace: string; ports: ApiInterceptPort[] }[];
+  /** STATUS: what the agent observed, one entry per service, matched to `services` BY NAME.
+   *  `intercepted_by` is the workspace actually receiving that service's traffic. The wish above
+   *  and this are separate facts and neither is ever inferred from the other: a wish with nothing
+   *  in force means the intercepting workspace is stopped and the real service is answering.
+   *  Absent while the environment has no status yet. */
+  service_status?: { name: string; ready: boolean; message?: string | null; intercepted_by?: string | null }[];
   /** The snapshot the volume last landed on, when an in-place restore put one there — only
    *  `GET /v1/environments/{id}` fills it in. Absent means "current" is simply the newest record. */
   restored_to?: string | null;

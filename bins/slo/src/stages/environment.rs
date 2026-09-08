@@ -596,9 +596,10 @@ async fn fallback(c: &mut Ctx, env: &str, ws: &str, held: bool) {
     .await;
 }
 
-/// What is IN FORCE for `svc`, from the environment document's own service status.
+/// What is IN FORCE for `svc`, from the environment document's own service status — `service_status`,
+/// never `services`, which is spec and carries no status at all.
 fn intercepted_by(doc: &Value, svc: &str) -> Option<String> {
-    doc.get("services")?
+    doc.get("service_status")?
         .as_array()?
         .iter()
         .find(|s| s.get("name").and_then(Value::as_str) == Some(svc))?
@@ -681,20 +682,20 @@ mod tests {
     #[test]
     fn the_wish_and_what_is_in_force_are_read_separately() {
         let doc = serde_json::json!({
-            "services": [{ "name": TARGET, "intercepted_by": "ws-1" }],
+            "service_status": [{ "name": TARGET, "ready": true, "intercepted_by": "ws-1" }],
             "intercepts": [{ "service": TARGET, "workspace": "ws-1" }],
         });
         assert_eq!(intercepted_by(&doc, TARGET).as_deref(), Some("ws-1"));
         assert!(wished(&doc, TARGET));
         // The state a released intercept leaves: nothing in force, the wish untouched.
         let doc = serde_json::json!({
-            "services": [{ "name": TARGET }],
+            "service_status": [{ "name": TARGET, "ready": true }],
             "intercepts": [{ "service": TARGET, "workspace": "ws-1" }],
         });
         assert_eq!(intercepted_by(&doc, TARGET), None);
         assert!(wished(&doc, TARGET));
         // And what a regression to clearing the wish looks like.
-        assert!(!wished(&serde_json::json!({ "services": [], "intercepts": [] }), TARGET));
+        assert!(!wished(&serde_json::json!({ "service_status": [], "intercepts": [] }), TARGET));
     }
 
     /// The three ids are the hourly suite's alone: a fast run files NO sample for any of them,

@@ -61,13 +61,13 @@ export default async function Page({ params }: { params: Promise<{ owner: string
       <ul className="mt-5 divide-y divide-border border border-border bg-card">
         {services.map((s) => {
           // Two different questions, and the row must never answer one with the other:
-          // `intercepted_by` is what traffic is ACTUALLY doing, `wish` is what was asked for.
-          // A wish with no `intercepted_by` is its own state — the workspace is stopped or
+          // `service_status` is what traffic is ACTUALLY doing, `wish` is what was asked for.
+          // A wish with nothing in force is its own state — the workspace is stopped or
           // unreachable, and the real service is up and answering.
-          const inForce = s.intercepted_by ?? null;
+          const inForce = env.service_status?.find((st) => st.name === s.name)?.intercepted_by ?? null;
           const wish = interceptSummary(s, env.intercepts);
           // DESCRIPTIVE, not authoritative: this is the wish's mapping. The api exposes no
-          // in-force port list — `intercepted_by` is the whole of what status says — so this is
+          // in-force port list — `intercepted_by` is the whole of what status says of it — so this is
           // the closest honest answer to "where does it land", and it is the same mapping the
           // controller applied unless the wish has been rewritten since.
           const mapping = wish.ports.map((m) => `${m.service} → ${m.workspace}`).join(", ");

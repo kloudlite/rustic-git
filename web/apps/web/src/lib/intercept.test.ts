@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { interceptSummary } from "./intercept";
-import type { ApiService } from "./api";
+import type { ApiEnvironment, ApiService } from "./api";
 
-const svc = (name: string, ports: number[], intercepted_by?: string | null): ApiService => ({
+const svc = (name: string, ports: number[]): ApiService => ({
   name, image: "img", command: [], env: {}, mounts: [], ports,
-  ...(intercepted_by === undefined ? {} : { intercepted_by }),
 });
 
 describe("interceptSummary", () => {
@@ -30,9 +29,14 @@ describe("interceptSummary", () => {
   });
 
   test("the wish is not what is in force: heldBy reads the wish alone", () => {
-    // `intercepted_by` null with a wish present is the state the page must render on its own —
-    // the helper never conflates the two, so heldBy still names the wish.
-    expect(interceptSummary(svc("api", [8080], null), [{ service: "api", workspace: "ws-1", ports: [] }]).heldBy)
+    // Nothing in force (an empty `service_status`, or an entry with a null `intercepted_by`) while
+    // a wish is present is the state the page must render on its own — the helper is given only
+    // the wish and never reaches for status, so heldBy still names the wish.
+    const env: Pick<ApiEnvironment, "service_status"> = {
+      service_status: [{ name: "api", ready: true, intercepted_by: null }],
+    };
+    expect(env.service_status?.[0].intercepted_by ?? null).toBeNull();
+    expect(interceptSummary(svc("api", [8080]), [{ service: "api", workspace: "ws-1", ports: [] }]).heldBy)
       .toBe("ws-1");
   });
 });

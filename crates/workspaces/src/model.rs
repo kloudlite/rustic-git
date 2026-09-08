@@ -351,6 +351,13 @@ pub struct Environment {
     /// actually redirected is `ServiceStatus::intercepted_by`, which only the agent writes.
     #[serde(default)]
     pub intercepts: Vec<crate::crd::Intercept>,
+    /// STATUS: what the AGENT observed, per service — `intercepted_by` here is the workspace whose
+    /// process is actually receiving that service's traffic. `intercepts` beside it is the WISH,
+    /// written only by `/v1`. Neither is ever inferred from the other: a wish with nothing in force
+    /// is the ordinary state of a stopped intercepting workspace, and the real service is answering.
+    /// Empty while the environment has no status yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_status: Vec<crate::crd::ServiceStatus>,
 }
 
 

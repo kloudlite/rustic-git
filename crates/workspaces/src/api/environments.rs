@@ -56,6 +56,9 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
             .filter(|c| c.status != "True" && c.reason == "NoCapacity")
             .map(ConditionDoc::from),
         intercepts: e.spec.intercepts.clone(),
+        // The other half of the pair: the wish above, what the agent observed here. Empty until
+        // a controller has written a status at all.
+        service_status: st.map(|s| s.service_status.clone()).unwrap_or_default(),
         id,
     }
 }
