@@ -111,7 +111,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-agent:352a04e76d3d32b43c77639917d06e3a6407b60c@sha256:75a3b07921d668cbb3e4323804fa693f91cb5a0b5ad9e46e36bdd9989e1cb267
+          image: ghcr.io/kloudlite/kloudlite-agent:cd722ae68fc7fe31b1f219681b4ae12742b37c06@sha256:7f45176a10fb5d4570dfa5bc62b6320dcf29d295bb57c83e074e1831bcd55ea5
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -194,7 +194,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-workspace:352a04e76d3d32b43c77639917d06e3a6407b60c@sha256:add52ab172a37bbf2a861bf7444f1928067447189633fde5df99a918b341fea1
+              value: ghcr.io/kloudlite/kloudlite-workspace:cd722ae68fc7fe31b1f219681b4ae12742b37c06@sha256:9e7f96ac3af40054c230d3512d45830c24457866efea114eeec6a642cbe8736c
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
