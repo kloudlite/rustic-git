@@ -59,6 +59,8 @@ first destructive stage.
 | `web.repo.page` | Git hosting | The web app's repo page loads | 95 % ≤ 1500 ms | fast | 2 · Git |
 | `git.push.ssh` | Git hosting | Push of one commit over SSH succeeds | 99.9 % | fast | 2 · Git |
 | `repo.lifecycle` | Git hosting | A repo is created, listed, deleted and its slug freed | 99.9 % ≤ 10000 ms | fast | 2 · Git |
+| `git.branch.delete` | Git hosting | A branch pushed by this run is deleted through `DELETE /v1/repos/{owner}/{name}/branches/{branch}` and `refs` no longer lists it | 99.9 % | hourly | 2 · Git |
+| `git.branch.delete.refused` | Git hosting | Deleting the default branch answers 409 and it is still listed | 99.9 % | hourly | 2 · Git |
 | `web.org.page` | Git hosting | The web app's org page loads | 95 % ≤ 1500 ms | fast | 2 · Git |
 | `web.repo.settings` | Git hosting | The web app's repo settings page loads | 95 % ≤ 1500 ms | fast | 2 · Git |
 | `web.workspaces.page` | Workspaces | The web app's workspaces and environments pages load | 95 % ≤ 1500 ms | fast | 2 · Git |

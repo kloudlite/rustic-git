@@ -36,7 +36,8 @@ is a 404. `branchdelete` joins `BROWSE_TAILS`, and `every_browse_route_is_routab
 ### 2. Api tier (`crates/api`)
 
 `DELETE /v1/repos/{owner}/{name}/branches/{branch}?oid=<hex>`. `settings_caller` gates it. Before
-forwarding it lists this repo's OPEN pull requests from the directory and refuses (409, naming
+forwarding it lists this repo's OPEN pull requests from the owning node's `/api/{o}/{n}/pulls?state=open`
+(pull requests live in the repo's own database) and refuses (409, naming
 the number) any whose `head` is the branch. Then `ask_owner` to the server route; 2xx → 204,
 404 → 404 "no such branch", 409 → 409 with the server's sentence verbatim, else 502.
 

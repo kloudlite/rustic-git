@@ -13,7 +13,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 
-use super::{api, get, poll_json, post};
+use kloudlite_workspaces::slo::catalogue::Suite;
+
+use super::{api, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 use crate::step::DEFAULT_TIMEOUT;
 use crate::tools;
@@ -50,6 +52,20 @@ const AFTER_PUSH: [&str; 10] = [
 /// without ever writing anything.
 const SSH_BRANCH: &str = "slo-ssh";
 
+/// The hourly pair `branch_delete` owns. Not in `AFTER_PUSH`: a fast run does not walk them at
+/// all, so a precondition failure skips them only when the run is the one that would have.
+const BRANCH_IDS: [&str; 2] = ["git.branch.delete", "git.branch.delete.refused"];
+
+/// Skipped with `why`, and only in the suite that walks them — a fast run reporting an hourly id
+/// would file a sample the journey never asked for on every five-minute tick.
+fn skip_branches(c: &mut Ctx, why: &str) {
+    if c.suite == Suite::Hourly {
+        for id in BRANCH_IDS {
+            c.skip(id, why);
+        }
+    }
+}
+
 /// The two page loads that need nothing from this stage. Kept out of `AFTER_PUSH` because a repo
 /// that never pushed does not stop the app's own org and workspaces pages from rendering.
 const WEB_IDS: [&str; 2] = ["web.org.page", "web.workspaces.page"];
@@ -67,6 +83,7 @@ pub async fn run(c: &mut Ctx) {
         for id in AFTER_PUSH {
             c.skip(id, &why);
         }
+        skip_branches(c, &why);
         // The host key is served by the SSH listener whether or not this repo exists, so it is the
         // one step here that still means something.
         hostkey(c).await;
@@ -83,6 +100,7 @@ pub async fn run(c: &mut Ctx) {
         for id in AFTER_PUSH {
             c.skip(id, "the first push failed");
         }
+        skip_branches(c, "the first push failed");
         super::identity::tiers(c, &name).await;
         hostkey(c).await;
         web_pages(c).await;
@@ -101,6 +119,7 @@ pub async fn run(c: &mut Ctx) {
         }
     };
 
+    branch_delete(c, &work, &name).await;
     clone_http(c, &name).await;
     hostkey(c).await;
     ssh_clone(c, &name).await;
@@ -152,6 +171,76 @@ async fn listed(c: &Ctx, url: &str, jwt: &str, name: &str) -> Result<bool> {
     Ok(rows
         .as_array()
         .is_some_and(|rows| rows.iter().any(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))))
+}
+
+/// The two branch ids: a branch this run pushed is deletable from the web, and the default branch
+/// is not.
+///
+/// Hourly rather than fast because it is a push and four reads on top of a repo the fast suite
+/// already measures ten other ways — a fast run skips both with the reason rather than reporting
+/// nothing, so a missing sample still reads as the CronJob never firing.
+async fn branch_delete(c: &mut Ctx, work: &Path, name: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let probe = c.probe_user.clone();
+    let push_url = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
+    let refs_url = api(c, &format!("/api/{probe}/{name}/refs"));
+    // Its OWN branch, never `slo`: stage 3 opens its pull request from that one, and deleting the
+    // head of an open change is the case the api tier is supposed to REFUSE.
+    let gone = format!("{}-gone", c.prefix());
+
+    {
+        let (gone, refs_url, work) = (gone.clone(), refs_url.clone(), work.to_path_buf());
+        let (probe, name) = (probe.clone(), name.to_string());
+        c.step("git.branch.delete", Duration::from_secs(90), move |c| {
+            let jwt = c.probe_jwt.clone();
+            let args = authed(c, &["push", "-q", &push_url, &format!("{HEAD_BRANCH}:refs/heads/{gone}")]);
+            let del = api(c, &format!("/v1/repos/{probe}/{name}/branches/{gone}"));
+            async move {
+                git(c, args, Some(&work)).await.context("could not push the branch to delete")?;
+                poll_json(c, &refs_url, &jwt, VISIBLE_CAP, |r| oid_of(r, &gone).is_some())
+                    .await
+                    .context("the pushed branch never appeared in refs")?;
+                // The oid comes from the SAME listing the web deletes from: the route is a
+                // compare-and-swap on it, and inventing one here would measure a 409 instead.
+                let refs = get(c, &refs_url, &jwt).await?;
+                let oid = oid_of(&refs, &gone).ok_or_else(|| anyhow!("the branch stopped being listed"))?;
+                let (status, body) = raw(c, reqwest::Method::DELETE, &format!("{del}?oid={oid}"), &jwt, None, &[]).await?;
+                if !status.is_success() {
+                    return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
+                }
+                poll_json(c, &refs_url, &jwt, VISIBLE_CAP, |r| oid_of(r, &gone).is_none())
+                    .await
+                    .context("the deleted branch is still listed")
+            }
+            .boxed()
+        })
+        .await;
+    }
+
+    let name = name.to_string();
+    c.step("git.branch.delete.refused", DEFAULT_TIMEOUT, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let del = api(c, &format!("/v1/repos/{probe}/{name}/branches/{BASE_BRANCH}"));
+        async move {
+            let refs = get(c, &refs_url, &jwt).await.context("could not list the refs")?;
+            let oid = oid_of(&refs, BASE_BRANCH).ok_or_else(|| anyhow!("the default branch is not listed"))?;
+            let (status, body) = raw(c, reqwest::Method::DELETE, &format!("{del}?oid={oid}"), &jwt, None, &[]).await?;
+            if status != reqwest::StatusCode::CONFLICT {
+                return Err(anyhow!("deleting the default branch answered {status}: {}", body.chars().take(200).collect::<String>()));
+            }
+            // The refusal is only half of it: a route that answered 409 AFTER writing would leave
+            // the repo headless, which is the failure this id exists to catch.
+            let refs = get(c, &refs_url, &jwt).await.context("could not list the refs again")?;
+            match oid_of(&refs, BASE_BRANCH) {
+                Some(_) => Ok(()),
+                None => Err(anyhow!("the default branch was refused and deleted anyway")),
+            }
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `git.push.ssh`: the other door.
@@ -757,6 +846,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// The branch pair is the hourly suite's alone: a fast run files NO sample for either id —
+    /// not a pass, not a skip — and an hourly run whose repo never existed skips both exactly
+    /// once, so the hole still reads as the CronJob never firing rather than as a green run.
+    #[tokio::test]
+    async fn the_branch_ids_belong_to_the_hourly_suite_only() {
+        let app = || {
+            axum::Router::new()
+                .route("/v1/repos", axpost(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+                .fallback(axget(|| async { StatusCode::NOT_FOUND }))
+        };
+        let mut c = testkit::ctx_against(app()).await;
+        c.stage = super::super::GIT.to_string();
+        run(&mut c).await;
+        assert!(
+            !c.steps.iter().any(|s| BRANCH_IDS.contains(&s.slo_id.as_str())),
+            "a fast run reported an hourly id"
+        );
+
+        let mut c = testkit::ctx_against(app()).await;
+        c.suite = Suite::Hourly;
+        c.stage = super::super::GIT.to_string();
+        run(&mut c).await;
+        for id in BRANCH_IDS {
+            let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == id).collect();
+            assert_eq!(rows.len(), 1, "{id} was not skipped exactly once");
+            assert!(rows[0].skipped, "{id} ran without a repo");
+        }
     }
 
     /// The one step whose polarity is inverted. An `ssh` that SUCCEEDS with a key the fleet has

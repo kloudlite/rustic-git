@@ -135,8 +135,26 @@ pub fn journey(suite: Suite) -> Vec<(&'static str, Vec<&'static str>)> {
         .iter()
         .copied()
         .chain(tail)
-        .map(|name| (name, CATALOGUE.iter().filter(|s| s.stage == name).map(|s| s.id).collect()))
+        .map(|name| {
+            let ids = CATALOGUE.iter().filter(|s| s.stage == name && walks(suite, s.suite)).map(|s| s.id);
+            (name, ids.collect())
+        })
         .collect()
+}
+
+/// Whether a run of `suite` produces samples for a row marked `of`.
+///
+/// A stage is NOT a suite: stage 2 carries fast ids and two hourly ones, so the walk has to ask
+/// per ROW rather than assume every id in a stage belongs to whoever walks that stage — a fast run
+/// that reported an hourly id would file a sample nobody asked for, and skip it on every
+/// five-minute tick.
+fn walks(suite: Suite, of: Suite) -> bool {
+    match suite {
+        Suite::Fast => of == Suite::Fast,
+        Suite::Hourly => matches!(of, Suite::Fast | Suite::Hourly),
+        Suite::Weekly => matches!(of, Suite::Fast | Suite::Weekly),
+        Suite::Monthly => matches!(of, Suite::Fast | Suite::Weekly | Suite::Monthly),
+    }
 }
 
 /// The SLO with this id, or `None` — the admin API's `PUT /admin/slo/runs/{id}` checks every
@@ -188,6 +206,10 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "web.repo.page", feature: "Git hosting", sli: "The web app's repo page loads", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "git.push.ssh", feature: "Git hosting", sli: "Push of one commit over SSH succeeds", target: avail(99.9), suite: Suite::Fast, stage: "2 · Git" },
     Slo { id: "repo.lifecycle", feature: "Git hosting", sli: "A repo is created, listed, deleted and its slug freed", target: bound(10_000), suite: Suite::Fast, stage: "2 · Git" },
+    // Hourly, not fast: a branch delete is a push and four reads on a repo the fast suite
+    // already walks ten other ways, and nobody deletes a branch every five minutes.
+    Slo { id: "git.branch.delete", feature: "Git hosting", sli: "A branch pushed by this run is deleted through `DELETE /v1/repos/{owner}/{name}/branches/{branch}` and `refs` no longer lists it", target: avail(99.9), suite: Suite::Hourly, stage: "2 · Git" },
+    Slo { id: "git.branch.delete.refused", feature: "Git hosting", sli: "Deleting the default branch answers 409 and it is still listed", target: avail(99.9), suite: Suite::Hourly, stage: "2 · Git" },
     // The three page loads beside `web.repo.page`, in the same stage for the same reason: they are
     // the app's own front door, and the only thing that says the shell renders at all.
     Slo { id: "web.org.page", feature: "Git hosting", sli: "The web app's org page loads", target: p95(1_500), suite: Suite::Fast, stage: "2 · Git" },

@@ -74,6 +74,10 @@ atomic tag updates). Git over SSH resolves identity from the fingerprint, not th
 `auth/sshkey/{fp}` maps to the signing person's email, and `App::may_act(user, owner)` then checks
 own handle or team membership through the directory (cached 60 s, refused on `Source::Unavailable`;
 a solo node with `Source::Absent` just requires `user == owner`).
+A branch is deleted from the web through `POST /api/{owner}/{name}/branchdelete` on the peer
+listener, which runs the delete through `update_refs` so every protection rule applies, gated at
+the api tier by `settings_caller` and refused for the default branch and an open pull request's
+head.
 
 ## Load-bearing rules (violations have all been real bugs)
 
