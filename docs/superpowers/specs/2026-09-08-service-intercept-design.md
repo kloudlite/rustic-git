@@ -26,11 +26,13 @@ second is refused.
 
 The alternative — a per-developer split, where only requests carrying a marker (an HTTP header,
 say) reach your workspace — would defeat that: your collaborators would have to know the marker and
-set it, and by default they would keep hitting the old code. It is also far more machinery. That needs something in the path that reads
-and understands the traffic, which means deploying and owning a protocol-aware proxy in every
-environment — and it would only ever work for HTTP, never for mongodb or redis, which have no
-headers to route on. This design changes only which address a name resolves to, so it works for
-any protocol and adds nothing to run.
+set it, and by default they would keep hitting the old code.
+
+It is also far more machinery. Routing on a marker means something in the path that reads and
+understands the traffic — a protocol-aware proxy deployed into every environment and owned
+forever — and it would only ever work for HTTP, never for mongodb or redis, which have no headers
+to route on. This design changes only which address a name resolves to, so it works for any
+protocol and adds nothing to run.
 
 ## Decisions taken
 
