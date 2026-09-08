@@ -133,6 +133,13 @@ spec:
         apiVersions: ["v1"]
         operations: ["DELETE"]
         resources: ["services", "pods"]
+      # `endpointslices`: the agent must not be able to delete one outside a namespace it
+      # reconciles — same fence as `services` above, since a stray EndpointSlice delete outside
+      # ws-/wt-/env- is as durable an outage as deleting kube-dns's own Service.
+      - apiGroups: ["discovery.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["endpointslices"]
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
         operations: ["DELETE"]
