@@ -311,7 +311,7 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
         let api: kube::Api<crd::ClusterSettings> = kube::Api::all(client.clone());
         let cfg = watcher::Config::default().fields("metadata.name=default");
         let watched = api.clone();
-        let mut new_stream =
+        let new_stream =
             move || watcher(watched.clone(), cfg.clone()).default_backoff().applied_objects().boxed();
         let mut events = new_stream();
         let mut tick = tokio::time::interval(settings_refresh_interval());
