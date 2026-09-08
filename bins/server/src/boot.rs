@@ -340,12 +340,15 @@ mod tests {
     #[tokio::test]
     async fn set_visibility_routes_unless_nothing_is_configured() {
         let _guard = ENV_LOCK.lock().await;
+        // Cleared BEFORE the first command, not after: these are read on EVERY `run`, and a shell
+        // that exports them (the dev pod does) routed this `create-repo` at an unreachable fleet
+        // and failed the test for the environment's reasons rather than the code's.
+        std::env::remove_var("KLOUDLITE_PEER_SECRET");
+        std::env::remove_var("KLOUDLITE_UPSTREAM");
         let store = store().await;
         run(&["admin", "create-repo", "alice/web"], &store).await.unwrap();
 
         // Nothing configured: a single node or an offline run. Writes directly (with a warning).
-        std::env::remove_var("KLOUDLITE_PEER_SECRET");
-        std::env::remove_var("KLOUDLITE_UPSTREAM");
         run(&["admin", "set-visibility", "alice/web", "public"], &store).await.unwrap();
         assert!(store.is_public("alice", "web").await.unwrap());
 
