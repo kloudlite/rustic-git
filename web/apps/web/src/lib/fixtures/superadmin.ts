@@ -528,6 +528,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["team.workspace", "Teams", "A team workspace lands in the team namespace and starts", "95 % ≤ 90000 ms", "hourly", "14 · Experience"],
   ["team.member.remove", "Teams", "A removed member loses access to the team repo", "99.9 %", "hourly", "14 · Experience"],
   ["team.delete", "Teams", "Deleting the team removes its profile and refuses its slug", "99.9 %", "hourly", "14 · Experience"],
+  ["team.namespace.reaped", "Workspaces", "No team namespace outlives by more than two resync beats the workspaces that used it", "99.9 %", "hourly", "14 · Experience"],
   ["repo.protection", "Git hosting", "A protected branch refuses a direct push and still merges via a PR", "99.9 %", "hourly", "14 · Experience"],
   ["repo.commit.patch", "Git hosting", "An edit made through the web commit endpoint lands in the log", "99.9 % ≤ 5000 ms", "hourly", "14 · Experience"],
   ["repo.compare", "Git hosting", "Comparing two branches lists the right commits", "99.9 % ≤ 1000 ms", "hourly", "14 · Experience"],

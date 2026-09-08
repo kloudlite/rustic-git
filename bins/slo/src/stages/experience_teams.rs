@@ -35,6 +35,7 @@ use super::git::{git, BASE_BRANCH};
 use super::{api, drain_team, get, poll_json, post, raw, TEAM_DRAIN};
 use crate::drill::{undoing, UNDO_SLACK};
 use crate::ctx::Ctx;
+use kloudlite_workspaces::crd;
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
 // answer must be a breach with a number, never a step the probe cut off.
@@ -452,6 +453,58 @@ pub(super) async fn delete(c: &mut Ctx) {
     .await;
 }
 
+/// `team.namespace.reaped`: no team namespace outlives the workspaces that used it.
+///
+/// The FLEET-WIDE invariant, not this run's namespace, and deliberately so: the prune runs on the
+/// api's resync beat, so waiting for this run's own namespace to go would cost the suite up to two
+/// beats. Asking "is any `wt-` namespace older than two beats that nothing resolves to" is two
+/// list calls, it answers instantly, and it catches a leak from ANY source — which is what the
+/// 2026-09-08 pile of 101 was, one per hourly run since nothing had ever deleted one.
+pub(super) async fn namespace_reaped(c: &mut Ctx) {
+    let Some(client) = c.kube.clone() else {
+        return c.skip("team.namespace.reaped", "no kubeconfig");
+    };
+    c.step("team.namespace.reaped", QUICK, move |_| {
+        async move {
+            use kube::ResourceExt;
+            let workspaces: kube::Api<crd::Workspace> = kube::Api::all(client.clone());
+            let keep: std::collections::BTreeSet<String> = workspaces
+                .list(&kube::api::ListParams::default())
+                .await
+                .context("could not list the workspaces")?
+                .items
+                .iter()
+                .map(|w| crd::ws_namespace(&w.spec.owner, &w.spec.team))
+                .collect();
+            let namespaces: kube::Api<k8s_openapi::api::core::v1::Namespace> = kube::Api::all(client);
+            let now = chrono::Utc::now().timestamp();
+            // Two beats: one for the namespace to age past the prune's own guard, one for the beat
+            // that then deletes it. Anything still here after that is a leak, not a lag.
+            let grace = 2 * kloudlite_workspaces::api::keys::KEYS_RESYNC_SECS as i64;
+            let leaked: Vec<String> = namespaces
+                .list(&kube::api::ListParams::default())
+                .await
+                .context("could not list the namespaces")?
+                .items
+                .iter()
+                .filter(|n| {
+                    let name = n.name_any();
+                    let age = n.metadata.creation_timestamp.as_ref().map_or(0, |t| now - t.0.as_second());
+                    name.starts_with("wt-") && !keep.contains(&name) && age > grace
+                })
+                .map(|n| n.name_any())
+                .take(4)
+                .collect();
+            if !leaked.is_empty() {
+                return Err(anyhow!("{} team namespace(s) nothing uses: {}", leaked.len(), leaked.join(", ")));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
 /// Whether the team this run creates is there. A read, not a remembered flag: the step that made
 /// it reports its own outcome, and every later id wants to know what the platform holds now.
 async fn team_exists(c: &Ctx) -> bool {
@@ -837,10 +890,11 @@ mod tests {
         workspace(&mut c).await;
         member_remove(&mut c).await;
         delete(&mut c).await;
+        namespace_reaped(&mut c).await;
 
         let made = sample(&c, "team.create");
         assert!(!made.ok && !made.skipped, "the create carries the failure");
-        for id in ["team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete"] {
+        for id in ["team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete", "team.namespace.reaped"] {
             assert!(sample(&c, id).skipped, "{id} should be skipped, not sampled");
             once(&c, id);
         }
@@ -875,8 +929,9 @@ mod tests {
         workspace(&mut c).await;
         member_remove(&mut c).await;
         delete(&mut c).await;
+        namespace_reaped(&mut c).await;
 
-        for id in ["team.create", "team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete"] {
+        for id in ["team.create", "team.invite.accept", "team.role.set", "team.repo.shared", "team.workspace", "team.member.remove", "team.delete", "team.namespace.reaped"] {
             once(&c, id);
         }
         // The one id that must SKIP rather than create anything: without a kubeconfig there is no

@@ -365,6 +365,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "team.workspace", feature: "Teams", sli: "A team workspace lands in the team namespace and starts", target: p95(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.member.remove", feature: "Teams", sli: "A removed member loses access to the team repo", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.delete", feature: "Teams", sli: "Deleting the team removes its profile and refuses its slug", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.namespace.reaped", feature: "Workspaces", sli: "No team namespace outlives by more than two resync beats the workspaces that used it", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.protection", feature: "Git hosting", sli: "A protected branch refuses a direct push and still merges via a PR", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.commit.patch", feature: "Git hosting", sli: "An edit made through the web commit endpoint lands in the log", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.compare", feature: "Git hosting", sli: "Comparing two branches lists the right commits", target: bound(1_000), suite: Suite::Hourly, stage: "14 · Experience" },
