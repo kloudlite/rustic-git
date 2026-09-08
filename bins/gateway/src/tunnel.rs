@@ -241,6 +241,13 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
                         r#in += b.len() as u64;
                         tcp.write_all(&b).await.is_ok()
                     }
+                    // The reply to a Close is QUEUED by tungstenite, not written: its own docs
+                    // say to keep calling read/write/flush until `ConnectionClosed`. Breaking
+                    // here and dropping the socket leaves that reply unsent, and the client waits
+                    // out the closing handshake it will never get — which is why this hung only
+                    // sometimes: when sshd's EOF won the race the `Ok(0)` arm below sent a Close
+                    // and the session ended cleanly, and when the client's Close arrived first it
+                    // did not. The flush after the loop is what drives it.
                     Some(Ok(Message::Close(_))) => false,
                     // Ping/Pong are answered by axum; a text frame is not something an ssh client
                     // sends, so it is ignored rather than treated as an error.
@@ -266,6 +273,9 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
             break;
         }
     }
+    // Drives tungstenite's queued close reply out, whichever side asked to finish. Without it a
+    // client that closes first is left waiting on the handshake until its own timeout fires.
+    let _ = tx.close().await;
     // Never the token, and never a byte of the stream: this line is the whole record of a session.
     tracing::info!(
         owner = slot.owner.as_deref().unwrap_or_default(),

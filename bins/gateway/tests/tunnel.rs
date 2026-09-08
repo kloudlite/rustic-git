@@ -114,6 +114,45 @@ async fn a_valid_session_is_pumped_to_the_pod_and_spent() {
     assert_eq!(connect(&base, "ws-1", &tok).await.err(), Some(401));
 }
 
+/// The closing handshake, from the side that closes FIRST. A client that says Close must get one
+/// back: tungstenite only QUEUES that reply, so a pump that breaks and drops the socket leaves the
+/// client waiting out its own timeout with a complete, successful session behind it. Measured on
+/// the fleet as `gw.tunnel.p95` failing at exactly its 20 s budget, roughly one attempt in ten —
+/// the ten being the race against sshd's own EOF, which took the other arm and closed cleanly.
+#[tokio::test]
+async fn a_client_that_closes_first_is_answered_and_not_left_hanging() {
+    use futures::{SinkExt, StreamExt};
+    let port = echo().await;
+    let base = serve(
+        vec![get(WS, workspace("ready", Some("ws-alice/ws-1-abc"))), get(POD, pod(Some("127.0.0.1")))],
+        port,
+    )
+    .await;
+
+    let mut sock = connect(&base, "ws-1", &token("ws-1", REGION)).await.expect("upgrade");
+    sock.send(tungstenite::Message::binary(b"SSH-2.0-hello".to_vec())).await.unwrap();
+    sock.next().await.unwrap().unwrap();
+
+    // The client finishes first, exactly as an ssh session that has run its command does.
+    sock.send(tungstenite::Message::Close(None)).await.unwrap();
+    // A Close frame BACK, not merely the stream ending: dropping the socket also ends the stream,
+    // so accepting that would pass whether or not the reply was ever written.
+    let answered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(m) = sock.next().await {
+            match m {
+                Ok(tungstenite::Message::Close(_)) => return true,
+                // tungstenite reports the completed handshake as this error, having seen the reply.
+                Err(tungstenite::Error::ConnectionClosed) => return true,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(answered, Ok(true), "the client was left waiting on a close that never came");
+}
+
 #[tokio::test]
 async fn a_token_for_another_workspace_is_refused() {
     let base = serve(
