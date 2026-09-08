@@ -44,11 +44,15 @@ rules:
     resources: ["quotas"]
     verbs: ["get", "list"]
   # The api is the ONLY writer of a key set — it projects the directory into one object per owner
-  # namespace by server-side apply, which the apiserver authorizes as `create` + `patch`. No
-  # `delete`: an owner losing their last key is an empty file, not a missing object.
+  # namespace by server-side apply, which the apiserver authorizes as `create` + `patch`.
+  # `delete` is the resync beat's prune (`api::keys::project_all`): an owner no Workspace names
+  # any more has no pod reading its file, and without this verb every team a probe run ever made
+  # lived on forever — 27 of them by 2026-09-08, each retried as a forbidden delete every beat.
+  # An owner losing their last KEY is still an empty file, not a delete; only losing their last
+  # WORKSPACE removes the object.
   - apiGroups: ["kloudlite.io"]
     resources: ["ownerkeys"]
-    verbs: ["get", "list", "create", "patch"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   # A person or a team admin may open a request for themselves; deciding it is not a /v1 verb.
   - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
