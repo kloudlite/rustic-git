@@ -30,9 +30,11 @@ pub const IDS: &[&str] = &[
     "ws.packages.remove",
     "ws.packages.pin",
     "ws.packages.pin.unknown",
+    "ws.packages.pin.uncached",
     "ws.packages.update",
     "ws.packages.pin.lockshape",
     "ws.seeded",
+    "ws.seed.failed",
     "key.platform.regenerate",
     "id.username",
     "id.profile.upsert",
@@ -102,8 +104,9 @@ pub async fn run(c: &mut Ctx) {
             // The pin journey is one workspace and four assertions about it, so one call reports
             // all four ids, in this order.
             "ws.packages.pin" => super::experience_ws::pin(c).await,
-            "ws.packages.pin.unknown" | "ws.packages.update" | "ws.packages.pin.lockshape" => {}
+            "ws.packages.pin.unknown" | "ws.packages.pin.uncached" | "ws.packages.update" | "ws.packages.pin.lockshape" => {}
             "ws.seeded" => super::experience_ws::seeded(c).await,
+            "ws.seed.failed" => super::experience_ws::seed_failed(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
             "home.persists" => super::experience_ws::home_persists(c).await,
             "team.create" => super::experience_teams::create(c).await,

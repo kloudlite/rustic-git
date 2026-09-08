@@ -132,9 +132,11 @@ first destructive stage.
 | `ws.packages.remove` | Workspaces | Removing it makes it disappear from the profile | 95 % ≤ 120000 ms | hourly | 14 · Experience |
 | `ws.packages.pin` | Workspaces | A workspace created with `jq@1.7` locks a 1.7.x, and `jq --version` in the pod says so | 95 % ≤ 180000 ms | hourly | 14 · Experience |
 | `ws.packages.pin.unknown` | Workspaces | `jq@0.0.99` is refused with the nearest versions named | 99.9 % | hourly | 14 · Experience |
+| `ws.packages.pin.uncached` | Workspaces | `nodejs@20.20.2` (EOL, never built) is refused naming a version that has a cached build | 99.9 % | hourly | 14 · Experience |
 | `ws.packages.update` | Workspaces | `POST …/packages/update` answers with the lock unchanged for an exact pin | 99.9 % | hourly | 14 · Experience |
 | `ws.packages.pin.lockshape` | Workspaces | The lock names a nixpkgs revision and a store path | 99.9 % | hourly | 14 · Experience |
-| `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out | 95 % ≤ 240000 ms | hourly | 14 · Experience |
+| `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out, and its doc names them | 95 % ≤ 240000 ms | hourly | 14 · Experience |
+| `ws.seed.failed` | Workspaces | A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating` | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `key.platform.regenerate` | Identity | Regenerating the platform key keeps seeding working | 99.9 % | hourly | 14 · Experience |
 | `team.create` | Teams | A team can be created by a person | 99.9 % | hourly | 14 · Experience |
 | `team.invite.accept` | Teams | An invite is created, previewed and accepted once | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |

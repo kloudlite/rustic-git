@@ -67,8 +67,13 @@ const PINNED_PREFIX: &str = "1.7.";
 const UNKNOWN: &str = "jq@0.0.99";
 
 /// The four ids `pin` reports, in catalogue order.
-const PIN_IDS: [&str; 4] =
-    ["ws.packages.pin", "ws.packages.pin.unknown", "ws.packages.update", "ws.packages.pin.lockshape"];
+const PIN_IDS: [&str; 5] =
+    ["ws.packages.pin", "ws.packages.pin.unknown", "ws.packages.pin.uncached", "ws.packages.update", "ws.packages.pin.lockshape"];
+
+/// A release nixpkgs marks insecure (past its EOL) is one Hydra never builds, so no binary cache
+/// will ever hold it: the one kind of "exists but uncached" that stays true. nodejs 20 reached
+/// EOL in 2026; 20.20.2 was its last release.
+const UNCACHED: &str = "nodejs@20.20.2";
 
 /// The pin step is a whole create — schedule, pull, `nix copy` jq from cache.nixos.org, buildEnv —
 /// plus an exec, which is `ws.packages.add`'s shape, so it gets `ws.packages.add`'s ceiling: at or
@@ -136,7 +141,10 @@ pub async fn seeded(c: &mut Ctx) {
             let id = seed(c, &name, &repo).await?;
             // Kept for teardown's prefix sweep either way; deleted here so the run does not hold a
             // workspace of its quota for the rest of the stage.
-            let out = clone_subject(c, &id, &name).await;
+            let out = match clone_subject(c, &id, &name).await {
+                Ok(()) => names_its_seed(c, &id, &repo).await,
+                e => e,
+            };
             drop_ws(c, &id).await;
             out
         }
@@ -390,6 +398,67 @@ async fn seed(c: &Ctx, name: &str, repo: &str) -> Result<String> {
     create(c, name, extra).await
 }
 
+/// The doc says where the workspace came from — the web's "open in a workspace" matches on it,
+/// and a workspace with no `repo` in its doc was created empty rather than seeded and lost.
+async fn names_its_seed(c: &Ctx, id: &str, repo: &str) -> Result<()> {
+    let doc = super::get(c, &api(c, &format!("/v1/workspaces/{id}")), &c.probe_jwt).await?;
+    let want = format!("{}/{repo}", c.probe_user);
+    let (r, b) = (doc.get("repo").and_then(Value::as_str), doc.get("branch").and_then(Value::as_str));
+    if r != Some(want.as_str()) || b != Some(BASE_BRANCH) {
+        return Err(anyhow!("the doc names {r:?} at {b:?}, not {want} at {BASE_BRANCH}"));
+    }
+    Ok(())
+}
+
+/// `ws.seed.failed`: a workspace seeded from a repository that does not exist says so —
+/// `Ready=False/SeedFailed` — instead of sitting at `Creating` with nothing to act on.
+///
+/// The clone retries in place for two minutes before the init container fails once, so the
+/// condition takes at least that long to appear; the ceiling leaves room above it.
+pub async fn seed_failed(c: &mut Ctx) {
+    if c.kube.is_none() {
+        return c.skip("ws.seed.failed", "no kubeconfig");
+    }
+    let name = format!("{}-noseed", c.prefix());
+    let probe = c.probe_user.clone();
+    c.step("ws.seed.failed", SEED_FAILED_CEILING, move |c| {
+        async move {
+            let body = json!({
+                "name": name, "region": c.cfg.region, "quota_gb": QUOTA_GB,
+                "repo": format!("{probe}/{name}-does-not-exist"), "branch": BASE_BRANCH, "packages": [],
+            });
+            let doc = post(c, &api(c, "/v1/workspaces"), &c.probe_jwt, body).await.context("could not create the workspace")?;
+            let id = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("the create answered no workspace id"))?.to_string();
+            let out = seed_failed_condition(c, &id).await;
+            drop_ws(c, &id).await;
+            out
+        }
+        .boxed()
+    })
+    .await;
+}
+
+const SEED_FAILED_CEILING: Duration = Duration::from_secs(240);
+
+async fn seed_failed_condition(c: &Ctx, id: &str) -> Result<()> {
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    let ws: kube::Api<kloudlite_workspaces::crd::Workspace> = kube::Api::all(k.clone());
+    let started = std::time::Instant::now();
+    let mut last = String::new();
+    while started.elapsed() < SEED_FAILED_CEILING - Duration::from_secs(20) {
+        let w = ws.get(id).await.map_err(|e| anyhow!("could not read the Workspace {id}: {e}"))?;
+        let ready = w.status.as_ref().and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready").cloned());
+        if let Some(r) = ready {
+            if r.reason == "SeedFailed" {
+                return if r.message.contains("git-seed") { Ok(()) } else { Err(anyhow!("SeedFailed without the log pointer: {}", r.message)) };
+            }
+            last = format!("{}/{}", r.reason, r.message);
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    Err(anyhow!("never reported SeedFailed; last Ready was {last}"))
+}
+
 /// The subject of the checked-out clone's last commit, compared to the one this run pushed.
 ///
 /// The path is `k8s::workspace_dir(name)` — the seeder clones into the workspace's own subvolume,
@@ -530,6 +599,28 @@ pub async fn pin(c: &mut Ctx) {
     })
     .await;
 
+    // Also a refusal against the same workspace: a version that exists but was never built.
+    let uncached = id.clone();
+    c.step("ws.packages.pin.uncached", PIN_READ_CEILING, move |c| {
+        async move {
+            let url = api(c, &format!("/v1/workspaces/{uncached}"));
+            let body = json!({ "packages": [UNCACHED] });
+            let (status, text) =
+                raw(c, reqwest::Method::PATCH, &url, &c.probe_jwt.clone(), Some(body), &[]).await?;
+            if status != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+                return Err(anyhow!("{UNCACHED} answered {status}, not 422: {}", text.trim()));
+            }
+            // The alternatives are the point: a person pinning an EOL release needs the nearest
+            // release that has a binary, not a bare no.
+            if !text.contains("no cached build") || !text.contains("nearest cached:") {
+                return Err(anyhow!("the refusal names no cached alternative: {}", text.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+
     if pinned {
         let updated = id.clone();
         c.step("ws.packages.update", PIN_READ_CEILING, move |c| {
@@ -633,14 +724,16 @@ mod tests {
     use axum::routing::{get, patch, post as apost};
 
     /// The nine ids this file owns, in the order `experience.rs` calls them.
-    const MINE: [&str; 9] = [
+    const MINE: [&str; 11] = [
         "ws.packages.add",
         "ws.packages.remove",
         "ws.packages.pin",
         "ws.packages.pin.unknown",
+        "ws.packages.pin.uncached",
         "ws.packages.update",
         "ws.packages.pin.lockshape",
         "ws.seeded",
+        "ws.seed.failed",
         "key.platform.regenerate",
         "home.persists",
     ];
@@ -649,6 +742,7 @@ mod tests {
         packages(c).await;
         pin(c).await;
         seeded(c).await;
+        seed_failed(c).await;
         platform_key(c).await;
         home_persists(c).await;
     }
@@ -689,12 +783,12 @@ mod tests {
         c.kube = Some(kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).expect("client"));
         c.state.repo = Some("run-fast-1".into());
         all(&mut c).await;
-        for id in ["ws.packages.add", "ws.packages.pin", "ws.seeded", "key.platform.regenerate"] {
+        for id in ["ws.packages.add", "ws.packages.pin", "ws.seeded", "ws.seed.failed", "key.platform.regenerate"] {
             let s = once(&c, id);
             assert!(!s.ok && !s.skipped, "{s:?}");
             assert!(s.detail.contains("409"), "the refusal is in the detail: {s:?}");
         }
-        for id in ["ws.packages.remove", "ws.packages.pin.unknown", "ws.packages.update", "ws.packages.pin.lockshape", "home.persists"] {
+        for id in ["ws.packages.remove", "ws.packages.pin.unknown", "ws.packages.pin.uncached", "ws.packages.update", "ws.packages.pin.lockshape", "home.persists"] {
             let s = once(&c, id);
             assert!(s.skipped, "{s:?}");
         }
