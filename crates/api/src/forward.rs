@@ -39,6 +39,19 @@ pub(crate) async fn ask_owner(api: &Api, path: String) -> std::result::Result<u1
     Ok(r.status().as_u16())
 }
 
+/// `ask_owner`, keeping the node's own sentence. A branch delete's 409 ("the branch moved;
+/// reload") is written for the person who clicked, so relaying it beats replacing it — and the
+/// existing `ask_owner` callers all discard the body, so this is a sibling rather than a change
+/// to them.
+pub(crate) async fn ask_owner_verbatim(
+    api: &Api,
+    path: String,
+) -> std::result::Result<(u16, String), Response> {
+    let r = to_owner(api, api.client.post(format!("{}{path}", api.upstream)), None).await?;
+    let status = r.status().as_u16();
+    Ok((status, text_bounded(r).await))
+}
+
 /// Read a repo-scoped route from the owning node, as `owner`, and pass its answer through.
 pub(crate) async fn read_from_owner(api: &Api, owner: &str, path: String) -> Response {
     match to_owner(api, api.client.get(format!("{}{path}", api.upstream)), Some(owner)).await {
