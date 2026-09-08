@@ -506,6 +506,95 @@ pub(crate) async fn set_protection(
 }
 
 
+/// Mirrors `kloudlite_gitbase::refs::DEFAULT_BRANCH`; this crate does not depend on gitbase, and
+/// one string is not worth the edge it would add to the graph.
+const DEFAULT_BRANCH: &str = "main";
+
+/// `DELETE /v1/repos/{owner}/{name}/branches/{branch}?oid=<hex>`.
+///
+/// Axum has already percent-decoded `{branch}`, so `feat%2Fx` arrives as `feat/x` and decoding it
+/// again here would turn a branch literally named `a%2Fb` into `a/b`.
+pub(crate) async fn delete_branch(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name, branch)): axum::extract::Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    branch_delete(&api, &owner, &name, &branch, q.get("oid").map(String::as_str)).await
+}
+
+/// Everything after the gate, so it can be exercised against a canned node — `settings_caller`
+/// needs the directory, which the test harness has no database for.
+pub(crate) async fn branch_delete(api: &Api, owner: &str, name: &str, branch: &str, oid: Option<&str>) -> Response {
+    let Some(oid) = oid.filter(|s| !s.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "the branch's current commit is required").into_response();
+    };
+    // It becomes a ref update's `old` on the node, so it is checked as an object id HERE rather
+    // than forwarded and refused a hop later — same rule as `Digest::parse` on the registry paths.
+    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return (StatusCode::BAD_REQUEST, "oid must be a 40-character commit id").into_response();
+    }
+    if branch == DEFAULT_BRANCH {
+        return (StatusCode::CONFLICT, "the default branch cannot be deleted").into_response();
+    }
+    // Deleting the head of an open change makes it unmergeable and hides why, so it is refused
+    // BEFORE the node is asked to touch the ref.
+    match open_pull_on(api, owner, name, branch).await {
+        Ok(Some(n)) => {
+            return (StatusCode::CONFLICT, format!("close or merge pull request #{n} first")).into_response()
+        }
+        Ok(None) => {}
+        Err(r) => return r,
+    }
+    let path = format!(
+        "/api/{}/{}/branchdelete?branch={}&oid={}",
+        encode(owner),
+        encode(name),
+        encode(branch),
+        encode(oid)
+    );
+    match ask_owner_verbatim(api, path).await {
+        Ok((200..=299, _)) => StatusCode::NO_CONTENT.into_response(),
+        Ok((400, _)) => (StatusCode::BAD_REQUEST, "that is not a branch this repository can delete").into_response(),
+        Ok((404, _)) => (StatusCode::NOT_FOUND, "no such branch").into_response(),
+        // The node's own sentence: it is the only thing that knows WHICH conflict this was.
+        Ok((409, body)) => (StatusCode::CONFLICT, body).into_response(),
+        Ok((s, _)) => {
+            tracing::error!(reason = "branchdelete", owner = %owner, name = %name, status = s, "upstream.request.failed");
+            (StatusCode::BAD_GATEWAY, "could not delete the branch").into_response()
+        }
+        Err(r) => r,
+    }
+}
+
+/// The number of an OPEN pull request whose head is `branch`, if there is one. Read from the
+/// owning node rather than the directory: pull requests live in the repo's own database now
+/// (`kloudlite_pulls::pulls`), and this tier has no handle on it.
+async fn open_pull_on(api: &Api, owner: &str, name: &str, branch: &str) -> std::result::Result<Option<i64>, Response> {
+    let url = format!("{}/api/{}/{}/pulls?state=open", api.upstream, encode(owner), encode(name));
+    let r = to_owner(api, api.client.get(url), Some(owner)).await?;
+    if !r.status().is_success() {
+        tracing::error!(reason = "pulls", owner = %owner, name = %name, status = r.status().as_u16(), "upstream.request.failed");
+        return Err((StatusCode::BAD_GATEWAY, "could not read the open pull requests").into_response());
+    }
+    // A body this tier cannot parse must not read as "no open changes" — that is the one answer
+    // that lets the delete through.
+    let list: Vec<serde_json::Value> = match serde_json::from_str(&text_bounded(r).await) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(reason = "pulls", owner = %owner, name = %name, error = %e, "upstream.request.failed");
+            return Err((StatusCode::BAD_GATEWAY, "could not read the open pull requests").into_response());
+        }
+    };
+    Ok(list
+        .iter()
+        .find(|p| p["state"] == "open" && p["head"] == branch)
+        .and_then(|p| p["number"].as_i64()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +736,136 @@ mod tests {
         let (status, deleted) = create_against(Some(500)).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(deleted, "a definite failure still unwinds the name");
+    }
+
+    /// A node that answers the open-pull listing with `pulls` and `branchdelete` with
+    /// `(status, body)`, recording whether the delete was ever asked for.
+    async fn branch_node(
+        pulls: serde_json::Value,
+        del: (u16, &'static str),
+    ) -> (String, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+        use axum::routing::{get, post};
+        let asked: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let a = asked.clone();
+        let app = axum::Router::new()
+            .route("/api/{owner}/{name}/pulls", get(move || async move { axum::Json(pulls) }))
+            .route(
+                "/api/{owner}/{name}/branchdelete",
+                post(move |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    // Axum has decoded the query, so this is the branch name the node would act on.
+                    a.lock().unwrap().push((
+                        q.get("branch").cloned().unwrap_or_default(),
+                        q.get("oid").cloned().unwrap_or_default(),
+                    ));
+                    (StatusCode::from_u16(del.0).unwrap(), del.1)
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        (url, asked)
+    }
+
+    async fn delete_against(
+        pulls: serde_json::Value,
+        del: (u16, &'static str),
+        branch: &str,
+        oid: Option<&str>,
+    ) -> (StatusCode, String, Vec<(String, String)>) {
+        let (url, asked) = branch_node(pulls, del).await;
+        let mut api = test_api_with_secret("s").await;
+        api.upstream = url;
+        let r = branch_delete(&api, "alice", "web", branch, oid).await;
+        let status = r.status();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let asked = asked.lock().unwrap().clone();
+        (status, String::from_utf8_lossy(&body).into_owned(), asked)
+    }
+
+    /// A well-formed object id, so every case below fails for the reason it is about.
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[tokio::test]
+    async fn a_branch_delete_is_forwarded_with_its_oid() {
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked, vec![("x".into(), OID.into())], "the node is the thing that deletes the ref");
+    }
+
+    #[tokio::test]
+    async fn a_delete_without_an_oid_is_refused() {
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "x", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(asked.is_empty());
+    }
+
+    /// Catches: the default branch reaching the node at all — the refusal is this tier's too.
+    #[tokio::test]
+    async fn the_default_branch_is_refused_here() {
+        let (status, body, asked) =
+            delete_against(serde_json::json!([]), (204, ""), DEFAULT_BRANCH, Some(OID)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, "the default branch cannot be deleted");
+        assert!(asked.is_empty());
+    }
+
+    /// Catches: deleting the head of an open change — the PR becomes unmergeable and nothing says why.
+    #[tokio::test]
+    async fn an_open_pulls_head_is_refused_by_number() {
+        let pulls = serde_json::json!([
+            {"number": 4, "head": "other", "state": "open"},
+            {"number": 7, "head": "x", "state": "open"},
+        ]);
+        let (status, body, asked) = delete_against(pulls, (204, ""), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, "close or merge pull request #7 first");
+        assert!(asked.is_empty());
+    }
+
+    /// A closed change is no reason to keep the branch.
+    #[tokio::test]
+    async fn a_closed_pulls_head_is_deletable() {
+        let pulls = serde_json::json!([{"number": 7, "head": "x", "state": "closed"}]);
+        let (status, _, asked) = delete_against(pulls, (204, ""), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked.len(), 1);
+    }
+
+    /// Catches: replacing the node's sentence — only it knows the branch moved.
+    #[tokio::test]
+    async fn an_upstream_conflict_keeps_its_sentence() {
+        let (status, body, _) =
+            delete_against(serde_json::json!([]), (409, "the branch moved; reload"), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, "the branch moved; reload");
+    }
+
+    /// Catches: a path segment or a raw ref forwarded as an oid — it becomes a ref update's
+    /// `old` on the node.
+    #[tokio::test]
+    async fn an_oid_that_is_not_an_object_id_is_refused() {
+        for bad in ["abc123", "0123456789ABCDEF0123456789abcdef01234567", &"a".repeat(41), "../etc"] {
+            let (status, body, asked) = delete_against(serde_json::json!([]), (204, ""), "x", Some(bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(body, "oid must be a 40-character commit id");
+            assert!(asked.is_empty(), "{bad} reached the node");
+        }
+    }
+
+    /// Catches: a slash in a branch name escaping into the upstream URL as a path separator —
+    /// `feat/x` must arrive at the node as one query value, not two segments.
+    #[tokio::test]
+    async fn a_branch_with_a_slash_survives_the_forward() {
+        let (status, _, asked) = delete_against(serde_json::json!([]), (204, ""), "feat/x", Some(OID)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(asked, vec![("feat/x".into(), OID.into())]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_branch_is_a_404() {
+        let (status, body, _) = delete_against(serde_json::json!([]), (404, "nope"), "x", Some(OID)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "no such branch");
     }
 
     #[tokio::test]
