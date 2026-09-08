@@ -366,7 +366,7 @@ fn state_is_local(out: &str, cache: &str, state: &str) -> Result<()> {
 const HOME_FILE: &str = "/home/kl/.slo-home";
 
 /// Create a workspace and wait for `ready`. Answers its id.
-async fn create(c: &Ctx, name: &str, extra: Value) -> Result<String> {
+pub(crate) async fn create(c: &Ctx, name: &str, extra: Value) -> Result<String> {
     let mut body = json!({ "name": name, "region": c.cfg.region, "quota_gb": QUOTA_GB });
     let (Some(o), Some(e)) = (body.as_object_mut(), extra.as_object()) else {
         return Err(anyhow!("bad request body"));

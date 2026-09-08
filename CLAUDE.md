@@ -266,6 +266,24 @@ There is no Workspace finalizer for this: `/v1`'s `delete_ws` removes the enviro
 itself while the spec is still readable, and the agent's janitor sweeps orphaned `{pool}/attach/{id}`
 directories left behind by a workspace that is simply gone.
 
+The other direction is an **intercept**: an attached workspace takes over one of the environment's
+services, so everything the environment sends to `api:8080` is delivered to that workspace instead.
+The wish is `Environment.spec.intercepts` (`{service, workspace, ports}`, written only by `/v1`);
+what is IN FORCE is each service's `status.intercepted_by`, and the web reads only that. Traffic
+moves by ENDPOINTS, never DNS and never a proxy: the real service's StatefulSet is scaled to 0 —
+leaving it running would let a queue consumer eat messages the workspace never sees — its ClusterIP
+Service loses its selector, and the agent writes the `EndpointSlice` itself, which is the only way
+to name an address in another namespace (a selector can never leave its own). The ClusterIP and the
+DNS name are untouched, so callers dial exactly what they dialled before, and ports may be REMAPPED
+— the Service's port is what callers dial, the slice's is where it lands, matched by the port name
+`p{port}` — because the process being debugged listens where a dev server listens
+(`api:8080 → workspace:3000`). One workspace per service; a second is refused naming the holder. A
+stopped, deleted or unreachable workspace RELEASES the intercept on its own (after
+`INTERCEPT_GRACE_SECS`, so an ordinary pod restart does not bounce the StatefulSet) and the real
+service comes back up — but the wish STAYS, because a transient blip must never discard what the
+person asked for, and it takes hold again when the workspace returns. Only
+`DELETE /v1/environments/{id}/intercepts/{service}` removes a wish.
+
 `Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only
 writer, via `/v1/regions` (server-side apply, so a second POST of the same id retires or renames it
 rather than 409ing). Snapshot BYTES have
