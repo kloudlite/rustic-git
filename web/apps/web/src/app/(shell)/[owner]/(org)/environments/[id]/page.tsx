@@ -66,6 +66,10 @@ export default async function Page({ params }: { params: Promise<{ owner: string
           // unreachable, and the real service is up and answering.
           const inForce = s.intercepted_by ?? null;
           const wish = interceptSummary(s, env.intercepts);
+          // DESCRIPTIVE, not authoritative: this is the wish's mapping. The api exposes no
+          // in-force port list — `intercepted_by` is the whole of what status says — so this is
+          // the closest honest answer to "where does it land", and it is the same mapping the
+          // controller applied unless the wish has been rewritten since.
           const mapping = wish.ports.map((m) => `${m.service} → ${m.workspace}`).join(", ");
           return (
           <li key={s.name} className="flex flex-wrap items-center gap-4 px-5 py-3.5">

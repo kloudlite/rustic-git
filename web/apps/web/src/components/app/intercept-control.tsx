@@ -89,14 +89,18 @@ export function InterceptDialog({
                     type="number"
                     min={1}
                     max={65535}
-                    defaultValue={p}
+                    placeholder={String(p)}
                     aria-label={`Workspace port answering ${service}:${p}`}
                     className="h-9 w-28 font-mono"
                   />
                 </div>
               ))}
+              {/* EMPTY, not prefilled: an untouched field is left out of the request entirely and
+                  the api answers that port on the same number. Prefilling would send every port
+                  explicitly and make the omission path dead code. */}
               <p className="text-caption text-muted-foreground">
-                Callers keep dialling {service}&rsquo;s own port; this is where your workspace listens.
+                Callers keep dialling {service}&rsquo;s own port; this is where your workspace
+                listens. Leave one blank to answer it on the same number.
               </p>
             </div>
           )}
