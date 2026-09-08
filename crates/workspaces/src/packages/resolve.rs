@@ -427,7 +427,14 @@ impl Resolver {
 
         if !skip_cache {
             if let Some(lock) = self.cached(&attr, &req).await {
-                return Ok(lock);
+                // A cached lock is still only a claim about a binary: one written before a
+                // release dropped out of the cache (or before this check existed) must not be
+                // handed out for a day. An unverifiable cache is an ordinary miss.
+                match self.binaries.has(&lock.store_path).await {
+                    Ok(true) => return Ok(lock),
+                    _ if lock.store_path.is_empty() => return Ok(lock),
+                    _ => {}
+                }
             }
         }
 
@@ -740,6 +747,23 @@ mod tests {
             store_path: path.into(),
             ..lock(entry, version, LockSource::Nixhub)
         }
+    }
+
+    #[tokio::test]
+    async fn a_cached_lock_whose_binary_is_gone_is_re_resolved() {
+        let nix = Arc::new(
+            FakeIndex::with(&[
+                ("nodejs", "20", Some(lock_at("nodejs@20", "20.20.2", "/nix/store/a-nodejs"))),
+                ("nodejs", "20.19.5", Some(lock_at("nodejs@20.19.5", "20.19.5", "/nix/store/c-nodejs"))),
+            ])
+            .knows("nodejs", &["20.20.2", "20.19.5"]),
+        );
+        let r = resolver_missing(nix, Arc::new(FakeIndex::default()), &["/nix/store/a-nodejs"]);
+        let mut stale = lock_at("nodejs@20", "20.20.2", "/nix/store/a-nodejs");
+        stale.resolved_at = at("2026-09-08T11:00:00Z").to_rfc3339();
+        put_cache(&r, "nodejs", &VersionReq::Prefix("20".into()), &stale).await;
+        let l = r.lock_one("nodejs@20", false).await.unwrap();
+        assert_eq!((l.version.as_str(), l.store_path.as_str()), ("20.19.5", "/nix/store/c-nodejs"));
     }
 
     #[tokio::test]
