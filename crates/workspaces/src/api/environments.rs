@@ -562,7 +562,10 @@ async fn validate_intercept(
     // 404, not 403, exactly as everywhere else: a caller learns nothing about workspaces that are
     // not theirs, not even that the id exists.
     let w = my_ws(s, caller, &want.workspace).await?;
-    if crd::attached_environment(&w).as_deref() != Some(e.name_any().as_str()) {
+    // `spec` only, exactly as `decide_intercept` reads it: `crd::attached_environment` falls back
+    // to the condition, which reads back a DETACHED workspace's last attachment — accepting one
+    // here is a 202 for something the controller will refuse forever as `WorkspaceDetached`.
+    if w.spec.attached_environment.as_deref() != Some(e.name_any().as_str()) {
         return Err((StatusCode::CONFLICT, "that workspace is not attached to this environment; attach it first").into_response());
     }
     // `spec`, not `status`: desired state is what this tier owns, and a workspace whose pod is

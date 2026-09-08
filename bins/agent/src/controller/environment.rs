@@ -428,7 +428,7 @@ async fn run_environment(
     }
     // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
     // three states below, and the rendering is a straight read of that decision.
-    let (wishes, plan) = intercept_plan(e, ctx).await;
+    let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
@@ -450,6 +450,17 @@ async fn run_environment(
             }
         }
         ensure(deployments, &set, ctx).await?;
+        let slice = format!("{}-intercept", svc.name);
+        // BEFORE the Service loses its selector, never after. A Service with no selector and no
+        // slice has no endpoints at all — a total outage of that service — and the wish stays, so
+        // every retry would repeat the same order; a slice write that fails because this region's
+        // `agent-rbac.yaml` has not been applied yet would strand it there forever. Written first,
+        // a failure leaves the real service serving and the next pass repairs it. The release
+        // path is the mirror of this: the selector is back before the slice is deleted.
+        if let Some(Intercepting::Force { pod_ip, .. }) = decided {
+            let ic = wishes[svc.name.as_str()];
+            ensure(&slices, &k8s::intercept_slice(svc, &e.name_any(), &e.spec.owner, owner_ref, ic, Some(pod_ip)), ctx).await?;
+        }
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
         // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
         // by an earlier definition that did have ports; `ensure` has no delete path of its own.
@@ -460,14 +471,15 @@ async fn run_environment(
                 forget_applied(ctx, "Service", ns, &svc.name);
             }
         }
-        let slice = format!("{}-intercept", svc.name);
         match decided {
-            Some(Intercepting::Force { pod_ip, .. }) => {
-                let ic = wishes[svc.name.as_str()];
-                ensure(&slices, &k8s::intercept_slice(svc, &e.name_any(), &e.spec.owner, owner_ref, ic, Some(pod_ip)), ctx).await?;
-            }
-            // Inside the grace, or with an unreadable answer: the slice is left exactly as it is.
-            Some(Intercepting::Keep) => {}
+            // Already written, above.
+            Some(Intercepting::Force { .. }) => {}
+            // Inside the grace, or with an unreadable answer, AND the last pass really did render
+            // an intercept: the slice is left exactly as it is. Held without that second half it
+            // would survive a pass that has just put the selector back — kube-proxy unions the
+            // two, splitting the service's traffic at random between the real pod and the
+            // workspace, which is worse than either end state.
+            Some(Intercepting::Keep) if intercepted => {}
             // Deleted only when this service has a wish that is not in force, or had one in force
             // last pass — not on every reconcile of every environment that never intercepted
             // anything, which would be one wasted DELETE per service per tick.
@@ -606,6 +618,7 @@ enum Intercepting {
 #[allow(clippy::type_complexity)]
 async fn intercept_plan<'a>(
     e: &'a crd::Environment,
+    prev: &crd::EnvironmentStatus,
     ctx: &Arc<Ctx>,
 ) -> (std::collections::HashMap<&'a str, &'a crd::Intercept>, std::collections::HashMap<&'a str, Intercepting>) {
     let mut wishes: std::collections::HashMap<&str, &crd::Intercept> = std::collections::HashMap::new();
@@ -615,14 +628,14 @@ async fn intercept_plan<'a>(
             continue;
         }
         wishes.insert(&ic.service, ic);
-        plan.insert(&ic.service, decide_intercept(ic, &e.name_any(), ctx).await);
+        plan.insert(&ic.service, decide_intercept(ic, &e.name_any(), prev, ctx).await);
     }
     (wishes, plan)
 }
 
 /// One intercept's fate, from the Workspace and its pod. Never errors: an unreadable answer is
 /// `Keep`, which changes nothing at all.
-async fn decide_intercept(ic: &crd::Intercept, env_name: &str, ctx: &Arc<Ctx>) -> Intercepting {
+async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Intercepting {
     let off = |reason, message: String, w: Option<crd::Workspace>| Intercepting::Off { reason, message, ws: w.map(Box::new) };
     let w = match Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&ic.workspace).await {
         Ok(Some(w)) => w,
@@ -663,9 +676,17 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, ctx: &Arc<Ctx>) -
     // grace exists to ride out. With no clock to trust the outage has, as far as anything here
     // knows, only just started: hold, and look again on the requeue, by which time the workspace's
     // own controller has stamped `Ready=False` and dated it.
+    //
+    // With NO clock anywhere the hold has to be BOUNDED, or it is forever: an absent pod on a
+    // workspace whose own controller has stopped stamping — its node died — is exactly that
+    // shape, and the service would stay scaled to zero behind a slice pointing at a pod that no
+    // longer exists. This environment's own `Intercepted` condition is the last clock left; it
+    // dates the intercept's last state change, so once THAT is older than the grace the outage
+    // has outlived any restart worth riding out and the real service comes back.
     let since = ready
         .and_then(|(_, t)| t)
-        .or_else(|| w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)));
+        .or_else(|| w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)))
+        .or_else(|| Some(prev.conditions.iter().find(|c| c.type_ == "Intercepted")?.last_transition_time.0.as_second()));
     let waited = since.map_or(0, |t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
     // A NEGATIVE wait is a node whose clock runs ahead of whoever stamped the condition. Held, it
     // would hold forever; expired, the real service comes back. Expired is the safe direction.

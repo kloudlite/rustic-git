@@ -1342,6 +1342,11 @@ pub fn intercept_policy_name(ws_id: &str) -> String {
 ///
 /// Namespace and pod selector sit in ONE element of `to`, which ANDs them; as two elements they
 /// would OR, opening the whole workspace namespace and every pod anywhere carrying that label.
+///
+/// The policy's own `podSelector` is empty — every pod in the environment — because any of them
+/// may be the one dialling the intercepted service, and they are all this environment's already.
+/// The ingress half is the opposite: it names the one workspace pod, since an owner's workspaces
+/// share a namespace.
 pub fn intercept_egress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
     policy(
         &intercept_policy_name(ws_id),

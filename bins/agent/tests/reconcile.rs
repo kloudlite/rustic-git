@@ -6291,3 +6291,81 @@ async fn a_long_ready_workspace_that_has_just_lost_its_pod_is_held_not_dated_fro
         "a ten-minute-old start time is not a ten-minute-old outage: {:?}", rec.calls()
     );
 }
+
+
+/// The ORDER, which is the whole difference between a failed slice write costing nothing and
+/// costing the service: a Service with its selector dropped and no slice behind it has no
+/// endpoints at all, and the wish stays, so every retry repeats it.
+#[tokio::test]
+async fn the_slice_is_written_before_the_service_loses_its_selector() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
+
+    let calls = rec.calls();
+    let slice = calls.iter().position(|c| c == &format!("PATCH {WEB_SLICE}")).expect("the slice is written");
+    let svc = calls.iter().position(|c| c == &format!("PATCH {WEB_SVC}")).expect("the Service is written");
+    assert!(slice < svc, "the endpoints go in before the selector goes: {calls:?}");
+}
+
+/// A Force pass whose status write failed, then an unreadable Workspace: `prev` records no
+/// intercept, so the Service is rendered WITH its selector again — and the slice from that first
+/// pass has to go with it. kube-proxy unions the two, so a survivor splits the service's traffic
+/// at random between the real pod and the workspace.
+#[tokio::test]
+async fn a_held_pass_that_rendered_no_intercept_last_time_deletes_the_stale_slice() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![Route {
+        method: "GET",
+        path: WS_OBJ.into(),
+        status: 500,
+        body: serde_json::json!({"kind": "Status", "code": 500, "message": "etcd leader changed"}),
+    }]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 1, "the real service is up");
+    assert!(!rec.sent("PATCH", WEB_SVC).last().unwrap()["spec"]["selector"].is_null(), "with its selector");
+    assert!(
+        rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")),
+        "a slice beside a selectored Service splits the traffic: {:?}", rec.calls()
+    );
+}
+
+/// The clock-less hold, BOUNDED. No pod, and a workspace whose own controller has stopped stamping
+/// — its node died — dates nothing at all, and the service would otherwise stay scaled to zero
+/// behind a slice pointing at a pod that no longer exists, on every pass, forever. This
+/// environment's own `Intercepted` condition is the last clock left.
+#[tokio::test]
+async fn an_intercept_with_no_clock_anywhere_falls_back_once_its_own_condition_is_older_than_the_grace() {
+    let tmp = env_tmp();
+    let mut ws = attached_ws("running", Some("env-1"), 0);
+    ws["status"]["conditions"] = serde_json::json!([]);
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, ws),
+        kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
+        Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let mut e = intercept_env(one_intercept(), Some("ws-1"));
+    e.status.as_mut().unwrap().conditions = vec![serde_json::from_value(serde_json::json!({
+        "type": "Intercepted", "status": "True", "reason": "InForce", "message": "intercepted: web",
+        "lastTransitionTime": secs_ago(600), "observedGeneration": 1,
+    }))
+    .unwrap()];
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 1, "the real service comes back");
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "the slice goes: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    let cond = st.last().unwrap()["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Intercepted").cloned().unwrap();
+    assert_eq!(cond["reason"], "PodUnreachable", "{cond}");
+}

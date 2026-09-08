@@ -146,6 +146,22 @@ async fn a_workspace_attached_elsewhere_is_409() {
     assert!(body.contains("attached"), "{body}");
 }
 
+/// DETACHED in spec, and its `Attached` condition still naming this environment: the condition is
+/// what a detach on a stopped workspace leaves behind, and reading it here would 202 something the
+/// controller then refuses forever as `WorkspaceDetached` — accepted, and never honourable.
+#[tokio::test]
+async fn a_workspace_detached_in_spec_is_409_however_its_condition_still_reads() {
+    let mut ws = ws_obj("ws-1", "karthik", None, "running");
+    ws["status"]["conditions"] = json!([{
+        "type": "Attached", "status": "True", "reason": "Attached", "message": "env-1",
+        "lastTransitionTime": "2026-09-08T00:00:00Z", "observedGeneration": 1,
+    }]);
+    let s = server(routes(json!([]), ws)).await;
+    let r = intercept(&s, good()).await;
+    assert_eq!(r.status(), 409);
+    assert!(patched(&s).is_empty(), "nothing written");
+}
+
 #[tokio::test]
 async fn a_stopped_workspace_is_409() {
     let s = server(routes(json!([]), ws_obj("ws-1", "karthik", Some("env-1"), "stopped"))).await;
