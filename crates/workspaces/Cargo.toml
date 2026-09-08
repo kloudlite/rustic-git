@@ -28,6 +28,8 @@ object_store = { workspace = true }
 bytes = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The `test`-op CAS `/v1` guards `spec.intercepts` with — same version the agent pins.
+json-patch = "4.2.0"
 libc = { workspace = true }
 reqwest = { workspace = true }
 # Only `kube_test` needs these — it is compiled into the library (not behind `#[cfg(test)]`)

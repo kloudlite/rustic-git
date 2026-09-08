@@ -3824,6 +3824,7 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
+ "json-patch",
  "k8s-openapi",
  "kloudlite-core",
  "kloudlite-server",

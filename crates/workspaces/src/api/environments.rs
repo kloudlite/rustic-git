@@ -584,6 +584,13 @@ async fn validate_intercept(
             )
                 .into_response());
         }
+        if p.workspace == 0 {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("port {} must answer on a real port of the workspace, and 0 is not one", p.service),
+            )
+                .into_response());
+        }
         if !seen.insert(p.service) {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -595,8 +602,59 @@ async fn validate_intercept(
     Ok(())
 }
 
+/// How many times a write re-reads and re-decides after losing the CAS below. Three: a lost race
+/// means somebody else's write landed in the microseconds between our read and our patch, and a
+/// caller that lost three of those in a row is contending with something a retry will not fix.
+const INTERCEPT_ATTEMPTS: usize = 3;
+
+/// Compare-and-set `spec.intercepts`, guarded by the `resourceVersion` the decision was made
+/// against — the same `test`-op construction `take_volume` uses, for the same reason.
+///
+/// A merge patch REPLACES a JSON array wholesale, so two calls naming two different services
+/// would each write the list they read and the second would silently discard the first — an
+/// accepted 202 with nothing on disk and no signal anywhere. The `test` turns that into a lost
+/// race the caller re-decides, which is the only reading that cannot lose a write.
+///
+/// `add`, not `replace`: `spec.intercepts` is `#[serde(default)]`, so an environment written
+/// before the field existed has no such key and a `replace` on a missing path is a 422 this would
+/// then retry forever. `add` creates or overwrites.
+///
+/// `Ok(None)` is a lost race. An `Err` is an outage — never "lost", same distinction `cas` draws.
+async fn cas_intercepts(
+    c: &kube::Client,
+    e: &crd::Environment,
+    want: Vec<crd::Intercept>,
+) -> Result<Option<crd::Environment>, Response> {
+    let api: Api<crd::Environment> = Api::all(c.clone());
+    let ops = json_patch::Patch(vec![
+        json_patch::PatchOperation::Test(json_patch::TestOperation {
+            path: "/metadata/resourceVersion".parse().expect("a static pointer"),
+            value: serde_json::json!(e.resource_version().unwrap_or_default()),
+        }),
+        json_patch::PatchOperation::Add(json_patch::AddOperation {
+            path: "/spec/intercepts".parse().expect("a static pointer"),
+            value: serde_json::to_value(want).expect("intercepts serialize"),
+        }),
+    ]);
+    match api.patch(&e.name_any(), &PatchParams::default(), &Patch::Json::<crd::Environment>(ops)).await {
+        Ok(v) => Ok(Some(v)),
+        Err(kube::Error::Api(st)) if st.code == 409 || st.code == 422 => Ok(None),
+        Err(err) => Err(kube_err(err)),
+    }
+}
+
+/// The one answer a write gets when it keeps losing the CAS: honest, and never a 202 over a list
+/// that was not written.
+fn contended() -> Response {
+    (StatusCode::CONFLICT, "the environment was changed while this was being written; try again").into_response()
+}
+
 /// Write one workspace's wish to receive a service's traffic. Spec only — every visible effect
 /// is the environment controller's reconcile, which is why this is a 202.
+///
+/// Read, validate and write are one attempt, retried: the validation reads the CURRENT holders,
+/// so a lost race must re-read them rather than re-send a decision made against a list somebody
+/// else has since changed.
 pub(crate) async fn set_intercept(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -604,22 +662,21 @@ pub(crate) async fn set_intercept(
     Json(body): Json<crd::Intercept>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    let e = find_env(&s, &caller_id, &id).await?;
-    validate_intercept(&s, &caller_id, &e, &body).await?;
-    // At most one entry per service, held here rather than by the controller (which takes the
-    // first, so a hand-edited object cannot flap): the same workspace asking again with new ports
-    // REPLACES, and a different one was already refused above.
-    let mut want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.service != body.service).cloned().collect();
-    want.push(body);
-    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
-    // A merge patch on the one field, like every other spec write here: this handler was sent one
-    // wish and must not claim ownership of a spec the caller never wrote.
-    let e = api
-        .patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"intercepts": want}})))
-        .await
-        .map_err(kube_err)?;
-    let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
-    Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &pushed))).into_response())
+    for _ in 0..INTERCEPT_ATTEMPTS {
+        let e = find_env(&s, &caller_id, &id).await?;
+        validate_intercept(&s, &caller_id, &e, &body).await?;
+        // At most one entry per service, held here rather than by the controller (which takes the
+        // first, so a hand-edited object cannot flap): the same workspace asking again with new
+        // ports REPLACES, and a different one was already refused above.
+        let mut want: Vec<crd::Intercept> =
+            e.spec.intercepts.iter().filter(|i| i.service != body.service).cloned().collect();
+        want.push(body.clone());
+        if let Some(e) = cas_intercepts(kube(&s)?, &e, want).await? {
+            let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
+            return Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &pushed))).into_response());
+        }
+    }
+    Err(contended())
 }
 
 /// The ONLY thing that removes an intercept. Deliberately not called by `stop_ws`, `detach_ws` or
@@ -634,16 +691,19 @@ pub(crate) async fn clear_intercept(
     Path((id, service)): Path<(String, String)>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
-    let e = find_env(&s, &caller_id, &id).await?;
-    if !e.spec.intercepts.iter().any(|i| i.service == service) {
-        return Ok(StatusCode::NO_CONTENT.into_response());
+    for _ in 0..INTERCEPT_ATTEMPTS {
+        let e = find_env(&s, &caller_id, &id).await?;
+        if !e.spec.intercepts.iter().any(|i| i.service == service) {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        let want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.service != service).cloned().collect();
+        // Guarded like the write above: a release that merge-patched the list it read would
+        // discard an intercept somebody added for another service in the meantime.
+        if cas_intercepts(kube(&s)?, &e, want).await?.is_some() {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
     }
-    let want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.service != service).cloned().collect();
-    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
-    api.patch(&id, &PatchParams::default(), &Patch::Merge(&serde_json::json!({"spec": {"intercepts": want}})))
-        .await
-        .map_err(kube_err)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    Err(contended())
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

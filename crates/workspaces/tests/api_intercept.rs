@@ -29,7 +29,7 @@ fn empty(kind: &str, plural: &str) -> Route {
 fn env_obj(intercepts: Value) -> Value {
     json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": "env-1", "labels": {"kloudlite.io/owner": "karthik"}},
+        "metadata": {"name": "env-1", "resourceVersion": "42", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {
             "owner": "karthik", "name": "app", "region": "centralindia",
             "services": [{"name": "api", "image": "nginx", "command": [], "env": {}, "mounts": [], "ports": [8080, 9090]}],
@@ -51,6 +51,26 @@ fn ws_obj(name: &str, owner: &str, attached: Option<&str>, state: &str) -> Value
         },
         "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": name},
     })
+}
+
+/// The `intercepts` value a CAS patch carried, from its `add` op — and the assertion that the
+/// `test` op guarding it is there at all, which is what makes a concurrent write lose rather
+/// than clobber.
+fn written(s: &Server) -> Vec<Value> {
+    patched(s)
+        .iter()
+        .map(|p| {
+            let ops = p.as_array().expect("a JSON Patch is an array of ops");
+            assert_eq!(
+                ops[0],
+                json!({"op": "test", "path": "/metadata/resourceVersion", "value": "42"}),
+                "every write is guarded: {p}"
+            );
+            assert_eq!(ops[1]["op"], "add");
+            assert_eq!(ops[1]["path"], "/spec/intercepts");
+            ops[1]["value"].clone()
+        })
+        .collect()
 }
 
 /// The reads every intercept call makes: the environment, the workspace, and the snapshot list
@@ -169,10 +189,9 @@ async fn a_good_request_writes_one_entry_with_the_mapping() {
     let s = server(routes(json!([]), attached_running())).await;
     let r = intercept(&s, good()).await;
     assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
-    let p = patched(&s).pop().unwrap();
     assert_eq!(
-        p,
-        json!({"spec": {"intercepts": [{"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3000}]}]}})
+        written(&s).pop().unwrap(),
+        json!([{"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3000}]}])
     );
 }
 
@@ -181,9 +200,9 @@ async fn the_same_workspace_asking_again_replaces_rather_than_duplicates() {
     let held = json!([{"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 1111}]}]);
     let s = server(routes(held, attached_running())).await;
     assert_eq!(intercept(&s, good()).await.status(), 202);
-    let p = patched(&s).pop().unwrap();
-    let list = p["spec"]["intercepts"].as_array().unwrap();
-    assert_eq!(list.len(), 1, "one entry per service: {p}");
+    let w = written(&s).pop().unwrap();
+    let list = w.as_array().unwrap();
+    assert_eq!(list.len(), 1, "one entry per service: {w}");
     assert_eq!(list[0]["ports"][0]["workspace"], 3000, "the new mapping won");
 }
 
@@ -201,8 +220,7 @@ async fn a_release_removes_the_entry() {
     let held = json!([{"service": "api", "workspace": "ws-1", "ports": []}]);
     let s = server(routes(held, attached_running())).await;
     assert_eq!(release(&s, "api").await.status(), 204);
-    let p = patched(&s).pop().unwrap();
-    assert_eq!(p, json!({"spec": {"intercepts": []}}));
+    assert_eq!(written(&s).pop().unwrap(), json!([]));
 }
 
 #[tokio::test]
@@ -238,4 +256,35 @@ async fn stopping_the_workspace_leaves_the_intercept_alone() {
         .unwrap();
     let doc: Value = e.json().await.unwrap();
     assert_eq!(doc["intercepts"], held, "{doc}");
+}
+
+/// A workspace port of 0 is not a port. It would be accepted here, scale the real service to 0,
+/// and then be refused by the API server when the agent writes the `EndpointSlice` — leaving the
+/// service answering nothing, from a request this tier said 202 to.
+#[tokio::test]
+async fn a_workspace_port_of_zero_is_422() {
+    let s = server(routes(json!([]), attached_running())).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 0}]})).await;
+    assert_eq!(r.status(), 422);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("0 is not one"), "{body}");
+    assert!(patched(&s).is_empty(), "nothing written");
+}
+
+/// The window this closes: two writes naming two different services each merge-patch the whole
+/// list they read, and the second discards the first after answering it 202. The `test` op turns
+/// that into a refusal — the API server answers 409, and a caller that keeps losing is told so
+/// rather than handed a 202 over a list that was never written.
+#[tokio::test]
+async fn a_stale_write_is_refused_rather_than_winning() {
+    let mut rs = routes(json!([]), attached_running());
+    // The mock walks a path's routes in order and repeats the last, so every attempt loses.
+    rs.retain(|r| !(r.method == "PATCH" && r.path.ends_with("/environments/env-1")));
+    rs.push(kloudlite_workspaces::kube_test::conflict("PATCH", format!("{API}/environments/env-1")));
+    let s = server(rs).await;
+    let r = intercept(&s, good()).await;
+    assert_eq!(r.status(), 409);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("changed while this was being written"), "{body}");
+    assert_eq!(patched(&s).len(), 3, "it re-read and re-decided, then gave up");
 }
