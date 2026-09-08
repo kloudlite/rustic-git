@@ -437,7 +437,7 @@ async fn run_environment(
             Some(Intercepting::Force { .. }) => true,
             // Nothing is known, or the grace has not run out: render what the LAST pass rendered,
             // which is exactly what `intercepted_by` records.
-            Some(Intercepting::Keep) => was_intercepted(&prev, &svc.name),
+            Some(Intercepting::Keep { .. }) => was_intercepted(&prev, &svc.name),
             _ => false,
         };
         let mut set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
@@ -479,7 +479,7 @@ async fn run_environment(
             // would survive a pass that has just put the selector back — kube-proxy unions the
             // two, splitting the service's traffic at random between the real pod and the
             // workspace, which is worse than either end state.
-            Some(Intercepting::Keep) if intercepted => {}
+            Some(Intercepting::Keep { .. }) if intercepted => {}
             // Deleted only when this service has a wish that is not in force, or had one in force
             // last pass — not on every reconcile of every environment that never intercepted
             // anything, which would be one wasted DELETE per service per tick.
@@ -506,10 +506,20 @@ async fn run_environment(
         // spec and this reports `None`, which is what the web and the CLI show.
         let by = match plan.get(svc.name.as_str()) {
             Some(Intercepting::Force { ws, .. }) => Some(ws.name_any()),
-            Some(Intercepting::Keep) => prev_intercepted_by(&prev, &svc.name),
+            Some(Intercepting::Keep { .. }) => prev_intercepted_by(&prev, &svc.name),
             _ => None,
         };
-        service_status.push(deployment_status(deployments, &svc.name, by).await?);
+        // Reachable, gone, stopped or detached all CLEAR the clock — it dates one continuous
+        // outage, and a workspace that came back and broke again is a new one. Only a `Keep` that
+        // learned nothing carries the recorded value forward untouched.
+        let unreachable_since = match plan.get(svc.name.as_str()) {
+            Some(Intercepting::Keep { since: Some(t) }) => Some(*t),
+            Some(Intercepting::Keep { since: None }) => {
+                prev.service_status.iter().find(|st| st.name == svc.name).and_then(|st| st.unreachable_since)
+            }
+            _ => None,
+        };
+        service_status.push(deployment_status(deployments, &svc.name, by, unreachable_since).await?);
     }
     let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
@@ -550,7 +560,7 @@ async fn run_environment(
     };
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
-    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep));
+    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. }));
     Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
 }
 
@@ -565,9 +575,16 @@ async fn deployment_status(
     // Decided by `intercept_plan`, threaded in rather than recomputed: this function reconstructs
     // the whole `ServiceStatus` every pass, so anything it defaults here is stomped every pass.
     intercepted_by: Option<String>,
+    unreachable_since: Option<i64>,
 ) -> Result<crd::ServiceStatus, ReconcileErr> {
     let Some(d) = deployments.get_opt(name).await? else {
-        return Ok(crd::ServiceStatus { name: name.into(), ready: false, message: Some("statefulset not created yet".into()), intercepted_by });
+        return Ok(crd::ServiceStatus {
+            name: name.into(),
+            ready: false,
+            message: Some("statefulset not created yet".into()),
+            intercepted_by,
+            unreachable_since,
+        });
     };
     let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
     // An intercepted service is scaled to zero BY US, so zero ready replicas is the converged
@@ -579,6 +596,7 @@ async fn deployment_status(
             ready: true,
             message: Some(format!("intercepted by {ws}")),
             intercepted_by: intercepted_by.clone(),
+            unreachable_since,
         });
     }
     Ok(crd::ServiceStatus {
@@ -586,6 +604,7 @@ async fn deployment_status(
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
         intercepted_by,
+        unreachable_since,
     })
 }
 
@@ -605,7 +624,10 @@ enum Intercepting {
     /// Either nothing is known (an API error) or the pod has not been unreachable long enough.
     /// Render what the last pass rendered and look again — a blip in the API server must never
     /// flap a service, and an unreadable answer is not evidence of anything.
-    Keep,
+    ///
+    /// `since` is when the outage began, carried out so the status write keeps it: `None` means
+    /// this pass learned nothing (an API error), so whatever was recorded stands unchanged.
+    Keep { since: Option<i64> },
     /// Not in force. The wish STAYS in spec; the rendering goes back to the ordinary one and the
     /// condition says why.
     Off { reason: &'static str, message: String, ws: Option<Box<crd::Workspace>> },
@@ -640,7 +662,7 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::Envir
     let w = match Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&ic.workspace).await {
         Ok(Some(w)) => w,
         Ok(None) => return off("WorkspaceGone", format!("{} no longer exists", ic.workspace), None),
-        Err(_) => return Intercepting::Keep,
+        Err(_) => return Intercepting::Keep { since: None },
     };
     if w.spec.desired_state == DesiredState::Stopped {
         return off("WorkspaceStopped", format!("{} is stopped", ic.workspace), Some(w));
@@ -654,7 +676,7 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::Envir
     let pod = match w.status.as_ref().and_then(|s| s.pod_ref.clone()) {
         Some(name) => match Api::<Pod>::namespaced(ctx.client.clone(), &ns).get_opt(&name).await {
             Ok(p) => p,
-            Err(_) => return Intercepting::Keep,
+            Err(_) => return Intercepting::Keep { since: None },
         },
         None => None,
     };
@@ -673,25 +695,26 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::Envir
     // The `Ready == "False"` guard is the whole grace. A workspace that has been `Ready=True` for
     // ten minutes and has just lost its pod would otherwise date the outage from when it CAME UP,
     // yielding `waited = 600` and an immediate fallback — in exactly the ordinary pod restart the
-    // grace exists to ride out. With no clock to trust the outage has, as far as anything here
-    // knows, only just started: hold, and look again on the requeue, by which time the workspace's
-    // own controller has stamped `Ready=False` and dated it.
+    // grace exists to ride out.
     //
-    // With NO clock anywhere the hold has to be BOUNDED, or it is forever: an absent pod on a
-    // workspace whose own controller has stopped stamping — its node died — is exactly that
-    // shape, and the service would stay scaled to zero behind a slice pointing at a pod that no
-    // longer exists. This environment's own `Intercepted` condition is the last clock left; it
-    // dates the intercept's last state change, so once THAT is older than the grace the outage
-    // has outlived any restart worth riding out and the real service comes back.
-    let since = ready
-        .and_then(|(_, t)| t)
-        .or_else(|| w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)))
-        .or_else(|| Some(prev.conditions.iter().find(|c| c.type_ == "Intercepted")?.last_transition_time.0.as_second()));
-    let waited = since.map_or(0, |t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
+    // With NO clock anywhere this pass stamps one ITSELF and keeps it in `unreachable_since`. That
+    // shape is a workspace whose node died: no pod object, and no controller of its own left to
+    // stamp `Ready=False`, so no event will ever arrive and no other object dates the outage.
+    // Borrowing one that does exist is worse than having none — the `Intercepted` condition dates
+    // the intercept's last state CHANGE, so an intercept in force since morning reads as an outage
+    // hours old and skips the grace on the very first pass.
+    let now = k8s_openapi::jiff::Timestamp::now().as_second();
+    let since = outage_since(
+        ready.and_then(|(_, t)| t),
+        w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)),
+        prev.service_status.iter().find(|s| s.name == ic.service).and_then(|s| s.unreachable_since),
+        now,
+    );
+    let waited = now - since;
     // A NEGATIVE wait is a node whose clock runs ahead of whoever stamped the condition. Held, it
     // would hold forever; expired, the real service comes back. Expired is the safe direction.
     if (0..INTERCEPT_GRACE_SECS).contains(&waited) {
-        return Intercepting::Keep;
+        return Intercepting::Keep { since: Some(since) };
     }
     off("PodUnreachable", format!("{}'s pod has been unreachable for {waited}s", ic.workspace), Some(w))
 }
@@ -709,6 +732,15 @@ fn pod_ready(p: &Pod) -> (bool, Option<i64>) {
 
 /// When the workspace itself last said it was NOT ready — never when it said it was. A `Ready=True`
 /// workspace whose pod has merely gone dates nothing about the outage; see `decide_intercept`.
+/// The moment the outage began, in the order the clocks are worth trusting: the pod's own
+/// `Ready=False`, then the Workspace's, then what a previous pass of ours recorded, then now.
+///
+/// Split out because the three-way fallback is the whole correctness of the grace and the caller
+/// around it needs a live cluster to reach.
+fn outage_since(pod: Option<i64>, workspace: Option<i64>, recorded: Option<i64>, now: i64) -> i64 {
+    pod.or(workspace).or(recorded).unwrap_or(now)
+}
+
 fn not_ready_since(conds: &[Condition]) -> Option<i64> {
     let c = conds.iter().find(|c| c.type_ == "Ready")?;
     (c.status == "False").then(|| c.last_transition_time.0.as_second())
@@ -811,7 +843,7 @@ fn intercept_condition(plan: &std::collections::HashMap<&str, Intercepting>, gen
     // states nothing. Claiming `InForce` there would be an affirmative falsehood on the very first
     // pass over a fresh wish that hit an API error, when nothing has been rendered at all.
     // `status.services[].intercepted_by` is the per-service truth and is correct either way.
-    if plan.values().any(|d| matches!(d, Intercepting::Keep)) {
+    if plan.values().any(|d| matches!(d, Intercepting::Keep { .. })) {
         return None;
     }
     Some(crd::condition("Intercepted", true, "InForce", &format!("intercepted: {}", names.join(", ")), gen))
@@ -1034,5 +1066,30 @@ mod tests {
         std::fs::create_dir_all(&live).unwrap();
         mkdir_env_mounts(&live, &[svc("dbdata"), svc("dbdata")]).unwrap();
         assert!(live.join("volumes/dbdata").is_dir());
+    }
+
+    /// The clock the grace measures against. The last case is the one that matters: a workspace
+    /// whose node died has no pod and no `Ready=False` of its own, so the FIRST pass records now
+    /// (nothing has been waited yet, the grace runs in full) and every later pass measures from
+    /// that record rather than restarting the grace or borrowing an unrelated timestamp.
+    #[test]
+    fn the_outage_clock_prefers_the_pod_then_the_workspace_then_its_own_record() {
+        assert_eq!(outage_since(Some(10), Some(20), Some(30), 100), 10, "the pod observed it first-hand");
+        assert_eq!(outage_since(None, Some(20), Some(30), 100), 20, "no pod object: the workspace's own condition");
+        assert_eq!(outage_since(None, None, Some(30), 100), 30, "a dead node stamps neither: our own record");
+        assert_eq!(outage_since(None, None, None, 100), 100, "nothing anywhere: the outage starts now");
+    }
+
+    /// The dead-node sequence end to end, in the units the caller uses. Recording `now` on the
+    /// first sight is what makes this terminate: hold for the grace, then fall back — not hold
+    /// forever, and not fall back immediately off some older object's timestamp.
+    #[test]
+    fn a_dead_nodes_workspace_holds_for_the_grace_and_then_falls_back() {
+        let first = outage_since(None, None, None, 1_000);
+        assert_eq!(1_000 - first, 0, "nothing waited yet on the pass that discovers it");
+        let held = 1_000 + INTERCEPT_GRACE_SECS - 1;
+        assert!((0..INTERCEPT_GRACE_SECS).contains(&(held - outage_since(None, None, Some(first), held))));
+        let expired = 1_000 + INTERCEPT_GRACE_SECS;
+        assert!(!(0..INTERCEPT_GRACE_SECS).contains(&(expired - outage_since(None, None, Some(first), expired))));
     }
 }

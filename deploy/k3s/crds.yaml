@@ -1141,6 +1141,12 @@
                             },
                             "ready": {
                               "type": "boolean"
+                            },
+                            "unreachableSince": {
+                              "description": "Unix seconds at which the intercepting workspace was first observed unreachable, stamped by\nthe environment's own controller and cleared the moment it is reachable again.\n\nIt exists because a workspace whose NODE died leaves nothing behind to date the outage: no\npod object, and no controller of its own still stamping `Ready=False`. Without a clock the\ngrace before the real service comes back is either unbounded or measured off some other\nobject's timestamp, which dates a different event entirely.",
+                              "format": "int64",
+                              "nullable": true,
+                              "type": "integer"
                             }
                           },
                           "required": [

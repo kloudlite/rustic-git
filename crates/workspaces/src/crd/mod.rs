@@ -781,6 +781,15 @@ pub struct ServiceStatus {
     /// own `intercepts`, reported here so a browse of one service shows its own fate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intercepted_by: Option<String>,
+    /// Unix seconds at which the intercepting workspace was first observed unreachable, stamped by
+    /// the environment's own controller and cleared the moment it is reachable again.
+    ///
+    /// It exists because a workspace whose NODE died leaves nothing behind to date the outage: no
+    /// pod object, and no controller of its own still stamping `Ready=False`. Without a clock the
+    /// grace before the real service comes back is either unbounded or measured off some other
+    /// object's timestamp, which dates a different event entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreachable_since: Option<i64>,
 }
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

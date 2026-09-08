@@ -6340,10 +6340,10 @@ async fn a_held_pass_that_rendered_no_intercept_last_time_deletes_the_stale_slic
 
 /// The clock-less hold, BOUNDED. No pod, and a workspace whose own controller has stopped stamping
 /// — its node died — dates nothing at all, and the service would otherwise stay scaled to zero
-/// behind a slice pointing at a pod that no longer exists, on every pass, forever. This
-/// environment's own `Intercepted` condition is the last clock left.
+/// behind a slice pointing at a pod that no longer exists, on every pass, forever. The clock is
+/// the one this controller stamped itself on the pass that first saw the outage.
 #[tokio::test]
-async fn an_intercept_with_no_clock_anywhere_falls_back_once_its_own_condition_is_older_than_the_grace() {
+async fn an_intercept_with_no_clock_anywhere_falls_back_once_our_own_record_is_older_than_the_grace() {
     let tmp = env_tmp();
     let mut ws = attached_ws("running", Some("env-1"), 0);
     ws["status"]["conditions"] = serde_json::json!([]);
@@ -6355,11 +6355,8 @@ async fn an_intercept_with_no_clock_anywhere_falls_back_once_its_own_condition_i
     ]);
     let (ctx, rec) = ctx(tmp.path(), routes);
     let mut e = intercept_env(one_intercept(), Some("ws-1"));
-    e.status.as_mut().unwrap().conditions = vec![serde_json::from_value(serde_json::json!({
-        "type": "Intercepted", "status": "True", "reason": "InForce", "message": "intercepted: web",
-        "lastTransitionTime": secs_ago(600), "observedGeneration": 1,
-    }))
-    .unwrap()];
+    e.status.as_mut().unwrap().service_status[0].unreachable_since =
+        Some(k8s_openapi::jiff::Timestamp::now().as_second() - 600);
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
 
@@ -6368,4 +6365,31 @@ async fn an_intercept_with_no_clock_anywhere_falls_back_once_its_own_condition_i
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     let cond = st.last().unwrap()["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Intercepted").cloned().unwrap();
     assert_eq!(cond["reason"], "PodUnreachable", "{cond}");
+}
+
+/// The pass that DISCOVERS a clock-less outage stamps the clock and holds. Without the stamp the
+/// next pass would find nothing again and hold again — forever — and borrowing an older timestamp
+/// from elsewhere would skip the grace entirely on this very pass.
+#[tokio::test]
+async fn the_pass_that_first_sees_no_clock_records_one_and_holds() {
+    let tmp = env_tmp();
+    let mut ws = attached_ws("running", Some("env-1"), 0);
+    ws["status"]["conditions"] = serde_json::json!([]);
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, ws),
+        kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
+    ]);
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx).await.unwrap();
+
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0, "the intercept is held, not dropped");
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "the slice stays: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    let svc = st.last().unwrap()["status"]["serviceStatus"][0].clone();
+    let stamped = svc["unreachableSince"].as_i64().expect("the outage is dated on the pass that finds it");
+    assert!(
+        (k8s_openapi::jiff::Timestamp::now().as_second() - stamped) < 5,
+        "dated now, not borrowed from an older object: {svc}"
+    );
 }
