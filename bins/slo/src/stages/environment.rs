@@ -383,19 +383,18 @@ const MARKER: &str = "slo-intercept";
 /// pod until it answers: intercepting a port nothing listens on would measure the intercept as
 /// broken when the listener is what never came up.
 ///
-/// `bun` twice rather than curl or `/dev/tcp`: it is the one runtime the workspace image is
-/// guaranteed to have, and `sh` here is not necessarily bash.
+/// busybox `nc`, which is in the workspace IMAGE, never a package: the workspace is created with
+/// `"packages": []`, so its nix profile holds the base set and nothing else. An earlier version
+/// used `bun` and skipped every intercept id on the fleet with "failed to run command 'bun'" —
+/// bun was only ever present in a workspace whose owner had installed it.
 ///
-/// The PATH is set explicitly because it is NOT inherited here: `bun` lives in the workspace's nix
-/// profile, which the login shell puts on the path and a `pods/exec` of `sh -c` does not — so
-/// every intercept step skipped on the fleet with "failed to run command 'bun'" while bun sat in
-/// the image all along.
-const LISTENER: &str = r#"PATH=/nix/profile/current/bin:$PATH
-export PATH
-nohup bun -e 'Bun.serve({ port: 3000, hostname: "0.0.0.0", fetch: () => new Response("slo-intercept") })' > /tmp/slo-intercept.log 2>&1 &
+/// One connection per `nc -l`, so the loop restarts it; the dial side polls, which covers the gap.
+/// No Content-Length: the answer ends when the connection closes, which is what `nc -w 3` reads.
+const LISTENER: &str = r#"body='HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nslo-intercept\n'
+nohup sh -c "while true; do printf '$body' | nc -l -p 3000; done" > /tmp/slo-intercept.log 2>&1 &
 i=0
 while [ $i -lt 20 ]; do
-  if bun -e 'const r = await fetch("http://127.0.0.1:3000"); process.exit((await r.text()) === "slo-intercept" ? 0 : 1)' > /dev/null 2>&1; then
+  if printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 127.0.0.1 3000 2>/dev/null | grep -q slo-intercept; then
     echo listening
     exit 0
   fi
@@ -673,11 +672,14 @@ mod tests {
     /// with "never answered", pointing at the intercept rather than at this file.
     #[test]
     fn the_listener_listens_on_the_port_the_intercept_maps_to() {
-        assert!(LISTENER.contains(&format!("port: {WS_PORT}")), "{LISTENER}");
-        assert!(LISTENER.contains(&format!("127.0.0.1:{WS_PORT}")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!("nc -l -p {WS_PORT}")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!("127.0.0.1 {WS_PORT}")), "{LISTENER}");
         // Served and asserted on, both by name: the log file happens to carry the marker too.
-        assert!(LISTENER.contains(&format!("new Response(\"{MARKER}\")")), "{LISTENER}");
-        assert!(LISTENER.contains(&format!("=== \"{MARKER}\"")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!("{MARKER}\\n'")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!("grep -q {MARKER}")), "{LISTENER}");
+        // The runtime this leans on is the image's, not a package: the workspace is created with
+        // an empty package list, and an earlier `bun` here skipped every id on the fleet.
+        assert!(!LISTENER.contains("bun"), "{LISTENER}");
         // The whole point of the id: the environment dials the service's port, never the
         // workspace's.
         assert_ne!(WS_PORT, TARGET_PORT);
