@@ -126,12 +126,7 @@ pub fn path(owner: &str, name: &str) -> String {
 /// See the comment at its use: this, not object-store latency, sets how long a lone push takes.
 const KLOUDLITE_FLUSH_INTERVAL_MS: u64 = 100;
 
-fn env_u64(k: &str, default: u64) -> u64 {
-    std::env::var(k)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+use kloudlite_core::settings::env_parsed as env_u64;
 
 /// SlateDB's on-disk cache for object-store parts, rooted under `KLOUDLITE_CACHE_DIR`.
 ///

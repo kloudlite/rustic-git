@@ -17,6 +17,7 @@ use kloudlite_workspaces::slo::catalogue::Suite;
 use super::{api, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 use crate::tools;
+use super::{state_is};
 
 /// Per-step ceilings. Each is at least its catalogue target — a slow answer must be a breach with a
 /// number, not a step the probe cut off. This stage sums to 310 s if every single step times out;
@@ -139,10 +140,6 @@ async fn create(c: &mut Ctx) -> bool {
         .boxed()
     })
     .await
-}
-
-fn state_is(v: &Value, want: &str) -> bool {
-    v.get("state").and_then(Value::as_str) == Some(want)
 }
 
 /// `ws.exec.ok`: a command inside the running pod, its OUTPUT, and the pod's home.

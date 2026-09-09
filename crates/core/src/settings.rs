@@ -144,24 +144,18 @@ impl CentralSettings {
     }
 
     pub fn from_env() -> Self {
-        fn env_u64(key: &str, default: u64) -> u64 {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-        }
-        fn env_u16(key: &str, default: u16) -> u16 {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-        }
         fn env_string(key: &str) -> String {
             std::env::var(key).unwrap_or_default()
         }
 
         let d = Self::built_in_defaults();
         Self {
-            max_body: env_u64("KLOUDLITE_MAX_BODY", d.max_body),
-            max_layer: env_u64("KLOUDLITE_MAX_LAYER", d.max_layer),
-            upload_grace_secs: env_u64("KLOUDLITE_UPLOAD_GRACE_SECS", d.upload_grace_secs),
+            max_body: env_parsed("KLOUDLITE_MAX_BODY", d.max_body),
+            max_layer: env_parsed("KLOUDLITE_MAX_LAYER", d.max_layer),
+            upload_grace_secs: env_parsed("KLOUDLITE_UPLOAD_GRACE_SECS", d.upload_grace_secs),
             clone_host: env_string("KLOUDLITE_CLONE_HOST"),
             ssh_host: env_string("KLOUDLITE_SSH_HOST"),
-            ssh_port: env_u16("KLOUDLITE_SSH_PORT", d.ssh_port),
+            ssh_port: env_parsed("KLOUDLITE_SSH_PORT", d.ssh_port),
             registry_host: env_string("KLOUDLITE_REGISTRY_HOST"),
             ..d
         }
@@ -348,6 +342,12 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
 /// `pub`: `ClusterSettings`' own range check (`crates/workspaces/src/api/settings.rs`) formats its
 /// 422s through this SAME function rather than a second copy, so the two settings scopes can never
 /// drift on what a range violation reads like.
+/// A numeric knob from the environment, `default` when unset or unparsable — the bootstrap
+/// value a fresh process starts from; `LiveSettings` is the last word on it after that.
+pub fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 pub fn range_err(field: &str, lo: impl std::fmt::Display, hi: impl std::fmt::Display, got: impl std::fmt::Display) -> String {
     format!("{field} must be between {lo} and {hi}, got {got}")
 }

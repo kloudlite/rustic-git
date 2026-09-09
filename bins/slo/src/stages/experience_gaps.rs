@@ -30,6 +30,7 @@ use super::{admin, api, call, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 use crate::drill::{undoing, UNDO_SLACK};
 use crate::tools;
+use super::{clip, id_of};
 
 /// Per-step ceilings, each at or above its catalogue target for the reason every other stage
 /// states: a slow answer must be a breach with a number, never a step the probe cut off.
@@ -996,14 +997,14 @@ pub(super) async fn admin_delete(c: &mut Ctx) {
         let environments = api(c, "/v1/environments");
         async move {
             let ws = json!({ "name": format!("{name}-w"), "region": region, "quota_gb": QUOTA_GB, "packages": [] });
-            let ws = id_of(post(c, &workspaces, &jwt, ws).await.context("could not create a workspace to delete")?)?;
+            let ws = id_of(&post(c, &workspaces, &jwt, ws).await.context("could not create a workspace to delete")?)?;
             let env = json!({
                 "name": format!("{name}-e"),
                 "region": region,
                 "quota_gb": QUOTA_GB,
                 "services": [{ "name": "redis", "image": "redis:7-alpine", "command": [], "env": {}, "mounts": [], "ports": [6379] }],
             });
-            let env = id_of(post(c, &environments, &jwt, env).await.context("could not create an environment to delete")?)?;
+            let env = id_of(&post(c, &environments, &jwt, env).await.context("could not create an environment to delete")?)?;
             // No wait for `ready`: the delete is the SLI and a create that is still converging is
             // deleted the same way. Both are named `run-…`, so teardown finds either one anyway.
             for (kind, id, path) in [
@@ -1180,7 +1181,7 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
                     "access": { "team": slug, "role": "member" },
                 });
                 let made = post(c, &api(c, "/v1/requests"), &other, ask).await.context("could not open the access request")?;
-                let id = id_of(made)?;
+                let id = id_of(&made)?;
                 post(c, &admin(c, &format!("/admin/requests/{id}/approve")), &admin_jwt, json!({ "note": NOTE }))
                     .await
                     .context("the access approval was refused")?;
@@ -1197,7 +1198,7 @@ pub(super) async fn decide_kinds(c: &mut Ctx) {
                     "other": { "title": "slo probe", "body": "deny me" },
                 });
                 let made = post(c, &api(c, "/v1/requests"), &other, ask).await.context("could not open the request to deny")?;
-                let id = id_of(made)?;
+                let id = id_of(&made)?;
                 let note = format!("slo probe denied {}", c.run_id);
                 post(c, &admin(c, &format!("/admin/requests/{id}/deny")), &admin_jwt, json!({ "note": note }))
                     .await
@@ -1291,17 +1292,6 @@ pub(super) async fn region_status(c: &mut Ctx) {
 }
 
 // ── shared ──────────────────────────────────────────────────────────────────
-
-fn id_of(doc: Value) -> Result<String> {
-    doc.get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("the answer carried no id"))
-}
-
-fn clip(body: &str) -> String {
-    body.chars().take(200).collect()
-}
 
 /// One path segment, with the characters that would SPLIT it escaped.
 ///

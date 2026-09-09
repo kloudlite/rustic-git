@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use super::{api, get, poll_json, post};
 use crate::ctx::Ctx;
+use super::{id_of, state_is};
 
 /// Per-step ceilings, each at or above its catalogue target — a slow answer must be a breach with a
 /// number, never a step the probe cut off. The three without a latency target still need one, or a
@@ -376,17 +377,6 @@ fn reflects(doc: &Value) -> Result<()> {
 }
 
 /// `id` off a create/clone/push answer.
-fn id_of(doc: &Value) -> Result<String> {
-    doc.get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("the answer carried no id"))
-}
-
-fn state_is(v: &Value, want: &str) -> bool {
-    v.get("state").and_then(Value::as_str) == Some(want)
-}
-
 /// The environment says `running` AND both StatefulSets have a ready replica. The record alone is
 /// not what a person waits for.
 async fn running(c: &Ctx, env: &str, cap: Duration) -> Result<()> {

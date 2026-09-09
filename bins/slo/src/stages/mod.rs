@@ -9,6 +9,23 @@ use serde_json::Value;
 
 use crate::ctx::Ctx;
 
+/// A response body carried into a step detail. Long enough to name the refusal, short enough that
+/// an HTML error page does not become the report. (`step::clip` is the other one — the byte cap
+/// on the whole detail; this is the per-body cut a stage applies before composing it.)
+pub(crate) fn clip(body: &str) -> String {
+    body.chars().take(200).collect()
+}
+
+/// The `id` of a created object, from the api's answer.
+pub(crate) fn id_of(doc: &Value) -> Result<String> {
+    doc.get("id").and_then(Value::as_str).map(str::to_string).ok_or_else(|| anyhow!("the answer carried no id"))
+}
+
+/// The `state` field of a workspace or environment document is `want`.
+pub(crate) fn state_is(v: &Value, want: &str) -> bool {
+    v.get("state").and_then(Value::as_str) == Some(want)
+}
+
 pub mod admin;
 pub mod edge;
 pub mod environment;

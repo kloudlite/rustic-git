@@ -36,6 +36,7 @@ use super::{api, drain_team, get, poll_json, post, raw, TEAM_DRAIN};
 use crate::drill::{undoing, UNDO_SLACK};
 use crate::ctx::Ctx;
 use kloudlite_workspaces::crd;
+use super::{clip};
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
 // answer must be a breach with a number, never a step the probe cut off.
@@ -857,10 +858,6 @@ async fn refused(c: &Ctx, method: reqwest::Method, url: &str, token: &str, what:
         return Ok(());
     }
     Err(anyhow!("{what} answered {status}: {}", clip(&body)))
-}
-
-fn clip(body: &str) -> String {
-    body.chars().take(200).collect()
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use super::{admin, api, call, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 use crate::drill::{undoing, UNDO_SLACK};
+use super::{clip, id_of, state_is};
 
 /// Per-step ceilings, each looser than the catalogue target it measures (10 s for the create after
 /// an approve, 30 s for the stop and the feed) so a slow fleet is a breach with a number rather
@@ -110,7 +111,7 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
             raw(c, reqwest::Method::POST, &ws_url, &jwt, Some(create.clone()), &[]).await?;
         if status != reqwest::StatusCode::CONFLICT {
             // Recorded even here: a create that SUCCEEDED is a workspace the undo must take back.
-            *created.lock().expect("lock") = id_of(&text);
+            *created.lock().expect("lock") = serde_json::from_str::<Value>(&text).ok().and_then(|v| id_of(&v).ok());
             return Err(anyhow!("an over-quota create answered {status}: {}", clip(&text)));
         }
         let body = json!({
@@ -185,7 +186,7 @@ async fn created_now(
         if status.is_success() {
             // Written down BEFORE the step can return: the undo takes it back, and a create the
             // probe forgot is one workspace of the owner's allocation held for good.
-            *made.lock().expect("lock") = id_of(&text);
+            *made.lock().expect("lock") = serde_json::from_str::<Value>(&text).ok().and_then(|v| id_of(&v).ok());
             return Ok(());
         }
         if start.elapsed() >= AFTER_APPROVE {
@@ -317,23 +318,10 @@ pub async fn feed(c: &mut Ctx) {
 
 /// The `id` off a create's body, whatever the body is. `None` for anything that is not a JSON
 /// object with one — a refusal, an HTML error page, an empty 204.
-fn id_of(text: &str) -> Option<String> {
-    serde_json::from_str::<Value>(text).ok()?.get("id").and_then(Value::as_str).map(str::to_string)
-}
-
 fn disk_gb(v: &Value) -> Option<u64> {
     v.get("diskGb").and_then(Value::as_u64)
 }
 
-fn state_is(v: &Value, want: &str) -> bool {
-    v.get("state").and_then(Value::as_str) == Some(want)
-}
-
-/// A response body carried into a step detail. Long enough to name the refusal, short enough that
-/// an HTML error page does not become the report.
-fn clip(text: &str) -> String {
-    text.chars().take(200).collect()
-}
 
 #[cfg(test)]
 mod tests {

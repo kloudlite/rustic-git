@@ -42,12 +42,8 @@ impl AgentSettings {
     /// read today. This is the FLOOR `merged_with` overrides from the stored `ClusterSettings`
     /// spec, never the other way around.
     pub fn from_env() -> Self {
-        fn env_u64(key: &str, default: u64) -> u64 {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-        }
-        fn env_u32(key: &str, default: u32) -> u32 {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-        }
+        use kloudlite_core::settings::env_parsed as env_u64;
+        use kloudlite_core::settings::env_parsed as env_u32;
 
         Self {
             sync_secs: env_u64("WS_SYNC_SECS", crd::defaults::sync_secs()),
