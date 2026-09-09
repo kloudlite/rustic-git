@@ -3438,6 +3438,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "tempfile",
+]
+
+[[package]]
 name = "kl-connect"
 version = "0.1.0"
 dependencies = [

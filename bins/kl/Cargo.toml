@@ -1,0 +1,17 @@
+[package]
+name = "kl"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+description = "kloudlite workspace CLI: build on the owner's builder, push to the owner's registry"
+repository = "https://github.com/kloudlite/rustic-git"
+
+[[bin]]
+name = "kl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,110 @@
+//! `kl` — the kloudlite workspace CLI. Two verbs, because a workspace has a builder and a
+//! registry and no container engine: `kl build` builds on the owner's builder and pushes,
+//! `kl push` copies an image the registry already holds to another name. Nothing here holds a
+//! token or calls the api; the docker credential helper (`docker-credential-kl`) is the login.
+
+mod docker;
+mod refs;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "kl",
+    version,
+    about = "kloudlite workspace CLI: build on your builder, push to your registry",
+    after_help = "There is no container engine in a workspace: `docker run`, `pull`, `ps` and a separate `docker push` do not apply. A build pushes as it finishes."
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Build on your builder and push to your registry: `kl build -t hello:1 .`
+    Build {
+        /// Name[:tag]; `hello:1` means <registry>/<you>/hello:1, `team/hello:1` pushes under the team
+        #[arg(short = 't', long = "tag", required = true)]
+        tags: Vec<String>,
+        #[arg(short = 'f', long)]
+        file: Option<String>,
+        #[arg(long = "build-arg")]
+        build_args: Vec<String>,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        no_cache: bool,
+        #[arg(default_value = ".")]
+        context: String,
+    },
+    /// Copy an image the registry already has to another name: `kl push hello:1 hello:latest`
+    Push {
+        src: String,
+        dst: Vec<String>,
+    },
+}
+
+const NO_DST: &str = "a build pushes as it finishes — `kl build -t hello:1 .`; `kl push` copies an image the registry already has to another name";
+
+fn env(name: &str) -> Result<String, String> {
+    std::env::var(name).map_err(|_| format!("{name} is not set — kl runs inside a kloudlite workspace"))
+}
+
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("kl: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<(), String> {
+    let cli = Cli::parse();
+    // Refused before anything touches docker: the sentence is the whole point of the verb.
+    if let Cmd::Push { dst, .. } = &cli.cmd {
+        if dst.is_empty() {
+            return Err(NO_DST.into());
+        }
+    }
+    let (host, owner, buildkit) = (env("KL_REGISTRY_HOST")?, env("KL_OWNER")?, env("BUILDKIT_HOST")?);
+    let home = std::env::var("HOME").map(std::path::PathBuf::from).map_err(|_| "HOME is not set".to_string())?;
+    docker::ensure_cred_helper(&home, &host)?;
+    docker::ensure_builder(&buildkit)?;
+    docker::wait_builder()?;
+    match cli.cmd {
+        Cmd::Build { tags, file, build_args, platform, no_cache, context } => {
+            let refs: Vec<String> = tags.iter().map(|t| refs::expand(t, &host, &owner)).collect();
+            let meta = std::env::temp_dir().join(format!("kl-build-{}.json", std::process::id()));
+            let meta_s = meta.display().to_string();
+            let code = docker::run(&docker::build_argv(&refs, file.as_deref(), &build_args, platform.as_deref(), no_cache, &context, &meta_s))?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            // buildx writes `containerimage.digest` into the metadata file; one line per pushed
+            // reference is what a script wants to capture.
+            let digest = std::fs::read_to_string(&meta)
+                .ok()
+                .and_then(|m| m.split("\"containerimage.digest\":\"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string));
+            let _ = std::fs::remove_file(&meta);
+            for r in refs {
+                match &digest {
+                    Some(d) => println!("{r}@{d}"),
+                    None => println!("{r}"),
+                }
+            }
+            Ok(())
+        }
+        Cmd::Push { src, dst } => {
+            let src = refs::expand(&src, &host, &owner);
+            for d in dst {
+                let d = refs::expand(&d, &host, &owner);
+                let code = docker::run(&docker::promote_argv(&src, &d))?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                println!("{d}");
+            }
+            Ok(())
+        }
+    }
+}
