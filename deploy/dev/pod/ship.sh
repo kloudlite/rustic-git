@@ -32,6 +32,9 @@ fi
 
 echo "==> release build"
 cargo build --release --locked --bins 2>&1 | tail -1
+# The workspace CLI, for the Alpine workspace image: its own target, so it never lands in
+# target/release beside the glibc binaries.
+cargo build --release --locked -p kl --target x86_64-unknown-linux-musl 2>&1 | tail -1
 
 # The Dockerfile COPYs target/release/* relative to its context and .dockerignore drops the rest,
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
@@ -43,6 +46,8 @@ mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
 for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
   ln -f /work/target/release/$b "$CTX/target/release/$b"
 done
+mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
+ln -f /work/target/x86_64-unknown-linux-musl/release/kl "$CTX/target/x86_64-unknown-linux-musl/release/kl"
 
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}

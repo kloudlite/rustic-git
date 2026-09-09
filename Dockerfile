@@ -143,6 +143,10 @@ RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx \
 # on disk — no `docker login`, nothing long-lived, rotation is just the next Secret projection.
 COPY deploy/workspace-image/docker-credential-kl /usr/local/bin/docker-credential-kl
 RUN chmod 0755 /usr/local/bin/docker-credential-kl
+# `kl` is the workspace CLI (build, push). A musl binary because this stage is Alpine: the glibc
+# `target/release/*` the other stages copy would not even load here.
+COPY target/x86_64-unknown-linux-musl/release/kl /usr/local/bin/kl
+RUN chmod 0755 /usr/local/bin/kl
 # `/etc/profile.d`, not the seeded rc files under `k8s::prelude`: those are copied into the
 # person's home once and their own edits then survive forever, which is wrong for a config that
 # must track `BUILDKIT_HOST`/`KL_REGISTRY_HOST` on every login.

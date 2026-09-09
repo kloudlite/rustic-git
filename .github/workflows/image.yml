@@ -103,6 +103,9 @@ jobs:
           --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
           --bin kloudlite-agent --bin kloudlite-gateway --bin kloudlite-builder-gate
           --bin kloudlite-slo --bin kl-connect
+      # The workspace CLI is a musl binary (the workspace image is Alpine); its own target and,
+      # below, its own artifact, so the flat `target/release` restore in the image job stays flat.
+      - run: rustup target add x86_64-unknown-linux-musl && cargo build --release --locked -p kl --target x86_64-unknown-linux-musl
       - name: glibc ceiling
         run: |
           set -eu
@@ -127,6 +130,12 @@ jobs:
             /ci-target/release/kl-connect
           if-no-files-found: error
           retention-days: 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kl-musl
+          path: /ci-target/x86_64-unknown-linux-musl/release/kl
+          if-no-files-found: error
+          retention-days: 1
 
   image:
     # Docker on the plain runner: buildx and the ghcr login have no business inside the rust
@@ -147,8 +156,12 @@ jobs:
         with:
           name: bins
           path: target/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kl-musl
+          path: target/x86_64-unknown-linux-musl/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
-      - run: chmod +x target/release/kloudlite* target/release/kl-connect
+      - run: chmod +x target/release/kloudlite* target/release/kl-connect target/x86_64-unknown-linux-musl/release/kl
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           # The classic driver: the VM's own daemon keeps every layer between runs, which is the

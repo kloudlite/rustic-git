@@ -59,6 +59,9 @@ Rules that keep this honest:
   needs `git config --global --add safe.directory /work/src` once per pod restart (the pod's
   own root filesystem is not on the disk).
 
+`rustup target add x86_64-unknown-linux-musl` once per pod: `ship.sh` builds the workspace CLI (`kl`)
+for the Alpine workspace image with it.
+
 Cost: one Standard_D16s_v5 (about $0.8/hour). Delete the pool when the campaign is over:
 `az aks nodepool delete -g kolomi-rg --cluster-name kolomi-cluster -n builder`.
 
