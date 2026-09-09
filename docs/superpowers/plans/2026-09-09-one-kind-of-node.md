@@ -82,14 +82,24 @@ Run → FAIL (arity).
 ### Task 3: Docs
 
 **Files:**
-- Modify: `deploy/k3s/README.md` (the two label lines → one; a rollout note), `docs/capacity-model.md` (one line), `CLAUDE.md` (grep for `session=true` / `env=true` / "env node" / "session node"; fix each sentence found)
+- Modify: `deploy/k3s/README.md` (the two label lines → one; a rollout note), `docs/capacity-model.md` (one line), the project guide (grep for `session=true` / `env=true` / "env node" / "session node"; fix each sentence found)
 
 - [ ] **Step 1:** README: `kubectl label node <node> kloudlite.io/pool=true   # hosts workspaces and environments` replaces lines 137–138; a dated note under the rollout history: "2026-09-09: node kinds removed; `kloudlite.io/session` and `kloudlite.io/env` are no longer read — `kubectl label node <n> kloudlite.io/session- kloudlite.io/env-` on each region when convenient."
 - [ ] **Step 2:** capacity model: one line at the top of the node section stating the fleet is one kind of node at 100 % of the guarantee.
 - [ ] **Step 3:** the project guide: every sentence naming a session node or an env node, rewritten; `grep -n "session node\|env node\|kloudlite.io/session\|kloudlite.io/env" CLAUDE.md docs/capacity-model.md deploy/k3s/README.md` → only the history note.
 - [ ] **Step 4: Commit** `"Docs: one kind of node"`.
 
-### Task 4: Fleet (controller runs this)
+### Task 4: The probe picks a pool node
+
+**Files:**
+- Modify: `bins/slo/src/stages/monthly.rs` (~line 624: the node-death drill picks a node by `kloudlite.io/session` or `kloudlite.io/env`)
+- Test: the stage's existing unit tests for the node pick, if any; else add one on the pure pick function
+
+- [ ] **Step 1:** Read the pick: it filters nodes on either role label to avoid the control plane. Change the filter to `kloudlite.io/pool == "true"` — the label that means "the agent runs here", which is what the comment above it already says it wants. Rewrite that comment. If the pick is inline, lift it into `fn pool_nodes(nodes: &[Node]) -> Vec<&Node>` and test it with three fixtures: pool, control-plane (no labels), and a node with only the OLD role labels (must NOT be picked after this).
+- [ ] **Step 2:** `grep -rn "kloudlite.io/session\|kloudlite.io/env" bins/slo` → empty. `cargo test -p kloudlite-slo-bin`; clippy → PASS. `deploy/slo.md` and the catalogue need no change: no id's SLI names a node kind.
+- [ ] **Step 3: Commit** `"Probe: the drill picks a pool node"`.
+
+### Task 5: Fleet (controller runs this)
 
 - [ ] **Step 1:** Ship; pin; `agent-daemonset.yaml` on the region; `deploy/roll.sh`.
 - [ ] **Step 2:** Before and after the agent roll: `kubectl get workspaces,environments -o custom-columns=NAME:.metadata.name,NODE:.status.nodeName` — identical.
@@ -98,4 +108,4 @@ Run → FAIL (arity).
 
 ## Self-review
 
-Spec §1 → Task 1; §2 → Task 1; §3 → Task 2; §4 → Task 1; §5 → Task 3; §6 → Tasks 1, 2. Names consistent: `has_pool`, `node_has_pool`, `ADMISSIBLE_PCT`, `placement(spec, node)`, `kloudlite.io/pool`. No placeholder steps; the one helper name left to the implementer (`may_claim_capacity`) is flagged in the test as "the existing helper's real name".
+Spec §1 → Task 1; §2 → Task 1; §3 → Task 2; §4 → Task 1; §5 → Task 3; §6 → Tasks 1, 2; the probe's own node pick (found by grep, not in the spec's table) → Task 4. Names consistent: `has_pool`, `node_has_pool`, `ADMISSIBLE_PCT`, `placement(spec, node)`, `kloudlite.io/pool`. No placeholder steps; the one helper name left to the implementer (`may_claim_capacity`) is flagged in the test as "the existing helper's real name".
