@@ -107,6 +107,15 @@ pub async fn allow(
     if public {
         return Ok(who);
     }
+    // Team membership, live: the rule git-over-SSH has used since identity moved to the
+    // fingerprint. Only on the miss path, so an owner's own push and every public pull cost
+    // what they cost today. `Source::Unavailable` is an Err here and lands in DENIED below —
+    // a directory outage must never widen who may write.
+    if let Some(u) = who.as_deref() {
+        if app.may_act(u, owner).await.unwrap_or(false) {
+            return Ok(who);
+        }
+    }
     let scope = format!("repository:{owner}/{name}:{}", if write { "pull,push" } else { "pull" });
     Err(match who {
         None => challenge(Some(&scope)),

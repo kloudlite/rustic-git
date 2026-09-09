@@ -725,3 +725,76 @@ async fn a_catalog_marker_without_this_owners_prefix_is_not_used_as_a_name() {
     let b: serde_json::Value = r.json().await.unwrap();
     assert_eq!(b["repositories"], serde_json::json!(["acme/alpha", "acme/beta"]));
 }
+
+
+/// Team membership, live: the rule git-over-SSH already uses, exercised here at the registry's
+/// own `allow()`. `registry_app_with_team`/`put_manifest`/`basic`/`token_for` from the brief do
+/// not exist under those names in this harness (grep found no `team_member_can_push_over_ssh`
+/// either) — built directly from `common::app_with_directory` and the directory's own
+/// `upsert_user`/`create` instead. A directory swap after boot is not a thing `App` supports
+/// (`Source` is fixed at construction — see its own doc comment), so the "outage" case is a
+/// second app built with `Source::Unavailable` rather than one app flipped mid-test.
+#[tokio::test]
+async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
+    use kloudlite_pulls::directory::Directory;
+    use std::sync::Arc;
+
+    let e = common::env().await;
+    let dir = Directory::in_memory();
+    dir.upsert_user("alice@x", "Alice").await.unwrap();
+    // The team's creator is seated as its Owner member, which is membership enough here.
+    dir.create("acme", "Acme", "alice@x").await.unwrap();
+    let app = common::app_with_directory(e.store.clone(), kloudlite_pulls::pulls::Source::Directory(Arc::new(dir))).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l, kloudlite_server::router::router(app)).await.unwrap();
+    });
+    common::seed_blobs(&e, "acme", &[b"cfg", b"layer"]).await;
+    let c = reqwest::Client::new();
+
+    // alice: a member of `acme`, pushing a manifest to `acme/web` she does not own outright.
+    let alice_token = e.store.create_token("alice@x").await.unwrap();
+    let r = c
+        .put(format!("{base}/v2/acme/web/manifests/latest"))
+        .basic_auth("alice@x", Some(&alice_token))
+        .header("content-type", MEDIA)
+        .body(manifest_bytes())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CREATED);
+
+    // bob: authenticated, but never added to `acme` — an authenticated stranger gets DENIED, not
+    // a challenge (logging in again would not help).
+    let bob_token = e.store.create_token("bob@x").await.unwrap();
+    let r = c
+        .put(format!("{base}/v2/acme/web/manifests/latest"))
+        .basic_auth("bob@x", Some(&bob_token))
+        .header("content-type", MEDIA)
+        .body(manifest_bytes())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    assert!(r.text().await.unwrap().contains("DENIED"));
+
+    // Directory down: alice's own membership can no longer be confirmed, so the miss path must
+    // deny rather than fall open. `Source` is fixed at construction, so this is a second app
+    // pointed at the same store with `Source::Unavailable` in place of the live directory.
+    let app2 = common::app_with_directory(e.store.clone(), kloudlite_pulls::pulls::Source::Unavailable).await;
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base2 = format!("http://{}", l2.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(l2, kloudlite_server::router::router(app2)).await.unwrap();
+    });
+    let r = c
+        .put(format!("{base2}/v2/acme/web/manifests/latest"))
+        .basic_auth("alice@x", Some(&alice_token))
+        .header("content-type", MEDIA)
+        .body(manifest_bytes())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::FORBIDDEN);
+}
