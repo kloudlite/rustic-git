@@ -222,6 +222,14 @@ pub(crate) struct ListVolQuery {
     owner: Option<String>,
 }
 
+/// A builder's `Volume` carries its environment's id, `bld-{slug}` — so ONE string compare
+/// against the owner decides it, with no `Environment` GET on paths that are already several list
+/// calls deep. The builder is hidden from `/v1/environments`; its disk, its cut chain and its
+/// snapshots are no more the owner's business, so every volume route treats it as absent.
+fn is_builder_volume(name: &str, owner: &str) -> bool {
+    name == crd::builder_id(owner)
+}
+
 pub(crate) async fn list_volumes(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
@@ -277,6 +285,9 @@ pub(crate) async fn volumes_for(
             continue;
         }
         let owner = rows.first().map(|sn| sn.spec.owner.clone()).unwrap_or_default();
+        if is_builder_volume(&name, &owner) {
+            continue;
+        }
         let parent = live.get(&name);
         let kind = parent
             .map(|p| p.kind.clone())
@@ -429,6 +440,13 @@ async fn snapshots_for_caller(s: &ApiState, caller_id: &Caller, name: &str) -> R
 async fn snapshots_for_caller_maybe_empty(s: &ApiState, caller_id: &Caller, name: &str) -> Result<Vec<crd::Snapshot>, Response> {
     check_path_segment(name)?;
     let owners: HashSet<String> = caller_owners(s, caller_id).await.into_iter().collect();
+    // The one guard for `/history`, `/refs`, `DELETE /v1/volumes/{name}` and
+    // `DELETE …/snapshots/{id}` — all four resolve the volume through here, so a builder's volume
+    // is a 404 on every one of them rather than four separate checks to forget. Against the
+    // CALLER's owners, not a row's, because the zero-snapshot case has no row to read.
+    if owners.iter().any(|o| is_builder_volume(name, o)) {
+        return Err(not_found());
+    }
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
     let list = api
         .list(&ListParams::default().fields(&format!("spec.volume={name}")))
@@ -494,6 +512,11 @@ pub(crate) async fn find_snapshot(
     let api: Api<crd::Snapshot> = Api::all(kube(s)?.clone());
     let snap = api.get_opt(snapshot_id).await.map_err(kube_err)?.ok_or_else(not_found)?;
     let ready = snap.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
+    // A builder never pushes, so it should have no Ready snapshot to name — but this is the one
+    // route that reaches a snapshot by id alone, and "should have none" is not a check.
+    if is_builder_volume(&snap.spec.volume, &snap.spec.owner) {
+        return Err(not_found());
+    }
     if volume.is_some_and(|v| snap.spec.volume != v) || !owners.contains(&snap.spec.owner) || !ready {
         return Err(not_found());
     }

@@ -759,9 +759,16 @@ fn builder_service() -> Service {
 /// every existing builder on the next workspace create. `desiredState` is the one field taken from
 /// whatever is already there: the gate starts and stops the builder, and an apply that re-asserted
 /// `Stopped` would tear down a running build the moment somebody created a workspace.
+///
+/// No `guard_alloc`: the builder is not the owner's allocation to approve, and the derived default
+/// ceilings already reserve exactly one per owner. An owner on a hand-set `Quota` below that gets
+/// a builder that is written but cannot start — the agent's `ResourceQuota` refuses its pod — and
+/// `kl builder status` is where they see why.
 pub(crate) async fn ensure_builder(s: &ApiState, owner: &str, team: &str, region: &str) -> Result<(), Response> {
-    // A team's builder belongs to the team, like everything else a team workspace allocates.
-    let slug = if team.is_empty() { owner } else { team };
+    // A team's builder belongs to the team, like everything else a team workspace allocates —
+    // through `owner_slug`, the fold `keys_owner` and therefore `prune_builders` use, because two
+    // spellings of the slug means the beat prunes what the create just wrote.
+    let slug = crate::k8s::owner_slug(owner, team);
     let id = crd::builder_id(slug);
     let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
     let desired_state = match api.get_opt(&id).await.map_err(kube_err)? {

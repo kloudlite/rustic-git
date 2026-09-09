@@ -218,8 +218,9 @@ async fn a_failed_builder_write_never_fails_the_workspace() {
     assert_eq!(create_ws(&s, None).await.status(), 202);
 }
 
-/// Every user-facing environment route, on a builder id. The one guard lives in the lookup they
-/// all share, so a route added later cannot forget it — this is the proof it holds today.
+/// Every user-facing environment route, on a builder id. The list is not hand-typed: it comes
+/// from `ENVIRONMENT_ID_ROUTES`, which `api::route_tests` holds equal to the router itself, so a
+/// route added later cannot skip this test.
 #[tokio::test]
 async fn the_builder_is_invisible_to_every_environment_route() {
     let routes = vec![
@@ -233,29 +234,48 @@ async fn the_builder_is_invisible_to_every_environment_route() {
     ];
     let s = server(routes).await;
     let c = reqwest::Client::new();
-    let base = &s.base;
-    let calls: Vec<(&str, String, Value)> = vec![
-        ("GET", format!("{base}/v1/environments/bld-karthik"), Value::Null),
-        ("DELETE", format!("{base}/v1/environments/bld-karthik"), Value::Null),
-        ("POST", format!("{base}/v1/environments/bld-karthik/start"), Value::Null),
-        ("POST", format!("{base}/v1/environments/bld-karthik/stop"), Value::Null),
-        ("POST", format!("{base}/v1/environments/bld-karthik/clone"), json!({"name": "copy"})),
-        ("POST", format!("{base}/v1/environments/bld-karthik/push"), json!({})),
-        ("POST", format!("{base}/v1/environments/bld-karthik/restore-in-place"), json!({"snapshot_id": "s1"})),
-        ("POST", format!("{base}/v1/environments/bld-karthik/intercepts"), json!({"service": "buildkit", "workspace": "ws-1", "ports": []})),
-        ("DELETE", format!("{base}/v1/environments/bld-karthik/intercepts/buildkit"), Value::Null),
+    // A body for the routes that need one to get past extraction, and the methods each answers.
+    let shape = |path: &str| -> (Vec<&'static str>, Value) {
+        match path {
+            "/v1/environments/{id}" => (vec!["GET", "DELETE"], Value::Null),
+            "/v1/environments/{id}/clone" => (vec!["POST"], json!({"name": "copy"})),
+            "/v1/environments/{id}/push" => (vec!["POST"], json!({})),
+            "/v1/environments/{id}/restore-in-place" => (vec!["POST"], json!({"snapshot_id": "s1"})),
+            "/v1/environments/{id}/intercepts" => (
+                vec!["POST"],
+                json!({"service": "buildkit", "workspace": "ws-1", "ports": []}),
+            ),
+            "/v1/environments/{id}/intercepts/{service}" => (vec!["DELETE"], Value::Null),
+            _ => (vec!["POST"], Value::Null),
+        }
+    };
+    let mut checked = 0;
+    for route in kloudlite_workspaces::api::ENVIRONMENT_ID_ROUTES {
+        let (methods, body) = shape(route);
+        let path = route.replace("{id}", "bld-karthik").replace("{service}", "buildkit");
+        for method in methods {
+            let mut req = c.request(method.parse().unwrap(), format!("{}{path}", s.base)).bearer_auth(token(&s.jwt));
+            if !body.is_null() {
+                req = req.json(&body);
+            }
+            let r = req.send().await.unwrap();
+            assert_eq!(r.status(), 404, "{method} {path} must 404 on a builder");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 9, "every environment-id route, both methods of `/{{id}}`");
+    // The two that name an environment from somewhere other than the path.
+    let extra: Vec<(&str, String, Value)> = vec![
+        ("POST", format!("{}/v1/workspaces/ws-1/attach", s.base), json!({"environment": "bld-karthik"})),
         // Not a route at all, and a 404 either way: the gate's own surface is `/v1/internal`.
-        ("GET", format!("{base}/v1/environments/bld-karthik/snapshots"), Value::Null),
-        // Attaching a workspace to the builder resolves the environment through the same lookup.
-        ("POST", format!("{base}/v1/workspaces/ws-1/attach"), json!({"environment": "bld-karthik"})),
+        ("GET", format!("{}/v1/environments/bld-karthik/snapshots", s.base), Value::Null),
     ];
-    for (method, url, body) in calls {
+    for (method, url, body) in extra {
         let mut req = c.request(method.parse().unwrap(), &url).bearer_auth(token(&s.jwt));
         if !body.is_null() {
             req = req.json(&body);
         }
-        let r = req.send().await.unwrap();
-        assert_eq!(r.status(), 404, "{method} {url} must 404 on a builder");
+        assert_eq!(req.send().await.unwrap().status(), 404, "{method} {url}");
     }
 }
 
@@ -413,5 +433,71 @@ async fn the_builder_costs_disk_and_capacity_but_is_not_an_environment() {
         assert_eq!(used["diskGb"], 70, "its cache is still the owner's disk: {used}");
         assert_eq!(used["cpu"], cpu, "desiredState {desired}: {used}");
         assert_eq!(used["memoryGb"], mem, "desiredState {desired}: {used}");
+    }
+}
+
+/// The builder's `Volume` is as hidden as the environment: not in the listing, and 404 on every
+/// route that reads or deletes one. An ordinary volume in the same answer is untouched.
+fn snap_obj(id: &str, volume: &str) -> Value {
+    json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": id, "creationTimestamp": "2026-09-09T00:00:00Z",
+                     "labels": {"kloudlite.io/owner": "karthik"}},
+        "spec": {"owner": "karthik", "volume": volume, "worktree": volume, "parent": "",
+                 "transient": false, "message": "a push"},
+        "status": {"phase": "ready", "readyAt": "2026-09-09T00:00:01Z"},
+    })
+}
+
+#[tokio::test]
+async fn the_builders_volume_is_not_in_the_listing() {
+    let s = server(vec![
+        list_of("Snapshot", "snapshots", vec![snap_obj("s1", "env-1"), snap_obj("s2", "bld-karthik")]),
+        empty("Workspace", "workspaces"),
+        empty("Environment", "environments"),
+    ])
+    .await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/v1/volumes", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    let names: Vec<&str> = body.as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["env-1"], "the builder's volume is nobody's history");
+}
+
+#[tokio::test]
+async fn every_volume_route_404s_on_the_builders_volume() {
+    let c = reqwest::Client::new();
+    for (method, suffix) in [
+        ("GET", "/history"),
+        ("GET", "/refs"),
+        ("DELETE", ""),
+        ("DELETE", "/snapshots/s2"),
+    ] {
+        let s = server(vec![
+            list_of("Snapshot", "snapshots", vec![snap_obj("s1", "env-1"), snap_obj("s2", "bld-karthik")]),
+            empty("Workspace", "workspaces"),
+            empty("Environment", "environments"),
+        ])
+        .await;
+        // The ordinary volume answers, through the very same lookup.
+        let ok = c
+            .request(method.parse().unwrap(), format!("{}/v1/volumes/env-1{}", s.base, suffix.replace("s2", "s1")))
+            .bearer_auth(token(&s.jwt))
+            .send()
+            .await
+            .unwrap();
+        assert!(ok.status().is_success(), "{method} on an ordinary volume{suffix}: {}", ok.status());
+        let r = c
+            .request(method.parse().unwrap(), format!("{}/v1/volumes/bld-karthik{suffix}", s.base))
+            .bearer_auth(token(&s.jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404, "{method} /v1/volumes/bld-karthik{suffix}");
     }
 }

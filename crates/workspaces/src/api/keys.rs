@@ -202,6 +202,18 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
     }
 }
 
+/// Which of `seen` — `(name, spec.owner)` for every `system` environment — belongs to nobody any
+/// more. `keep` is `k8s::keys_owner` of every Workspace, the SAME fold `ensure_builder` names the
+/// builder with, so a team spelled `Alice` over an owner `alice` cannot keep one slug and delete
+/// the other.
+///
+/// The keep-bias lives in the caller: an empty `keep` prunes every builder, which is exactly what
+/// a failed Workspace list would produce — so `prune_builders` returns before reaching this
+/// rather than passing an empty set in.
+fn stale_builders(keep: &BTreeSet<String>, seen: &[(String, String)]) -> Vec<String> {
+    seen.iter().filter(|(_, owner)| !keep.contains(owner)).map(|(name, _)| name.clone()).collect()
+}
+
 /// The builder half of the same beat: an owner with no workspace left has nothing to build, so
 /// their hidden `bld-{slug}` environment goes — and the next workspace create writes it back.
 ///
@@ -226,14 +238,63 @@ pub(crate) async fn prune_builders(s: &ApiState) {
             return;
         }
     };
+    let seen: Vec<(String, String)> =
+        envs.iter().filter(|e| e.spec.system.is_some()).map(|e| (e.name_any(), e.spec.owner.clone())).collect();
     let api: Api<crd::Environment> = Api::all(c.clone());
-    for e in envs.iter().filter(|e| e.spec.system.is_some() && !keep.contains(&e.spec.owner)) {
-        let name = e.name_any();
+    for name in stale_builders(&keep, &seen) {
         match api.delete(&name, &Default::default()).await {
             Ok(_) => tracing::info!(environment = %name, "keys.builder.pruned"),
             Err(kube::Error::Api(err)) if err.code == 404 => {}
             Err(err) => tracing::warn!(environment = %name, error = %err, "keys.builder.prune.failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod builder_prune_tests {
+    use super::stale_builders;
+    use crate::crd;
+    // `owner_slug` is the whole of `keys_owner`, which is what the beat calls, and it is also what
+    // `ensure_builder` names the builder with — the agreement these tests are about.
+    use crate::k8s::owner_slug;
+    use std::collections::BTreeSet;
+
+    /// What the beat computes from a workspace list, spelled the one way both halves must agree on.
+    fn keep(workspaces: &[(&str, &str)]) -> BTreeSet<String> {
+        workspaces.iter().map(|(owner, team)| owner_slug(owner, team).to_string()).collect()
+    }
+
+    fn builders(slugs: &[&str]) -> Vec<(String, String)> {
+        slugs.iter().map(|s| (crd::builder_id(s), (*s).to_string())).collect()
+    }
+
+    #[test]
+    fn a_member_workspace_keeps_the_teams_builder() {
+        let seen = builders(&["acme", "alice"]);
+        // Alice's own workspace lives in the team, so only the team's builder is spared.
+        assert_eq!(stale_builders(&keep(&[("alice", "acme")]), &seen), vec!["bld-alice".to_string()]);
+    }
+
+    #[test]
+    fn a_builder_whose_owner_has_no_workspace_is_pruned() {
+        assert_eq!(stale_builders(&keep(&[]), &builders(&["alice"])), vec!["bld-alice".to_string()]);
+        assert!(stale_builders(&keep(&[("alice", "")]), &builders(&["alice"])).is_empty());
+    }
+
+    /// The defect this rule was rewritten for: `team` differing from `owner` only in case folds to
+    /// the owner on BOTH sides, so the builder a create just wrote survives the next beat.
+    #[test]
+    fn a_team_that_is_the_owner_in_another_case_keeps_its_builder() {
+        let keep = keep(&[("alice", "Alice")]);
+        assert!(keep.contains("alice"), "the fold picks the owner: {keep:?}");
+        assert!(stale_builders(&keep, &builders(&["alice"])).is_empty());
+    }
+
+    /// Why `prune_builders` returns on a failed Workspace list instead of carrying on: an empty
+    /// keep set is indistinguishable from "nobody has a workspace", and it prunes everything.
+    #[test]
+    fn an_empty_keep_set_would_prune_every_builder() {
+        assert_eq!(stale_builders(&BTreeSet::new(), &builders(&["a", "b"])).len(), 2);
     }
 }
 

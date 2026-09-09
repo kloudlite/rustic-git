@@ -968,12 +968,21 @@ pub fn git_init_container(
 /// The handle whose `OwnerKeys` this pod's namespace sees — the same pair `ws_namespace` is keyed
 /// by, since the namespace is what a key set is scoped to: a team's members share one file.
 pub fn keys_owner(spec: &WorkspaceSpec) -> &str {
-    // `team == owner` is the personal namespace spelled the long way — `ws_namespace` folds it,
-    // and a second file under the same name written by two handles would be one node's race.
-    if spec.team.is_empty() || spec.team.eq_ignore_ascii_case(&spec.owner) {
-        &spec.owner
+    owner_slug(&spec.owner, &spec.team)
+}
+
+/// The same fold on the two strings a handler has before there is a spec — `ensure_builder` names
+/// the builder with this and `prune_builders` decides what to keep with `keys_owner`, so they MUST
+/// be one function: a workspace with `owner: "alice", team: "Alice"` folded two ways created
+/// `bld-Alice` and kept `alice`, and the next beat deleted the builder the create had just made.
+///
+/// `team == owner` is the personal namespace spelled the long way — `ws_namespace` folds it, and a
+/// second file under the same name written by two handles would be one node's race.
+pub fn owner_slug<'a>(owner: &'a str, team: &'a str) -> &'a str {
+    if team.is_empty() || team.eq_ignore_ascii_case(owner) {
+        owner
     } else {
-        &spec.team
+        team
     }
 }
 

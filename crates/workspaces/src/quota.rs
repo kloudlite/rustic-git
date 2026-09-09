@@ -263,9 +263,9 @@ mod tests {
             let env = crate::api::environment_cost(0, SERVICES_PER_ENV as usize);
             for dim in [Dim::Cpu, Dim::MemoryGb] {
                 let of = |cost: &[(Dim, u64)]| cost.iter().find(|(d, _)| *d == dim).map_or(0, |(_, n)| *n);
-                // `+ of(&ws)`: one builder per owner, at `PodResources::default()` — the same
-            // shape a workspace slot has, which is what `builder_service` gives it.
-            let need = u64::from(q.workspaces) * of(&ws) + u64::from(q.environments) * of(&env) + of(&ws);
+                    // `+ of(&ws)`: one builder per owner, at `PodResources::default()` — the same
+                // shape a workspace slot has, which is what `builder_service` gives it.
+                let need = u64::from(q.workspaces) * of(&ws) + u64::from(q.environments) * of(&env) + of(&ws);
                 let have = u64::from(if dim == Dim::Cpu { q.cpu } else { q.memory_gb });
                 assert!(have >= need, "{dim:?}: {have} does not cover {need} for team={team}");
             }

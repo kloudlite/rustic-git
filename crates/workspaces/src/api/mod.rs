@@ -334,6 +334,43 @@ impl ApiState {
     }
 }
 
+/// Every route that names an environment by id, and therefore every route a caller could name the
+/// hidden builder on. `api_builders.rs` iterates this to prove each one 404s; the test below holds
+/// it equal to the router itself, so a route added above and forgotten here fails the build rather
+/// than quietly gaining a hole. (An axum `Router` cannot be walked for its paths, which is why
+/// this is a list checked against the source rather than derived from the router value.)
+pub const ENVIRONMENT_ID_ROUTES: &[&str] = &[
+    "/v1/environments/{id}",
+    "/v1/environments/{id}/start",
+    "/v1/environments/{id}/stop",
+    "/v1/environments/{id}/clone",
+    "/v1/environments/{id}/push",
+    "/v1/environments/{id}/restore-in-place",
+    "/v1/environments/{id}/intercepts",
+    "/v1/environments/{id}/intercepts/{service}",
+];
+
+#[cfg(test)]
+mod route_tests {
+    /// The router is the truth; this is the copy the builder's 404 test can iterate. Reading this
+    /// file's own source is the only way to compare them — and it is a real check: adding
+    /// `.route("/v1/environments/{id}/anything", ...)` above fails here until it is listed.
+    #[test]
+    fn every_environment_id_route_is_listed() {
+        let mut found: Vec<String> = include_str!("mod.rs")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(".route(\""))
+            .filter_map(|l| l.split_once('"').map(|(p, _)| p.to_string()))
+            .filter(|p| p.starts_with("/v1/environments/{id}"))
+            .collect();
+        found.sort();
+        found.dedup();
+        let mut listed: Vec<String> = super::ENVIRONMENT_ID_ROUTES.iter().map(|p| (*p).to_string()).collect();
+        listed.sort();
+        assert_eq!(found, listed, "the router and ENVIRONMENT_ID_ROUTES have drifted");
+    }
+}
+
 /// Constant-time bytes compare. Neither `subtle` nor `ring` is in this crate's tree and this is
 /// five lines: an early-exit `==` on a shared secret leaks it one byte at a time to anything that
 /// can time a request.
