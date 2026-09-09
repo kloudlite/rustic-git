@@ -267,7 +267,11 @@ pub const CATALOGUE: &[Slo] = &[
     // Hourly, like the intercept journey: the build itself waits on the gate starting a pod,
     // which is too much to pay every five minutes, and the builder must be Stopped going in or
     // the sample is timing someone else's cold start.
-    Slo { id: "ws.build.p95", feature: "Workspaces", sli: "`docker buildx build` of a two-line Dockerfile in the probe workspace is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step", target: p95(180_000), suite: Suite::Hourly, stage: "5 · Workspace" },
+    Slo { id: "ws.build.p95", feature: "Workspaces", sli: "`kl build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step", target: p95(180_000), suite: Suite::Hourly, stage: "5 · Workspace" },
+    // `kl push` is a registry-side copy through buildx imagetools; the probe promotes the image
+    // the build above just pushed and reads the new tag's digest back, so the step proves both
+    // the copy and that the credential helper serves imagetools as it serves build.
+    Slo { id: "ws.build.promote", feature: "Workspaces", sli: "`kl push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back", target: bound(30_000), suite: Suite::Hourly, stage: "5 · Workspace" },
 
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },

@@ -38,6 +38,8 @@ const ENV_QUOTA_CEILING: Duration =
 /// The catalogue's own 180 s for `ws.build.p95`: a real `docker buildx build --push`
 /// dispatched through the gate to a builder that has to start cold.
 const BUILD_CEILING: Duration = Duration::from_secs(180);
+/// The catalogue's 30 s for `ws.build.promote`: a registry-side copy, no build.
+const PROMOTE_CEILING: Duration = Duration::from_secs(30);
 
 /// The disk a probe workspace asks for, well inside `Quota/slo-probe`'s `diskGb`.
 pub(crate) const QUOTA_GB: u64 = 1;
@@ -98,6 +100,7 @@ pub async fn run(c: &mut Ctx) {
     quota_refused(c).await;
     env_quota_refused(c, &id).await;
     build_push(c, &id).await;
+    promote(c, &id).await;
 }
 
 /// `ws.create.p95`: the create AND the wait for `ready`, because "creating a workspace completes"
@@ -711,7 +714,7 @@ async fn refused_over(
     Ok(())
 }
 
-/// `ws.build.p95`, hourly only: `docker buildx build --push` from inside the probe workspace,
+/// `ws.build.p95`, hourly only: `kl build` from inside the probe workspace,
 /// dispatched to the owner's hidden builder through the gate, and the pushed manifest read back
 /// over `/v2` with the probe's own registry credential.
 ///
@@ -720,9 +723,9 @@ async fn refused_over(
 /// RUNNING is measuring somebody else's leftover job, not this one's cold start — and that is its
 /// own finding, reported as a skip rather than folded into the sample as a pass.
 ///
-/// The build script runs `/etc/profile.d/kl-build.sh` itself: `ws_exec` is not a login shell (see
-/// its own doc), so nothing that script sets — the `kl` buildx builder, `~/.docker/config.json` —
-/// exists yet when the script starts.
+/// The build script deliberately does NOT source `/etc/profile.d/kl-build.sh`: `ws_exec` is not a
+/// login shell (see its own doc), and `kl build` has to make its own buildx builder and credential
+/// config for exactly that kind of exec — an editor's terminal, a CI hook.
 async fn build_push(c: &mut Ctx, id: &str) {
     if c.suite != Suite::Hourly {
         return;
@@ -747,13 +750,11 @@ async fn build_push(c: &mut Ctx, id: &str) {
     let Some(secret) = c.state.token_value.clone() else {
         return c.skip("ws.build.p95", "no personal registry token");
     };
-    let (probe, registry, run_id, id) =
-        (c.probe_user.clone(), super::registry::host(c), c.run_id.clone(), id.to_string());
+    let (probe, run_id, id) = (c.probe_user.clone(), c.run_id.clone(), id.to_string());
     c.step("ws.build.p95", BUILD_CEILING, move |c| {
-        let (probe, registry, run_id, id, secret) =
-            (probe.clone(), registry.clone(), run_id.clone(), id.clone(), secret.clone());
+        let (probe, run_id, id, secret) = (probe.clone(), run_id.clone(), id.clone(), secret.clone());
         async move {
-            let script = build_script(&probe, &registry, &run_id);
+            let script = build_script(&run_id);
             let (code, out, err) = ws_exec(c, &id, &script, BUILD_CEILING).await?;
             if code != 0 {
                 return Err(anyhow!("the build/push failed ({code}): {} {}", out.trim(), err.trim()));
@@ -782,29 +783,54 @@ async fn build_push(c: &mut Ctx, id: &str) {
     .await;
 }
 
-/// The script the step runs, in the workspace, as the person.
-///
-/// `docker buildx inspect --bootstrap` first, retried: buildx's remote driver dials the gate with
-/// its own ~20 s deadline and reports "waiting for connection: DeadlineExceeded" when a cold
-/// builder takes longer, which is buildx's cap deciding the sample rather than the platform. The
-/// retries are INSIDE the measurement on purpose — waking a stopped builder IS the cold start
-/// `ws.build.p95` exists to measure — and stop at 150 s so the 180 s ceiling still leaves the
-/// build itself half a minute.
-fn build_script(probe: &str, registry: &str, run_id: &str) -> String {
+/// The script the step runs, in the workspace, as the person — `kl build` from a NON-login exec,
+/// with none of `kl-build.sh`'s setup: that `kl` creates its own builder and credential config
+/// is the clause the spec calls self-sufficiency, and this is where it is held. `kl` carries the
+/// bootstrap retry the script used to (150 s of `buildx inspect --bootstrap`), still inside the
+/// measurement: waking a stopped builder IS the cold start `ws.build.p95` exists to measure.
+fn build_script(run_id: &str) -> String {
     format!(
-        "sh /etc/profile.d/kl-build.sh\n\
-export BUILDKIT_HOST=tcp://builder-gate.kloudlite-system.svc:1234\n\
-export KL_OWNER={probe}\n\
-export KL_REGISTRY_HOST={registry}\n\
-mkdir -p /tmp/d\n\
+        "mkdir -p /tmp/d\n\
 printf 'FROM alpine:3.20\\nRUN echo slo > /slo\\n' > /tmp/d/Dockerfile\n\
-deadline=$(( $(date +%s) + 150 ))\n\
-while ! docker buildx inspect --bootstrap kl >/dev/null 2>&1; do\n\
-  [ $(date +%s) -ge $deadline ] && break\n\
-  sleep 5\n\
-done\n\
-docker buildx build -t $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id} --push /tmp/d"
+kl build -t slo-build:{run_id} /tmp/d"
     )
+}
+
+/// `kl push` from the same workspace, then the promoted tag's digest read back through buildx's
+/// own imagetools so the copy is verified by a second, independent reader.
+fn promote_script(run_id: &str) -> String {
+    format!(
+        "kl push slo-build:{run_id} slo-build:{run_id}-promoted\n\
+docker buildx imagetools inspect $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id}-promoted --format '{{{{json .Manifest.Digest}}}}'"
+    )
+}
+
+/// `ws.build.promote`, hourly only, right after the build so the source tag exists. Skipped —
+/// never failed — when the build step itself did not pass, since a missing source says nothing
+/// about `kl push`.
+async fn promote(c: &mut Ctx, id: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    if !c.passed("ws.build.p95") {
+        return c.skip("ws.build.promote", "the build step did not pass");
+    }
+    let (run_id, id) = (c.run_id.clone(), id.to_string());
+    c.step("ws.build.promote", PROMOTE_CEILING, move |c| {
+        let (run_id, id) = (run_id.clone(), id.clone());
+        async move {
+            let (code, out, err) = ws_exec(c, &id, &promote_script(&run_id), PROMOTE_CEILING).await?;
+            if code != 0 {
+                return Err(anyhow!("kl push failed ({code}): {} {}", out.trim(), err.trim()));
+            }
+            if !out.contains("\"sha256:") {
+                return Err(anyhow!("the promoted tag's digest did not read back: {}", out.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `env.quota.refused`: the OTHER three verbs behind the one gate.
@@ -892,6 +918,20 @@ mod tests {
 
     /// The ProxyCommand IS the gateway path: without it ssh would dial the workspace directly,
     /// which nothing routes, and the step would measure a DNS failure. The session goes down to the
+    #[test]
+    fn the_build_script_runs_kl_build_without_sourcing_the_login_setup() {
+        let s = build_script("hourly-1");
+        assert!(s.contains("kl build -t slo-build:hourly-1 /tmp/d"), "{s}");
+        assert!(!s.contains("kl-build.sh"), "{s}");
+    }
+
+    #[test]
+    fn the_promote_script_reads_the_new_tag_back_through_imagetools() {
+        let s = promote_script("hourly-1");
+        assert!(s.contains("kl push slo-build:hourly-1 slo-build:hourly-1-promoted"), "{s}");
+        assert!(s.contains("imagetools inspect"), "{s}");
+    }
+
     /// proxy child through the environment, exactly as `kl-connect ws ssh` hands it over.
     #[test]
     fn gateway_step_uses_kl_proxy() {
@@ -940,21 +980,6 @@ mod tests {
         assert!(script.contains("/proc/uptime"), "{script}");
         // BusyBox `date` has no `%N`, so a nanosecond clock would fail on some images.
         assert!(!script.contains("%N"), "{script}");
-    }
-
-    /// buildx's remote driver gives the dial ~20 s and then fails the whole build; a cold builder
-    /// takes longer than that, so the step bootstraps in a loop before it builds.
-    #[test]
-    fn the_build_script_waits_for_buildkit_before_it_builds() {
-        let s = build_script("slo-hourly", "reg.example", "run-1");
-        let (boot, build) = (
-            s.find("docker buildx inspect --bootstrap kl").expect("bootstraps"),
-            s.find("docker buildx build").expect("builds"),
-        );
-        assert!(boot < build, "the bootstrap comes first:\n{s}");
-        assert!(s.contains("sleep 5"), "{s}");
-        // Bounded well inside BUILD_CEILING, so the build itself still has time.
-        assert!(s.contains("+ 150 ))"), "{s}");
     }
 
     /// No kubeconfig is a deployment gap, not an SLO breach: the two ids that need one skip with a

@@ -72,6 +72,12 @@ impl Ctx {
     /// A step whose precondition is gone. Skipped is NO SAMPLE — neither good nor bad — because
     /// the failure was already counted where it happened, and counting it twice would make one
     /// broken workspace look like eight broken SLOs.
+    /// Whether a step already ran and passed — for a step that only makes sense after another
+    /// (a promote after a build), where a missing prerequisite is a skip, never a failure.
+    pub fn passed(&self, id: &str) -> bool {
+        self.steps.iter().any(|s| s.slo_id == id && s.ok)
+    }
+
     pub fn skip(&mut self, id: &'static str, why: &str) {
         tracing::info!(slo_id = id, reason = why, "slo.step.skipped");
         self.steps.push(StepReport {

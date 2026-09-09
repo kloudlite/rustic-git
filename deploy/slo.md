@@ -87,7 +87,8 @@ first destructive stage.
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `quota.refused` | Workspaces | An over-quota create is refused with 409 naming the dimension, what is used and the limit | 99.9 % | fast | 5 · Workspace |
 | `env.quota.refused` | Workspaces | An over-quota restore, clone and push are each refused with 409 | 99.9 % | fast | 5 · Workspace |
-| `ws.build.p95` | Workspaces | `docker buildx build` of a two-line Dockerfile in the probe workspace is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
+| `ws.build.p95` | Workspaces | `kl build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
+| `ws.build.promote` | Workspaces | `kl push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
 | `env.create.p95` | Environments | Creating an environment completes | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.dns` | Environments | A service in an environment resolves a sibling by bare name and connects to it | 99.9 % | fast | 6 · Environment |
 | `env.attach` | Environments | Attaching a workspace to an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
