@@ -24,3 +24,7 @@ deploy/k3s/env.sh
 # files were committed once. They are regenerated on every kubectl call.
 /.kube/
 __pycache__/
+
+# Crash dumps a test binary leaves in the checkout; never a source file.
+core
+core.[0-9]*
