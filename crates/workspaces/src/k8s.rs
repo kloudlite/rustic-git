@@ -80,6 +80,10 @@ pub struct PodContext<'a> {
     /// every call site already builds one of these per reconcile, and a workspace's is always
     /// `None`.
     pub system: Option<&'a str>,
+    /// `WS_REGISTRY_HOST` — the platform registry's external host, learned the same way
+    /// `registry::auth::realm()` learns it, because the agent has no route to that api-tier env.
+    /// Fed to `login_env` as `KL_REGISTRY_HOST`, the credential helper's `credHelpers` key.
+    pub registry_host: &'a str,
 }
 
 pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -229,6 +233,7 @@ pub fn user_key_secret(
     private_openssh: &str,
     m: &crate::api::OwnerMaterial,
     authorized_keys: &str,
+    registry_token: &str,
 ) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
@@ -251,6 +256,10 @@ pub fn user_key_secret(
             // overrides it and a changed display name reaches running workspaces with the next
             // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
             ("gitconfig".to_string(), gitconfig(&m.git_name, &m.git_email)),
+            // 24h, re-minted every `KEYS_RESYNC_SECS` beat by whoever calls this — rotation is
+            // just the next beat, no revocation code needed. `"*"` because authorization is
+            // re-checked per registry request against the image, never trusted from the scope.
+            ("registry-token".to_string(), registry_token.to_string()),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
@@ -319,8 +328,8 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// where the file is written instead (`agent::controller::keys`: 0600, owned by `kl`).
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
-pub fn sshd_config(name: &str) -> String {
-    let set_env = format!("SetEnv {}", login_env(name).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
+pub fn sshd_config(name: &str, owner: &str, registry_host: &str) -> String {
+    let set_env = format!("SetEnv {}", login_env(name, owner, registry_host).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
@@ -349,7 +358,11 @@ pub fn sshd_config(name: &str) -> String {
 /// The environment a workspace shell sees, whether it is the image's entrypoint or an ssh login:
 /// the Nix profile on PATH, git's key and identity. ONE list, because sshd does not inherit the
 /// container's environment and two lists would drift.
-fn login_env(name: &str) -> Vec<EnvVar> {
+/// The remote buildkit gate every workspace pod builds through — never a daemon in the pod
+/// itself, which would need privilege the sandbox exists to remove.
+pub const BUILDKIT_HOST: &str = "tcp://builder-gate.kloudlite-system.svc:1234";
+
+fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<EnvVar> {
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     vec![
         git_ssh_command(),
@@ -358,6 +371,9 @@ fn login_env(name: &str) -> Vec<EnvVar> {
         var("KL_WORKSPACE", workspace_dir(name)),
         var("KL_WORKSPACE_NAME", name.to_string()),
         var("GIT_CONFIG_SYSTEM", format!("{USER_KEY_PATH}/gitconfig")),
+        var("BUILDKIT_HOST", BUILDKIT_HOST.to_string()),
+        var("KL_OWNER", owner.to_string()),
+        var("KL_REGISTRY_HOST", registry_host.to_string()),
         // ponytail: an image with a non-standard PATH loses it; read it from the image config
         // via the registry if that ever matters.
         var("PATH", crate::packages::path_env(None)),
@@ -473,6 +489,7 @@ fn prelude(name: &str) -> String {
 /// Per workspace and owned BY the workspace: it is the identity users pin in `known_hosts`, so it
 /// must survive pod recreation (hence a Secret, not a file on the subvolume) and die with the
 /// workspace (hence the ownerReference — a clone is a different host and gets its own).
+#[allow(clippy::too_many_arguments)]
 pub fn ws_ssh_secret(
     id: &str,
     name: &str,
@@ -481,13 +498,14 @@ pub fn ws_ssh_secret(
     owner_ref: &OwnerReference,
     private_openssh: &str,
     public_line: &str,
+    registry_host: &str,
 ) -> Secret {
     Secret {
         metadata: meta(&ws_ssh_secret_name(id), Some(namespace), owner, "workspace", owner_ref),
         string_data: Some(BTreeMap::from([
             ("ssh_host_ed25519_key".to_string(), private_openssh.to_string()),
             ("ssh_host_ed25519_key.pub".to_string(), public_line.to_string()),
-            ("sshd_config".to_string(), sshd_config(name)),
+            ("sshd_config".to_string(), sshd_config(name, owner, registry_host)),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
@@ -1054,7 +1072,7 @@ pub fn workspace_pod(
             ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key and commits as the owner without
             // anyone configuring it. The same list feeds sshd's `SetEnv`.
-            env: Some(login_env(&spec.name)),
+            env: Some(login_env(&spec.name, &spec.owner, ctx.registry_host)),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
@@ -1844,7 +1862,7 @@ mod tests {
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io" }
     }
 
     /// A service's own `resources` overrides the environment unit; a service with none still gets
@@ -1955,7 +1973,7 @@ mod tests {
             git_name: "Alice \"Al\" Liddell".into(),
             git_email: "alice@example.com".into(),
         };
-        let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n");
+        let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN");
         let data = s.string_data.unwrap();
         assert_eq!(data["id_ed25519"], "PRIVATE");
         // Who may ssh in is `OwnerKeys` now; this entry only keeps an old agent's pods working
@@ -1963,6 +1981,18 @@ mod tests {
         assert_eq!(data["authorized_keys"], "ssh-ed25519 AAAA alice\n");
         // A quote in a name must not end git's string early.
         assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
+        assert_eq!(data["registry-token"], "TOKEN");
+    }
+
+    /// The build credential the docker helper reads: minted for the owner, ttl exactly what
+    /// `keys::write_user_key` passes (`86_400`), and verifiable with the same `Jwt` the api tier
+    /// signs everything else with. The ttl itself is `mint_registry`'s own contract
+    /// (`crates/core/src/jwt.rs`), not reworked here.
+    #[test]
+    fn the_registry_token_verifies_as_the_owner() {
+        let jwt = kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap();
+        let token = jwt.mint_registry("alice", "*", 86_400).unwrap();
+        assert_eq!(jwt.verify_registry(&token), Some("alice".to_string()));
     }
 
     /// A team's members share one namespace and therefore ONE keys file — the pod must mount the
@@ -2035,7 +2065,7 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None };
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io" };
         assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).unwrap().spec.unwrap().runtime_class_name.is_none());
     }
 
@@ -2338,7 +2368,7 @@ mod tests {
 
     #[test]
     fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
-        let env = login_env("ws-1");
+        let env = login_env("ws-1", "acme", "registry.kloudlite.io");
         let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
         assert_eq!(get("XDG_CACHE_HOME"), format!("{HOME_CACHE_DIR}/xdg"));
         assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
@@ -2406,10 +2436,10 @@ mod tests {
         assert_eq!(ak.sub_path, None);
         assert_eq!(ak.read_only, Some(true));
         // Where sshd is told to look has to be where the mount actually puts it.
-        assert!(sshd_config("dev").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
+        assert!(sshd_config("dev", "acme", "registry.kloudlite.io").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
         // The mount's parent directories are the node's, not `kl`'s; without this every key is
         // refused as "bad ownership or modes".
-        assert!(sshd_config("dev").contains("StrictModes no\n"));
+        assert!(sshd_config("dev", "acme", "registry.kloudlite.io").contains("StrictModes no\n"));
         // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
         let prelude = &cmd[2];
         // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
@@ -2474,7 +2504,7 @@ mod tests {
         assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
         // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
         // so the profile's PATH has to come from sshd itself.
-        let cfg = sshd_config("dev");
+        let cfg = sshd_config("dev", "acme", "registry.kloudlite.io");
         // Exactly one SetEnv line, carrying every variable: sshd ignores a second one.
         assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
         let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
@@ -2524,7 +2554,7 @@ mod tests {
     /// The host key Secret is per workspace and dies with it — a clone gets its own.
     #[test]
     fn a_workspaces_host_key_lives_and_dies_with_it() {
-        let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws");
+        let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws", "registry.kloudlite.io");
         assert_eq!(s.metadata.name.as_deref(), Some("ws-ssh-ws-1"));
         assert_eq!(s.metadata.namespace.as_deref(), Some("ws-alice"));
         assert_eq!(s.metadata.owner_references.unwrap()[0].controller, Some(true));
@@ -2802,6 +2832,7 @@ mod tests {
             runtime_class: None,
             default_image: "img:1",
             system: None,
+            registry_host: "registry.kloudlite.io",
         };
         for hostile in ["../../etc", "a; touch /pwned", "", "..", "x'\nchown 0 /", &"n".repeat(64)] {
             let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
@@ -2823,6 +2854,7 @@ mod tests {
             runtime_class: None,
             default_image: "img:1",
             system: None,
+            registry_host: "registry.kloudlite.io",
         };
         let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
             "owner": "alice", "team": "", "name": "my-ws", "region": "r1",

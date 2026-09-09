@@ -212,6 +212,7 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: 
             "r1".into(),
             true,
             homes_export,
+            "registry.kloudlite.io".into(),
             nix,
             profiles,
             test_settings(),
@@ -2354,6 +2355,7 @@ fn test_pod_ctx() -> kloudlite_workspaces::k8s::PodContext<'static> {
         },
         runtime_class: None,
         system: None,
+        registry_host: "registry.kloudlite.io",
     }
 }
 
@@ -5399,6 +5401,7 @@ fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> 
             "r1".into(),
             true,
             Some("127.0.0.1:/".into()),
+            "registry.kloudlite.io".into(),
             Arc::new(FakeNix::default()),
             profiles,
             test_settings(),

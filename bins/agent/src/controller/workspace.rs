@@ -398,7 +398,7 @@ async fn ensure_ssh(
             .unwrap_or_default(),
         None => {
             let (private, public) = crate::sshkeys::generate().map_err(ReconcileErr)?;
-            let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, owner_ref, &private, &public);
+            let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, owner_ref, &private, &public, &ctx.registry_host);
             match secrets.create(&PostParams::default(), &s).await {
                 Ok(_) => public,
                 // Lost the race with our own earlier pass: the winner's key is the identity, and
@@ -1074,6 +1074,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         default_image: &ctx.default_image,
         // A workspace pod is never the builder — that shape exists only on an Environment.
         system: None,
+        registry_host: &ctx.registry_host,
     };
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.

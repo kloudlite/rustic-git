@@ -148,6 +148,13 @@ spec:
             # region-local by design, so each region gets its own share.
             - name: WS_HOMES_EXPORT
               value: kloudlitegithomes.file.core.windows.net:/kloudlitegithomes/homes
+            # The platform registry's external host, no scheme — the same value
+            # `registry::auth::realm()`'s `KLOUDLITE_EXTERNAL_URL` resolves the host half of
+            # (`deploy/kloudlite.yaml`'s `https://cr.khost.dev`). The agent has no route to that
+            # api-tier env, so it is configured here instead; fed into every workspace pod as
+            # `KL_REGISTRY_HOST`, the docker credential helper's `credHelpers` key.
+            - name: WS_REGISTRY_HOST
+              value: cr.khost.dev
             # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
             # runc and share the host kernel (audit S-29); set, every tenant pod names the
             # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is

@@ -15,3 +15,5 @@
 !target/dev-image/kloudlite-gateway
 !target/dev-image/kloudlite-slo
 !target/dev-image/kl
+!deploy/workspace-image/docker-credential-kl
+!deploy/workspace-image/kl-build.sh

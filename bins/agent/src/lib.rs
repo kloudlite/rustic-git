@@ -46,6 +46,11 @@ pub struct Config {
     /// export. Unset means no shared home on this node: workspace reconciles that need it park on
     /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
     pub homes_export: Option<String>,
+    /// `WS_REGISTRY_HOST`: the platform registry's external host (no scheme), the same value
+    /// `registry::auth::realm()`'s host half resolves to on the api tier — the agent has no route
+    /// to that env, so it is configured here instead. Fed into every workspace pod as
+    /// `KL_REGISTRY_HOST`, the docker credential helper's `credHelpers` key.
+    pub registry_host: String,
 }
 
 impl Config {
@@ -57,6 +62,7 @@ impl Config {
             // hand-maintained copy of it is a second thing that can be wrong.
             node: std::env::var("NODE_NAME").unwrap_or_default(),
             homes_export: std::env::var("WS_HOMES_EXPORT").ok().filter(|v| !v.is_empty()),
+            registry_host: std::env::var("WS_REGISTRY_HOST").unwrap_or_default(),
         }
     }
 }
@@ -255,7 +261,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
     stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
-    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
+    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.homes_export, cfg.registry_host, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);
     // Not a Controller: `OwnerKeys` is cluster-wide, every node converges every object, and there
     // is no per-node sharding to reconcile against.

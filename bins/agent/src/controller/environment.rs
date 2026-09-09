@@ -376,6 +376,7 @@ async fn run_environment(
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
         system: e.spec.system.as_deref(),
+        registry_host: &ctx.registry_host,
     };
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the

@@ -118,11 +118,20 @@ ENTRYPOINT ["kloudlite-gateway"]
 # Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
 # `k8s::prelude`, not here.
 FROM alpine:3.20 AS workspace
-RUN apk add --no-cache libstdc++ libgcc \
+RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx \
     && mkdir -p /var/empty \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
     && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
     && printf '%s\n' 'Kloudlite workspace — you are kl (no root, no sudo).' > /etc/motd
+# The docker CLI's credential-helper protocol resolves `credHelpers.<host>: kl` to
+# `docker-credential-kl`, which reads the registry token `login_env`/`user_key_secret` keep fresh
+# on disk — no `docker login`, nothing long-lived, rotation is just the next Secret projection.
+COPY deploy/workspace-image/docker-credential-kl /usr/local/bin/docker-credential-kl
+RUN chmod 0755 /usr/local/bin/docker-credential-kl
+# `/etc/profile.d`, not the seeded rc files under `k8s::prelude`: those are copied into the
+# person's home once and their own edits then survive forever, which is wrong for a config that
+# must track `BUILDKIT_HOST`/`KL_REGISTRY_HOST` on every login.
+COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
 
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a

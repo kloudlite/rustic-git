@@ -409,7 +409,17 @@ async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
         tracing::warn!(%owner, reason = "authorized-keys", "key.read.failed");
         return;
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized);
+    // Re-minted every rewrite of this Secret (this beat, or a key change): rotation is just the
+    // next projection, no revocation code needed. `"*"` because a registry request re-checks
+    // authorization against the image itself, never trusts the scope a token claims.
+    let registry_token = match s.jwt.mint_registry(owner, "*", 86_400) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(%owner, error = %e, "registry-token.mint.failed");
+            return;
+        }
+    };
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
