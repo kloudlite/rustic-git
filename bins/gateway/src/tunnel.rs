@@ -275,7 +275,9 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
     }
     // Drives tungstenite's queued close reply out, whichever side asked to finish. Without it a
     // client that closes first is left waiting on the handshake until its own timeout fires.
-    let _ = tx.close().await;
+    // Bounded: a client that has silently gone would otherwise hold this task — and the Slot it
+    // counts against the owner's limit — for as long as the kernel takes to give up the write.
+    let _ = tokio::time::timeout(Duration::from_secs(5), tx.close()).await;
     // Never the token, and never a byte of the stream: this line is the whole record of a session.
     tracing::info!(
         owner = slot.owner.as_deref().unwrap_or_default(),

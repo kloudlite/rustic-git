@@ -748,7 +748,10 @@ async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::Envir
     // hours old and skips the grace on the very first pass.
     let now = k8s_openapi::jiff::Timestamp::now().as_second();
     let since = outage_since(
-        ready.and_then(|(_, t)| t),
+        // Only a `Ready=False` pod dates anything — the same rule `not_ready_since` applies to
+        // the workspace. A `Ready=True` pod reaches here only with no IP yet, and its transition
+        // time is when it came UP, which would expire the grace on the spot.
+        ready.and_then(|(ok, t)| if ok { None } else { t }),
         w.status.as_ref().and_then(|st| not_ready_since(&st.conditions)),
         prev.service_status.iter().find(|s| s.name == ic.service).and_then(|s| s.unreachable_since),
         now,

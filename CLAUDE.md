@@ -273,13 +273,20 @@ what is IN FORCE is each service's `status.intercepted_by`, and the web reads on
 moves by ENDPOINTS, never DNS and never a proxy: the real service's StatefulSet is scaled to 0 —
 leaving it running would let a queue consumer eat messages the workspace never sees — its ClusterIP
 Service loses its selector, and the agent writes the `EndpointSlice` itself, which is the only way
-to name an address in another namespace (a selector can never leave its own). The ClusterIP and the
+to name an address in another namespace (a selector can never leave its own). Kubernetes does not
+clean up after a Service that loses its selector — the endpointslice controller's own slice and the
+legacy `Endpoints` object both keep naming the stopped pod, and the mirroring controller rebuilds a
+slice from that `Endpoints` — so the agent deletes both AFTER the selector is gone (measured: two
+dials in six went to the dead pod until it did). The ClusterIP and the
 DNS name are untouched, so callers dial exactly what they dialled before, and ports may be REMAPPED
 — the Service's port is what callers dial, the slice's is where it lands, matched by the port name
 `p{port}` — because the process being debugged listens where a dev server listens
 (`api:8080 → workspace:3000`). One workspace per service; a second is refused naming the holder. A
 stopped, deleted or unreachable workspace RELEASES the intercept on its own (after
-`INTERCEPT_GRACE_SECS`, so an ordinary pod restart does not bounce the StatefulSet) and the real
+`INTERCEPT_GRACE_SECS`, so an ordinary pod restart does not bounce the StatefulSet; the grace is
+measured from the pod's own `Ready=False`, else the workspace's, else `status.services[].unreachableSince`,
+which the environment's controller stamps itself on the pass that first finds no clock at all — a
+workspace whose node died leaves no pod object and no controller to date the outage) and the real
 service comes back up — but the wish STAYS, because a transient blip must never discard what the
 person asked for, and it takes hold again when the workspace returns. Only
 `DELETE /v1/environments/{id}/intercepts/{service}` removes a wish.
