@@ -35,18 +35,6 @@ use rand::RngCore;
 use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use std::sync::Arc;
 
-/// How long an abandoned session may sit before the GC worker sweeps it. Same shape as
-/// `blobs::max_layer`: a const default, overridable via env for deployments that want a tighter
-/// (or looser) window. Session leak is bounded by grace * max_layer per abandoned push, so this
-/// is the other half of the DoS fix `max_layer` alone does not cover.
-pub fn upload_grace() -> std::time::Duration {
-    std::env::var("KLOUDLITE_UPLOAD_GRACE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(std::time::Duration::from_secs(24 * 3600))
-}
-
 fn staging(owner: &str, name: &str, uuid: &str) -> OsPath {
     OsPath::from(format!("uploads/{owner}/{name}/{uuid}"))
 }
