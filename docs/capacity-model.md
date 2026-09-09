@@ -1,9 +1,11 @@
 # Capacity model
 
 Source: the owner's capacity model sheet, 2026-09-06, section "Slot sizing (M = default session,
-4 GB env = default environment)". The sheet's word for a workspace is **session**, and a **session
-node** is a node in the workspace pool (`kloudlite.io/session=true`); an **env unit** is one
-environment SERVICE. This file uses the product's words, with the sheet's noted once here.
+4 GB env = default environment)". The sheet's word for a workspace is **session**; an **env unit** is
+one environment SERVICE. This file uses the product's words, with the sheet's noted once here.
+There is one kind of node (`kloudlite.io/pool=true`) hosting both, admitted up to 100 % of the
+guarantee; the sheet's separate "env node" packed to 80 % never existed on the fleet and was removed
+from the code on 2026-09-09.
 
 | Slot | Guaranteed (request) | Limit | Where the numbers live |
 | --- | --- | --- | --- |

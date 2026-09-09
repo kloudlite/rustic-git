@@ -133,13 +133,11 @@ on it for anything user-facing mid-rollout.
 Nodes need labels before the DaemonSet will schedule and before placement will pick them:
 
 ```sh
-kubectl label node <node> kloudlite.io/pool=true          # has a btrfs pool: run the controller here
-kubectl label node <node> kloudlite.io/session=true       # may host workspaces
-kubectl label node <node> kloudlite.io/env=true           # may host environments
+kubectl label node <node> kloudlite.io/pool=true          # has a btrfs pool: the controller runs here and hosts every kind
 ```
 
-One key per role, not `role=session`, because a label key holds one value and a small cluster needs
-one node to be both.
+One kind of node. `kloudlite.io/session` and `kloudlite.io/env` were the old per-kind labels; nothing
+reads them since 2026-09-09 (see the release note below), and a fresh node needs only `pool`.
 
 ```sh
 # N. The new node's flannel /32, BEFORE its agent first mounts. `system-netpol.yaml` allow-lists
@@ -970,3 +968,15 @@ is the same fail-closed empty-file state as a deleted object.
 mid-rollout shows `Synced=False` until the agent catches up); `GET /v1/keys` as the person confirms
 their own key set unaffected by the migration. `deploy/k3s/README.md`'s Clusters admin row for
 this is deferred — see `docs/migrations/2026-09-07-user-keys.md`.
+
+## Release: one kind of node (2026-09-09)
+
+The session/env node-role concept is gone from the agent (`Ctx.has_pool` replaces `Ctx.roles`, both
+claim watches run on every pool node), from placement (`kloudlite.io/pool` + hostname is the whole
+selector) and from the capacity rule (100 % of the guarantee everywhere). No manifest changes; the
+agent DaemonSet roll is the release. Every node already carried both old labels, so nothing moved.
+Remove the old labels when convenient — they are read by nothing:
+
+```sh
+KUBECONFIG=.local/k3s.yaml kubectl label node --all kloudlite.io/session- kloudlite.io/env- kloudlite.io/role-
+```
