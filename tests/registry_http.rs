@@ -773,6 +773,9 @@ async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
     let e = common::env().await;
     let dir = Directory::in_memory();
     dir.upsert_user("alice@x", "Alice").await.unwrap();
+    dir.claim_username("alice@x", "alice").await.unwrap().expect("alice takes her handle");
+    dir.upsert_user("bob@x", "Bob").await.unwrap();
+    dir.claim_username("bob@x", "bob").await.unwrap().expect("bob takes his handle");
     // The team's creator is seated as its Owner member, which is membership enough here.
     dir.create("acme", "Acme", "alice@x").await.unwrap();
     let app = common::app_with_directory(e.store.clone(), kloudlite_pulls::pulls::Source::Directory(Arc::new(dir))).await;
@@ -785,10 +788,12 @@ async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
     let c = reqwest::Client::new();
 
     // alice: a member of `acme`, pushing a manifest to `acme/web` she does not own outright.
-    let alice_token = e.store.create_token("alice@x").await.unwrap();
+    // The credential names her HANDLE, which is the shape the fleet has — a PAT's owner and a
+    // registry token's `sub` are handles, never emails.
+    let alice_token = e.store.create_token("alice").await.unwrap();
     let r = c
         .put(format!("{base}/v2/acme/web/manifests/latest"))
-        .basic_auth("alice@x", Some(&alice_token))
+        .basic_auth("alice", Some(&alice_token))
         .header("content-type", MEDIA)
         .body(manifest_bytes())
         .send()
@@ -798,10 +803,10 @@ async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
 
     // bob: authenticated, but never added to `acme` — an authenticated stranger gets DENIED, not
     // a challenge (logging in again would not help).
-    let bob_token = e.store.create_token("bob@x").await.unwrap();
+    let bob_token = e.store.create_token("bob").await.unwrap();
     let r = c
         .put(format!("{base}/v2/acme/web/manifests/latest"))
-        .basic_auth("bob@x", Some(&bob_token))
+        .basic_auth("bob", Some(&bob_token))
         .header("content-type", MEDIA)
         .body(manifest_bytes())
         .send()
@@ -821,7 +826,7 @@ async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
     });
     let r = c
         .put(format!("{base2}/v2/acme/web/manifests/latest"))
-        .basic_auth("alice@x", Some(&alice_token))
+        .basic_auth("alice", Some(&alice_token))
         .header("content-type", MEDIA)
         .body(manifest_bytes())
         .send()

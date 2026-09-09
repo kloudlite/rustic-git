@@ -56,9 +56,13 @@ pub(crate) fn probe_quota() -> Value {
         "workspaces": 10,
         "environments": 6,
         "snapshots": 20,
-        "diskGb": 40,
-        "cpu": 48,
-        "memoryGb": 96,
+        // Room for the owner's hidden builder environment on top of the journey: its cache volume
+        // is `BUILDER_CACHE_GB` (50 GB) and it costs 4 vCPU / 8 GiB while it runs. Held equal to
+        // deploy/k3s/quotas-slo.yaml by `quota_yaml` below — teardown RESTORES these, so a stale
+        // copy here would undo the region's limits every five minutes.
+        "diskGb": 90,
+        "cpu": 52,
+        "memoryGb": 104,
     })
 }
 

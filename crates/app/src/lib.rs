@@ -208,24 +208,35 @@ impl App {
         }
     }
 
-    /// May `user` (an email) act under `owner` (a handle)? Their own handle, or a team they
-    /// belong to. `Err` when the directory is configured but cannot answer — the caller refuses,
-    /// never falls open. With no directory at all (single-node, `Source::Absent`) only the user's
-    /// own handle matches, and "own handle" is then the fingerprint row's value itself: a solo
-    /// deploy registers keys by handle and has no memberships to check.
+    /// May `user` (an email OR a handle) act under `owner` (a handle)? Their own handle, or a
+    /// team they belong to. `Err` when the directory is configured but cannot answer — the caller
+    /// refuses, never falls open. With no directory at all (single-node, `Source::Absent`) only
+    /// the user's own handle matches, and "own handle" is then the fingerprint row's value itself:
+    /// a solo deploy registers keys by handle and has no memberships to check.
+    ///
+    /// A handle principal is judged by the PERSON it names when the directory knows one: the
+    /// registry passes handles (a PAT's owner and a registry token's `sub` are both handles), and
+    /// judging a handle by equality alone refused every team member a push.
     pub async fn may_act(&self, user: &str, owner: &str) -> Result<bool> {
-        // The server tier rolls BEFORE the api, and the api's boot migration is what re-indexes
-        // `auth/sshkey/{fp}` from handles to emails. Until it has run, a fingerprint row still
-        // names a handle — which no directory lookup can resolve to a person — so a handle
-        // principal is judged by exactly the rule that stood before this branch: its own
-        // namespace and nothing else. The branch dies on its own once every row is an email.
-        if !user.contains('@') {
-            return Ok(user == owner);
-        }
         match &self.dir {
             pulls::Source::Absent => Ok(user == owner),
             pulls::Source::Unavailable => Err(err("directory unavailable")),
             pulls::Source::Directory(d) => {
+                // A handle the directory cannot place is judged by exactly the rule that stood
+                // before: its own namespace and nothing else. That is the solo deploy, and the
+                // pre-migration `auth/sshkey/{fp}` row that still names a handle.
+                let user = match user.contains('@') {
+                    true => user.to_string(),
+                    false => match d
+                        .user_by_handle(user)
+                        .await
+                        .map_err(|e| err(format!("directory: {e}")))?
+                    {
+                        Some(u) => u.email,
+                        None => return Ok(user == owner),
+                    },
+                };
+                let user = user.as_str();
                 let key = (user.to_string(), owner.to_string());
                 if let Some(yes) = self
                     .membership
@@ -1466,6 +1477,34 @@ mod tests {
         );
         assert!(a.may_act("alice", "alice").await.unwrap(), "its own namespace");
         assert!(!a.may_act("alice", "acme").await.unwrap(), "somebody else's");
+    }
+
+    /// The registry authenticates by HANDLE — a PAT's owner and a registry token's `sub` are both
+    /// handles — so a handle the directory can place is judged by that person's memberships, the
+    /// same as their email. A handle it cannot place keeps the equality rule.
+    #[tokio::test]
+    async fn a_handle_the_directory_knows_is_judged_as_that_person() {
+        let os = mem();
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(store::Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap());
+        std::mem::forget(tmp);
+        let dir = Arc::new(kloudlite_pulls::directory::Directory::in_memory());
+        dir.upsert_user("alice@x", "Alice").await.unwrap();
+        dir.claim_username("alice@x", "alice").await.unwrap().expect("handle");
+        dir.create("acme", "Acme", "alice@x").await.unwrap().expect("team");
+        let a = App::new(
+            store,
+            Arc::new(OwnershipStore::open(os.clone())),
+            "kloudlite-srv-0".into(),
+            Arc::new(|_: &str| "127.0.0.1:1".into()),
+            "test-secret".into(),
+            pulls::Source::Directory(dir),
+        );
+        assert!(a.may_act("alice", "acme").await.unwrap(), "a member, named by handle");
+        assert!(a.may_act("alice@x", "acme").await.unwrap(), "the same person, named by email");
+        assert!(a.may_act("alice", "alice").await.unwrap(), "their own namespace");
+        assert!(!a.may_act("bob", "acme").await.unwrap(), "a handle nobody holds: equality only");
     }
 
     /// Solo: one node, no lease, no store traffic. It leads by construction.

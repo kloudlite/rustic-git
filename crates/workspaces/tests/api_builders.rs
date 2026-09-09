@@ -392,6 +392,20 @@ async fn get_reports_ready_from_the_condition() {
     }
 }
 
+/// A builder the controller has not touched yet has no status at all. Reading `creating` for one
+/// that was created Stopped told the gate to wait for a stop that had already happened.
+#[tokio::test]
+async fn a_builder_with_no_status_reads_its_desired_state() {
+    let mut obj = builder_obj("karthik", "stopped", false);
+    obj.as_object_mut().unwrap().remove("status");
+    let s = server(vec![get(format!("{API}/environments/bld-karthik"), obj)]).await;
+    let r = internal(&s, "GET", "/v1/internal/builders/karthik", Some(SECRET)).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["state"], "stopped");
+    assert_eq!(body["ready"], false);
+}
+
 #[tokio::test]
 async fn get_is_404_for_an_owner_with_no_builder() {
     let s = server(vec![]).await;

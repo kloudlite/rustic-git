@@ -1,7 +1,7 @@
 //! `OwnerKeys` → the file sshd reads. The projection is the api's; this node's whole job is to
 //! make the bytes on disk equal the spec and say so in status.
 
-use super::{status::patch_status, Ctx};
+use super::Ctx;
 use kloudlite_workspaces::{crd, k8s};
 use kube::{Api, ResourceExt};
 use std::collections::HashSet;
@@ -77,8 +77,26 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
     if ok {
         status["observedGeneration"] = generation.into();
     }
-    if let Err(e) = patch_status(api, &owner, "OwnerKeys", status).await {
-        tracing::warn!(%owner, error = %e, "keys.status.failed");
+    // Patched here rather than through `patch_status`, which flattens the API error to a string:
+    // a 404 has to be told apart, because it is the one failure that is not worth a word of
+    // warning. On 2026-09-09 one deleted `OwnerKeys` logged `keys.status.failed` 10133 times in
+    // thirty minutes.
+    let body = serde_json::json!({
+        "apiVersion": format!("{}/{}", crd::GROUP, crd::VERSION),
+        "kind": "OwnerKeys",
+        "status": status,
+    });
+    let params = kube::api::PatchParams::apply(crd::AGENT_FIELD_MANAGER).force();
+    match api.patch_status(&owner, &params, &kube::api::Patch::Apply(&body)).await {
+        Ok(_) => {}
+        // The object is gone, so there is nothing to say it in and nobody left to admit: the same
+        // revoke the Delete event does, which a deletion this node was disconnected across never
+        // delivered.
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            revoke(&ctx.pool, &owner);
+            tracing::info!(%owner, "keys.status.gone");
+        }
+        Err(e) => tracing::warn!(%owner, error = %e, "keys.status.failed"),
     }
 }
 
@@ -148,6 +166,10 @@ where
                         converge(&ctx, &api, obj).await;
                     }
                 }
+                // A watch can go stale without ever ending: on 2026-09-09, 07:50–12:00, keys
+                // stopped converging on two nodes while the stream sat alive and silent. The tick
+                // replaces it unconditionally, so a stale watch costs ten minutes, never hours.
+                events = watch();
             }
         }
     }
@@ -175,6 +197,48 @@ mod tests {
         // `run_with` never returns by design, so the timeout is how the test ends.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(60), run_with(ctx, api, watch)).await;
         assert!(built.load(Ordering::SeqCst) > 1, "the watch must be rebuilt, not returned from");
+    }
+
+    /// The 2026-09-09 outage in one test: a stream that never ends and never yields — the shape a
+    /// silently stale watch has — must still be replaced, by the tick.
+    #[tokio::test(start_paused = true)]
+    async fn the_tick_rebuilds_a_watch_that_never_ends() {
+        use futures::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _rec) = crate::testsupport::test_ctx(tmp.path(), "node-a", vec![]);
+        let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+        let built = Arc::new(AtomicUsize::new(0));
+        let seen = built.clone();
+        let watch = move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            futures::stream::pending().boxed()
+        };
+        // The stream is `pending()`: it never ends, so the `None` arm can never run and every
+        // rebuild past the first is the tick's. (The interval fires once at zero as well.)
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(700), run_with(ctx, api, watch)).await;
+        assert!(built.load(Ordering::SeqCst) > 1, "the tick must replace a stream that never ended");
+    }
+
+    /// A status write on an object that has been deleted is a 404, and the only right reading of
+    /// it is that nobody may log in as that owner any more — the revoke the Delete event would
+    /// have done. It must not be a warning, and it must not leave the file standing.
+    #[tokio::test]
+    async fn a_status_write_on_a_deleted_object_revokes() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No PATCH route: the mock answers an unrouted call with a 404 `Status`, which is exactly
+        // what the API server sends for the status subresource of an object that is gone.
+        let (ctx, _rec) = crate::testsupport::test_ctx(tmp.path(), "node-a", vec![]);
+        let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+        let obj: crd::OwnerKeys = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeys",
+            "metadata": {"name": "acme"},
+            "spec": {"generation": 7i64, "authorizedKeys": "ssh-ed25519 AAAA a\n"},
+        }))
+        .unwrap();
+        converge(&ctx, &api, obj).await;
+        let path = kloudlite_workspaces::k8s::keys_file(&ctx.pool, "acme");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "the object is gone: nobody is admitted");
     }
 
     /// Written IN PLACE: the pod holds the file's inode through its hostPath mount, so a rename

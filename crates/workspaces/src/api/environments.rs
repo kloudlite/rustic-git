@@ -836,9 +836,16 @@ async fn set_builder_state(s: &ApiState, slug: &str, want: DesiredState) -> Resu
 /// shape, so the CLI's own status view can never drift from what the gate itself polls.
 fn builder_body(id: &str, e: &crd::Environment) -> serde_json::Value {
     let st = e.status.as_ref();
+    // A builder the controller has not reconciled yet has no status, and reading `creating` for
+    // one that was created Stopped made the caller wait for a stop that had already happened.
+    // With nothing observed, what is desired is the whole truth about it.
+    let unseen = match e.spec.desired_state {
+        crd::DesiredState::Running => EnvState::Running,
+        crd::DesiredState::Stopped => EnvState::Stopped,
+    };
     serde_json::json!({
         "id": id,
-        "state": phase(st.map(|s| s.phase.as_str()), EnvState::Creating),
+        "state": phase(st.map(|s| s.phase.as_str()), unseen),
         // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
         "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
         "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),

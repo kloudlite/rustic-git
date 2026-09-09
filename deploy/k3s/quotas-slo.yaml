@@ -37,7 +37,11 @@ spec:
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
   snapshots: 20
-  diskGb: 40
+  # Ninety, not forty: the owner's hidden builder environment (`bld-{slug}`) is charged to them
+  # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
+  # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
+  # builder — the api writes it with the owner's first workspace, and nothing deletes it.
+  diskGb: 90
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
@@ -48,8 +52,10 @@ spec:
   # are the values `request.approve` writes back after it has raised and used the quota.
   # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
-  cpu: 48
-  memoryGb: 96
+  # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
+  # this owner like every other environment of theirs.
+  cpu: 52
+  memoryGb: 104
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
@@ -101,7 +107,11 @@ spec:
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
   snapshots: 20
-  diskGb: 40
+  # Ninety, not forty: the owner's hidden builder environment (`bld-{slug}`) is charged to them
+  # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
+  # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
+  # builder — the api writes it with the owner's first workspace, and nothing deletes it.
+  diskGb: 90
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
@@ -112,8 +122,10 @@ spec:
   # are the values `request.approve` writes back after it has raised and used the quota.
   # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
-  cpu: 48
-  memoryGb: 96
+  # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
+  # this owner like every other environment of theirs.
+  cpu: 52
+  memoryGb: 104
 
 ---
 # The hourly suite's second tenant, all zero for the same reason as `slo-other`.
@@ -161,7 +173,11 @@ spec:
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
   snapshots: 20
-  diskGb: 40
+  # Ninety, not forty: the owner's hidden builder environment (`bld-{slug}`) is charged to them
+  # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
+  # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
+  # builder — the api writes it with the owner's first workspace, and nothing deletes it.
+  diskGb: 90
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
@@ -172,8 +188,10 @@ spec:
   # are the values `request.approve` writes back after it has raised and used the quota.
   # A probe workspace costs 4 vCPU / 8 GiB whatever it asks for (`PodResources::default`), so ten
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
-  cpu: 48
-  memoryGb: 96
+  # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
+  # this owner like every other environment of theirs.
+  cpu: 52
+  memoryGb: 104
 
 ---
 # The drills' second tenant, all zero for the same reason as `slo-other`.
