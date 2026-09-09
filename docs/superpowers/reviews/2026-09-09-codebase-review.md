@@ -34,6 +34,47 @@ Severity is impact × likelihood; cost is the fix's size (S < 1 h, M < 1 day, L 
 | 13 | INFO | security | Verified sound: registry `allow()` fails closed on directory errors (`unwrap_or(false)` both branches) and only challenges anonymous callers; `may_act_on` is owner/team/superadmin with the superadmin act logged; admin router refuses without the claim before any route; signin has per-IP and per-email limiters; gateway verifies the ssh-session JWT before splicing; builder gate fails closed without its secret; the pod-fence VAP re-checks caps/hostPath/gvisor at admission; the only `dangerouslySetInnerHTML` sites are shiki output and the theme bootstrap script; the passkey cookie is httpOnly+strict. | reads | Two things to confirm in Phase 3: the main web session token's storage (bearer header from where — cookie flags), and constant-time comparison of `KLOUDLITE_BUILDER_SECRET` on `/v1/internal/builders/*` | S |
 | 14 | INFO | deps | 735 packages in `Cargo.lock`, 872 crate versions in the tree; `cargo audit`/`cargo deny` results below. | `cargo tree` | Trim after the audit — likely duplicates of `syn`/`hashbrown`/`rustls` majors | S |
 
+## Phase 3 outcome (2026-09-09, branch `review-fixes`)
+
+Verified against the code before fixing; four findings did not survive the read and are retracted
+here rather than "fixed":
+
+- **1 — done** (`ea892267`): the request-facing crates deny `clippy::unwrap_used`/`expect_used`
+  (crate root or `api/mod.rs`, tests allowed). 33 sites reviewed: header values built from names
+  and numbers are now dropped on failure instead of unwrapped; mutex poisoning is tolerated in the
+  builder gate; a missing Volume uid is a 500; the sigterm handler logs instead of panicking; the
+  12 boot-time and by-construction sites carry a function-level `allow` with the reason. Note the
+  Link-header `parse().unwrap()` sites were NOT user-triggerable: `paginate` falls back to the
+  whole page when `n` is unparsable, so the header is only built from validated names.
+- **2 — retracted**: every production `reqwest` call already sets a per-request
+  `.timeout(HTTP_TIMEOUT)` (`resolve.rs`, `mirror_beat.rs`, `notify.rs`) or a builder timeout
+  (`api::serve`, `history`, `admin::settings`); the nine untimed `Client::new()` sites are tests.
+- **3 — retracted**: `kloudlite-server` is a documented cyclic **dev**-dependency of
+  `crates/workspaces` (boots the real router in `engine_ops` tests); `crates/git → crates/app` is
+  library-to-library. No layering break.
+- **5 — narrowed**: the tunables that also exist as `Settings` fields were `KLOUDLITE_MAX_LAYER`
+  and `KLOUDLITE_UPLOAD_GRACE_SECS`. `upload_grace()` had no caller and is deleted (`614073dc`);
+  `blobs::max_layer()` stays a boot-time `OnceLock` on purpose (its doc explains: the
+  `DefaultBodyLimit` layer needs a value before an `App` exists, `tests/registry_limits.rs` is its
+  one setter) while the per-request check reads the live setting — the one residual is that a
+  central `max_layer` raised above the default is still refused by the body-limit layer, which is
+  the safe direction. The remaining env reads are boot-only URLs/credentials read once in
+  constructors.
+- **7 — retracted**: the `std::fs`/`Command` counts were in synchronous helpers already run under
+  `spawn_blocking`; `nix.rs` uses `tokio::process::Command`. What remains inside async fns is a
+  handful of sub-millisecond `read_link`/`remove_file` metadata calls in `ensure_profile`.
+- **9 — retracted**: the bun lockfile resolves `@simplewebauthn/server@13.3.2` (patched); the
+  advisory came from an npm-regenerated lock that resolved an older nested copy. Nothing to bump.
+- **10 — done** (`cc3458da`): `stages::{clip,id_of,state_is}` and `core::settings::env_parsed`
+  replace the copies.
+- **14 — already in place**: `image.yml` runs `cargo-deny-action` with the repo's `deny.toml`
+  (advisories, licenses, bans, sources); `cargo audit` is a subset of that. The 80 duplicate
+  versions remain a trimming candidate.
+
+Lesson for the next pass: the static sweep over-counted in three places (tests counted as request
+paths, sync helpers counted as async, an npm lock that is not the project's lock). Each finding
+was read at the site before it was fixed, which is what the numbers above reflect.
+
 ## Modularisation plan (Phase 2 targets)
 
 Rule: no source file over ~800 lines, one responsibility per file, a `//!` module doc that
