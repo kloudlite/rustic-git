@@ -894,7 +894,10 @@ fn git_ssh_command() -> EnvVar {
 /// `Err` is a permanent failure, never a retry — a bad name never becomes a good one.
 ///
 /// ponytail: `--depth 1` shallow, so `git log` in the workspace shows one commit; deepen on demand
-/// if anyone asks for the history they did not ask to clone.
+/// if anyone asks for the history they did not ask to clone. NOT `--single-branch`, though: that
+/// narrows the fetch refspec to the seeded branch, and a person who then runs `git fetch` never
+/// sees `master` appear on a repo whose default is `main` — the branch exists, their clone just
+/// stopped asking for it. Every branch tip at depth 1 costs nothing a person would notice.
 pub fn git_init_container(
     source: &crate::crd::VolumeSource,
     init_image: &str,
@@ -939,7 +942,7 @@ pub fn git_init_container(
                  echo \"seed key $(ssh-keygen -lf /tmp/seed_key 2>/dev/null | cut -d\" \" -f2)\"; \
                  echo \"seed key $(ssh-keygen -lf /tmp/seed_key 2>/dev/null | cut -d\" \" -f2)\"; \
                  GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\" \
-                 git clone --depth 1 --single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR} && exit 0; \
+                 git clone --depth 1 --no-single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR} && exit 0; \
                  rm -rf {SEED_DIR}/* {SEED_DIR}/.[!.]* 2>/dev/null || true; sleep 5; done; exit 1"
             ),
         ]),
