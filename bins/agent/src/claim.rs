@@ -243,6 +243,34 @@ pub(crate) async fn nodes_with_room(ctx: &Arc<Ctx>, candidates: &[String], want:
     Ok(out)
 }
 
+/// The live pool node with the most room for `want`, by the same arithmetic `fits` applies —
+/// `None` when nothing fits anywhere. One cluster-wide node and pod listing, like `nodes_with_room`,
+/// and the same ponytail: peers' claimed-but-podless parents are not counted.
+pub(crate) async fn roomiest(ctx: &Arc<Ctx>, want: Want) -> Result<Option<String>, ReconcileErr> {
+    let candidates = crate::peer::placeable_nodes(ctx).await;
+    let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+    let pods = Api::<Pod>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+    let rooms = candidates
+        .iter()
+        .map(|c| {
+            let here: Vec<Pod> = pods.iter().filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(c.as_str())).cloned().collect();
+            (c.clone(), room(nodes.iter().find(|n| n.name_any() == *c), &here, (0, 0)))
+        })
+        .collect();
+    Ok(pick_roomiest(rooms, want))
+}
+
+/// Most free cpu wins, then most free memory, then the lower name — deterministic, so every
+/// node computing this from the same listings elects the same one.
+fn pick_roomiest(rooms: Vec<(String, Room)>, want: Want) -> Option<String> {
+    rooms
+        .into_iter()
+        .filter(|(_, r)| r.fits(want))
+        .map(|(n, r)| (r.free(), n))
+        .max_by(|(fa, na), (fb, nb)| fa.cmp(fb).then_with(|| nb.cmp(na)))
+        .map(|(_, n)| n)
+}
+
 /// What the parent described by `state` will request wherever it starts.
 pub(crate) fn want_of_state(state: &crd::SnapshotState) -> Want {
     match state {
@@ -359,6 +387,8 @@ const NO_CAPACITY_AFTER_SECS: i64 = 60;
 /// watching "creating"; bounded in cost because this controller only ever holds UNPLACED objects,
 /// normally none.
 const LATER_SECS: u64 = 10;
+/// How long a fresh parent is left to the roomiest node before any node with room may claim it.
+const BEST_FIT_SECS: i64 = 15;
 
 /// What the claim decides for one object, given what it currently says about itself.
 ///
@@ -366,7 +396,7 @@ const LATER_SECS: u64 = 10;
 /// beat us may have placed it (leave it), or may have written something else entirely (still ours
 /// to claim). A second, subtly different decision on the retry path is how a loser talks itself into
 /// overwriting a winner.
-async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, gen: i64) -> Result<Verdict, ReconcileErr> {
+async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, gen: i64, unplaced: i64) -> Result<Verdict, ReconcileErr> {
     use Verdict::Decline;
     let (storage, volume, want) = (p.storage, p.volume, p.want);
     if !p.node_name.is_empty() {
@@ -426,6 +456,20 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
             let why = format!("no node has room for it: it requests {}m cpu and {} MiB", want.0, want.1);
             r.refuse(name, want, "claim");
             return Ok(Verdict::NoCapacity(why));
+        }
+        // Best fit, not first come: every node with room races to claim a fresh parent, and the
+        // winner is whoever reconciled first — which fills an 8-vCPU node exactly as readily as a
+        // 16-vCPU one, until the small node's next clone (pinned to its source's node) finds
+        // 1150 m free where it needs 2000. So a node that is not the roomiest waits `LATER_SECS`
+        // and lets the roomiest claim; after `BEST_FIT_SECS` unplaced, anyone with room takes it,
+        // so a roomiest node that is slow or gone never stalls a create.
+        if unplaced < BEST_FIT_SECS {
+            if let Some(best) = roomiest(ctx, want).await? {
+                if best != ctx.node {
+                    tracing::info!(%name, %best, free_cpu_m = r.free().0, "claim.deferred.best_fit");
+                    return Ok(Verdict::Later);
+                }
+            }
         }
     }
     Ok(Verdict::Claim(serde_json::json!({
@@ -489,7 +533,7 @@ where
     let mut obj = obj.clone();
     for attempt in 0..ATTEMPTS {
         let p = parts(&obj);
-        let patch = match decide(ctx, &obj.name_any(), &p, phase, obj.meta().generation.unwrap_or(0)).await? {
+        let patch = match decide(ctx, &obj.name_any(), &p, phase, obj.meta().generation.unwrap_or(0), unplaced_for(&obj)).await? {
             Verdict::Claim(patch) => patch,
             Verdict::Decline => return Ok(Action::await_change()),
             Verdict::Later => return Ok(Action::requeue(std::time::Duration::from_secs(LATER_SECS))),
@@ -737,6 +781,15 @@ mod tests {
         assert!(fits(Some(&n), &running, (0, 0), want));
         // Counted on both sides, the same node refuses it — the double count this skip removes.
         assert!(!fits(Some(&n), &running, want, want));
+    }
+
+    #[test]
+    fn the_roomiest_node_wins_ties_by_name_and_nothing_fits_is_none() {
+        let r = |a, p| Room { alloc: (a, 32_000), pods: (p, 8_000), committed: (0, 0) };
+        let rooms = vec![("session-1".into(), r(8_000, 6_850)), ("session-0".into(), r(16_000, 1_400)), ("env-0".into(), r(16_000, 1_400))];
+        assert_eq!(pick_roomiest(rooms, (2_000, 4_096)).as_deref(), Some("env-0"));
+        let full = vec![("session-1".into(), r(8_000, 6_850))];
+        assert_eq!(pick_roomiest(full, (2_000, 4_096)), None);
     }
 
     #[test]
