@@ -753,15 +753,7 @@ async fn build_push(c: &mut Ctx, id: &str) {
         let (probe, registry, run_id, id, secret) =
             (probe.clone(), registry.clone(), run_id.clone(), id.clone(), secret.clone());
         async move {
-            let script = format!(
-                "sh /etc/profile.d/kl-build.sh\n\
-export BUILDKIT_HOST=tcp://builder-gate.kloudlite-system.svc:1234\n\
-export KL_OWNER={probe}\n\
-export KL_REGISTRY_HOST={registry}\n\
-mkdir -p /tmp/d\n\
-printf 'FROM alpine:3.20\\nRUN echo slo > /slo\\n' > /tmp/d/Dockerfile\n\
-docker buildx build -t $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id} --push /tmp/d"
-            );
+            let script = build_script(&probe, &registry, &run_id);
             let (code, out, err) = ws_exec(c, &id, &script, BUILD_CEILING).await?;
             if code != 0 {
                 return Err(anyhow!("the build/push failed ({code}): {} {}", out.trim(), err.trim()));
@@ -788,6 +780,31 @@ docker buildx build -t $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id} --push /tm
         .boxed()
     })
     .await;
+}
+
+/// The script the step runs, in the workspace, as the person.
+///
+/// `docker buildx inspect --bootstrap` first, retried: buildx's remote driver dials the gate with
+/// its own ~20 s deadline and reports "waiting for connection: DeadlineExceeded" when a cold
+/// builder takes longer, which is buildx's cap deciding the sample rather than the platform. The
+/// retries are INSIDE the measurement on purpose — waking a stopped builder IS the cold start
+/// `ws.build.p95` exists to measure — and stop at 150 s so the 180 s ceiling still leaves the
+/// build itself half a minute.
+fn build_script(probe: &str, registry: &str, run_id: &str) -> String {
+    format!(
+        "sh /etc/profile.d/kl-build.sh\n\
+export BUILDKIT_HOST=tcp://builder-gate.kloudlite-system.svc:1234\n\
+export KL_OWNER={probe}\n\
+export KL_REGISTRY_HOST={registry}\n\
+mkdir -p /tmp/d\n\
+printf 'FROM alpine:3.20\\nRUN echo slo > /slo\\n' > /tmp/d/Dockerfile\n\
+deadline=$(( $(date +%s) + 150 ))\n\
+while ! docker buildx inspect --bootstrap kl >/dev/null 2>&1; do\n\
+  [ $(date +%s) -ge $deadline ] && break\n\
+  sleep 5\n\
+done\n\
+docker buildx build -t $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id} --push /tmp/d"
+    )
 }
 
 /// `env.quota.refused`: the OTHER three verbs behind the one gate.
@@ -923,6 +940,21 @@ mod tests {
         assert!(script.contains("/proc/uptime"), "{script}");
         // BusyBox `date` has no `%N`, so a nanosecond clock would fail on some images.
         assert!(!script.contains("%N"), "{script}");
+    }
+
+    /// buildx's remote driver gives the dial ~20 s and then fails the whole build; a cold builder
+    /// takes longer than that, so the step bootstraps in a loop before it builds.
+    #[test]
+    fn the_build_script_waits_for_buildkit_before_it_builds() {
+        let s = build_script("slo-hourly", "reg.example", "run-1");
+        let (boot, build) = (
+            s.find("docker buildx inspect --bootstrap kl").expect("bootstraps"),
+            s.find("docker buildx build").expect("builds"),
+        );
+        assert!(boot < build, "the bootstrap comes first:\n{s}");
+        assert!(s.contains("sleep 5"), "{s}");
+        // Bounded well inside BUILD_CEILING, so the build itself still has time.
+        assert!(s.contains("+ 150 ))"), "{s}");
     }
 
     /// No kubeconfig is a deployment gap, not an SLO breach: the two ids that need one skip with a

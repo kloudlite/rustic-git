@@ -157,8 +157,13 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
     }
 
     let waited = gate.central.load().builder_start_secs;
-    match wait_ready(&gate, &slug, Duration::from_secs(waited), &sock).await {
-        Wait::Ready => {}
+    let upstream = match wait_ready(&gate, &slug, Duration::from_secs(waited), &sock).await {
+        Wait::Ready(up) => up,
+        Wait::Refused(addr, e) => {
+            outcome("refused");
+            tracing::warn!(%slug, %addr, error = %e, secs = waited, "gate.dial.failed");
+            return;
+        }
         Wait::Timeout => {
             // Deliberately no `stop`: the builder may simply be slow, and stopping it here would
             // tear down the very pod the next connection is waiting for.
@@ -174,16 +179,6 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
             tracing::info!(%slug, "gate.client.gone");
             return;
         }
-    }
-
-    let addr = gate.buildkit_addr(&slug);
-    let upstream = match tokio::net::TcpStream::connect(&addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            outcome("refused");
-            tracing::warn!(%slug, %addr, error = %e, "gate.dial.failed");
-            return;
-        }
     };
     outcome("ok");
     splice::splice(sock, upstream).await;
@@ -191,12 +186,19 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
 }
 
 enum Wait {
-    Ready,
+    Ready(tokio::net::TcpStream),
+    /// The budget ran out with the dial itself still failing — the builder said ready and the
+    /// address did not answer, which is a different fault from one that never came up.
+    Refused(String, std::io::Error),
     Timeout,
     ClientGone,
 }
 
-/// Poll the builder until it answers, the budget runs out, or the CLIENT hangs up.
+/// Poll the builder AND dial it until buildkit answers, the budget runs out, or the CLIENT hangs
+/// up. The dial belongs inside this loop rather than after it: `ready` is a report about the
+/// Service, and between the report and the connect there is a moment where the name does not
+/// resolve yet. Failing the connection there closed the build for a builder that was seconds from
+/// answering, so a dial failure inside the budget is "not ready yet" and nothing else.
 ///
 /// `peek`, never `read`: those bytes are the client's own request (buildkit's HTTP/2 preface
 /// arrives immediately, before the builder is anywhere near up) and consuming one would corrupt
@@ -210,13 +212,31 @@ async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net
     // found when the pump reaches it. Upgrade path if the polling cost ever shows: peek the
     // buffered bytes aside and hand them to `copy_bidirectional` as a prefix.
     let mut watch = true;
+    // The last dial failure, if there was one: it decides whether running out of the budget is a
+    // builder that never came up or one whose address never answered.
+    let mut dialled: Option<(String, std::io::Error)> = None;
+    macro_rules! out_of_budget {
+        () => {
+            match dialled.take() {
+                Some((addr, e)) => return Wait::Refused(addr, e),
+                None => return Wait::Timeout,
+            }
+        };
+    }
     loop {
         if gate.api.ready(slug).await.unwrap_or(false) {
-            return Wait::Ready;
+            let addr = gate.buildkit_addr(slug);
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(up) => return Wait::Ready(up),
+                Err(e) => {
+                    tracing::debug!(%slug, %addr, error = %e, "gate.dial.retry");
+                    dialled = Some((addr, e));
+                }
+            }
         }
         if !watch {
             if tokio::time::Instant::now() + POLL_GAP > deadline {
-                return Wait::Timeout;
+                out_of_budget!();
             }
             tokio::time::sleep(POLL_GAP).await;
             continue;
@@ -238,7 +258,7 @@ async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net
                 // A broken socket is a gone client; there is nothing to splice to either way.
                 Err(_) => return Wait::ClientGone,
             },
-            _ = tokio::time::sleep_until(deadline) => return Wait::Timeout,
+            _ = tokio::time::sleep_until(deadline) => out_of_budget!(),
             _ = tokio::time::sleep(POLL_GAP) => {}
         }
     }

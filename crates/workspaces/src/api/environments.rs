@@ -852,11 +852,17 @@ fn builder_body(id: &str, e: &crd::Environment) -> serde_json::Value {
         (crd::DesiredState::Stopped, Some(p)) if p != "running" => EnvState::Stopped,
         _ => phase(observed, unseen),
     };
+    let running = matches!(state, EnvState::Running);
     serde_json::json!({
         "id": id,
         "state": state,
-        // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
-        "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
+        // The gate dials on this and nothing else, so it must mean "buildkit answers". NOT the
+        // environment's `Ready` condition: a stopped environment carries `Ready=True/Stopped`
+        // ("pushed and stopped"), which read as ready one second after `start` and sent the gate
+        // at a Service that did not exist yet. The buildkit service's own readiness is written
+        // from the StatefulSet's `readyReplicas`, which is the endpoint the dial needs.
+        "ready": running
+            && st.is_some_and(|s| s.service_status.iter().any(|x| x.name == "buildkit" && x.ready)),
         "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),
     })
 }

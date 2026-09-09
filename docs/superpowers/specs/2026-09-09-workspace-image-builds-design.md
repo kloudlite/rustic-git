@@ -100,7 +100,13 @@ On a connection:
    secret the peer listeners already use (`WS_PEER_SECRET`'s pattern, its own variable). The api
    writes `desiredState: Running` and answers 202; the gate polls the environment (through the
    same internal route, GET) until `Ready=True`, `BUILDER_START_SECS` (120) at most, then dials
-   `buildkit.env-bld-{slug}.svc:1234` and splices both directions. A start that runs out of time
+   `buildkit.env-bld-{slug}.svc:1234` and splices both directions. `ready` means the buildkit
+   SERVICE reports ready — never the environment's own `Ready` condition, which a stopped
+   environment carries as `Ready=True/Stopped` — and the dial is retried on the same poll gap
+   until the budget, because the Service's name resolves a moment after the report. buildx's
+   remote driver dials with its own ~20 s deadline, so the first `docker build` after idle may
+   still report "waiting for connection" on a cold start slower than that and is simply re-run.
+   A start that runs out of time
    closes the connection; buildx reports the endpoint unreachable, and the environment's own
    condition says why (`ServicesNotReady`, a ResourceQuota refusal, `Placed=False`).
 3. **Stop.** The gate counts open connections per builder. When a builder's count has been zero
@@ -213,7 +219,8 @@ result from the step log, and a `skip` is a hole, never a pass.
 
 `docker run` inside a workspace. Registry-exported build cache (`--cache-to type=registry`) for
 cross-node or cross-region sharing — the opt-in for a team that outgrows one builder. Sharded
-builders. A per-team registry quota.
+builders. A per-team registry quota. Warming the builder at login (the rc file poking the gate),
+which would hide the cold start from buildx's dial deadline — a product decision, not a fix.
 
 ## Files
 

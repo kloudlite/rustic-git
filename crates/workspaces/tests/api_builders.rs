@@ -67,6 +67,7 @@ fn builder_obj(slug: &str, desired: &str, ready: bool) -> Value {
         },
         "status": {"phase": if ready { "running" } else { "creating" }, "nodeName": "node-a",
                    "volumeRef": format!("bld-{slug}"),
+                   "serviceStatus": [{"name": "buildkit", "ready": ready}],
                    "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" },
                                    "reason": "Running", "message": "buildkit is up",
                                    "lastTransitionTime": "2026-09-09T00:00:00Z", "observedGeneration": 1}]},
@@ -378,8 +379,40 @@ async fn start_and_stop_404_on_an_ordinary_environment_with_a_builder_name() {
     assert_eq!(internal(&s, "GET", "/v1/internal/builders/alice", Some(SECRET)).await.status(), 404);
 }
 
+/// A stopped builder carries `Ready=True/Stopped` — "pushed and stopped" — and the gate dialled
+/// on it one second after `start`, before the Service existed. `ready` is the buildkit service's
+/// own readiness, and a stopped builder has none.
 #[tokio::test]
-async fn get_reports_ready_from_the_condition() {
+async fn a_stopped_builder_is_not_ready_however_its_ready_condition_reads() {
+    let mut obj = builder_obj("karthik", "stopped", false);
+    obj["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": "Stopped",
+                                          "message": "pushed and stopped",
+                                          "lastTransitionTime": "2026-09-09T00:00:00Z",
+                                          "observedGeneration": 1}]);
+    let s = server(vec![get(format!("{API}/environments/bld-karthik"), obj)]).await;
+    let r = internal(&s, "GET", "/v1/internal/builders/karthik", Some(SECRET)).await;
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["state"], "stopped");
+    assert_eq!(body["ready"], false);
+}
+
+/// Running is not enough either: the StatefulSet's pod may exist with no endpoint behind the
+/// Service, which is exactly the dial that failed on the fleet.
+#[tokio::test]
+async fn a_running_builder_is_ready_only_when_its_buildkit_service_is() {
+    for svc_ready in [false, true] {
+        let mut obj = builder_obj("karthik", "running", true);
+        obj["status"]["serviceStatus"] = json!([{"name": "buildkit", "ready": svc_ready}]);
+        let s = server(vec![get(format!("{API}/environments/bld-karthik"), obj)]).await;
+        let r = internal(&s, "GET", "/v1/internal/builders/karthik", Some(SECRET)).await;
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body["state"], "running");
+        assert_eq!(body["ready"], svc_ready);
+    }
+}
+
+#[tokio::test]
+async fn get_reports_ready_from_the_buildkit_service() {
     for ready in [false, true] {
         let s = server(vec![get(format!("{API}/environments/bld-karthik"), builder_obj("karthik", "running", ready))]).await;
         let r = internal(&s, "GET", "/v1/internal/builders/karthik", Some(SECRET)).await;

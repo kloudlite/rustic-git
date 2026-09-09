@@ -126,7 +126,14 @@ impl who::Resolver for TestPods {
 /// assertion cannot be explained by anything but bytes having crossed in both directions.
 async fn fake_buildkit() -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = l.local_addr().unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    fake_buildkit_on(l);
+    addr
+}
+
+/// The same server on a listener the caller bound — how a test binds the address LATE, which is
+/// the real shape of a builder whose Service does not exist yet.
+fn fake_buildkit_on(l: tokio::net::TcpListener) {
     tokio::spawn(async move {
         while let Ok((mut s, _)) = l.accept().await {
             tokio::spawn(async move {
@@ -144,7 +151,6 @@ async fn fake_buildkit() -> String {
             });
         }
     });
-    addr.to_string()
 }
 
 // ── the gate under test ──────────────────────────────────────────────────
@@ -260,6 +266,35 @@ async fn an_unknown_peer_is_closed_and_costs_the_api_nothing() {
     let mut buf = [0u8; 8];
     assert_eq!(c.read(&mut buf).await.unwrap(), 0, "closed without a byte");
     assert!(api.calls().is_empty(), "no api call for an IP we cannot name: {:?}", api.calls());
+}
+
+/// The fleet's failure: the api said ready and the gate dialled a Service that did not exist yet
+/// (`failed to lookup address information`), counted `refused` and closed — buildx then reported
+/// "waiting for connection: DeadlineExceeded". Inside the start budget a dial failure is "not
+/// ready yet", so the gate keeps trying and the build simply starts a few seconds later.
+#[tokio::test(start_paused = true)]
+async fn a_buildkit_that_is_not_listening_yet_is_waited_for_not_refused() {
+    let api = Arc::new(MockApi::default());
+    let base = mock_api(api.clone()).await;
+    // Bound to learn a free port, then dropped: for the next few polls nothing answers there.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bk = l.local_addr().unwrap();
+    drop(l);
+    let gate = build_gate(base, pods(&[("10.0.0.5", "alice", "")]), Some(bk.to_string()));
+    let addr = gate_on(gate, "10.0.0.5".parse().unwrap()).await;
+
+    let refused_before = metric(r#"outcome="refused""#);
+    let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    c.write_all(b"hello").await.unwrap();
+    // Two poll gaps' worth of failed dials, then buildkit arrives.
+    let a = api.clone();
+    until("the gate dialled twice", move || a.count("get") > 2).await;
+    fake_buildkit_on(tokio::net::TcpListener::bind(bk).await.unwrap());
+
+    let mut buf = [0u8; 32];
+    let n = c.read(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"buildkit:hello", "the splice completed after the late bind");
+    assert_eq!(metric(r#"outcome="refused""#), refused_before, "a dial inside the budget is a wait");
 }
 
 #[tokio::test(start_paused = true)]
@@ -392,7 +427,6 @@ async fn a_client_that_hangs_up_mid_start_stops_the_polling() {
     let gate = build_gate(base, pods(&[("10.0.0.5", "alice", "")]), Some("127.0.0.1:1".into()));
     let addr = gate_on(gate, "10.0.0.5".parse().unwrap()).await;
 
-    let before = metric(r#"outcome="timeout""#);
     let gone_before = metric(r#"outcome="client_gone""#);
     let c = tokio::net::TcpStream::connect(addr).await.unwrap();
     // A poll or two in, the client leaves.
@@ -405,7 +439,10 @@ async fn a_client_that_hangs_up_mid_start_stops_the_polling() {
     // "it polled on to the end for a socket nobody was reading".
     let polls = api.count("get");
     assert!(polls < (START / 4) as usize, "polling stopped with the client, saw {polls} polls");
-    assert_eq!(metric(r#"outcome="timeout""#), before, "a client leaving is not a builder timeout");
+    // No assertion on the timeout counter: it is process-wide and the never-ready test
+    // increments it from another thread, which failed this test 2 runs in 8. That a client
+    // leaving is not a builder timeout is what the pair above says — `client_gone` was counted,
+    // and the polling stopped far short of the budget.
     assert_eq!(api.count("stop"), 0, "still no stop: {:?}", api.calls());
 }
 
