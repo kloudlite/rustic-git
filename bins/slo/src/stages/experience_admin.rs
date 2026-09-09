@@ -145,6 +145,19 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
                 .with_context(|| format!("the over-quota workspace {id} was left RUNNING")),
             None => Ok(()),
         };
+        // The deleted workspace's Volume keeps counting under diskGb until its finalizer has
+        // detached it — seconds, not instant — and a limit restored before that leaves the owner
+        // OVER it ("diskGb: 95 of 90"), which is what refused `admin.stop.workspace`'s 1 GB create
+        // on 2026-09-09. Wait for the usage to fit under the limit about to be written; on a
+        // timeout the limit goes back anyway, since a raised one outlives everything here.
+        let cap = disk_gb(&probe_quota()).unwrap_or(0);
+        for _ in 0..30 {
+            let fits = get(c, &quota_url, &jwt).await.ok().and_then(|q| q.get("used").and_then(disk_gb)).is_some_and(|u| u < cap);
+            if fits {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         let body = json!({ "spec": probe_quota(), "note": "slo probe quota restore" });
         // The quota goes back whatever the delete did — a raised limit is allocation nobody
         // decided on, and it outlives the workspace by definition.
