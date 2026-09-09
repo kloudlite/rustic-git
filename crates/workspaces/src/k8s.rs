@@ -767,27 +767,18 @@ fn live_worktree_volume(pool: &str, volume: &str, ws: &str) -> Volume {
 /// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
 /// role's taint.
 ///
-/// Two selectors, two jobs: the role key says "session pods run on session nodes" (and a
-/// single-node install may carry both role labels), the hostname pins this pod to the node holding
+/// Two selectors, two jobs: the pool label says the data this pod mounts lives on this node
+/// (a node without one cannot host it), the hostname pins the pod to the specific node holding
 /// its subvolume. That pin used to come from the PV's `nodeAffinity`; with the volumes mounted from
 /// the host there is no PV to carry it, and an unpinned pod would mount an empty directory on the
 /// wrong node. The toleration is not optional: the label without it schedules nothing.
-fn placement(spec: &mut PodSpec, role: &str, node: &str) {
-    // One label KEY per role (`kloudlite.io/session`, `kloudlite.io/env`) rather than one shared
-    // key with the role as its value. A label key holds a single value, so `role=session` and
-    // `role=env` are mutually exclusive and no node could ever serve both — which made a
-    // single-node install impossible, and produced an unschedulable pod whose data was on one node
-    // and whose selector demanded another:
-    //   1 node(s) didn't match PersistentVolume's node affinity
-    //   1 node(s) didn't match Pod's node affinity/selector
-    // Separate keys let a small or CI cluster put both roles on one box and a large one keep them
-    // apart, with no change to this code.
+fn placement(spec: &mut PodSpec, node: &str) {
     spec.node_selector = Some(BTreeMap::from([
-        (format!("kloudlite.io/{role}"), "true".to_string()),
+        ("kloudlite.io/pool".to_string(), "true".to_string()),
         ("kubernetes.io/hostname".to_string(), node.to_string()),
     ]));
     spec.tolerations = Some(vec![Toleration {
-        key: Some(format!("kloudlite.io/{role}")),
+        key: Some("kloudlite.io/pool".to_string()),
         operator: Some("Exists".to_string()),
         effect: Some("NoSchedule".to_string()),
         ..Default::default()
@@ -1058,7 +1049,7 @@ pub fn workspace_pod(
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
-    placement(&mut pod_spec, "session", ctx.node_name);
+    placement(&mut pod_spec, ctx.node_name);
     // `ws_id`, never `id`: for a shared-volume clone `id` is the SOURCE volume, so naming the pod
     // after it makes every clone of one volume claim the same pod name — the clone then adopts its
     // source's running pod, its `podRef` points at another workspace's shell, and the gateway
@@ -1180,7 +1171,7 @@ pub fn service_statefulset(
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };
-    placement(&mut pod_spec, "env", ctx.node_name);
+    placement(&mut pod_spec, ctx.node_name);
 
     Ok(StatefulSet {
         metadata: meta(
@@ -1747,14 +1738,14 @@ mod tests {
     }
 
     /// Placement is the pod's own now that no PV carries node affinity, and it is ADDED to the
-    /// role selector rather than replacing it.
+    /// pool selector rather than replacing it.
     #[test]
     fn the_pod_selects_its_node_by_hostname() {
         let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).unwrap();
         let s = p.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
-        assert_eq!(sel.get("kloudlite.io/session").map(String::as_str), Some("true"));
+        assert_eq!(sel.get("kloudlite.io/pool").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
     }
 
@@ -1766,8 +1757,21 @@ mod tests {
         let s = d.spec.unwrap().template.spec.unwrap();
         let sel = s.node_selector.expect("a node selector");
         assert_eq!(sel.get("kubernetes.io/hostname").map(String::as_str), Some("session-0"));
-        assert_eq!(sel.get("kloudlite.io/env").map(String::as_str), Some("true"));
+        assert_eq!(sel.get("kloudlite.io/pool").map(String::as_str), Some("true"));
         assert!(s.node_name.is_none(), "the scheduler still places the pod");
+    }
+
+    #[test]
+    fn a_pod_is_pinned_to_its_node_and_to_the_pool_and_nothing_else() {
+        let mut spec = PodSpec::default();
+        placement(&mut spec, "node-a");
+        let sel = spec.node_selector.unwrap();
+        assert_eq!(sel.len(), 2);
+        assert_eq!(sel["kloudlite.io/pool"], "true");
+        assert_eq!(sel["kubernetes.io/hostname"], "node-a");
+        let tol = &spec.tolerations.unwrap()[0];
+        assert_eq!(tol.key.as_deref(), Some("kloudlite.io/pool"));
+        assert_eq!(spec.automount_service_account_token, Some(false));
     }
 
     /// An environment's worktree is its OWN id under whatever volume it resolved to — volume root,
@@ -1972,14 +1976,12 @@ mod tests {
         let s = p.spec.unwrap();
         assert_eq!(s.automount_service_account_token, Some(false));
         assert_eq!(s.restart_policy.as_deref(), Some("Always"));
-        // A key per role, not a shared key with the role as its value: a node can then carry both
-        // and a single-node install works.
         assert_eq!(
-            s.node_selector.as_ref().unwrap().get("kloudlite.io/session").map(String::as_str),
+            s.node_selector.as_ref().unwrap().get("kloudlite.io/pool").map(String::as_str),
             Some("true")
         );
         // The label without the toleration schedules nothing.
-        assert_eq!(s.tolerations.as_ref().unwrap()[0].key.as_deref(), Some("kloudlite.io/session"));
+        assert_eq!(s.tolerations.as_ref().unwrap()[0].key.as_deref(), Some("kloudlite.io/pool"));
 
         let c = &s.containers[0];
         let sc = c.security_context.as_ref().unwrap();
