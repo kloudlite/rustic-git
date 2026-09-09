@@ -143,6 +143,10 @@ fn token(jwt: &Jwt) -> String {
     jwt.mint("karthik@example.com", "Test User", Some("karthik")).unwrap()
 }
 
+fn token_for(jwt: &Jwt, sub: &str) -> String {
+    jwt.mint(&format!("{sub}@example.com"), "Test User", Some(sub)).unwrap()
+}
+
 async fn create_ws(s: &Server, team: Option<&str>) -> reqwest::Response {
     let mut body = json!({"name": "web", "region": "centralindia", "quota_gb": 20});
     if let Some(t) = team {
@@ -500,4 +504,66 @@ async fn every_volume_route_404s_on_the_builders_volume() {
             .unwrap();
         assert_eq!(r.status(), 404, "{method} /v1/volumes/bld-karthik{suffix}");
     }
+}
+
+
+// ── GET /v1/builders/me ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_my_builder_answers_the_callers_own() {
+    let s = server(vec![get(format!("{API}/environments/bld-karthik"), builder_obj("karthik", "running", true))]).await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/v1/builders/me", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["id"], "bld-karthik");
+    assert_eq!(body["state"], "running");
+    assert_eq!(body["ready"], true);
+    assert_eq!(body["conditions"][0]["type"], "Ready");
+}
+
+#[tokio::test]
+async fn get_my_builder_answers_a_team_the_caller_belongs_to() {
+    // karthik is a member of acme per StubTeams.
+    let s = server(vec![get(format!("{API}/environments/bld-acme"), builder_obj("acme", "stopped", false))]).await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/v1/builders/me?team=acme", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["id"], "bld-acme");
+    assert_eq!(body["state"], "creating");
+    assert_eq!(body["ready"], false);
+}
+
+#[tokio::test]
+async fn get_my_builder_404s_for_a_team_the_caller_is_not_in() {
+    // bob is nobody's teammate per StubTeams, so may_act_on refuses before any kube read.
+    let s = server(vec![get(format!("{API}/environments/bld-acme"), builder_obj("acme", "stopped", false))]).await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/v1/builders/me?team=acme", s.base))
+        .bearer_auth(token_for(&s.jwt, "bob"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404, "a non-member must not learn the builder exists");
+}
+
+#[tokio::test]
+async fn get_my_builder_404s_with_no_builder_yet() {
+    let s = server(vec![]).await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/v1/builders/me", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
 }

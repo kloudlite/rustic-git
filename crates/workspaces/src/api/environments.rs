@@ -827,6 +827,19 @@ async fn set_builder_state(s: &ApiState, slug: &str, want: DesiredState) -> Resu
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": id, "desiredState": want}))).into_response())
 }
 
+/// The body both `GET /v1/internal/builders/{slug}` and `GET /v1/builders/me` answer — one
+/// shape, so the CLI's own status view can never drift from what the gate itself polls.
+fn builder_body(id: &str, e: &crd::Environment) -> serde_json::Value {
+    let st = e.status.as_ref();
+    serde_json::json!({
+        "id": id,
+        "state": phase(st.map(|s| s.phase.as_str()), EnvState::Creating),
+        // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
+        "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
+        "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),
+    })
+}
+
 /// `GET /v1/internal/builders/{slug}` — what the gate polls between `start` and dialling buildkit.
 pub(crate) async fn get_builder(
     State(s): State<Arc<ApiState>>,
@@ -837,15 +850,36 @@ pub(crate) async fn get_builder(
     // `!visible_env`: this route reaches builders and ONLY builders, so a person's environment
     // that happened to be named `bld-…` is not readable through the gate's secret.
     let e = api.get_opt(&id).await.map_err(kube_err)?.filter(|e| !visible_env(e)).ok_or_else(not_found)?;
-    let st = e.status.as_ref();
-    Ok(Json(serde_json::json!({
-        "id": id,
-        "state": phase(st.map(|s| s.phase.as_str()), EnvState::Creating),
-        // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
-        "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
-        "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),
-    }))
-    .into_response())
+    Ok(Json(builder_body(&id, &e)).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct BuilderQuery {
+    /// Absent means the caller's own builder. A team slug they belong to is allowed; anything
+    /// else is a 404, same as every other owner-scoped read — the builder must stay
+    /// indistinguishable from nothing to a stranger.
+    #[serde(default)]
+    team: Option<String>,
+}
+
+/// `GET /v1/builders/me` — the ONE user-facing window onto the hidden builder: never listed,
+/// never started or stopped by a person, but visible so `kl builder status` can say why a build
+/// is waiting. Same body as the internal GET the gate polls.
+pub(crate) async fn get_my_builder(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<BuilderQuery>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    let team = q.team.unwrap_or_default();
+    if !team.is_empty() && !may_act_on(&s, &c, &team).await {
+        return Err(not_found());
+    }
+    let slug = crate::k8s::owner_slug(&c.name, &team);
+    let id = crd::builder_id(slug);
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    let e = api.get_opt(&id).await.map_err(kube_err)?.filter(|e| !visible_env(e)).ok_or_else(not_found)?;
+    Ok(Json(builder_body(&id, &e)).into_response())
 }
 
 /// `GET /v1/internal/builders` — every builder that is meant to be running, so a restarted gate

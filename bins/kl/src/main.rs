@@ -5,6 +5,7 @@
 //!   KL_GATEWAY_OVERRIDE replaces the origin of the api-supplied gateway URL
 
 mod api;
+mod builder;
 mod config;
 mod login;
 mod proxy;
@@ -41,6 +42,20 @@ enum Cmd {
         #[command(subcommand)]
         cmd: WsCmd,
     },
+    /// The hidden per-owner build environment
+    Builder {
+        #[command(subcommand)]
+        cmd: BuilderCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BuilderCmd {
+    /// State, readiness, and why it isn't ready yet
+    Status {
+        #[arg(long)]
+        team: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +91,9 @@ async fn main() {
             WsCmd::Ssh { target, args } => ws::ssh(target, args).await,
             WsCmd::Proxy { id } => proxy::proxy(id).await,
             WsCmd::SshConfig => ws::ssh_config().await,
+        },
+        Cmd::Builder { cmd } => match cmd {
+            BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
     };
     if let Err(e) = r {

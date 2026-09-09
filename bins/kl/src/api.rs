@@ -88,3 +88,37 @@ pub async fn ssh_session(cfg: &crate::config::Config, target: &str) -> Result<Se
         .map_err(|e| Error::Other(e.to_string()))?;
     json(r).await
 }
+
+/// One condition off the builder's `Environment` status -- the same shape `GET
+/// /v1/internal/builders/{slug}` and `/v1/builders/me` both answer.
+#[derive(serde::Deserialize)]
+pub struct Condition {
+    // Kept for the shape's sake, unused by `kl builder status`'s rendering.
+    #[allow(dead_code)]
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct BuilderStatus {
+    pub state: String,
+    pub ready: bool,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// `GET /v1/builders/me` -- the caller's own hidden builder, or their team's with `team`.
+pub async fn builder_status(
+    cfg: &crate::config::Config,
+    team: Option<&str>,
+) -> Result<BuilderStatus, Error> {
+    let mut req = client()
+        .get(format!("{}/v1/builders/me", cfg.api))
+        .bearer_auth(&cfg.token);
+    if let Some(t) = team {
+        req = req.query(&[("team", t)]);
+    }
+    json(req.send().await.map_err(|e| Error::Other(e.to_string()))?).await
+}

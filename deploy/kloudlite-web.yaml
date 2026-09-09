@@ -235,8 +235,10 @@ spec:
           # `internal` is the build gate's: it runs in the k3s region, so this ingress is its ONLY
           # route to the api and a build hangs at `start` without it. Guarded by
           # KLOUDLITE_BUILDER_SECRET the same way `/v1/keys` is by the session JWT — published,
-          # not unauthenticated.
-          - path: /v1/(cli|workspaces|keys|internal)(/.*)?$
+          # not unauthenticated. `builders` is the one person-facing read of the hidden builder
+          # (`GET /v1/builders/me`, session JWT again) — `kl builder status` on a laptop has no
+          # other way in.
+          - path: /v1/(cli|workspaces|keys|internal|builders)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:

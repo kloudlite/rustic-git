@@ -62,7 +62,7 @@ pub use scope::{owner_set_selector, Owned};
 pub use workspaces::keys_changed;
 
 use environments::{
-    get_builder, list_builders, start_builder, stop_builder,
+    get_builder, get_my_builder, list_builders, start_builder, stop_builder,
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
@@ -438,6 +438,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/restore-in-place", post(restore_env_in_place))
         .route("/v1/environments/{id}/intercepts", post(set_intercept))
         .route("/v1/environments/{id}/intercepts/{service}", axum::routing::delete(clear_intercept))
+        .route("/v1/builders/me", get(get_my_builder))
         .merge(internal_router(state.clone()))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
