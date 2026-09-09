@@ -13,8 +13,11 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 use rand::RngCore;
+use serde_json::Value;
 
-use super::{api, poll_json, post};
+use kloudlite_workspaces::slo::catalogue::Suite;
+
+use super::{api, call, poll_json, post};
 use crate::crane::Crane;
 use crate::ctx::Ctx;
 /// Per-step ceilings. Each is well above its catalogue target — a slow answer must be a BREACH
@@ -27,6 +30,8 @@ const TAGS_CEILING: Duration = Duration::from_secs(15);
 const SHARED_CEILING: Duration = Duration::from_secs(90);
 const VISIBILITY_CEILING: Duration = Duration::from_secs(60);
 const CANARY_CEILING: Duration = Duration::from_secs(30);
+/// One push each, member and denied, no convergence to wait for.
+const TEAM_PUSH_CEILING: Duration = Duration::from_secs(60);
 
 /// `reg.tags.visible` is bounded at 5 s by the catalogue, and that bound IS the wait: a tag that
 /// took longer has failed the SLI whether the probe keeps looking or not.
@@ -51,6 +56,11 @@ const CATALOGUE_CEILING: Duration = Duration::from_secs(5);
 const DELETE_CEILING: Duration = Duration::from_secs(15);
 
 pub async fn run(c: &mut Ctx) {
+    // Independent of everything below: its own throwaway team, its own two credentials, and
+    // (like the intercept journey in stage 6) hourly-only — `team_push` reports nothing at
+    // all on a fast run, never a skip, which is what keeps a fast run's row count matching
+    // the catalogue's fast-only rows.
+    team_push(c).await;
     // Every id here needs the personal token, the canary included: `slo-probe/canary` is PRIVATE
     // (bootstrap pushes it and never makes it public), so pulling it is an authenticated pull.
     let Some(secret) = c.state.token_value.clone() else {
@@ -615,6 +625,91 @@ fn write(path: &PathBuf, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// `reg.team.push`, hourly only: a team member's OWN personal credential — never a team-scoped
+/// token — pushes to the team's own image, and an identity that never joined the team is DENIED
+/// the same push.
+///
+/// The registry checks `may_act(caller, owner)` (`crates/registry/src/auth.rs::allow`), never
+/// what a token was minted under, so a fresh throwaway team is the whole of the setup: its only
+/// member is its creator (the probe), which is `experience_teams::repo_shared`'s own "a member's
+/// credential works" rule with the git half swapped for the registry's. `other` never joins it, so
+/// its own personal token is the non-member half for free.
+async fn team_push(c: &mut Ctx) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let Some(probe_secret) = c.state.token_value.clone() else {
+        return c.skip("reg.team.push", "no personal registry token");
+    };
+    let slug = format!("{}-regteam", c.prefix());
+    if let Err(e) = post(
+        c,
+        &api(c, "/v1/teams"),
+        &c.probe_jwt.clone(),
+        serde_json::json!({ "slug": slug, "name": "kloudlite slo registry probe" }),
+    )
+    .await
+    {
+        return c.skip("reg.team.push", &format!("no team: {e:#}"));
+    }
+    let (other_user, other_jwt) = (c.other_user.clone(), c.other_jwt.clone());
+    let minted = match post(
+        c,
+        &api(c, "/v1/tokens"),
+        &other_jwt,
+        serde_json::json!({ "owner": other_user, "name": format!("{}-regteam", c.run_id) }),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return c.skip("reg.team.push", &format!("no credential for the non-member: {e:#}")),
+    };
+    let Some(other_secret) = minted.get("token").and_then(Value::as_str).map(str::to_string) else {
+        return c.skip("reg.team.push", "the non-member's token answer carried no secret");
+    };
+    let token_id = minted.get("_id").and_then(Value::as_str).map(str::to_string);
+    let probe = c.probe_user.clone();
+    let (dir_member, dir_denied) = (c.tmp.join("team-push-member"), c.tmp.join("team-push-denied"));
+    let cfg_denied = c.tmp.join("team-push-denied-cfg");
+    let h = host(c);
+    c.step("reg.team.push", TEAM_PUSH_CEILING, move |c| {
+        let (slug, probe, other_user, h) = (slug.clone(), probe.clone(), other_user.clone(), h.clone());
+        let (probe_secret, other_secret, token_id, other_jwt) =
+            (probe_secret.clone(), other_secret.clone(), token_id.clone(), other_jwt.clone());
+        let (dir_member, dir_denied, cfg_denied) = (dir_member.clone(), dir_denied.clone(), cfg_denied.clone());
+        async move {
+            let layer = random_layer();
+            write_layout(&dir_member, &layer, "slo-team").context("could not build the image")?;
+            let reference = format!("{h}/{slug}/slo-team:latest");
+            let member = authed(c);
+            member.login(&h, &probe, &probe_secret).await.context("the member could not log in")?;
+            let member_ok = member.push(&dir_member, &reference).await;
+
+            write_layout(&dir_denied, &layer, "slo-team").context("could not build the second copy")?;
+            let denied = Crane::new(&c.programs.crane, cfg_denied);
+            let denied_ok = async {
+                denied.login(&h, &other_user, &other_secret).await.context("could not log in as the non-member")?;
+                denied.push(&dir_denied, &reference).await
+            }
+            .await;
+
+            // Revoked either way: a live team-scoped-looking credential for an account outside the
+            // team must never survive the step that proved it should be denied.
+            if let Some(id) = token_id {
+                let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/tokens/{id}")), &other_jwt, None).await;
+            }
+
+            member_ok.context("the team member's own credential was refused")?;
+            if denied_ok.is_ok() {
+                return Err(anyhow!("a non-member's credential pushed to the team's image"));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +769,23 @@ mod tests {
             assert!(s.skipped, "{id} should be skipped, not counted twice");
         }
         let _ = std::fs::remove_file(&blocked);
+    }
+
+    /// `reg.team.push` is the hourly suite's alone: a fast run files no sample for it at all,
+    /// and an hourly run with no personal registry token skips it exactly once — the same shape
+    /// `environment.rs`'s intercept ids use for the same reason.
+    #[tokio::test]
+    async fn reg_team_push_is_hourly_only() {
+        let mut c = crate::testkit::ctx().await;
+        team_push(&mut c).await;
+        assert!(!c.steps.iter().any(|s| s.slo_id == "reg.team.push"), "a fast run reported reg.team.push");
+
+        let mut c = crate::testkit::ctx().await;
+        c.suite = Suite::Hourly;
+        team_push(&mut c).await;
+        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == "reg.team.push").collect();
+        assert_eq!(rows.len(), 1, "reg.team.push was not reported exactly once");
+        assert!(rows[0].skipped && rows[0].detail == "no personal registry token", "{:?}", rows[0]);
     }
 
     #[test]

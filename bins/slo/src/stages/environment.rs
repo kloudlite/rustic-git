@@ -53,6 +53,9 @@ pub async fn run(c: &mut Ctx) {
     // Its OWN environment and workspace, so it neither depends on the fast journey's having
     // worked nor leaves the one stage 7 stops and starts in a state stage 7 did not ask for.
     intercepts(c).await;
+    // Stands nothing up of its own — it only asks about whatever the owner's builder already
+    // is, which is why it costs nothing to also gate hourly-only alongside the intercepts.
+    builder_hidden(c).await;
 }
 
 async fn fast(c: &mut Ctx) {
@@ -662,6 +665,48 @@ async fn refused(c: &mut Ctx, env: &str, ws: &str) {
     .await;
 }
 
+/// `builder.hidden`, hourly only: the probe owner's builder Environment (`bld-{owner}`) is never
+/// listed and its id answers 404 everywhere a person could otherwise reach it.
+///
+/// One step, five requests: the list omission and four verbs, because a builder that fails one of
+/// the five and passes the rest is exactly as reachable as one that fails none — `spec.system`
+/// hides it from the list AND from every id-addressed route, one property, not five to keep in
+/// step with each other.
+const BUILDER_CEILING: Duration = Duration::from_secs(30);
+
+async fn builder_hidden(c: &mut Ctx) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let id = format!("bld-{}", c.probe_user);
+    c.step("builder.hidden", BUILDER_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let id = id.clone();
+        async move {
+            let listed = get(c, &api(c, "/v1/environments"), &jwt).await.context("could not list environments")?;
+            if listed.as_array().is_some_and(|rows| {
+                rows.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            }) {
+                return Err(anyhow!("the builder is listed in GET /v1/environments"));
+            }
+            for (method, path) in [
+                (reqwest::Method::GET, format!("/v1/environments/{id}")),
+                (reqwest::Method::POST, format!("/v1/environments/{id}/start")),
+                (reqwest::Method::POST, format!("/v1/environments/{id}/push")),
+                (reqwest::Method::GET, format!("/v1/volumes/{id}/history")),
+            ] {
+                let (status, text) = raw(c, method.clone(), &api(c, &path), &jwt, None, &[]).await?;
+                if status != reqwest::StatusCode::NOT_FOUND {
+                    return Err(anyhow!("{method} {path} answered {status}, not 404: {}", text.chars().take(200).collect::<String>()));
+                }
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +771,22 @@ mod tests {
             assert_eq!(rows.len(), 1, "{id} was not reported exactly once");
             assert!(rows[0].skipped && rows[0].detail == "no kubeconfig", "{:?}", rows[0]);
         }
+    }
+
+    /// `builder.hidden` is the hourly suite's alone, the same shape as the intercept ids: a fast
+    /// run files no sample for it, and an hourly run reports it exactly once whatever the fleet
+    /// answers.
+    #[tokio::test]
+    async fn builder_hidden_is_hourly_only() {
+        let mut c = testkit::ctx().await;
+        builder_hidden(&mut c).await;
+        assert!(!c.steps.iter().any(|s| s.slo_id == "builder.hidden"), "a fast run reported builder.hidden");
+
+        let mut c = testkit::ctx().await;
+        c.suite = Suite::Hourly;
+        builder_hidden(&mut c).await;
+        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == "builder.hidden").collect();
+        assert_eq!(rows.len(), 1, "builder.hidden was not reported exactly once");
     }
 
     /// The gate above and the catalogue's own `walks()` are two statements of one rule.

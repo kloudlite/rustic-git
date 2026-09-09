@@ -12,7 +12,9 @@ use anyhow::{anyhow, Context, Result};
 use futures::FutureExt;
 use serde_json::Value;
 
-use super::{api, poll_json, post, raw};
+use kloudlite_workspaces::slo::catalogue::Suite;
+
+use super::{api, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 use crate::tools;
 
@@ -33,6 +35,9 @@ const QUOTA_BODY: Duration = Duration::from_secs(15);
 const QUOTA_CEILING: Duration = Duration::from_secs(20);
 const ENV_QUOTA_CEILING: Duration =
     Duration::from_secs(QUOTA_BODY.as_secs() + crate::drill::UNDO_SLACK);
+/// The catalogue's own 180 s for `ws.build.p95`: a real `docker buildx build --push`
+/// dispatched through the gate to a builder that has to start cold.
+const BUILD_CEILING: Duration = Duration::from_secs(180);
 
 /// The disk a probe workspace asks for, well inside `Quota/slo-probe`'s `diskGb`.
 const QUOTA_GB: u64 = 1;
@@ -92,6 +97,7 @@ pub async fn run(c: &mut Ctx) {
     clone(c, &id).await;
     quota_refused(c).await;
     env_quota_refused(c, &id).await;
+    build_push(c, &id).await;
 }
 
 /// `ws.create.p95`: the create AND the wait for `ready`, because "creating a workspace completes"
@@ -703,6 +709,75 @@ async fn refused_over(
         return Err(anyhow!("the refusal of {what} does not name {dim} and its usage: {clipped}"));
     }
     Ok(())
+}
+
+/// `ws.build.p95`, hourly only: `docker buildx build --push` from inside the probe workspace,
+/// dispatched to the owner's hidden builder through the gate, and the pushed manifest read back
+/// over `/v2` with the probe's own registry credential.
+///
+/// Gated on the builder being `stopped` BEFORE the step, and outside its timing: a build that
+/// itself starts a cold builder measures something real, but a run that finds the builder already
+/// RUNNING is measuring somebody else's leftover job, not this one's cold start — and that is its
+/// own finding, reported as a skip rather than folded into the sample as a pass.
+///
+/// The build script runs `/etc/profile.d/kl-build.sh` itself: `ws_exec` is not a login shell (see
+/// its own doc), so nothing that script sets — the `kl` buildx builder, `~/.docker/config.json` —
+/// exists yet when the script starts.
+async fn build_push(c: &mut Ctx, id: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let doc = match get(c, &api(c, "/v1/builders/me"), &c.probe_jwt.clone()).await {
+        Ok(v) => v,
+        Err(e) => return c.skip("ws.build.p95", &format!("could not read the builder: {e:#}")),
+    };
+    if doc.get("state").and_then(Value::as_str) != Some("stopped") {
+        return c.skip("ws.build.p95", "builder was not stopped before the step");
+    }
+    let Some(secret) = c.state.token_value.clone() else {
+        return c.skip("ws.build.p95", "no personal registry token");
+    };
+    let (probe, registry, run_id, id) =
+        (c.probe_user.clone(), super::registry::host(c), c.run_id.clone(), id.to_string());
+    c.step("ws.build.p95", BUILD_CEILING, move |c| {
+        let (probe, registry, run_id, id, secret) =
+            (probe.clone(), registry.clone(), run_id.clone(), id.clone(), secret.clone());
+        async move {
+            let script = format!(
+                "sh /etc/profile.d/kl-build.sh\n\
+export BUILDKIT_HOST=tcp://builder-gate.kloudlite-system.svc:1234\n\
+export KL_OWNER={probe}\n\
+export KL_REGISTRY_HOST={registry}\n\
+mkdir -p /tmp/d\n\
+printf 'FROM alpine:3.20\\nRUN echo slo > /slo\\n' > /tmp/d/Dockerfile\n\
+docker buildx build -t $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id} --push /tmp/d"
+            );
+            let (code, out, err) = ws_exec(c, &id, &script, BUILD_CEILING).await?;
+            if code != 0 {
+                return Err(anyhow!("the build/push failed ({code}): {} {}", out.trim(), err.trim()));
+            }
+            let scope = format!("repository:{probe}/slo-build:pull");
+            let bearer = super::registry::bearer(c, Some(&secret), &scope)
+                .await
+                .context("could not mint a registry token to read the manifest back")?;
+            let url = format!("{}/v2/{probe}/slo-build/manifests/{run_id}", super::registry::base(c));
+            let (status, body) = raw(
+                c,
+                reqwest::Method::GET,
+                &url,
+                &bearer,
+                None,
+                &[("accept", "application/vnd.oci.image.manifest.v1+json".to_string())],
+            )
+            .await?;
+            if !status.is_success() {
+                return Err(anyhow!("the pushed manifest never appeared: {status}: {}", body.chars().take(200).collect::<String>()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `env.quota.refused`: the OTHER three verbs behind the one gate.

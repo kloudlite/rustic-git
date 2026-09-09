@@ -291,6 +291,35 @@ service comes back up — but the wish STAYS, because a transient blip must neve
 person asked for, and it takes hold again when the workspace returns. Only
 `DELETE /v1/environments/{id}/intercepts/{service}` removes a wish.
 
+Image builds run on a hidden per-owner builder, not on the workspace pod: `crd::builder_id(slug)`
+names it `bld-{slug}`, `EnvironmentSpec::system` (`crd::BUILDER_SYSTEM`) is the one field that makes
+it that instead of an ordinary Environment — `visible_env` is the filter every listing and every
+`/v1/environments/{id}` read applies, so it never appears and its id 404s the way this stage's own
+`builder.hidden` probes. A workspace's buildx is configured once, at `k8s::BUILDKIT_HOST`
+(`tcp://builder-gate.kloudlite-system.svc:1234`), and never learns it moved: behind that address
+`kloudlite-builder-gate` starts the owner's buildkitd on demand (`POST /v1/internal/builders/{slug}/start`,
+polled until `ready`, within `ClusterSettings`'s `builder_start_secs`), splices the connection
+through, and stops it once nobody has dialled in for `builder_idle_secs` — the same shape as a
+workspace pod itself, one layer further from a person. It runs under gvisor as root
+(`k8s::builder_hardened`), because buildkitd's rootless mode needs `newuidmap`/`newgidmap` and
+gvisor's own capability emulation, never the host's, is what its `add` list is sized to. The push
+credential is `registry-token` in the workspace's `user-key` Secret, read by
+`docker-credential-kl` so `docker buildx build --push` never sees a raw token on the command line;
+it is minted alongside every other key projection and re-minted on the same beat
+(`refresh_user_key_secrets`, `KEYS_RESYNC_SECS`), so a rotated or revoked credential reaches a
+running workspace without a restart. On the registry side a build is an ordinary owner push: `crates/registry/src/auth.rs::allow`
+checks `may_act(caller, owner)` exactly as a team's git push does, never what the token was minted
+under, which is what lets a team's builder push under the team's name with a member's own personal
+credential. `GET /v1/builders/me` is the one user-facing window onto all of this — never listed,
+never started or stopped by a person — so `kl builder status` can say why a build is waiting rather
+than a person guessing at a hidden pod. The ingress carries `builders` in its `/v1/(cli|workspaces|keys|internal|builders)(/.*)?$`
+allow-list beside `internal` (`deploy/kloudlite-web.yaml`), because the CLI talks to `/v1/builders/me`
+directly and the gate talks to `/v1/internal/builders/*`. Quota counts the builder's cpu and memory
+while it runs and its disk always (`crd::BUILDER_CACHE_GB`), but never its `environments` slot — an
+owner never made it and cannot see it — which is why `default_quota`'s derived cpu/memory ceilings
+(40/80 for a person, 148/296 for a team) already have one builder's worth of `PodResources::default()`
+folded in rather than being spent by a create nobody asked for.
+
 `Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only
 writer, via `/v1/regions` (server-side apply, so a second POST of the same id retires or renames it
 rather than 409ing). Snapshot BYTES have

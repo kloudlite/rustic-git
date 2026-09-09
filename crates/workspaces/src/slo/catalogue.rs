@@ -232,6 +232,10 @@ pub const CATALOGUE: &[Slo] = &[
     // `_catalog` and `/api/{owner}/images` are the two any-node exceptions to the routing rule, so
     // a routing regression shows here before it shows anywhere a person would notice.
     Slo { id: "reg.catalogue", feature: "Container registry", sli: "The image catalogue lists a pushed image from any node", target: bound(5_000), suite: Suite::Fast, stage: "4 · Registry" },
+    // Hourly: a fresh throwaway team, whose only member is its creator, is enough to prove
+    // both halves of the rule the registry actually enforces (`may_act(caller, owner)`, never
+    // what a token was minted under) — no invite round trip needed every five minutes.
+    Slo { id: "reg.team.push", feature: "Container registry", sli: "A team member's personal credential pushes to the team's image, and a non-member's is DENIED", target: avail(99.9), suite: Suite::Hourly, stage: "4 · Registry" },
 
     // Stage 5 · workspace
     Slo { id: "ws.create.p95", feature: "Workspaces", sli: "Creating a workspace completes", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },
@@ -260,6 +264,10 @@ pub const CATALOGUE: &[Slo] = &[
     // Create is only one of the four verbs behind `guard_alloc`; restore, clone and push route
     // through the same gate and none was probed.
     Slo { id: "env.quota.refused", feature: "Workspaces", sli: "An over-quota restore, clone and push are each refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // Hourly, like the intercept journey: the build itself waits on the gate starting a pod,
+    // which is too much to pay every five minutes, and the builder must be Stopped going in or
+    // the sample is timing someone else's cold start.
+    Slo { id: "ws.build.p95", feature: "Workspaces", sli: "`docker buildx build` of a two-line Dockerfile in the probe workspace is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step", target: p95(180_000), suite: Suite::Hourly, stage: "5 · Workspace" },
 
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
@@ -282,6 +290,9 @@ pub const CATALOGUE: &[Slo] = &[
     // `spec.intercepts` would silently discard what the person asked for.
     Slo { id: "env.intercept.fallback", feature: "Environments", sli: "Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
     Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+    // Hourly: proving a hidden thing stays hidden is not a five-minute cost, and the builder
+    // is not stood up by this id — it asks about whatever the owner's builder already is.
+    Slo { id: "builder.hidden", feature: "Environments", sli: "The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
