@@ -1187,6 +1187,21 @@ pub fn env_unit_resources() -> PodResources {
     }
 }
 
+/// The namespace `LimitRange` ceiling for an environment: the LARGEST shape any of its services
+/// renders with, the env unit when none names its own. `limit_range`'s `max` is enforced at
+/// admission, so a service that asks for more than the unit — the builder, at
+/// `PodResources::default()` — was refused by the API server before it ever ran, and the
+/// StatefulSet retried forever against a ceiling nothing else could raise.
+pub fn env_limit_resources(services: &[model::Service]) -> PodResources {
+    use crate::quota::{mebibytes, millicores};
+    services
+        .iter()
+        .filter_map(|s| s.resources.clone())
+        .chain(std::iter::once(env_unit_resources()))
+        .max_by_key(|r| (millicores(&r.cpu_limit), mebibytes(&r.memory_limit)))
+        .expect("the unit is always a candidate")
+}
+
 /// One StatefulSet per service in an environment.
 ///
 /// **Every mount goes through `validate_mount` here.** An environment has ONE volume, and each
@@ -1961,6 +1976,17 @@ mod tests {
         let plain = service_statefulset(&svc("data", "/data"), "e", "e", "alice", &ctx()).unwrap();
         let p = &plain.spec.unwrap().template.spec.unwrap().containers[0];
         assert_eq!(p.resources.as_ref().unwrap().limits.as_ref().unwrap()["cpu"].0, "2");
+    }
+
+    /// The namespace ceiling follows the biggest service, so a builder's 4 vCPU pod is admitted
+    /// where an ordinary environment stays at the unit's 2.
+    #[test]
+    fn the_limit_range_ceiling_is_the_largest_service_shape() {
+        let mut big = svc("buildkit", "/cache");
+        big.resources = Some(PodResources::default());
+        assert_eq!(env_limit_resources(&[svc("db", "/data"), big]).cpu_limit, "4");
+        assert_eq!(env_limit_resources(&[svc("db", "/data")]).cpu_limit, "2");
+        assert_eq!(env_limit_resources(&[]).cpu_limit, "2");
     }
 
     /// The spike's ruling, tested: an ordinary service keeps `hardened()`'s narrow list, and a

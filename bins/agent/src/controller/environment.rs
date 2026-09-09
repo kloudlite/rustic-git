@@ -379,11 +379,11 @@ async fn run_environment(
         ctx,
     )
     .await?;
-    // The env unit's ceiling, matching `service_deployment`'s resources: 4 GB limit, packed at the
-    // model's 1.5x oversubscription. Owned by the Environment — this namespace holds exactly one.
+    // The ceiling the services render under — the env unit, or the largest shape a service names
+    // (the builder). Owned by the Environment — this namespace holds exactly one.
     ensure(
         &Api::<LimitRange>::namespaced(ctx.client.clone(), ns),
-        &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_unit_resources(), Some(owner_ref)),
+        &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_limit_resources(&e.spec.services), Some(owner_ref)),
         ctx,
     )
     .await?;
