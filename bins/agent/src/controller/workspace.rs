@@ -560,9 +560,10 @@ async fn stop_workspace(
     // pod, taking a running workspace down with it.
     //
     // Nothing ran, nothing to cut: with no pod there is no writer, so the worktree holds exactly
-    // what its last snapshot or sync point already does. An environment has no equivalent signal —
-    // its StatefulSets are scaled to zero by `drain_services` on the way in, so "no pods now" says
-    // nothing about whether any ran — and keeps its unconditional cut.
+    // what its last snapshot or sync point already does. An environment cannot read its pods the
+    // same way — `drain_services` scales its StatefulSets to zero on the way in, so "no pods now"
+    // says nothing — so it asks the same question of the disk instead: whether its worktree was
+    // ever materialised.
     let cut = prev.pod_ref.is_some();
     if cut {
         match stop_push(&stop_name(w), &w.spec.owner, &id, &w.name_any(), w, crd::SnapshotState::of_workspace(w), ctx).await? {

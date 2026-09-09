@@ -2548,6 +2548,12 @@ fn replica_list(rows: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
     })
 }
 
+/// The environment's live worktree on disk. Its existence is what tells the stop path there is
+/// something to cut — every test that expects a cut must materialise it.
+fn materialise_env(tmp: &std::path::Path) {
+    std::fs::create_dir_all(tmp.join("vol").join("env-1").join("live").join("env-1")).unwrap();
+}
+
 /// Everything a stopping environment touches before the flush gate: the drain, and the volume.
 fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec<Route> {
     vec![
@@ -2577,6 +2583,7 @@ fn env_flush_routes(stop: serde_json::Value, replicas: serde_json::Value) -> Vec
 #[tokio::test]
 async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
     let tmp = tempfile::tempdir().unwrap();
+    materialise_env(tmp.path());
     let ready = stop_snapshot(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(1)}));
     // NOBODY holds it: under the old gate this was a ten-minute wait, and now it is a condition.
     let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[])));
@@ -2610,6 +2617,7 @@ async fn a_stop_tears_down_as_soon_as_the_cut_is_ready() {
 #[tokio::test]
 async fn a_stop_whose_cut_is_not_ready_still_tears_nothing_down() {
     let tmp = tempfile::tempdir().unwrap();
+    materialise_env(tmp.path());
     let wedged = stop_snapshot(serde_json::json!({"phase": "working"}));
     let (ctx, rec) = ctx(tmp.path(), env_flush_routes(wedged, replica_list(&[])));
 
@@ -2617,6 +2625,33 @@ async fn a_stop_whose_cut_is_not_ready_still_tears_nothing_down() {
 
     assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "no cut, no teardown: {:?}", rec.calls());
     assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "FlushBeforeStop");
+}
+
+/// A builder is an `Environment` created `Stopped` from birth: no pod ever ran, no worktree was
+/// ever materialised, and `btrfs subvolume snapshot` of a path that does not exist fails forever.
+/// It must reach `Stopped` in one pass, cut nothing, and clear the unfulfillable stop request an
+/// earlier build of the agent left behind.
+#[tokio::test]
+async fn an_environment_that_never_materialised_stops_without_a_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No `materialise_env`: nothing on disk, which is the whole point.
+    let pending = stop_snapshot(serde_json::json!({"phase": "working"}));
+    let mut routes = env_flush_routes(pending.clone(), replica_list(&[]));
+    routes.push(Route { method: "DELETE", path: STOP_REQ.into(), status: 200, body: pending });
+    let (ctx, rec) = ctx(tmp.path(), routes);
+
+    // Exactly the fleet's shape: the `Waiting` arm wrote `phase: running` itself on an earlier
+    // pass, which is why phase is not evidence that anything ever ran.
+    kloudlite_agent::controller::apply_environment(&stopping_env(), &ctx).await.unwrap();
+
+    assert!(
+        !rec.calls().iter().any(|c| c.starts_with("POST /apis/kloudlite.io/v1alpha1/snapshots")),
+        "nothing to cut: {:?}",
+        rec.calls()
+    );
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {STOP_REQ}")), "the unfulfillable request goes: {:?}", rec.calls());
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "the teardown still runs: {:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["phase"], "stopped");
 }
 
 /// The `Replicated` condition is the ONE truth about whether a stopped parent can start

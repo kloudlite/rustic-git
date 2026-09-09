@@ -174,32 +174,67 @@ async fn stop_environment(
     // requested.
     // The worktree is the environment's own name — the same string the sync beat cuts under, so
     // the stop's sync point extends that chain rather than starting a second one.
-    match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, crd::SnapshotState::of_environment(e), ctx).await? {
-        StopPush::Landed => {}
-        StopPush::Waiting => {
-            let st = crd::EnvironmentStatus {
-                // Still `running`: the StatefulSets exist (at zero) until the push lands, and
-                // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
-                // `Creating`, which is both wrong and alarming. Progress belongs in the condition
-                // below, which is where a reader looks for it.
-                phase: crd::Phase::Running,
-                observed_generation: None,
-                service_status: vec![],
-                conditions: vec![crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen)],
-                ..e.status.clone().unwrap_or_default()
-            };
-            write_env_status(e, st, ctx).await?;
-            return Ok(Action::requeue(TICK));
-        }
+    //
+    // Unless there is nothing on disk to cut. A cut protects bytes some writer produced, and an
+    // environment whose worktree was never materialised has none — a builder is created `Stopped`
+    // from birth, so `btrfs subvolume snapshot` of a path that does not exist failed every tick
+    // and parked it in `FlushBeforeStop` forever. The worktree's existence IS the signal the
+    // workspace path gets from its `pod_ref`. A recorded service short-circuits the stat, and is
+    // also the safe direction: anything that ever ran is cut unconditionally, because losing its
+    // last state is exactly what this path exists to prevent. Phase is deliberately not evidence —
+    // the `Waiting` arm below writes `Running` itself, so the stuck builder looked like it ran.
+    let wt = e.name_any();
+    let ran = !prev.service_status.is_empty() || {
+        let (engine, vol_id, worktree) = (ctx.engine.clone(), id.clone(), wt.clone());
+        tokio::task::spawn_blocking(move || engine.pool.worktree(&vol_id, &worktree).exists())
+            .await
+            .map_err(|err| ReconcileErr(format!("worktree stat panicked: {err}")))?
     };
+    if !ran {
+        // An unfulfillable request, not a pending one: there is no subvolume to snapshot and never
+        // will be under this generation, so an earlier pass's `stop-{env}` is deleted rather than
+        // left Working forever. A `Ready` one is somebody's sync point — never ours to delete.
+        let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+        let name = stop_name(e);
+        let pending = api
+            .get_opt(&name)
+            .await?
+            .is_some_and(|s| s.status.as_ref().map(|st| st.phase) != Some(crd::Phase::Ready));
+        if pending {
+            delete_ignoring_404(&api, &name).await?;
+        }
+    } else {
+        match stop_push(&stop_name(e), &e.spec.owner, &vol.name_any(), &e.name_any(), e, crd::SnapshotState::of_environment(e), ctx).await? {
+            StopPush::Landed => {}
+            StopPush::Waiting => {
+                let st = crd::EnvironmentStatus {
+                    // Still `running`: the StatefulSets exist (at zero) until the push lands, and
+                    // `model::EnvState` has no `Stopping` — an unknown phase silently becomes
+                    // `Creating`, which is both wrong and alarming. Progress belongs in the condition
+                    // below, which is where a reader looks for it.
+                    phase: crd::Phase::Running,
+                    observed_generation: None,
+                    service_status: vec![],
+                    conditions: vec![crd::condition("Progressing", true, "FlushBeforeStop", "waiting for the final sync point", gen)],
+                    ..e.status.clone().unwrap_or_default()
+                };
+                write_env_status(e, st, ctx).await?;
+                return Ok(Action::requeue(TICK));
+            }
+        }
+    }
     for svc in &e.spec.services {
         forget_applied(ctx, "StatefulSet", ns, &svc.name);
         delete_ignoring_404(deployments, &svc.name).await?;
     }
     // Poke every placeable peer: the cut exists NOW, and waiting out the pull beat is what used to
     // make a cross-node start take minutes. Best-effort by construction — the ticker still comes.
-    let live = crate::peer::placeable_nodes(ctx).await;
-    crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
+    // Only when there WAS a cut: nothing new left this node otherwise, and waking the fleet for a
+    // no-op stop is a cluster-wide listing per tick.
+    if ran {
+        let live = crate::peer::placeable_nodes(ctx).await;
+        crate::peer::wake_peers(ctx, &live, &ctx.peer_secret).await;
+    }
     let replicated = replicated_condition(ctx, &id, &e.name_any(), vol.spec.replicas, &prev.conditions, gen).await?;
     let st = crd::EnvironmentStatus {
         phase: crd::Phase::Stopped,
