@@ -56,10 +56,14 @@ pub(crate) fn probe_quota() -> Value {
         "workspaces": 10,
         "environments": 6,
         "snapshots": 20,
-        // Room for the owner's hidden builder environment on top of the journey: its cache volume
-        // is `BUILDER_CACHE_GB` (50 GB) and it costs 4 vCPU / 8 GiB while it runs. Held equal to
-        // deploy/k3s/quotas-slo.yaml by `quota_yaml` below — teardown RESTORES these, so a stale
-        // copy here would undo the region's limits every five minutes.
+        // This function and deploy/k3s/quotas-slo.yaml are ONE table, held equal by `quota_yaml`
+        // below: teardown restores the region's Quota from here (`PUT /admin/quota/{owner}`), so a
+        // number changed only in the yaml is reverted within five minutes — which is exactly what
+        // happened on 2026-09-09, three fast runs failing `diskGb: 51 of 40` against a CR that
+        // briefly read 90. Room for the owner's hidden builder environment on top of the journey:
+        // its cache volume is `BUILDER_CACHE_GB` (50 GB) and it costs 4 vCPU / 8 GiB while it
+        // runs, charged to the owner like everything else. Too small and every create after the
+        // builder's back-fill answers 409 on diskGb.
         "diskGb": 90,
         "cpu": 52,
         "memoryGb": 104,
@@ -562,5 +566,17 @@ mod quota_yaml {
             }
         }
         assert_eq!(seen, crate::ctx::SUITE_TENANTS.len(), "one primary Quota object per suite");
+    }
+
+    /// The baseline has to hold the owner's builder AND the journey beside it, or the builder's
+    /// back-fill alone puts every later create over. `quota.refused` is unaffected either way: it
+    /// asks for `u32::MAX` GB, which overshoots any limit this table could carry.
+    #[test]
+    fn the_baseline_holds_a_builder_and_the_journey_beside_it() {
+        let disk = super::probe_quota()["diskGb"].as_u64().unwrap();
+        let journey = kloudlite_workspaces::crd::BUILDER_CACHE_GB
+            + super::probe_quota()["workspaces"].as_u64().unwrap() * crate::stages::workspace::QUOTA_GB;
+        assert!(disk >= journey, "diskGb {disk} cannot hold a builder plus {journey} GB of working copies");
+        assert!(u64::from(u32::MAX) > disk, "the over-quota create must still overshoot the baseline");
     }
 }

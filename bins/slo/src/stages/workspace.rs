@@ -40,7 +40,7 @@ const ENV_QUOTA_CEILING: Duration =
 const BUILD_CEILING: Duration = Duration::from_secs(180);
 
 /// The disk a probe workspace asks for, well inside `Quota/slo-probe`'s `diskGb`.
-const QUOTA_GB: u64 = 1;
+pub(crate) const QUOTA_GB: u64 = 1;
 
 /// The container in a workspace pod (`k8s::workspace_pod`). Named rather than defaulted: the pod
 /// grows a second container the day anything is side-carred, and an exec with no container named
