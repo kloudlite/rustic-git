@@ -583,7 +583,9 @@ async fn get_my_builder_answers_a_team_the_caller_belongs_to() {
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["id"], "bld-acme");
-    assert_eq!(body["state"], "creating");
+    // Meant to be Stopped and not observed Running: `stopped`, whatever interim phase the claim
+    // wrote — nothing can be building, and the probe waits on this word before a cold start.
+    assert_eq!(body["state"], "stopped");
     assert_eq!(body["ready"], false);
 }
 
