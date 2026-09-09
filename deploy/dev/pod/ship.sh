@@ -37,6 +37,9 @@ cargo build --release --locked --bins 2>&1 | tail -1
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
 CTX=/work/ctx; rm -rf "$CTX"; mkdir -p "$CTX/target/release"
 cp Dockerfile .dockerignore "$CTX/"
+# The workspace image COPYs two scripts from deploy/workspace-image (CI's context is `.`, so it
+# never notices); a staging context that holds only binaries fails that COPY with "not found".
+mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
 for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl; do
   ln -f /work/target/release/$b "$CTX/target/release/$b"
 done
