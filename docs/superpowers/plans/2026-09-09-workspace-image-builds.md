@@ -39,7 +39,8 @@ metadata:
   namespace: ws-slo-probe
 spec:
   runtimeClassName: gvisor
-  nodeName: session-0
+  # Where a builder will actually run: an Environment lands on a node with the `env` role.
+  nodeName: env-0
   restartPolicy: Never
   containers:
     - name: buildkit
@@ -300,7 +301,7 @@ fi
 - [ ] **Step 1:** Ship the branch (`deploy/dev/pod/ship.sh`); pin.
 - [ ] **Step 2:** Order on the region, BEFORE any image pin: `crds.yaml` (the new spec fields), `agent-rbac.yaml` (unchanged, apply anyway), the `kloudlite-builder-gate` Secret (a fresh random secret, `kubectl create secret generic`), `builder-gate.yaml`. Then the api Deployment gains `KLOUDLITE_BUILDER_SECRET` (`deploy/kloudlite.yaml`) and rolls; then `deploy/roll.sh`; then `agent-daemonset.yaml` + `gateway.yaml`.
 - [ ] **Step 3:** Patch `default-user` / `default-team` to `40/80` and `148/296`.
-- [ ] **Step 4:** Hand test on `centralindia-k3s`: in the owner's real workspace, `docker buildx build -t <registry>/karthik1729/hello:1 --push .` on a two-line Dockerfile; watch `bld-karthik1729` go Stopped → Running → (11 min later) Stopped; `docker pull` it from the laptop. Then the same against a team image as a member.
+- [ ] **Step 4:** Hand test on `centralindia-k3s` (the builder lands on `env-0`, the workspace stays on its session node — the gate crosses that): in the owner's real workspace, `docker buildx build -t <registry>/karthik1729/hello:1 --push .` on a two-line Dockerfile; watch `bld-karthik1729` go Stopped → Running → (11 min later) Stopped; `docker pull` it from the laptop. Then the same against a team image as a member.
 - [ ] **Step 5:** Suspend fast + hourly crons; `deploy/dev/run-job.sh fast` then `hourly`; read the three ids BY RESULT from `default.otel_logs`; restore the crons. `reconcile.queue.failed` and the gate's own logs clean for 10 minutes.
 - [ ] **Step 6:** Merge to master, push origin and platform, record the fleet lessons in the ledger and in memory.
 
