@@ -214,16 +214,21 @@ async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net
         if gate.api.ready(slug).await.unwrap_or(false) {
             return Wait::Ready;
         }
-        if tokio::time::Instant::now() + POLL_GAP > deadline {
-            return Wait::Timeout;
-        }
         if !watch {
+            if tokio::time::Instant::now() + POLL_GAP > deadline {
+                return Wait::Timeout;
+            }
             tokio::time::sleep(POLL_GAP).await;
             continue;
         }
         let mut byte = [0u8; 1];
         tokio::select! {
-            _ = tokio::time::sleep(POLL_GAP) => {}
+            // The hangup is looked at FIRST. A client that left at the same instant the budget
+            // ran out is a client that left, not a builder that timed out — and under a paused
+            // test clock the deadline arm is always ready, so without the bias it always won and
+            // a hangup was counted as a timeout whenever the run was slow (seen in the full
+            // workspace test run, never alone).
+            biased;
             peeked = sock.peek(&mut byte) => match peeked {
                 Ok(0) => return Wait::ClientGone,
                 Ok(_) => {
@@ -233,6 +238,8 @@ async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net
                 // A broken socket is a gone client; there is nothing to splice to either way.
                 Err(_) => return Wait::ClientGone,
             },
+            _ = tokio::time::sleep_until(deadline) => return Wait::Timeout,
+            _ = tokio::time::sleep(POLL_GAP) => {}
         }
     }
 }
