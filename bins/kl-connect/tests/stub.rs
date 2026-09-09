@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Default)]
 pub struct Stub {
-    /// Every `/v1` request served — what `kl ws ssh` must keep to one.
+    /// Every `/v1` request served — what `kl-connect ws ssh` must keep to one.
     pub api_calls: Arc<AtomicUsize>,
 }
 

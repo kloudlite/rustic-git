@@ -1,4 +1,4 @@
-//! `kl ws ssh-config` against a stub api: the rendering is a contract (people read and edit these
+//! `kl-connect ws ssh-config` against a stub api: the rendering is a contract (people read and edit these
 //! files), and the `Include` line must survive being written twice.
 
 mod stub;
@@ -18,7 +18,7 @@ fn renders_a_block_per_workspace_and_includes_once() {
     stub::write_config(cfg.path(), &api);
 
     let run = || {
-        let out = Command::new(env!("CARGO_BIN_EXE_kl"))
+        let out = Command::new(env!("CARGO_BIN_EXE_kl-connect"))
             .args(["ws", "ssh-config"])
             .env("HOME", home.path())
             .env("KL_CONFIG_DIR", cfg.path())
@@ -34,19 +34,19 @@ fn renders_a_block_per_workspace_and_includes_once() {
 
     let known = cfg.path().join("known_hosts").display().to_string();
     let want = format!(
-        "# Managed by kl. Edits are overwritten by `kl ws ssh-config`.\n\
+        "# Managed by kl-connect. Edits are overwritten by `kl-connect ws ssh-config`.\n\
          \n\
          Host gh\n  \
            HostName ws-1\n  \
            User kl\n  \
-           ProxyCommand kl ws proxy ws-1\n  \
+           ProxyCommand kl-connect ws proxy ws-1\n  \
            UserKnownHostsFile {known}\n  \
            HostKeyAlias ws-1\n\
          \n\
          Host api\n  \
            HostName ws-2\n  \
            User kl\n  \
-           ProxyCommand kl ws proxy ws-2\n  \
+           ProxyCommand kl-connect ws proxy ws-2\n  \
            UserKnownHostsFile {known}\n  \
            HostKeyAlias ws-2\n"
     );

@@ -180,9 +180,9 @@ RUN set -eux; \
     rm -f /tmp/crane.tgz
 ARG PROFILE=release
 COPY target/${PROFILE}/kloudlite-slo /usr/local/bin/kloudlite-slo
-# `kl` is the user CLI, built by the same `cargo build`: stage 1's `id.cli.flow` and stage 5's
+# `kl-connect` is the laptop CLI, built by the same `cargo build`: stage 1's `id.cli.flow` and stage 5's
 # tunnel checks exercise the CLI a person actually runs, not a reimplementation of it.
-COPY target/${PROFILE}/kl /usr/local/bin/kl
+COPY target/${PROFILE}/kl-connect /usr/local/bin/kl-connect
 # uid 1001 as everywhere else. No home directory: the pod's root filesystem is read-only and
 # everything git, ssh and crane write goes under the /tmp emptyDir (HOME is set to it in the
 # CronJob), so a home baked in here would only be a read-only trap.

@@ -9,7 +9,7 @@ pub struct Workspace {
     pub packages: Vec<String>,
 }
 
-/// Serialized too: `kl ws ssh` hands it to the ProxyCommand child through the environment.
+/// Serialized too: `kl-connect ws ssh` hands it to the ProxyCommand child through the environment.
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct Session {
     /// The workspace it was minted for — the api resolves a name, so this is how the CLI learns
@@ -42,7 +42,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Unauthorized => write!(f, "your login has expired — run `kl login`"),
+            Error::Unauthorized => write!(f, "your login has expired — run `kl-connect login`"),
             Error::Other(m) => write!(f, "{m}"),
         }
     }
@@ -93,7 +93,7 @@ pub async fn ssh_session(cfg: &crate::config::Config, target: &str) -> Result<Se
 /// /v1/internal/builders/{slug}` and `/v1/builders/me` both answer.
 #[derive(serde::Deserialize)]
 pub struct Condition {
-    // Kept for the shape's sake, unused by `kl builder status`'s rendering.
+    // Kept for the shape's sake, unused by `kl-connect builder status`'s rendering.
     #[allow(dead_code)]
     #[serde(rename = "type")]
     pub type_: String,

@@ -40,7 +40,7 @@ cp Dockerfile .dockerignore "$CTX/"
 # The workspace image COPYs two scripts from deploy/workspace-image (CI's context is `.`, so it
 # never notices); a staging context that holds only binaries fails that COPY with "not found".
 mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
-for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl; do
+for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
   ln -f /work/target/release/$b "$CTX/target/release/$b"
 done
 

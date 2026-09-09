@@ -294,7 +294,7 @@ pub(crate) async fn ws_exec(c: &Ctx, id: &str, script: &str, cap: Duration) -> R
 }
 
 /// `gw.tunnel.p95`: the whole `kl ssh` path — mint a session, then let `ssh` reach the pod through
-/// `kl ws proxy`, which is the websocket tunnel to the region's gateway.
+/// `kl-connect ws proxy`, which is the websocket tunnel to the region's gateway.
 async fn tunnel(c: &mut Ctx, id: &str) {
     let key = c.cfg.ssh_key_path.clone();
     let id = id.to_string();
@@ -549,7 +549,7 @@ async fn unregistered_refused(c: &mut Ctx, id: &str) {
     .await;
 }
 
-/// The connect ticket `kl ws ssh` mints, as the JSON `kl ws proxy` reads from its environment.
+/// The connect ticket `kl-connect ws ssh` mints, as the JSON `kl-connect ws proxy` reads from its environment.
 pub(crate) async fn ssh_session(c: &Ctx, id: &str) -> Result<String> {
     let url = api(c, &format!("/v1/workspaces/{id}/ssh-session"));
     let doc = post(c, &url, &c.probe_jwt.clone(), Value::Null)
@@ -558,18 +558,18 @@ pub(crate) async fn ssh_session(c: &Ctx, id: &str) -> Result<String> {
     Ok(doc.to_string())
 }
 
-/// What `kl ws proxy` expects to be handed: the whole `Session` document, so the child makes no api
-/// call and needs no `kl login` state in the pod.
+/// What `kl-connect ws proxy` expects to be handed: the whole `Session` document, so the child makes no api
+/// call and needs no `kl-connect login` state in the pod.
 pub(crate) fn session_env(session: &str) -> std::collections::HashMap<String, String> {
     std::collections::HashMap::from([(SESSION_ENV.to_string(), session.to_string())])
 }
 
-/// `kl`'s own `proxy::SESSION_ENV` (`bins/kl/src/proxy.rs`). Repeated rather than imported: `kl` is
+/// `kl`'s own `proxy::SESSION_ENV` (`bins/kl-connect/src/proxy.rs`). Repeated rather than imported: `kl` is
 /// a binary crate with no library target, so there is nothing to depend on — and the name is part
 /// of the CLI's contract with ssh, which is exactly the kind of thing this probe exists to catch.
 const SESSION_ENV: &str = "KL_SSH_SESSION";
 
-/// ssh's argv for a workspace, through `kl ws proxy`.
+/// ssh's argv for a workspace, through `kl-connect ws proxy`.
 ///
 /// `StrictHostKeyChecking=no` is CORRECT here, unlike everywhere else in this probe: a workspace
 /// pod's host key is generated per workspace when the pod is created, so there is nothing to pin —
@@ -892,12 +892,12 @@ mod tests {
 
     /// The ProxyCommand IS the gateway path: without it ssh would dial the workspace directly,
     /// which nothing routes, and the step would measure a DNS failure. The session goes down to the
-    /// proxy child through the environment, exactly as `kl ws ssh` hands it over.
+    /// proxy child through the environment, exactly as `kl-connect ws ssh` hands it over.
     #[test]
     fn gateway_step_uses_kl_proxy() {
-        let args = ssh_args("kl", "/etc/slo-ssh/id_ed25519", "ws-abc");
+        let args = ssh_args("kl-connect", "/etc/slo-ssh/id_ed25519", "ws-abc");
         assert!(
-            args.iter().any(|a| a == "ProxyCommand=kl ws proxy ws-abc"),
+            args.iter().any(|a| a == "ProxyCommand=kl-connect ws proxy ws-abc"),
             "{args:?}"
         );
         assert!(args.iter().any(|a| a == "kl@ws-abc"), "{args:?}");

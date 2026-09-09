@@ -263,15 +263,15 @@ fi
 - [ ] **Step 4: Deploy shape.** `deploy/k3s/builder-gate.yaml` mirrors `gateway.yaml` (uid 1001, read-only root, `KLOUDLITE_BUILDER_SECRET` from a Secret `kloudlite-builder-gate`, `KLOUDLITE_API_URL` the api's in-cluster URL from the same place the gateway reads its own). `deploy/pin.sh` learns the image. The api Deployment in `deploy/kloudlite.yaml` gains `KLOUDLITE_BUILDER_SECRET` from the same Secret.
 - [ ] **Step 5: Commit** `"The builder gate: start on the first connection, stop after idle"`.
 
-### Task 8: `kl builder status`
+### Task 8: `kl-connect builder status`
 
 **Files:**
-- Modify: `bins/kl/src/main.rs` (subcommand), `bins/kl/src/api.rs` (one GET)
+- Modify: `bins/kl-connect/src/main.rs` (subcommand), `bins/kl-connect/src/api.rs` (one GET)
 - Modify: `crates/workspaces/src/api/environments.rs`: `GET /v1/builders/me` — the ONE user-facing read, answering the caller's own builder (person, or `?team=`), the same body as the internal GET
-- Test: `bins/kl` tests, the api route test (a stranger's team → 404)
+- Test: `bins/kl-connect` tests, the api route test (a stranger's team → 404)
 
-- [ ] **Step 1:** failing test for the route (member sees it, non-member 404) and for `kl builder status` printing `state`, `ready` and the first non-True condition's message.
-- [ ] **Step 2:** implement; `kl builder status --team acme`.
+- [ ] **Step 1:** failing test for the route (member sees it, non-member 404) and for `kl-connect builder status` printing `state`, `ready` and the first non-True condition's message.
+- [ ] **Step 2:** implement; `kl-connect builder status --team acme`.
 - [ ] **Step 3:** tests + clippy → PASS.
 - [ ] **Step 4: Commit** `"kl builder status says why a build is waiting"`.
 
@@ -307,4 +307,4 @@ fi
 
 ## Self-review
 
-Spec §1 → Tasks 1, 2, 5, 6; §2 → Task 7 (+ Task 6's policies, Task 4's `BUILDKIT_HOST`); §3 → Task 4; §4 → Task 3; §5 → Task 5 (hidden, quota) + Task 8 (`kl builder status`); §6 → nothing to build (inherited; Task 5 makes push a 404); §7 → Task 9; §8's rows → Task 7's timeout/idle tests and Task 5's `visible_env`. Names used consistently: `bld-{slug}`, `buildkit`, `1234`, `cache`, `builder-gate`, `registry-token`, `docker-credential-kl`, `allow-builder-gate`, `KLOUDLITE_BUILDER_SECRET`, `builder_idle_secs`, `builder_start_secs`, `builder_cache_gb`, `ensure_builder`, `visible_env`, `builder_id`, `BUILDER_SYSTEM`. The one open decision (gvisor) is Task 1 and feeds Task 2 Step 4 only.
+Spec §1 → Tasks 1, 2, 5, 6; §2 → Task 7 (+ Task 6's policies, Task 4's `BUILDKIT_HOST`); §3 → Task 4; §4 → Task 3; §5 → Task 5 (hidden, quota) + Task 8 (`kl-connect builder status`); §6 → nothing to build (inherited; Task 5 makes push a 404); §7 → Task 9; §8's rows → Task 7's timeout/idle tests and Task 5's `visible_env`. Names used consistently: `bld-{slug}`, `buildkit`, `1234`, `cache`, `builder-gate`, `registry-token`, `docker-credential-kl`, `allow-builder-gate`, `KLOUDLITE_BUILDER_SECRET`, `builder_idle_secs`, `builder_start_secs`, `builder_cache_gb`, `ensure_builder`, `visible_env`, `builder_id`, `BUILDER_SYSTEM`. The one open decision (gvisor) is Task 1 and feeds Task 2 Step 4 only.

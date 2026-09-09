@@ -634,7 +634,7 @@ check and its own rollback — if a check fails, roll that step back before star
    prints `gvisor`; and every workspace pod already runs under it —
    `kubectl get pod -A -l kloudlite.io/kind -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,RC:.spec.runtimeClassName`
    shows `gvisor` on every row, no `<none>`. Only then
-   `kubectl apply -f workspace-admission.yaml`. *Check:* create one workspace (`kl ws create …`)
+   `kubectl apply -f workspace-admission.yaml`. *Check:* create one workspace (`kl-connect ws create …`)
    and watch it reach `Running` — the policy refuses pods at admission, so a bad policy shows up
    as a workspace stuck in `Creating` with a denial event on its namespace.
    *Rollback:* `kubectl delete validatingadmissionpolicybinding kloudlite-workspace-pod-fence`
@@ -653,14 +653,14 @@ check and its own rollback — if a check fails, roll that step back before star
 
 4. **`api-rbac.yaml`.** `kubectl apply -f api-rbac.yaml`. *Check:* a **new** owner — one who has
    never had a workspace, so their namespace and `user-key` Secret do not exist yet — creates
-   their first workspace and can `kl ws ssh` into it. That is the only path that exercises
+   their first workspace and can `kl-connect ws ssh` into it. That is the only path that exercises
    `secrets: create`; an existing owner's key is an update and would pass either way.
    *Rollback:* re-apply the previous revision of the file from git.
 
 
 
 7. **`agent-peer.yaml`.** `kubectl apply -f agent-peer.yaml`, any time — it only narrows who may
-   reach 8444/9464. *Check:* a `kl ws push` on a workspace with replicas still reports its
+   reach 8444/9464. *Check:* a `kl-connect ws push` on a workspace with replicas still reports its
    replica `Synced`. *Rollback:* re-apply the previous revision.
 
 8. **`agent-daemonset.yaml` — only after step 6 is verified good.** It adds a nix-daemon sidecar
@@ -678,12 +678,12 @@ check and its own rollback — if a check fails, roll that step back before star
    `CF_CIDRS=$(paste -sd, cloudflare-ips-v4.txt) ssh <node> sudo CF_CIDRS="$CF_CIDRS" bash -s < harden-node.sh`.
    *Check, all four, before moving to the next node:* `kubectl get node <n>` still `Ready`; that
    node's agent log has no apiserver connection errors
-   (`kubectl -n kube-system logs <that node's agent pod> --since=2m`); `kl ws ssh` into a
-   workspace running on that node succeeds; and a `kl ws push` from it completes.
+   (`kubectl -n kube-system logs <that node's agent pod> --since=2m`); `kl-connect ws ssh` into a
+   workspace running on that node succeeds; and a `kl-connect ws push` from it completes.
    *Rollback, from the held session:* `nft delete table inet node` — the whole ruleset is one
    table, so that one command restores the previous (open) state instantly.
 
-The Rust-side changes in this batch — the narrowed `allow-dns` egress rule and the `kl` host-key
+The Rust-side changes in this batch — the narrowed `allow-dns` egress rule and the `kl-connect` host-key
 pin — are NOT in any step above. They ship as code: merge to master, wait for the image build,
 `deploy/pin.sh <sha>`, commit, `deploy/roll.sh`. Applying a manifest cannot deliver them.
 

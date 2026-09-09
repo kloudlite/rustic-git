@@ -1,4 +1,4 @@
-//! `kl ws proxy <id>` — ssh's ProxyCommand. Everything on this path is opaque ssh bytes; the only
+//! `kl-connect ws proxy <id>` — ssh's ProxyCommand. Everything on this path is opaque ssh bytes; the only
 //! thing that must never appear in output is the session token.
 
 use futures::{SinkExt, StreamExt};
@@ -6,12 +6,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-/// The session `kl ws ssh` minted, handed down through ssh's environment so this child makes no
+/// The session `kl-connect ws ssh` minted, handed down through ssh's environment so this child makes no
 /// api call of its own.
 pub const SESSION_ENV: &str = "KL_SSH_SESSION";
 
 pub async fn proxy(id: &str) -> Result<(), String> {
-    // A session from the parent `kl ws ssh` is used as is (host key already pinned there). The
+    // A session from the parent `kl-connect ws ssh` is used as is (host key already pinned there). The
     // mint stays for the `ssh-config` blocks, where ssh runs this with no `kl` parent at all.
     let handed = std::env::var(SESSION_ENV)
         .ok()
@@ -26,7 +26,7 @@ pub async fn proxy(id: &str) -> Result<(), String> {
                 // No retry: the second attempt would send the same stored token, so a 401 is a
                 // fact about the token, not a transient. Say what fixes it.
                 Err(crate::api::Error::Unauthorized) => {
-                    return Err("your login has expired — run `kl login`".to_string())
+                    return Err("your login has expired — run `kl-connect login`".to_string())
                 }
                 Err(e) => return Err(e.to_string()),
             };

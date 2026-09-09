@@ -1,7 +1,7 @@
-//! `kl` — the kloudlite CLI: log in once, then ssh into a workspace through the region gateway.
+//! `kl-connect` — the kloudlite laptop CLI: log in once, then ssh into a workspace through the region gateway.
 //!
 //! Hidden env vars, for tests and the e2e script only:
-//!   KL_CONFIG_DIR       where config.json and known_hosts live (default ~/.config/kl)
+//!   KL_CONFIG_DIR       where config.json and known_hosts live (default ~/.config/kl-connect)
 //!   KL_GATEWAY_OVERRIDE replaces the origin of the api-supplied gateway URL
 
 mod api;
@@ -16,11 +16,11 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "kl",
+    name = "kl-connect",
     version,
-    about = "kloudlite CLI",
+    about = "kloudlite connect CLI: log in, list workspaces, ssh into one",
     after_help = "Hidden, for tests and e2e only:\n  \
-        KL_CONFIG_DIR        where config.json and known_hosts live (default ~/.config/kl)\n  \
+        KL_CONFIG_DIR        where config.json and known_hosts live (default ~/.config/kl-connect)\n  \
         KL_GATEWAY_OVERRIDE  replaces the origin of the api-supplied gateway URL"
 )]
 struct Cli {
@@ -65,7 +65,7 @@ enum WsCmd {
         #[arg(long)]
         team: Option<String>,
     },
-    /// ssh into a workspace: `kl ws ssh gh -- -A`
+    /// ssh into a workspace: `kl-connect ws ssh gh -- -A`
     Ssh {
         target: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -97,7 +97,7 @@ async fn main() {
         },
     };
     if let Err(e) = r {
-        eprintln!("kl: {e}");
+        eprintln!("kl-connect: {e}");
         std::process::exit(1);
     }
 }

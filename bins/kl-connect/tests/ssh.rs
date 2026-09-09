@@ -1,4 +1,4 @@
-//! `kl ws ssh <name>` used to make three api calls before ssh even started (list to resolve the
+//! `kl-connect ws ssh <name>` used to make three api calls before ssh even started (list to resolve the
 //! name, mint, then the ProxyCommand minted again). Now it is one: the api resolves the name, and
 //! the session reaches the ProxyCommand through ssh's environment. A fake `ssh` on PATH shows
 //! what the real one would have been handed.
@@ -32,7 +32,7 @@ fn ssh_makes_one_api_call_and_hands_the_session_to_the_proxy_by_env() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let out = Command::new(env!("CARGO_BIN_EXE_kl"))
+    let out = Command::new(env!("CARGO_BIN_EXE_kl-connect"))
         .args(["ws", "ssh", "gh", "--", "-A"])
         .env("KL_CONFIG_DIR", cfg.path())
         .env("PATH", path)

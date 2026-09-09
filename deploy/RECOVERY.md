@@ -334,7 +334,7 @@ by hand if that backup is unavailable or the row is missing; this goes through t
 (A.3 must be serving) as a workspaces admin (`KLOUDLITE_WORKSPACES_ADMINS`):
 
 ```sh
-ADMIN_JWT=<session token of an admin, from the web app's cookie or `kl` login>
+ADMIN_JWT=<session token of an admin, from the web app's cookie or `kl-connect` login>
 # re-register (only when the CR is gone; re-registering an existing id is also how one is retired):
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' https://dev.kloudlite.io/v1/regions \
   -d '{"id":"centralindia-k3s","name":"Central India (k3s)"}'
@@ -350,7 +350,7 @@ KUBECONFIG=.local/k3s.yaml kubectl wait workspace/$ID --for=condition=Ready --ti
 curl -fsS -X POST -H "Authorization: Bearer $ADMIN_JWT" -H 'Content-Type: application/json' \
   https://dev.kloudlite.io/v1/workspaces/$ID/push -d '{"message":"recovery check"}'
 KUBECONFIG=.local/k3s.yaml kubectl get snapshots          # the new one reaches phase ready = the node claimed it, snapshotted and recorded the commit
-kl ws ssh $ID -- true                                      # the gateway: DNS, NSG, harden-node, the copied jwt Secret
+kl-connect ws ssh $ID -- true                                      # the gateway: DNS, NSG, harden-node, the copied jwt Secret
 ```
 
 ### The real verification: one probe run

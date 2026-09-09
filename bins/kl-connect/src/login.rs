@@ -85,7 +85,7 @@ pub async fn login(api: String) -> Result<(), String> {
                 return Ok(());
             }
             // 410 is the api's one terminal answer: expired, denied, or already spent.
-            410 => return Err("that login expired or was denied — run `kl login` again".into()),
+            410 => return Err("that login expired or was denied — run `kl-connect login` again".into()),
             other => {
                 if !complained {
                     eprintln!("kl: still trying (the api answered {other})");

@@ -1,4 +1,4 @@
-//! `kl ws proxy` is ssh's ProxyCommand: whatever ssh writes must come back out of stdout. The
+//! `kl-connect ws proxy` is ssh's ProxyCommand: whatever ssh writes must come back out of stdout. The
 //! stub tunnel echoes, so a round trip through the real binary is the whole test.
 
 mod stub;
@@ -14,7 +14,7 @@ fn pumps_stdin_to_the_tunnel_and_back_to_stdout() {
     let cfg = tempfile::tempdir().unwrap();
     stub::write_config(cfg.path(), &api);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kl"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kl-connect"))
         .args(["ws", "proxy", "ws-1"])
         .env("KL_CONFIG_DIR", cfg.path())
         .env("KL_GATEWAY_OVERRIDE", api.replace("http://", "ws://"))

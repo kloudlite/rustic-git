@@ -1,13 +1,13 @@
 [package]
-name = "kl"
+name = "kl-connect"
 version = "0.1.0"
 edition = "2021"
 license = "SSPL-1.0"
-description = "kloudlite CLI: log in, list workspaces, ssh into one"
+description = "kloudlite connect CLI: log in, list workspaces, ssh into one from a laptop"
 repository = "https://github.com/kloudlite/rustic-git"
 
 [[bin]]
-name = "kl"
+name = "kl-connect"
 path = "src/main.rs"
 
 [dependencies]

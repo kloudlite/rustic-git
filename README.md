@@ -15,7 +15,7 @@ flowchart LR
 
 | Path | What |
 | --- | --- |
-| `bins/` | `server` (git + registry), `api` (`/v1`, admin), `worker` (merges, GC), `agent` (k3s node controller), `gateway`, `kl`, `slo` |
+| `bins/` | `server` (git + registry), `api` (`/v1`, admin), `worker` (merges, GC), `agent` (k3s node controller), `gateway`, `kl-connect`, `slo` |
 | `crates/` | the libraries behind them |
 | `web/` | Next.js app in `web/apps/web` |
 | `deploy/` | AKS and k3s manifests, `deploy/dev/` (the dev pod), `slo.md`, `alerts.md` |

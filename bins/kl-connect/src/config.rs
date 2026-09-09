@@ -13,7 +13,7 @@ pub struct Config {
 /// `KL_CONFIG_DIR` exists so the tests (and anyone juggling two logins) can point the whole CLI at
 /// a scratch directory; everything the CLI stores lives under it.
 ///
-/// `~/.config/kl` on EVERY OS, not `dirs::config_dir()` — on macOS that is
+/// `~/.config/kl-connect` on EVERY OS, not `dirs::config_dir()` — on macOS that is
 /// `~/Library/Application Support/kl`, while the web's copy-paste ssh block and the docs both say
 /// `~/.config/kl/known_hosts`. One of the two had to be wrong on a Mac, and a path a person can
 /// type is worth more here than the platform convention.
@@ -22,12 +22,12 @@ pub fn dir() -> PathBuf {
         return d.into();
     }
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
-        return PathBuf::from(x).join("kl");
+        return PathBuf::from(x).join("kl-connect");
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
-        .join("kl")
+        .join("kl-connect")
 }
 
 pub fn path() -> PathBuf {
@@ -41,7 +41,7 @@ pub fn known_hosts() -> PathBuf {
 pub fn load() -> Result<Config, String> {
     let p = path();
     let s =
-        std::fs::read_to_string(&p).map_err(|_| "not logged in — run `kl login`".to_string())?;
+        std::fs::read_to_string(&p).map_err(|_| "not logged in — run `kl-connect login`".to_string())?;
     serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display()))
 }
 
@@ -174,7 +174,7 @@ mod tests {
         let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
-        let dir = d.path().join("kl");
+        let dir = d.path().join("kl-connect");
         std::env::set_var("KL_CONFIG_DIR", &dir);
         let cfg = super::Config {
             api: "https://x".into(),
@@ -219,14 +219,14 @@ mod tests {
     ///
     #[test]
     #[cfg(unix)]
-    fn the_config_dir_is_dot_config_kl_everywhere() {
+    fn the_config_dir_is_dot_config_kl_connect_everywhere() {
         let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("KL_CONFIG_DIR");
         std::env::set_var("XDG_CONFIG_HOME", "/xdg");
-        assert_eq!(super::dir(), std::path::Path::new("/xdg/kl"));
+        assert_eq!(super::dir(), std::path::Path::new("/xdg/kl-connect"));
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::set_var("HOME", "/home/k");
-        assert_eq!(super::dir(), std::path::Path::new("/home/k/.config/kl"));
+        assert_eq!(super::dir(), std::path::Path::new("/home/k/.config/kl-connect"));
     }
 }

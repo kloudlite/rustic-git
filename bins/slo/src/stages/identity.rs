@@ -189,7 +189,7 @@ async fn key(c: &mut Ctx, name: &str) {
     .await;
 }
 
-/// The whole device-code handshake a person walks when they run `kl login`: ask for a code with no
+/// The whole device-code handshake a person walks when they run `kl-connect login`: ask for a code with no
 /// credentials, approve it as the signed-in person, then collect the token exactly once.
 async fn cli_flow(c: &mut Ctx, name: &str) {
     c.step("id.cli.flow", Duration::from_secs(45), |c| {

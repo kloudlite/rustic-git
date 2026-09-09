@@ -236,7 +236,7 @@ spec:
           # route to the api and a build hangs at `start` without it. Guarded by
           # KLOUDLITE_BUILDER_SECRET the same way `/v1/keys` is by the session JWT — published,
           # not unauthenticated. `builders` is the one person-facing read of the hidden builder
-          # (`GET /v1/builders/me`, session JWT again) — `kl builder status` on a laptop has no
+          # (`GET /v1/builders/me`, session JWT again) — `kl-connect builder status` on a laptop has no
           # other way in.
           - path: /v1/(cli|workspaces|keys|internal|builders)(/.*)?$
             pathType: ImplementationSpecific

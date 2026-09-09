@@ -102,11 +102,11 @@ jobs:
           cargo build --release --locked
           --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
           --bin kloudlite-agent --bin kloudlite-gateway --bin kloudlite-builder-gate
-          --bin kloudlite-slo --bin kl
+          --bin kloudlite-slo --bin kl-connect
       - name: glibc ceiling
         run: |
           set -eu
-          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl; do
+          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
             need=$(objdump -T "/ci-target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
             echo "$b needs $need"
             if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
@@ -124,7 +124,7 @@ jobs:
             /ci-target/release/kloudlite-gateway
             /ci-target/release/kloudlite-builder-gate
             /ci-target/release/kloudlite-slo
-            /ci-target/release/kl
+            /ci-target/release/kl-connect
           if-no-files-found: error
           retention-days: 1
 
@@ -148,7 +148,7 @@ jobs:
           name: bins
           path: target/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
-      - run: chmod +x target/release/kloudlite* target/release/kl
+      - run: chmod +x target/release/kloudlite* target/release/kl-connect
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           # The classic driver: the VM's own daemon keeps every layer between runs, which is the

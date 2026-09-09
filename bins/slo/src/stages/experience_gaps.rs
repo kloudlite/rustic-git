@@ -153,7 +153,7 @@ pub(super) async fn cli_tokens(c: &mut Ctx) {
     .await;
 }
 
-/// The whole `kl login` handshake, answering `(token, id)`. The device name carries the run
+/// The whole `kl-connect login` handshake, answering `(token, id)`. The device name carries the run
 /// prefix, which is teardown's only handle on what this mints.
 pub(super) async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(String, String)> {
     let started = post(c, &api(c, "/v1/cli/code"), "", json!({ "device": device }))
@@ -184,7 +184,7 @@ pub(super) async fn cli_login(c: &Ctx, jwt: &str, device: &str) -> Result<(Strin
     Ok((token, id))
 }
 
-/// `id.cli.sshconfig`: `kl ws sshconfig` writes a block a person's `ssh` can use.
+/// `id.cli.sshconfig`: `kl-connect ws sshconfig` writes a block a person's `ssh` can use.
 ///
 /// The real binary, against a real login, with `HOME` and `KL_CONFIG_DIR` pointed at the run's tmp
 /// tree — the pod's root filesystem is read-only and the command writes `~/.ssh/config`. The
@@ -213,9 +213,9 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
                     .context("the CLI token was left LIVE")
             };
             let body = async {
-                let dir = home.join(".config/kl");
+                let dir = home.join(".config/kl-connect");
                 std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
-                // Exactly what `kl login` stores, so the command has nothing to do but read it.
+                // Exactly what `kl-connect login` stores, so the command has nothing to do but read it.
                 let cfg = json!({
                     "api": api_url,
                     "token": token,
@@ -229,7 +229,7 @@ pub(super) async fn sshconfig(c: &mut Ctx) {
                 ]);
                 tools::run(&kl, &["ws".to_string(), KL_SSH_CONFIG.into()], &env, None, SSHCONFIG_CEILING)
                     .await
-                    .with_context(|| format!("`kl ws {KL_SSH_CONFIG}` failed"))?;
+                    .with_context(|| format!("`kl-connect ws {KL_SSH_CONFIG}` failed"))?;
                 let block = std::fs::read_to_string(home.join(".ssh/kloudlite_config"))
                     .context("no ~/.ssh/kloudlite_config was written")?;
                 has_host_block(&block, &ws)
@@ -252,7 +252,7 @@ const KL_SSH_CONFIG: &str = "ssh-config";
 /// exactly what an exit-code check would call a pass.
 fn has_host_block(block: &str, id: &str) -> Result<()> {
     let hostname = format!("HostName {id}");
-    let proxy = format!("ProxyCommand kl ws proxy {id}");
+    let proxy = format!("ProxyCommand kl-connect ws proxy {id}");
     if !block.contains(&hostname) {
         return Err(anyhow!("the ssh config carries no block for {id}"));
     }
@@ -1330,11 +1330,11 @@ mod tests {
     /// exactly what an exit-code check would call a pass.
     #[test]
     fn the_ssh_config_check_wants_a_real_host_block() {
-        let good = "# Managed by kl.\n\nHost run-fast-1\n  HostName ws-abc\n  User kl\n  \
-                    ProxyCommand kl ws proxy ws-abc\n  HostKeyAlias ws-abc\n";
+        let good = "# Managed by kl-connect.\n\nHost run-fast-1\n  HostName ws-abc\n  User kl\n  \
+                    ProxyCommand kl-connect ws proxy ws-abc\n  HostKeyAlias ws-abc\n";
         assert!(has_host_block(good, "ws-abc").is_ok());
         // A file the command wrote having skipped every workspace.
-        assert!(has_host_block("# Managed by kl.\n", "ws-abc").is_err());
+        assert!(has_host_block("# Managed by kl-connect.\n", "ws-abc").is_err());
         // Another workspace's block is not this one's.
         assert!(has_host_block(good, "ws-other").is_err());
         // A block with no way to reach the pod is a block ssh cannot use.

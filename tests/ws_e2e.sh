@@ -78,10 +78,10 @@ kubectl -n kloudlite-system get deploy zerofs >/dev/null 2>&1 || {
 SERVER_BIN="${WS_E2E_SERVER_BIN:-target/debug/kloudlite}"
 API_BIN="${WS_E2E_API_BIN:-target/debug/kloudlite-api}"
 AGENT_BIN="${WS_E2E_AGENT_BIN:-target/debug/kloudlite-agent}"
-KL_BIN="${WS_E2E_KL_BIN:-target/debug/kl}"
+KL_BIN="${WS_E2E_KL_BIN:-target/debug/kl-connect}"
 if [ ! -x "$SERVER_BIN" ] || [ ! -x "$API_BIN" ] || [ ! -x "$AGENT_BIN" ] || [ ! -x "$KL_BIN" ]; then
-  log "building kloudlite/kloudlite-api/kloudlite-agent/kl (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN / $KL_BIN)"
-  cargo build -q --bin kloudlite --bin kloudlite-api --bin kloudlite-agent --bin kl
+  log "building kloudlite/kloudlite-api/kloudlite-agent/kl-connect (not found at $SERVER_BIN / $API_BIN / $AGENT_BIN / $KL_BIN)"
+  cargo build -q --bin kloudlite --bin kloudlite-api --bin kloudlite-agent --bin kl-connect
 fi
 
 # ---------------------------------------------------------------------------
@@ -782,7 +782,7 @@ wait_ws_ready "$CLONE_ID"
 # ---------------------------------------------------------------------------
 # SSH: `kl` mints a session against the api (a session JWT works as its bearer token, same as the
 # CLI's own long-lived login) and tunnels through the gateway — this VM has no Cloudflare edge in
-# front of it, so `KL_GATEWAY_OVERRIDE` (hidden, tests-only — see bins/kl/src/proxy.rs) swaps the
+# front of it, so `KL_GATEWAY_OVERRIDE` (hidden, tests-only — see bins/kl-connect/src/proxy.rs) swaps the
 # `wss://ws-{region}.khost.dev` origin the api hands back for the gateway's own k3s Service,
 # keeping the `/tunnel/{id}` path the api minted. Needs PackagesReady=Built (asserted above) so the
 # pod is actually running sshd on the default image, and the running-source clone above so a SECOND
@@ -807,7 +807,7 @@ eval "$(ssh-agent -s)" >/dev/null
 ssh-add "$TMPD/id" >/dev/null 2>&1 || fail "ssh-add failed"
 
 log "pointing kl at the local api and the gateway's in-cluster Service"
-export KL_CONFIG_DIR="$TMPD/kl-config"
+export KL_CONFIG_DIR="$TMPD/kl-connect-config"
 mkdir -p "$KL_CONFIG_DIR"
 GATEWAY_IP=$(kubectl get svc kloudlite-gateway -n kloudlite-system -o jsonpath='{.spec.clusterIP}')
 [ -n "$GATEWAY_IP" ] || fail "kloudlite-gateway Service has no clusterIP"

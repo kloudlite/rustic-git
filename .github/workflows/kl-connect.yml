@@ -1,10 +1,10 @@
-name: kl
+name: kl-connect
 on:
   push:
-    tags: ["kl-v*"]
+    tags: ["kl-connect-v*"]
   workflow_dispatch:
 
-# The CLI ships on its own tags, not on master: `bins/kl` builds four host binaries for people's
+# The CLI ships on its own tags, not on master: `bins/kl-connect` builds four host binaries for people's
 # laptops, which has nothing to do with the cluster images `image.yml` pushes per commit.
 permissions:
   contents: read
@@ -37,19 +37,19 @@ jobs:
       # unpinned `cargo install` at release time is the one unpinned input in this file.
       - if: matrix.cross
         run: cargo install cross --version 0.2.5 --locked
-      - run: ${{ matrix.cross && 'cross' || 'cargo' }} build -p kl --release --locked --target ${{ matrix.target }}
+      - run: ${{ matrix.cross && 'cross' || 'cargo' }} build -p kl-connect --release --locked --target ${{ matrix.target }}
       - name: package
         run: |
           set -eu
-          name="kl-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/kl" "$name"
+          name="kl-connect-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/kl-connect" "$name"
           shasum -a 256 "$name" > "$name.sha256" 2>/dev/null || sha256sum "$name" > "$name.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: kl-${{ matrix.target }}
+          name: kl-connect-${{ matrix.target }}
           path: |
-            kl-${{ matrix.target }}
-            kl-${{ matrix.target }}.sha256
+            kl-connect-${{ matrix.target }}
+            kl-connect-${{ matrix.target }}.sha256
 
   release:
     needs: build
@@ -68,11 +68,11 @@ jobs:
       # One sha256sums file next to the assets: install.sh verifies against it.
       - run: cd dist && cat *.sha256 > sha256sums && rm -f *.sha256
       # `sha256sums` proves a download is intact; this proves it came from THIS workflow on THIS
-      # commit (`gh attestation verify kl-<target> -R kloudlite/kloudlite`). Free for a public
+      # commit (`gh attestation verify kl-connect-<target> -R kloudlite/kloudlite`). Free for a public
       # repo, and the only origin signal `install.sh`'s same-origin checksum cannot give.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          subject-path: dist/kl-*
+          subject-path: dist/kl-connect-*
       - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2
         with:
           files: dist/*

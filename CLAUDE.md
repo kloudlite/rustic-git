@@ -35,10 +35,10 @@ Run a server locally without S3: `KLOUDLITE_S3_URL=file://./x` (or `mem://`, los
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
 
 Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}` are the
-library crates; `bins/{server,api,worker,agent,gateway,kl}` build the six binaries (`kloudlite`,
+library crates; `bins/{server,api,worker,agent,gateway,kl-connect}` build the six binaries (`kloudlite`,
 `kloudlite-api`, `kloudlite-worker`, `kloudlite-agent` — the agent is root-only and runs as a
 DaemonSet, one per btrfs-capable node, see "Workspaces and environments" — `kloudlite-gateway`,
-the workspace SSH tunnel, and `kl`, the user CLI, which is built by `kl.yml` and never deployed);
+the workspace SSH tunnel, and `kl-connect`, the laptop CLI, which is built by `kl-connect.yml` and never deployed);
 the root package is `tests/`'s host only, not a facade.
 
 ## The one invariant everything hangs off
@@ -311,7 +311,7 @@ running workspace without a restart. On the registry side a build is an ordinary
 checks `may_act(caller, owner)` exactly as a team's git push does, never what the token was minted
 under, which is what lets a team's builder push under the team's name with a member's own personal
 credential. `GET /v1/builders/me` is the one user-facing window onto all of this — never listed,
-never started or stopped by a person — so `kl builder status` can say why a build is waiting rather
+never started or stopped by a person — so `kl-connect builder status` can say why a build is waiting rather
 than a person guessing at a hidden pod. The ingress carries `builders` in its `/v1/(cli|workspaces|keys|internal|builders)(/.*)?$`
 allow-list beside `internal` (`deploy/kloudlite-web.yaml`), because the CLI talks to `/v1/builders/me`
 directly and the gate talks to `/v1/internal/builders/*`. Quota counts the builder's cpu and memory

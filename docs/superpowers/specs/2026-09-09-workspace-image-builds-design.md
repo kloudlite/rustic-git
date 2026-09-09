@@ -179,7 +179,7 @@ private team image, refused the same way today.
   api did, at a fixed size), so the count dimension never sees it. The derived defaults in
   `crd::default_quota` gain the builder's ceiling once per owner: person **40 vCPU / 80 GiB**,
   team **148 / 296**; the derivation test enforces it, and the live `default-*` objects are patched.
-- The web reads nothing new. `kl` gains `kl builder status` (the internal GET, through the api,
+- The web reads nothing new. `kl` gains `kl-connect builder status` (the internal GET, through the api,
   for the caller's own builder) so "why is my build hanging" has an answer; nothing else.
 
 ### 6. Snapshots, clone, restore, move
@@ -206,7 +206,7 @@ result from the step log, and a `skip` is a hole, never a pass.
 
 | Failure | Behaviour |
 | --- | --- |
-| Builder cannot start (ResourceQuota, no capacity, `Placed=False`) | gate closes the connection after `BUILDER_START_SECS`; `kl builder status` shows the environment's own condition; the workspace is unaffected |
+| Builder cannot start (ResourceQuota, no capacity, `Placed=False`) | gate closes the connection after `BUILDER_START_SECS`; `kl-connect builder status` shows the environment's own condition; the workspace is unaffected |
 | buildkitd crashes mid-build | the StatefulSet restarts it; buildx reports the build failed; the next `docker build` reconnects through the gate |
 | Gate restarts | every Running builder gets a fresh idle timer; worst case one idle period of compute |
 | Token expired in a long-lived pod | impossible while the api runs (re-minted every beat against a 24 h TTL); with the api down for a day, pushes fail with the registry's challenge and resume when it returns |
@@ -230,6 +230,6 @@ which would hide the cold start from buildx's dial deadline — a product decisi
 two internal routes, builder create), `crates/workspaces/src/api/keys.rs` (`registry-token`,
 builder prune), `crates/workspaces/src/quota.rs` + `crd::default_quota`,
 `crates/registry/src/auth.rs` (`may_act`), the gate (`bins/gateway` or `bins/builder-gate`),
-`bins/kl` (`kl builder status`), the workspace image (`docker`, buildx, `docker-credential-kl`, rc
+`bins/kl-connect` (`kl-connect builder status`), the workspace image (`docker`, buildx, `docker-credential-kl`, rc
 file), `bins/slo` + catalogue + `deploy/slo.md` + web fixtures (three ids), `deploy/kloudlite.yaml`
 + `deploy/k3s/*.yaml` (the gate, its RBAC, `crds.yaml`), `CLAUDE.md` (one paragraph).

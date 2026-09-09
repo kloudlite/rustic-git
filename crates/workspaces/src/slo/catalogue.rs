@@ -185,7 +185,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "id.signin", feature: "Identity", sli: "Sign-in over HTTP succeeds", target: avail(99.9), suite: Suite::Fast, stage: "1 · Identity" },
     Slo { id: "id.token.mint", feature: "Identity", sli: "Minting a user JWT succeeds", target: avail(99.9), suite: Suite::Fast, stage: "1 · Identity" },
     Slo { id: "id.key.usable", feature: "Identity", sli: "A freshly minted platform SSH key is usable", target: bound(30_000), suite: Suite::Fast, stage: "1 · Identity" },
-    Slo { id: "id.cli.flow", feature: "Identity", sli: "The kl CLI's login-to-command flow completes", target: bound(15_000), suite: Suite::Fast, stage: "1 · Identity" },
+    Slo { id: "id.cli.flow", feature: "Identity", sli: "The kl-connect CLI's login-to-command flow completes", target: bound(15_000), suite: Suite::Fast, stage: "1 · Identity" },
     Slo { id: "id.jwt.tiers", feature: "Identity", sli: "A JWT is honoured across every tier", target: avail(99.9), suite: Suite::Fast, stage: "1 · Identity" },
     // NOT "sign-in with a passkey succeeds": WebAuthn is verified in the web app, which holds the
     // relying-party identity and the challenge (`crates/api/src/passkeys.rs`) — this tier only
@@ -408,7 +408,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "id.username", feature: "Identity", sli: "A second username claim is refused as already set, and a malformed handle is rejected", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.cli.tokens", feature: "Identity", sli: "A CLI token is listed and, once revoked, is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.profile.upsert", feature: "Identity", sli: "A profile upsert is saved and read back", target: bound(5_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "id.cli.sshconfig", feature: "Identity", sli: "`kl ws sshconfig` writes a host block naming a running workspace", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "id.cli.sshconfig", feature: "Identity", sli: "`kl-connect ws sshconfig` writes a host block naming a running workspace", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // Strict, and it can be: credential HITS are not cached at all (`crates/storage/src/auth.rs`,
     // `CACHE_TTL` — only misses are, because the cache is per process while the revocation happens
     // in another one), so a removed key stops working on the very next request, fleet-wide.
@@ -448,7 +448,7 @@ pub const CATALOGUE: &[Slo] = &[
     // a catalogue nobody reads.
     Slo { id: "repo.metadata", feature: "Git hosting", sli: "The browse `lastmod` route answers for a commit this run pushed", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "kl.commands", feature: "Identity", sli: "`kl ws`, `kl ws list --team` and `kl logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "kl.commands", feature: "Identity", sli: "`kl-connect ws`, `kl-connect ws list --team` and `kl-connect logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.reads", feature: "Admin", sli: "`/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly

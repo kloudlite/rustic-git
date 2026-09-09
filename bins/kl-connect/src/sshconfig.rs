@@ -14,7 +14,7 @@ fn home() -> PathBuf {
 /// rule: an object written before that check, or by any other path, is skipped rather than
 /// rendered. Duplicated rather than shared because the CLI depends on no server crate.
 ///
-/// A leading `-` is refused too: `kl ws ssh` puts the id into ssh's argv and into a
+/// A leading `-` is refused too: `kl-connect ws ssh` puts the id into ssh's argv and into a
 /// shell-parsed `ProxyCommand`, where `-oProxyCommand=…` is an option, not a host.
 pub fn safe_name(name: &str) -> bool {
     !name.is_empty()
@@ -26,7 +26,7 @@ pub fn safe_name(name: &str) -> bool {
 }
 
 pub fn render(workspaces: &[crate::api::Workspace], known_hosts: &std::path::Path) -> String {
-    let mut s = String::from("# Managed by kl. Edits are overwritten by `kl ws ssh-config`.\n");
+    let mut s = String::from("# Managed by kl-connect. Edits are overwritten by `kl-connect ws ssh-config`.\n");
     for w in workspaces {
         // The id is checked by the same rule for the same reason: it is written into `HostName`
         // and `HostKeyAlias`, and nothing here should trust the shape of either string.
@@ -35,7 +35,7 @@ pub fn render(workspaces: &[crate::api::Workspace], known_hosts: &std::path::Pat
             continue;
         }
         s.push_str(&format!(
-            "\nHost {name}\n  HostName {id}\n  User kl\n  ProxyCommand kl ws proxy {id}\n  \
+            "\nHost {name}\n  HostName {id}\n  User kl\n  ProxyCommand kl-connect ws proxy {id}\n  \
              UserKnownHostsFile {kh}\n  HostKeyAlias {id}\n",
             name = w.name,
             id = w.id,
@@ -48,7 +48,7 @@ pub fn render(workspaces: &[crate::api::Workspace], known_hosts: &std::path::Pat
 pub fn write(workspaces: &[crate::api::Workspace]) -> Result<PathBuf, String> {
     let ssh = home().join(".ssh");
     // ssh REFUSES to use a config directory others can write, so creating it at the umask's
-    // discretion can leave `kl ws ssh-config` writing a file ssh will not read.
+    // discretion can leave `kl-connect ws ssh-config` writing a file ssh will not read.
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]

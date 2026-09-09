@@ -320,7 +320,7 @@ pub(super) async fn session_reads(c: &mut Ctx) {
 
 /// `kl.commands`: the three CLI verbs nothing walked.
 ///
-/// `kl logout` is LAST and deliberate: it forgets this pod's stored token, which every earlier
+/// `kl-connect logout` is LAST and deliberate: it forgets this pod's stored token, which every earlier
 /// `kl` step has already used — and the token itself is revoked by teardown either way.
 pub(super) async fn kl_commands(c: &mut Ctx) {
     let device = format!("{}-klc", c.prefix());
@@ -330,11 +330,11 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
         let (kl, api_url) = (c.programs.kl.clone(), c.cfg.api_url.clone());
         let probe = c.probe_user.clone();
         async move {
-            // A real CLI token and the config `kl login` would have written: without it every one
+            // A real CLI token and the config `kl-connect login` would have written: without it every one
             // of these exits 1 with "not logged in", which measures the probe, not the CLI. The
             // same staging `id.cli.sshconfig` does, and the same revoke afterwards.
             let (token, id) = super::experience_gaps::cli_login(c, &jwt, &device).await?;
-            // A 404 is SUCCESS for an undo: `kl logout` revokes the token itself, so the
+            // A 404 is SUCCESS for an undo: `kl-connect logout` revokes the token itself, so the
             // credential this would take back is already gone — and "already revoked" is the state
             // the compensation wanted. Anything else still fails the step.
             let revoke = || async {
@@ -347,7 +347,7 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
                 }
             };
             let body = async {
-                let dir = home.join(".config/kl");
+                let dir = home.join(".config/kl-connect");
                 std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
                 let cfg = json!({
                     "api": api_url,
@@ -370,7 +370,7 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
                         // may not do is fail to run at all.
                         let refused = detail.contains("no such team") || detail.contains("not a member");
                         if !(what.contains("--team") && refused) {
-                            return Err(anyhow!("`kl {what}` failed: {detail}"));
+                            return Err(anyhow!("`kl-connect {what}` failed: {detail}"));
                         }
                     }
                 }

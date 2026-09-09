@@ -46,7 +46,7 @@ pub struct Programs {
 
 impl Default for Programs {
     fn default() -> Self {
-        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl".into(), openssl: "openssl".into(), dig: "dig".into(), bash: "bash".into(), kubectl: "kubectl".into() }
+        Programs { git: "git".into(), ssh_keygen: "ssh-keygen".into(), ssh_keyscan: "ssh-keyscan".into(), crane: "crane".into(), ssh: "ssh".into(), kl: "kl-connect".into(), openssl: "openssl".into(), dig: "dig".into(), bash: "bash".into(), kubectl: "kubectl".into() }
     }
 }
 
