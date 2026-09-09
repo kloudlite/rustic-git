@@ -1,199 +1,219 @@
 # Building and pushing images from a workspace
 
-Status: draft for review, 2026-09-09. One decision (§1, where the builder's kernel is) is left
-to a spike named there; everything else is settled by this document.
+Status: draft for review, 2026-09-09, revised the same day after review. The builder is an
+Environment the platform owns, not a new kind; it is never listed by `/v1` or the web; it has no
+user-facing snapshots; and it runs only while a build is running. One decision (§1, the kernel the
+builder runs under) is left to a spike named there.
 
 ## Why
 
 A workspace is where the code is, and the code has a Dockerfile. Today `docker build` inside one
-fails at the first step — there is no daemon, no buildkit, and the container has no capability
-that could start either — so the loop is "push the branch, wait for CI, pull the image", which is
-the loop a workspace exists to remove.
+fails at the first step — no daemon, no buildkit, and a container with no capability that could
+start either — so the loop is "push the branch, wait for CI, pull the image", which is the loop a
+workspace exists to remove.
 
-The second half is worse than missing: it is refused. `registry::auth::allow`
+The second half is refused rather than missing. `registry::auth::allow`
 (`crates/registry/src/auth.rs`) grants a push only when the caller IS the image's owner. A person
 is never a team, so no personal credential can push to `registry/{team}/{image}` — the directory
-check that git-over-SSH already applies (`App::may_act(user, owner)`, membership through the
-directory, cached 60 s) is never consulted by the registry. Every team member who has tried has
-seen `DENIED: insufficient scope`, whether or not they are an admin of that team.
+check git-over-SSH already applies (`App::may_act(user, owner)`) is never consulted by the
+registry. Every team member who has tried has seen `DENIED: insufficient scope`.
 
 ## Decisions taken
 
 | Question | Answer |
 | --- | --- |
-| Where buildkit runs | In its own pod beside the workspace, `build-{ws}`, rendered and torn down by the workspace's controller with the workspace pod, on the same node. Never inside the workspace container: gvisor plus `drop: ALL` cannot host it, and the dev pod's privileged sidecar is a shape no tenant may have. |
-| Why not a shared per-node buildkitd | A build cache is a side channel: every `RUN` layer of every tenant on the node would sit in one store, readable by the next tenant's cache hit. One builder per workspace keeps the cache inside the tenant boundary the volume already draws. |
-| Why not buildx's `kubernetes` driver | It needs a kubeconfig and RBAC inside the workspace container. The workspace pod runs with `automountServiceAccountToken: false` on purpose; handing a tenant sandbox the power to create pods in its namespace reverses that. |
-| How the workspace reaches it | A unix socket on a hostPath directory the agent owns, `{pool}/build/{ws}/buildkitd.sock`, mounted read-write into both pods. No network, no TLS, no port. buildx's `remote` driver speaks to it. |
-| Rootless, unprivileged | `moby/buildkit:rootless`, `runAsUser: 1000`, `--oci-worker-no-process-sandbox`, no capabilities added, `privileged` never. Rootless buildkit needs `seccompProfile: Unconfined` and `appArmorProfile: Unconfined` on its own container; that is the whole exception, and it is on the builder pod only, never the workspace's. |
-| Where the cache lives | `{pool}/homecache/{owner}/buildkit`, the LOCAL per-(owner, node) subvolume every tool cache already goes to. Not the workspace volume: a build cache is large, node-bound, and must not be snapshotted, pushed or cloned. It is shared by a person's workspaces on one node, which is the same boundary `~/.cache` already has. |
-| Who pays | The builder pod runs in the owner's namespace, so its limits count against the `owner-quota` ResourceQuota and `/v1`'s quota check charges them (§4). A build is the workspace's cost, not free. |
-| Registry credential | A per-person registry bearer token (`Jwt::mint_registry`, the type `/v2/token` already issues), projected by the api into the `user-key` Secret it already writes into every workspace pod, and served to docker by a credential helper. No derived copy of the SSH key, no long-lived password, nothing minted by the agent (which holds no JWT key). |
-| Team push | `allow()` consults `may_act(who, owner)` when the caller is not the owner — the exact rule git-over-SSH has used since the fingerprint-identity change. Membership is the permission; a team admin role is not required to push. |
-| Ceiling on the token | 24 h, re-minted by the api's resync beat every `KEYS_RESYNC_SECS` (300 s); a Secret volume updates in place so the pod reads the fresh token on the next docker call. A stolen token is bounded by a day and by that person's own images plus the teams they are in. |
+| What the builder is | An `Environment`, `bld-{owner}` — one per owner, a person or a team — with a single service `buildkit` (`moby/buildkit:rootless`) whose mount folder `cache` IS the build cache. Placement, claim, replicas, stop-and-move on decommission, quota: all inherited, none written. `spec.system: "builder"` marks it. |
+| Why not a new kind | A third worktree parent touches every place the reconciler matches on "workspace or environment" — the 24 settle sites already audited once. An Environment already is a snapshotted, replicated, placed volume with services and `desiredState`. |
+| Why not inside the workspace, or one daemon per node | The workspace container is gvisor plus `drop: ALL`; nothing can start a daemon in it. A shared per-node buildkitd has ONE `--root`: every tenant's layers in one content store, cross-tenant cache hits, and no way to switch cache per build. One builder per owner keeps the cache inside the boundary the volume already draws. |
+| Hidden | Never listed: `GET /v1/environments` omits `system` environments, every other environment route answers 404 for one as if it did not exist, and the web never sees it. It is not counted in the owner's `environments` quota. |
+| No snapshots | No push, restore, clone or history: those routes are among the 404s. The volume still carries the platform's own SYNC POINTS — a stop cuts one, peers pull it, retention keeps one — because that is what replication is. Nothing non-transient is ever cut, `status.head` never advances, and nothing about it appears anywhere a person reads. |
+| On demand | `desiredState: Stopped` at rest. A region-wide gate the workspace's buildx connects through starts it on the first connection, waits for `Ready`, splices the bytes, and stops it after `BUILDER_IDLE_SECS` with no connection open. cpu and memory are charged only while Running (`quota::usage` already counts only live parents). |
+| Who writes its spec | `bins/api`, and only it, as for every CR: created with the owner's first workspace, `desiredState` flipped by the gate THROUGH the api. The gate never writes a CR. |
+| Registry credential | A per-person registry bearer token (`Jwt::mint_registry`, the type `/v2/token` issues), projected by the api into the `user-key` Secret it already writes into every workspace pod, served to docker by a credential helper. No derived copy of the SSH key, nothing long-lived, nothing minted by the agent. |
+| Team push | `allow()` consults `may_act(who, owner)` when the caller is not the owner — the rule git-over-SSH has used since the fingerprint-identity change. Membership is the permission. |
 
 ## Design
 
-### 1. The builder pod (`bins/agent/src/controller/workspace.rs`, `crates/workspaces/src/k8s.rs`)
+### 1. The builder environment
 
-`apply_workspace` renders a second pod, `build-{ws}`, whenever it renders the workspace pod, and
-deletes it wherever it deletes the workspace pod (stop, delete, move). Same node (`placement`),
-same namespace, same owner labels, an ownerReference to the Workspace so a lost delete is still
-collected. It is NOT part of the workspace pod: a pod's runtimeClass is pod-wide, and the
-workspace's is gvisor.
+**Identity.** `bld-{slug}`, where `slug` is the owner: a person's handle for their own
+workspaces, the team's slug for a team's. Namespace `env-bld-{slug}` through `crd::env_namespace`
+as for every environment, so nothing about namespaces, labels, quotas or policies is special. One
+service:
 
 ```
-image:  moby/buildkit:rootless  (pinned by digest in ClusterSettings, a Mark::Boot field)
-args:   --addr unix:///run/buildkit/buildkitd.sock --oci-worker-no-process-sandbox
-        --root /cache/{ws}          # per workspace under the owner's shared cache subvolume (§8)
-env:    BUILDKITD_FLAGS=--oci-worker-no-process-sandbox
-securityContext (container):
-        runAsUser: 1000, runAsGroup: 1000, allowPrivilegeEscalation: false,
-        capabilities: {drop: [ALL]},
-        seccompProfile: Unconfined, appArmorProfile: Unconfined   # rootless buildkit's own requirement
-volumes:
-        socket  hostPath {pool}/build/{ws}      DirectoryOrCreate  -> /run/buildkit   (both pods)
-        cache   hostPath {pool}/homecache/{owner} subPath buildkit  -> /cache
-resources: request 250m / 512Mi, limit = the workspace's own cpu/memory limit (§4)
+name:      buildkit
+image:     moby/buildkit:rootless           (pinned by digest in ClusterSettings, Mark::Boot)
+command:   buildkitd --addr tcp://0.0.0.0:1234 --oci-worker-no-process-sandbox --root /cache
+ports:     [1234]
+mounts:    [{path: /cache, folder: cache}]
+resources: request 250m / 512Mi, limit PodResources::default() (4 vCPU / 8 GiB)   # §4
 ```
 
-`{pool}/build/{ws}` is created by the agent (`mkdir` + `chown 1000`) before either pod, exactly
-as `ensure_shared_home` does, and swept by the janitor with the other per-workspace directories
-when the workspace is gone. The socket is a file inside a directory the tenant can write, which
-is why the directory is per workspace and not per owner: two workspaces must never share a
-builder, or one's `docker buildx prune` empties the other's queue.
+`spec.system: "builder"` is a new optional field on `EnvironmentSpec`, written only by the api
+and only here. `model::Service` gains an optional `resources` (the env unit stays the default):
+a builder wants the ceiling a workspace has, not a service's.
 
-The workspace pod mounts the same directory at `/run/buildkit`. `login_env` gains
-`BUILDKIT_HOST=unix:///run/buildkit/buildkitd.sock`, and the platform rc file runs, idempotently,
-`docker buildx create --name kl --driver remote "$BUILDKIT_HOST" --use` — so `docker buildx build`
-and `docker build` (aliased through buildx) just work, and `docker buildx bake` too. The workspace
-image gains the `docker` CLI and the `buildx` plugin, no daemon.
+**Created** by the api's `user` role, server-side apply, the first time it writes a Workspace for
+that owner (the same call that projects `OwnerKeys`), with `desiredState: Stopped` and a volume of
+`BUILDER_CACHE_GB` (50, a `Quota`-charged `diskGb`). Idempotent: a second workspace changes
+nothing. **Deleted** by the resync beat that prunes `OwnerKeys` and `wt-` namespaces, one beat
+after the owner has no Workspace left — the cache goes with the last workspace, which is when
+nothing can use it. A person's builder and a team's are distinct objects.
 
-**Readiness.** `Ready` on the workspace does not wait for the builder — a workspace is usable
-without ever building — but the builder's phase is reported as a condition, `Builder=True/Ready`
-or `False/{Pending,CrashLoop}`, so `kl status` and the web can say why `docker build` hangs.
+**Rendered** by the existing environment controller with no builder-specific branch except the
+per-service `resources`. Stop, start, claim, move, replicate, `Replicated`, the dead-node sweep:
+unchanged code.
 
-**The kernel it runs on — the one open decision.** The builder pod is rendered WITHOUT a
-runtimeClass (runc, host kernel) in this draft: a tenant's `RUN` steps execute in rootless
-buildkit's own containers, unprivileged, uid 1000, no capabilities, user-namespaced — the
-same isolation every rootless-docker host relies on, and weaker than gvisor. gVisor documents
-running rootless buildkit inside it (native snapshotter, no process sandbox); if that works on
-this region's `runsc`, the pod gets `runtimeClassName: gvisor` and this paragraph disappears. The
-spike is one pod on `session-0` and an hour; it decides one field in the pod spec and nothing
-else in this document.
+**The kernel it runs under — the one open decision.** Environment services run under the region's
+`runtime_class` (gvisor) today, and that is the default here too: gVisor documents rootless
+buildkit inside it (`--oci-worker-no-process-sandbox`, native snapshotter), and under gvisor the
+sandbox is the isolation, so `hardened()` stays exactly as it is — no `seccomp: Unconfined`
+anywhere. The spike is one builder environment on `session-0` and an hour. If it fails, the
+fallback is a per-service `runtimeClass: none` the api may set only on a `system` environment,
+with rootless buildkit's own requirements (`seccompProfile`/`appArmorProfile: Unconfined` on that
+one container). That fallback changes one field and this paragraph; nothing else in the document.
 
-### 2. The credential (`crates/workspaces/src/api/keys.rs`, `crates/workspaces/src/k8s.rs`, image)
+### 2. The gate (`bins/gateway`, a second listener — or `bins/builder-gate` if the split is cleaner)
+
+A region-wide Deployment in `kloudlite-system`, one replica, reached at
+`builder-gate.kloudlite-system.svc:1234`. The workspace's `login_env` gains
+`BUILDKIT_HOST=tcp://builder-gate.kloudlite-system.svc:1234`, and the platform rc file runs,
+idempotently, `docker buildx create --name kl --driver remote "$BUILDKIT_HOST" --use`. `docker
+build`, `docker buildx build` and `bake` need nothing else; the workspace image gains the `docker`
+CLI and the buildx plugin, no daemon.
+
+On a connection:
+
+1. **Who.** A TCP connection carries no identity, so the gate reads the peer address and looks the
+   pod up by IP in a reflector over `kloudlite.io/kind=workspace` pods (the same label selector
+   the agent's own pod watch uses). The pod's owner and team labels name the builder:
+   `bld-{team}` for a team workspace, `bld-{owner}` otherwise. No pod at that address is a closed
+   connection.
+2. **Start.** `POST /v1/internal/builders/{slug}/start` on the api, authenticated by the shared
+   secret the peer listeners already use (`WS_PEER_SECRET`'s pattern, its own variable). The api
+   writes `desiredState: Running` and answers 202; the gate polls the environment (through the
+   same internal route, GET) until `Ready=True`, `BUILDER_START_SECS` (120) at most, then dials
+   `buildkit.env-bld-{slug}.svc:1234` and splices both directions. A start that runs out of time
+   closes the connection; buildx reports the endpoint unreachable, and the environment's own
+   condition says why (`ServicesNotReady`, a ResourceQuota refusal, `Placed=False`).
+3. **Stop.** The gate counts open connections per builder. When a builder's count has been zero
+   for `BUILDER_IDLE_SECS` (600, a central live setting), `POST …/stop`; the api writes
+   `desiredState: Stopped`; the environment controller cuts the stop sync point and tears the
+   pod down; peers pull. A connection arriving during the stop starts it again on the next pass —
+   the same rule a workspace stopped mid-`kl start` follows.
+4. **Restart of the gate.** Counts are in memory. On start the gate lists Running builders (the
+   internal GET) and begins an idle timer for each: the worst case of a gate restart is one idle
+   period of compute, never a builder left running.
+
+Two NetworkPolicies, both written by the reconcilers that own the namespaces: `allow-builder-gate`
+in every owner namespace (egress from workspace pods to the gate's pods, the shape `allow-dns` has),
+and `allow-builder-gate` in `env-bld-{slug}` (ingress to `buildkit` from the gate's pods, the shape
+`allow-gateway-ssh` has in workspace namespaces). The builder is otherwise as closed as any
+environment: `default-deny`, `allow-dns`, `allow-internet-egress` — the registry host and every
+public base image are outside RFC 1918. An attached environment's services are not reachable
+from a build, on purpose; that is what a pushed image is for.
+
+### 3. The credential (`crates/workspaces/src/api/keys.rs`, `crates/workspaces/src/k8s.rs`, image)
 
 The api's `user` role already writes the `user-key` Secret into each owner namespace and
-re-projects it on every key change and on the resync beat. It gains one key,
-`registry-token`: `Jwt::mint_registry(person, "*", 86_400)`. The beat re-mints it every pass, so
-the token in the pod is never older than 300 s plus one pass, and a person whose access is
-removed stops being able to push within a day at the outside and within one beat for a team push
-(§3 checks membership live, the token only says who you are).
+re-projects it on every key change and on the resync beat. It gains one key, `registry-token`:
+`Jwt::mint_registry(person, "*", 86_400)`, re-minted every pass, so the token in the pod is never
+older than one beat plus one pass and a stolen one is bounded by a day and by what §4 lets that
+person do.
 
 The workspace pod already mounts `user-key` read-only at `/etc/kloudlite/ssh` (`USER_KEY_PATH`),
-so the token lands at `/etc/kloudlite/ssh/registry-token` with no new mount. `docker-credential-kl`, a POSIX shell script in the
-workspace image, answers `get` for the registry host with `{"Username": "<owner>",
-"Secret": "<token>"}` and `erase`/`store` with success and no action. `~/.docker/config.json`
-is rendered once by the rc file: `{"credHelpers": {"<registry host>": "kl"}}`. Nothing is ever
-written to `auths`, so nothing long-lived is on disk.
+so the token lands at `/etc/kloudlite/ssh/registry-token` with no new mount. `docker-credential-kl`,
+a POSIX shell script in the workspace image, answers `get` for the registry host with
+`{"Username": "<owner>", "Secret": "<token>"}` and `store`/`erase` with success and no action.
+`~/.docker/config.json` is rendered once by the rc file: `{"credHelpers": {"<registry host>":
+"kl"}}`. Nothing is ever written to `auths`. `docker login` is not needed and the rc file's
+`docker` wrapper refuses it with a sentence naming this document: the helper IS the login.
 
-`docker login` is never needed and is refused with a message naming this document if someone
-tries: the helper IS the login.
+The builder pod itself pulls base images anonymously or from the team's own registry with the
+same helper: the `buildkit` service's pod mounts the same Secret, and the daemon reads
+`DOCKER_CONFIG`. A private base image of another team is DENIED, as §4 says it must be.
 
-### 3. Team authorization (`crates/registry/src/auth.rs`)
-
-`allow()` today:
-
-```
-who == owner            -> allowed
-public && !write        -> allowed
-else                    -> challenge / DENIED
-```
-
-becomes:
+### 4. Team authorization (`crates/registry/src/auth.rs`)
 
 ```
 who == owner                          -> allowed
 public && !write                      -> allowed
-who is Some(u) && may_act(u, owner)   -> allowed          # NEW: team membership, read and write
+who is Some(u) && may_act(u, owner)   -> allowed      # NEW: team membership, read and write
 else                                  -> challenge / DENIED
 ```
 
 `may_act` is the `App` method git-over-SSH resolves identity with: own handle, or team membership
-through the directory, cached 60 s, and refused on `Source::Unavailable` — a directory outage is
-a DENIED with a reason, never an allow. It is called only on the miss path, so an owner's own
-pushes and every public pull cost what they cost today. The Bearer token's `scope` claim is not
-consulted for this: `"*"` means "the person", and the image-level decision is made here, live.
+through the directory, cached 60 s, refused on `Source::Unavailable` — a directory outage is a
+DENIED, never an allow. It runs only on the miss path, so an owner's own pushes and every public
+pull cost what they cost today. The token's `scope` claim is not consulted: `"*"` means "this
+person", and the image-level decision is made here, live, against the directory.
 
-This is the whole of "push to the team's registry". It also fixes `docker pull` of a private team
-image by a member, which was refused the same way.
+This is the whole of "push to the team's registry". It also fixes a member's `docker pull` of a
+private team image, refused the same way today.
 
-### 4. Quota (`crates/workspaces/src/api/mod.rs`, `crd::default_quota`)
+### 5. Hidden, and not counted (`crates/workspaces/src/api/environments.rs`, `quota.rs`, web)
 
-`workspace_cost` charges the builder's limits beside the workspace's — the builder is part of
-what a running workspace can consume, and the `owner-quota` ResourceQuota will refuse the second
-pod otherwise, which reads as "workspace stuck Creating" instead of a 409 with a sentence. With
-the builder's limit equal to the workspace's (4 vCPU / 8 GiB), a workspace charges 8 vCPU / 16 GiB.
-`default_quota` is recomputed by the rule already written above it: person 5 × 8 + 2 × 4 × 2 =
-**56 vCPU**, 5 × 16 + 32 = **112 GiB**; team 20 × 8 + 64 = **224**, 20 × 16 + 128 = **448**. The
-test `the_default_cpu_and_memory_cover_the_counts_they_promise` fails until the table is updated,
-which is the point of it. The live `default-user` / `default-team` objects are patched to match.
-
-The builder's request stays small (250m / 512Mi): an idle buildkitd is idle, and nodes pack on
-requests. Only the ceiling moves.
-
-### 5. Networking
-
-The builder pod is selected by the namespace's existing policies: `default-deny`,
-`allow-dns`, `allow-internet-egress` (the registry host and every public base image are outside
-RFC 1918). It has no ingress and needs none; the socket is a file. An attached environment's
-services are NOT reachable from the builder — a build that needs them is a build that should
-run against a pushed image — so `attach-{ws}` keeps selecting the workspace pod only.
+- `GET /v1/environments` filters `spec.system.is_some()` out. Every other environment route —
+  get, start, stop, delete, attach, intercept, clone, restore, push, history, snapshots — answers
+  404 for a `system` environment, so it is indistinguishable from an environment that does not
+  exist. The two internal routes in §2 are the only way to touch one, and they take a slug, not an
+  environment id.
+- `quota::usage` skips `system` environments for the `environments` count and charges their
+  `diskGb` and, while live, their cpu and memory; `environment_cost` is not what created it (the
+  api did, at a fixed size), so the count dimension never sees it. The derived defaults in
+  `crd::default_quota` gain the builder's ceiling once per owner: person **40 vCPU / 80 GiB**,
+  team **148 / 296**; the derivation test enforces it, and the live `default-*` objects are patched.
+- The web reads nothing new. `kl` gains `kl builder status` (the internal GET, through the api,
+  for the caller's own builder) so "why is my build hanging" has an answer; nothing else.
 
 ### 6. Snapshots, clone, restore, move
 
-Nothing here is in the volume. A push or clone carries no cache; a restore or a move to another
-node starts with a cold builder there. `spec.state` gains nothing. The socket directory is
-per-workspace and per-node and is recreated by the controller wherever the workspace lands.
+Inherited and, for people, invisible. A stop cuts `stop-{env}-{gen}` and peers pull it; a node
+death or a decommission moves the builder as it moves any environment; retention keeps one sync
+point. No `Snapshot` with `transient: false` is ever written for a builder — push is a 404 — so
+history is empty by construction and `status.head` is never advanced. A moved builder starts on
+the up-to-date node with the cache as of its last stop, which is the last build.
 
 ### 7. Probe (`bins/slo`)
 
 | id | suite | sli | target |
 | --- | --- | --- | --- |
-| `ws.build.p95` | hourly | `docker buildx build` of a two-line Dockerfile in the probe workspace, pushed to the probe owner's own image, and its manifest readable back through `/v2` | `p95(120_000)` |
+| `ws.build.p95` | hourly | `docker buildx build` of a two-line Dockerfile in the probe workspace, pushed to the probe owner's own image, its manifest readable back through `/v2`; the builder was Stopped before the step, so this measures the on-demand start too | `p95(180_000)` |
 | `registry.team.push` | hourly | a team member's personal credential pushes to the team's image, and a non-member's is DENIED | `avail(99.9)` |
+| `builder.hidden` | hourly | the probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots | `avail(99.9)` |
 
-The hourly already creates a team with the probe user in it and a second owner outside it, so
-`registry.team.push` is an assertion on what teardown already stands up. Both ids follow the
-rule this branch's predecessor learned: they are read by result from the step log, and a `skip`
-is a hole, never a pass.
+The idle stop is unit-tested in the gate with a paused clock and deliberately NOT probed:
+`BUILDER_IDLE_SECS` is 600, and an hourly step cannot wait it out. Both build ids are read by
+result from the step log, and a `skip` is a hole, never a pass.
 
 ### 8. Failure modes
 
 | Failure | Behaviour |
 | --- | --- |
-| Builder pod cannot schedule (ResourceQuota) | `Builder=False/Pending` on the workspace; `docker build` reports the socket absent; the workspace itself is unaffected |
-| buildkitd crashes | Kubernetes restarts it; the socket path is stable so buildx reconnects on the next command |
-| Token expired in a long-running pod | Impossible while the api runs: the beat re-mints every 300 s against a 24 h TTL. If the api is down for a day, pushes fail with the registry's challenge, and resume when it returns |
-| Directory unavailable during a team push | DENIED, as every `may_act` refusal on `Source::Unavailable` is; never an allow |
-| Person removed from the team | Next push is DENIED within the 60 s membership cache; the token itself keeps working for that person's own images |
-| Workspace moved to another node | Builder re-rendered there; cache cold; nothing lost that was promised |
-| Two workspaces of one owner on one node | Separate sockets, shared cache directory — buildkit locks its root, so the second builder must use `--root /cache/{ws}`; the spec's `--root` is therefore per workspace under the shared subvolume |
+| Builder cannot start (ResourceQuota, no capacity, `Placed=False`) | gate closes the connection after `BUILDER_START_SECS`; `kl builder status` shows the environment's own condition; the workspace is unaffected |
+| buildkitd crashes mid-build | the StatefulSet restarts it; buildx reports the build failed; the next `docker build` reconnects through the gate |
+| Gate restarts | every Running builder gets a fresh idle timer; worst case one idle period of compute |
+| Token expired in a long-lived pod | impossible while the api runs (re-minted every beat against a 24 h TTL); with the api down for a day, pushes fail with the registry's challenge and resume when it returns |
+| Directory unavailable during a team push | DENIED, as every `may_act` refusal on `Source::Unavailable` is |
+| Person removed from the team | next push DENIED within the 60 s membership cache |
+| Builder's node dies mid-build | the build fails; the builder is interrupted like any environment and the cache as of its last stop is what the next start gets, on an up-to-date node |
+| Two builds from one team at once | one daemon, concurrent builds — buildkit's ordinary behaviour; `ponytail:` one builder per owner is the ceiling, sharded builders or registry-exported cache is the upgrade path |
 
 ## Out of scope
 
-`docker run` inside a workspace (a daemon, and a second sandbox question). Build cache
-replication between nodes. Registry-side build triggers. A per-team registry quota — images are
-already per-owner and counted by the registry's own GC, which this changes nothing about.
+`docker run` inside a workspace. Registry-exported build cache (`--cache-to type=registry`) for
+cross-node or cross-region sharing — the opt-in for a team that outgrows one builder. Sharded
+builders. A per-team registry quota.
 
 ## Files
 
-`crates/workspaces/src/k8s.rs` (builder pod, socket mount, `login_env`, credential file),
-`bins/agent/src/controller/workspace.rs` (render/tear down with the pod, `Builder` condition,
-socket directory), `crates/workspaces/src/api/keys.rs` (`registry-token` in `user-key`),
-`crates/registry/src/auth.rs` (`may_act` on the miss path), `crates/workspaces/src/api/mod.rs` +
-`crates/workspaces/src/crd/mod.rs` (quota), the workspace image (`docker`, `buildx`,
-`docker-credential-kl`, rc file), `bins/slo` + `crates/workspaces/src/slo/catalogue.rs` +
-`deploy/slo.md` + `web/apps/web/src/lib/fixtures/superadmin.ts` (two ids),
-`deploy/k3s/crds.yaml` (nothing new: the condition is a condition), `CLAUDE.md` (one paragraph).
+`crates/workspaces/src/crd/mod.rs` (`EnvironmentSpec.system`), `crates/workspaces/src/model.rs`
+(`Service.resources`), `crates/workspaces/src/k8s.rs` (per-service resources, `login_env`,
+`allow-builder-gate` policies), `crates/workspaces/src/api/environments.rs` (hidden routes, the
+two internal routes, builder create), `crates/workspaces/src/api/keys.rs` (`registry-token`,
+builder prune), `crates/workspaces/src/quota.rs` + `crd::default_quota`,
+`crates/registry/src/auth.rs` (`may_act`), the gate (`bins/gateway` or `bins/builder-gate`),
+`bins/kl` (`kl builder status`), the workspace image (`docker`, buildx, `docker-credential-kl`, rc
+file), `bins/slo` + catalogue + `deploy/slo.md` + web fixtures (three ids), `deploy/kloudlite.yaml`
++ `deploy/k3s/*.yaml` (the gate, its RBAC, `crds.yaml`), `CLAUDE.md` (one paragraph).
