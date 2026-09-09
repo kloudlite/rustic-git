@@ -37,11 +37,11 @@ cargo build --release --locked --bins 2>&1 | tail -1
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
 CTX=/work/ctx; rm -rf "$CTX"; mkdir -p "$CTX/target/release"
 cp Dockerfile .dockerignore "$CTX/"
-for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-slo kl; do
+for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl; do
   ln -f /work/target/release/$b "$CTX/target/release/$b"
 done
 
-for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway slo:kloudlite-slo workspace:kloudlite-workspace; do
+for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
   buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX" \

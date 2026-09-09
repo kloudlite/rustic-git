@@ -442,6 +442,12 @@ spec:
               value: karthik@kloudlite.io
             - name: KLOUDLITE_PEER_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
+            # What `/v1/internal/builders/*` requires — the build gate's only credential. The gate
+            # itself runs in the k3s region, so this Secret exists in BOTH clusters with the SAME
+            # value (`deploy/k3s/builder-gate.yaml` reads the same name and key); rotating it means
+            # writing both and rolling both. Without it those four routes are not mounted at all.
+            - name: KLOUDLITE_BUILDER_SECRET
+              valueFrom: { secretKeyRef: { name: kloudlite-builder-gate, key: secret } }
             # Optional: without it every request still answers, just always from a git node
             # instead of the cache. See the Redis Deployment/config below for the policy this
             # relies on.

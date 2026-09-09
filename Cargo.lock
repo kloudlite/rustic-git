@@ -3547,6 +3547,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kloudlite-builder-gate-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "k8s-openapi",
+ "kloudlite-core",
+ "kloudlite-storage",
+ "kloudlite-workspaces",
+ "kube",
+ "metrics",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "kloudlite-core"
 version = "0.1.0"
 dependencies = [

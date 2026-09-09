@@ -19,6 +19,7 @@ Files, in the order a cluster is built:
 | `otel-agent.yaml` | The region's OpenTelemetry collectors: ServiceAccount + ClusterRole (the header table is the role), a DaemonSet for the per-node receivers (kubelet stats, pod logs, and this node's `prometheus.io/scrape` pods) and a one-replica Deployment for `k8s_cluster`. Exports to the ClickStack gateway on AKS. Needs the `kloudlite-otel` Secret first (`../clickstack/README.md`) and `KLOUDLITE_REGION` edited to this region's id. |
 | `harden-node.sh` | Node firewall (drop-by-default on the public NIC), unattended upgrades, keys-only sshd. Idempotent; run on every node after provisioning and after changing the operator CIDR, and again with `CF_CIDRS` set once the gateway is live. Streamed over `ssh … sudo bash -s < harden-node.sh`, so `CF_CIDRS` must be passed as an env var on the remote command, not read from a local file — see the Gateway section below. |
 | `cloudflare-ips-v4.txt` | Cloudflare's published v4 edge ranges, one CIDR per line — the one source. Build `CF_CIDRS` from it locally (`paste -sd, cloudflare-ips-v4.txt`) before running `harden-node.sh`. Refreshed by `../cf-sync.sh`, which also renders the AKS-side copies (`../ingress-nginx-service.yaml`, `../ingress-nginx-config.yaml`) and is run weekly by CI; never edit by hand. A stale list fails safe (the new edge is just refused, never wrongly trusted). |
+| `builder-gate.yaml` | The build gate: one pod in `kloudlite-system` behind the Service `builder-gate:1234` every workspace's buildx points at. Starts an owner's builder on the first connection and stops it after `builderIdleSecs`. Needs the `kloudlite-builder-gate` Secret (key `secret`) — the SAME value as the api's on AKS — and `KLOUDLITE_API_URL` in its ConfigMap pointing at the api's public base. |
 | `gateway.yaml` | The workspace SSH gateway: one pod per pool node on the node's own `hostPort: 80`, behind the Cloudflare proxy (TLS ends at the edge). In its own `kloudlite-system` namespace, which the workspace NetworkPolicy names (`k8s::GATEWAY_NAMESPACE`). |
 | `nix-conf.yaml` | ConfigMap: the host Nix daemon's substituters, keys and GC headroom. |
 | `backup-controlplane.sh` | Hourly backup of the SQLite datastore, the cluster identity and a YAML dump of every CRD object to Azure Blob. Restore procedure is in the script's trailing comment. |
@@ -48,7 +49,7 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f api-rbac.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f api-rbac.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f builder-gate.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
 ```
 
 ### The SLO probe's six owners

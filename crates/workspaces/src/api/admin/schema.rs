@@ -112,6 +112,8 @@ fn central_range(name: &str) -> Option<(f64, f64)> {
         "announceStrandedSecs" => Some((5.0, 300.0)),
         "feedRetentionSecs" => Some((3_600.0, 2_592_000.0)),
         "sshPort" => Some((1.0, 65_535.0)),
+        "builderIdleSecs" => Some((60.0, 86_400.0)),
+        "builderStartSecs" => Some((30.0, 600.0)),
         _ => None,
     }
 }

@@ -43,7 +43,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-workspace kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -63,6 +63,7 @@ pin() {
 pin 'kloudlite(?!-)' "$SHA" "${DIGEST[kloudlite]}" kloudlite.yaml
 pin 'kloudlite-agent' "$SHA" "${DIGEST[kloudlite-agent]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
+pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/builder-gate.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
@@ -75,5 +76,5 @@ cat <<EOF
 pinned. Next:
   git commit -am "Pin every tier to $SHA"
   deploy/roll.sh                                   # AKS: one apply, then the rollout waits
-  KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml
+  KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml -f deploy/k3s/builder-gate.yaml
 EOF

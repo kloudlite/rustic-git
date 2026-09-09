@@ -101,12 +101,12 @@ jobs:
       - run: >
           cargo build --release --locked
           --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
-          --bin kloudlite-agent --bin kloudlite-gateway
+          --bin kloudlite-agent --bin kloudlite-gateway --bin kloudlite-builder-gate
           --bin kloudlite-slo --bin kl
       - name: glibc ceiling
         run: |
           set -eu
-          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-slo kl; do
+          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl; do
             need=$(objdump -T "/ci-target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
             echo "$b needs $need"
             if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
@@ -122,6 +122,7 @@ jobs:
             /ci-target/release/kloudlite-worker
             /ci-target/release/kloudlite-agent
             /ci-target/release/kloudlite-gateway
+            /ci-target/release/kloudlite-builder-gate
             /ci-target/release/kloudlite-slo
             /ci-target/release/kl
           if-no-files-found: error
@@ -187,6 +188,16 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-gateway:latest
             ghcr.io/kloudlite/kloudlite-gateway:${{ github.sha }}
+      # The build gate. Same commit as the api whose internal routes it calls.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: builder-gate
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-builder-gate:latest
+            ghcr.io/kloudlite/kloudlite-builder-gate:${{ github.sha }}
       # The SLO probe. Same commit as the tier it probes, deliberately: a probe pinned behind the
       # fleet reports the previous release's journey and calls it green.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6

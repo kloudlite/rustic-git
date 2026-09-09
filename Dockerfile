@@ -102,6 +102,21 @@ USER kloudlite
 EXPOSE 443 8080
 ENTRYPOINT ["kloudlite-gateway"]
 
+# The build gate. Its own image for the same reason the gateway has one: a different pod, a
+# different ServiceAccount, and no reason for the git server's pods to carry either binary.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS builder-gate
+# ca-certificates only: the gate talks TLS to the kube API server and to the api tier's public
+# URL, and plain TCP to buildkit.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG PROFILE=release
+COPY target/${PROFILE}/kloudlite-builder-gate /usr/local/bin/kloudlite-builder-gate
+# No file capability, unlike the gateway: 1234 and 8080 are both unprivileged.
+RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite
+USER kloudlite
+EXPOSE 1234 8080
+ENTRYPOINT ["kloudlite-builder-gate"]
+
 # The default workspace image: what `ws-{id}` runs when a workspace names no image of its own.
 # Stock alpine plus exactly what the platform itself needs and cannot get from Nix:
 #   - libstdc++/libgcc: VS Code Remote-SSH's Alpine server ships a musl `node` that still

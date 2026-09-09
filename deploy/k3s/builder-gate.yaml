@@ -1,0 +1,159 @@
+# The build gate.
+#
+# A workspace's buildx points at `tcp://builder-gate.kloudlite-system.svc:1234`
+# (`k8s::BUILDKIT_HOST`) and never moves. Behind that one address the gate identifies the calling
+# pod by IP, starts that owner's hidden builder environment through the api's internal routes,
+# waits for it, splices the bytes to `buildkit.env-bld-{slug}.svc:1234`, and stops the builder
+# once nobody has been connected for `builderIdleSecs`. Nothing about that is visible to
+# `docker build`.
+#
+# In `kloudlite-system` with the gateway (the namespace already exists there; both are declared so
+# either file applies alone). The workspace and environment NetworkPolicies admit exactly
+# `app=kloudlite-builder-gate` pods in THIS namespace, so the label and the namespace are the
+# contract — see `k8s::allow_builder_gate`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kloudlite-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kloudlite-builder-gate
+  namespace: kloudlite-system
+---
+# Pods, read-only, and nothing else in the cluster. The gate's whole Kubernetes need is one
+# reflector over workspace pods, to answer "which owner is this IP?" — it writes nothing, and it
+# cannot read a Secret, a workspace or an environment. `list`/`watch` (unlike the gateway's bare
+# `get`) is the reflector: an index by pod IP cannot be built from named gets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kloudlite-builder-gate
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kloudlite-builder-gate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kloudlite-builder-gate
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-builder-gate
+    namespace: kloudlite-system
+---
+# The api's PUBLIC base URL, not a Service: the api tier runs on AKS and this cluster is a
+# different one, so `http://kloudlite-api` resolves to nothing here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kloudlite-builder-gate
+  namespace: kloudlite-system
+data:
+  KLOUDLITE_API_URL: https://dev.kloudlite.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kloudlite-builder-gate
+  namespace: kloudlite-system
+  labels:
+    app: kloudlite-builder-gate
+spec:
+  # ONE replica, and not a preference: the connection counts that decide when a builder is idle
+  # live in this process's memory (`bins/builder-gate/src/idle.rs`). Two replicas would each count
+  # their own half, and one of them would stop a builder the other is still splicing to. Raise
+  # this only once the count lives somewhere both read.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kloudlite-builder-gate
+  template:
+    metadata:
+      labels:
+        app: kloudlite-builder-gate
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: kloudlite-builder-gate
+      nodeSelector:
+        kloudlite.io/pool: "true"
+      tolerations:
+        - key: kloudlite.io/role
+          operator: Exists
+      containers:
+        - name: builder-gate
+          # `pin.sh` rewrites this to `:<sha>@sha256:<digest>` — the placeholder is here only so
+          # the file parses and applies before the first pin.
+          image: ghcr.io/kloudlite/kloudlite-builder-gate:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: gate
+              containerPort: 1234
+            - name: http
+              containerPort: 8080
+          env:
+            - name: KLOUDLITE_LOG_FORMAT
+              value: json
+            - name: KLOUDLITE_METRICS_ADDR
+              value: 0.0.0.0:9464
+            # The same secret the api's `/v1/internal/builders/*` requires. The api runs on AKS
+            # and the gate here, so this Secret exists in BOTH clusters with the SAME value —
+            # rotating it means writing both and rolling both. The pod fails closed without it.
+            - name: KLOUDLITE_BUILDER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kloudlite-builder-gate
+                  key: secret
+            - name: KLOUDLITE_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: kloudlite-builder-gate
+                  key: KLOUDLITE_API_URL
+            - name: RUST_BACKTRACE
+              value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 20
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# `builder-gate`, not `kloudlite-builder-gate`: this name is spliced into the address every
+# workspace's buildx is configured with (`k8s::BUILDKIT_HOST`), so it is a contract, not a label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: builder-gate
+  namespace: kloudlite-system
+spec:
+  selector:
+    app: kloudlite-builder-gate
+  ports:
+    - name: gate
+      port: 1234
+      targetPort: 1234

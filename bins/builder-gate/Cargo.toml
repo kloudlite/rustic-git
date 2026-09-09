@@ -1,0 +1,36 @@
+[package]
+name = "kloudlite-builder-gate-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "kloudlite_builder_gate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kloudlite-builder-gate"
+path = "src/main.rs"
+
+[dependencies]
+tracing = { workspace = true }
+metrics = { workspace = true }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-workspaces = { path = "../../crates/workspaces" }
+# The same single, read-only GET of `cluster/settings` the gateway makes, and nothing else from
+# the object store — `object_store_views`, not the SlateDB pool.
+kloudlite-storage = { path = "../../crates/storage" }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+axum = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The tests stand the api up as a real HTTP server, because the gate reaches it over HTTP and a
+# faked client would not prove the bearer header or the paths.
+axum = { workspace = true }
+tokio = { workspace = true }

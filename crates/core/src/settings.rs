@@ -102,6 +102,12 @@ pub struct CentralSettings {
     /// Whether new-account signup is open. No current gate reads this.
     // ponytail: no signup gate exists today; ships true and is a no-op until one does.
     pub signup_open: bool,
+    /// How long a builder environment sits with no connection through the gate before the gate
+    /// stops it. 60..=86400 seconds.
+    pub builder_idle_secs: u64,
+    /// How long the gate waits for a builder to report `Ready` before giving up on a connection.
+    /// 30..=600 seconds.
+    pub builder_start_secs: u64,
 }
 
 impl Default for CentralSettings {
@@ -132,6 +138,8 @@ impl CentralSettings {
             ssh_port: 22,
             registry_host: String::new(),
             signup_open: true,
+            builder_idle_secs: 600,
+            builder_start_secs: 120,
         }
     }
 
@@ -184,6 +192,8 @@ impl CentralSettings {
         over!(ssh_port);
         over!(registry_host);
         over!(signup_open);
+    over!(builder_idle_secs);
+    over!(builder_start_secs);
         self
     }
 }
@@ -220,6 +230,10 @@ pub struct StoredCentralSettings {
     pub registry_host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signup_open: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder_idle_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder_start_secs: Option<u64>,
     /// Last ten versions, newest first, kept inline rather than as ten separate object-store
     /// keys — one small object either way, and one GET beats eleven.
     #[serde(default)]
@@ -260,6 +274,10 @@ pub struct StoredCentralSettingsSnapshot {
     pub registry_host: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signup_open: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder_idle_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builder_start_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub updated_by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -285,6 +303,8 @@ impl From<&StoredCentralSettingsSnapshot> for StoredCentralSettings {
             ssh_port: snap.ssh_port,
             registry_host: snap.registry_host.clone(),
             signup_open: snap.signup_open,
+            builder_idle_secs: snap.builder_idle_secs,
+            builder_start_secs: snap.builder_start_secs,
             history: Vec::new(),
             updated_by: String::new(),
             updated_at: String::new(),
@@ -319,6 +339,8 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
     ("sshPort", Mark::Live),
     ("registryHost", Mark::Live),
     ("signupOpen", Mark::Live),
+    ("builderIdleSecs", Mark::Live),
+    ("builderStartSecs", Mark::Live),
 ];
 
 /// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
@@ -354,6 +376,8 @@ pub fn validate_stored(patch: &StoredCentralSettings) -> Result<(), String> {
     range!(announce_stranded_secs, 5u64, 300u64);
     range!(feed_retention_secs, 3_600u64, 2_592_000u64);
     range!(ssh_port, 1u16, 65_535u16);
+    range!(builder_idle_secs, 60u64, 86_400u64);
+    range!(builder_start_secs, 30u64, 600u64);
     Ok(())
 }
 
@@ -374,6 +398,8 @@ fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
         ssh_port: old.ssh_port,
         registry_host: old.registry_host.clone(),
         signup_open: old.signup_open,
+        builder_idle_secs: old.builder_idle_secs,
+        builder_start_secs: old.builder_start_secs,
         updated_by: old.updated_by.clone(),
         updated_at: old.updated_at.clone(),
     };
@@ -413,6 +439,8 @@ pub fn apply_patch(
     over!(ssh_port);
     over!(registry_host);
     over!(signup_open);
+    over!(builder_idle_secs);
+    over!(builder_start_secs);
     push_history(current, &mut next);
     next.updated_by = updated_by.to_string();
     next.updated_at = updated_at.to_string();
@@ -526,6 +554,8 @@ mod tests {
             ssh_port: snap.ssh_port,
             registry_host: snap.registry_host.clone(),
             signup_open: snap.signup_open,
+            builder_idle_secs: snap.builder_idle_secs,
+            builder_start_secs: snap.builder_start_secs,
             history: vec![],
             updated_by: String::new(),
             updated_at: String::new(),
