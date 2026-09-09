@@ -93,6 +93,10 @@ pub async fn project_all(s: &ApiState) {
         if let Err(e) = project(s, &o).await {
             tracing::warn!(owner = %o, error = %e, "keys.project.failed");
         }
+        // The registry token lives in `user-key`, minted with a 24h ttl (`write_user_key`), so
+        // this beat is its only rotation path — nothing else re-mints it before it expires.
+        super::workspaces::refresh_user_key_secrets(s, &o).await;
+        tracing::info!(owner = %o, "keys.registry_token.refreshed");
     }
     if listed {
         let api: Api<crd::OwnerKeys> = Api::all(c.clone());
@@ -249,5 +253,42 @@ mod tests {
         assert_eq!(live, vec!["acme", "karthik", "meera"]);
         assert_eq!(stale, vec!["gone"]);
         assert_eq!(owner_set([(String::new(), String::new())], vec![]), (vec![], vec![]));
+    }
+
+    /// The beat's ONLY rotation path for `registry-token`: `refresh_user_key_secrets` — the same
+    /// function `keys_changed` uses — must run for every owner a Workspace names, and for no
+    /// other owner. Namespace listing is `refresh_user_key_secrets`'s first HTTP call and happens
+    /// before it ever checks `s.keys`, so its presence/absence is what this test observes.
+    #[tokio::test]
+    async fn the_beat_refreshes_user_key_for_an_owner_with_a_workspace_and_no_one_else() {
+        let ws_list = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+            "items": [{
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+                "metadata": {"name": "ws-1"},
+                "spec": {
+                    "owner": "acme", "team": "", "name": "dev", "region": "r1",
+                    "image": "", "packages": [], "desiredState": "running",
+                },
+            }],
+        });
+        let owner_keys_list = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeysList", "metadata": {}, "items": [],
+        });
+        let ns_list = serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": []});
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerkeys", owner_keys_list),
+            crate::kube_test::get("/api/v1/namespaces", ns_list),
+        ]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.kube = Some(client);
+        project_all(&s).await;
+        assert!(rec.calls().contains(&"GET /api/v1/namespaces".to_string()), "acme has a workspace and must be refreshed");
+        // No second owner exists in the fixture at all, so a bug that refreshed every owner
+        // regardless of ownership would still pass the assertion above — this counts calls
+        // instead, which catches "refreshed acme twice" or "refreshed a phantom owner" either way.
+        assert_eq!(rec.calls().iter().filter(|c| *c == "GET /api/v1/namespaces").count(), 1);
     }
 }

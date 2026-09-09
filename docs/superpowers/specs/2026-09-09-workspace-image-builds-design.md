@@ -122,11 +122,13 @@ from a build, on purpose; that is what a pushed image is for.
 
 ### 3. The credential (`crates/workspaces/src/api/keys.rs`, `crates/workspaces/src/k8s.rs`, image)
 
-The api's `user` role already writes the `user-key` Secret into each owner namespace and
-re-projects it on every key change and on the resync beat. It gains one key, `registry-token`:
-`Jwt::mint_registry(person, "*", 86_400)`, re-minted every pass, so the token in the pod is never
-older than one beat plus one pass and a stolen one is bounded by a day and by what §4 lets that
-person do.
+The api's `user` role already writes the `user-key` Secret into each owner namespace, but today
+only re-projects it on a key change — the resync beat (`keys::run_beat`) re-projects `OwnerKeys`
+only, and never touched `user-key`. This task adds a resync pass for `user-key` too, so the
+Secret (and the `registry-token` key below) is rewritten every beat as well as on every key
+change. It gains one key, `registry-token`: `Jwt::mint_registry(person, "*", 86_400)`, re-minted
+every pass, so the token in the pod is never older than one beat plus one pass and a stolen one
+is bounded by a day and by what §4 lets that person do.
 
 The workspace pod already mounts `user-key` read-only at `/etc/kloudlite/ssh` (`USER_KEY_PATH`),
 so the token lands at `/etc/kloudlite/ssh/registry-token` with no new mount. `docker-credential-kl`,

@@ -366,7 +366,11 @@ pub async fn keys_changed(s: &ApiState, principal: &str) {
 /// are found by the owner label the controller stamps, so a team the api tier has never heard of
 /// is still covered. Transitional with the Secret's `authorized_keys` entry (spec §5 step 4); the
 /// private-key half stays for as long as workspaces push git with a platform key.
-async fn refresh_user_key_secrets(s: &ApiState, owner: &str) {
+///
+/// `pub(crate)`, not private: `keys::run_beat`'s pass reuses this directly rather than
+/// reimplementing "every namespace of this owner" — it is also the registry token's ONLY
+/// rotation path, since nothing else re-mints the 24h token `write_user_key` puts in the Secret.
+pub(crate) async fn refresh_user_key_secrets(s: &ApiState, owner: &str) {
     let Some(c) = s.kube.as_ref() else { return };
     let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(c.clone());
     let sel = format!("{}={owner},{}=workspace", crate::k8s::OWNER_LABEL, crate::k8s::KIND_LABEL);

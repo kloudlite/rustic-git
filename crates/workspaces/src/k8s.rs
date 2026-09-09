@@ -468,8 +468,8 @@ fn prelude(name: &str) -> String {
          chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
          chown {SSH_UID}:{SSH_UID} $H/.local\n\
          mkdir -p /etc/fish/conf.d\n\
-         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' > /etc/zshrc\n\
-         printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' > /etc/fish/conf.d/kl.fish\n\
+         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' '[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh' > /etc/zshrc\n\
+         printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish\n\
          printf '%s\\n' 'format = \"$directory$git_branch$git_status$cmd_duration$line_break$character\"' > /etc/starship.toml\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
@@ -550,6 +550,24 @@ fn user_key_volume(required: bool) -> Volume {
             // then reports Ready.
             optional: Some(!required),
             ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The `git-seed` init container's OWN view of `user-key`: `id_ed25519` only, via `items`. That
+/// container clones over SSH and never reads `gitconfig`/`authorized_keys` — let alone
+/// `registry-token`, an api-tier build credential a root init image has no business seeing. The
+/// main container keeps the unrestricted `user_key_volume` above; this is a second volume over
+/// the same Secret; a Secret is JSON, so serving one key from it costs nothing extra.
+fn user_key_seed_volume(required: bool) -> Volume {
+    Volume {
+        name: "user-key-seed".to_string(),
+        secret: Some(SecretVolumeSource {
+            secret_name: Some(USER_KEY_SECRET.to_string()),
+            default_mode: Some(0o444),
+            optional: Some(!required),
+            items: Some(vec![KeyToPath { key: "id_ed25519".into(), path: "id_ed25519".into(), mode: None }]),
         }),
         ..Default::default()
     }
@@ -932,7 +950,7 @@ pub fn git_init_container(
         volume_mounts: Some(vec![
             VolumeMount { name: "live".to_string(), mount_path: SEED_DIR.to_string(), ..Default::default() },
             VolumeMount {
-                name: "user-key".to_string(),
+                name: "user-key-seed".to_string(),
                 mount_path: USER_KEY_PATH.to_string(),
                 read_only: Some(true),
                 ..Default::default()
@@ -1091,6 +1109,10 @@ pub fn workspace_pod(
                 attach_volume(ctx.pool, ws_id),
                 user_key_volume(init.is_some()),
             ];
+            // Only the init container mounts this, so only a seeded workspace needs it at all.
+            if init.is_some() {
+                v.push(user_key_seed_volume(true));
+            }
             if default_image {
                 v.extend([ws_ssh_volume(ws_id), keys_volume(ctx.pool, keys_owner(spec))]);
             }
@@ -2517,6 +2539,10 @@ mod tests {
         // completer, which appends the match to the word instead of replacing it ("cacargo").
         // The dump goes to the per-node cache dir, never the shared home.
         assert!(prelude.contains("autoload -Uz compinit && compinit -d"), "{prelude}");
+        // The build profile: files, not env, so it runs as a subprocess of both rc files rather
+        // than needing to be sourced — see kl-build.sh's own doc for why.
+        assert!(prelude.contains("[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh"), "{prelude}");
+        assert!(prelude.contains("test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh"), "{prelude}");
         // `~/.local` is created ROOT-owned by the kubelet as the parent of the `.local/state`
         // mount point, so without this fish cannot create `.local/share` and refuses to save
         // history ("Permission denied"); the same for anything else that keeps XDG data.
@@ -2842,6 +2868,33 @@ mod tests {
             .unwrap();
             assert!(workspace_pod(&spec, "vol-1", "ws-1", &ctx, None).is_err(), "accepted {hostile:?}");
         }
+    }
+
+    /// The init image is root and never reads anything but `id_ed25519` — least privilege says
+    /// it should not be ABLE to read `registry-token` even though it never would, and it must not
+    /// share a volume name with the main container's unrestricted view of the same Secret.
+    #[test]
+    fn only_the_seed_key_is_visible_to_the_git_seed_container() {
+        let source = crate::crd::VolumeSource::GitRepo { repo: "acme/dev".into(), branch: "main".into() };
+        let init = git_init_container(&source, "alpine/git:1", "git.khost.dev", "22").unwrap().unwrap();
+        let pod = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), Some(init)).unwrap();
+        let s = pod.spec.unwrap();
+
+        let seed_mount = s.init_containers.unwrap()[0].volume_mounts.clone().unwrap();
+        let seed_vol_name = seed_mount.iter().find(|m| m.mount_path == USER_KEY_PATH).unwrap().name.clone();
+        assert_ne!(seed_vol_name, "user-key", "the init container must not share the main container's volume");
+
+        let volumes = s.volumes.unwrap();
+        let seed_vol = volumes.iter().find(|v| v.name == seed_vol_name).unwrap();
+        let items = seed_vol.secret.as_ref().unwrap().items.as_ref().expect("scoped by items");
+        assert_eq!(items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), vec!["id_ed25519"]);
+
+        // The main container's own mount is untouched: still the full Secret, no `items`.
+        let main_mount = s.containers[0].volume_mounts.clone().unwrap();
+        let main_vol_name = main_mount.iter().find(|m| m.mount_path == USER_KEY_PATH).unwrap().name.clone();
+        assert_eq!(main_vol_name, "user-key");
+        let main_vol = volumes.iter().find(|v| v.name == "user-key").unwrap();
+        assert!(main_vol.secret.as_ref().unwrap().items.is_none());
     }
 
     /// The ordinary name still builds, and still mounts where it always did.
