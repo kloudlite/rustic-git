@@ -843,9 +843,18 @@ fn builder_body(id: &str, e: &crd::Environment) -> serde_json::Value {
         crd::DesiredState::Running => EnvState::Running,
         crd::DesiredState::Stopped => EnvState::Stopped,
     };
+    // A builder that is meant to be Stopped and is not observed Running IS stopped, whatever
+    // interim phase the claim wrote (`creating` between the claim and the controller's first
+    // stop pass): nothing can be building, and a caller that waits on the word — the probe does,
+    // before it measures a cold start — would otherwise read a state that is seconds from true.
+    let observed = st.map(|s| s.phase.as_str());
+    let state = match (e.spec.desired_state, observed) {
+        (crd::DesiredState::Stopped, Some(p)) if p != "running" => EnvState::Stopped,
+        _ => phase(observed, unseen),
+    };
     serde_json::json!({
         "id": id,
-        "state": phase(st.map(|s| s.phase.as_str()), unseen),
+        "state": state,
         // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
         "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
         "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),

@@ -727,11 +727,21 @@ async fn build_push(c: &mut Ctx, id: &str) {
     if c.suite != Suite::Hourly {
         return;
     }
-    let doc = match get(c, &api(c, "/v1/builders/me"), &c.probe_jwt.clone()).await {
-        Ok(v) => v,
-        Err(e) => return c.skip("ws.build.p95", &format!("could not read the builder: {e:#}")),
-    };
-    if doc.get("state").and_then(Value::as_str) != Some("stopped") {
+    // The builder is created by this run's own first workspace, seconds before this: give the
+    // controller's first pass its moment rather than reading the claim's interim phase.
+    let mut stopped = false;
+    for _ in 0..10 {
+        let doc = match get(c, &api(c, "/v1/builders/me"), &c.probe_jwt.clone()).await {
+            Ok(v) => v,
+            Err(e) => return c.skip("ws.build.p95", &format!("could not read the builder: {e:#}")),
+        };
+        if doc.get("state").and_then(Value::as_str) == Some("stopped") {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    if !stopped {
         return c.skip("ws.build.p95", "builder was not stopped before the step");
     }
     let Some(secret) = c.state.token_value.clone() else {
