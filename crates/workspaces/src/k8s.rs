@@ -764,8 +764,8 @@ fn live_worktree_volume(pool: &str, volume: &str, ws: &str) -> Volume {
     host_dir("live", worktree_path(pool, volume, ws))
 }
 
-/// Keep the pod on its role's nodes and on the node holding its subvolume, and tolerate that
-/// role's taint.
+/// Keep the pod on a pool node and on the node holding its subvolume, and tolerate the pool
+/// taint.
 ///
 /// Two selectors, two jobs: the pool label says the data this pod mounts lives on this node
 /// (a node without one cannot host it), the hostname pins the pod to the specific node holding

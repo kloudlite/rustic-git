@@ -309,8 +309,8 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
-  # `get` is read-only, once, at startup: which pools this node advertises
-  # (`kloudlite.io/session|env`).
+  # `get` is read-only, once, at startup: whether this node carries the pool
+  # (`kloudlite.io/pool`).
   # `list` joined `get` for replication: the sender computes standby targets by rendezvous over
   # the pooled nodes, and every agent must see the same candidate list or two nodes will disagree
   # about who holds what.

@@ -217,7 +217,7 @@ sudo systemctl start k3s
 still joins workers. Workers: the k3s agent install with that token, then the labels:
 
 ```sh
-kubectl label node <node> kloudlite.io/pool=true kloudlite.io/session=true   # or env=true
+kubectl label node <node> kloudlite.io/pool=true
 ```
 
 **No bundle, or a bundle the key cannot open** — a fresh cluster: install normally, then only

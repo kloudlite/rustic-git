@@ -379,10 +379,21 @@ async fn node_has_pool(client: &kube::Client, node: &str) -> bool {
     has_pool
 }
 
-
-
 #[cfg(test)]
 mod tests {
+    /// The one gate on the claim watches. A node without the pool label starts neither — the
+    /// spec's rule — and that is decided here, before any controller is built.
+    #[tokio::test]
+    async fn a_node_without_the_pool_label_has_no_pool_and_one_with_it_does() {
+        let bare = serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "cp"}});
+        let (client, _) = kloudlite_workspaces::kube_test::mock_client(vec![kloudlite_workspaces::kube_test::get("/api/v1/nodes/cp", bare)]);
+        assert!(!super::node_has_pool(&client, "cp").await);
+        let pool = serde_json::json!({"apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "n1", "labels": {"kloudlite.io/pool": "true", "kloudlite.io/session": "true"}}});
+        let (client, _) = kloudlite_workspaces::kube_test::mock_client(vec![kloudlite_workspaces::kube_test::get("/api/v1/nodes/n1", pool)]);
+        assert!(super::node_has_pool(&client, "n1").await);
+    }
+
     use super::{already_mounted, resolve_export};
 
     /// Literal addresses only — `to_socket_addrs` on a literal never touches DNS, so this pins the

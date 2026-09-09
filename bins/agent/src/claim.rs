@@ -147,9 +147,8 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Resul
 fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool {
     let alloc = node.and_then(|n| n.status.as_ref()).and_then(|s| s.allocatable.as_ref());
     let q = |k: &str| alloc.and_then(|a| a.get(k)).map(|v| v.0.as_str()).unwrap_or_default().to_string();
-    let pct = ADMISSIBLE_PCT;
-    let cpu = kloudlite_workspaces::quota::millicores(&q("cpu")) * pct / 100;
-    let mem = kloudlite_workspaces::quota::mebibytes(&q("memory")) * pct / 100;
+    let cpu = kloudlite_workspaces::quota::millicores(&q("cpu")) * ADMISSIBLE_PCT / 100;
+    let mem = kloudlite_workspaces::quota::mebibytes(&q("memory")) * ADMISSIBLE_PCT / 100;
     let (pod_cpu, pod_mem) = requested(pods);
     let (used_cpu, used_mem) = (pod_cpu + committed.0, pod_mem + committed.1);
     cpu.saturating_sub(used_cpu) >= want.0 && mem.saturating_sub(used_mem) >= want.1
@@ -709,6 +708,8 @@ mod tests {
         assert_eq!(ADMISSIBLE_PCT, 100);
         let n = node(serde_json::json!({"kloudlite.io/pool": "true"}), "8", "33554432Ki");
         assert!(fits(Some(&n), &[], (0, 0), (8_000, 0))); // 8 vCPU requested, all of it available
+        // ...and not one millicore past the guarantee: this is what pins the ceiling.
+        assert!(!fits(Some(&n), &[], (0, 0), (8_001, 0)));
     }
 
     /// The owner is ALWAYS allowed: it holds the bytes by construction, and a rule that could
