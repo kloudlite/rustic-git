@@ -74,13 +74,25 @@ pub async fn project_all(s: &ApiState) {
     // something a lost list can make safe.
     // Pruning needs the Workspace list to have SUCCEEDED: a failed list would make every
     // projection look stale, and this beat must never delete on a guess.
-    let (pairs, listed) = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => (l.items.into_iter().map(|w| (w.spec.owner, w.spec.team)).collect(), true),
+    let (specs, listed) = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => (l.items.into_iter().map(|w| w.spec).collect::<Vec<_>>(), true),
         Err(e) => {
             tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
             (Vec::new(), false)
         }
     };
+    // One builder per owner slug, from a workspace of that owner's — the region has to come from
+    // somewhere real and any of their workspaces names one. This is the only back-fill there is:
+    // `create_ws` writes a builder for new owners, and every owner whose workspaces predate the
+    // release would otherwise have no builder and every build refused.
+    let mut builders: std::collections::BTreeMap<String, (String, String, String)> = Default::default();
+    for w in &specs {
+        builders
+            .entry(k8s::keys_owner(w).to_string())
+            .or_insert_with(|| (w.owner.clone(), w.team.clone(), w.region.clone()));
+    }
+    let pairs: Vec<(String, String)> =
+        specs.into_iter().map(|w| (w.owner, w.team)).collect();
     let existing = match Api::<crd::OwnerKeys>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => l.items.iter().filter_map(|o| o.metadata.name.clone()).collect(),
         Err(e) => {
@@ -97,6 +109,12 @@ pub async fn project_all(s: &ApiState) {
         // this beat is its only rotation path — nothing else re-mints it before it expires.
         super::workspaces::refresh_user_key_secrets(s, &o).await;
         tracing::info!(owner = %o, "keys.registry_token.refreshed");
+    }
+    // Best effort and keep-biased like the rest of the beat: a failed apply is retried next beat.
+    for (slug, (owner, team, region)) in builders {
+        if let Err(e) = super::environments::ensure_builder(s, &owner, &team, &region).await {
+            tracing::warn!(owner = %slug, status = ?e.status(), "keys.builder.ensure.failed");
+        }
     }
     if listed {
         let api: Api<crd::OwnerKeys> = Api::all(c.clone());
@@ -387,5 +405,54 @@ mod tests {
         // regardless of ownership would still pass the assertion above — this counts calls
         // instead, which catches "refreshed acme twice" or "refreshed a phantom owner" either way.
         assert_eq!(rec.calls().iter().filter(|c| *c == "GET /api/v1/namespaces").count(), 1);
+    }
+
+    /// The back-fill: `ensure_builder` used to run only from `create_ws`, so every owner whose
+    /// workspaces predate the release had no builder and every build was refused. The beat writes
+    /// one per owner SLUG — a team workspace's builder belongs to the team, not to the person.
+    #[tokio::test]
+    async fn the_beat_writes_a_builder_for_every_owner_a_workspace_names() {
+        let ws = |name: &str, owner: &str, team: &str| {
+            serde_json::json!({
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+                "metadata": {"name": name},
+                "spec": {
+                    "owner": owner, "team": team, "name": "dev", "region": "r1",
+                    "image": "", "packages": [], "desiredState": "running",
+                },
+            })
+        };
+        let ws_list = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+            "items": [ws("ws-1", "acme", ""), ws("ws-2", "meera", "widgets")],
+        });
+        let empty = |kind: &str| serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": [],
+        });
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerkeys", empty("OwnerKeysList")),
+            crate::kube_test::get(
+                "/api/v1/namespaces",
+                serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": []}),
+            ),
+        ]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.kube = Some(client);
+        project_all(&s).await;
+        let patched: Vec<String> = rec
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("PATCH /apis/kloudlite.io/v1alpha1/environments/"))
+            .collect();
+        assert_eq!(
+            patched,
+            vec![
+                "PATCH /apis/kloudlite.io/v1alpha1/environments/bld-acme".to_string(),
+                // The team's slug, not the person's: `bld-meera` would be pruned next beat.
+                "PATCH /apis/kloudlite.io/v1alpha1/environments/bld-widgets".to_string(),
+            ]
+        );
     }
 }

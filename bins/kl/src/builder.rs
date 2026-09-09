@@ -48,4 +48,21 @@ mod tests {
         };
         assert_eq!(render(&b), "state: creating\nready: false\nwhy: no capacity");
     }
+
+    /// The wire shape, not a struct literal: `type` is a Rust keyword and `conditions` is absent
+    /// before the controller has written status, so both are places the rendering can break
+    /// against a real body while every literal-built test still passes.
+    #[test]
+    fn a_real_body_deserialises_and_renders() {
+        let b: BuilderStatus = serde_json::from_str(
+            r#"{"id":"bld-acme","state":"creating","ready":false,
+                "conditions":[{"type":"Ready","status":"False","message":"buildkit is not up"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(render(&b), "state: creating\nready: false\nwhy: buildkit is not up");
+
+        let b: BuilderStatus =
+            serde_json::from_str(r#"{"id":"bld-acme","state":"creating","ready":false}"#).unwrap();
+        assert_eq!(render(&b), "state: creating\nready: false\nwhy: -");
+    }
 }

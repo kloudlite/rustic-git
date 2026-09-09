@@ -551,6 +551,37 @@ fn manifest_bytes() -> Vec<u8> {
     }).to_string().into_bytes()
 }
 
+/// The workspace credential helper hands docker `{Username, Secret}` where the secret is a
+/// registry JWT, and docker presents that as BASIC — so the Basic branch must verify a registry
+/// token after the personal-access-token lookup misses, under the same name rule as a PAT.
+#[tokio::test]
+async fn a_registry_token_pushes_as_a_basic_password() {
+    let (base, e) = serve().await;
+    common::seed_blobs(&e, "alice", &[b"cfg", b"layer"]).await;
+    let pat = e.store.create_token("alice").await.unwrap();
+    let c = reqwest::Client::new();
+    // The exact token a client gets from `/v2/token` — nothing here mints one by hand.
+    let r = c
+        .get(format!("{base}/v2/token?service=localhost&scope=repository:alice/nginx:pull,push"))
+        .basic_auth("alice", Some(&pat))
+        .send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let jwt = r.json::<serde_json::Value>().await.unwrap()["token"].as_str().unwrap().to_string();
+
+    let m = manifest_bytes();
+    let put = |user: &str, secret: String, tag: &str| {
+        c.put(format!("{base}/v2/alice/nginx/manifests/{tag}"))
+            .basic_auth(user, Some(secret))
+            .header("content-type", MEDIA)
+            .body(m.clone())
+            .send()
+    };
+    assert_eq!(put("alice", jwt.clone(), "latest").await.unwrap().status(), StatusCode::CREATED);
+    // A leaked token must not work under another name, exactly as a PAT does not.
+    assert_eq!(put("bob", jwt, "v2").await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(put("alice", "garbage".into(), "v3").await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
 /// docker sends `scope` TWICE — once for pull, once for pull,push — and a token endpoint that
 /// deserializes one `scope: String` answers 400 before the handler runs, which shows up at the
 /// client as "failed to fetch oauth token". This is the exact query docker 28 sent.

@@ -181,6 +181,25 @@ fn deleting_a_workspace_or_an_environment_is_one_event_each() {
     assert_eq!(rows[0].owner, "acme");
 }
 
+/// A builder is invisible on the admin owner page, so it must be invisible in the feed too —
+/// otherwise the console disagrees with itself about what an owner has.
+#[test]
+fn a_system_environment_and_its_cuts_write_no_rows() {
+    let builder = |rv: &str, phase: Phase| {
+        let mut e = env("uid-b", rv, phase);
+        e.spec.system = Some(crd::BUILDER_SYSTEM.into());
+        e
+    };
+    assert!(environment_events(None, &builder("1", Phase::Creating), "eu").is_empty());
+    assert!(environment_events(Some(&builder("1", Phase::Creating)), &builder("2", Phase::Running), "eu").is_empty());
+    assert!(environment_deleted(&builder("3", Phase::Stopped), "eu").is_empty());
+
+    let mut cut = snap("1", Phase::Ready, true);
+    cut.spec.worktree = crd::builder_id("acme");
+    assert!(snapshot_events(None, &cut, "eu").is_empty());
+    assert!(snapshot_deleted(&cut, "eu").is_empty());
+}
+
 fn snap(rv: &str, phase: Phase, transient: bool) -> crd::Snapshot {
     let mut s = crd::Snapshot::new(
         "snap-1",

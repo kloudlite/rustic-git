@@ -339,13 +339,43 @@ async fn the_internal_routes_refuse_without_the_secret() {
 
 #[tokio::test]
 async fn start_and_stop_write_the_desired_state() {
-    let s = server(vec![patch(format!("{API}/environments/bld-karthik"), builder_obj("karthik", "running", false))]).await;
+    let s = server(vec![
+        get(format!("{API}/environments/bld-karthik"), builder_obj("karthik", "stopped", false)),
+        patch(format!("{API}/environments/bld-karthik"), builder_obj("karthik", "running", false)),
+    ])
+    .await;
     for (path, want) in [("start", "running"), ("stop", "stopped")] {
         let r = internal(&s, "POST", &format!("/v1/internal/builders/karthik/{path}"), Some(SECRET)).await;
         assert_eq!(r.status(), 202, "{path}");
         let sent = s.rec.sent("PATCH", &format!("{API}/environments/bld-karthik"));
         assert_eq!(sent.last().unwrap()["spec"]["desiredState"], want);
     }
+}
+
+/// The gate's secret reaches builders and ONLY builders. `get_builder` always checked
+/// `!visible_env`; start/stop patched blind, so an ordinary environment a person happened to name
+/// `bld-…` could be started and stopped by the gate.
+#[tokio::test]
+async fn start_and_stop_404_on_an_ordinary_environment_with_a_builder_name() {
+    let mine = json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
+        "metadata": {"name": "bld-alice", "labels": {"kloudlite.io/owner": "alice"}},
+        "spec": {"owner": "alice", "name": "bld-alice", "region": "centralindia",
+                 "services": [], "storage": {"quotaGb": 20}, "desiredState": "stopped"},
+    });
+    for path in ["start", "stop"] {
+        let s = server(vec![
+            get(format!("{API}/environments/bld-alice"), mine.clone()),
+            patch(format!("{API}/environments/bld-alice"), mine.clone()),
+        ])
+        .await;
+        let r = internal(&s, "POST", &format!("/v1/internal/builders/alice/{path}"), Some(SECRET)).await;
+        assert_eq!(r.status(), 404, "{path} on a person's own environment");
+        assert!(s.rec.sent("PATCH", &format!("{API}/environments/bld-alice")).is_empty(), "nothing written");
+    }
+    // The GET has always refused it; asserted here so the three routes are checked as one rule.
+    let s = server(vec![get(format!("{API}/environments/bld-alice"), mine)]).await;
+    assert_eq!(internal(&s, "GET", "/v1/internal/builders/alice", Some(SECRET)).await.status(), 404);
 }
 
 #[tokio::test]

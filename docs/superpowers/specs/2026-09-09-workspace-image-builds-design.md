@@ -138,9 +138,10 @@ a POSIX shell script in the workspace image, answers `get` for the registry host
 "kl"}}`. Nothing is ever written to `auths`. `docker login` is not needed and the rc file's
 `docker` wrapper refuses it with a sentence naming this document: the helper IS the login.
 
-The builder pod itself pulls base images anonymously or from the team's own registry with the
-same helper: the `buildkit` service's pod mounts the same Secret, and the daemon reads
-`DOCKER_CONFIG`. A private base image of another team is DENIED, as §4 says it must be.
+The builder pod itself needs no credential at all, and mounts none: buildx sends the CLIENT's
+registry auth to the daemon with the build session, so the base-image pull the daemon performs
+runs under the helper's token from the workspace that asked for the build. A private base image
+of another team is DENIED, as §4 says it must be.
 
 ### 4. Team authorization (`crates/registry/src/auth.rs`)
 

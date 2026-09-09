@@ -822,6 +822,11 @@ pub(crate) async fn stop_builder(
 
 async fn set_builder_state(s: &ApiState, slug: &str, want: DesiredState) -> Result<Response, Response> {
     let id = builder_of(slug)?;
+    let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
+    // Read before writing, for the reason `get_builder` reads: these routes reach builders and
+    // ONLY builders, so a person's environment that happens to be named `bld-…` must not be
+    // startable or stoppable with the gate's secret.
+    api.get_opt(&id).await.map_err(kube_err)?.filter(|e| !visible_env(e)).ok_or_else(not_found)?;
     set_desired::<crd::Environment>(kube(s)?, &id, want).await?;
     // 202 like every other desired-state write: the controller is what makes it true.
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": id, "desiredState": want}))).into_response())

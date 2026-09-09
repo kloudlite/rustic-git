@@ -67,9 +67,22 @@ pub async fn caller(
         // The token is the secret, but the username must be the owner it belongs to: a credential
         // whose halves disagree did not verify, and a leaked token must not work under any name.
         // No placeholder here — unlike git, `docker login` always has a real username to send.
+        // Two kinds of secret arrive here as the Basic password: a personal access token, and a
+        // registry JWT — the workspace credential helper hands docker `{Username, Secret}`, which
+        // docker presents as Basic, and `docker login -u <owner> -p <registry-token>` does the
+        // same by hand. So a PAT miss falls through to verifying the token, under the same rule.
         return match app.store.owner_for_token(&token).await {
             Ok(Some(o)) if crate::httpauth::basic_user_names(headers, &o, false) => Ok(Some(o)),
-            Ok(_) => Err(challenge(None)),
+            Ok(Some(_)) => Err(challenge(None)),
+            Ok(None) => {
+                use super::routes::RegistryToken;
+                match super::routes::verify_registry_token(&app.jwt, &token) {
+                    RegistryToken::Owner(o) if crate::httpauth::basic_user_names(headers, &o, false) => {
+                        Ok(Some(o))
+                    }
+                    _ => Err(challenge(None)),
+                }
+            }
             Err(e) => Err(crate::oci_internal(e)),
         };
     }

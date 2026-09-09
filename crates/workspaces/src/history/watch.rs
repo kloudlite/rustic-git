@@ -211,6 +211,11 @@ pub fn environment_events(
     next: &crd::Environment,
     region: &str,
 ) -> Vec<EventRow> {
+    // A builder is not something anybody asked for, and the admin owner page hides it — so its
+    // rows would only make the console disagree with itself.
+    if next.spec.system.is_some() {
+        return Vec::new();
+    }
     let (uid, rv) = uid_rv(next);
     parent_rows(
         transition_at(next, prev.is_none()),
@@ -241,7 +246,9 @@ pub fn snapshot_events(
         Some(Phase::Ready)
     );
     let st = next.status.as_ref();
-    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready {
+    // Same reason the builder's own rows are dropped: every build stop cuts one, and none of it
+    // belongs in a feed whose owner page hides the parent.
+    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready || from_a_builder(&next.spec) {
         return Vec::new();
     }
     // `readyAt` is the exact instant the cut landed, written by the node that took it — a better
@@ -612,12 +619,21 @@ pub fn workspace_deleted(o: &crd::Workspace, region: &str) -> Vec<EventRow> {
 }
 
 pub fn environment_deleted(o: &crd::Environment, region: &str) -> Vec<EventRow> {
-    vec![deleted_event(o, "environment", &o.spec.owner, region)]
+    match o.spec.system.is_some() {
+        true => Vec::new(),
+        false => vec![deleted_event(o, "environment", &o.spec.owner, region)],
+    }
+}
+
+/// A cut taken from a builder's worktree. The worktree id is the parent's own name, so the
+/// builder's `bld-` prefix (`crd::builder_id`) is the whole test.
+fn from_a_builder(s: &crd::SnapshotSpec) -> bool {
+    s.worktree.starts_with(&crd::builder_id(""))
 }
 
 /// A sync point is cut and pruned every beat; only a real snapshot's deletion is history.
 pub fn snapshot_deleted(o: &crd::Snapshot, region: &str) -> Vec<EventRow> {
-    match o.spec.transient {
+    match o.spec.transient || from_a_builder(&o.spec) {
         true => Vec::new(),
         false => vec![deleted_event(o, "snapshot", &o.spec.owner, region)],
     }
