@@ -68,6 +68,23 @@ where
     store.state().iter().map(|o| kube::runtime::reflector::ObjectRef::from_obj(o.as_ref())).collect()
 }
 
+/// `r`, only if this controller's own store holds it. Every child watch below is cluster-wide (a
+/// Pod, a StatefulSet, a Snapshot, a Workspace) while the parents are `placed` — this node's alone
+/// — so on a three-node region two thirds of every child event named a parent that lives
+/// elsewhere, and the runtime answered each with an `ObjectNotFound` nobody could act on: about
+/// 3,500 `reconcile.queue.failed` an hour, flat for days. Dropping the reference loses nothing —
+/// a parent not yet in the store is delivered by its own watch, and that reconcile reads the child
+/// fresh — it just stops asking the runtime for objects it was told it cannot have.
+fn held<K>(
+    store: &kube::runtime::reflector::Store<K>,
+    r: Option<kube::runtime::reflector::ObjectRef<K>>,
+) -> Option<kube::runtime::reflector::ObjectRef<K>>
+where
+    K: Resource<DynamicType = ()> + Clone + 'static,
+{
+    r.filter(|r| store.get(r).is_some())
+}
+
 /// An mpsc receiver as the `Stream` `reconcile_on` wants — `futures` already has the adapter, so
 /// this costs no dependency.
 fn wake_stream<T: Send + 'static>(
@@ -153,9 +170,15 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
     // the cluster to filter for its own is the cheapest way to peg an API server.
     let our_pods = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
-    let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone())
+    let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone());
+    // Taken before the child watches so their mappers can ask it — see `held`.
+    let ws_store = workspaces.store();
+    let (ws_store_for_pods, ws_store_for_stops) = (ws_store.clone(), ws_store.clone());
+    let workspaces = workspaces
         .reconcile_on(wake_stream(ws_wakes))
-        .watches(Api::<Pod>::all(ctx.client.clone()), our_pods, |p| owned_by::<crd::Workspace, _>(&p))
+        .watches(Api::<Pod>::all(ctx.client.clone()), our_pods, move |p| {
+            held(&ws_store_for_pods, owned_by::<crd::Workspace, _>(&p))
+        })
         // The parent acts on the child's STATUS, so it must wake when that status moves — the 15s
         // requeue is the backstop, never the mechanism. Scoped to this node's Volumes: the child is
         // authored on the parent's node, so a Volume elsewhere can never own a Workspace here.
@@ -171,11 +194,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
-            |r| owned_by::<crd::Workspace, _>(&r),
+            move |r| held(&ws_store_for_stops, owned_by::<crd::Workspace, _>(&r)),
         );
     // Every workspace this node hosts wakes on its own Node changing — see `my_node_only`. The
     // store is read at mapper time, not now, so a workspace claimed later is included too.
-    let ws_store = workspaces.store();
     let ws_store_for_replicas = ws_store.clone();
     let workspaces = workspaces
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only.clone(), move |_: Node| all_in_store(&ws_store))
@@ -202,15 +224,24 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
     let env_sets = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let env_pods = env_sets.clone();
-    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed.clone())
-        .watches(Api::<StatefulSet>::all(ctx.client.clone()), env_sets, |d| owned_by::<crd::Environment, _>(&d))
+    let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed.clone());
+    let env_store = environments.store();
+    let (env_store_for_sets, env_store_for_pods, env_store_for_stops, env_store_for_ws) =
+        (env_store.clone(), env_store.clone(), env_store.clone(), env_store.clone());
+    let environments = environments
+        .watches(Api::<StatefulSet>::all(ctx.client.clone()), env_sets, move |d| {
+            held(&env_store_for_sets, owned_by::<crd::Environment, _>(&d))
+        })
         // A restore waits for the service pods to be GONE, not scaled down — and the StatefulSet
         // stops reporting a terminating pod the moment it is marked for deletion, seconds before
         // the process has exited. That wake arrives too early, and without this one the drain
         // would sit out the full requeue tick. The pod's owner is a ReplicaSet, so the namespace
         // is the link — and `crd::env_namespace` makes it the Environment's own name.
-        .watches(Api::<Pod>::all(ctx.client.clone()), env_pods, |p| {
-            Some(kube::runtime::reflector::ObjectRef::<crd::Environment>::new(p.metadata.namespace.as_deref()?))
+        .watches(Api::<Pod>::all(ctx.client.clone()), env_pods, move |p| {
+            held(
+                &env_store_for_pods,
+                Some(kube::runtime::reflector::ObjectRef::<crd::Environment>::new(p.metadata.namespace.as_deref()?)),
+            )
         })
         // The env's own Volume child: it waits on that child's STATUS, so it must wake when the
         // status moves. Scoped to this node's Volumes — the child is authored on the parent's node.
@@ -223,9 +254,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
             watcher::Config::default().labels(crd::STOP_LABEL),
-            |r| owned_by::<crd::Environment, _>(&r),
+            move |r| held(&env_store_for_stops, owned_by::<crd::Environment, _>(&r)),
         );
-    let env_store = environments.store();
     let env_store_for_quota = env_store.clone();
     let env_store_for_replicas = env_store.clone();
     let environments = environments
@@ -249,11 +279,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // `spec.attachedEnvironment` is a field read and costs no API call; a workspace attached to
         // nothing maps to nothing. Deliberately not `crd::attached_environment`, whose condition
         // fallback would keep waking an environment a workspace has already left.
-        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), |w: crd::Workspace| {
-            w.spec
-                .attached_environment
-                .as_deref()
-                .map(kube::runtime::reflector::ObjectRef::<crd::Environment>::new)
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), move |w: crd::Workspace| {
+            held(
+                &env_store_for_ws,
+                w.spec.attached_environment.as_deref().map(kube::runtime::reflector::ObjectRef::<crd::Environment>::new),
+            )
         })
         .shutdown_on_signal()
         .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
@@ -616,4 +646,28 @@ mod tests {
         refs.sort_by_key(|r| r.name.clone());
         assert_eq!(refs, vec![ObjectRef::new("ws-1"), ObjectRef::new("ws-2")]);
     }
+
+    /// The filter behind every cluster-wide child watch: a reference the node's own store holds
+    /// passes, one it does not is dropped rather than handed to the runtime as a request it will
+    /// answer with `ObjectNotFound` — the shape of ~3,500 `reconcile.queue.failed` an hour.
+    #[test]
+    fn a_child_event_for_a_parent_this_node_does_not_hold_maps_to_nothing() {
+        use kube::runtime::reflector::{self, ObjectRef};
+        use kube::runtime::watcher::Event;
+        let (store, mut writer) = reflector::store::<crd::Workspace>();
+        let mut mine: crd::Workspace = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": "ws-here"},
+            "spec": {"owner": "alice", "team": "", "name": "here", "region": "r", "image": "img",
+                     "storage": {"quotaGb": 1}, "desiredState": "running"},
+        }))
+        .unwrap();
+        mine.metadata.resource_version = Some("1".into());
+        writer.apply_watcher_event(&Event::InitApply(mine));
+        writer.apply_watcher_event(&Event::InitDone);
+        assert!(held(&store, Some(ObjectRef::<crd::Workspace>::new("ws-here"))).is_some(), "placed here: wakes");
+        assert!(held(&store, Some(ObjectRef::<crd::Workspace>::new("ws-elsewhere"))).is_none(), "another node's: dropped");
+        assert!(held(&store, None).is_none());
+    }
+
 }
