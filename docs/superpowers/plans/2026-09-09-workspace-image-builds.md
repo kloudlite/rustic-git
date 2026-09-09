@@ -6,7 +6,7 @@
 
 **Architecture:** The builder is a hidden `Environment` (`bld-{owner}`, `spec.system: "builder"`) rendered by the existing environment controller; a region-wide gate starts it on the first buildx connection through two internal api routes and stops it after idle; the api projects a 24 h registry token into the `user-key` Secret it already writes; the registry consults `may_act` on the miss path.
 
-**Tech Stack:** Rust (axum, kube, tokio), moby/buildkit:rootless, busybox/alpine workspace image, the SLO probe, k3s manifests.
+**Tech Stack:** Rust (axum, kube, tokio), moby/buildkit:v0.18.2, busybox/alpine workspace image, the SLO probe, k3s manifests.
 
 **Spec:** `docs/superpowers/specs/2026-09-09-workspace-image-builds-design.md`
 
@@ -103,7 +103,7 @@ and in `crd_yaml.rs` add `assert!(crds_yaml.contains("system:"))` beside the exi
 
 - [ ] **Step 2: Implement.** `EnvironmentSpec.system`, `Service.resources`, `builder_id`, `BUILDER_SYSTEM`. In `service_statefulset`, `resources: Some(quantities(svc.resources.as_ref().unwrap_or(&env_unit_resources())))`. Also thread `resources` through `crd::SnapshotState` where services are frozen (it is `Vec<model::Service>`, so it comes for free — assert that in the existing state round-trip test).
 - [ ] **Step 3:** `CRD_REGEN=1 cargo test -p kloudlite-workspaces --test crd_yaml`; `cargo test -p kloudlite-workspaces`; `cargo clippy --workspace --all-targets -- -D warnings` → PASS.
-- [ ] **Step 4 (only if Task 1 failed):** `Service.runtime_class: Option<String>`; `service_statefulset` sets `runtime_class_name` to `None` when it is `Some("none")`, and sets `seccomp_profile: Unconfined` + `app_armor_profile: Unconfined` on that container only. A test that a plain service still gets the ctx's runtime class.
+- [ ] **Step 4 (the spike's ruling):** a `system == "builder"` environment's service is rendered with `builder_hardened()` instead of `hardened()`: `run_as_user: Some(0)`, `allow_privilege_escalation: Some(false)`, `seccomp_profile: RuntimeDefault`, `capabilities: {drop: [ALL], add: [SYS_ADMIN, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, SETUID, SETGID, SETPCAP, SETFCAP, MKNOD, SYS_CHROOT, KILL, NET_BIND_SERVICE, NET_RAW, AUDIT_WRITE]}` — with a comment saying these are gvisor's capabilities, not the host's, and that rootless cannot run under gvisor. `service_statefulset` takes the environment's `system` (thread `Option<&str>` through `PodContext` or a parameter — the smaller change) and picks the context. `hardened()` is byte-for-byte unchanged. Test: an ordinary service still gets `hardened()`'s add list; a builder service gets root and exactly that list.
 - [ ] **Step 5: Commit** `"An environment service may carry its own resources, and an environment may be the platform's"`.
 
 ### Task 3: The registry consults team membership

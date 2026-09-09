@@ -1,9 +1,9 @@
 # Building and pushing images from a workspace
 
-Status: draft for review, 2026-09-09, revised the same day after review. The builder is an
-Environment the platform owns, not a new kind; it is never listed by `/v1` or the web; it has no
-user-facing snapshots; and it runs only while a build is running. One decision (§1, the kernel the
-builder runs under) is left to a spike named there.
+Status: draft for review, 2026-09-09, revised the same day after review, and again after the
+spike in §1 settled the kernel question. The builder is an Environment the platform owns, not a
+new kind; it is never listed by `/v1` or the web; it has no user-facing snapshots; and it runs
+only while a build is running.
 
 ## Why
 
@@ -43,8 +43,8 @@ service:
 
 ```
 name:      buildkit
-image:     moby/buildkit:rootless           (pinned by digest in ClusterSettings, Mark::Boot)
-command:   buildkitd --addr tcp://0.0.0.0:1234 --oci-worker-no-process-sandbox --root /cache
+image:     moby/buildkit:v0.18.2            (pinned by digest in ClusterSettings, Mark::Boot)
+command:   buildkitd --addr tcp://0.0.0.0:1234 --oci-worker-snapshotter=native --root /cache
 ports:     [1234]
 mounts:    [{path: /cache, folder: cache}]
 resources: request 250m / 512Mi, limit PodResources::default() (4 vCPU / 8 GiB)   # §4
@@ -65,14 +65,20 @@ nothing can use it. A person's builder and a team's are distinct objects.
 per-service `resources`. Stop, start, claim, move, replicate, `Replicated`, the dead-node sweep:
 unchanged code.
 
-**The kernel it runs under — the one open decision.** Environment services run under the region's
-`runtime_class` (gvisor) today, and that is the default here too: gVisor documents rootless
-buildkit inside it (`--oci-worker-no-process-sandbox`, native snapshotter), and under gvisor the
-sandbox is the isolation, so `hardened()` stays exactly as it is — no `seccomp: Unconfined`
-anywhere. The spike is one builder environment on `session-0` and an hour. If it fails, the
-fallback is a per-service `runtimeClass: none` the api may set only on a `system` environment,
-with rootless buildkit's own requirements (`seccompProfile`/`appArmorProfile: Unconfined` on that
-one container). That fallback changes one field and this paragraph; nothing else in the document.
+**The kernel it runs under — decided by the spike (2026-09-09).** The builder runs under the
+region's `runtime_class` (gvisor) like every environment service. Rootless buildkit cannot run
+under gvisor: rootlesskit needs `newuidmap` capabilities that `drop: ALL` forbids, and `buildkitd`
+refuses a non-root user without a user namespace. What works — six attempts, the last building a
+`RUN` step and caching the second build in 1 s — is `buildkitd` as ROOT INSIDE THE SANDBOX with
+`drop: ALL` and an explicit add-back: the container runtime's default set (`CHOWN`,
+`DAC_OVERRIDE`, `FOWNER`, `FSETID`, `SETUID`, `SETGID`, `SETPCAP`, `SETFCAP`, `MKNOD`,
+`SYS_CHROOT`, `KILL`, `NET_BIND_SERVICE`, `NET_RAW`, `AUDIT_WRITE`) plus `SYS_ADMIN` for the
+snapshotter's bind mounts; `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`,
+the plain `moby/buildkit` image, `--oci-worker-snapshotter=native`. Every one of those
+capabilities is gvisor's, not the host kernel's: the isolation the builder relies on is exactly
+the one every workspace already relies on. `hardened()` is not changed — a `system == "builder"`
+environment's service is rendered with its own `builder_hardened()`, and the api is the only
+writer of `system`. No `seccomp: Unconfined` exists anywhere, and there is no runc fallback.
 
 ### 2. The gate (`bins/gateway`, a second listener — or `bins/builder-gate` if the split is cleaner)
 
