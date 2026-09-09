@@ -329,6 +329,12 @@ async fn run_environment(
     for p in k8s::default_policies(ns, &e.spec.owner, owner_ref) {
         ensure(&policies, &p, ctx).await?;
     }
+    // Only the hidden per-owner builder environment gets this hole: the gate is the only thing
+    // that may reach a builder's buildkit service, and an ordinary environment has no buildkit
+    // service for it to reach.
+    if e.spec.system.as_deref() == Some(crd::BUILDER_SYSTEM) {
+        ensure(&policies, &k8s::builder_gate_ingress(ns, &e.spec.owner, owner_ref), ctx).await?;
+    }
     // An environment's services are the likeliest place a private image appears, so this namespace
     // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
     // here, and nowhere it has not been vouched for.

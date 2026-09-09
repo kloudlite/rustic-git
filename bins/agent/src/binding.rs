@@ -146,6 +146,10 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         // workspace reconciler because the policy covers the whole SHARED namespace — an
         // ownerReference to any one workspace would revoke ssh for its siblings when it is deleted.
         ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref), ctx).await?;
+        // The one egress hole to a builder: the gate, and nothing past it. Every workspace this
+        // owner has shares this namespace, so this reaches all of them — same reasoning as the
+        // gateway ingress hole just above.
+        ensure(&policies, &k8s::builder_gate_egress(&ns, owner, &owner_ref), ctx).await?;
         // Scope the API's Secret access to THIS namespace. The alternative is a cluster-wide
         // `secrets: create` for the API, which would include the agent's own credentials.
         let bindings = Api::<RoleBinding>::namespaced(ctx.client.clone(), &ns);

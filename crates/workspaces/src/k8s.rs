@@ -1600,6 +1600,58 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
     )
 }
 
+/// The port the gate and buildkitd both listen on — one hop from a workspace, through the gate,
+/// to the builder's own buildkit service. Task 7's contract for the gate pod's label; the gate is
+/// the only thing that may dial a builder's buildkit, so this is the only egress a workspace gets
+/// beyond DNS, the gateway and the public internet.
+const BUILDER_GATE_PORT: i32 = 1234;
+
+/// The one hole a workspace's egress gets to reach its builder: the gate, and nothing past it. A
+/// workspace never dials buildkitd directly — `builder_gate_ingress` is what admits the gate to
+/// the builder's own namespace, and this is the other half of that one path.
+pub fn builder_gate_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-builder-gate",
+        ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
+                    "podSelector": { "matchLabels": { "app": "kloudlite-builder-gate" } },
+                }],
+                "ports": [{ "protocol": "TCP", "port": BUILDER_GATE_PORT }],
+            }],
+        }),
+    )
+}
+
+/// The one hole in a builder environment's ingress: the gate, and only the gate, reaching its
+/// buildkit service pod — never the whole namespace, which would let any other tenant's pod that
+/// somehow lands here dial buildkitd directly.
+pub fn builder_gate_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-builder-gate",
+        ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": { "matchLabels": { SERVICE_LABEL: "buildkit" } },
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
+                    "podSelector": { "matchLabels": { "app": "kloudlite-builder-gate" } },
+                }],
+                "ports": [{ "protocol": "TCP", "port": BUILDER_GATE_PORT }],
+            }],
+        }),
+    )
+}
+
 /// Both halves of an attachment grant share this name, one in each namespace, so a detach can
 /// delete them by name without a lookup.
 pub fn attach_policy_name(ws_id: &str) -> String {
@@ -2604,6 +2656,50 @@ mod tests {
         assert!(cfg.contains("PermitRootLogin no\n"), "{cfg}");
         assert!(cfg.contains("AllowUsers kl\n"), "{cfg}");
         assert!(cfg.contains("PasswordAuthentication no"), "{cfg}");
+    }
+
+    /// The gate is the only thing that may reach a builder, and a workspace reaching the gate is
+    /// the only new hole this task opens — one peer, both selectors, same AND trap as
+    /// `allow_gateway_ingress`.
+    #[test]
+    fn only_the_builder_gate_may_be_reached_on_egress() {
+        let p = builder_gate_egress("ws-alice", "alice", &owner_ref());
+        assert_eq!(p.metadata.name.as_deref(), Some("allow-builder-gate"));
+        assert_eq!(p.metadata.namespace.as_deref(), Some("ws-alice"));
+        assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
+        let spec = p.spec.unwrap();
+        assert_eq!(spec.policy_types.as_ref().unwrap(), &vec!["Egress".to_string()], "never an ingress hole here");
+        let pod_sel = spec.pod_selector.unwrap();
+        assert!(pod_sel.match_labels.is_none() && pod_sel.match_expressions.is_none(), "every pod in the namespace");
+        let rule = &spec.egress.as_ref().unwrap()[0];
+        let to = rule.to.as_ref().unwrap();
+        assert_eq!(to.len(), 1, "one peer: namespace AND pod, not namespace OR pod");
+        let ns = to[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(ns["kubernetes.io/metadata.name"], "kloudlite-system");
+        let pod = to[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(pod["app"], "kloudlite-builder-gate");
+        assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(1234)));
+    }
+
+    /// Only the gate may dial buildkit — never any other pod, in this namespace or any other.
+    #[test]
+    fn only_the_builder_gate_may_reach_buildkit() {
+        let p = builder_gate_ingress("env-bld-alice", "alice", &owner_ref());
+        assert_eq!(p.metadata.name.as_deref(), Some("allow-builder-gate"));
+        assert_eq!(p.metadata.namespace.as_deref(), Some("env-bld-alice"));
+        assert_eq!(p.metadata.owner_references.unwrap()[0].controller, Some(true));
+        let spec = p.spec.unwrap();
+        assert_eq!(spec.policy_types.as_ref().unwrap(), &vec!["Ingress".to_string()], "never an egress hole here");
+        let sel = spec.pod_selector.unwrap().match_labels.clone().unwrap();
+        assert_eq!(sel[SERVICE_LABEL], "buildkit", "only the buildkit service pod, not the whole namespace");
+        let rule = &spec.ingress.as_ref().unwrap()[0];
+        let from = rule.from.as_ref().unwrap();
+        assert_eq!(from.len(), 1, "one peer: namespace AND pod, not namespace OR pod");
+        let ns = from[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(ns["kubernetes.io/metadata.name"], "kloudlite-system");
+        let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
+        assert_eq!(pod["app"], "kloudlite-builder-gate");
+        assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(1234)));
     }
 
     /// Port 22 is open to exactly one peer. Without the namespace half every tenant's own pods

@@ -1830,7 +1830,7 @@ fn ns_routes(ns: &str) -> Vec<Route> {
             "RoleBinding",
         ),
     ];
-    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh"] {
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh", "allow-builder-gate"] {
         r.push(ok(
             format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
             "networking.k8s.io/v1",
@@ -4692,6 +4692,68 @@ async fn snapshot_model_environment_bootstrap_materializes_its_worktree() {
     assert!(
         rec.calls().iter().any(|c| c.starts_with("PATCH") && c.contains("/namespaces/env-1")),
         "the worktree materialized and the pass reached namespace reconciliation: {:?}", rec.calls()
+    );
+}
+
+/// The hidden per-owner builder environment gets the one ingress hole that admits the gate to its
+/// buildkit service. Same "run far enough, check the call landed" shape as the bootstrap test
+/// above — the pass fails on the next unmocked route, which is not the point.
+#[tokio::test]
+async fn a_builder_environment_opens_ingress_to_the_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
+    let mut ej = env_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+    ej["spec"]["system"] = serde_json::json!("builder");
+    let routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-builder-gate", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let e: crd::Environment = serde_json::from_value(ej).unwrap();
+
+    let _ = kloudlite_agent::controller::apply_environment(&e, &ctx).await;
+
+    assert!(
+        rec.calls().iter().any(|c| c == &format!(
+            "PATCH /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-builder-gate",
+            crd::env_namespace("env-1")
+        )),
+        "the builder environment must open the gate's one ingress hole: {:?}", rec.calls()
+    );
+}
+
+/// An ordinary environment has no buildkit service, so it gets no ingress hole for the gate.
+#[tokio::test]
+async fn an_ordinary_environment_opens_no_ingress_to_the_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
+    let routes = vec![
+        Route { method: "PATCH", path: ENV_PATCH.into(), status: 200, body: env_json(serde_json::json!({})) },
+        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/env-1", env_vol()),
+        Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: snapshot_list_of("Snapshot", vec![]) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "Namespace"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/default-deny", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-dns", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-internet-egress", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/allow-same-namespace", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{}/rolebindings/api-secrets", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
+        Route { method: "PATCH", path: format!("/api/v1/namespaces/{}/limitranges/slot", crd::env_namespace("env-1")), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let e = environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"}));
+
+    let _ = kloudlite_agent::controller::apply_environment(&e, &ctx).await;
+
+    assert!(
+        !rec.calls().iter().any(|c| c.contains("/networkpolicies/allow-builder-gate")),
+        "an ordinary environment must open no path to any builder: {:?}", rec.calls()
     );
 }
 
