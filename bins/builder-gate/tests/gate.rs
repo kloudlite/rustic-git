@@ -286,9 +286,10 @@ async fn a_buildkit_that_is_not_listening_yet_is_waited_for_not_refused() {
     let refused_before = metric(r#"outcome="refused""#);
     let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
     c.write_all(b"hello").await.unwrap();
-    // Two poll gaps' worth of failed dials, then buildkit arrives.
+    // A poll gap's worth of failed dials — the retry is the property, and waiting on a third
+    // poll ran `until` out of its own budget on a slow run — then buildkit arrives.
     let a = api.clone();
-    until("the gate dialled twice", move || a.count("get") > 2).await;
+    until("the gate polled again after a failed dial", move || a.count("get") > 1).await;
     fake_buildkit_on(tokio::net::TcpListener::bind(bk).await.unwrap());
 
     let mut buf = [0u8; 32];

@@ -267,3 +267,37 @@ async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net
 fn outcome(o: &'static str) {
     metrics::counter!("builder_gate_starts_total", "outcome" => o).increment(1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client that leaves is `ClientGone` and NOT `Timeout` — the two are the same early return
+    /// to the caller's eye, and the outcome counters cannot tell them apart from a test because
+    /// the recorder is process-wide (the never-ready case increments `timeout` from another test's
+    /// thread). Driving `wait_ready` directly names the arm with no counter in sight.
+    #[tokio::test]
+    async fn a_client_that_leaves_mid_wait_is_not_a_timeout() {
+        // Nothing listens on port 1, so `ready` errs on every poll: the builder never comes up and
+        // the only way out of the loop inside a ten-minute budget is the client.
+        let gate = Gate {
+            api: ApiClient::new("http://127.0.0.1:1".into(), "s".into()),
+            who: Arc::new(who::Pods::default()),
+            idle: idle::Idle::default(),
+            central: LiveSettings::new(CentralSettings::built_in_defaults()),
+            buildkit: Some("127.0.0.1:1".into()),
+        };
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(l.local_addr().unwrap()).await.unwrap();
+        let (sock, _) = l.accept().await.unwrap();
+
+        let w = tokio::spawn(async move {
+            wait_ready(&gate, "alice", Duration::from_secs(600), &sock).await
+        });
+        // Mid-wait: a poll or two in, with the budget nowhere near spent.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(client);
+        let w = w.await.unwrap();
+        assert!(matches!(w, Wait::ClientGone), "a client leaving is not a builder timeout");
+    }
+}
