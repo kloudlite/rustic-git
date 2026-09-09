@@ -610,6 +610,14 @@ async fn verb(c: &Ctx, base: &str, v: &str, jwt: &str, reason: &Value) -> Result
 /// running, so a node with a live worktree on it would never stamp `drained` inside the drill's ten
 /// minutes and the id would fail for the fleet behaving exactly as designed. Anyone's worktree
 /// counts, not only the probe's: this drill touches a shared cluster.
+/// A POOL node only: the drain and the `drained …` stamp are the node's own agent's work, and
+/// the agent runs only where `kloudlite.io/pool` is set. The control plane carries no pool label,
+/// has nothing to drain, and stamps nothing — picking it labelled k3s-cp waited the whole cap for
+/// a stamp that could never come.
+fn is_pool_node(n: &k8s_openapi::api::core::v1::Node) -> bool {
+    n.metadata.labels.as_ref().and_then(|l| l.get("kloudlite.io/pool")).map(String::as_str) == Some("true")
+}
+
 async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
     use kloudlite_workspaces::crd;
     let busy = running_nodes(k).await?;
@@ -619,15 +627,8 @@ async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<String> {
         .iter()
         .find(|n| {
             let name = kube::ResourceExt::name_any(*n);
-            let labels = n.metadata.labels.as_ref();
-            // A POOL node only: the drain and the `drained …` stamp are the node's own agent's
-            // work, and the agent runs only where `kloudlite.io/session` or `/env` is set. The
-            // control plane carries neither, has nothing to drain, and stamps nothing — picking
-            // it labelled k3s-cp and waited the whole cap for a stamp that could never come.
-            let pool = ["kloudlite.io/session", "kloudlite.io/env"]
-                .iter()
-                .any(|k| labels.and_then(|l| l.get(*k)).map(String::as_str) == Some("true"));
-            pool && Some(name.as_str()) != avoid
+            is_pool_node(n)
+                && Some(name.as_str()) != avoid
                 && !busy.contains(&name)
                 && !n.metadata.labels.as_ref().is_some_and(|l| l.contains_key(crd::DECOMMISSION_LABEL))
                 // A node already cordoned by a person is one somebody is retiring by hand.
@@ -942,6 +943,28 @@ mod tests {
     /// The slot names are the shell script's contract, and the daily check is about EXISTENCE:
     /// a missing weekday means a whole day's run has never succeeded, which "the newest backup is
     /// recent" cannot see.
+    /// The old session/env labels are rejected on purpose: a node still wearing only those from
+    /// before the pool rename must not be picked, or the drill would fence a node the agent never
+    /// reconciles.
+    #[test]
+    fn only_the_pool_label_picks_a_node() {
+        fn node(labels: &[(&str, &str)]) -> k8s_openapi::api::core::v1::Node {
+            k8s_openapi::api::core::v1::Node {
+                metadata: kube::api::ObjectMeta {
+                    labels: Some(labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+        assert!(is_pool_node(&node(&[("kloudlite.io/pool", "true")])));
+        assert!(!is_pool_node(&node(&[])), "the control plane carries no pool label");
+        assert!(
+            !is_pool_node(&node(&[("kloudlite.io/session", "true"), ("kloudlite.io/env", "true")])),
+            "the retired labels no longer qualify a node"
+        );
+    }
+
     #[test]
     fn slots_before_the_encrypted_unit_existed_are_not_due_yet() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T20:38:00Z").unwrap().with_timezone(&Utc);
