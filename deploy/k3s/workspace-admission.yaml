@@ -103,6 +103,12 @@ spec:
     # fixed list is "the only thing" stopping SYS_ADMIN/NET_RAW/SYS_PTRACE now that the namespace
     # floor is `privileged`. This is the second thing: a pod builder bug or an operator with kubectl
     # cannot widen the set in a tenant namespace. Keep in step with `crates/workspaces/src/k8s.rs`.
+    #
+    # The one exception is the hidden builder (`k8s::builder_hardened`): buildkitd under gvisor
+    # needs the fifteen below, and only in a namespace the AGENT has labelled
+    # `kloudlite.io/system=builder` (`crd::SYSTEM_LABEL`, from `EnvironmentSpec.system`). The
+    # decision reads the namespace, never the pod — pod labels are whoever created the pod's to
+    # write; namespaces are written by one controller. Keep both lists in step with `k8s.rs`.
     - expression: >-
         (object.spec.containers
            + (has(object.spec.initContainers) ? object.spec.initContainers : [])
@@ -112,8 +118,15 @@ spec:
                   || !has(c.securityContext.capabilities.add)
                   || c.securityContext.capabilities.add.all(a, a in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER',
                                                                     'SETGID', 'SETUID', 'NET_BIND_SERVICE',
-                                                                    'SYS_CHROOT']))
-      message: "workspace/environment containers may add only the seven capabilities k8s::hardened grants"
+                                                                    'SYS_CHROOT'])
+                  || (has(namespaceObject.metadata.labels)
+                      && 'kloudlite.io/system' in namespaceObject.metadata.labels
+                      && namespaceObject.metadata.labels['kloudlite.io/system'] == 'builder'
+                      && c.securityContext.capabilities.add.all(a, a in ['SYS_ADMIN', 'CHOWN', 'DAC_OVERRIDE', 'FOWNER',
+                                                                        'FSETID', 'SETUID', 'SETGID', 'SETPCAP',
+                                                                        'SETFCAP', 'MKNOD', 'SYS_CHROOT', 'KILL',
+                                                                        'NET_BIND_SERVICE', 'NET_RAW', 'AUDIT_WRITE'])))
+      message: "workspace/environment containers may add only the seven capabilities k8s::hardened grants (the builder namespace: k8s::builder_hardened's fifteen)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

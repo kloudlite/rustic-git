@@ -356,7 +356,17 @@ async fn run_environment(
 
     ensure(
         &Api::<Namespace>::all(ctx.client.clone()),
-        &k8s::namespace(ns, &e.spec.owner, "environment", Some(owner_ref)),
+        &{
+            let mut n = k8s::namespace(ns, &e.spec.owner, "environment", Some(owner_ref));
+            // The pod fence (`deploy/k3s/workspace-admission.yaml`) admits `builder_hardened()`'s
+            // wider capability list only in a namespace carrying this label. On the NAMESPACE, not
+            // the pod: only this controller writes namespaces, while anything with pod create in a
+            // tenant namespace could stamp a pod label and widen its own fence.
+            if let Some(sys) = e.spec.system.as_deref() {
+                n.metadata.labels.get_or_insert_default().insert(crd::SYSTEM_LABEL.into(), sys.into());
+            }
+            n
+        },
         ctx,
     )
     .await?;

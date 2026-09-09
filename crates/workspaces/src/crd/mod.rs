@@ -842,6 +842,11 @@ pub struct EnvironmentSpec {
     pub system: Option<String>,
 }
 
+/// Namespace label naming the system an environment serves (`BUILDER_SYSTEM`), written by the
+/// agent from `EnvironmentSpec::system` so the pod fence can widen its rules for exactly that
+/// namespace and no other. A view of the spec, like every other label here — never authorization.
+pub const SYSTEM_LABEL: &str = "kloudlite.io/system";
+
 /// The one recognised value of `EnvironmentSpec.system` today: the per-owner buildkitd
 /// environment a workspace image build starts on demand (see Task 1's spike).
 pub const BUILDER_SYSTEM: &str = "builder";
