@@ -145,13 +145,44 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Resul
 /// ephemeral-storage are ignored. At the workspace slot size memory binds decades before either
 /// does; read them here too if the slots ever get small enough for pod count to bite first.
 fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool {
+    room(node, pods, committed).fits(want)
+}
+
+/// The three numbers `fits` subtracts, kept so a refusal can SAY them: a node that declines a
+/// 250 m environment while the scheduler shows 3 vCPU free is a disagreement nobody can settle
+/// from "no room" alone.
+struct Room {
+    alloc: Want,
+    pods: Want,
+    committed: Want,
+}
+
+impl Room {
+    fn free(&self) -> Want {
+        (self.alloc.0.saturating_sub(self.pods.0 + self.committed.0), self.alloc.1.saturating_sub(self.pods.1 + self.committed.1))
+    }
+    fn fits(&self, want: Want) -> bool {
+        let f = self.free();
+        f.0 >= want.0 && f.1 >= want.1
+    }
+    /// One log line, the same shape wherever a refusal is logged.
+    fn refuse(&self, name: &str, want: Want, where_: &'static str) {
+        let f = self.free();
+        tracing::info!(
+            %name, gate = where_, cpu_m = want.0, mem_mi = want.1,
+            alloc_cpu_m = self.alloc.0, pods_cpu_m = self.pods.0, committed_cpu_m = self.committed.0, free_cpu_m = f.0,
+            alloc_mem_mi = self.alloc.1, pods_mem_mi = self.pods.1, committed_mem_mi = self.committed.1, free_mem_mi = f.1,
+            "claim.declined.capacity"
+        );
+    }
+}
+
+fn room(node: Option<&Node>, pods: &[Pod], committed: Want) -> Room {
     let alloc = node.and_then(|n| n.status.as_ref()).and_then(|s| s.allocatable.as_ref());
     let q = |k: &str| alloc.and_then(|a| a.get(k)).map(|v| v.0.as_str()).unwrap_or_default().to_string();
     let cpu = kloudlite_workspaces::quota::millicores(&q("cpu")) * ADMISSIBLE_PCT / 100;
     let mem = kloudlite_workspaces::quota::mebibytes(&q("memory")) * ADMISSIBLE_PCT / 100;
-    let (pod_cpu, pod_mem) = requested(pods);
-    let (used_cpu, used_mem) = (pod_cpu + committed.0, pod_mem + committed.1);
-    cpu.saturating_sub(used_cpu) >= want.0 && mem.saturating_sub(used_mem) >= want.1
+    Room { alloc: (cpu, mem), pods: requested(pods), committed }
 }
 
 /// Whether this node still has room to START `parent` — the check the RECLAIM path never gets.
@@ -170,7 +201,12 @@ pub(crate) async fn room_to_start(ctx: &Arc<Ctx>, parent: &str, want: Want) -> R
     let pods: Api<Pod> = Api::all(ctx.client.clone());
     let mine = pods.list(&ListParams::default().fields(&format!("spec.nodeName={}", ctx.node))).await?.items;
     let committed = claimed_here(ctx, &mine, Some(parent)).await?;
-    Ok(fits(node.as_ref(), &mine, committed, want))
+    let r = room(node.as_ref(), &mine, committed);
+    let ok = r.fits(want);
+    if !ok {
+        r.refuse(parent, want, "start");
+    }
+    Ok(ok)
 }
 
 /// What one workspace's pod will request, for callers outside this module.
@@ -385,9 +421,10 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
         let pods: Api<Pod> = Api::all(ctx.client.clone());
         let mine = pods.list(&ListParams::default().fields(&format!("spec.nodeName={}", ctx.node))).await?.items;
         let committed = claimed_here(ctx, &mine, None).await?;
-        if !fits(me.as_ref(), &mine, committed, want) {
+        let r = room(me.as_ref(), &mine, committed);
+        if !r.fits(want) {
             let why = format!("no node has room for it: it requests {}m cpu and {} MiB", want.0, want.1);
-            tracing::info!(%name, cpu_m = want.0, mem_mi = want.1, "claim.declined.capacity");
+            r.refuse(name, want, "claim");
             return Ok(Verdict::NoCapacity(why));
         }
     }
