@@ -188,10 +188,10 @@ pub struct Ctx {
     pub git_init_image: String,
     /// This node's region, from `WS_REGION` — the other half of an `OwnerBinding`'s identity.
     pub region: String,
-    /// The roles this node carries, read ONCE from its own `Node` labels at startup
-    /// (`kloudlite.io/session`, `kloudlite.io/env`). A second, hand-maintained copy of a label
-    /// the scheduler already reads is a second thing that can be wrong — see `k8s::placement`.
-    pub roles: Vec<String>,
+    /// Whether this node carries `kloudlite.io/pool`, read ONCE from its own `Node` labels at
+    /// startup. A second, hand-maintained copy of a label the scheduler already reads is a second
+    /// thing that can be wrong — see `k8s::placement`.
+    pub has_pool: bool,
     /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every
     /// workspace reconcile parks on `HomeNotReady` rather than starting a pod that would hostPath
     /// an empty local dir in the home's place.
@@ -238,7 +238,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, roles: Vec<String>, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, settings: LiveSettings<AgentSettings>) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, has_pool: bool, homes_export: Option<String>, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, settings: LiveSettings<AgentSettings>) -> Ctx {
         // Boot-marked fields (`CLUSTER_SETTING_META`): read ONCE here from the settings already
         // merged at process start, not per reconcile — a change to one takes effect on this
         // agent's next restart, not its next tick (pod templates and runtimeClassName are
@@ -286,7 +286,7 @@ impl Ctx {
             default_image,
             running: Mutex::new(HashMap::new()),
             region,
-            roles,
+            has_pool,
             homes_export,
             nix,
             profiles_dir,

@@ -74,22 +74,13 @@ fn requested(pods: &[Pod]) -> Want {
 
 /// What percentage of a node's allocatable the model lets a claim fill (`docs/capacity-model.md`).
 ///
-/// A WORKSPACE node (`kloudlite.io/session=true` — the sheet calls a workspace a session) admits up
-/// to the guarantee and no further: "guaranteed CPU is NOT oversubscribed on session nodes". An
-/// ENV node is packed to the model's 80% target instead, leaving the steady-state headroom the
-/// sheet prices. A node carrying BOTH role labels (a single-node install does) is treated as a
-/// workspace node, which is the rule that admits the workspace slot in full.
+/// One kind of node now, so one number: "guaranteed CPU is NOT oversubscribed" anywhere, and the
+/// model's 80% "env packing" was for a kind of node that does not exist — every node admits up to
+/// its guarantee and no further.
 ///
 /// The sheet's 45% average utilisation is deliberately NOT here: it prices the fleet, and using it
-/// to admit more than the guarantees would sell capacity that is not there.
-fn admissible_pct(node: Option<&Node>) -> u64 {
-    let label = |k: &str| node.and_then(|n| n.metadata.labels.as_ref()).and_then(|l| l.get(k)).map(String::as_str) == Some("true");
-    if !label("kloudlite.io/session") && label("kloudlite.io/env") {
-        80
-    } else {
-        100
-    }
-}
+/// to admit more than the guarantee would sell capacity that is not there.
+pub(crate) const ADMISSIBLE_PCT: u64 = 100;
 
 /// What this node has already PROMISED but is not yet paying for in pods: every Workspace and
 /// Environment claimed here whose pod does not exist yet, at its own requested size.
@@ -145,7 +136,7 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Resul
 /// ALLOCATABLE — not its capacity: allocatable is already capacity minus the kubelet's
 /// `--system-reserved`/`--kube-reserved` and eviction threshold, so the system margin is accounted
 /// for and adding a second one here would double-count it. The model's own headroom is the pool's,
-/// via `admissible_pct`.
+/// via `ADMISSIBLE_PCT`.
 ///
 /// A node with no allocatable readable (no status yet) fits nothing: refusing leaves the parent
 /// visibly unplaced for a peer, where claiming on a guess strands it.
@@ -156,7 +147,7 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Resul
 fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool {
     let alloc = node.and_then(|n| n.status.as_ref()).and_then(|s| s.allocatable.as_ref());
     let q = |k: &str| alloc.and_then(|a| a.get(k)).map(|v| v.0.as_str()).unwrap_or_default().to_string();
-    let pct = admissible_pct(node);
+    let pct = ADMISSIBLE_PCT;
     let cpu = kloudlite_workspaces::quota::millicores(&q("cpu")) * pct / 100;
     let mem = kloudlite_workspaces::quota::mebibytes(&q("memory")) * pct / 100;
     let (pod_cpu, pod_mem) = requested(pods);
@@ -682,7 +673,7 @@ mod tests {
     /// never compared as strings.
     #[test]
     fn a_workspace_node_admits_up_to_its_guarantee_and_no_further() {
-        let n = node(serde_json::json!({"kloudlite.io/session": "true"}), "8", "33554432Ki");
+        let n = node(serde_json::json!({"kloudlite.io/pool": "true"}), "8", "33554432Ki");
         let want = (2000, 4096); // `PodResources::default`, parsed.
         assert!(fits(Some(&n), &[pod("Running", "5", "8Gi")], (0, 0), want));
         assert!(!fits(Some(&n), &[pod("Running", "7", "8Gi")], (0, 0), want), "1 vCPU left, 2 asked for");
@@ -702,7 +693,7 @@ mod tests {
     /// `claimed_here`'s `skip` is what keeps the two sides of the comparison disjoint.
     #[test]
     fn the_start_gate_does_not_count_the_parent_it_is_asking_about_twice() {
-        let n = node(serde_json::json!({"kloudlite.io/session": "true"}), "8", "33554432Ki");
+        let n = node(serde_json::json!({"kloudlite.io/pool": "true"}), "8", "33554432Ki");
         let want = (2000, 4096);
         // Three workspaces running (6 vCPU), and the one being started is the only thing claimed
         // here without a pod. Excluded from `committed`, as the gate excludes it: it fits.
@@ -712,18 +703,12 @@ mod tests {
         assert!(!fits(Some(&n), &running, want, want));
     }
 
-    /// The model packs env nodes to 80% and workspace nodes to the guarantee; a node with both
-    /// role labels (a single-node install) takes the workspace rule.
     #[test]
-    fn an_env_node_keeps_the_models_twenty_percent_headroom() {
-        let want = (2000, 4096);
-        let env = node(serde_json::json!({"kloudlite.io/env": "true"}), "8", "33554432Ki");
-        // 80% of 8 vCPU is 6.4; 5 promised leaves 1.4, not the 2 asked for — where a workspace
-        // node would have said yes.
-        assert!(!fits(Some(&env), &[pod("Running", "5", "8Gi")], (0, 0), want));
-        assert!(fits(Some(&env), &[pod("Running", "4", "8Gi")], (0, 0), want));
-        let both = node(serde_json::json!({"kloudlite.io/env": "true", "kloudlite.io/session": "true"}), "8", "33554432Ki");
-        assert!(fits(Some(&both), &[pod("Running", "5", "8Gi")], (0, 0), want), "both labels: the workspace rule");
+    fn every_node_admits_up_to_the_guarantee_and_no_further() {
+        // One kind of node: the sheet's 80% "env packing" was for a kind that does not exist.
+        assert_eq!(ADMISSIBLE_PCT, 100);
+        let n = node(serde_json::json!({"kloudlite.io/pool": "true"}), "8", "33554432Ki");
+        assert!(fits(Some(&n), &[], (0, 0), (8_000, 0))); // 8 vCPU requested, all of it available
     }
 
     /// The owner is ALWAYS allowed: it holds the bytes by construction, and a rule that could

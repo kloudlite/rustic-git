@@ -296,16 +296,12 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             }
         });
-    // Unplaced objects, one watch per ROLE this node carries. `status.nodeName=` (empty) is a
-    // legal field selector because the CRD declares `.status.nodeName` selectable — and the claim
-    // is what moves the object out of this watch and into the node's own, with no poll in between.
+    // Unplaced objects, one watch per KIND, run on every node that carries the pool label.
+    // `status.nodeName=` (empty) is a legal field selector because the CRD declares
+    // `.status.nodeName` selectable — and the claim is what moves the object out of this watch and
+    // into the node's own, with no poll in between.
     let unplaced = watcher::Config::default().fields("status.nodeName=");
-    // ponytail: a node carrying BOTH labels (the dev `session-0`) runs both claim watches and so
-    // races peers for Environments as well as Workspaces. The claim is atomic, so this is correct
-    // rather than merely tolerated — the only consequence is that an Environment can land on the
-    // session node. Single-label nodes are the intended production shape; if mixed nodes ever
-    // become normal, the fix is a role check inside the claim, not here.
-    let claim_ws = ctx.roles.iter().any(|r| r == "session").then(|| {
+    let claim_ws = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
             .shutdown_on_signal()
             .run(|w, c| timed("claim", async move { claim::claim_workspace(&w, &c).await }), error_policy, ctx.clone())
@@ -379,7 +375,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             }
         });
-    let claim_env = ctx.roles.iter().any(|r| r == "env").then(|| {
+    let claim_env = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
             .run(|e, c| async move { claim::claim_environment(&e, &c).await }, error_policy, ctx.clone())

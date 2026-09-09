@@ -244,8 +244,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // The CRDs must be Established before the watch starts, or it fails at startup and the
     // controller sits idle looking healthy. Fail loudly here rather than in production.
     let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
-    let roles = node_roles(&client, &cfg.node).await;
-    tracing::info!(node = %cfg.node, ?roles, "node.roles");
+    let has_pool = node_has_pool(&client, &cfg.node).await;
+    tracing::info!(node = %cfg.node, has_pool, "node.pool");
     // Resolved BEFORE `Ctx`: `Ctx::new` reads the boot-marked fields (`default_image`,
     // `git_init_image`, `runtime_class`) straight off this handle instead of `std::env` itself,
     // so the CRD's admin-written value is what a fresh pod boots with, not just what a running
@@ -255,7 +255,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
     stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
-    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, roles, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
+    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.homes_export, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);
     // Not a Controller: `OwnerKeys` is cluster-wide, every node converges every object, and there
     // is no per-node sharding to reconcile against.
@@ -360,27 +360,23 @@ async fn apply_settings(api: &kube::Api<crd::ClusterSettings>, settings: &LiveSe
     }
 }
 
-/// The roles this node advertises. An unreadable Node object yields no roles, so the agent
-/// converges what it already owns and claims nothing new — the safe direction, since the
+/// Whether this node carries `kloudlite.io/pool`. An unreadable Node object reads as false, so
+/// the agent converges what it already owns and claims nothing new — the safe direction, since the
 /// alternative is claiming work for a pool this box may not have.
-async fn node_roles(client: &kube::Client, node: &str) -> Vec<String> {
+async fn node_has_pool(client: &kube::Client, node: &str) -> bool {
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client.clone());
     let Ok(Some(n)) = api.get_opt(node).await else {
         tracing::warn!(%node, reason = "unreadable", "node.labels.missing");
-        return vec![];
+        return false;
     };
     let labels = n.metadata.labels.unwrap_or_default();
-    let roles: Vec<String> = ["session", "env"]
-        .into_iter()
-        .filter(|r| labels.get(&format!("kloudlite.io/{r}")).map(String::as_str) == Some("true"))
-        .map(str::to_string)
-        .collect();
-    if roles.is_empty() {
-        // Zero roles means zero claim watches, and an agent with no claim watch looks identical to
-        // a healthy one from the outside — it just never picks anything up. Say so.
-        tracing::warn!(%node, reason = "no-role-label", "node.labels.missing");
+    let has_pool = labels.get("kloudlite.io/pool").map(String::as_str) == Some("true");
+    if !has_pool {
+        // No pool label means no claim watches, and an agent with no claim watch looks identical
+        // to a healthy one from the outside — it just never picks anything up. Say so.
+        tracing::warn!(%node, reason = "no-pool-label", "node.labels.missing");
     }
-    roles
+    has_pool
 }
 
 

@@ -47,7 +47,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
             node.into(),
             pool.to_string_lossy().into(),
             "r1".into(),
-            vec![],
+            false,
             Some("test:/".into()),
             Arc::new(NoopNix),
             pool.join("profiles"),

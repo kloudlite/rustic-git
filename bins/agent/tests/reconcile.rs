@@ -210,7 +210,7 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: 
             node.into(),
             pool.to_string_lossy().into(),
             "r1".into(),
-            vec!["session".into(), "env".into()],
+            true,
             homes_export,
             nix,
             profiles,
@@ -5391,7 +5391,7 @@ fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<Route>) -> 
             node.into(),
             pool.to_string_lossy().into(),
             "r1".into(),
-            vec!["session".into(), "env".into()],
+            true,
             Some("127.0.0.1:/".into()),
             Arc::new(FakeNix::default()),
             profiles,
@@ -5631,7 +5631,7 @@ async fn a_full_owner_hands_a_movable_volume_to_a_peer_with_room() {
     });
     let sized = |name: &str| {
         serde_json::json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": name,
-                           "labels": {"kloudlite.io/session": "true"}},
+                           "labels": {"kloudlite.io/pool": "true"}},
                            "status": {"allocatable": {"cpu": "8", "memory": "33554432Ki"},
                                       "conditions": [{"type": "Ready", "status": "True",
                                                       "lastTransitionTime": rfc3339_ago(60)}]}})
