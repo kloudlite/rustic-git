@@ -117,6 +117,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
         tick.tick().await;
         project_all(&s).await;
         prune_namespaces(&s).await;
+        prune_builders(&s).await;
     }
 }
 
@@ -197,6 +198,41 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             Ok(_) => tracing::info!(namespace = %name, "keys.namespace.pruned"),
             Err(kube::Error::Api(e)) if e.code == 404 => {}
             Err(e) => tracing::warn!(namespace = %name, error = %e, "keys.namespace.prune.failed"),
+        }
+    }
+}
+
+/// The builder half of the same beat: an owner with no workspace left has nothing to build, so
+/// their hidden `bld-{slug}` environment goes — and the next workspace create writes it back.
+///
+/// Keep-biased exactly like `prune_namespaces`, and in the same order for the same reason: the
+/// environments are listed FIRST, so the workspace list that spares them is never the older of
+/// the two and a workspace created between the calls cannot lose its builder.
+pub(crate) async fn prune_builders(s: &ApiState) {
+    let Some(c) = s.kube.as_ref() else { return };
+    let envs = match Api::<crd::Environment>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Environment", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let keep: BTreeSet<String> = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        // `keys_owner`, not a hand-rolled team-else-owner: `ensure_builder` picks the slug the
+        // same way, and a second spelling here would prune what a create just made.
+        Ok(l) => l.items.iter().map(|w| k8s::keys_owner(&w.spec).to_string()).collect(),
+        Err(e) => {
+            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let api: Api<crd::Environment> = Api::all(c.clone());
+    for e in envs.iter().filter(|e| e.spec.system.is_some() && !keep.contains(&e.spec.owner)) {
+        let name = e.name_any();
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => tracing::info!(environment = %name, "keys.builder.pruned"),
+            Err(kube::Error::Api(err)) if err.code == 404 => {}
+            Err(err) => tracing::warn!(environment = %name, error = %err, "keys.builder.prune.failed"),
         }
     }
 }

@@ -398,7 +398,7 @@ fn quota_kinds_are_published() {
 #[test]
 fn the_bootstrap_defaults_are_the_specs_table() {
     let u = kloudlite_workspaces::crd::default_quota(false);
-    assert_eq!((u.workspaces, u.environments, u.snapshots, u.disk_gb, u.cpu, u.memory_gb), (5, 2, 20, 100, 36, 72));
+    assert_eq!((u.workspaces, u.environments, u.snapshots, u.disk_gb, u.cpu, u.memory_gb), (5, 2, 20, 100, 40, 80));
     let t = kloudlite_workspaces::crd::default_quota(true);
-    assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 144, 288));
+    assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 148, 296));
 }

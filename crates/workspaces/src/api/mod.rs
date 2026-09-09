@@ -62,6 +62,7 @@ pub use scope::{owner_set_selector, Owned};
 pub use workspaces::keys_changed;
 
 use environments::{
+    get_builder, list_builders, start_builder, stop_builder,
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
@@ -249,6 +250,11 @@ pub struct ApiState {
     /// run and a firing `SloBurn` are recorded and shown on the console like every other fact, and
     /// nothing is posted anywhere: the webhook is a nudge, never the record.
     pub slo_webhook: Option<String>,
+    /// `KLOUDLITE_BUILDER_SECRET` — the shared secret the build gate presents on
+    /// `/v1/internal/builders/*`, the one surface with no person behind it. `None` (dev, tests
+    /// that do not exercise it, and the admin role, which mounts none of these routes) means
+    /// every internal route answers 401: fail closed, never open.
+    pub builder_secret: Option<String>,
     /// Turns a `name@version` entry into a `crd::Lock` before the CR is written. The api always wires one
     /// (`Resolver::from_env`); `None` is the test harness, where a list with a `@` entry is
     /// refused 503 rather than written unlocked, and a list without one never asks.
@@ -268,8 +274,16 @@ impl ApiState {
             history: None,
             cache: None,
             slo_webhook: None,
+            builder_secret: None,
             resolver: None,
         }
+    }
+
+    /// An empty value is no secret at all — an env var set to "" in a manifest must not become
+    /// a gate anybody can pass by sending `Bearer `.
+    pub fn with_builder_secret(mut self, secret: Option<String>) -> Self {
+        self.builder_secret = secret.filter(|s| !s.trim().is_empty());
+        self
     }
 
     pub fn with_resolver(mut self, r: Arc<crate::packages::resolve::Resolver>) -> Self {
@@ -320,6 +334,44 @@ impl ApiState {
     }
 }
 
+/// Constant-time bytes compare. Neither `subtle` nor `ring` is in this crate's tree and this is
+/// five lines: an early-exit `==` on a shared secret leaks it one byte at a time to anything that
+/// can time a request.
+fn secret_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u32;
+    for (x, y) in a.iter().zip(b) {
+        diff |= u32::from(x ^ y);
+    }
+    diff == 0
+}
+
+/// The build gate's own routes: no person behind them, so no `caller`, no team membership and no
+/// `visible_env` — one shared secret instead, checked here so no handler can forget it.
+async fn require_builder_secret(
+    State(s): State<Arc<ApiState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let ok = s
+        .builder_secret
+        .as_deref()
+        .zip(bearer_token(req.headers()))
+        .is_some_and(|(want, got)| secret_eq(want.as_bytes(), got.trim().as_bytes()));
+    if !ok {
+        return unauthorized();
+    }
+    next.run(req).await
+}
+
+fn internal_router(state: Arc<ApiState>) -> Router<Arc<ApiState>> {
+    Router::new()
+        .route("/v1/internal/builders", get(list_builders))
+        .route("/v1/internal/builders/{slug}", get(get_builder))
+        .route("/v1/internal/builders/{slug}/start", post(start_builder))
+        .route("/v1/internal/builders/{slug}/stop", post(stop_builder))
+        .route_layer(axum::middleware::from_fn_with_state(state, require_builder_secret))
+}
+
 pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/v1/quota", get(get_quota))
@@ -349,6 +401,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/restore-in-place", post(restore_env_in_place))
         .route("/v1/environments/{id}/intercepts", post(set_intercept))
         .route("/v1/environments/{id}/intercepts/{service}", axum::routing::delete(clear_intercept))
+        .merge(internal_router(state.clone()))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))
         .route("/v1/volumes/{name}", axum::routing::delete(delete_volume))

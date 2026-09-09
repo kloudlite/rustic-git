@@ -151,6 +151,14 @@ pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Opti
 pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id: &str) -> Result<crd::Environment, Response> {
     let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
     let e = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
+    // The ONE visibility guard, in the lookup every environment route shares — get, start, stop,
+    // delete, clone, push, restore-in-place, the intercepts and `attach_ws` all come through here,
+    // so a route added later inherits it rather than having to remember it. A `system`
+    // environment (the hidden per-owner builder) is indistinguishable from an id that does not
+    // exist; the build gate reaches it through `/v1/internal/builders`, which never calls this.
+    if !super::environments::visible_env(&e) {
+        return Err(not_found());
+    }
     if !may_act_on(s, caller, &e.spec.owner).await {
         return Err(not_found());
     }

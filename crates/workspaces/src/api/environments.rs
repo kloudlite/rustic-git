@@ -309,6 +309,11 @@ pub(crate) async fn envs_for(s: &ApiState, owners: &[String]) -> Result<Vec<Envi
     for owner in owners {
         let pushed = pushed_volumes(s, c, owner).await?;
         for e in mine(api.list(&owned_by(owner)).await.map_err(kube_err)?.items, std::slice::from_ref(owner)) {
+            // The same rule `find_env` applies, on the listing side: a builder is nobody's
+            // environment, so it is in no owner's list and in no admin owner-detail page either.
+            if !visible_env(&e) {
+                continue;
+            }
             list.push(env_doc(&e, &pushed));
         }
     }
@@ -713,6 +718,144 @@ pub(crate) async fn clear_intercept(
         }
     }
     Err(contended())
+}
+
+// ── the hidden per-owner builder ─────────────────────────────────────────
+
+/// Is this an environment a person may see and act on?
+///
+/// A `system` environment — the per-owner buildkitd builder — is not: nobody asked for it, nothing
+/// about it is theirs to start, stop, clone or push, and it must not even be distinguishable from
+/// an id that does not exist. Used by `scope::find_env` and by the listing above, which between
+/// them are every user-facing environment route.
+pub(crate) fn visible_env(e: &crd::Environment) -> bool {
+    e.spec.system.is_none()
+}
+
+/// buildkitd, exactly as the gvisor spike settled it: the non-rootless image, one tcp listener the
+/// build gate dials, and its cache on the environment's own subvolume. `builder_hardened()` in
+/// `k8s` is what renders this service's security context, keyed off `spec.system`.
+fn builder_service() -> Service {
+    Service {
+        name: "buildkit".into(),
+        image: "moby/buildkit:v0.18.2".into(),
+        command: ["buildkitd", "--addr", "tcp://0.0.0.0:1234", "--oci-worker-snapshotter=native", "--root", "/cache"]
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect(),
+        env: Default::default(),
+        mounts: vec![Mount { folder: "cache".into(), path: "/cache".into() }],
+        ports: vec![1234],
+        // Not the idle-database unit every other service gets: a build is the one thing in an
+        // environment that is genuinely cpu- and memory-bound. The quota table's cpu/memory
+        // defaults are derived assuming exactly one of these per owner.
+        resources: Some(crd::PodResources::default()),
+    }
+}
+
+/// Give an owner — or their team — the builder their workspaces build through.
+///
+/// Server-side apply, so a repeat is a no-op and a change to the image or the argv above reaches
+/// every existing builder on the next workspace create. `desiredState` is the one field taken from
+/// whatever is already there: the gate starts and stops the builder, and an apply that re-asserted
+/// `Stopped` would tear down a running build the moment somebody created a workspace.
+pub(crate) async fn ensure_builder(s: &ApiState, owner: &str, team: &str, region: &str) -> Result<(), Response> {
+    // A team's builder belongs to the team, like everything else a team workspace allocates.
+    let slug = if team.is_empty() { owner } else { team };
+    let id = crd::builder_id(slug);
+    let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
+    let desired_state = match api.get_opt(&id).await.map_err(kube_err)? {
+        Some(e) => e.spec.desired_state,
+        None => DesiredState::Stopped,
+    };
+    let mut e = crd::Environment::new(
+        &id,
+        crd::EnvironmentSpec {
+            owner: slug.to_string(),
+            name: "builder".into(),
+            region: region.to_string(),
+            services: vec![builder_service()],
+            storage: Some(crd::WorkspaceStorage { quota_gb: crd::BUILDER_CACHE_GB, source: None }),
+            desired_state,
+            restore: None,
+            intercepts: Vec::new(),
+            system: Some(crd::BUILDER_SYSTEM.to_string()),
+        },
+    );
+    e.metadata.labels = Some(labels(slug, "environment"));
+    api.patch(&id, &PatchParams::apply("kloudlite-api"), &Patch::Apply(&e)).await.map_err(kube_err)?;
+    Ok(())
+}
+
+/// The slug is spliced into a URL to the API server, so it is validated exactly as every other
+/// path segment is. A bad one is 404, not 400: the gate has no business learning the difference.
+fn builder_of(slug: &str) -> Result<String, Response> {
+    if !kloudlite_storage::store::valid_owner(slug) {
+        return Err(not_found());
+    }
+    Ok(crd::builder_id(slug))
+}
+
+/// `POST /v1/internal/builders/{slug}/start|stop` — the build gate's two writes, through the same
+/// merge-patch `start_env`/`stop_env` use and deliberately past `visible_env`: `/v1` stays the
+/// only writer of spec, and the gate holds a secret rather than a person's identity.
+pub(crate) async fn start_builder(
+    State(s): State<Arc<ApiState>>,
+    Path(slug): Path<String>,
+) -> Result<Response, Response> {
+    set_builder_state(&s, &slug, DesiredState::Running).await
+}
+
+pub(crate) async fn stop_builder(
+    State(s): State<Arc<ApiState>>,
+    Path(slug): Path<String>,
+) -> Result<Response, Response> {
+    set_builder_state(&s, &slug, DesiredState::Stopped).await
+}
+
+async fn set_builder_state(s: &ApiState, slug: &str, want: DesiredState) -> Result<Response, Response> {
+    let id = builder_of(slug)?;
+    set_desired::<crd::Environment>(kube(s)?, &id, want).await?;
+    // 202 like every other desired-state write: the controller is what makes it true.
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": id, "desiredState": want}))).into_response())
+}
+
+/// `GET /v1/internal/builders/{slug}` — what the gate polls between `start` and dialling buildkit.
+pub(crate) async fn get_builder(
+    State(s): State<Arc<ApiState>>,
+    Path(slug): Path<String>,
+) -> Result<Response, Response> {
+    let id = builder_of(&slug)?;
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    // `!visible_env`: this route reaches builders and ONLY builders, so a person's environment
+    // that happened to be named `bld-…` is not readable through the gate's secret.
+    let e = api.get_opt(&id).await.map_err(kube_err)?.filter(|e| !visible_env(e)).ok_or_else(not_found)?;
+    let st = e.status.as_ref();
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "state": phase(st.map(|s| s.phase.as_str()), EnvState::Creating),
+        // The gate dials on this and nothing else: a pod that exists is not a buildkit that answers.
+        "ready": st.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True")),
+        "conditions": st.map(|s| s.conditions.clone()).unwrap_or_default(),
+    }))
+    .into_response())
+}
+
+/// `GET /v1/internal/builders` — every builder that is meant to be running, so a restarted gate
+/// re-seeds its idle timers instead of leaving one running until somebody builds again.
+pub(crate) async fn list_builders(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    let mut running: Vec<String> = api
+        .list(&ListParams::default())
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter(|e| !visible_env(e) && e.spec.desired_state == DesiredState::Running)
+        .map(|e| e.spec.owner)
+        .collect();
+    running.sort();
+    Ok(Json(serde_json::json!({"running": running})).into_response())
 }
 
 // ── volumes ──────────────────────────────────────────────────────────────

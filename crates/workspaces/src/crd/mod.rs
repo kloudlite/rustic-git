@@ -846,6 +846,10 @@ pub struct EnvironmentSpec {
 /// environment a workspace image build starts on demand (see Task 1's spike).
 pub const BUILDER_SYSTEM: &str = "builder";
 
+/// The builder's own cache subvolume, in GB. A constant for now; `builder_cache_gb` becomes a
+/// live setting once anyone needs a different number per region.
+pub const BUILDER_CACHE_GB: u64 = 50;
+
 /// `bld-{slug}` — the builder environment's id, deterministic from the owner slug so a build
 /// gate can name it without a lookup.
 pub fn builder_id(slug: &str) -> String {
@@ -1080,8 +1084,11 @@ pub const DEFAULT_TEAM_QUOTA: &str = "default-team";
 /// `cpu` and `memoryGb` are DERIVED from the count dimensions, never picked independently: quota
 /// charges the LIMIT (`workspace_cost`, `environment_cost`), so a ceiling must cover
 /// `workspaces x PodResources::default()` plus `environments x 4 services x env_unit_resources()`
-/// (four being the environment size we plan for), or the counts are unreachable and cpu refuses
-/// first. Change a count or either limit and recompute this, or the dimensions drift apart again.
+/// (four being the environment size we plan for) plus one builder per owner at
+/// `PodResources::default()` (the hidden `bld-{slug}` environment, whose buildkit service carries
+/// its own resources and whose cpu/memory count against the owner while it runs), or the counts
+/// are unreachable and cpu refuses first. Change a count or either limit and recompute this, or
+/// the dimensions drift apart again.
 pub fn default_quota(team: bool) -> QuotaSpec {
     if team {
         QuotaSpec {
@@ -1089,8 +1096,8 @@ pub fn default_quota(team: bool) -> QuotaSpec {
             environments: 8,
             snapshots: 80,
             disk_gb: 400,
-            cpu: 144,
-            memory_gb: 288,
+            cpu: 148,
+            memory_gb: 296,
             regions: Vec::new(),
         }
     } else {
@@ -1099,8 +1106,8 @@ pub fn default_quota(team: bool) -> QuotaSpec {
             environments: 2,
             snapshots: 20,
             disk_gb: 100,
-            cpu: 36,
-            memory_gb: 72,
+            cpu: 40,
+            memory_gb: 80,
             regions: Vec::new(),
         }
     }

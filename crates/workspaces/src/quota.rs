@@ -151,15 +151,22 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
         if e.spec.owner != owner {
             continue;
         }
-        u.environments += 1;
+        // The hidden per-owner builder is not one of the owner's environments — they never made
+        // it, cannot see it, and must not have their `environments` ceiling spent by it. Its DISK
+        // and, while it runs, its capacity are still theirs, which is why only the count skips.
+        if e.spec.system.is_none() {
+            u.environments += 1;
+        }
         if live(e.spec.desired_state) {
             // Every service gets the env unit — one definition, in `k8s::env_unit_resources`, used
-            // by the StatefulSet and by the namespace's LimitRange. Reading it here is what keeps
-            // the accounting and what actually runs from being two numbers.
-            let unit = crate::k8s::env_unit_resources();
-            let n = e.spec.services.len() as u64;
-            millis += n * millicores(&unit.cpu_limit);
-            mib += n * mebibytes(&unit.memory_limit);
+            // by the StatefulSet and by the namespace's LimitRange — unless the service names its
+            // own (the builder does). Reading what the StatefulSet reads is what keeps the
+            // accounting and what actually runs from being two numbers.
+            for svc in &e.spec.services {
+                let unit = svc.resources.clone().unwrap_or_else(crate::k8s::env_unit_resources);
+                millis += millicores(&unit.cpu_limit);
+                mib += mebibytes(&unit.memory_limit);
+            }
         }
     }
     for v in vols.list(&lp).await?.items {
@@ -256,7 +263,9 @@ mod tests {
             let env = crate::api::environment_cost(0, SERVICES_PER_ENV as usize);
             for dim in [Dim::Cpu, Dim::MemoryGb] {
                 let of = |cost: &[(Dim, u64)]| cost.iter().find(|(d, _)| *d == dim).map_or(0, |(_, n)| *n);
-                let need = u64::from(q.workspaces) * of(&ws) + u64::from(q.environments) * of(&env);
+                // `+ of(&ws)`: one builder per owner, at `PodResources::default()` — the same
+            // shape a workspace slot has, which is what `builder_service` gives it.
+            let need = u64::from(q.workspaces) * of(&ws) + u64::from(q.environments) * of(&env) + of(&ws);
                 let have = u64::from(if dim == Dim::Cpu { q.cpu } else { q.memory_gb });
                 assert!(have >= need, "{dim:?}: {have} does not cover {need} for team={team}");
             }

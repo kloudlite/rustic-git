@@ -273,6 +273,13 @@ pub(crate) async fn create_ws(
         },
     )
     .await?;
+    // Every owner builds images through their own hidden buildkit environment, and this is the
+    // moment they are known to need one. Awaited, so a create's own test can see it, but best
+    // effort: a builder that fails to appear costs the owner `kl build` until the next create,
+    // never the workspace they actually asked for.
+    if let Err(e) = super::environments::ensure_builder(&s, &owner.name, &team, &w.spec.region).await {
+        tracing::warn!(owner = %owner.name, team = %team, status = ?e.status(), "builder.ensure.failed");
+    }
     // Off the request: the wait is up to 5 s of polling for a node to claim the object, and the
     // 202 already says "accepted, not done". `list_ws` re-installs an absent key regardless.
     tokio::spawn({

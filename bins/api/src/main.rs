@@ -321,6 +321,17 @@ async fn run() -> Result<()> {
             let mut state = kloudlite_workspaces::api::ApiState::new(jwt);
             // So a new workspace comes up with the owner's platform-issued git key already mounted.
             state = state.with_keys(store.clone());
+            // The build gate's shared secret. REQUIRED in the user role, the only one that
+            // mounts `/v1/internal/builders/*`, and fail-closed like `KLOUDLITE_PEER_SECRET`:
+            // an api that came up without it would answer 401 to every build in the region, and
+            // finding that out at boot beats finding it out from a user.
+            if role != "admin" {
+                let secret = std::env::var("KLOUDLITE_BUILDER_SECRET")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| err("KLOUDLITE_BUILDER_SECRET required"))?;
+                state = state.with_builder_secret(Some(secret));
+            }
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
             state = state.with_slo_webhook(std::env::var("KLOUDLITE_SLO_WEBHOOK").ok());
