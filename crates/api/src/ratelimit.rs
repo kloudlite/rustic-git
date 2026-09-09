@@ -39,6 +39,7 @@ impl Limiter {
 
     /// `N/SECONDS`, e.g. `20/600`. An unparseable value falls back to `default` rather than to
     /// no limit: a typo must not open the surface.
+    #[allow(clippy::expect_used)] // the default is a compile-time literal parsed once at boot
     pub(crate) fn from_env(var: &str, default: &str) -> Self {
         let parse = |s: &str| {
             let (n, secs) = s.trim().split_once('/')?;
@@ -46,7 +47,7 @@ impl Limiter {
         };
         match std::env::var(var).ok().and_then(|v| parse(&v)) {
             Some(l) => l,
-            None => parse(default).expect("default limit is well-formed"),
+            None => parse(default).expect("default limit is well-formed"), // a compile-time literal
         }
     }
 

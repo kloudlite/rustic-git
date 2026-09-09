@@ -31,7 +31,7 @@ pub struct Idle(Mutex<HashMap<String, Slot>>);
 
 impl Idle {
     pub fn opened(&self, slug: &str) {
-        let mut m = self.0.lock().unwrap();
+        let mut m = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let s = m.entry(slug.to_string()).or_default();
         s.open += 1;
         s.zero_since = None;
@@ -40,7 +40,7 @@ impl Idle {
     }
 
     pub fn closed(&self, slug: &str) {
-        let mut m = self.0.lock().unwrap();
+        let mut m = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(s) = m.get_mut(slug) {
             s.open = s.open.saturating_sub(1);
             if s.open == 0 {
@@ -55,7 +55,7 @@ impl Idle {
     pub fn seed(&self, slug: &str) {
         self.0
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(slug.to_string())
             .or_insert_with(|| Slot { open: 0, zero_since: Some(Instant::now()), stopped: false });
     }
@@ -64,7 +64,7 @@ impl Idle {
     /// happens exactly once per idle period even if it fails.
     fn due(&self, after: Duration) -> Vec<String> {
         let now = Instant::now();
-        let mut m = self.0.lock().unwrap();
+        let mut m = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut due = Vec::new();
         for (slug, s) in m.iter_mut() {
             if s.open == 0 && !s.stopped && s.zero_since.is_some_and(|z| now.duration_since(z) >= after) {

@@ -155,6 +155,9 @@ pub(crate) async fn clone_base(
 
 /// Attach `based_on` to a doc the way `stop_ws` attaches `warning`: a key beside the doc's own
 /// fields, so the web client's `res.json()` of a Workspace/Environment keeps working unchanged.
+// serde of a derive(Serialize) value of ours cannot fail; the allow is on the fn because an
+// attribute on the assignment statement is not stable Rust.
+#[allow(clippy::expect_used)]
 pub(crate) fn with_based_on<T: serde::Serialize>(doc: &T, based_on: &BasedOn) -> Response {
     let mut body = serde_json::to_value(doc).expect("doc always serializes");
     body["based_on"] = serde_json::to_value(based_on).expect("BasedOn always serializes");
@@ -289,8 +292,12 @@ async fn create_snapshot(
         }
         Err(e) => return Err(kube_err(e)),
     };
-    snap.metadata.owner_references =
-        Some(vec![vol.controller_owner_ref(&()).expect("a live Volume has a uid")]);
+    // A Volume read back from the API server always carries a uid; `None` here is a kube-rs bug,
+    // and the 500 says so rather than aborting the pod.
+    let Some(owner_ref) = vol.controller_owner_ref(&()) else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "the volume carries no uid").into_response());
+    };
+    snap.metadata.owner_references = Some(vec![owner_ref]);
     snap.status = Some(crd::SnapshotStatus { phase: crd::Phase::Working, ready_at: None });
     api.create(&PostParams::default(), &snap).await.map_err(kube_err)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::json!({"id": name, "phase": crd::Phase::Working.as_str()}))).into_response())

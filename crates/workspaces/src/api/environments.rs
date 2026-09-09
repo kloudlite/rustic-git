@@ -370,7 +370,8 @@ pub(crate) async fn stop_env(
     let mut doc = env_doc(&e, &pushed);
     doc.state = EnvState::Stopped;
     let warning = e.status.as_ref().and_then(|st| node_dead_warning(&st.node_name, &st.conditions));
-    let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
+    #[allow(clippy::expect_used)] // serde of a derive(Serialize) value of ours cannot fail
+        let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
     if let Some(w) = warning {
         body["warning"] = serde_json::Value::String(w);
     }
@@ -425,7 +426,8 @@ pub(crate) async fn delete_env(
     let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
     let mut doc = env_doc(&e, &pushed);
     doc.state = EnvState::Deleted;
-    let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
+    #[allow(clippy::expect_used)] // serde of a derive(Serialize) value of ours cannot fail
+        let mut body = serde_json::to_value(&doc).expect("Environment doc always serializes");
     if let Some(w) = warning {
         body["warning"] = serde_json::Value::String(w);
     }
@@ -634,6 +636,9 @@ const INTERCEPT_ATTEMPTS: usize = 3;
 /// then retry forever. `add` creates or overwrites.
 ///
 /// `Ok(None)` is a lost race. An `Err` is an outage — never "lost", same distinction `cas` draws.
+// Two static JSON pointers and the serialisation of our own `Intercept` list: none can fail,
+// and an attribute on an expression inside the vec is not stable Rust, so the allow is here.
+#[allow(clippy::expect_used)]
 async fn cas_intercepts(
     c: &kube::Client,
     e: &crd::Environment,

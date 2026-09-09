@@ -4,6 +4,11 @@
 //! and what makes the port safe is Task 6's NetworkPolicies plus the fact that the only thing on
 //! the other side of a connection is that pod's OWN builder.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use kloudlite_builder_gate::{idle, serve, who, ApiClient, Gate};
 use kloudlite_core::settings::CentralSettings;
 use std::sync::Arc;

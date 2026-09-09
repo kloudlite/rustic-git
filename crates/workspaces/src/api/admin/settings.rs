@@ -32,11 +32,12 @@ impl PeerClient {
     /// `bins/api` has no `reqwest` dependency of its own (nothing else there makes an outbound
     /// HTTP call) — building the client here keeps that true rather than adding one just for
     /// this one call site.
+    #[allow(clippy::expect_used)] // boot-time: built once at process start, never per request
     pub fn new(upstream: String, secret: String) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()
-            .expect("building an HTTP client cannot fail with these options");
+            .expect("building an HTTP client cannot fail with these options"); // boot-time
         Self { client, upstream, secret }
     }
 }

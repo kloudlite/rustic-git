@@ -6,6 +6,11 @@
 //! owner header — exactly the identity a forwarding node presents, so upstream authorizes this
 //! the way it authorizes a peer.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 // `Result<T, axum::Response>` is the handler idiom here: the Err is an early-return response,
 // unwrapped exactly once per request by `?`. Boxing it to please the size lint would add an
 // allocation per refusal for no measurable gain.
@@ -107,6 +112,7 @@ pub struct Api {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::expect_used)] // boot-time: the one HTTP client is built here, at process start
 pub async fn serve(
     store: Arc<Store>,
     cache: Arc<Cache>,
@@ -156,7 +162,7 @@ pub async fn serve(
             .timeout(UPSTREAM_TIMEOUT)
             .build()
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
-            .expect("building an HTTP client cannot fail with these options"),
+            .expect("building an HTTP client cannot fail with these options"), // boot-time
         on_keys_changed,
         membership: crate::browse::Membership::default(),
         central,

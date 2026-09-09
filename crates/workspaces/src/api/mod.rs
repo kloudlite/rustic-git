@@ -23,6 +23,11 @@
 //! all of them: `ApiState`, the router, auth, and the small set of error/lookup helpers every
 //! handler in every submodule calls.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 // Same idiom and same tradeoff as `crates/api`: `Result<T, Response>` is the handler style here,
 // and boxing the Err to please the size lint would add an allocation per refusal for nothing.
 #![allow(clippy::result_large_err)]

@@ -286,10 +286,9 @@ pub async fn put_manifest(
     // Spec: a manifest with a `subject` MUST get `OCI-Subject` on the 201, so a client can tell
     // without a GET that the push was indexed as a referrer.
     if let Some(subject) = subject {
-        resp.headers_mut().insert(
-            header::HeaderName::from_static("oci-subject"),
-            subject.to_string().parse().unwrap(),
-        );
+        if let Ok(v) = header::HeaderValue::from_str(&subject.to_string()) {
+            resp.headers_mut().insert(header::HeaderName::from_static("oci-subject"), v);
+        }
     }
     resp
 }
@@ -558,12 +557,9 @@ pub async fn tags_list(
     let mut r = axum::Json(body).into_response();
     if let Some(last) = truncated {
         let n = q.get("n").cloned().unwrap_or_default();
-        r.headers_mut().insert(
-            header::LINK,
-            format!("</v2/{owner}/{name}/tags/list?n={n}&last={last}>; rel=\"next\"")
-                .parse()
-                .unwrap(),
-        );
+        if let Ok(v) = header::HeaderValue::from_str(&format!("</v2/{owner}/{name}/tags/list?n={n}&last={last}>; rel=\"next\"")) {
+            r.headers_mut().insert(header::LINK, v);
+        }
     }
     r
 }

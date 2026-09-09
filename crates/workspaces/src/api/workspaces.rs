@@ -718,7 +718,8 @@ pub(crate) async fn stop_as(
     let pushed = pushed_volumes(s, kube(s)?, &w.spec.owner).await?;
     let mut doc = ws_doc(&w, &pushed);
     doc.state = WsState::Stopped;
-    let mut body = serde_json::to_value(&doc).expect("Workspace doc always serializes");
+    #[allow(clippy::expect_used)] // serde of a derive(Serialize) value of ours cannot fail
+        let mut body = serde_json::to_value(&doc).expect("Workspace doc always serializes");
     if let Some(w) = warning {
         body["warning"] = serde_json::Value::String(w);
     }

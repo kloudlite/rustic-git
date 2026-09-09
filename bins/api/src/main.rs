@@ -10,6 +10,11 @@
 //! make it a fact: this process cannot open a repository for writing, because none
 //! of that code is reachable from here.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use kloudlite_core::err;
 use kloudlite_core::{require_jwt_secret_from_env, Result};
 use kloudlite_storage::config::{env, install_crypto_provider, open_store};

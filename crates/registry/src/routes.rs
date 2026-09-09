@@ -79,7 +79,7 @@ async fn v2_root(State(app): State<Arc<App>>, Extension(trusted): Extension<Trus
 }
 
 fn with_version(mut r: Response) -> Response {
-    r.headers_mut().insert("docker-distribution-api-version", "registry/2.0".parse().unwrap());
+    r.headers_mut().insert("docker-distribution-api-version", axum::http::HeaderValue::from_static("registry/2.0"));
     r
 }
 
@@ -192,10 +192,11 @@ async fn catalog(
     let mut r = axum::Json(serde_json::json!({"repositories": page})).into_response();
     if let Some(last) = truncated {
         let n = q.get("n").cloned().unwrap_or_default();
-        r.headers_mut().insert(
-            axum::http::header::LINK,
-            format!("</v2/_catalog?n={n}&last={last}>; rel=\"next\"").parse().unwrap(),
-        );
+        // Built from a stored name and a query value; a value no header can carry drops the
+        // Link rather than the pod (a client then sees a shorter listing, never a crash).
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("</v2/_catalog?n={n}&last={last}>; rel=\"next\"")) {
+            r.headers_mut().insert(axum::http::header::LINK, v);
+        }
     }
     r
 }

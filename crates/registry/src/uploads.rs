@@ -203,6 +203,7 @@ impl BlockingHasher {
             return Ok(());
         }
         let part = std::mem::take(&mut self.buf);
+        #[allow(clippy::expect_used)] // a state-machine invariant of this type, not a request value
         let mut hasher = self.hasher.take().expect("BlockingHasher used after finish");
         let hasher = tokio::task::spawn_blocking(move || {
             hasher.update(&part);
@@ -216,6 +217,7 @@ impl BlockingHasher {
 
     async fn finish(mut self) -> crate::Result<Digest> {
         self.flush().await?;
+        #[allow(clippy::expect_used)] // same invariant as `update`
         let hasher = self.hasher.take().expect("BlockingHasher used after finish");
         tokio::task::spawn_blocking(move || hasher.finish()).await.map_err(|e| crate::err(e.to_string()))
     }
@@ -446,7 +448,9 @@ fn accepted(owner: &str, name: &str, uuid: &str, len: u64) -> Response {
     )
         .into_response();
     if len > 0 {
-        r.headers_mut().insert(header::RANGE, format!("0-{}", len - 1).parse().unwrap());
+        if let Ok(v) = header::HeaderValue::from_str(&format!("0-{}", len - 1)) {
+            r.headers_mut().insert(header::RANGE, v);
+        }
     }
     r
 }
@@ -460,9 +464,17 @@ fn range_not_satisfiable(owner: &str, name: &str, uuid: &str, have: u64) -> Resp
     let mut r = oci_err(StatusCode::RANGE_NOT_SATISFIABLE, "BLOB_UPLOAD_INVALID", "chunk does not continue the upload");
     let last = if have == 0 { 0 } else { have - 1 };
     let h = r.headers_mut();
-    h.insert(header::RANGE, format!("0-{last}").parse().unwrap());
-    h.insert(header::LOCATION, format!("/v2/{owner}/{name}/blobs/uploads/{uuid}").parse().unwrap());
-    h.insert(header::HeaderName::from_static("docker-upload-uuid"), uuid.parse().unwrap());
+    // Every value here is digits, a validated name or a validated uuid; a value that still cannot
+    // be a header is dropped, never a panic.
+    for (k, v) in [
+        (header::RANGE, format!("0-{last}")),
+        (header::LOCATION, format!("/v2/{owner}/{name}/blobs/uploads/{uuid}")),
+        (header::HeaderName::from_static("docker-upload-uuid"), uuid.to_string()),
+    ] {
+        if let Ok(v) = header::HeaderValue::from_str(&v) {
+            h.insert(k, v);
+        }
+    }
     r
 }
 
@@ -640,7 +652,9 @@ pub async fn status(
                 // header unconditionally, and reference registries answer 0-0 rather than
                 // omitting it when nothing has landed yet.
                 let n = n.max(1);
-                r.headers_mut().insert(header::RANGE, format!("0-{}", n - 1).parse().unwrap());
+                if let Ok(v) = header::HeaderValue::from_str(&format!("0-{}", n - 1)) {
+        r.headers_mut().insert(header::RANGE, v);
+    }
             }
             r
         }

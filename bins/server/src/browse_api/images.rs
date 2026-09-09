@@ -80,10 +80,9 @@ pub(super) async fn images(
     if let Some(last) = truncated {
         let n = q.get("n").cloned().unwrap_or_default();
         let public = if public_only { "&public=1" } else { "" };
-        r.headers_mut().insert(
-            axum::http::header::LINK,
-            format!("</api/{owner}/images?n={n}&last={last}{public}>; rel=\"next\"").parse().unwrap(),
-        );
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("</api/{owner}/images?n={n}&last={last}{public}>; rel=\"next\"")) {
+            r.headers_mut().insert(axum::http::header::LINK, v);
+        }
     }
     r
 }
@@ -177,10 +176,9 @@ pub(super) async fn imagetags(
     let mut r = Json(out).into_response();
     if let Some(last) = truncated {
         let n = q.get("n").cloned().unwrap_or_default();
-        r.headers_mut().insert(
-            axum::http::header::LINK,
-            format!("</api/{owner}/{name}/imagetags?n={n}&last={last}>; rel=\"next\"").parse().unwrap(),
-        );
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("</api/{owner}/{name}/imagetags?n={n}&last={last}>; rel=\"next\"")) {
+            r.headers_mut().insert(axum::http::header::LINK, v);
+        }
     }
     r
 }

@@ -4,6 +4,11 @@
 //! the same name grants no claim on it. What makes the two safe to serve from one process is this
 //! module's key derivation — see `routing_key`.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 // `Result<T, axum::Response>` is the handler idiom here: the Err is an early-return response,
 // unwrapped exactly once per request by `?`. Boxing it to please the size lint would add an
 // allocation per refusal for no measurable gain.

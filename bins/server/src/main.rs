@@ -1,3 +1,8 @@
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use kloudlite_server::boot::{host_key, run};
 use kloudlite_server::config::{env, open_store};
 use kloudlite_server::lanes::spawn_lease_tasks;
@@ -153,8 +158,11 @@ async fn serve() -> Result<()> {
     let pool_for_term = store.pool.clone();
     let app_for_term = app.clone();
     tokio::spawn(async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("sigterm handler");
+        // No handler means no graceful drain: better to know at start than at the first roll.
+        let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) else {
+            tracing::error!("sigterm handler could not be installed; this pod will not drain on Killing");
+            return;
+        };
         term.recv().await;
         let began = std::time::Instant::now();
         tracing::info!(signal = "sigterm", "process.shutdown.begun");

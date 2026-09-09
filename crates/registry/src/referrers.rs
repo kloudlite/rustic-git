@@ -117,7 +117,7 @@ pub async fn list(
     if filter.is_some() {
         r.headers_mut().insert(
             header::HeaderName::from_static("oci-filters-applied"),
-            "artifactType".parse().unwrap(),
+            header::HeaderValue::from_static("artifactType"),
         );
     }
     r

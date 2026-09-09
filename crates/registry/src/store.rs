@@ -44,6 +44,7 @@ impl Digest {
     /// sha256 of `bytes`, for content this code digests itself (manifests keyed by digest, etc.) —
     /// there the algorithm is our choice, not a claim from the client.
     pub fn of(bytes: &[u8]) -> Digest {
+        #[allow(clippy::expect_used)] // sha256 is compiled in; `of_algo` only fails for an unknown name
         Self::of_algo("sha256", bytes).expect("sha256 is always supported")
     }
 

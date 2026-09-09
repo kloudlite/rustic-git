@@ -7,6 +7,11 @@
 //! set with no readable certificate is FATAL — falling back to plaintext there is a pod that
 //! passes its probe and is unreachable from the edge. Unset is the laptop shape: HTTP only.
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_gateway::tunnel::{app, Gateway};
 use std::sync::Arc;

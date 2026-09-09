@@ -12,6 +12,11 @@
 //! pod IP is the one fact the network gives us that the tenant cannot forge (the CNI assigns it,
 //! and Task 6's NetworkPolicies are what stop anything but a workspace pod reaching this port).
 
+// A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
+// `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod idle;
 pub mod splice;
 pub mod who;
@@ -36,6 +41,7 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
+    #[allow(clippy::expect_used)] // boot-time: built once in main, never per request
     pub fn new(base: String, secret: String) -> Self {
         // An explicit User-Agent, because the api is reached through Cloudflare and its bot check
         // answers 1010 to some defaults (python-urllib is refused; curl and this string pass). A
@@ -43,7 +49,7 @@ impl ApiClient {
         let http = reqwest::Client::builder()
             .user_agent(concat!("kloudlite-builder-gate/", env!("CARGO_PKG_VERSION")))
             .build()
-            .expect("reqwest client");
+            .expect("reqwest client"); // boot-time: see the crate lint header
         Self { http, base: base.trim_end_matches('/').to_string(), secret }
     }
 
