@@ -1,4 +1,5 @@
-# Builds go to the owner's builder through the gate; the credential helper is the login.
+# Builds go to the owner's builder through the gate; the credential helper is the login. `kl`
+# does this setup itself; this is for people who call `docker buildx` directly.
 # Never fails the login shell that sources it: every branch below falls through to exit 0.
 if [ -n "${BUILDKIT_HOST:-}" ] && [ -n "${KL_REGISTRY_HOST:-}" ] && command -v docker >/dev/null 2>&1; then
   mkdir -p "$HOME/.docker"
