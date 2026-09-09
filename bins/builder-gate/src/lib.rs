@@ -37,7 +37,14 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base: String, secret: String) -> Self {
-        Self { http: reqwest::Client::new(), base: base.trim_end_matches('/').to_string(), secret }
+        // An explicit User-Agent, because the api is reached through Cloudflare and its bot check
+        // answers 1010 to some defaults (python-urllib is refused; curl and this string pass). A
+        // gate whose every api call is a 1010 hangs every build at `start`.
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("kloudlite-builder-gate/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("reqwest client");
+        Self { http, base: base.trim_end_matches('/').to_string(), secret }
     }
 
     async fn call(&self, method: reqwest::Method, path: &str) -> Result<reqwest::Response, String> {
@@ -83,6 +90,25 @@ impl ApiClient {
     }
 }
 
+/// `/healthz`. 503 until the pod reflector has listed once: with `strategy: Recreate` the new pod
+/// joins the Service the moment it is Ready, and serving before the index exists closes the first
+/// build after every roll as an unknown peer. Liveness reads the same route — a gate that never
+/// lists is a gate that will never work.
+pub fn health(pods: who::Pods) -> axum::Router {
+    axum::Router::new().route(
+        "/healthz",
+        axum::routing::get(move || {
+            let pods = pods.clone();
+            async move {
+                match pods.listed() {
+                    true => (axum::http::StatusCode::OK, "ok"),
+                    false => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "listing pods"),
+                }
+            }
+        }),
+    )
+}
+
 pub struct Gate {
     pub api: ApiClient,
     pub who: Arc<dyn who::Resolver>,
@@ -118,6 +144,12 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
     };
     let slug = who::slug_of(&owner, &team);
 
+    // Counted BEFORE `start`, and this is the whole point of the ordering: the builder may
+    // already be running and halfway through its idle countdown (or seeded by a restart), and the
+    // beat would then POST `stop` for the very builder this connection is about to use. The count
+    // is what holds it open; the `Drop` guard releases it on every early return below.
+    let open = splice::Open::new(gate.clone(), slug.clone());
+
     if let Err(e) = gate.api.start(&slug).await {
         outcome("refused");
         tracing::warn!(%slug, error = %e, "gate.start.failed");
@@ -125,17 +157,25 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
     }
 
     let waited = gate.central.load().builder_start_secs;
-    if !wait_ready(&gate, &slug, Duration::from_secs(waited)).await {
-        // Deliberately no `stop`: the builder may simply be slow, and stopping it here would
-        // tear down the very pod the next connection is waiting for.
-        outcome("timeout");
-        tracing::warn!(%slug, secs = waited, "gate.start.timeout");
-        return;
+    match wait_ready(&gate, &slug, Duration::from_secs(waited), &sock).await {
+        Wait::Ready => {}
+        Wait::Timeout => {
+            // Deliberately no `stop`: the builder may simply be slow, and stopping it here would
+            // tear down the very pod the next connection is waiting for.
+            outcome("timeout");
+            tracing::warn!(%slug, secs = waited, "gate.start.timeout");
+            return;
+        }
+        Wait::ClientGone => {
+            // NOT a timeout: nothing failed, the client left. Counting it as one would report a
+            // slow builder every time somebody hits ^C, and polling on to the full budget for a
+            // socket nobody is reading is two minutes of api calls per abandoned build.
+            outcome("client_gone");
+            tracing::info!(%slug, "gate.client.gone");
+            return;
+        }
     }
 
-    // Counted from BEFORE the dial: a builder that is up must not be stopped out from under a
-    // connection that is still being established.
-    let open = splice::Open::new(gate.clone(), slug.clone());
     let addr = gate.buildkit_addr(&slug);
     let upstream = match tokio::net::TcpStream::connect(&addr).await {
         Ok(s) => s,
@@ -150,16 +190,50 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
     drop(open);
 }
 
-async fn wait_ready(gate: &Gate, slug: &str, budget: Duration) -> bool {
+enum Wait {
+    Ready,
+    Timeout,
+    ClientGone,
+}
+
+/// Poll the builder until it answers, the budget runs out, or the CLIENT hangs up.
+///
+/// `peek`, never `read`: those bytes are the client's own request (buildkit's HTTP/2 preface
+/// arrives immediately, before the builder is anywhere near up) and consuming one would corrupt
+/// the stream the splice is about to carry. `Ok(0)` from a peek is EOF and nothing else.
+async fn wait_ready(gate: &Gate, slug: &str, budget: Duration, sock: &tokio::net::TcpStream) -> Wait {
     let deadline = tokio::time::Instant::now() + budget;
+    // Once the client has sent something, its socket stays readable and watching it would spin
+    // this loop; from then on the wait is a plain sleep.
+    // ponytail: with bytes already buffered, a FIN is indistinguishable from data without
+    // draining the stream the splice still needs — so a hangup AFTER the first bytes is only
+    // found when the pump reaches it. Upgrade path if the polling cost ever shows: peek the
+    // buffered bytes aside and hand them to `copy_bidirectional` as a prefix.
+    let mut watch = true;
     loop {
         if gate.api.ready(slug).await.unwrap_or(false) {
-            return true;
+            return Wait::Ready;
         }
         if tokio::time::Instant::now() + POLL_GAP > deadline {
-            return false;
+            return Wait::Timeout;
         }
-        tokio::time::sleep(POLL_GAP).await;
+        if !watch {
+            tokio::time::sleep(POLL_GAP).await;
+            continue;
+        }
+        let mut byte = [0u8; 1];
+        tokio::select! {
+            _ = tokio::time::sleep(POLL_GAP) => {}
+            peeked = sock.peek(&mut byte) => match peeked {
+                Ok(0) => return Wait::ClientGone,
+                Ok(_) => {
+                    watch = false;
+                    tokio::time::sleep(POLL_GAP).await;
+                }
+                // A broken socket is a gone client; there is nothing to splice to either way.
+                Err(_) => return Wait::ClientGone,
+            },
+        }
     }
 }
 

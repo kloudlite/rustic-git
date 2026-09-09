@@ -130,11 +130,23 @@ spec:
               memory: 256Mi
             limits:
               memory: 256Mi
+          # `/healthz` answers 503 until the pod reflector has completed its first LIST. Without
+          # a READINESS probe on it the new pod joins the `builder-gate` Service the moment the
+          # container starts, and — `strategy: Recreate`, so there is no old pod left — the first
+          # build after every roll resolves to nobody and is closed as an unknown peer.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
             periodSeconds: 20
+            # Generous, because the same route is the readiness gate: a slow first LIST must not
+            # also be a restart loop.
+            failureThreshold: 6
           securityContext:
             runAsUser: 1001
             runAsGroup: 1001

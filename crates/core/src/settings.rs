@@ -192,8 +192,8 @@ impl CentralSettings {
         over!(ssh_port);
         over!(registry_host);
         over!(signup_open);
-    over!(builder_idle_secs);
-    over!(builder_start_secs);
+        over!(builder_idle_secs);
+        over!(builder_start_secs);
         self
     }
 }

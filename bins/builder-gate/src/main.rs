@@ -21,7 +21,12 @@ async fn main() {
         ("builder_gate_starts_total", Counter, &[("outcome", "timeout")]),
         ("builder_gate_starts_total", Counter, &[("outcome", "refused")]),
         ("builder_gate_starts_total", Counter, &[("outcome", "unknown_peer")]),
+        ("builder_gate_starts_total", Counter, &[("outcome", "client_gone")]),
     ]);
+    // `builder_gate_connections` is NOT registered: its one label is the owner, and the set of
+    // owners is not known until somebody builds. Pre-registering it label-less would export a
+    // second, permanently-zero series beside the real ones rather than making them exist.
+
     // Exactly one rustls CryptoProvider, installed before the first handshake — the kube client's
     // and reqwest's, neither of which can choose between `ring` and `aws-lc-rs` on its own.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -43,6 +48,7 @@ async fn main() {
 
     let pods = who::Pods::default();
     pods.spawn(kube);
+    let health = kloudlite_builder_gate::health(pods.clone());
     let gate = Arc::new(Gate {
         api: ApiClient::new(base, secret),
         who: Arc::new(pods),
@@ -82,7 +88,6 @@ async fn main() {
     }
     tokio::spawn(idle::beat(gate.clone()));
 
-    let health = axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }));
     let hl = match tokio::net::TcpListener::bind("0.0.0.0:8080").await {
         Ok(l) => l,
         Err(e) => fatal(&format!("binding 8080: {e}")),

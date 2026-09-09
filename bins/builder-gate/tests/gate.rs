@@ -69,20 +69,33 @@ async fn mock_api(api: Arc<MockApi>) -> String {
         s.calls.lock().unwrap().push(format!("stop {slug}"));
         axum::http::StatusCode::ACCEPTED
     }
-    async fn one(State(s): State<Arc<MockApi>>, Path(slug): Path<String>) -> axum::Json<serde_json::Value> {
+    async fn one(
+        State(s): State<Arc<MockApi>>,
+        headers: axum::http::HeaderMap,
+        Path(slug): Path<String>,
+    ) -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
+        if !auth(&headers).await {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
         s.calls.lock().unwrap().push(format!("get {slug}"));
         let n = s.gets.fetch_add(1, Ordering::SeqCst);
         let ready = n >= s.ready_after.load(Ordering::SeqCst);
-        axum::Json(serde_json::json!({
+        Ok(axum::Json(serde_json::json!({
             "id": format!("bld-{slug}"),
             "state": if ready { "running" } else { "creating" },
             "ready": ready,
             "conditions": [],
-        }))
+        })))
     }
-    async fn list(State(s): State<Arc<MockApi>>) -> axum::Json<serde_json::Value> {
+    async fn list(
+        State(s): State<Arc<MockApi>>,
+        headers: axum::http::HeaderMap,
+    ) -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
+        if !auth(&headers).await {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
         s.calls.lock().unwrap().push("list".into());
-        axum::Json(serde_json::json!({ "running": s.running.lock().unwrap().clone() }))
+        Ok(axum::Json(serde_json::json!({ "running": s.running.lock().unwrap().clone() })))
     }
 
     let app = axum::Router::new()
@@ -183,6 +196,19 @@ async fn round_trip(addr: SocketAddr, msg: &[u8]) -> Vec<u8> {
 
 /// The recorder is process-wide and installed once; without it `render()` is empty and every
 /// metric assertion would pass vacuously.
+/// Wait for something the GATE did. A paused clock makes `sleep` return before any of the gate's
+/// real HTTP has happened, so a test that only slept would assert against a task still in its
+/// first request. Each tiny sleep parks the runtime, which is what lets the IO driver run.
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..5000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    panic!("never happened: {what}");
+}
+
 fn metric(labels: &str) -> f64 {
     kloudlite_core::metrics::init();
     let want = format!("builder_gate_starts_total{{{labels}}} ");
@@ -315,4 +341,86 @@ async fn a_builder_left_running_across_a_restart_is_stopped() {
     assert_eq!(api.count("stop"), 0, "seeded idle-from-now, not idle-forever");
     tokio::time::sleep(Duration::from_secs(60)).await;
     assert_eq!(api.count("stop"), 1, "stopped one idle period after boot: {:?}", api.calls());
+}
+
+// ── round 1: the three defects the review found ──────────────────────────
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_holds_a_builder_that_was_already_counting_down() {
+    let api = Arc::new(MockApi::default());
+    // Slow to become ready, so the whole start window sits inside the idle countdown — which is
+    // exactly the window the old ordering left the builder stoppable in.
+    api.ready_after.store(u64::MAX, Ordering::SeqCst);
+    *api.running.lock().unwrap() = vec!["alice".into()];
+    let base = mock_api(api.clone()).await;
+    let gate = build_gate(base, pods(&[("10.0.0.5", "alice", "")]), Some("127.0.0.1:1".into()));
+    // The longest permitted start budget, so the whole test sits INSIDE one start: the property
+    // under test is what the beat may do while a connection is waiting for its builder.
+    gate.central.store(CentralSettings {
+        builder_idle_secs: IDLE,
+        builder_start_secs: 600,
+        ..CentralSettings::built_in_defaults()
+    });
+    for slug in gate.api.running().await.unwrap() {
+        gate.idle.seed(&slug);
+    }
+    tokio::spawn(idle::beat(gate.clone()));
+    let addr = gate_on(gate, "10.0.0.5".parse().unwrap()).await;
+
+    // A build arrives halfway through the countdown; `start` is POSTed right after the count, so
+    // seeing it is how the test knows the connection is held.
+    tokio::time::sleep(Duration::from_secs(IDLE / 2)).await;
+    let _c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let a = api.clone();
+    until("the gate took the connection", move || a.count("start") > 0).await;
+    // Well past the deadline the beat would otherwise have fired on, with the builder still not
+    // ready — the window the old ordering left the builder stoppable in.
+    tokio::time::sleep(Duration::from_secs(IDLE * 2)).await;
+    assert_eq!(
+        api.count("stop"),
+        0,
+        "the connection is counted before `start`, so the builder it is waiting for is held: {:?}",
+        api.calls()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_hangs_up_mid_start_stops_the_polling() {
+    let api = Arc::new(MockApi::default());
+    api.ready_after.store(u64::MAX, Ordering::SeqCst);
+    let base = mock_api(api.clone()).await;
+    let gate = build_gate(base, pods(&[("10.0.0.5", "alice", "")]), Some("127.0.0.1:1".into()));
+    let addr = gate_on(gate, "10.0.0.5".parse().unwrap()).await;
+
+    let before = metric(r#"outcome="timeout""#);
+    let gone_before = metric(r#"outcome="client_gone""#);
+    let c = tokio::net::TcpStream::connect(addr).await.unwrap();
+    // A poll or two in, the client leaves.
+    let a = api.clone();
+    until("polling began", move || a.count("get") > 0).await;
+    drop(c);
+    until("the hangup was noticed", || metric(r#"outcome="client_gone""#) > gone_before).await;
+
+    // The full budget is START/2 polls; a handful is "it noticed and stopped" rather than
+    // "it polled on to the end for a socket nobody was reading".
+    let polls = api.count("get");
+    assert!(polls < (START / 4) as usize, "polling stopped with the client, saw {polls} polls");
+    assert_eq!(metric(r#"outcome="timeout""#), before, "a client leaving is not a builder timeout");
+    assert_eq!(api.count("stop"), 0, "still no stop: {:?}", api.calls());
+}
+
+#[tokio::test]
+async fn healthz_is_503_until_the_pods_have_been_listed_once() {
+    let pods = who::Pods::default();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let app = kloudlite_builder_gate::health(pods.clone());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let url = format!("http://{addr}/healthz");
+    let http = reqwest::Client::new();
+
+    assert_eq!(http.get(&url).send().await.unwrap().status(), 503, "not ready before the first LIST");
+    // What the reflector does at `InitDone`.
+    pods.mark_listed();
+    assert_eq!(http.get(&url).send().await.unwrap().status(), 200);
 }

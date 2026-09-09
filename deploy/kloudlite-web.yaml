@@ -228,10 +228,15 @@ spec:
           # the browser does. Before `/`, or the app swallows it and answers 404 in HTML.
           # The rate-limit annotations above are ingress-wide and cover this path too.
           #
-          # Only the three prefixes the CLI actually calls: the REST of `/v1` is peer-only —
-          # routes authenticated with KLOUDLITE_PEER_SECRET, which the Next.js server holds and
-          # the internet must not be able to reach. `/v1/(.*)` published all of them.
-          - path: /v1/(cli|workspaces|keys)(/.*)?$
+          # Only the prefixes something outside AKS actually calls: the REST of `/v1` is
+          # peer-only — routes authenticated with KLOUDLITE_PEER_SECRET, which the Next.js server
+          # holds and the internet must not be able to reach. `/v1/(.*)` published all of them.
+          #
+          # `internal` is the build gate's: it runs in the k3s region, so this ingress is its ONLY
+          # route to the api and a build hangs at `start` without it. Guarded by
+          # KLOUDLITE_BUILDER_SECRET the same way `/v1/keys` is by the session JWT — published,
+          # not unauthenticated.
+          - path: /v1/(cli|workspaces|keys|internal)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:

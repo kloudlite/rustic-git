@@ -9,6 +9,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kloudlite_workspaces::k8s;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// `(owner, team)` — the pair, not the fold, because `owner_slug` is the one place that folds.
@@ -23,22 +24,39 @@ pub fn slug_of(owner: &str, team: &str) -> String {
 }
 
 #[derive(Clone, Default)]
-pub struct Pods(Arc<RwLock<HashMap<IpAddr, (String, String)>>>);
+pub struct Pods {
+    index: Arc<RwLock<HashMap<IpAddr, (String, String)>>>,
+    listed: Arc<AtomicBool>,
+}
 
 impl Resolver for Pods {
     fn resolve(&self, ip: IpAddr) -> Option<(String, String)> {
-        self.0.read().ok()?.get(&ip).cloned()
+        self.index.read().ok()?.get(&ip).cloned()
     }
 }
 
 impl Pods {
+    /// Whether the reflector has completed its first LIST. Until it has, EVERY pod IP resolves to
+    /// nobody and every connection would be closed as an unknown peer — which is why this gates
+    /// readiness rather than being a detail of the watch. Set once and never cleared: a later
+    /// relist swaps the index in whole, so the gate is never knowingly serving an empty one.
+    pub fn listed(&self) -> bool {
+        self.listed.load(Ordering::Relaxed)
+    }
+
+    /// Set at `InitDone`, by the reflector below.
+    pub fn mark_listed(&self) {
+        self.listed.store(true, Ordering::Relaxed);
+    }
+
     /// Watch every workspace pod in the cluster and keep the IP index current.
     ///
     /// Deletes are handled, not just applies: a pod IP is recycled, and a stale entry would hand
     /// one tenant's build to another tenant's builder. That is the whole reason this is a full
     /// `watcher::Event` match rather than `applied_objects()`.
     pub fn spawn(&self, client: kube::Client) {
-        let index = self.0.clone();
+        let index = self.index.clone();
+        let flag = self.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
             use kube::runtime::{watcher, watcher::Event, WatchStreamExt};
@@ -60,12 +78,18 @@ impl Pods {
                         if let Ok(mut w) = index.write() {
                             *w = std::mem::take(&mut relist);
                         }
+                        flag.mark_listed();
                     }
                     Ok(Event::Apply(p)) => {
                         if let (Some((ip, who)), Ok(mut w)) = (entry(&p), index.write()) {
                             w.insert(ip, who);
                         }
                     }
+                    // Keyed on the IP alone, so an out-of-order `Apply(new)` followed by a late
+                    // `Delete(old)` for a REUSED IP drops the new pod's entry until the next
+                    // relist. That fails closed — a connection is refused as an unknown peer, not
+                    // routed to the wrong owner's builder — which is the direction to be wrong in;
+                    // keying on `(ip, uid)` would be the fix if a real relist gap ever bites.
                     Ok(Event::Delete(p)) => {
                         if let (Some((ip, _)), Ok(mut w)) = (entry(&p), index.write()) {
                             w.remove(&ip);
