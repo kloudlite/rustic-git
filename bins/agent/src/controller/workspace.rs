@@ -1072,6 +1072,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         owner_ref: owner_ref.clone(),
         runtime_class: ctx.runtime_class.as_deref(),
         default_image: &ctx.default_image,
+        // A workspace pod is never the builder — that shape exists only on an Environment.
+        system: None,
     };
     // Resolve the attachment before writing anything: a missing or cross-region environment is
     // reported and treated as unattached, never as a half-applied grant.

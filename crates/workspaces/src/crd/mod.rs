@@ -835,6 +835,21 @@ pub struct EnvironmentSpec {
     /// this field, so `#[serde(default)]` is load-bearing, not decoration.
     #[serde(default)]
     pub intercepts: Vec<Intercept>,
+    /// Marks the hidden per-owner builder environment (`BUILDER_SYSTEM`) so the renderer can tell
+    /// it apart from an ordinary one — `None` for every environment a person created, which is
+    /// every environment before this field existed too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+}
+
+/// The one recognised value of `EnvironmentSpec.system` today: the per-owner buildkitd
+/// environment a workspace image build starts on demand (see Task 1's spike).
+pub const BUILDER_SYSTEM: &str = "builder";
+
+/// `bld-{slug}` — the builder environment's id, deterministic from the owner slug so a build
+/// gate can name it without a lookup.
+pub fn builder_id(slug: &str) -> String {
+    format!("bld-{slug}")
 }
 
 /// One workspace's wish to receive an environment service's traffic instead of the service
@@ -1802,6 +1817,28 @@ mod tests {
         assert_eq!(v["kind"], "workspace");
         assert_eq!(v["quotaGb"], 5);
         assert_eq!(v["attachedEnvironment"], "env-1");
+        let back: SnapshotState = serde_json::from_value(v).unwrap();
+        assert_eq!(back, st);
+    }
+
+    /// A frozen environment's services carry `resources` for free — `SnapshotState::Environment`
+    /// holds `Vec<model::Service>` verbatim, so the field needed no plumbing here, only the round
+    /// trip proving it.
+    #[test]
+    fn a_frozen_environments_service_resources_round_trip() {
+        let st = SnapshotState::Environment {
+            services: vec![crate::model::Service {
+                name: "buildkit".into(),
+                image: "moby/buildkit".into(),
+                command: vec![],
+                env: Default::default(),
+                mounts: vec![],
+                ports: vec![],
+                resources: Some(PodResources::default()),
+            }],
+            quota_gb: 10,
+        };
+        let v = serde_json::to_value(&st).unwrap();
         let back: SnapshotState = serde_json::from_value(v).unwrap();
         assert_eq!(back, st);
     }

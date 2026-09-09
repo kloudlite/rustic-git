@@ -133,6 +133,7 @@ pub(crate) async fn create_env(
             desired_state: DesiredState::Running,
             restore: None,
             intercepts: Vec::new(),
+            system: None,
         },
     )
     .await?;
@@ -264,6 +265,7 @@ pub(crate) async fn restore_env(
             desired_state: DesiredState::Running,
             restore: None,
             intercepts: Vec::new(),
+            system: None,
         },
     )
     .await?;
@@ -483,6 +485,7 @@ pub(crate) async fn clone_env(
             desired_state: DesiredState::Running,
             restore: None,
             intercepts: Vec::new(),
+            system: None,
         },
     )
     .await?;
@@ -738,6 +741,7 @@ mod tests {
                 desired_state: crd::DesiredState::Running,
                 restore: None,
                 intercepts: Vec::new(),
+                system: None,
             },
         );
         e.status = Some(crd::EnvironmentStatus {
@@ -762,6 +766,7 @@ mod tests {
             env: Default::default(),
             mounts: vec![Mount { folder: folder.into(), path: path.into() }],
             ports: vec![],
+            resources: None,
         }
     }
 

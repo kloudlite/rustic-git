@@ -2353,6 +2353,7 @@ fn test_pod_ctx() -> kloudlite_workspaces::k8s::PodContext<'static> {
             block_owner_deletion: Some(true),
         },
         runtime_class: None,
+        system: None,
     }
 }
 
@@ -2878,6 +2879,7 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
             env: Default::default(),
             mounts: vec![],
             ports: vec![80],
+            resources: None,
         },
         kloudlite_workspaces::model::Service {
             name: "worker".into(),
@@ -2886,6 +2888,7 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
             env: Default::default(),
             mounts: vec![],
             ports: vec![],
+            resources: None,
         },
     ];
 
@@ -2969,6 +2972,7 @@ async fn a_team_owned_environments_quota_reads_the_bindings_team_flag() {
         env: Default::default(),
         mounts: vec![],
         ports: vec![80],
+        resources: None,
     }];
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
@@ -3267,6 +3271,7 @@ fn a_service_statefulset_is_one_replica() {
         env: Default::default(),
         mounts: vec![],
         ports: vec![],
+        resources: None,
     };
     let dep = kloudlite_workspaces::k8s::service_statefulset(&svc, "env-1", "env-1", "acme", &test_pod_ctx()).unwrap();
     assert_eq!(dep.spec.unwrap().replicas, Some(1));
@@ -4861,6 +4866,7 @@ fn restored_env() -> crd::Environment {
         command: vec![],
         env: Default::default(),
         ports: vec![],
+        resources: None,
     }];
     e.spec.storage = Some(crd::WorkspaceStorage {
         quota_gb: 20,
@@ -6018,6 +6024,7 @@ fn intercept_env(intercepts: serde_json::Value, prev_by: Option<&str>) -> crd::E
         env: Default::default(),
         mounts: vec![],
         ports: vec![80],
+        resources: None,
     }];
     e.spec.intercepts = serde_json::from_value(intercepts).unwrap();
     e

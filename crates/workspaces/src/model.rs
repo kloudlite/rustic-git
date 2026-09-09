@@ -290,6 +290,12 @@ pub struct Service {
     /// written before ports existed still deserialize as "exposes nothing".
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// This service's own resource shape, overriding `env_unit_resources()` — the builder
+    /// service needs real buildkitd headroom, not the idle-database unit the rest of an
+    /// environment is sized for. `None` for every ordinary service, which is every service before
+    /// this field existed too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<crate::crd::PodResources>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,7 +378,7 @@ mod tests {
     }
 
     fn svc(name: &str) -> Service {
-        Service { name: name.into(), image: "alpine".into(), command: vec![], env: Default::default(), mounts: vec![], ports: vec![80] }
+        Service { name: name.into(), image: "alpine".into(), command: vec![], env: Default::default(), mounts: vec![], ports: vec![80], resources: None }
     }
 
     #[test]

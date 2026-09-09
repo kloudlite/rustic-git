@@ -295,6 +295,7 @@ mod tests {
             env: Default::default(),
             mounts: vec![],
             ports: vec![27017],
+            resources: None,
         }
     }
 

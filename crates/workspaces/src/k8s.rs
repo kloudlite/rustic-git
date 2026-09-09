@@ -74,6 +74,12 @@ pub struct PodContext<'a> {
     pub runtime_class: Option<&'a str>,
     /// The tagged image behind `model::DEFAULT_WS_IMAGE`, from the agent's `WS_DEFAULT_IMAGE`.
     pub default_image: &'a str,
+    /// The environment's own `EnvironmentSpec::system` (`crd::BUILDER_SYSTEM` for the hidden
+    /// per-owner buildkitd environment, `None` for one a person created and for every workspace
+    /// pod — a field on the context rather than an extra `service_statefulset` parameter because
+    /// every call site already builds one of these per reconcile, and a workspace's is always
+    /// `None`.
+    pub system: Option<&'a str>,
 }
 
 pub(crate) fn labels(owner: &str, kind: &str) -> BTreeMap<String, String> {
@@ -731,6 +737,41 @@ fn hardened() -> SecurityContext {
     }
 }
 
+/// The builder environment's context: buildkitd under gvisor, root, with the sandbox's OWN
+/// capability list rather than `hardened()`'s. `hardened()` stays untouched above — this is a
+/// second, narrower exception, not a widening of it.
+///
+/// Rootless cannot run under gvisor here: buildkitd's rootless mode needs `newuidmap`/`newgidmap`
+/// to build a user namespace, and that needs capabilities `drop: ALL` forbids; buildkitd itself
+/// refuses to start as a non-root user without one. So the builder runs as root instead, inside
+/// the sandbox, with exactly the capabilities gvisor's kernel emulation needs — NOT the host's
+/// list, gvisor intercepts and re-implements what these capabilities gate, so this add list is
+/// sized to what its emulation checks for, not to what a bare-metal root would need to do the same
+/// work. Found empirically: the 2026-09-09 spike started from `hardened()`'s list and added one
+/// capability back at a time, each time until buildkitd's refusal changed to a different one.
+fn builder_hardened() -> SecurityContext {
+    SecurityContext {
+        run_as_user: Some(0),
+        allow_privilege_escalation: Some(false),
+        seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".to_string(), localhost_profile: None }),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            add: Some(
+                [
+                    "SYS_ADMIN", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID",
+                    "SETPCAP", "SETFCAP", "MKNOD", "SYS_CHROOT", "KILL", "NET_BIND_SERVICE",
+                    "NET_RAW", "AUDIT_WRITE",
+                ]
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect(),
+            ),
+        }),
+        privileged: Some(false),
+        ..Default::default()
+    }
+}
+
 /// The owner's persistent home: one region-shared NFS export, `{pool}/homes/{owner}`, so every
 /// node the owner lands on sees the same dotfiles and history — no per-node btrfs subvolume, no
 /// materialize-on-first-landing.
@@ -1159,8 +1200,8 @@ pub fn service_statefulset(
                     .collect(),
             ),
             volume_mounts: (!mounts.is_empty()).then_some(mounts),
-            resources: Some(quantities(&env_unit_resources())),
-            security_context: Some(hardened()),
+            resources: Some(quantities(svc.resources.as_ref().unwrap_or(&env_unit_resources()))),
+            security_context: Some(if ctx.system == Some(crate::crd::BUILDER_SYSTEM) { builder_hardened() } else { hardened() }),
             ..Default::default()
         }],
         // Volume root, environment leaf — the same split a workspace clone's mount uses.
@@ -1803,7 +1844,51 @@ mod tests {
     }
 
     fn ctx() -> PodContext<'static> {
-        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef" }
+        PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None }
+    }
+
+    /// A service's own `resources` overrides the environment unit; a service with none still gets
+    /// the unit (`env_unit_resources()`'s 2 vCPU limit), not an empty `ResourceRequirements`.
+    #[test]
+    fn a_service_with_its_own_resources_is_rendered_with_them_and_the_unit_otherwise() {
+        let mut with_res = svc("data", "/data");
+        with_res.resources = Some(PodResources::default());
+        let sts = service_statefulset(&with_res, "bld-alice", "bld-alice", "alice", &ctx()).unwrap();
+        let c = &sts.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(c.resources.as_ref().unwrap().limits.as_ref().unwrap()["cpu"].0, "4");
+
+        let plain = service_statefulset(&svc("data", "/data"), "e", "e", "alice", &ctx()).unwrap();
+        let p = &plain.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(p.resources.as_ref().unwrap().limits.as_ref().unwrap()["cpu"].0, "2");
+    }
+
+    /// The spike's ruling, tested: an ordinary service keeps `hardened()`'s narrow list, and a
+    /// builder-environment service gets root plus gvisor's exact capability set — never the union
+    /// of the two, and never `hardened()`'s list silently widened.
+    #[test]
+    fn a_builder_service_gets_root_and_the_gvisor_capability_list_an_ordinary_one_does_not() {
+        let mut builder_ctx = ctx();
+        builder_ctx.system = Some(crate::crd::BUILDER_SYSTEM);
+        let sts = service_statefulset(&svc("data", "/data"), "bld-alice", "bld-alice", "alice", &builder_ctx).unwrap();
+        let sc = sts.spec.unwrap().template.spec.unwrap().containers[0].security_context.clone().unwrap();
+        assert_eq!(sc.run_as_user, Some(0));
+        let add = sc.capabilities.unwrap().add.unwrap();
+        assert_eq!(
+            add,
+            vec![
+                "SYS_ADMIN", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID",
+                "SETPCAP", "SETFCAP", "MKNOD", "SYS_CHROOT", "KILL", "NET_BIND_SERVICE", "NET_RAW",
+                "AUDIT_WRITE",
+            ]
+        );
+
+        let ordinary = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "alice", &ctx()).unwrap();
+        let sc2 = ordinary.spec.unwrap().template.spec.unwrap().containers[0].security_context.clone().unwrap();
+        assert_eq!(sc2.run_as_user, None);
+        assert_eq!(
+            sc2.capabilities.unwrap().add.unwrap(),
+            vec!["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE", "SYS_CHROOT"]
+        );
     }
 
     fn svc(folder: &str, path: &str) -> model::Service {
@@ -1814,6 +1899,7 @@ mod tests {
             env: Default::default(),
             mounts: vec![Mount { folder: folder.into(), path: path.into() }],
             ports: vec![80],
+            resources: None,
         }
     }
 
@@ -1949,7 +2035,7 @@ mod tests {
         );
 
         // Unset means the host kernel, not a broken pod.
-        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef" };
+        let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None };
         assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).unwrap().spec.unwrap().runtime_class_name.is_none());
     }
 
@@ -2715,6 +2801,7 @@ mod tests {
             owner_ref: owner_ref(),
             runtime_class: None,
             default_image: "img:1",
+            system: None,
         };
         for hostile in ["../../etc", "a; touch /pwned", "", "..", "x'\nchown 0 /", &"n".repeat(64)] {
             let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
@@ -2735,6 +2822,7 @@ mod tests {
             owner_ref: owner_ref(),
             runtime_class: None,
             default_image: "img:1",
+            system: None,
         };
         let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
             "owner": "alice", "team": "", "name": "my-ws", "region": "r1",

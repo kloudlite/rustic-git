@@ -21,6 +21,15 @@ fn generated_crds_match_the_committed_manifest() {
     assert_eq!(got, want, "run CRD_REGEN=1 cargo test --test crd_yaml to regenerate");
 }
 
+/// `EnvironmentSpec.system` publishes to the schema — the builder gate (a later task) needs to
+/// tell a hidden builder environment apart from an ordinary one by reading the CRD, not just the
+/// Rust struct.
+#[test]
+fn environment_system_is_in_the_published_schema() {
+    let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
+    assert!(yaml.contains("\"system\":"), "regenerate deploy/k3s/crds.yaml");
+}
+
 /// The status field placement stopped reading is gone from the SCHEMA too, not merely unwritten:
 /// a schema that still advertises it invites the next reader to trust it. Old stored objects keep
 /// parsing because the Rust struct tolerates the field on read (`#[serde(default)]`) and the CRD

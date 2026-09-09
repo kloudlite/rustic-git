@@ -931,6 +931,31 @@
                                 "type": "integer"
                               },
                               "type": "array"
+                            },
+                            "resources": {
+                              "description": "This service's own resource shape, overriding `env_unit_resources()` — the builder\nservice needs real buildkitd headroom, not the idle-database unit the rest of an\nenvironment is sized for. `None` for every ordinary service, which is every service before\nthis field existed too.",
+                              "nullable": true,
+                              "properties": {
+                                "cpuLimit": {
+                                  "type": "string"
+                                },
+                                "cpuRequest": {
+                                  "type": "string"
+                                },
+                                "memoryLimit": {
+                                  "type": "string"
+                                },
+                                "memoryRequest": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "cpuLimit",
+                                "cpuRequest",
+                                "memoryLimit",
+                                "memoryRequest"
+                              ],
+                              "type": "object"
                             }
                           },
                           "required": [
@@ -1029,6 +1054,11 @@
                           "quotaGb"
                         ],
                         "type": "object"
+                      },
+                      "system": {
+                        "description": "Marks the hidden per-owner builder environment (`BUILDER_SYSTEM`) so the renderer can tell\nit apart from an ordinary one — `None` for every environment a person created, which is\nevery environment before this field existed too.",
+                        "nullable": true,
+                        "type": "string"
                       }
                     },
                     "required": [
