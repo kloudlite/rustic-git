@@ -23,40 +23,47 @@ if [ "${1:-}" != "--no-gate" ]; then
   # nothing" into a silent exit.
   cargo clippy --workspace --all-targets --locked -- -D warnings > /tmp/ship-clippy.log 2>&1 \
     || { grep -E '^(warning|error)' -A6 /tmp/ship-clippy.log | head -40; exit 1; }
-  cargo test --locked > /tmp/ship-test.log 2>&1 \
-    || { grep -E '^test result|FAILED|panicked|^error' /tmp/ship-test.log | grep -v ': ok' | head -20; exit 1; }
+  # nextest, not `cargo test`: the same tests from the same binaries, but the 100-odd binaries
+  # run in parallel instead of one after another — `cargo test` left 16 cores idle behind a
+  # 59 s wall-clock test. No doctests are lost: the workspace has none.
+  cargo nextest run --workspace --locked > /tmp/ship-test.log 2>&1 \
+    || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
   ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
     && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \
     && bun run typecheck >> /tmp/ship-web.log 2>&1 && bun run lint >> /tmp/ship-web.log 2>&1 && bun run test >> /tmp/ship-web.log 2>&1 ) \
     || { tail -30 /tmp/ship-web.log; exit 1; }
-  echo "gate passed: $(grep -c '^test result: ok' /tmp/ship-test.log || true) test binaries green"
+  echo "gate passed: $(grep -oE 'Summary.*' /tmp/ship-test.log | tail -1)"
 fi
 
-echo "==> release build"
-cargo build --release --locked --bins 2>&1 | tail -1
+# `dev-image`, not `release`: this fleet is the dev fleet, and thin LTO + one codegen unit cost
+# 3.5 min of single-threaded relinking per ship for a few percent of runtime. CI's master images
+# keep the full release profile (`image.yml`), so a production repin is never built here.
+PROFILE=dev-image
+echo "==> $PROFILE build"
+cargo build --profile $PROFILE --locked --bins 2>&1 | tail -1
 # The workspace CLI, for the Alpine workspace image: its own target, so it never lands in
-# target/release beside the glibc binaries.
-cargo build --release --locked -p kl --target x86_64-unknown-linux-musl 2>&1 | tail -1
+# target/$PROFILE beside the glibc binaries.
+cargo build --profile $PROFILE --locked -p kl --target x86_64-unknown-linux-musl 2>&1 | tail -1
 
 # The Dockerfile COPYs target/release/* relative to its context and .dockerignore drops the rest,
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
-CTX=/work/ctx; rm -rf "$CTX"; mkdir -p "$CTX/target/release"
+CTX=/work/ctx; rm -rf "$CTX"; mkdir -p "$CTX/target/$PROFILE"
 cp Dockerfile .dockerignore "$CTX/"
 # The workspace image COPYs two scripts from deploy/workspace-image (CI's context is `.`, so it
 # never notices); a staging context that holds only binaries fails that COPY with "not found".
 mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
 for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
-  ln -f /work/target/release/$b "$CTX/target/release/$b"
+  ln -f /work/target/$PROFILE/$b "$CTX/target/$PROFILE/$b"
 done
-mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
-ln -f /work/target/x86_64-unknown-linux-musl/release/kl "$CTX/target/x86_64-unknown-linux-musl/release/kl"
+mkdir -p "$CTX/target/x86_64-unknown-linux-musl/$PROFILE"
+ln -f /work/target/x86_64-unknown-linux-musl/$PROFILE/kl "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kl"
 
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
   buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX" \
-    --opt target="$target" --opt build-arg:PROFILE=release \
+    --opt target="$target" --opt build-arg:PROFILE=$PROFILE \
     --output "type=image,\"name=ghcr.io/kloudlite/$image:$SHA,ghcr.io/kloudlite/$image:latest\",push=true" \
     --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
 done

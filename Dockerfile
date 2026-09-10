@@ -133,6 +133,7 @@ ENTRYPOINT ["kloudlite-builder-gate"]
 # Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
 # `k8s::prelude`, not here.
 FROM alpine:3.20 AS workspace
+ARG PROFILE=release
 RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx \
     && mkdir -p /var/empty \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
@@ -145,7 +146,7 @@ COPY deploy/workspace-image/docker-credential-kl /usr/local/bin/docker-credentia
 RUN chmod 0755 /usr/local/bin/docker-credential-kl
 # `kl` is the workspace CLI (build, push). A musl binary because this stage is Alpine: the glibc
 # `target/release/*` the other stages copy would not even load here.
-COPY target/x86_64-unknown-linux-musl/release/kl /usr/local/bin/kl
+COPY target/x86_64-unknown-linux-musl/${PROFILE}/kl /usr/local/bin/kl
 RUN chmod 0755 /usr/local/bin/kl
 # `/etc/profile.d`, not the seeded rc files under `k8s::prelude`: those are copied into the
 # person's home once and their own edits then survive forever, which is wrong for a config that
