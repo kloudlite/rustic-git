@@ -185,14 +185,58 @@ fn parent_rows(
     }
 }
 
+/// The `Ready` condition as `(status, reason, message)`, the three fields a person asks about.
+fn ready_of(conds: &[crd::Condition]) -> Option<(String, String, String)> {
+    conds
+        .iter()
+        .find(|c| c.type_ == "Ready")
+        .map(|c| (c.status.clone(), c.reason.clone(), c.message.clone()))
+}
+
+/// One row whenever a parent's `Ready` status or reason changes — `PodNotReady` → `NoCapacity`
+/// → `Ready` is the story of a start, and on 2026-09-10 16:20 a restart that never became ready
+/// left nothing in this table between `stopped` and `deleted`. Keyed by resourceVersion like a
+/// phase transition, so a replayed watch is byte-identical. The message rides in `attrs`.
+#[allow(clippy::too_many_arguments)]
+fn condition_row(
+    ts: chrono::DateTime<chrono::Utc>,
+    uid: &str,
+    rv: &str,
+    kind_prefix: &str,
+    owner: &str,
+    target: &str,
+    region: &str,
+    prev: Option<&[crd::Condition]>,
+    next: &[crd::Condition],
+) -> Option<EventRow> {
+    let now = ready_of(next)?;
+    let was = prev.and_then(ready_of);
+    if was.as_ref().is_some_and(|w| w.0 == now.0 && w.1 == now.1) {
+        return None;
+    }
+    Some(row(
+        ts,
+        uid,
+        rv,
+        "condition",
+        &format!("{kind_prefix}.condition"),
+        "",
+        owner,
+        target,
+        region,
+        serde_json::json!({ "status": now.0, "reason": now.1, "message": now.2 }),
+    ))
+}
+
 pub fn workspace_events(
     prev: Option<&crd::Workspace>,
     next: &crd::Workspace,
     region: &str,
 ) -> Vec<EventRow> {
     let (uid, rv) = uid_rv(next);
-    parent_rows(
-        transition_at(next, prev.is_none()),
+    let ts = transition_at(next, prev.is_none());
+    let mut rows = parent_rows(
+        ts,
         &uid,
         &rv,
         "workspace",
@@ -203,7 +247,21 @@ pub fn workspace_events(
         next.status.as_ref().map(|s| s.phase).unwrap_or_default(),
         prev.is_none(),
         serde_json::json!({ "image": next.spec.image }),
-    )
+    );
+    if let Some(st) = next.status.as_ref() {
+        rows.extend(condition_row(
+            ts,
+            &uid,
+            &rv,
+            "workspace",
+            &next.spec.owner,
+            &next.name_any(),
+            region,
+            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
+            &st.conditions,
+        ));
+    }
+    rows
 }
 
 pub fn environment_events(
@@ -217,8 +275,9 @@ pub fn environment_events(
         return Vec::new();
     }
     let (uid, rv) = uid_rv(next);
-    parent_rows(
-        transition_at(next, prev.is_none()),
+    let ts = transition_at(next, prev.is_none());
+    let mut rows = parent_rows(
+        ts,
         &uid,
         &rv,
         "environment",
@@ -229,7 +288,21 @@ pub fn environment_events(
         next.status.as_ref().map(|s| s.phase).unwrap_or_default(),
         prev.is_none(),
         serde_json::json!({ "services": next.spec.services.len() }),
-    )
+    );
+    if let Some(st) = next.status.as_ref() {
+        rows.extend(condition_row(
+            ts,
+            &uid,
+            &rv,
+            "environment",
+            &next.spec.owner,
+            &next.name_any(),
+            region,
+            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
+            &st.conditions,
+        ));
+    }
+    rows
 }
 
 /// A snapshot's only interesting transition is becoming `Ready` — that is the instant its bytes
@@ -811,5 +884,43 @@ pub async fn watch_region(client: kube::Client, region: String, history: Arc<His
     // Each task loops forever; awaiting them all only ends if the process does.
     for t in tasks {
         let _ = t.await;
+    }
+}
+
+#[cfg(test)]
+mod condition_tests {
+    use super::*;
+
+    fn ws(rv: &str, ready: &str, reason: &str) -> crd::Workspace {
+        let mut w = crd::Workspace::new(
+            "ws-1",
+            serde_json::from_value(serde_json::json!({
+                "owner": "alice", "name": "dev", "region": "r", "image": "nginx", "desiredState": "running"
+            }))
+            .unwrap(),
+        );
+        w.metadata.uid = Some("u1".into());
+        w.metadata.resource_version = Some(rv.into());
+        w.status = Some(crd::WorkspaceStatus {
+            conditions: vec![crd::condition("Ready", ready == "True", reason, "m", 1)],
+            ..Default::default()
+        });
+        w
+    }
+
+    /// A reason change is a row; the same reason written again is not; the message rides along.
+    #[test]
+    fn a_ready_reason_change_is_one_row_and_a_rewrite_is_none() {
+        let a = ws("1", "False", "PodNotReady");
+        let b = ws("2", "False", "PodNotReady");
+        let c = ws("3", "True", "Ready");
+        let rows = workspace_events(Some(&a), &b, "r");
+        assert!(rows.iter().all(|r| r.kind != "workspace.condition"), "{rows:?}");
+        let rows = workspace_events(Some(&b), &c, "r");
+        let cond = rows.iter().find(|r| r.kind == "workspace.condition").expect("a condition row");
+        assert_eq!(cond.attrs["reason"], "Ready");
+        assert_eq!(cond.attrs["status"], "True");
+        assert_eq!(cond.attrs["message"], "m");
+        assert_eq!(cond.id, event_id("u1", "3", "condition"));
     }
 }

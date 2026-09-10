@@ -58,14 +58,20 @@ pub(crate) use seed::*;
 /// object like any other.
 pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let api: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
+    let name = w.name_any();
+    let started = std::time::Instant::now();
+    let out = finalizer(&api, crd::WORKTREE_FINALIZER, w, |event| async {
         match event {
             FinalizerEvent::Cleanup(w) => cleanup_workspace_worktree(&w, &ctx).await,
             FinalizerEvent::Apply(w) => apply_workspace(&w, &ctx).await,
         }
     })
     .await
-    .map_err(|e| ReconcileErr(e.to_string()))
+    .map_err(|e| ReconcileErr(e.to_string()));
+    // Every pass, with its cost: `reconcile.pass`/`status.written` say what was decided, this says
+    // how long deciding took and whether the pass ended in an error.
+    tracing::info!(kind = "Workspace", %name, ms = started.elapsed().as_millis() as u64, ok = out.is_ok(), "reconcile.done");
+    out
 }
 
 

@@ -147,6 +147,36 @@ pub(crate) fn admin(c: &Ctx, path: &str) -> String {
     format!("{}{path}", c.cfg.admin_url.trim_end_matches('/'))
 }
 
+/// What a wait that gave up leaves behind: the WHOLE last answer (the step's detail keeps 160
+/// chars, which on 2026-09-10 16:20 cut the object off before its conditions), and — when the
+/// answer names a workspace or environment and the region's cluster is reachable — that object's
+/// own status, conditions and all. Read by result from `otel_logs`, never from the step verdict.
+async fn evidence(c: &Ctx, url: &str, last: &Value) {
+    tracing::warn!(url, answer = %last, "slo.step.evidence");
+    let Some(id) = last.get("id").and_then(|v| v.as_str()) else { return };
+    let Some(k3s) = c.kube.as_ref() else { return };
+    let status = if id.starts_with("ws-") {
+        kube::Api::<kloudlite_workspaces::crd::Workspace>::all(k3s.clone())
+            .get_opt(id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|w| serde_json::to_value(w.status).ok())
+    } else if id.starts_with("env-") {
+        kube::Api::<kloudlite_workspaces::crd::Environment>::all(k3s.clone())
+            .get_opt(id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|e| serde_json::to_value(e.status).ok())
+    } else {
+        None
+    };
+    if let Some(status) = status {
+        tracing::warn!(object = id, status = %status, "slo.step.evidence");
+    }
+}
+
 /// `GET url` until `want` is satisfied, or `cap` elapses.
 ///
 /// Concrete rather than a generic "poll this closure": all three waits in the journey are the same
@@ -167,6 +197,7 @@ pub(crate) async fn poll_json(
     // WHAT it last saw instead of the step's own bare "timed out" swallowing the evidence.
     let cap = cap.saturating_sub(Duration::from_secs(2));
     let mut why;
+    let mut last = Value::Null;
     loop {
         match get(c, url, token).await {
             Ok(v) if want(&v) => return Ok(()),
@@ -174,10 +205,12 @@ pub(crate) async fn poll_json(
                 let seen = v.to_string();
                 let cut = seen.char_indices().nth(160).map_or(seen.len(), |(i, _)| i);
                 why = format!("the answer does not have it yet; last answer: {}", &seen[..cut]);
+                last = v;
             }
             Err(e) => why = format!("{e:#}"),
         }
         if start.elapsed() >= cap {
+            evidence(c, url, &last).await;
             return Err(anyhow!("not there after {} ms: {why}", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;

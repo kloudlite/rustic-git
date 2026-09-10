@@ -56,18 +56,33 @@ where
     K: Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
     S: serde::Serialize,
 {
+    let next = serde_json::to_value(st).map_err(|e| ReconcileErr(e.to_string()))?;
     if cur.is_some_and(|c| same(c, st)) {
+        // The converged steady state, one line per PASS: "the controller looked and decided the
+        // same thing again" is the evidence a stuck object needs, and `status.written` below
+        // only fires on a change.
+        tracing::info!(kind, name = %obj.name_any(), phase = phase_of(&next), ready = %ready_of(&next), "reconcile.pass");
         return Ok(());
     }
     let api: Api<K> = Api::all(ctx.client.clone());
-    let next = serde_json::to_value(st).map_err(|e| ReconcileErr(e.to_string()))?;
     // Only on a write that actually changes something — the no-op return above is the converged
     // steady state, and timing it would restart the clock on every watch event.
     observe_time_to_running(kind, &obj.name_any(), cur.and_then(|c| serde_json::to_value(c).ok()).as_ref(), &next);
     // One line per status TRANSITION, never per pass: the phase and the `Ready` reason are the
     // whole answer to "what held this parent", and on 2026-09-10 16:20 a restarted workspace sat
     // `creating` for 28 s with nothing in the log to say which gate had it.
-    let ready = next
+    tracing::info!(kind, name = %obj.name_any(), phase = phase_of(&next), ready = %ready_of(&next), "status.written");
+    patch_status(&api, &obj.name_any(), kind, next).await
+}
+
+fn phase_of(status: &serde_json::Value) -> &str {
+    status.get("phase").and_then(|v| v.as_str()).unwrap_or("-")
+}
+
+/// `True/Ready`, `False/PodNotReady`: the `Ready` condition's status and reason, the two words that
+/// say what holds a parent.
+fn ready_of(status: &serde_json::Value) -> String {
+    status
         .get("conditions")
         .and_then(|c| c.as_array())
         .and_then(|cs| cs.iter().find(|c| c.get("type").and_then(|t| t.as_str()) == Some("Ready")))
@@ -78,15 +93,7 @@ where
                 c.get("reason").and_then(|v| v.as_str()).unwrap_or("-")
             )
         })
-        .unwrap_or_default();
-    tracing::info!(
-        kind,
-        name = %obj.name_any(),
-        phase = next.get("phase").and_then(|v| v.as_str()).unwrap_or("-"),
-        ready = %ready,
-        "status.written"
-    );
-    patch_status(&api, &obj.name_any(), kind, next).await
+        .unwrap_or_default()
 }
 
 /// When each parent last left `Ready`, so the transition back into it has something to subtract.

@@ -95,12 +95,19 @@ where
     let start = std::time::Instant::now();
     let mut why;
     loop {
+        let mut last = None;
         match api.get_opt(name).await {
             Ok(v) if want(v.as_ref()) => return Ok(()),
-            Ok(_) => why = "it has not converged yet".to_string(),
+            Ok(v) => {
+                why = "it has not converged yet".to_string();
+                last = v;
+            }
             Err(e) => why = format!("{e}"),
         }
         if start.elapsed() >= cap {
+            // The object as last seen, whole: the verdict above says only that it had not
+            // converged, and which condition held it is the question that follows.
+            tracing::warn!(object = name, last = ?last, "slo.step.evidence");
             return Err(anyhow!("{name} was not there after {} ms: {why}", cap.as_millis()));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
