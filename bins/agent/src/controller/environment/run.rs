@@ -22,7 +22,54 @@ pub(crate) async fn run_environment(
     ctx: &Arc<Ctx>,
 ) -> Result<Action, ReconcileErr> {
     let id = vol.name_any();
+    // The worktree is the environment's OWN name on whatever volume it resolved to — `id` for an
+    // environment that owns its volume (the same string), the SOURCE's volume for a restored one,
+    // which holds a SECOND worktree of it. Never `(id, id)`: that checked a restored environment
+    // out on top of the source's live worktree, two environments writing one subvolume. It is also
+    // the name `sync.rs`'s `live_worktrees` writes into `Snapshot.spec.worktree`, so every path
+    // below — checkout, mount, mkdir, stop cut, drop — uses this one string.
+    let wt = e.name_any();
+    let mut prev = prev;
+    if let Some(action) = materialise(e, vol, &wt, &mut prev, gen, owner_ref, ctx).await? {
+        return Ok(action);
+    }
+    ensure_fabric(e, ns, owner_ref, ctx).await?;
+    let pod_ctx = k8s::PodContext {
+        pool: &ctx.pool,
+        node_name: &vol.spec.node_name,
+        owner_ref: owner_ref.clone(),
+        runtime_class: ctx.runtime_class.as_deref(),
+        default_image: &ctx.default_image,
+        system: e.spec.system.as_deref(),
+        registry_host: &ctx.registry_host,
+    };
+    ensure_mounts(&id, &wt, &e.spec.services, ctx).await?;
+    if let Some(action) = capacity_gate(e, deployments, &prev, gen, ctx).await? {
+        return Ok(action);
+    }
+    // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
+    // three states below, and the rendering is a straight read of that decision.
+    let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
+    apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
+    let service_status = read_services_back(e, deployments, &prev, &plan).await?;
+    let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
+    write_env_status(e, st, ctx).await?;
+    // A held intercept has to be looked at again: nothing woke us for the grace running out.
+    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. }));
+    Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
+}
 
+/// Phase 1: the worktree — migration, head, checkout, quota — and the first graft's head write.
+/// `Some(action)` means the environment is parked and the caller returns it.
+async fn materialise(
+    e: &crd::Environment,
+    vol: &crd::Volume,
+    wt: &str,
+    prev: &mut crd::EnvironmentStatus,
+    gen: i64,
+    owner_ref: &OwnerReference,
+    ctx: &Arc<Ctx>,
+) -> Result<Option<Action>, ReconcileErr> {
     // Same worktree materialization a workspace does before any pod is built, and the same
     // HeadUnknown guard: an environment claimed onto this node for a volume with snapshots but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
@@ -33,11 +80,10 @@ pub(crate) async fn run_environment(
     // out on top of the source's live worktree, two environments writing one subvolume. It is also
     // the name `sync.rs`'s `live_worktrees` writes into `Snapshot.spec.worktree`, so every path
     // below — checkout, mount, mkdir, stop cut, drop — uses this one string.
-    let wt = e.name_any();
     // Lazy per-volume migration, resolve the effective head, checkout and quota — identical for a
     // Workspace and an Environment down to the guard conditions; see `worktree_gate`.
     let gate = super::super::worktree_gate(
-        &wt,
+        wt,
         "Environment",
         vol,
         &e.spec.storage,
@@ -48,12 +94,11 @@ pub(crate) async fn run_environment(
         ctx,
     )
     .await?;
-    let mut prev = prev;
     match gate {
         super::super::WorktreeGate::Wait { reason: "NoSuchSnapshot", message, .. } => {
             // Permanent: only the caller can settle it, since `settle` needs the object itself.
             let prev = prev.clone();
-            return settle(
+            return Ok(Some(settle(
                 Outcome::Permanent(message, "NoSuchSnapshot"),
                 e,
                 "Environment",
@@ -68,7 +113,7 @@ pub(crate) async fn run_environment(
                 },
                 ctx,
             )
-            .await;
+            .await?));
         }
         // `HeadUnknown` REPLACES conditions rather than keeping — matching the pre-extraction
         // code exactly; only `SnapshotPending` (and the settled `NoSuchSnapshot` above) keep them.
@@ -80,7 +125,7 @@ pub(crate) async fn run_environment(
                 ..prev.clone()
             };
             write_env_status(e, st, ctx).await?;
-            return Ok(action);
+            return Ok(Some(action));
         }
         super::super::WorktreeGate::Wait { reason, message, action } => {
             let st = crd::EnvironmentStatus {
@@ -90,7 +135,7 @@ pub(crate) async fn run_environment(
                 ..prev.clone()
             };
             write_env_status(e, st, ctx).await?;
-            return Ok(action);
+            return Ok(Some(action));
         }
         super::super::WorktreeGate::Ready => {}
     }
@@ -104,6 +149,12 @@ pub(crate) async fn run_environment(
         }
     }
 
+    Ok(None)
+}
+
+/// Phase 2: everything the namespace needs before a pod: the namespace itself, the network
+/// policies, the api's pull-credential grant, the per-container ceiling and the namespace total.
+async fn ensure_fabric(e: &crd::Environment, ns: &str, owner_ref: &OwnerReference, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     ensure(
         &Api::<Namespace>::all(ctx.client.clone()),
         &{
@@ -170,15 +221,11 @@ pub(crate) async fn run_environment(
         ctx,
     )
     .await?;
-    let pod_ctx = k8s::PodContext {
-        pool: &ctx.pool,
-        node_name: &vol.spec.node_name,
-        owner_ref: owner_ref.clone(),
-        runtime_class: ctx.runtime_class.as_deref(),
-        default_image: &ctx.default_image,
-        system: e.spec.system.as_deref(),
-        registry_host: &ctx.registry_host,
-    };
+    Ok(())
+}
+
+/// Phase 3a: every declared mount folder, made inside the worktree on a blocking thread.
+async fn ensure_mounts(id: &str, wt: &str, services: &[model::Service], ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
     // Every declared folder must exist before a subPath binds it — and `validate_mount` here is a
     // security check, not a formality: `create_dir_all` on an unvalidated folder is itself the
     // escape, mkdir -p'ing outside the subvolume before a pod ever starts.
@@ -186,13 +233,24 @@ pub(crate) async fn run_environment(
     // busy disk. Same rule the module doc states for the btrfs work.
     // The worktree, not `live/` itself: the pod mounts the worktree and binds `volumes/{folder}`
     // as a subPath INSIDE it, so a folder made one level up is invisible to every service.
-    let live = ctx.engine.pool.worktree(&id, &wt);
-    let services = e.spec.services.clone();
+    let live = ctx.engine.pool.worktree(id, wt);
+    let services = services.to_vec();
     tokio::task::spawn_blocking(move || mkdir_env_mounts(&live, &services))
         .await
         .map_err(|e| ReconcileErr(format!("mkdir panicked: {e}")))?
         .map_err(ReconcileErr)?;
 
+    Ok(())
+}
+
+/// Phase 3b: the start-time capacity gate. `Some(action)` parks the environment at `NoCapacity`.
+async fn capacity_gate(
+    e: &crd::Environment,
+    deployments: &Api<StatefulSet>,
+    prev: &crd::EnvironmentStatus,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<Option<Action>, ReconcileErr> {
     // The same start-time capacity gate the workspace reconciler runs, for the same reason: the
     // claim checked capacity once, and an environment restarting onto its own node never reaches
     // that check at all. Only before the FIRST StatefulSet exists — once they are applied their
@@ -227,11 +285,28 @@ pub(crate) async fn run_environment(
             ..prev.clone()
         };
         write_env_status(e, st, ctx).await?;
-        return Ok(Action::requeue(TICK));
+        return Ok(Some(Action::requeue(TICK)));
     }
+    Ok(None)
+}
+
+/// Phase 4: one StatefulSet, ClusterIP and (when intercepted) EndpointSlice per service, then the
+/// intercept policies.
+#[allow(clippy::too_many_arguments)]
+async fn apply_services(
+    e: &crd::Environment,
+    ns: &str,
+    id: &str,
+    pod_ctx: &k8s::PodContext<'_>,
+    deployments: &Api<StatefulSet>,
+    prev: &crd::EnvironmentStatus,
+    wishes: &std::collections::HashMap<&str, &crd::Intercept>,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+    owner_ref: &OwnerReference,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
     // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
     // three states below, and the rendering is a straight read of that decision.
-    let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {
@@ -240,10 +315,10 @@ pub(crate) async fn run_environment(
             Some(Intercepting::Force { .. }) => true,
             // Nothing is known, or the grace has not run out: render what the LAST pass rendered,
             // which is exactly what `intercepted_by` records.
-            Some(Intercepting::Keep { .. }) => was_intercepted(&prev, &svc.name),
+            Some(Intercepting::Keep { .. }) => was_intercepted(prev, &svc.name),
             _ => false,
         };
-        let mut set = k8s::service_statefulset(svc, &e.name_any(), &id, &e.spec.owner, &pod_ctx).map_err(ReconcileErr)?;
+        let mut set = k8s::service_statefulset(svc, &e.name_any(), id, &e.spec.owner, pod_ctx).map_err(ReconcileErr)?;
         if intercepted {
             // The real service is STOPPED while its traffic goes elsewhere. Leaving it running is
             // wrong for anything that acts on its own rather than only answering — a queue consumer
@@ -301,14 +376,25 @@ pub(crate) async fn run_environment(
             // by the Environment's own delete (it is ownerReferenced); a list of the namespace's
             // slices per pass is the upgrade path if one is ever seen stranded.
             _ => {
-                if decided.is_some() || was_intercepted(&prev, &svc.name) {
+                if decided.is_some() || was_intercepted(prev, &svc.name) {
                     forget_applied(ctx, "EndpointSlice", ns, &slice);
                     delete_ignoring_404(&slices, &slice).await?;
                 }
             }
         }
     }
-    intercept_policies(e, ns, &prev, &plan, owner_ref, ctx).await?;
+    intercept_policies(e, ns, prev, plan, owner_ref, ctx).await?;
+    Ok(())
+}
+
+/// Phase 5a: what the StatefulSets actually say, per service, with the intercept that is in
+/// force and the outage clock carried as the plan decided.
+async fn read_services_back(
+    e: &crd::Environment,
+    deployments: &Api<StatefulSet>,
+    prev: &crd::EnvironmentStatus,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+) -> Result<Vec<crd::ServiceStatus>, ReconcileErr> {
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
     // ready the instant its object existed — so `kubectl wait --for=condition=Ready
@@ -320,7 +406,7 @@ pub(crate) async fn run_environment(
         // spec and this reports `None`, which is what the web and the CLI show.
         let by = match plan.get(svc.name.as_str()) {
             Some(Intercepting::Force { ws, .. }) => Some(ws.name_any()),
-            Some(Intercepting::Keep { .. }) => prev_intercepted_by(&prev, &svc.name),
+            Some(Intercepting::Keep { .. }) => prev_intercepted_by(prev, &svc.name),
             _ => None,
         };
         // Reachable, gone, stopped or detached all CLEAR the clock — it dates one continuous
@@ -335,6 +421,19 @@ pub(crate) async fn run_environment(
         };
         service_status.push(deployment_status(deployments, &svc.name, by, unreachable_since).await?);
     }
+    Ok(service_status)
+}
+
+/// Phase 5b, pure: the status a running environment writes, and whether every service is ready.
+pub(crate) fn running_status(
+    e: &crd::Environment,
+    prev: &crd::EnvironmentStatus,
+    service_status: Vec<crd::ServiceStatus>,
+    id: &str,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+    decommissioning: bool,
+    gen: i64,
+) -> (crd::EnvironmentStatus, bool) {
     let all_ready = service_status.iter().all(|s| s.ready);
     let st = crd::EnvironmentStatus {
         phase: crd::Phase::Running,
@@ -361,7 +460,7 @@ pub(crate) async fn run_environment(
             // Why an intercept is, or is not, in force. The wish itself is never touched here —
             // a controller does not write spec, and a stopped workspace must not discard what
             // somebody asked for.
-            if let Some(ic) = intercept_condition(&plan, gen) {
+            if let Some(ic) = intercept_condition(plan, gen) {
                 c.push(ic);
             }
             // A retirement in progress is told HERE, on the running environment, and nowhere else:
@@ -369,13 +468,10 @@ pub(crate) async fn run_environment(
             // every 15 s.
             super::super::with_drain_notice(&prev.conditions, c, decommissioning, gen)
         },
-        volume_ref: Some(id.clone()),
-        ..prev
+        volume_ref: Some(id.to_string()),
+        ..prev.clone()
     };
-    write_env_status(e, st, ctx).await?;
-    // A held intercept has to be looked at again: nothing woke us for the grace running out.
-    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. }));
-    Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
+    (st, all_ready)
 }
 
 
@@ -526,3 +622,62 @@ pub(crate) async fn drain_services(
     }
     Ok(remaining)
 }
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn env(restore: bool) -> crd::Environment {
+        crd::Environment::new(
+            "env-1",
+            crd::EnvironmentSpec {
+                owner: "acme".into(),
+                name: "e".into(),
+                region: "r".into(),
+                services: vec![],
+                storage: None,
+                desired_state: DesiredState::Running,
+                restore: restore.then(|| crd::RestoreWish { snapshot_id: "snap-1".into(), volume: "vol-1".into(), owner: None, region: None, requested_at: String::new() }),
+                intercepts: vec![],
+                system: None,
+            },
+        )
+    }
+
+    fn svc(name: &str, ready: bool) -> crd::ServiceStatus {
+        crd::ServiceStatus { name: name.into(), ready, message: None, intercepted_by: None, unreachable_since: None }
+    }
+
+    /// Converged only when every service is: a half-up environment stays unobserved so the next
+    /// pass looks again, and its Ready condition names the reason.
+    #[test]
+    fn a_running_status_is_converged_only_when_every_service_is_ready() {
+        let plan = std::collections::HashMap::new();
+        let prev = crd::EnvironmentStatus::default();
+        let (st, all) = running_status(&env(false), &prev, vec![svc("db", true), svc("api", true)], "vol-1", &plan, false, 7);
+        assert!(all);
+        assert_eq!(st.observed_generation, Some(7));
+        assert_eq!(st.volume_ref.as_deref(), Some("vol-1"));
+        let ready = st.conditions.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert_eq!((ready.status.as_str(), ready.reason.as_str()), ("True", "Converged"));
+
+        let (st, all) = running_status(&env(false), &prev, vec![svc("db", true), svc("api", false)], "vol-1", &plan, false, 7);
+        assert!(!all);
+        assert_eq!(st.observed_generation, None);
+        let ready = st.conditions.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert_eq!((ready.status.as_str(), ready.reason.as_str()), ("False", "ServicesNotReady"));
+    }
+
+    /// Reaching the running status with a restore wish means the services are the scale back
+    /// up, so the status says the restore is over — and nothing else does.
+    #[test]
+    fn a_restore_wish_is_reported_over_once_the_services_run() {
+        let plan = std::collections::HashMap::new();
+        let (st, _) = running_status(&env(true), &crd::EnvironmentStatus::default(), vec![], "vol-1", &plan, false, 1);
+        let r = st.conditions.iter().find(|c| c.type_ == "Restoring").expect("Restoring");
+        assert_eq!((r.status.as_str(), r.reason.as_str()), ("False", "Restored"));
+        let (st, _) = running_status(&env(false), &crd::EnvironmentStatus::default(), vec![], "vol-1", &plan, false, 1);
+        assert!(st.conditions.iter().all(|c| c.type_ != "Restoring"));
+    }
+}
+
