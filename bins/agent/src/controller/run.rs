@@ -9,7 +9,6 @@ use k8s_openapi::api::core::v1::{Node, Pod};
 use kloudlite_workspaces::k8s;
 use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::watcher;
 use kube::{Api, Resource, ResourceExt};
 use kloudlite_workspaces::crd;
 use std::sync::Arc;
@@ -113,7 +112,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     spawn_sync(ctx.clone());
     spawn_decommission(ctx.clone());
     // NB the RBAC grant is cluster-wide — a field selector narrows a watch, never authorization.
-    let mine = watcher::Config::default().fields(&format!("spec.nodeName={}", ctx.node));
+    let mine = crate::controller::watch_config().fields(&format!("spec.nodeName={}", ctx.node));
     // The completion wake-ups (see `wake_on_finish`). Taken once; a second `run` on one Ctx would
     // be two agents in one process, which is not a thing.
     let (vol_wakes, ws_wakes) =
@@ -159,17 +158,17 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         });
     // Placement is a status fact now, so the node's own Workspaces and Environments are selected
     // by `status.nodeName` — `mine` (`spec.nodeName`) stays for the kinds the API still places.
-    let placed = watcher::Config::default().fields(&format!("status.nodeName={}", ctx.node));
+    let placed = crate::controller::watch_config().fields(&format!("status.nodeName={}", ctx.node));
     // THIS node's own object, nothing else in the cluster. A converged parent ends in
     // `await_change()`, so without this watch a decommission label landing on the Node reached
     // nobody: the annotation said `running=1` while every workspace on it carried no
     // `Decommissioning` condition, for as long as nothing else happened to touch them. Removing
     // the label was just as stuck, leaving a stale notice forever. Readiness moves the same way,
     // so `my_node`'s dead-guard sees a change at once instead of on the next 15s tick.
-    let my_node_only = watcher::Config::default().fields(&format!("metadata.name={}", ctx.node));
+    let my_node_only = crate::controller::watch_config().fields(&format!("metadata.name={}", ctx.node));
     // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
     // the cluster to filter for its own is the cheapest way to peg an API server.
-    let our_pods = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+    let our_pods = crate::controller::watch_config().labels(&format!("{}=workspace", k8s::KIND_LABEL));
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone());
     // Taken before the child watches so their mappers can ask it — see `held`.
     let ws_store = workspaces.store();
@@ -193,7 +192,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // same `stop-of` label and this watch is shared plumbing with `owned_by` doing the filter.
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
-            watcher::Config::default().labels(crd::STOP_LABEL),
+            crate::controller::watch_config().labels(crd::STOP_LABEL),
             move |r| held(&ws_store_for_stops, owned_by::<crd::Workspace, _>(&r)),
         );
     // Every workspace this node hosts wakes on its own Node changing — see `my_node_only`. The
@@ -205,7 +204,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // owner must wake when one of those moves — the probe measured a stop's final sync point
         // reaching a replica in under a second and the condition flipping 15 s later, on the tick.
         // Every replica in the cluster, not this node's: the rows that matter are the peers'.
-        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), watcher::Config::default(), move |r: crd::VolumeReplica| {
+        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), crate::controller::watch_config(), move |r: crd::VolumeReplica| {
             on_volume(&ws_store_for_replicas, &r.spec.volume, |w: &crd::Workspace| {
                 w.status.as_ref().and_then(|st| st.volume_ref.as_deref())
             })
@@ -222,7 +221,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             }
         });
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
-    let env_sets = watcher::Config::default().labels(&format!("{}=environment", k8s::KIND_LABEL));
+    let env_sets = crate::controller::watch_config().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let env_pods = env_sets.clone();
     let environments = Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), placed.clone());
     let env_store = environments.store();
@@ -253,7 +252,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // user push in the cluster to find the handful of stop requests that are its own.
         .watches(
             Api::<crd::Snapshot>::all(ctx.client.clone()),
-            watcher::Config::default().labels(crd::STOP_LABEL),
+            crate::controller::watch_config().labels(crd::STOP_LABEL),
             move |r| held(&env_store_for_stops, owned_by::<crd::Environment, _>(&r)),
         );
     let env_store_for_quota = env_store.clone();
@@ -261,7 +260,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
         // Same as the Workspace controller's `VolumeReplica` watch: `Replicated` waits on a peer's row.
-        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), watcher::Config::default(), move |r: crd::VolumeReplica| {
+        .watches(Api::<crd::VolumeReplica>::all(ctx.client.clone()), crate::controller::watch_config(), move |r: crd::VolumeReplica| {
             on_volume(&env_store_for_replicas, &r.spec.volume, |e: &crd::Environment| {
                 e.status.as_ref().and_then(|st| st.volume_ref.as_deref())
             })
@@ -270,7 +269,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // `spec.owner` is a plain field so filtering by it is easy, but there are few Environments
         // per cluster and this is the same "cluster-wide fact changed" shape the Node watch above
         // already uses `all_in_store` for — so it does too, rather than adding a second pattern.
-        .watches(Api::<crd::Quota>::all(ctx.client.clone()), watcher::Config::default(), move |_: crd::Quota| {
+        .watches(Api::<crd::Quota>::all(ctx.client.clone()), crate::controller::watch_config(), move |_: crd::Quota| {
             all_in_store(&env_store_for_quota)
         })
         // An intercept is in force only while the workspace serving it is up, so the environment
@@ -279,7 +278,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // `spec.attachedEnvironment` is a field read and costs no API call; a workspace attached to
         // nothing maps to nothing. Deliberately not `crd::attached_environment`, whose condition
         // fallback would keep waking an environment a workspace has already left.
-        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), watcher::Config::default(), move |w: crd::Workspace| {
+        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), crate::controller::watch_config(), move |w: crd::Workspace| {
             held(
                 &env_store_for_ws,
                 w.spec.attached_environment.as_deref().map(kube::runtime::reflector::ObjectRef::<crd::Environment>::new),
@@ -300,7 +299,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // `status.nodeName=` (empty) is a legal field selector because the CRD declares
     // `.status.nodeName` selectable — and the claim is what moves the object out of this watch and
     // into the node's own, with no poll in between.
-    let unplaced = watcher::Config::default().fields("status.nodeName=");
+    let unplaced = crate::controller::watch_config().fields("status.nodeName=");
     let claim_ws = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
             .shutdown_on_signal()
@@ -319,7 +318,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // namespaces it ensures must exist on whichever node the claim picks. Every node reconciles
     // every binding; every object it writes is a forced server-side apply, so concurrent
     // reconcilers converge on the same result rather than fighting.
-    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), watcher::Config::default())
+    let bindings = Controller::new(Api::<crd::OwnerBinding>::all(ctx.client.clone()), crate::controller::watch_config())
         // A new Workspace of this owner may need a new TEAM namespace, so the binding reconciles
         // on it. Mapped by `spec.owner`, not by ownerReference: the binding is not the Workspace's
         // parent, it is the thing that makes its namespace exist. Only the ones placed HERE,
@@ -344,7 +343,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // cluster — cheap enough that the precision is not worth the extra code.
     let bindings_store = bindings.store();
     let bindings = bindings
-        .watches(Api::<crd::Quota>::all(ctx.client.clone()), watcher::Config::default(), move |_: crd::Quota| {
+        .watches(Api::<crd::Quota>::all(ctx.client.clone()), crate::controller::watch_config(), move |_: crd::Quota| {
             all_in_store(&bindings_store)
         })
         .shutdown_on_signal()
@@ -363,7 +362,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // carries no node of its own, so there is no field to select on, and a label would be a second
     // copy of `Volume.spec.nodeName` that some write path forgets to stamp. `reconcile_snapshot`
     // filters against the node-scoped Volume store instead, at no API cost.
-    let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), watcher::Config::default())
+    let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), crate::controller::watch_config())
         .shutdown_on_signal()
         .run(|s, c| timed("snapshot", async move { snapshot::reconcile_snapshot(s, c).await }), error_policy, ctx.clone())
         .for_each(|r| async move {

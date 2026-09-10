@@ -36,6 +36,19 @@ pub use workspace::write_resolv_conf;
 pub use workspace::kept_conditions;
 pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status};
 pub(crate) mod keys;
+
+/// Every watcher this process opens, list and watch alike, asks the server to end the call after
+/// this many seconds; kube-runtime resumes from the last resourceVersion, so a timeout costs one
+/// request and no relist. It is also the client's idle bound (timeout + 5 s): a watch that goes
+/// silent without ending — a dead connection the server's close never reaches — is rebuilt after
+/// a minute rather than the default 295 s. Twice on 2026-09-09/10 a node stopped seeing
+/// `OwnerKeys` and spec changes for a few minutes while its streams sat alive and quiet, and
+/// every probe that ran inside that window failed; a minute is the ceiling now.
+pub(crate) const WATCH_TIMEOUT_SECS: u32 = 60;
+
+pub(crate) fn watch_config() -> watcher::Config {
+    watcher::Config::default().timeout(WATCH_TIMEOUT_SECS)
+}
 pub use keys::write_keys_file;
 pub(crate) mod volume;
 pub use volume::{apply_volume, cleanup_volume};

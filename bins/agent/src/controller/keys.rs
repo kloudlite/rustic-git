@@ -88,7 +88,9 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
     });
     let params = kube::api::PatchParams::apply(crd::AGENT_FIELD_MANAGER).force();
     match api.patch_status(&owner, &params, &kube::api::Patch::Apply(&body)).await {
-        Ok(_) => {}
+        // One line per event per node, so a node whose file lags is named rather than inferred
+        // from file mtimes after the fact.
+        Ok(_) => tracing::info!(%owner, generation, reason, "keys.converged"),
         // The object is gone, so there is nothing to say it in and nobody left to admit: the same
         // revoke the Delete event does, which a deletion this node was disconnected across never
         // delivered.
@@ -100,6 +102,21 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
     }
 }
 
+/// The file from a fresh GET, for the moment a pod is about to mount it: the watch is what keeps
+/// the file current, but a pod's first sshd read must not depend on a stream that may be sitting
+/// stale — every `Permission denied` the probe saw on 2026-09-10 was a pod started while this
+/// node's watch had not delivered the owner's newest projection. A missing object writes nothing
+/// (the workspace parks on `KeysNotReady` as before); a failed GET is a warning and the file as it
+/// stands.
+pub async fn converge_owner(ctx: &Ctx, owner: &str) {
+    let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+    match api.get_opt(owner).await {
+        Ok(Some(obj)) => converge(ctx, &api, obj).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(%owner, error = %e, "keys.get.failed"),
+    }
+}
+
 /// An owner whose projection is gone is an owner nobody may log in as. No status patch — the
 /// object it would be written to is what just disappeared.
 fn revoke(pool: &str, owner: &str) {
@@ -108,7 +125,7 @@ fn revoke(pool: &str, owner: &str) {
     }
 }
 
-/// Every `OwnerKeys` in the cluster, converged on every event and on a ten-minute tick — the tick
+/// Every `OwnerKeys` in the cluster, converged on every event and on a one-minute tick — the tick
 /// is what heals a file deleted by hand, a write that failed transiently, and a deletion this node
 /// was not watching for (a watch drops events it was disconnected across; the disk must not).
 pub async fn run(ctx: Arc<Ctx>) {
@@ -119,7 +136,7 @@ pub async fn run(ctx: Arc<Ctx>) {
     // The RAW event stream, not `applied_objects()`: a deletion has to reach the disk, and that
     // helper drops exactly the event that says so.
     run_with(ctx, api, move || {
-        watcher(watched.clone(), watcher::Config::default()).default_backoff().boxed()
+        watcher(watched.clone(), crate::controller::watch_config()).default_backoff().boxed()
     })
     .await
 }
@@ -129,7 +146,7 @@ type KeyEvents = futures::stream::BoxStream<'static, Result<kube::runtime::watch
 /// The watch is a nudge; the tick is what makes this correct. So a stream that ENDS is rebuilt,
 /// never fatal: kube-runtime's backoff gives up after its elapsed limit, which a burst of
 /// `too old resource version … Expired` reached on 2026-09-08. This loop used to `return` there,
-/// and the ten-minute tick died with it — keys stopped converging on every node for two hours,
+/// and the resync tick died with it — keys stopped converging on every node for two hours,
 /// `authorized_keys` went stale, and every default-image workspace started meanwhile parked at
 /// `KeysNotReady`. Nothing about a watch is allowed to end this task.
 async fn run_with<F>(ctx: Arc<Ctx>, api: Api<crd::OwnerKeys>, mut watch: F)
@@ -139,7 +156,7 @@ where
     use futures::StreamExt;
     use kube::runtime::watcher;
     let mut events = watch();
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(600));
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -168,7 +185,7 @@ where
                 }
                 // A watch can go stale without ever ending: on 2026-09-09, 07:50–12:00, keys
                 // stopped converging on two nodes while the stream sat alive and silent. The tick
-                // replaces it unconditionally, so a stale watch costs ten minutes, never hours.
+                // replaces it unconditionally, so a stale watch costs a minute, never hours.
                 events = watch();
             }
         }
@@ -180,7 +197,7 @@ mod tests {
     use super::*;
 
     /// The 2026-09-08 outage in one test: the watch stream ends, and the loop must build a new one
-    /// instead of returning and taking the ten-minute resync tick down with it.
+    /// instead of returning and taking the resync tick down with it.
     #[tokio::test(start_paused = true)]
     async fn a_watch_that_ends_is_rebuilt_rather_than_fatal() {
         use futures::StreamExt;
@@ -291,5 +308,32 @@ mod tests {
     fn a_pool_with_no_keys_directory_has_nothing_stale() {
         let pool = tempfile::tempdir().unwrap();
         assert!(stale_owners(pool.path().to_str().unwrap(), &HashSet::new()).is_empty());
+    }
+
+    /// The pod-start path: the file comes from a GET, not from whatever the watch last delivered.
+    #[tokio::test]
+    async fn converge_owner_writes_the_file_from_a_fresh_get() {
+        use kloudlite_workspaces::kube_test::{get, patch};
+        let tmp = tempfile::tempdir().unwrap();
+        let obj = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeys", "metadata": {"name": "alice"},
+            "spec": {"generation": 7, "authorizedKeys": "ssh-ed25519 AAAA alice\n"}
+        });
+        let (ctx, rec) = crate::testsupport::test_ctx(
+            tmp.path(),
+            "node-a",
+            vec![
+                get("/apis/kloudlite.io/v1alpha1/ownerkeys/alice", obj.clone()),
+                patch("/apis/kloudlite.io/v1alpha1/ownerkeys/alice/status", obj),
+            ],
+        );
+        converge_owner(&ctx, "alice").await;
+        let file = std::fs::read_to_string(k8s::keys_file(&ctx.pool, "alice")).unwrap();
+        assert_eq!(file, "ssh-ed25519 AAAA alice\n");
+        assert!(rec.calls().iter().any(|c| c.starts_with("GET ")), "{:?}", rec.calls());
+        // No object: nothing written, so the workspace keeps parking on `KeysNotReady`.
+        let (ctx, _) = crate::testsupport::test_ctx(tmp.path(), "node-b", vec![]);
+        converge_owner(&ctx, "nobody").await;
+        assert!(!std::path::Path::new(&k8s::keys_file(&ctx.pool, "nobody")).exists());
     }
 }

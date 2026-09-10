@@ -315,7 +315,7 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
         use futures::StreamExt;
         use kube::runtime::{watcher, WatchStreamExt};
         let api: kube::Api<crd::ClusterSettings> = kube::Api::all(client.clone());
-        let cfg = watcher::Config::default().fields("metadata.name=default");
+        let cfg = crate::controller::watch_config().fields("metadata.name=default");
         let watched = api.clone();
         let new_stream =
             move || watcher(watched.clone(), cfg.clone()).default_backoff().applied_objects().boxed();

@@ -228,6 +228,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // kubelet refuses with an opaque mount error; park until the projection has reached this node.
     // Only the default image mounts it at all — a user's own image gets no sshd and no keys volume,
     // and parking one on a file it never reads would be a workspace that never starts.
+    if kloudlite_workspaces::model::is_default_image(&w.spec.image) {
+        super::keys::converge_owner(ctx, k8s::keys_owner(&w.spec)).await;
+    }
     if kloudlite_workspaces::model::is_default_image(&w.spec.image)
         && !std::path::Path::new(&k8s::keys_file(&ctx.pool, k8s::keys_owner(&w.spec))).exists()
     {
