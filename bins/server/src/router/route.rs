@@ -423,62 +423,14 @@ async fn route_inner(
     peer: bool,
 ) -> Response {
     let path = req.uri().path().to_string();
-    // The browse API is mounted on the peer router only. Treating `/api/...` as repo-scoped on the
-    // public listener would forward a client request to the owner's PEER port with the shared
-    // secret, serving the peer-only endpoint publicly — and only when this node is NOT the owner.
-    // Answered here with a flat 404 rather than passed on: `/api/{o}/info/refs` would otherwise
-    // match the PUBLIC router's git route as owner=`api`, and be served without ever being routed.
-    if !peer && api_prefixed(&path) {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    // `cluster/settings` is a shared object-store document, not a per-repo database — nothing to
-    // route by, servable on any node, exactly like `/healthz` below. Carved out here rather than
-    // added to `BROWSE_TAILS`/`api_route` because those two encode "owner-scoped repo route" and
-    // this path has no owner segment at all (`admin_settings.rs` mounts it directly on the peer
-    // router, not through `browse_routes()`).
-    if matches!(path.trim_start_matches('/'), "api/admin/settings" | "api/admin/settings/revert") {
-        return next.run(req).await;
-    }
-    // An `/api/` path that is not a browse route is not routable, and must not fall through: no
-    // browse route matches fewer than four segments, so matchit would hand
-    // `/api/{owner}/git-upload-pack` to the GIT handler as owner=`api` name=`{owner}` — reaching a
-    // repo's database on a node that never checked whether it owns it. Refuse instead.
-    if api_prefixed(&path) && api_route(&path).is_none() {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
-    }
-    // A `/v2/` path that names no image is either one of the three local endpoints — answered
-    // here, on any node — or nothing at all. It must not fall through to `repo_of`'s git branch,
-    // where `/v2/alice/info/refs` would otherwise be served as owner=`v2` having never routed.
-    if crate::registry::is_v2_path(&path) && crate::registry::image_route(&path).is_none() {
-        let tail = path.trim_start_matches('/').trim_start_matches("v2").trim_start_matches('/');
-        if crate::registry::LOCAL_V2.contains(&tail) {
-            return next.run(req).await;
-        }
-        return crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
-    }
-    let repo = match repo_of(&path) {
-        Some(r) => r,
-        // A git route whose repo does not parse — a percent-encoded or otherwise invalid name.
-        // Refuse here. Falling through would let the handler DECODE the path and open a repo
-        // this node may not own, bypassing routing entirely; that is the invariant this whole
-        // middleware exists to hold.
-        None if is_git_route(&path) => {
-            return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
-        }
-        None => return next.run(req).await, // /healthz, /own/*, anything else: served locally
+    let repo = match classify(&path, peer) {
+        Routing::Local => return next.run(req).await,
+        Routing::NotFound => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Routing::NoSuchImage => return crate::registry::oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image"),
+        Routing::BadRepoPath => return (StatusCode::BAD_REQUEST, "invalid repository path").into_response(),
+        Routing::Repo(repo) => repo,
     };
-    // Absent means fresh (0): the public listener strips this header, so every client request
-    // arrives without it and MUST route. Present-but-unparseable means exhausted: a peer sent
-    // garbage, and serving here beats bouncing. Conflating the two — "missing = exhausted" — makes
-    // the public listener never route at all, and every node opens every repo it is sent.
-    let hops: u32 = match req.headers().get(crate::proxy::HOPS_HEADER) {
-        None => 0,
-        Some(v) => v
-            .to_str()
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(crate::proxy::MAX_HOPS),
-    };
+    let hops = hops_of(req.headers());
     let route = app.route_for(&repo, may_create(req.method(), &path)).await;
     // The leader says nobody owns this key and its prefix is empty: there is nobody to forward to
     // and nothing worth claiming, so serve it HERE — the handler then answers after authenticating,
@@ -543,109 +495,230 @@ async fn route_inner(
             });
             match app.forwarder.forward(&peer.addr, &owner, hops, req).await {
                 Ok(res) => res,
-                Err(e) => {
-                    // A forward that failed to CONNECT means the owner is not there. That happens
-                    // on every roll: the owner releases its lease at SIGTERM and stops answering,
-                    // while this node's copy of the map is up to a poll interval behind, so it
-                    // forwards into a node that has already gone. Measured, that was essentially
-                    // every remaining failure of a rolling restart.
-                    //
-                    // Recovery asks the LEADER again rather than concluding anything: the old owner
-                    // has released, so the map now names whoever holds it, and one more hop gets
-                    // there. If it still names the same node, this answers 502 exactly as before.
-                    //
-                    // Only a connect failure qualifies. Routing runs before authentication, so a
-                    // client that could make a forward fail on purpose — pushing half a body and
-                    // aborting — must not be able to move a repo; that produces a different error,
-                    // and a request with a body is not replayed at all.
-                    // Decide replay-ability and the error class BEFORE touching the throttle: a
-                    // tuple pattern evaluates every element, so putting the throttle in a tuple with
-                    // `replay` would burn the per-repo window on a failed push — a request that can
-                    // never be replayed — and starve a concurrent GET of the ask it needs.
-                    let recoverable = replay.filter(|_| crate::proxy::is_connect_error(&e));
-                    if let Some((method, uri, headers, exts)) =
-                        recoverable.filter(|_| app.may_ask_to_recover(&repo))
-                    {
-                        let rebuild = || {
-                            let mut again = axum::extract::Request::new(axum::body::Body::empty());
-                            *again.method_mut() = method.clone();
-                            *again.uri_mut() = uri.clone();
-                            *again.headers_mut() = headers.clone();
-                            *again.extensions_mut() = exts.clone();
-                            again
-                        };
-                        // Ask the LEADER, not this node's copy of the map. The copy is up to a
-                        // poll interval stale, which is the only reason a wait was ever needed
-                        // here; the leader is the authority and answers now. Its reply is also the
-                        // corroboration that a timer used to stand in for: `HeldBy` naming the node
-                        // we could not reach is independent evidence that the holder still owns the
-                        // lease and is simply not answering, rather than merely being slow.
-                        let asked = app.claim_to_recover(&repo).await;
-                        // The leader is unreachable, or refused: answer as before.
-                        if let Err(ref why) = asked {
-                            tracing::warn!(repo = %repo, reason = "after_failed_forward", error = %why, "route.claim.failed");
-                        }
-                        let mut next_step =
-                            decide_recovery(asked.ok().as_ref(), &peer.name, &app.self_name);
-                        if next_step == Recovery::Force {
-                            // Re-resolve rather than reusing the address from the first
-                            // attempt: this is a fresh decision, and the node's address is
-                            // whatever it is NOW.
-                            let addr = (app.addr_of)(&peer.name);
-                            match app.forwarder.forward(&addr, &owner, hops, rebuild()).await {
-                                Ok(res) => return res,
-                                Err(again) if !crate::proxy::is_connect_error(&again) => {
-                                    tracing::error!(repo = %repo, peer = %peer.name, error = %again, "route.forward.failed");
-                                    return (StatusCode::BAD_GATEWAY, "peer error").into_response();
-                                }
-                                // Two connect failures, and the leader says it is still theirs:
-                                // the holder went without releasing. Move the repo. This fences
-                                // the old owner if it is in fact alive — its in-flight push
-                                // fails and the client retries, which is the trade against ten
-                                // seconds of 502s.
-                                Err(_) => {}
-                            }
-                            next_step = match app.force_claim(&repo).await {
-                                // A forced claim's `HeldBy` is read as a grant on purpose: we asked
-                                // to take it over, so whoever the leader names is the winner —
-                                // ourselves included — and there is nothing left to force.
-                                Ok(g) => {
-                                    let e = match g {
-                                        crate::ownership::Grant::Granted(e)
-                                        | crate::ownership::Grant::HeldBy(e) => e,
-                                    };
-                                    decide_recovery(
-                                        Some(&crate::ownership::Grant::Granted(e)),
-                                        &peer.name,
-                                        &app.self_name,
-                                    )
-                                }
-                                Err(e) => {
-                                    tracing::warn!(repo = %repo, reason = "force_claim", error = %e, "route.claim.failed");
-                                    Recovery::GiveUp
-                                }
-                            };
-                        }
-                        match next_step {
-                            Recovery::ServeHere => return next.run(rebuild()).await,
-                            Recovery::ForwardTo(node) => {
-                                let addr = (app.addr_of)(&node);
-                                if let Ok(res) =
-                                    app.forwarder.forward(&addr, &owner, hops, rebuild()).await
-                                {
-                                    return res;
-                                }
-                            }
-                            // A second `Force` cannot be acted on — the takeover already happened —
-                            // and `GiveUp` never could be. Both fall through to the 502 below.
-                            Recovery::Force | Recovery::GiveUp => {}
-                        }
-                    }
-                    tracing::error!(repo = %repo, peer = %peer.name, error = %e, "route.forward.failed");
-                    (StatusCode::BAD_GATEWAY, "peer error").into_response()
-                }
+                Err(e) => recover_after_forward(&app, &repo, &peer, &owner, hops, replay, e, next).await,
             }
         }
+    }
+}
+
+/// What the path alone decides, before any ownership lookup: served on any node, refused, or a
+/// repo key to route by. Pure, so every refusal is a table test rather than a live request.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Routing {
+    /// `/healthz`, `/own/*`, the three local `/v2` endpoints, `cluster/settings`: any node.
+    Local,
+    /// An `/api/` path off the peer listener, or one no browse route matches: a flat 404, never
+    /// passed to a handler that would read it as owner=`api`.
+    NotFound,
+    /// A `/v2/` path that names no image and is not a local endpoint.
+    NoSuchImage,
+    /// A git route whose repo does not parse: refused, never decoded by a handler.
+    BadRepoPath,
+    Repo(String),
+}
+
+pub(crate) fn classify(path: &str, peer: bool) -> Routing {
+    // The browse API is mounted on the peer router only. Treating `/api/...` as repo-scoped on the
+    // public listener would forward a client request to the owner's PEER port with the shared
+    // secret, serving the peer-only endpoint publicly — and only when this node is NOT the owner.
+    // Answered here with a flat 404 rather than passed on: `/api/{o}/info/refs` would otherwise
+    // match the PUBLIC router's git route as owner=`api`, and be served without ever being routed.
+    if !peer && api_prefixed(path) {
+        return Routing::NotFound;
+    }
+    // `cluster/settings` is a shared object-store document, not a per-repo database — nothing to
+    // route by, servable on any node, exactly like `/healthz` below. Carved out here rather than
+    // added to `BROWSE_TAILS`/`api_route` because those two encode "owner-scoped repo route" and
+    // this path has no owner segment at all (`admin_settings.rs` mounts it directly on the peer
+    // router, not through `browse_routes()`).
+    if matches!(path.trim_start_matches('/'), "api/admin/settings" | "api/admin/settings/revert") {
+        return Routing::Local;
+    }
+    // An `/api/` path that is not a browse route is not routable, and must not fall through: no
+    // browse route matches fewer than four segments, so matchit would hand
+    // `/api/{owner}/git-upload-pack` to the GIT handler as owner=`api` name=`{owner}` — reaching a
+    // repo's database on a node that never checked whether it owns it. Refuse instead.
+    if api_prefixed(path) && api_route(path).is_none() {
+        return Routing::NotFound;
+    }
+    // A `/v2/` path that names no image is either one of the three local endpoints — answered
+    // here, on any node — or nothing at all. It must not fall through to `repo_of`'s git branch,
+    // where `/v2/alice/info/refs` would otherwise be served as owner=`v2` having never routed.
+    if crate::registry::is_v2_path(path) && crate::registry::image_route(path).is_none() {
+        let tail = path.trim_start_matches('/').trim_start_matches("v2").trim_start_matches('/');
+        if crate::registry::LOCAL_V2.contains(&tail) {
+            return Routing::Local;
+        }
+        return Routing::NoSuchImage;
+    }
+    match repo_of(path) {
+        Some(r) => Routing::Repo(r),
+        // A git route whose repo does not parse — a percent-encoded or otherwise invalid name.
+        // Refuse here. Falling through would let the handler DECODE the path and open a repo
+        // this node may not own, bypassing routing entirely; that is the invariant this whole
+        // middleware exists to hold.
+        None if is_git_route(path) => Routing::BadRepoPath,
+        None => Routing::Local, // /healthz, /own/*, anything else: served locally
+    }
+}
+
+/// The forwarded-hop count. Absent means fresh (0): the public listener strips this header, so
+/// every client request arrives without it and MUST route. Present-but-unparseable means
+/// exhausted: a peer sent garbage, and serving here beats bouncing. Conflating the two —
+/// "missing = exhausted" — makes the public listener never route at all.
+pub(crate) fn hops_of(headers: &axum::http::HeaderMap) -> u32 {
+    // Absent means fresh (0): the public listener strips this header, so every client request
+    // arrives without it and MUST route. Present-but-unparseable means exhausted: a peer sent
+    // garbage, and serving here beats bouncing. Conflating the two — "missing = exhausted" — makes
+    // the public listener never route at all, and every node opens every repo it is sent.
+    match headers.get(crate::proxy::HOPS_HEADER) {
+        None => 0,
+        Some(v) => v
+            .to_str()
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::proxy::MAX_HOPS),
+    }
+}
+
+/// A forward that failed to CONNECT means the owner is not there: ask the leader again, forward
+/// once more or serve here, and only then answer 502. See the comments inline for why only a
+/// bodyless GET is ever replayed and why the throttle is touched last.
+#[allow(clippy::too_many_arguments)]
+async fn recover_after_forward(
+    app: &Arc<App>,
+    repo: &str,
+    peer: &crate::ownership::Peer,
+    owner: &str,
+    hops: u32,
+    replay: Option<(axum::http::Method, axum::http::Uri, axum::http::HeaderMap, axum::http::Extensions)>,
+    e: kloudlite_core::Error,
+    next: axum::middleware::Next,
+) -> Response {
+        // A forward that failed to CONNECT means the owner is not there. That happens
+        // on every roll: the owner releases its lease at SIGTERM and stops answering,
+        // while this node's copy of the map is up to a poll interval behind, so it
+        // forwards into a node that has already gone. Measured, that was essentially
+        // every remaining failure of a rolling restart.
+        //
+        // Recovery asks the LEADER again rather than concluding anything: the old owner
+        // has released, so the map now names whoever holds it, and one more hop gets
+        // there. If it still names the same node, this answers 502 exactly as before.
+        //
+        // Only a connect failure qualifies. Routing runs before authentication, so a
+        // client that could make a forward fail on purpose — pushing half a body and
+        // aborting — must not be able to move a repo; that produces a different error,
+        // and a request with a body is not replayed at all.
+        // Decide replay-ability and the error class BEFORE touching the throttle: a
+        // tuple pattern evaluates every element, so putting the throttle in a tuple with
+        // `replay` would burn the per-repo window on a failed push — a request that can
+        // never be replayed — and starve a concurrent GET of the ask it needs.
+        let recoverable = replay.filter(|_| crate::proxy::is_connect_error(&e));
+        if let Some((method, uri, headers, exts)) =
+            recoverable.filter(|_| app.may_ask_to_recover(repo))
+        {
+            let rebuild = || {
+                let mut again = axum::extract::Request::new(axum::body::Body::empty());
+                *again.method_mut() = method.clone();
+                *again.uri_mut() = uri.clone();
+                *again.headers_mut() = headers.clone();
+                *again.extensions_mut() = exts.clone();
+                again
+            };
+            // Ask the LEADER, not this node's copy of the map. The copy is up to a
+            // poll interval stale, which is the only reason a wait was ever needed
+            // here; the leader is the authority and answers now. Its reply is also the
+            // corroboration that a timer used to stand in for: `HeldBy` naming the node
+            // we could not reach is independent evidence that the holder still owns the
+            // lease and is simply not answering, rather than merely being slow.
+            let asked = app.claim_to_recover(repo).await;
+            // The leader is unreachable, or refused: answer as before.
+            if let Err(ref why) = asked {
+                tracing::warn!(repo = %repo, reason = "after_failed_forward", error = %why, "route.claim.failed");
+            }
+            let mut next_step =
+                decide_recovery(asked.ok().as_ref(), &peer.name, &app.self_name);
+            if next_step == Recovery::Force {
+                // Re-resolve rather than reusing the address from the first
+                // attempt: this is a fresh decision, and the node's address is
+                // whatever it is NOW.
+                let addr = (app.addr_of)(&peer.name);
+                match app.forwarder.forward(&addr, owner, hops, rebuild()).await {
+                    Ok(res) => return res,
+                    Err(again) if !crate::proxy::is_connect_error(&again) => {
+                        tracing::error!(repo = %repo, peer = %peer.name, error = %again, "route.forward.failed");
+                        return (StatusCode::BAD_GATEWAY, "peer error").into_response();
+                    }
+                    // Two connect failures, and the leader says it is still theirs:
+                    // the holder went without releasing. Move the repo. This fences
+                    // the old owner if it is in fact alive — its in-flight push
+                    // fails and the client retries, which is the trade against ten
+                    // seconds of 502s.
+                    Err(_) => {}
+                }
+                next_step = match app.force_claim(repo).await {
+                    // A forced claim's `HeldBy` is read as a grant on purpose: we asked
+                    // to take it over, so whoever the leader names is the winner —
+                    // ourselves included — and there is nothing left to force.
+                    Ok(g) => {
+                        let e = match g {
+                            crate::ownership::Grant::Granted(e)
+                            | crate::ownership::Grant::HeldBy(e) => e,
+                        };
+                        decide_recovery(
+                            Some(&crate::ownership::Grant::Granted(e)),
+                            &peer.name,
+                            &app.self_name,
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(repo = %repo, reason = "force_claim", error = %e, "route.claim.failed");
+                        Recovery::GiveUp
+                    }
+                };
+            }
+            match next_step {
+                Recovery::ServeHere => return next.run(rebuild()).await,
+                Recovery::ForwardTo(node) => {
+                    let addr = (app.addr_of)(&node);
+                    if let Ok(res) =
+                        app.forwarder.forward(&addr, owner, hops, rebuild()).await
+                    {
+                        return res;
+                    }
+                }
+                // A second `Force` cannot be acted on — the takeover already happened —
+                // and `GiveUp` never could be. Both fall through to the 502 below.
+                Recovery::Force | Recovery::GiveUp => {}
+            }
+        }
+        tracing::error!(repo = %repo, peer = %peer.name, error = %e, "route.forward.failed");
+    (StatusCode::BAD_GATEWAY, "peer error").into_response()
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    #[test]
+    fn the_path_alone_decides_what_is_local_refused_or_routed() {
+        assert_eq!(classify("/healthz", false), Routing::Local);
+        assert_eq!(classify("/v2/", false), Routing::Local);
+        assert_eq!(classify("/v2/alice/info/refs", false), Routing::NoSuchImage);
+        assert_eq!(classify("/api/alice/repo/pulls", false), Routing::NotFound, "the browse api is peer-only");
+        assert_eq!(classify("/api/alice/git-upload-pack", true), Routing::NotFound, "no browse route matches");
+        assert_eq!(classify("/api/admin/settings", true), Routing::Local);
+        assert_eq!(classify("/alice/repo.git/info/refs", false), Routing::Repo("alice/repo".into()));
+    }
+
+    #[test]
+    fn hops_are_zero_when_absent_and_exhausted_when_garbage() {
+        let mut h = axum::http::HeaderMap::new();
+        assert_eq!(hops_of(&h), 0);
+        h.insert(crate::proxy::HOPS_HEADER, "2".parse().unwrap());
+        assert_eq!(hops_of(&h), 2);
+        h.insert(crate::proxy::HOPS_HEADER, "junk".parse().unwrap());
+        assert_eq!(hops_of(&h), crate::proxy::MAX_HOPS);
     }
 }
 
