@@ -33,8 +33,10 @@ if [ "${1:-}" != "--no-gate" ]; then
   NX=$!
   while kill -0 $NX 2>/dev/null; do
     sleep 5
-    for pid in $(pgrep -f '^/work/target/debug/deps/'); do
-      age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+    #  on every probe: a test process that exits between pgrep and ps is the common
+    # case, and under  a failing substitution here silently ended the whole ship.
+    for pid in $(pgrep -f '^/work/target/debug/deps/' || true); do
+      age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)
       [ -n "$age" ] && [ "$age" -gt 150 ] || continue
       echo "HUNG: $(ps -o args= -p "$pid" | cut -c1-200) (${age}s) — stacks in /tmp/ship-hang-$pid.bt" >&2
       gdb -p "$pid" -batch -ex "info threads" -ex "thread apply all bt 40" > "/tmp/ship-hang-$pid.bt" 2>&1
