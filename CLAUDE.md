@@ -54,7 +54,12 @@ epoch is checked under `leader_lock` on every map write, a fenced write demotes,
 writer fence is the backstop; followers re-read the lease when the node they asked answers 421 or is
 unreachable. There is no leader pod, no `KLOUDLITE_LEADER`, and no preferred ordinal; a dead leader
 is replaced in ~15 s. A multi-node `file://` store is refused at boot (`LocalFileSystem` has no
-conditional update). When adding any
+conditional update). Two bounds keep a wedged peer from becoming a wedged fleet: every peer
+connection carries TCP keepalive plus `TCP_USER_TIMEOUT` (`peer::bound_dead_peer`, the forwarder's
+client too), so a node that died without a RST is an error inside ~30 s rather than a forward that
+waits forever; and every ownership-map write is bounded by one lease TTL
+(`ownership::WRITE_BOUND`) — a leader whose map write stalls demotes itself, because holding
+`leader_lock` on a write that never lands would stall every claim in the fleet. When adding any
 route that touches a per-repo/per-image database, it must route —
 `BROWSE_TAILS` in `bins/server/src/router/route.rs` is the contract, and `every_browse_route_is_routable` holds the
 router and the middleware together. A handler that only reads the shared object store may be

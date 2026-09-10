@@ -29,6 +29,38 @@ pub fn secret_eq(presented: &str, expected: &str) -> bool {
 /// Connecting to a peer inside the cluster is a microsecond round trip; a second is three orders
 /// of magnitude of headroom, and a peer that has not accepted by then is not there.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A peer that DIES mid-request must be noticed by the kernel, not by a person: without keepalive
+/// and a user timeout, a connection whose other end vanished without a RST — a node reboot, a
+/// pod on a dead VM, a NAT that forgot the flow — reads forever, and the forward that was waiting
+/// on it holds its caller (a git client, a probe, another node) forever too. Idle 15 s, then a
+/// probe every 5 s, three misses: a dead peer is an error inside ~30 s. `TCP_USER_TIMEOUT` bounds
+/// the other direction, data we sent that was never acked, to the same figure. Neither caps a
+/// LIVE stream: a clone that is still moving bytes is never touched by either.
+pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+pub const KEEPALIVE_RETRIES: u32 = 3;
+pub const USER_TIMEOUT: Duration = Duration::from_secs(30);
+/// A forwarded RESPONSE that goes silent — the peer is alive on the wire but has stopped sending
+/// — is given this long between reads before the forward fails. Generous on purpose: a large push
+/// is unpacked on the owner before its status line comes back, and that is real work.
+pub const FORWARD_IDLE: Duration = Duration::from_secs(300);
+
+/// Apply the dead-peer bounds above to a raw peer stream (the stream port's connections, which
+/// reqwest does not open). Best effort: a socket that refuses an option is still a socket.
+pub fn bound_dead_peer(stream: &tokio::net::TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = sock.set_tcp_keepalive(&ka) {
+        tracing::warn!(error = %e, "peer.keepalive.failed");
+    }
+    if let Err(e) = sock.set_tcp_user_timeout(Some(USER_TIMEOUT)) {
+        tracing::warn!(error = %e, "peer.user_timeout.failed");
+    }
+}
 /// How long a claim/renew/release waits on the leader. It is one small write behind a 10ms flush,
 /// so this is generous — but bounded, because a request is blocked on it.
 pub const LEADER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -105,6 +137,13 @@ impl Forwarder {
             client: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 // No total timeout: a clone of a large repo legitimately streams for a long time.
+                // What IS bounded is silence: a dead peer through the kernel's keepalive and
+                // user timeout, a silent one through the idle read timeout. See `KEEPALIVE_IDLE`.
+                .tcp_keepalive(KEEPALIVE_IDLE)
+                .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
+                .tcp_keepalive_retries(KEEPALIVE_RETRIES)
+                .tcp_user_timeout(USER_TIMEOUT)
+                .read_timeout(FORWARD_IDLE)
                 .build()
                 .expect("building an HTTP client cannot fail with these options"),
             secret,
@@ -190,6 +229,7 @@ where
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let connect_and_status = async {
         let sock = tokio::net::TcpStream::connect(peer_stream).await?;
+        bound_dead_peer(&sock);
         let mut sock = BufReader::new(sock);
         sock.get_mut()
             .write_all(format!("{secret} {service} {repo} {owner} {}\n", hops + 1).as_bytes())

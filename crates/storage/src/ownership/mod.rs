@@ -15,6 +15,27 @@ pub struct Entry {
 
 /// How long a fresh claim lasts before it must be renewed or is up for grabs.
 pub const LEASE_TTL: Duration = Duration::from_secs(10);
+
+/// How long one map write may take before the writer is judged stalled. A SlateDB write awaits
+/// its own flusher for durability, with no bound of its own; a flusher that has stopped — an
+/// object store that hangs, a task that died — would otherwise hold `leader_lock` forever and
+/// every claim, renew and release in the fleet behind it. One lease TTL: a leader whose map has
+/// not accepted a write for that long has already lost the right to decide anything.
+pub const WRITE_BOUND: Duration = LEASE_TTL;
+
+/// The error a stalled write surfaces as; `is_stalled` is how the leader tells it from a fence.
+const STALLED: &str = "ownership: map write stalled";
+
+pub fn is_stalled(e: &crate::Error) -> bool {
+    e.to_string().contains(STALLED)
+}
+
+async fn bounded<T>(op: impl std::future::Future<Output = Result<T, slatedb::Error>>) -> crate::Result<T> {
+    match tokio::time::timeout(WRITE_BOUND, op).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(crate::err(STALLED)),
+    }
+}
 /// How often a holder renews, well inside `LEASE_TTL` so a missed beat or two is not fatal.
 pub const RENEW_EVERY: Duration = Duration::from_secs(3);
 /// How long a node keeps serving a repo it has decided to give up, before it closes the database.
@@ -372,10 +393,7 @@ impl OwnershipStore {
     /// silently opening a writer or dropping the write.
     pub async fn put(&self, repo: &str, e: &Entry) -> crate::Result<()> {
         match &*self.role.read().await {
-            Role::Writer(db) => {
-                db.put(key(repo), e.encode()).await?;
-                Ok(())
-            }
+            Role::Writer(db) => bounded(db.put(key(repo), e.encode())).await.map(|_| ()),
             Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
             Role::Solo => Ok(()),
         }
@@ -393,8 +411,7 @@ impl OwnershipStore {
                 for (repo, e) in entries {
                     batch.put(key(repo), e.encode());
                 }
-                db.write(batch).await?;
-                Ok(())
+                bounded(db.write(batch)).await.map(|_| ())
             }
             Role::Reader { .. } => Err(crate::err("ownership: put on a follower")),
             Role::Solo => Ok(()),
@@ -405,10 +422,7 @@ impl OwnershipStore {
     /// task. A live entry is shortened by `decide_release`, never deleted; see its comment.
     pub async fn delete(&self, repo: &str) -> crate::Result<()> {
         match &*self.role.read().await {
-            Role::Writer(db) => {
-                db.delete(key(repo)).await?;
-                Ok(())
-            }
+            Role::Writer(db) => bounded(db.delete(key(repo))).await.map(|_| ()),
             Role::Reader { .. } => Err(crate::err("ownership: delete on a follower")),
             Role::Solo => Ok(()),
         }
@@ -536,3 +550,21 @@ pub mod lease;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod write_bound_tests {
+    use super::*;
+
+    /// A write that never lands is an error the leader can act on, not a wait; the bound is
+    /// exactly one lease TTL, so a stalled writer is off the lease before anybody else's claim
+    /// could be granted against a map it no longer controls.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_that_never_lands_is_a_stall_after_one_lease() {
+        let never = std::future::pending::<Result<(), slatedb::Error>>();
+        let started = tokio::time::Instant::now();
+        let e = bounded(never).await.unwrap_err();
+        assert!(is_stalled(&e), "{e}");
+        assert_eq!(started.elapsed(), WRITE_BOUND);
+    }
+}
+

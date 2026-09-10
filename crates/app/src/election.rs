@@ -381,6 +381,11 @@ impl App {
         if let Err(e) = &r {
             if pool::is_fenced(e) {
                 self.demote_locked("map write fenced").await;
+            } else if kloudlite_storage::ownership::is_stalled(e) {
+                // The write never landed: this process cannot say what the map holds any more,
+                // and a leader that cannot write must not keep answering as one. Standing down
+                // lets the lease lapse and somebody with a working store take over.
+                self.demote_locked("map write stalled").await;
             }
         }
         r

@@ -26,8 +26,22 @@ if [ "${1:-}" != "--no-gate" ]; then
   # nextest, not `cargo test`: the same tests from the same binaries, but the 100-odd binaries
   # run in parallel instead of one after another — `cargo test` left 16 cores idle behind a
   # 59 s wall-clock test. No doctests are lost: the workspace has none.
-  cargo nextest run --workspace --locked > /tmp/ship-test.log 2>&1 \
-    || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
+  # A watcher beside the run: any test process alive past 150 s is dumped with gdb (the pod
+  # carries SYS_PTRACE for exactly this), then killed so the gate fails with a stack rather
+  # than sitting for hours. The dump is the whole evidence of a hang; keep it.
+  cargo nextest run --workspace --locked > /tmp/ship-test.log 2>&1 &
+  NX=$!
+  while kill -0 $NX 2>/dev/null; do
+    sleep 5
+    for pid in $(pgrep -f '^/work/target/debug/deps/'); do
+      age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+      [ -n "$age" ] && [ "$age" -gt 150 ] || continue
+      echo "HUNG: $(ps -o args= -p "$pid" | cut -c1-200) (${age}s) — stacks in /tmp/ship-hang-$pid.bt" >&2
+      gdb -p "$pid" -batch -ex "info threads" -ex "thread apply all bt 40" > "/tmp/ship-hang-$pid.bt" 2>&1
+      kill -9 "$pid"
+    done
+  done
+  wait $NX || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
   ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
     && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \
