@@ -44,6 +44,9 @@ spec:
       containers:
         - name: dev
           image: rust:1-bookworm
+          # ptrace, so gdb can read a hung test binary in place: yama scope 1 refuses it without
+          # the capability, and the 2026-09-10 test hangs were undiagnosable for it.
+          securityContext: { capabilities: { add: [SYS_PTRACE] } }
           # Tools the probe image carries (Dockerfile `slo` target), installed on first start and
           # kept on the disk's PATH after that; then wait for work.
           command: ["/bin/bash", "-lc"]

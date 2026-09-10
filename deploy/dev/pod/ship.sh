@@ -26,7 +26,7 @@ if [ "${1:-}" != "--no-gate" ]; then
   # nextest, not `cargo test`: the same tests from the same binaries, but the 100-odd binaries
   # run in parallel instead of one after another — `cargo test` left 16 cores idle behind a
   # 59 s wall-clock test. No doctests are lost: the workspace has none.
-  # A watcher beside the run: any test process alive past 150 s is dumped with gdb (the pod
+  # A watcher beside the run: any test process alive past 90 s is dumped with gdb (the pod
   # carries SYS_PTRACE for exactly this), then killed so the gate fails with a stack rather
   # than sitting for hours. The dump is the whole evidence of a hang; keep it.
   cargo nextest run --workspace --locked > /tmp/ship-test.log 2>&1 &
@@ -37,7 +37,7 @@ if [ "${1:-}" != "--no-gate" ]; then
     # case, and under  a failing substitution here silently ended the whole ship.
     for pid in $(pgrep -f '^/work/target/debug/deps/' || true); do
       age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)
-      [ -n "$age" ] && [ "$age" -gt 150 ] || continue
+      [ -n "$age" ] && [ "$age" -gt 90 ] || continue
       echo "HUNG: $(ps -o args= -p "$pid" | cut -c1-200) (${age}s) — stacks in /tmp/ship-hang-$pid.bt" >&2
       gdb -p "$pid" -batch -ex "info threads" -ex "thread apply all bt 40" > "/tmp/ship-hang-$pid.bt" 2>&1
       kill -9 "$pid"
