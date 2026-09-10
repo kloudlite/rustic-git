@@ -10,6 +10,7 @@
 !target/release/kloudlite-slo
 !target/release/kl-connect
 !target/x86_64-unknown-linux-musl/release/kl
+!target/x86_64-unknown-linux-musl/dev-image/kl
 !target/dev-image/kloudlite
 !target/dev-image/kloudlite-api
 !target/dev-image/kloudlite-worker
