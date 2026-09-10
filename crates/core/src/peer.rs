@@ -57,6 +57,9 @@ pub fn bound_dead_peer(stream: &tokio::net::TcpStream) {
     if let Err(e) = sock.set_tcp_keepalive(&ka) {
         tracing::warn!(error = %e, "peer.keepalive.failed");
     }
+    // Linux only, like the client option below: the fleet is Linux, and the Mac editor's checker
+    // must not paint a real option red.
+    #[cfg(target_os = "linux")]
     if let Err(e) = sock.set_tcp_user_timeout(Some(USER_TIMEOUT)) {
         tracing::warn!(error = %e, "peer.user_timeout.failed");
     }
@@ -134,18 +137,21 @@ mod is_connect_error_tests {
 impl Forwarder {
     pub fn new(secret: String) -> Forwarder {
         Forwarder {
-            client: reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                // No total timeout: a clone of a large repo legitimately streams for a long time.
-                // What IS bounded is silence: a dead peer through the kernel's keepalive and
-                // user timeout, a silent one through the idle read timeout. See `KEEPALIVE_IDLE`.
-                .tcp_keepalive(KEEPALIVE_IDLE)
-                .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
-                .tcp_keepalive_retries(KEEPALIVE_RETRIES)
-                .tcp_user_timeout(USER_TIMEOUT)
-                .read_timeout(FORWARD_IDLE)
-                .build()
-                .expect("building an HTTP client cannot fail with these options"),
+            client: {
+                let b = reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    // No total timeout: a clone of a large repo legitimately streams for a long
+                    // time. What IS bounded is silence: a dead peer through the kernel's keepalive
+                    // and user timeout, a silent one through the idle read timeout. See
+                    // `KEEPALIVE_IDLE`.
+                    .tcp_keepalive(KEEPALIVE_IDLE)
+                    .tcp_keepalive_interval(KEEPALIVE_INTERVAL)
+                    .tcp_keepalive_retries(KEEPALIVE_RETRIES)
+                    .read_timeout(FORWARD_IDLE);
+                #[cfg(target_os = "linux")]
+                let b = b.tcp_user_timeout(USER_TIMEOUT);
+                b.build().expect("building an HTTP client cannot fail with these options")
+            },
             secret,
         }
     }
