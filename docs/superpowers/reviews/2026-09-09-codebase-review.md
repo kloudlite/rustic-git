@@ -34,6 +34,23 @@ Severity is impact × likelihood; cost is the fix's size (S < 1 h, M < 1 day, L 
 | 13 | INFO | security | Verified sound: registry `allow()` fails closed on directory errors (`unwrap_or(false)` both branches) and only challenges anonymous callers; `may_act_on` is owner/team/superadmin with the superadmin act logged; admin router refuses without the claim before any route; signin has per-IP and per-email limiters; gateway verifies the ssh-session JWT before splicing; builder gate fails closed without its secret; the pod-fence VAP re-checks caps/hostPath/gvisor at admission; the only `dangerouslySetInnerHTML` sites are shiki output and the theme bootstrap script; the passkey cookie is httpOnly+strict. | reads | Two things to confirm in Phase 3: the main web session token's storage (bearer header from where — cookie flags), and constant-time comparison of `KLOUDLITE_BUILDER_SECRET` on `/v1/internal/builders/*` | S |
 | 14 | INFO | deps | 735 packages in `Cargo.lock`, 872 crate versions in the tree; `cargo audit`/`cargo deny` results below. | `cargo tree` | Trim after the audit — likely duplicates of `syn`/`hashbrown`/`rustls` majors | S |
 
+## Phase 5 outcome (2026-09-10, after the fleet cache)
+
+- **Finding 8**, `bins/api` untested: the role → surface choice is now `workspaces_router(role, state)`
+  with a test that the user surface 404s every `/admin` path, the admin surface 404s every `/v1`
+  path, and an unrecognised role falls to the user side. The parallel-test hang: see Phase 4.
+- **Finding 13** follow-ups, both read and both sound as they stand: the builder-gate secret is
+  compared by `secret_eq` (constant time) in `require_builder_secret`; the session cookie is
+  NextAuth's (`httpOnly`, `SameSite=Lax`), `Secure` is forced by `AUTH_URL` being https and a
+  production boot without it refuses to start. No change.
+- **Probe hygiene**: a manual `deploy/dev/run-job.sh` refuses to start within two minutes of its
+  CronJob's next tick — the two share one owner and its quota, and a straddled run filed
+  `quota.refused` as a false sample on 2026-09-10 05:15.
+- **Agent watches** (found while reading the fast failures, `fe3ae370`): every watcher asks for a
+  60 s server timeout so a silent stream is rebuilt in about a minute, the keys tick is 60 s, a
+  node logs `keys.converged` per event, and a default-image pod's keys file is read from a GET
+  right before the pod starts.
+
 ## Phase 4 outcome (2026-09-10, the four leftovers, in the order agreed)
 
 1. **The parallel `cargo test` hang** (finding 8) did not reproduce: nine rounds of the full

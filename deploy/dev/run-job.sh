@@ -10,6 +10,24 @@ SUITE=${1:?suite}
 case "$SUITE" in fast) T=slo-probe;; hourly) T=slo-hourly;; weekly|monthly) T=slo-drill;; *) echo "unknown suite $SUITE" >&2; exit 2;; esac
 ACTIVE=$(kubectl -n kloudlite get jobs -o json | python3 -c 'import sys,json; print(" ".join(j["metadata"]["name"] for j in json.load(sys.stdin)["items"] if (j.get("status",{}).get("active") or 0)>0))')
 [ -z "$ACTIVE" ] || { echo "a probe Job is active: $ACTIVE" >&2; exit 3; }
+# A manual run and the cron's own run share one owner and its quota (two workspaces), so one that
+# straddles the cron's firing fails on `quota.refused` and files a false sample. Refuse to start
+# within the two minutes before the CronJob's next tick; the active-Job check above covers after.
+SCHED=$(kubectl -n kloudlite get cronjob "kloudlite-slo-$SUITE" -o jsonpath='{.spec.schedule}')
+python3 - "$SCHED" <<'PY' || exit 3
+import sys, datetime
+mins, hour = sys.argv[1].split()[0], sys.argv[1].split()[1]
+allowed = set()
+for part in mins.split(","):
+    if part.startswith("*/"): allowed |= set(range(0, 60, int(part[2:])))
+    elif part == "*": allowed = set(range(60))
+    else: allowed.add(int(part))
+now = datetime.datetime.now(datetime.timezone.utc)
+for ahead in range(0, 121, 30):
+    t = now + datetime.timedelta(seconds=ahead)
+    if t.minute in allowed and (hour == "*" or t.hour == int(hour)) and t.second < 30:
+        sys.exit(f"the cron fires at :{t.minute:02d}, within two minutes; run after it finishes")
+PY
 J=$SUITE-$(date -u +%H%M%S)
 kubectl -n kloudlite create job "$J" --from="cronjob/kloudlite-slo-$SUITE" >/dev/null || exit 1
 for _ in $(seq 1 60); do

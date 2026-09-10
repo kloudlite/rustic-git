@@ -504,10 +504,7 @@ async fn run() -> Result<()> {
     // a `/v1` authorization bug literally cannot reach an admin handler on that process; the user
     // role mounts ONLY `/v1` and never sees an admin route (design doc §5). `role` was read once,
     // above, before the bootstrap decided whether to run.
-    let workspaces_router = workspaces.map(|ws| match role.as_str() {
-        "admin" => kloudlite_workspaces::api::admin::router(ws),
-        _ => kloudlite_workspaces::api::router(ws),
-    });
+    let workspaces_router = workspaces.map(|ws| workspaces_router(&role, ws));
     kloudlite_api::serve(
         store,
         cache,
@@ -521,4 +518,42 @@ async fn run() -> Result<()> {
         role == "admin",
     )
     .await
+}
+
+/// The one place a role becomes a surface. Anything but `admin` is the user surface: an unknown
+/// value must fall to the side with no admin handler rather than the other way round.
+fn workspaces_router(role: &str, ws: std::sync::Arc<kloudlite_workspaces::api::ApiState>) -> axum::Router {
+    match role {
+        "admin" => kloudlite_workspaces::api::admin::router(ws),
+        _ => kloudlite_workspaces::api::router(ws),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn state() -> std::sync::Arc<kloudlite_workspaces::api::ApiState> {
+        let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        std::sync::Arc::new(kloudlite_workspaces::api::ApiState::new(jwt))
+    }
+
+    async fn status(router: axum::Router, path: &str) -> StatusCode {
+        router.oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap().status()
+    }
+
+    /// The design's whole safety argument: the user process has no admin route compiled in, the
+    /// admin process has no `/v1` route, and a role nobody recognises is the user surface.
+    #[tokio::test]
+    async fn each_role_mounts_only_its_own_surface() {
+        assert_eq!(status(workspaces_router("user", state()), "/admin/regions").await, StatusCode::NOT_FOUND);
+        assert_eq!(status(workspaces_router("typo", state()), "/admin/regions").await, StatusCode::NOT_FOUND);
+        assert_eq!(status(workspaces_router("admin", state()), "/v1/quota").await, StatusCode::NOT_FOUND);
+        // The admin route exists on the admin surface and refuses without a claim, never 404s.
+        assert_ne!(status(workspaces_router("admin", state()), "/admin/regions").await, StatusCode::NOT_FOUND);
+        assert_ne!(status(workspaces_router("user", state()), "/v1/quota").await, StatusCode::NOT_FOUND);
+    }
 }

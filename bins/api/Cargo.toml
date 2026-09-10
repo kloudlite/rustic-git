@@ -16,5 +16,9 @@ kloudlite-pulls = { path = "../../crates/pulls" }     # directory; no check feat
 kloudlite-api = { path = "../../crates/api" }
 kloudlite-workspaces = { path = "../../crates/workspaces" }
 kube = { workspace = true }
+axum = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
