@@ -143,8 +143,8 @@ passing probe before merge (`b9c8a09c`: fast; `10dce0d5`: the 20:02 cron hourly,
 Left as they are, on purpose: `k8s/tests.rs` (shared fixtures), `history/alerts.rs`
 (`two_metric_ratio` is a rule table), `slo/catalogue.rs` (`find` is the catalogue), and the
 function-length findings (`run_environment` 374, `ensure_profile` 274, `route_inner` 234) — those
-need a designed refactor with their own tests, not a file move. Two test section files are still
-over 800 (`snapshot_model_placement.rs` 1050) and can be cut again by marker later.
+need a designed refactor with their own tests, not a file move. The one test section file still over 800 (`snapshot_model_placement.rs` 1050) was cut by topic on 2026-09-10 into
+`snapshot_model_placement` / `parent_deletion_and_the_volume` / `owner_bindings_and_quota`, largest 406.
 
 The project guide's house-style paragraph now says where context goes ("context in module docs,
 the why at the line") and names these modules as the shape to copy.

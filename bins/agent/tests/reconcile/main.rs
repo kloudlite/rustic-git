@@ -16,6 +16,8 @@ use std::sync::Arc;
 mod placement_claims;
 mod capacity;
 mod snapshot_model_placement;
+mod parent_deletion_and_the_volume;
+mod owner_bindings_and_quota;
 mod the_workspace_reconciler_and_its_volume;
 mod the_stop_before_teardown_snapshot;
 mod in_place_restore;
@@ -43,6 +45,10 @@ use placement_claims::*;
 use snapshot_model_clone_restore_task_6b::*;
 #[allow(unused_imports)]
 use snapshot_model_placement::*;
+#[allow(unused_imports)]
+use parent_deletion_and_the_volume::*;
+#[allow(unused_imports)]
+use owner_bindings_and_quota::*;
 #[allow(unused_imports)]
 use starts_spread_the_owner_gives_a_movable::*;
 #[allow(unused_imports)]
