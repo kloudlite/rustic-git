@@ -34,6 +34,32 @@ Severity is impact × likelihood; cost is the fix's size (S < 1 h, M < 1 day, L 
 | 13 | INFO | security | Verified sound: registry `allow()` fails closed on directory errors (`unwrap_or(false)` both branches) and only challenges anonymous callers; `may_act_on` is owner/team/superadmin with the superadmin act logged; admin router refuses without the claim before any route; signin has per-IP and per-email limiters; gateway verifies the ssh-session JWT before splicing; builder gate fails closed without its secret; the pod-fence VAP re-checks caps/hostPath/gvisor at admission; the only `dangerouslySetInnerHTML` sites are shiki output and the theme bootstrap script; the passkey cookie is httpOnly+strict. | reads | Two things to confirm in Phase 3: the main web session token's storage (bearer header from where — cookie flags), and constant-time comparison of `KLOUDLITE_BUILDER_SECRET` on `/v1/internal/builders/*` | S |
 | 14 | INFO | deps | 735 packages in `Cargo.lock`, 872 crate versions in the tree; `cargo audit`/`cargo deny` results below. | `cargo tree` | Trim after the audit — likely duplicates of `syn`/`hashbrown`/`rustls` majors | S |
 
+## Phase 4 outcome (2026-09-10, the four leftovers, in the order agreed)
+
+1. **The parallel `cargo test` hang** (finding 8) did not reproduce: nine rounds of the full
+   suite, `gdb` installed in the dev pod and a watcher ready to dump any test binary alive over
+   150 s, all clean. The ship gate's watchdog stays; the dump script is the tool for the next time
+   it shows.
+2. **The three long functions**, each with its own tests (`f20a6448`): `run_environment` is now
+   ~50 lines over `materialise`, `ensure_fabric`, `ensure_mounts`, `capacity_gate`,
+   `apply_services`, `read_services_back` and a pure `running_status`; `ensure_profile` reads its
+   inputs through `ProfileInputs::resolve` and settles a finished build through `settle_finished`
+   / `reuse_or_record`; `route_inner` is 84 lines over a pure `classify` (the path's verdict as an
+   enum, table-tested), `hops_of` and `recover_after_forward`.
+3. **`k8s/tests.rs`** is `k8s/tests/{attach,pod,environment,policies}.rs` with the fixtures in
+   `mod.rs`, every file under 730 lines.
+4. **Admin reflectors** (finding 4, `ed5a6db6`): `api::admin::fleet::FleetCache` holds one
+   reflector store per kind the admin pages read; `fleet::all` answers from a ready store and
+   lists otherwise (the `user` role, the mock-client tests, the first 30 s of boot). Design in
+   `docs/superpowers/specs/2026-09-10-admin-fleet-cache-design.md`.
+
+Verified on the fleet: `f20a6448` fast + hourly (`hourly-1789017796`, 0 failed), `ed5a6db6` fast
+(`fast-1789019329`) and hourly, after a roll of both clusters each. One thing seen on the way:
+the first two fast runs within three minutes of an agent roll failed `gw.tunnel.p95` and
+`key.live` with `Permission denied (publickey)` and every run since passed; the keys watch was
+live on all three nodes when probed with a throwaway `OwnerKeys`. Not the refactor, root cause
+still open — re-run before blaming a build.
+
 ## Phase 3 outcome (2026-09-09, branch `review-fixes`)
 
 Verified against the code before fixing; four findings did not survive the read and are retracted
