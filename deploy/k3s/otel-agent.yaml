@@ -171,7 +171,10 @@ data:
             field: attributes["service.name"]
             value: node-syslog
       filelog:
-        include: [/var/log/pods/kube-system_kloudlite-*/*/*.log, /var/log/pods/kloudlite-system_*/*/*.log]
+        # Plus the PROBE owners workspace pods (the ws-slo-* namespaces): the entrypoint and sshd
+        # of a synthetic tenant, so "when did sshd listen" is answerable. Real tenants pods are
+        # deliberately not here; that is a privacy decision, not a glob.
+        include: [/var/log/pods/kube-system_kloudlite-*/*/*.log, /var/log/pods/kloudlite-system_*/*/*.log, /var/log/pods/ws-slo-*_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
         exclude: [/var/log/pods/*_kloudlite-otel-*/*/*.log]
         include_file_path: true
