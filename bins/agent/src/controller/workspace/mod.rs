@@ -213,12 +213,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // `timeout -s KILL 5 ls`, `umount -f -l` and `timeout -s KILL 60 nsenter … mount`, all
     // synchronous — up to ~65 s of a reactor thread that every other workspace on this node shares.
     let (pool, export_owned, owner) = (ctx.pool.clone(), export.to_string(), w.spec.owner.clone());
-    tokio::task::spawn_blocking(move || ensure_shared_home(&pool, &export_owned, &owner, k8s::SSH_UID as u32))
+    super::timed("shared_home", &id, tokio::task::spawn_blocking(move || ensure_shared_home(&pool, &export_owned, &owner, k8s::SSH_UID as u32)))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .map_err(ReconcileErr)?;
     let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
-    tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32))
+    super::timed("homecache", &id, tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32)))
         .await
         .map_err(|e| ReconcileErr(e.to_string()))?
         .map_err(|e| ReconcileErr(e.0))?;
@@ -228,8 +228,13 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // kubelet refuses with an opaque mount error; park until the projection has reached this node.
     // Only the default image mounts it at all — a user's own image gets no sshd and no keys volume,
     // and parking one on a file it never reads would be a workspace that never starts.
-    if kloudlite_workspaces::model::is_default_image(&w.spec.image) {
-        super::keys::converge_owner(ctx, k8s::keys_owner(&w.spec)).await;
+    // Only where a pod is about to be started (none recorded yet: a first start, or after a
+    // stop) or the file is missing — not on every pass, which was a GET and a status write per
+    // reconcile per node.
+    if kloudlite_workspaces::model::is_default_image(&w.spec.image)
+        && (prev.pod_ref.is_none() || !std::path::Path::new(&k8s::keys_file(&ctx.pool, k8s::keys_owner(&w.spec))).exists())
+    {
+        super::timed("keys", &id, super::keys::converge_owner(ctx, k8s::keys_owner(&w.spec))).await;
     }
     if kloudlite_workspaces::model::is_default_image(&w.spec.image)
         && !std::path::Path::new(&k8s::keys_file(&ctx.pool, k8s::keys_owner(&w.spec))).exists()

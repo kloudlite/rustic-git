@@ -46,6 +46,22 @@ pub(crate) mod keys;
 /// every probe that ran inside that window failed; a minute is the ceiling now.
 pub(crate) const WATCH_TIMEOUT_SECS: u32 = 60;
 
+/// A reconcile step that took longer than this is worth a line: on 2026-09-10 16:20 a restarted
+/// workspace sat `creating` for 28 s with a running pod and nothing logged, and the steps on that
+/// path that can block — the NFS home mkdir, the cache subvolume, an API GET — had no timing.
+pub(crate) const SLOW_STEP: Duration = Duration::from_secs(2);
+
+/// Run `fut` and warn `reconcile.slow` when it outlives `SLOW_STEP`; the value passes through.
+pub(crate) async fn timed<T>(step: &'static str, name: &str, fut: impl std::future::Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let out = fut.await;
+    let took = started.elapsed();
+    if took > SLOW_STEP {
+        tracing::warn!(step, %name, ms = took.as_millis() as u64, "reconcile.slow");
+    }
+    out
+}
+
 pub(crate) fn watch_config() -> watcher::Config {
     watcher::Config::default().timeout(WATCH_TIMEOUT_SECS)
 }
