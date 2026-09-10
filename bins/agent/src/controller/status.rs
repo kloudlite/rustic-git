@@ -64,6 +64,28 @@ where
     // Only on a write that actually changes something — the no-op return above is the converged
     // steady state, and timing it would restart the clock on every watch event.
     observe_time_to_running(kind, &obj.name_any(), cur.and_then(|c| serde_json::to_value(c).ok()).as_ref(), &next);
+    // One line per status TRANSITION, never per pass: the phase and the `Ready` reason are the
+    // whole answer to "what held this parent", and on 2026-09-10 16:20 a restarted workspace sat
+    // `creating` for 28 s with nothing in the log to say which gate had it.
+    let ready = next
+        .get("conditions")
+        .and_then(|c| c.as_array())
+        .and_then(|cs| cs.iter().find(|c| c.get("type").and_then(|t| t.as_str()) == Some("Ready")))
+        .map(|c| {
+            format!(
+                "{}/{}",
+                c.get("status").and_then(|v| v.as_str()).unwrap_or("-"),
+                c.get("reason").and_then(|v| v.as_str()).unwrap_or("-")
+            )
+        })
+        .unwrap_or_default();
+    tracing::info!(
+        kind,
+        name = %obj.name_any(),
+        phase = next.get("phase").and_then(|v| v.as_str()).unwrap_or("-"),
+        ready = %ready,
+        "status.written"
+    );
     patch_status(&api, &obj.name_any(), kind, next).await
 }
 
