@@ -12,6 +12,7 @@ use super::*;
 use axum::extract::Path;
 
 mod audit;
+pub mod fleet;
 pub(crate) mod clusters;
 mod history;
 pub mod monitoring;
@@ -675,8 +676,7 @@ pub(crate) async fn list_all_quota_requests_inner(
     s: &ApiState,
     f: &RequestFilter,
 ) -> Result<Vec<crd::QuotaRequest>, Response> {
-    let api: Api<crd::QuotaRequest> = Api::all(kube(s)?.clone());
-    let mut rows = api.list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let mut rows = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.quota_requests).await?;
     rows.retain(|r| {
         f.owner.as_deref().is_none_or(|o| r.spec.owner == o)
             && f.state.is_none_or(|st| r.status.as_ref().map(|s| s.state).unwrap_or_default() == st)
@@ -723,9 +723,8 @@ fn legacy_doc(r: &crd::QuotaRequest) -> RequestDoc {
 /// client-side of the k3s API) for the same reason `list_all_quota_requests_inner` does it: the
 /// fleet-wide row count is small and neither CRD carries a label to select a kind or a state on.
 pub(crate) async fn list_requests_inner(s: &ApiState, f: &RequestFilter) -> Result<Vec<RequestDoc>, Response> {
-    let api: Api<crd::Request> = Api::all(kube(s)?.clone());
     let mut rows: Vec<RequestDoc> =
-        api.list(&ListParams::default()).await.map_err(kube_err)?.items.iter().map(generic_doc).collect();
+        fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.requests).await?.iter().map(generic_doc).collect();
     if f.kind.is_none_or(|k| k == crd::RequestKind::Quota) {
         let legacy = RequestFilter { owner: f.owner.clone(), state: f.state, kind: None };
         rows.extend(list_all_quota_requests_inner(s, &legacy).await?.iter().map(legacy_doc));
@@ -955,12 +954,8 @@ pub(crate) fn parse_scope(seg: &str) -> super::workloads::Scope {
 /// Every active region — the source `list_workloads`' per-region half walks, and `api::settings`'
 /// central-scope boot roll (`sshHost`/`sshPort` → every region's gateway) walks the same list.
 pub(crate) async fn active_regions(s: &ApiState) -> Result<Vec<String>, Response> {
-    let api: Api<crd::Region> = Api::all(kube(s)?.clone());
-    Ok(api
-        .list(&ListParams::default())
-        .await
-        .map_err(kube_err)?
-        .items
+    Ok(fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.regions)
+        .await?
         .into_iter()
         .filter(|r| r.spec.status == "active")
         .map(|r| r.name_any())

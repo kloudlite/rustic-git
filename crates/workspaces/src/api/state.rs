@@ -197,6 +197,9 @@ pub struct ApiState {
     /// (`Resolver::from_env`); `None` is the test harness, where a list with a `@` entry is
     /// refused 503 rather than written unlocked, and a list without one never asks.
     pub resolver: Option<Arc<crate::packages::resolve::Resolver>>,
+    /// The admin role's reflector stores over the primary cluster; `None` in the user role and
+    /// in tests, where every admin reader lists instead (`admin::fleet::all`).
+    pub fleet: Option<Arc<crate::api::admin::fleet::FleetCache>>,
 }
 
 
@@ -215,6 +218,7 @@ impl ApiState {
             slo_webhook: None,
             builder_secret: None,
             resolver: None,
+            fleet: None,
         }
     }
 

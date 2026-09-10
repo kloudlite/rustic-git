@@ -149,15 +149,15 @@ pub(crate) async fn cluster_rows_degraded(
     let Ok(client) = kube(s) else {
         return (Vec::new(), Vec::new(), vec!["clusters: kubernetes not configured".into()]);
     };
-    let regions = match Api::<crd::Region>::all(client.clone()).list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => return (Vec::new(), Vec::new(), vec![format!("clusters: {e}")]),
+    let regions = match fleet::all(s.fleet.as_deref(), client, |c| &c.regions).await {
+        Ok(l) => l,
+        Err(_) => return (Vec::new(), Vec::new(), vec!["clusters: could not list regions".into()]),
     };
     let mut errors = Vec::new();
-    let nodes: Vec<super::NodeDoc> = match Api::<Node>::all(client.clone()).list(&ListParams::default()).await {
-        Ok(l) => l.items.iter().map(super::node_doc).collect(),
-        Err(e) => {
-            errors.push(format!("nodes: {e}"));
+    let nodes: Vec<super::NodeDoc> = match fleet::all(s.fleet.as_deref(), client, |c| &c.nodes).await {
+        Ok(l) => l.iter().map(super::node_doc).collect(),
+        Err(_) => {
+            errors.push("nodes: could not list nodes".into());
             Vec::new()
         }
     };
@@ -175,8 +175,8 @@ pub(crate) async fn cluster_rows_degraded(
 /// (a region's, the node list's) becomes this route's one error instead of a partial list, since
 /// the route's existing callers expect a complete list or a clear failure, not a silent gap.
 pub(crate) async fn cluster_rows(s: &ApiState) -> Result<Vec<ClusterRow>, Response> {
-    let all_ws = Api::<crd::Workspace>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let all_envs = Api::<crd::Environment>::all(kube(s)?.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let all_ws = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.workspaces).await?;
+    let all_envs = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.environments).await?;
     let (rows, _, errors) = cluster_rows_degraded(s, &all_ws, &all_envs).await;
     match errors.into_iter().next() {
         Some(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),

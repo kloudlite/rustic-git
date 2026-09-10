@@ -353,7 +353,14 @@ async fn run() -> Result<()> {
             // routes answer 503 rather than not existing. The volume routes keep working without
             // it: the cluster only says whether a snapshot's parent is still around.
             match kube::Client::try_default().await {
-                Ok(c) => state = state.with_kube(c),
+                Ok(c) => {
+                    // The admin pages read the fleet from reflector stores rather than listing
+                    // six kinds per request; the user role serves no such page and keeps no cache.
+                    if role == "admin" {
+                        state.fleet = Some(kloudlite_workspaces::api::admin::fleet::FleetCache::spawn(&c).await);
+                    }
+                    state = state.with_kube(c);
+                }
                 Err(e) => tracing::warn!(reason = "no-kube-config", error = %e, "kube.unavailable"),
             }
             // The admin role's one outbound call to the git tier: `PUT /admin/settings/central`

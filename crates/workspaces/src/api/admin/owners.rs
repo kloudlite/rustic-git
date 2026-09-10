@@ -65,20 +65,15 @@ pub(crate) struct Fleet {
     pub(crate) snaps: Vec<crd::Snapshot>,
 }
 
-pub(crate) async fn fleet(client: &kube::Client) -> Result<Fleet, Response> {
-    let quotas: Api<crd::Quota> = Api::all(client.clone());
-    let reqs: Api<crd::QuotaRequest> = Api::all(client.clone());
-    let ws: Api<crd::Workspace> = Api::all(client.clone());
-    let envs: Api<crd::Environment> = Api::all(client.clone());
-    let vols: Api<crd::Volume> = Api::all(client.clone());
-    let snaps: Api<crd::Snapshot> = Api::all(client.clone());
-
-    let quotas = quotas.list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let reqs = reqs.list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let ws = ws.list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let envs = envs.list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let vols = vols.list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let snaps = snaps.list(&ListParams::default()).await.map_err(kube_err)?.items;
+///  is the admin process's stores when it has them; a caller without an  (the
+/// history beat) passes  and lists, exactly as before the cache existed.
+pub(crate) async fn fleet(cache: Option<&fleet::FleetCache>, client: &kube::Client) -> Result<Fleet, Response> {
+    let quotas = fleet::all(cache, client, |c| &c.quotas).await?;
+    let reqs = fleet::all(cache, client, |c| &c.quota_requests).await?;
+    let ws = fleet::all(cache, client, |c| &c.workspaces).await?;
+    let envs = fleet::all(cache, client, |c| &c.environments).await?;
+    let vols = fleet::all(cache, client, |c| &c.volumes).await?;
+    let snaps = fleet::all(cache, client, |c| &c.snapshots).await?;
 
     let mut owners: BTreeSet<String> = quotas
         .iter()
@@ -148,7 +143,7 @@ fn fold_usage(
 /// totals from the same six list calls instead of re-listing.
 pub(crate) async fn owner_rows(s: &ApiState) -> Result<Vec<OwnerRow>, Response> {
     let client = kube(s)?;
-    let f = fleet(client).await?;
+    let f = fleet(s.fleet.as_deref(), client).await?;
 
     let mut rows = Vec::with_capacity(f.owners.len());
     for owner in f.owners {
@@ -250,8 +245,7 @@ pub(crate) async fn owner_detail(
     let environments = super::super::environments::envs_for(&s, std::slice::from_ref(&owner)).await?;
     let volumes = super::super::volumes::volumes_for(&s, std::slice::from_ref(&owner), None).await?;
 
-    let reqs_api: Api<crd::QuotaRequest> = Api::all(client.clone());
-    let mut requests = reqs_api.list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let mut requests = fleet::all(s.fleet.as_deref(), &client, |c| &c.quota_requests).await?;
     requests.retain(|r| r.spec.owner == owner);
     requests.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
     requests.truncate(5);

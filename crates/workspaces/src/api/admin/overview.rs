@@ -213,7 +213,7 @@ pub(crate) async fn overview_handler(State(s): State<Arc<ApiState>>) -> Result<R
     // folds them per region and `fleet_numbers` folds them per owner, so nothing after this line
     // lists either CRD again.
     let f = match kube(&s) {
-        Ok(client) => match owners::fleet(client).await {
+        Ok(client) => match owners::fleet(s.fleet.as_deref(), client).await {
             Ok(f) => f,
             Err(resp) => {
                 errors.push(format!("fleet: HTTP {}", resp.status()));

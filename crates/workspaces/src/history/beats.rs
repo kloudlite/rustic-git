@@ -216,7 +216,7 @@ pub async fn tick_once(state: &Arc<ApiState>) {
         tracing::warn!(reason = "no-kube-client", "history.beats.skipped");
         return;
     };
-    let f = match owners::fleet(client).await {
+    let f = match owners::fleet(None, client).await {
         Ok(f) => f,
         Err(_) => {
             tracing::warn!(reason = "owners-fold-failed", "history.beats.skipped");
