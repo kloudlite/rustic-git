@@ -75,7 +75,38 @@ Lesson for the next pass: the static sweep over-counted in three places (tests c
 paths, sync helpers counted as async, an npm lock that is not the project's lock). Each finding
 was read at the site before it was fixed, which is what the numbers above reflect.
 
-## Modularisation plan (Phase 2 targets)
+## Phase 2 outcome (2026-09-09/10)
+
+Every split was mechanical and behaviour-neutral — items moved whole with their docs and
+attributes, private items became `pub(crate)`/`pub(super)`, `mod.rs` re-exports so no path outside
+a module changed — and each batch shipped through the full gate, a roll of both clusters and a
+passing probe before merge (`b9c8a09c`: fast; `10dce0d5`: the 20:02 cron hourly, 0 failures).
+
+| Before | After |
+|--------|-------|
+| `crates/workspaces/src/k8s.rs` 3116 | `k8s/{mod,namespace,secrets,workspace,attach,environment,policies}.rs` ≤ 642 + `tests.rs` 1346 (kept whole: shared fixtures) |
+| `crates/workspaces/src/crd/mod.rs` 2063 | `crd/{volume,snapshot,workspace,environment,owner,quota,region,settings}.rs` ≤ 339, `mod.rs` 647 |
+| `bins/agent/src/controller/workspace.rs` 1521 | `workspace/{profile,conditions,replicas,home,seed,lifecycle,status}.rs`, `mod.rs` 599 |
+| `bins/agent/src/controller/environment.rs` 1194 | `environment/{run,stop,intercept,services,mounts}.rs` ≤ 528, `mod.rs` 196 |
+| `crates/app/src/lib.rs` 1535 | `lib.rs` 556 + `election.rs` 509 + `routing.rs` 489 (one `App`, three impl blocks) |
+| `crates/workspaces/src/api/workspaces.rs` 1253 | `workspaces/{keys,ssh,attach,packages,clone_restore}.rs`, `mod.rs` 725 |
+| `crates/workspaces/src/api/mod.rs` 1104 | `state.rs`, `requests.rs` 373, `mod.rs` 540 |
+| `crates/pulls/src/directory/mod.rs` 1547 | `directory/{signin,users,credentials,passkeys,superadmins}.rs`, `mod.rs` 777 |
+| `crates/workspaces/src/packages/resolve.rs` 1183 | `resolve/{cache,nixhub,mirror,tests}.rs`, `mod.rs` 392 |
+| `bins/slo/src/stages/{experience_gaps,weekly_gaps,experience_teams,monthly}.rs` 1408/1285/1034/1022 | directory modules by probe family, every file < 600 |
+| `bins/agent/tests/reconcile.rs` 6557 | `tests/reconcile/main.rs` (fixtures) + 14 section files, largest 1050 |
+| `web/apps/web/src/lib/api.ts` 1679 | `lib/api/{client,auth,teams,repos,keys,pulls,workspaces,requests,admin}.ts` ≤ 475, `api.ts` a barrel |
+
+Left as they are, on purpose: `k8s/tests.rs` (shared fixtures), `history/alerts.rs`
+(`two_metric_ratio` is a rule table), `slo/catalogue.rs` (`find` is the catalogue), and the
+function-length findings (`run_environment` 374, `ensure_profile` 274, `route_inner` 234) — those
+need a designed refactor with their own tests, not a file move. Two test section files are still
+over 800 (`snapshot_model_placement.rs` 1050) and can be cut again by marker later.
+
+The project guide's house-style paragraph now says where context goes ("context in module docs,
+the why at the line") and names these modules as the shape to copy.
+
+## Modularisation plan (Phase 2 targets, as planned)
 
 Rule: no source file over ~800 lines, one responsibility per file, a `//!` module doc that
 carries the design context. Behaviour-neutral; each slice ships with tests + clippy green and a

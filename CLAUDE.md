@@ -620,5 +620,13 @@ with a read-only root — anything new that writes to disk needs a mount.
 
 Comments explain WHY, never what; match the density of `bins/server/src/router/route.rs`. Deliberate shortcuts are
 marked `// ponytail: <ceiling and upgrade path>` — keep the marker when editing near one.
+**Context lives in module docs, the why at the line.** A source file stays under ~800 lines and
+does one thing; a `//!` header carries the design context, incident history and the module map
+(`k8s/`, `crd/`, `controller/workspace/`, `controller/environment/`, `crates/app`,
+`api/workspaces/`, `packages/resolve/`, `pulls/directory/`, the four split probe stages,
+`web/.../lib/api/` and `bins/agent/tests/reconcile/` are the shape to copy — one file per object
+family or concern, `mod.rs` re-exporting so paths outside the module never change). Inline
+comments keep only what is load-bearing at that line. The one deliberate exception is a shared
+test file (`k8s/tests.rs`), kept whole because its fixtures are.
 Commit subjects are imperative sentence case with no tool attribution. The design docs code still cites
 live in `docs/superpowers/`. The README is deliberately short; the deep material is this file.
