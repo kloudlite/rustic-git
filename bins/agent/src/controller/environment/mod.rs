@@ -74,7 +74,12 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     if me.dead {
         return Ok(Action::requeue(TICK));
     }
-    prune_attach_grants(e, ctx).await?;
+    // A cleanup, not the environment's own convergence: a failure here is a warning, never a
+    // failed reconcile — the 10:44 roll of 2026-09-11 lacked `list` on NetworkPolicies and every
+    // environment on the fleet stopped converging for the eight minutes it took to notice.
+    if let Err(err) = prune_attach_grants(e, ctx).await {
+        tracing::warn!(environment = %e.name_any(), error = %err.0, "attach.grant.prune.failed");
+    }
     let gen = e.meta().generation.unwrap_or(0);
     // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too. Only the
     // owner: `EnvironmentSpec.name` is display text that reaches no path and no argv — the

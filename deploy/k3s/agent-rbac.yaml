@@ -95,7 +95,7 @@
 #   limitranges                            create,patch                 ensure (server-side apply)
 #   resourcequotas                         create,patch                 ensure (server-side apply)
 #   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports
-#   networkpolicies                        create,patch                 ensure (incl. both halves of
+#   networkpolicies                        create,patch,list,delete                 ensure (incl. both halves of
 #                                                                       an attachment grant)
 #                                          delete                       delete_ignoring_404 — the
 #                                                                       unattached branch of EVERY
@@ -298,7 +298,7 @@ rules:
   # workspace reconcile in the cluster, attached or not.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "patch", "delete"]
+    verbs: ["create", "patch", "list", "delete"]
   # Pods are created when absent (a Pod is immutable, so never applied), read back for readiness,
   # watched to wake the parent's reconcile, and deleted to stop a workspace.
   - apiGroups: [""]
