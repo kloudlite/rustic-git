@@ -59,6 +59,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # `/docs` reads `apps/web/content/docs` in the image (see `lib/docs.ts`); git-ignored,
+      # so the docs are copied in here, the same way `deploy/dev/pod/ship.sh` does.
+      - run: mkdir -p apps/web/content && cp -r ../docs/product apps/web/content/docs
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: web

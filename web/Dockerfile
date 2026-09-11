@@ -38,6 +38,9 @@ RUN useradd --system --create-home --uid 1001 app
 COPY --from=build --chown=app:app /src/apps/web/.next/standalone ./
 COPY --from=build --chown=app:app /src/apps/web/.next/static ./apps/web/.next/static
 COPY --from=build --chown=app:app /src/apps/web/public ./apps/web/public
+# The product docs, read at request time by `lib/docs.ts`. Copied in from `docs/product` by
+# `deploy/dev/pod/ship.sh` and `web.yml` before the build — `web/` alone does not hold them.
+COPY --from=build --chown=app:app /src/apps/web/content ./apps/web/content
 
 USER app
 EXPOSE 3000

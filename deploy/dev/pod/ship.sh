@@ -89,6 +89,9 @@ done
 # inside the build, so nothing from the pod's node_modules leaks in). CI's web.yml still builds it
 # on master; this is the same image under the same SHA tag, so either may land first.
 echo "==> kloudlite-web:$SHA"
+# `/docs` reads `apps/web/content/docs` in the image (see `lib/docs.ts`); git-ignored, so this
+# is the only way it gets there.
+rm -rf web/apps/web/content/docs && mkdir -p web/apps/web/content && cp -r docs/product web/apps/web/content/docs
 buildctl build --frontend dockerfile.v0 --local context=web --local dockerfile=web \
   --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-web:$SHA,ghcr.io/kloudlite/kloudlite-web:latest\",push=true" \
   --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4

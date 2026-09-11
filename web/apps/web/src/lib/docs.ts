@@ -11,7 +11,12 @@ import { fenceLang, highlight } from "@/lib/highlight";
  *  (the web image is built from `web/` alone) ships the same files under `content/docs`, which
  *  `deploy/dev/pod/ship.sh` and `web.yml` copy in before building; that directory wins when it
  *  exists so a production build and a dev server read the same tree. */
-const CANDIDATES = [path.join(process.cwd(), "content", "docs"), path.resolve(process.cwd(), "..", "..", "..", "docs", "product")];
+const CANDIDATES = [
+  path.join(process.cwd(), "content", "docs"),
+  // The standalone image runs `node apps/web/server.js` from `/app`.
+  path.join(process.cwd(), "apps", "web", "content", "docs"),
+  path.resolve(process.cwd(), "..", "..", "..", "docs", "product"),
+];
 
 async function root(): Promise<string> {
   for (const c of CANDIDATES) {

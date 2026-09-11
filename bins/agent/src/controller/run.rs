@@ -74,6 +74,16 @@ where
 /// 3,500 `reconcile.queue.failed` an hour, flat for days. Dropping the reference loses nothing —
 /// a parent not yet in the store is delivered by its own watch, and that reconcile reads the child
 /// fresh — it just stops asking the runtime for objects it was told it cannot have.
+/// Every not-yet-cut Snapshot on `volume`, for the Volume → Snapshot fan-out above.
+fn working_snapshots_of(store: &kube::runtime::reflector::Store<crd::Snapshot>, volume: &str) -> Vec<kube::runtime::reflector::ObjectRef<crd::Snapshot>> {
+    store
+        .state()
+        .iter()
+        .filter(|s| s.spec.volume == volume)
+        .filter(|s| s.status.as_ref().map(|st| st.phase).unwrap_or(crd::Phase::Working) == crd::Phase::Working)
+        .map(|s| kube::runtime::reflector::ObjectRef::from_obj(s.as_ref()))
+        .collect()
+}
 fn held<K>(
     store: &kube::runtime::reflector::Store<K>,
     r: Option<kube::runtime::reflector::ObjectRef<K>>,
@@ -192,7 +202,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let writer =
         ctx.volume_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the volume writer is already taken")?;
     let subscribe = || writer.subscribe().ok_or("the volume store is not shared");
-    let (vol_self, vol_ws, vol_env) = (subscribe()?, subscribe()?, subscribe()?);
+    let (vol_self, vol_ws, vol_env, vol_snap) = (subscribe()?, subscribe()?, subscribe()?, subscribe()?);
     let volume_watch = {
         use kube::runtime::{watcher, WatchStreamExt};
         watcher(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
@@ -461,7 +471,14 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     };
+    let snap_store_for_volumes = snap_store.clone();
     let snapshots = Controller::for_shared_stream(snap_sub, snap_store)
+        // A Volume that arrives on this node — claimed, handed over, restored in place — brings
+        // its still-Working snapshots with it, and `reconcile_snapshot` had filed those as
+        // "foreign" on the node they were cut for. Nothing re-read them: the Snapshot itself does
+        // not change when its Volume moves. So a Volume event reconciles every Working snapshot
+        // that names it; a Ready one is a no-op pass.
+        .watches_shared_stream(vol_snap, move |v: Arc<crd::Volume>| working_snapshots_of(&snap_store_for_volumes, &v.name_any()))
         .shutdown_on_signal()
         .run(|s, c| async move { observed("snapshot", &*s, &c, snapshot::reconcile_snapshot(s.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -668,6 +685,27 @@ pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The Volume → Snapshot fan-out names only the snapshots still to be cut on that volume.
+    #[test]
+    fn a_volume_event_names_its_working_snapshots_only() {
+        let (reader, mut writer) = store::<crd::Snapshot>();
+        let snap = |name: &str, volume: &str, phase: Option<crd::Phase>| -> crd::Snapshot {
+            let mut s: crd::Snapshot = serde_json::from_value(serde_json::json!({
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+                "metadata": {"name": name},
+                "spec": {"volume": volume, "worktree": "ws-1", "owner": "alice", "parent": ""}
+            }))
+            .unwrap();
+            s.status = phase.map(|p| crd::SnapshotStatus { phase: p, ..Default::default() });
+            s
+        };
+        for s in [snap("a", "v1", None), snap("b", "v1", Some(crd::Phase::Working)), snap("c", "v1", Some(crd::Phase::Ready)), snap("d", "v2", None)] {
+            writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(s));
+        }
+        let mut got: Vec<String> = working_snapshots_of(&reader, "v1").into_iter().map(|r| r.name).collect();
+        got.sort();
+        assert_eq!(got, vec!["a", "b"], "status-less counts as Working; Ready and another volume do not");
+    }
     use super::*;
     use crate::testsupport::test_ctx;
     use kube::runtime::reflector::{store, ObjectRef};
