@@ -1625,6 +1625,11 @@ metadata:
   namespace: kloudlite
 data:
   KLOUDLITE_LOG_FORMAT: json
+  # hyper's pool and connect logs on every suite: a request the probe abandoned (`slo.http.abandoned`)
+  # then carries whether it went out on a reused keep-alive connection or a fresh dial — the one
+  # fact neither side logged when `GET /admin/workloads` stalled for 15 s on 2026-09-11 and the
+  # admin never saw it. Remove once that stall is explained.
+  RUST_LOG: info,hyper_util::client::legacy::pool=debug,hyper_util::client::legacy::connect=debug
   # The admin process, the only writer of the `kloudlite` database — every /admin/* call and the
   # run report itself.
   KLOUDLITE_ADMIN_API_URL: http://kloudlite-admin
