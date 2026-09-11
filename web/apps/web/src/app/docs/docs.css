@@ -126,10 +126,10 @@
 
 /* tabbed code: one bar, the panel's own block below it without a second frame line */
 .docs-tabs { margin: 0 0 20px; border: 1px solid var(--border); background: var(--card); }
-.docs-tabs-bar { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); overflow-x: auto; background: color-mix(in oklab, var(--foreground) 2%, var(--card)); }
+.docs-tabs-bar { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; background: color-mix(in oklab, var(--foreground) 2%, var(--card)); }
 .docs-tabs-bar [role=tab] {
   font: inherit; font-size: 13px; font-weight: 550; padding: 9px 10px; color: var(--muted-foreground);
-  background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; white-space: nowrap;
+  background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap;
 }
 .docs-tabs-bar [role=tab]:hover { color: var(--foreground); }
 .docs-tabs-bar [role=tab][aria-selected=true] { color: var(--foreground); border-bottom-color: var(--primary); }
