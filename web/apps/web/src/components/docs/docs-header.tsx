@@ -21,14 +21,16 @@ export function DocsHeader({
           <Logo className="h-5" />
         </Link>
         <Link href="/docs" className="docs-wordmark">Docs</Link>
+        <nav className="docs-header-links" aria-label="Documentation areas">
+          <Link href="/docs">Guides</Link>
+          <Link href="/docs/reference/api">API reference</Link>
+          <Link href="/docs/reference/cli/kl-connect">CLI</Link>
+        </nav>
         <div className="flex-1" />
         <Search index={index} />
-        <nav className="docs-header-links">
-          <a href="https://kloudlite.io" target="_blank" rel="noreferrer">kloudlite.io</a>
-        </nav>
         <ThemeToggle />
         <Button asChild size="sm">
-          <Link href="/login">Open app</Link>
+          <Link href="/login">Open console</Link>
         </Button>
       </div>
     </header>

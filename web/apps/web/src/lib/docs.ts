@@ -1,7 +1,7 @@
 import "server-only";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Marked, type Token, type Tokens } from "marked";
+import { Marked, type Token, type Tokens, type TokenizerAndRendererExtension } from "marked";
 import { fenceLang, highlight } from "@/lib/highlight";
 
 /** The product documentation, `docs/product` in the repository, served at `/docs`.
@@ -23,75 +23,29 @@ async function root(): Promise<string> {
   return CANDIDATES[0];
 }
 
-/** The sidebar, in reading order. Slugs are paths under `docs/product` without `.md`; a
- *  section's own page is generated from its children when no `index.md` exists. Titles are the
- *  files' own `# ` lines, read at request time, so a rename in the markdown is a rename here. */
+/** The sidebar, in reading order. Slugs are paths under `docs/product` without `.md`. Titles
+ *  are the files' own `# ` lines, read at request time, so a rename in the markdown is a rename
+ *  here. A group is one product surface — the same shape a reader already knows from every
+ *  other platform's docs — so a page is where its name says it is. */
 export const NAV: { section: string; items: string[] }[] = [
-  { section: "Start here", items: ["", "concepts/overview", "tutorials/01-first-workspace", "best-practices"] },
-  {
-    section: "Concepts",
-    items: [
-      "concepts/workspaces",
-      "concepts/environments",
-      "concepts/snapshots",
-      "concepts/connections",
-      "concepts/agents",
-      "concepts/git-repositories",
-      "concepts/container-repositories",
-    ],
-  },
-  { section: "Tutorials", items: ["tutorials/01-first-workspace", "tutorials/02-agent-driven-flow"] },
-  {
-    section: "How-to · Workspaces",
-    items: [
-      "how-to/workspaces/create",
-      "how-to/workspaces/update",
-      "how-to/workspaces/exec-commands",
-      "how-to/workspaces/read-and-write-files",
-      "how-to/workspaces/run-background-processes",
-      "how-to/workspaces/install-packages",
-      "how-to/workspaces/clone",
-      "how-to/workspaces/work-in-many",
-      "how-to/workspaces/discard",
-    ],
-  },
-  {
-    section: "How-to · Environments",
-    items: [
-      "how-to/environments/create",
-      "how-to/environments/update",
-      "how-to/environments/inspect-services",
-      "how-to/environments/snapshot",
-      "how-to/environments/clone",
-      "how-to/environments/clone-from-snapshot",
-    ],
-  },
-  {
-    section: "How-to · Connections",
-    items: [
-      "how-to/connections/connect",
-      "how-to/connections/switch-environment",
-      "how-to/connections/intercept",
-      "how-to/connections/release-intercept",
-    ],
-  },
-  {
-    section: "Troubleshooting",
-    items: [
-      "how-to/troubleshooting/workspace-wont-start",
-      "how-to/troubleshooting/cannot-reach-service",
-      "how-to/troubleshooting/dead-intercept",
-    ],
-  },
+  { section: "Introduction", items: ["", "quick-start", "authentication"] },
+  { section: "Concepts", items: ["concepts/workspaces", "concepts/environments", "concepts/snapshots", "concepts/storage", "concepts/teams-and-quota"] },
+  { section: "Workspaces", items: ["workspaces/create", "workspaces/packages", "workspaces/lifecycle", "workspaces/clone-and-restore", "workspaces/ssh"] },
+  { section: "Environments", items: ["environments/create", "environments/services", "environments/lifecycle", "environments/clone-and-restore"] },
+  { section: "Snapshots", items: ["snapshots/push", "snapshots/history", "snapshots/volumes"] },
+  { section: "Connections", items: ["connections/attach", "connections/intercepts"] },
+  { section: "Agent tools", items: ["agent-tools/exec", "agent-tools/files", "agent-tools/images", "agent-tools/git"] },
+  { section: "Human tools", items: ["human-tools/console", "human-tools/kl-connect", "human-tools/editors"] },
+  { section: "Platform", items: ["platform/regions", "platform/teams", "platform/quota", "platform/requests"] },
   {
     section: "Reference",
-    items: ["reference/cli/index", "reference/api/workspaces", "reference/api/environments", "reference/limits-and-defaults", "reference/glossary"],
+    items: ["reference/api/index", "reference/api/workspaces", "reference/api/environments", "reference/api/snapshots", "reference/api/platform", "reference/cli/kl-connect", "reference/cli/kl", "reference/limits", "reference/glossary"],
   },
 ];
 
-/** A directory that is linked to as a section (`how-to/`, `reference/`) but has no page of its
- *  own: its index is generated from the NAV items beneath it. */
-const SECTION_DIRS = ["concepts", "tutorials", "how-to", "how-to/workspaces", "how-to/environments", "how-to/connections", "how-to/troubleshooting", "reference", "reference/api", "reference/cli"];
+/** A directory that is linked to as a section but has no page of its own: its index is
+ *  generated from the NAV items beneath it. */
+const SECTION_DIRS = ["concepts", "workspaces", "environments", "snapshots", "connections", "agent-tools", "human-tools", "platform", "reference", "reference/cli"];
 
 export type NavItem = { slug: string; href: string; title: string };
 export type NavSection = { section: string; items: NavItem[] };
@@ -146,8 +100,7 @@ export async function nav(): Promise<NavSection[]> {
   );
 }
 
-/** Every page once, in sidebar order, for prev/next — the two "Start here" repeats are skipped
- *  where they recur. */
+/** Every page once, in sidebar order, for prev/next. */
 async function flat(): Promise<NavItem[]> {
   const seen = new Set<string>();
   const out: NavItem[] = [];
@@ -164,11 +117,59 @@ function slugify(text: string): string {
 function rewriteHref(href: string, fromSlug: string): string {
   if (/^(https?:|mailto:|#)/.test(href)) return href;
   const [target, hash] = href.split("#");
-  const dir = fromSlug.includes("/") ? fromSlug.slice(0, fromSlug.lastIndexOf("/")) : fromSlug === "" ? "" : "";
+  const dir = fromSlug.includes("/") ? fromSlug.slice(0, fromSlug.lastIndexOf("/")) : "";
   let joined = path.posix.normalize(path.posix.join(dir, target));
   joined = joined.replace(/\/$/, "").replace(/\.md$/, "").replace(/(^|\/)index$/, "");
   if (joined === ".") joined = "";
   return hrefOf(joined) + (hash ? `#${hash}` : "");
+}
+
+/** `::: tabs` … `:::`, `::: cards` … `:::`, `::: note|tip|warning [Title]` … `:::` — the three
+ *  block containers the pages use. A tabs container holds fenced blocks whose info string names
+ *  the tab, ```` ```bash [kl-connect] ````; a cards container holds one list whose items are
+ *  `[Title](link) — one line`; a callout holds ordinary markdown. */
+type Container = Tokens.Generic & { kind: string; title: string; tokens: Token[] };
+const CONTAINER_RE = /^:::\s*(tabs|cards|note|tip|warning)(?:[ \t]+([^\n]+?))?[ \t]*\n([\s\S]*?)\n:::[ \t]*(?:\n|$)/;
+const container: TokenizerAndRendererExtension = {
+  name: "container",
+  level: "block",
+  start(src: string) {
+    return src.match(/^:::/m)?.index;
+  },
+  tokenizer(src: string) {
+    const m = CONTAINER_RE.exec(src);
+    if (!m) return undefined;
+    const tok: Container = { type: "container", raw: m[0], kind: m[1], title: m[2] ?? "", tokens: [] };
+    this.lexer.blockTokens(m[3], tok.tokens);
+    return tok;
+  },
+  renderer(token) {
+    const t = token as Container;
+    if (t.kind === "tabs") {
+      const codes = t.tokens.filter((x): x is Tokens.Code => x.type === "code");
+      const names = codes.map((c, i) => tabName(c.lang) || `Tab ${i + 1}`);
+      const bar = names.map((n, i) => `<button type="button" role="tab" data-tab="${escapeHtml(n)}" aria-selected="${i === 0}">${escapeHtml(n)}</button>`).join("");
+      const panels = codes.map((c, i) => `<div role="tabpanel" data-tab="${escapeHtml(names[i])}"${i === 0 ? "" : " hidden"}>${this.parser.parse([c])}</div>`).join("");
+      return `<div class="docs-tabs"><div class="docs-tabs-bar" role="tablist">${bar}</div>${panels}</div>\n`;
+    }
+    if (t.kind === "cards") {
+      const list = t.tokens.find((x): x is Tokens.List => x.type === "list");
+      const cards = (list?.items ?? []).map((it) => {
+        const inline = it.tokens.find((x): x is Tokens.Text | Tokens.Paragraph => x.type === "text" || x.type === "paragraph");
+        const html = inline ? this.parser.parseInline(inline.tokens ?? []) : "";
+        const m = /^<a href="([^"]+)"[^>]*>(.*?)<\/a>\s*(?:—|-|:)?\s*([\s\S]*)$/.exec(html);
+        if (!m) return `<div class="docs-card">${html}</div>`;
+        return `<a class="docs-card" href="${m[1]}"><span class="docs-card-title">${m[2]}</span>${m[3] ? `<span class="docs-card-text">${m[3]}</span>` : ""}</a>`;
+      });
+      return `<div class="docs-cards">${cards.join("")}</div>\n`;
+    }
+    const label = t.title || { note: "Note", tip: "Tip", warning: "Warning" }[t.kind];
+    return `<aside class="docs-callout is-${t.kind}"><div class="docs-callout-label">${escapeHtml(label ?? "")}</div><div class="docs-callout-body">${this.parser.parse(t.tokens)}</div></aside>\n`;
+  },
+};
+
+function tabName(lang: string | undefined): string {
+  return /\[(.+?)\]/.exec(lang ?? "")?.[1] ?? "";
 }
 
 async function render(md: string, slug: string): Promise<{ html: string; headings: Heading[] }> {
@@ -176,6 +177,7 @@ async function render(md: string, slug: string): Promise<{ html: string; heading
   const body = md.replace(/^#\s+.+\n?/, "");
   const m = new Marked({ gfm: true, async: true });
   m.use({
+    extensions: [container],
     walkTokens: async (token: Token) => {
       if (token.type === "code") {
         const t = token as Tokens.Code & { html?: string };
@@ -198,8 +200,9 @@ async function render(md: string, slug: string): Promise<{ html: string; heading
       code(token: Tokens.Code): string {
         const t = token as Tokens.Code & { html?: string };
         const lang = t.lang?.split(/\s+/)[0] ?? "";
+        const title = /title="([^"]+)"/.exec(t.lang ?? "")?.[1] ?? tabName(t.lang) ?? "";
         const html = t.html ?? `<pre class="shiki"><code>${escapeHtml(t.text)}</code></pre>`;
-        return `<div class="docs-code" data-lang="${lang}"><div class="docs-code-bar"><span>${lang || "text"}</span><button type="button" class="docs-copy" data-copy>Copy</button></div>${html}</div>\n`;
+        return `<div class="docs-code" data-lang="${lang}"><div class="docs-code-bar"><span>${escapeHtml(title || lang || "text")}</span><button type="button" class="docs-copy" data-copy>Copy</button></div>${html}</div>\n`;
       },
       table({ header, rows }: Tokens.Table): string {
         const th = header.map((c) => `<th${c.align ? ` align="${c.align}"` : ""}>${this.parser.parseInline(c.tokens)}</th>`).join("");
@@ -215,13 +218,13 @@ async function render(md: string, slug: string): Promise<{ html: string; heading
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /** The first paragraph, for the page header and `<meta name="description">`. */
 function describe(md: string): string {
   const body = md.replace(/^#\s+.+\n?/, "").trim();
-  const para = body.split(/\n\s*\n/).find((p) => p && !p.startsWith("#") && !p.startsWith("-") && !p.startsWith("|") && !p.startsWith("```")) ?? "";
+  const para = body.split(/\n\s*\n/).find((p) => p && !/^[#\-|`:>]/.test(p)) ?? "";
   return para.replace(/\s+/g, " ").replace(/[*_`]/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").slice(0, 200);
 }
 
@@ -244,17 +247,8 @@ export async function page(slugParts: string[]): Promise<Page | null> {
   }
   if (SECTION_DIRS.includes(slug)) {
     const items = order.filter((i) => i.slug.startsWith(`${slug}/`));
-    const list = items.map((i) => `<li><a href="${i.href}">${i.title}</a></li>`).join("");
-    return {
-      slug,
-      title: humanize(slug),
-      description: `${items.length} pages`,
-      html: `<ul class="docs-section-list">${list}</ul>`,
-      headings: [],
-      section: humanize(slug),
-      prev: null,
-      next: null,
-    };
+    const list = items.map((i) => `<a class="docs-card" href="${i.href}"><span class="docs-card-title">${i.title}</span></a>`).join("");
+    return { slug, title: humanize(slug), description: `${items.length} pages`, html: `<div class="docs-cards">${list}</div>`, headings: [], section: humanize(slug), prev: null, next: null };
   }
   return null;
 }
@@ -262,12 +256,13 @@ export async function page(slugParts: string[]): Promise<Page | null> {
 /** Every page's title, section and h2/h3 headings: the search index the palette filters. */
 export async function searchIndex(): Promise<{ title: string; section: string; href: string; headings: { text: string; id: string }[] }[]> {
   const out = [];
+  const sections = await nav();
   for (const it of await flat()) {
     const md = await readFile(it.slug);
     const headings = md
       ? [...md.matchAll(/^(##|###)\s+(.+)$/gm)].map((m) => ({ text: m[2].replace(/[*_`]/g, "").trim(), id: slugify(m[2]) }))
       : [];
-    out.push({ title: it.title, section: (await nav()).find((s) => s.items.some((x) => x.slug === it.slug))?.section ?? "Docs", href: it.href, headings });
+    out.push({ title: it.title, section: sections.find((s) => s.items.some((x) => x.slug === it.slug))?.section ?? "Docs", href: it.href, headings });
   }
   return out;
 }

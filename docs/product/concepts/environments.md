@@ -1,76 +1,45 @@
 # Environments
 
-An environment is where your application runs.
+An environment is your application: a named set of services, each an image with a command, ports, environment variables, and mounts, plus one disk that holds every service's data. It runs in its own namespace, so services reach each other by name.
 
-It is a namespaced group of running services — normally every service of your
-application, deployed and talking to each other. For the shop, an environment is `web`,
-`api`, `payments`, `worker`, Postgres, and the queue, all up and wired together.
-Code is not edited there. Editing happens in a [workspace](workspaces.md), which
-[connects](connections.md) to the environment.
+## Services
 
-## The gap it closes
+A service is one StatefulSet with one pod. Its name is its DNS name inside the environment, so `mongodb://db:27017` resolves when a service is called `db`. A name is a DNS label: lowercase letters, digits, hyphens, at most 63 characters.
 
-To see the refund fix work, you need somewhere realistic to run it: `api` calling
-`payments`, Postgres holding an order big enough to refund, the queue delivering
-the refund event to `worker`. Getting that has always meant one of two
-compromises. A docker-compose stack on your laptop, which is never quite the real
-shop and takes a day to set up. Or the shared staging environment, which is real
-but belongs to everyone — so you wait your turn, avoid touching data, and find out
-later that your test order broke someone else's run.
+```json
+{
+  "name": "db",
+  "image": "postgres:16",
+  "env": { "POSTGRES_PASSWORD": "dev" },
+  "ports": [5432],
+  "mounts": [{ "folder": "pgdata", "path": "/var/lib/postgresql/data" }],
+  "resources": { "cpu_request": "500m", "cpu_limit": "1", "memory_request": "1Gi", "memory_limit": "2Gi" }
+}
+```
 
-An environment is the real shop, and it is yours.
+A mount names a folder on the environment's disk and the path it appears at in the container. Every service's folders live on the one disk, which is why a snapshot of an environment is one consistent cut across all its services.
 
-## One per developer
+## State
 
-An environment is owned by one developer. It is your own copy of the whole
-application, which you can break, intercept, reset, and take apart without affecting
-anyone else.
+| State | Meaning |
+|---|---|
+| `creating` | Placed; StatefulSets being applied |
+| `running` | Every service is up |
+| `stopped` | Services torn down after a final sync point; the disk is kept |
+| `error` | A service will not converge; the service's own status says why |
 
-Ownership is not a permission model; it is what makes the environment usable.
-When you intercept `payments`, *all* `payments` traffic in that environment goes
-to your workspace. That is only reasonable if the environment is yours. And an
-application you can freely break is only useful if it is nobody else's.
+## Ownership
 
-Owned does not mean sealed. Other developers can connect their workspaces to your
-environment — see [below](#one-workspace-different-environments).
+An environment belongs to you or to a team. A team's environment is visible to every member, and a member's workspace may attach to it.
 
-## Cloning
+## Data
 
-Nobody assembles an environment by hand. A developer who needs one clones one.
-The clone is a full copy of the service group, owned by whoever cloned it.
+The disk is a btrfs subvolume, quota-bounded by `quota_gb`, replicated like a workspace's tree. A push takes a snapshot of the whole disk. A restore puts a snapshot's bytes under a new environment, or in place under the same one.
 
-When a new developer joins the team and needs a shop of their own, they clone
-yours. When you want a second one — kept stable while you take the first apart —
-you clone your own. When a test run is going to write to Postgres, it gets a clone
-too, and discards it afterwards.
+## Next steps
 
-Cloning is cheap for the same reason [snapshots](snapshots.md) are: the state is
-copied, not prepared.
-
-## One workspace, different environments
-
-A workspace is not tied to one environment. You can disconnect your `payments`
-workspace from your environment and connect it to another. Your code stays put;
-the shop around it changes.
-
-- **Testing.** A teammate's environment has different data — a customer with a
-  partial refund already in progress. Connect to it to see whether your fix holds
-  there too.
-- **Collaboration.** A teammate wants to see the fix before it merges. Connect to
-  their environment and intercept `payments` there. Their shop, your code,
-  immediately — no branch for them to check out and nothing to deploy. When you
-  disconnect, their environment is exactly as it was.
-
-## Lifecycle
-
-- **Create** — a new environment with its services.
-- **Update** — change what runs in the environment and how it is configured.
-- **Clone** — a copy of an existing environment, owned by the caller; from the
-  environment as it stands, or from one of its [snapshots](snapshots.md).
-- **Snapshot** — capture all persisted data in the environment as a single object.
-
-## Where next
-
-- [Snapshots](snapshots.md) — why state stops being scarce.
-- [Best practices: environments](../best-practices.md#environments)
-- [Environment API](../reference/api/environments.md)
+::: cards
+- [Create an environment](../environments/create.md) — Define services and their mounts.
+- [Services](../environments/services.md) — Validation rules, DNS, resources, and status.
+- [Clone and restore](../environments/clone-and-restore.md) — Copy an environment, or bring back a snapshot.
+:::

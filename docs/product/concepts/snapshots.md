@@ -1,62 +1,33 @@
 # Snapshots
 
-A snapshot captures all of an environment's persisted data — every database,
-queue, and volume in it — as a single object. An environment can be cloned from a
-snapshot and comes up with exactly that state.
+A snapshot is a read-only copy of a workspace's tree or an environment's disk at one instant. Snapshots form a chain: each names its parent, and a restore starts a new working copy from any point on it.
 
-## The gap it closes
+## Push
 
-State is the expensive part of an environment. Starting the shop's six services is
-a matter of starting containers. What is hard is the data: the orders in Postgres,
-the events in the queue, the uploaded receipts on a volume — seeded, migrated,
-consistent with each other, and not corrupted by whatever ran last.
+`push` is the one verb that makes a snapshot you keep. It takes the working copy as it is, records the object's definition with it (image, packages, quota, attached environment; for an environment, its services), and advances the head. There is no separate commit step and no un-pushed state to manage.
 
-That expense is why teams share one staging environment, why tests that write to
-the database run one at a time, and why every test suite drags a tail of fixtures,
-seed scripts, and cleanup jobs behind it.
+## Sync points
 
-A snapshot makes state copyable. Copyable state is cheap state, and cheap state
-means an environment is no longer something to protect — it is something to clone.
+Between pushes the platform cuts sync points on its own: on a beat while the working copy changes, on every stop, and at the instant of a clone. They exist so another node always holds something recent, they are never listed as history, and they go away with the working copy. You never restore to one; a clone grafts onto one for you.
 
-## One snapshot, not one per service
+## Restore
 
-The snapshot is of the whole environment at once, not a backup per database to
-reassemble later.
+`restore` creates a new workspace or environment from a snapshot by id. The request may override the frozen definition; anything you leave out is taken from the snapshot. A restore re-attaches the snapshot's volume, so it works even after the original working copy is gone.
 
-That matters because the shop's state only makes sense across services together.
-A refund is a row in Postgres *and* a message in the queue *and* a status `worker`
-has not yet updated. Snapshotting Postgres on Monday and the queue on Tuesday
-gives you a shop that has never existed. A snapshot is one consistent picture of
-all of it.
+An environment may also be restored in place: services drain, the disk is swapped, services come back.
 
-## What it changes
+## Clone
 
-The refund fix needs an order over the threshold to test against. Without
-snapshots you seed one into staging, run the refund, and delete it afterwards —
-and hope nobody else's test saw it in between.
+`clone` copies a running or stopped workspace into a new one right now, cutting its own sync point at the moment of the request. The response says exactly what it grafted onto (`based_on`), including the age of that cut when the source could not be cut fresh.
 
-With snapshots: take a snapshot of your environment once, with the large order in
-it, and name it `large-order-pending`. From then on, every time you — or a test,
-or an agent — need that state, clone an environment from the snapshot, do whatever
-you like to it, and discard it.
+## Delete
 
-**Tests may mutate freely.** The refund test writes to Postgres and drains the
-queue. Fine — it is a clone. The next run clones the same snapshot and starts from
-the same state, so a failure is about the code, never about what ran before.
+Snapshots are kept until deleted. `DELETE /v1/volumes/{name}/snapshots/{id}` refuses the base of a running working copy. Deleting a detached volume's last snapshot deletes the volume.
 
-**Tests may run concurrently.** Five agents each testing a different `payments`
-change get five clones of `large-order-pending`, running at the same time, none
-touching the others' data. Nothing to serialize.
+## Next steps
 
-**Teardown disappears.** There is nothing to clean up. The clone is discarded.
-The seed script becomes "clone from snapshot".
-
-**States worth returning to are kept, not rebuilt.** The shop as it was before the
-`orders` table migration. The exact data a customer's bug reproduces on. A clean
-demo dataset. Each is a snapshot, restored in one step.
-
-## Where next
-
-- [Environments](environments.md) — what a snapshot is a snapshot of.
-- [Best practices: snapshots and testing](../best-practices.md#snapshots-and-testing)
-- [Environment API](../reference/api/environments.md)
+::: cards
+- [Push](../snapshots/push.md) — Take a snapshot, with a message.
+- [History](../snapshots/history.md) — Walk the chain, find refs, restore.
+- [Volumes](../snapshots/volumes.md) — What holds snapshots once the working copy is gone.
+:::

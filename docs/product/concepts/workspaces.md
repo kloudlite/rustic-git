@@ -1,86 +1,55 @@
 # Workspaces
 
-A workspace is a running Linux sandbox on a Kloudlite region: a pod with your source tree, a Nix
-profile of the tools you declared, your persistent home directory, and an sshd behind the
-platform's gateway. You ssh in, edit, and run. It is not an image: packages change while it runs,
-and the tree survives stops, restarts, and node moves.
+A workspace is one running pod with your source tree, a Nix profile of the packages you asked for, and ssh. One workspace per change you are making; they are cheap to create, clone, and delete.
 
-## Anatomy
+## What is in a workspace
 
-| Path | What | Lifetime |
+| Path | What | Persists |
 |---|---|---|
-| `/workspace` | The working tree, a btrfs subvolume on the node's pool. Snapshots and clones are cut from it. | the workspace; kept across stop/start |
-| `/home/kl` | Your home. One per person and region, on a shared NFS export, so dotfiles and ssh keys follow you into every workspace you own there. | you |
-| `/home/kl/.cache`, `~/.local/state`, `CARGO_TARGET_DIR` | Tool caches and shell history, on a local subvolume per (owner, node). Never shared across nodes. | the node |
-| `/nix/profile/current` | The Nix profile built from `packages`, on top of the platform's base set. | rebuilt when `packages` changes |
+| `/home/kl/workspaces/{name}` | Your tree, a btrfs subvolume sized by `quota_gb` | Across stop and start; snapshotted by push |
+| `/home/kl` | Your home for the region: dotfiles, editor state, credentials | Across every workspace of yours in the region |
+| Tool caches, shell history | `~/.cache`, `~/.local/state`, `CARGO_TARGET_DIR`, and their kin | Per workspace and node, on local disk |
+| `PATH` | The packages in `packages`, plus a base set | Rebuilt from the spec on every start |
 
-The workspace user is `kl` (uid 1000). The default image is `ghcr.io/kloudlite/kloudlite-workspace`
-(Alpine plus sshd); with your own `image`, no sshd and no keys are mounted and you reach the
-workspace only through `exec`.
+The tree is what you version. The home is what makes the second workspace feel like the first. Caches are local because they are large and never worth moving.
+
+## Image
+
+Default image is `ghcr.io/kloudlite/kloudlite-workspace`, which carries the ssh server, Nix, and the `kl` CLI. A custom `image` may replace it; it then owns its own ssh setup and mounts no `authorized_keys`.
 
 ## Packages
 
-`packages` is a list of nixpkgs attribute names, optionally pinned:
+`packages` is a list of nixpkgs attribute names. Bare `nodejs` means the region's nixpkgs pin; `nodejs@22` is locked to the newest 22.x that the binary cache holds, and the lock is frozen into the workspace before it is created. See [Packages](../workspaces/packages.md).
+
+## State
 
 ```
-nodejs            # the region's nixpkgs pin
-nodejs@20         # newest 20.x that cache.nixos.org already has a binary for
-postgresql@16.4   # exact
-jq@latest
+creating ─▶ ready ⇄ stopped ─▶ deleted
+              │
+              ▼
+            error
 ```
 
-A pinned entry is resolved and locked when the workspace is written; the lock is kept through
-every later edit until you ask for `packages/update`. Nothing is built from source: a pin with no
-cached binary is refused (`422`, naming the versions that exist). Installing a package does not
-restart the workspace; the new profile is published in place and the shell sees it on the next
-`PATH` lookup.
+| State | Meaning |
+|---|---|
+| `creating` | Placed and being built; `packages_status` and `ssh` fill in as they arrive |
+| `ready` | The pod is running and accepting ssh |
+| `stopped` | The pod is gone; the tree is kept and a sync point was cut |
+| `error` | The controller could not converge; `degraded` says why |
+| `deleted` | Being torn down; the volume survives only if a snapshot references it |
 
-## States and verbs
+## Placement
 
-```
-creating ──▶ ready ──▶ stopped ──▶ ready
-                │          │
-                └──────────┴──▶ deleted
-```
+A workspace is placed on one node in its region. Its tree is replicated to other nodes on a sync beat, so a stopped workspace may start on any node that already holds its newest sync point. A running one is never moved; if its node dies it is interrupted, and the way forward is a [clone](../workspaces/clone-and-restore.md) from the last synced point.
 
-| Verb | Route | Effect |
-|---|---|---|
-| create | `POST /v1/workspaces` | Writes the spec; a node claims it, materialises the tree, builds the profile, starts the pod. |
-| start / stop | `POST /v1/workspaces/{id}/start`, `/stop` | Stop cuts a sync point and deletes the pod. The tree stays. Start reschedules; a stopped workspace may start on another node once that node holds the sync point. |
-| push | `POST /v1/workspaces/{id}/push` | Takes a **snapshot** of `/workspace`, kept until deleted. The only way to keep state past a delete. |
-| clone | `POST /v1/workspaces/{id}/clone` | A new workspace from the source's newest sync point, with the same packages and locks. Seconds, on the same node. |
-| restore | `POST /v1/workspaces/restore` | A new workspace from a named snapshot, even after the source is gone. |
-| update packages | `POST /v1/workspaces/{id}/packages/update` | Re-resolves the pins; otherwise `packages` is edited in place. |
-| attach / detach | `POST /v1/workspaces/{id}/attach`, `/detach` | Connect to an environment. See [Connections](connections.md). |
-| delete | `DELETE /v1/workspaces/{id}` | Drops the tree and its sync points. Snapshots from `push` survive, on a detached volume. |
+## Seeding from a repository
 
-Between pushes a sync beat cuts a point every few minutes from any tree that changed, and peers
-replicate it; that is what a clone, a move after a node failure, and the `Replicated` condition
-read. It is never a restore target and never listed as history.
+`repo` and `branch` on create run a clone inside the pod with your platform ssh key, into `/home/kl/workspaces/{name}`. No credential is minted or stored for it.
 
-## Access
+## Next steps
 
-- **ssh**: `kl-connect ws ssh <name>` opens a session through the gateway with your account's ssh
-  keys; `kl-connect ws ssh-config` writes `~/.ssh/kloudlite_config` so `ssh <name>` and every
-  editor's remote-ssh work unchanged. Keys are per person, projected into every workspace you own.
-- **Web console**: `/{owner}/workspaces` lists, creates, starts, stops, pushes and clones; a
-  workspace page shows packages, snapshots and the attached environment.
-- **API**: everything above, with a bearer token from `kl-connect login`.
-
-## Sizing and limits
-
-A workspace requests 2 CPU / 4 GiB and is limited to 4 CPU / 8 GiB by default; the tree has a
-`quota_gb` (the console sends 20). Personal accounts get 5 workspaces, teams 20; see
-[Limits and defaults](../reference/limits-and-defaults.md).
-
-## Teams
-
-A workspace created with `team` runs in the team's namespace, under the team's quota, and is
-visible to every member. Its ssh keys are still the person's: every member's keys are projected, so
-a teammate can ssh into a team workspace.
-
-## Related
-
-- [Connections and intercepts](connections.md)
-- [Snapshots](snapshots.md)
-- [Workspace API](../reference/api/workspaces.md)
+::: cards
+- [Create a workspace](../workspaces/create.md) — Every field of the create request.
+- [Lifecycle](../workspaces/lifecycle.md) — Start, stop, delete, and what each keeps.
+- [ssh](../workspaces/ssh.md) — Connect from a terminal, an editor, or an agent.
+:::

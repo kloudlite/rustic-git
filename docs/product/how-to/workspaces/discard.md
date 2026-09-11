@@ -1,1 +1,0 @@
-# Discard a Workspace
