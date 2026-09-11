@@ -32,27 +32,57 @@ pub async fn exec(
         ..Default::default()
     };
     tokio::time::timeout(timeout, async {
-        let mut p = api.exec(pod, argv.iter().copied(), &params).await.context("could not exec")?;
-        let mut out = p.stdout().ok_or_else(|| anyhow!("no stdout"))?;
-        let mut err = p.stderr().ok_or_else(|| anyhow!("no stderr"))?;
-        let status = p.take_status().ok_or_else(|| anyhow!("no status"))?;
-        // Both streams drained CONCURRENTLY: the reader ends of the two are one duplex pair, and
-        // reading one to the end while the other's buffer fills is a deadlock, not a slow read.
-        let (mut o, mut e) = (String::new(), String::new());
-        let (a, b) = tokio::join!(out.read_to_string(&mut o), err.read_to_string(&mut e));
-        a.context("reading stdout")?;
-        b.context("reading stderr")?;
-        let status = status.await;
-        // An exec the API server refused ("container not found", "pod is terminating") carries
-        // no ExitCode; without its message a refusal read as `exited 1:` with nothing after it.
-        let refusal = status.as_ref().filter(|s| s.status.as_deref() != Some("Success")).and_then(|s| s.message.clone());
-        if let Some(m) = refusal.filter(|_| e.trim().is_empty()) {
-            e = m;
+        // The exec is one command in one pod, but the path to it is two hops (api server, then the
+        // kubelet through k3s's tunnel) and either can drop ONE handshake: on 2026-09-11 15:02:53
+        // the session-0 kubelet logged a single "TLS handshake error … EOF" all day, at the
+        // millisecond the hourly's `env.exec.ok` dialled it, 100 ms after the pod started, and
+        // the step failed with 30 s of ceiling unspent. A transport failure — never the command's
+        // own outcome — is retried until the ceiling, one second apart.
+        loop {
+            match attempt(&api, pod, argv, &params).await {
+                Ok(r) => return Ok(r),
+                Err(e) if transient(&format!("{e:#}")) => {
+                    tracing::info!(pod, error = %format!("{e:#}"), "slo.exec.retry");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
         }
-        Ok((code(status), o, e))
     })
     .await
     .map_err(|_| anyhow!("exec timed out after {} ms", timeout.as_millis()))?
+}
+/// One exec, with the api server's refusal surfaced as an `Err` so the loop above can tell a
+/// transport failure from a command that ran and failed.
+async fn attempt(api: &Api<Pod>, pod: &str, argv: &[&str], params: &AttachParams) -> Result<(i32, String, String)> {
+    let mut p = api.exec(pod, argv.iter().copied(), params).await.context("could not exec")?;
+    let mut out = p.stdout().ok_or_else(|| anyhow!("no stdout"))?;
+    let mut err = p.stderr().ok_or_else(|| anyhow!("no stderr"))?;
+    let status = p.take_status().ok_or_else(|| anyhow!("no status"))?;
+    // Both streams drained CONCURRENTLY: the reader ends of the two are one duplex pair, and
+    // reading one to the end while the other's buffer fills is a deadlock, not a slow read.
+    let (mut o, mut e) = (String::new(), String::new());
+    let (a, b) = tokio::join!(out.read_to_string(&mut o), err.read_to_string(&mut e));
+    a.context("reading stdout")?;
+    b.context("reading stderr")?;
+    let status = status.await;
+    // An exec the API server refused ("container not found", "pod is terminating") carries
+    // no ExitCode; without its message a refusal read as `exited 1:` with nothing after it.
+    let refusal = status.as_ref().filter(|s| s.status.as_deref() != Some("Success")).and_then(|s| s.message.clone());
+    if let Some(m) = refusal.filter(|_| e.trim().is_empty()) {
+        if transient(&m) {
+            return Err(anyhow!("{m}"));
+        }
+        e = m;
+    }
+    Ok((code(status), o, e))
+}
+/// The api server's words for "the hop to the kubelet failed" — the request never reached the
+/// command, so running it again cannot double an effect. Anything else is the command's answer.
+fn transient(msg: &str) -> bool {
+    ["error sending request", "EOF", "connection reset", "TLS handshake", "connection refused", "error dialing backend"]
+        .iter()
+        .any(|k| msg.contains(k))
 }
 
 /// The exit code the API server reports for a finished exec. `Success` is 0; a failure carries the
