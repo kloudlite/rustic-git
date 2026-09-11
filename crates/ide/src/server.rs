@@ -1,6 +1,7 @@
 //! The HTTP surface: `/healthz`, `/mcp`, and the two streams. Loopback only — see the crate doc.
+use crate::graft::Graft;
 use crate::procs::Procs;
-use crate::tools::{exec::Exec, files::Files, watch::WatchTools, Registry};
+use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
 use crate::watches::Watches;
 use crate::Config;
 use axum::{extract::State, routing::{get, post}, Json, Router};
@@ -11,18 +12,26 @@ pub struct App {
     pub registry: Registry,
     pub procs: Arc<Procs>,
     pub watches: Arc<Watches>,
+    pub graft: Arc<Graft>,
 }
 
 impl App {
+    /// Wires everything; `Graft::start` is the caller's (`serve`) so a test App spawns nothing.
     pub fn new(cfg: Config) -> Self {
         let procs = Arc::new(Procs::default());
         let watches = Arc::new(Watches::default());
+        let graft = Graft::new(cfg.root.clone(), cfg.graft_dir.clone());
+        let after: Arc<dyn Fn() + Send + Sync> = {
+            let g = graft.clone();
+            Arc::new(move || g.refresh_soon())
+        };
         let registry = Registry::new(vec![
-            Box::new(Files { root: cfg.root.clone(), home: cfg.home.clone() }),
-            Box::new(Exec { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone() }),
+            Box::new(Files { root: cfg.root.clone(), home: cfg.home.clone(), after_change: Some(after.clone()) }),
+            Box::new(Exec { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), after_change: Some(after) }),
             Box::new(WatchTools { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), watches: watches.clone() }),
+            Box::new(GraftTools { graft: graft.clone(), procs: procs.clone() }),
         ]);
-        App { cfg, registry, procs, watches }
+        App { cfg, registry, procs, watches, graft }
     }
 }
 
@@ -36,12 +45,13 @@ pub fn router(app: Arc<App>) -> Router {
 }
 
 async fn healthz(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true, "root": app.cfg.root, "graph": "unknown" }))
+    Json(serde_json::json!({ "ok": true, "root": app.cfg.root, "graph": app.graft.state() }))
 }
 
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let bind = cfg.bind;
     let app = Arc::new(App::new(cfg));
+    app.graft.start();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "ide.listening");
     axum::serve(listener, router(app)).await?;
@@ -83,7 +93,7 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["name"], "kl-ide");
         let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
         let names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop"]);
+        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_check_freshness", "graft_build", "graft_blast"]);
         let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"path":"a.txt"}}})).await;
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("two"));

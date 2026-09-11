@@ -19,6 +19,8 @@ pub struct Exec {
     pub root: PathBuf,
     pub home: PathBuf,
     pub procs: Arc<Procs>,
+    /// Called after every finished job: a command may have moved the tree.
+    pub after_change: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Build the command: argv or a shell string, cwd confined, env merged, its own process group so
@@ -121,7 +123,11 @@ impl ToolSet for Exec {
                         return Ok(json!({ "id": id }));
                     }
                     let timeout = opt_u64(&args, "timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
-                    job(cmd, timeout).await
+                    let r = job(cmd, timeout).await;
+                    if let Some(f) = &self.after_change {
+                        f();
+                    }
+                    r
                 }
                 "process_list" => Ok(json!({ "processes": self.procs.list().iter().map(|p| {
                     let g = p.lock().unwrap_or_else(|q| q.into_inner());
@@ -163,7 +169,7 @@ mod tests {
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("ws");
         std::fs::create_dir_all(&root).unwrap();
-        (tmp, Exec { root, home, procs: Arc::new(Procs::default()) })
+        (tmp, Exec { root, home, procs: Arc::new(Procs::default()), after_change: None })
     }
 
     #[tokio::test]

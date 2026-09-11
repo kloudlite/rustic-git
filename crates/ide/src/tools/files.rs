@@ -6,6 +6,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const MAX_BYTES: u64 = 10 << 20;
 pub const MAX_GREP: usize = 2_000;
@@ -14,6 +15,8 @@ pub const MAX_GLOB: usize = 5_000;
 pub struct Files {
     pub root: PathBuf,
     pub home: PathBuf,
+    /// Called after every `write` and `edit`: the graph refresh, wired by the server.
+    pub after_change: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 fn io(e: std::io::Error, p: &Path) -> ToolError {
@@ -189,7 +192,8 @@ impl ToolSet for Files {
         async move {
             let (root, home, name) = (self.root.clone(), self.home.clone(), name.to_string());
             // File work is blocking I/O; off the reactor so a 10 MiB read never stalls a stream.
-            tokio::task::spawn_blocking(move || match name.as_str() {
+            let changes = matches!(name.as_str(), "write" | "edit");
+            let r = tokio::task::spawn_blocking(move || match name.as_str() {
                 "read" => read(&root, &home, &args),
                 "write" => write(&root, &home, &args),
                 "edit" => edit(&root, &home, &args),
@@ -198,7 +202,13 @@ impl ToolSet for Files {
                 other => Err(ToolError::Unknown(other.to_string())),
             })
             .await
-            .map_err(|e| ToolError::Failed(format!("task: {e}")))?
+            .map_err(|e| ToolError::Failed(format!("task: {e}")))?;
+            if changes && r.is_ok() {
+                if let Some(f) = &self.after_change {
+                    f();
+                }
+            }
+            r
         }
         .boxed()
     }

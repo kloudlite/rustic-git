@@ -2,6 +2,7 @@
 //! (`ide.call`: tool, ms, ok, bytes) — the pod log is the record, there is no metrics endpoint.
 pub mod exec;
 pub mod files;
+pub mod graft;
 pub mod watch;
 
 use futures::future::BoxFuture;

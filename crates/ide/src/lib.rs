@@ -13,6 +13,7 @@
 //! (JSON-RPC over `POST /mcp`), `paths` (confinement to the home), `tools/` (one file per tool
 //! family), `procs` (detached processes and their ring buffers), `stream` (the two WebSocket
 //! streams), `graft` (the child and the freshness triggers).
+pub mod graft;
 pub mod guard;
 pub mod mcp;
 pub mod paths;
