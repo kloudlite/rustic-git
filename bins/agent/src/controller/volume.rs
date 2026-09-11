@@ -88,17 +88,31 @@ async fn collect_unreferenced(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<bool, R
         return Ok(false);
     }
     let name = v.name_any();
+    // A listing that fails keeps the Volume and lets the ordinary apply run: this is a
+    // collector, and "could not see everything" is never grounds to delete. The sweep gets
+    // another look on its own beat.
     let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let items = snaps
-        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={name}")))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?
-        .items;
+    let items = match snaps.list(&kube::api::ListParams::default().fields(&format!("spec.volume={name}"))).await {
+        Ok(l) if whole_listing(&l) => l.items,
+        Ok(_) => {
+            tracing::warn!(volume = %name, "volume.collect.skipped");
+            return Ok(false);
+        }
+        Err(e) => {
+            tracing::warn!(volume = %name, error = %e, "volume.collect.skipped");
+            return Ok(false);
+        }
+    };
     if items.iter().any(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != Phase::Error)) {
         return Ok(false);
     }
-    if parent_names_volume(ctx, &name).await? {
-        return Ok(false);
+    match parent_names_volume(ctx, &name).await {
+        Ok(false) => {}
+        Ok(true) => return Ok(false),
+        Err(e) => {
+            tracing::warn!(volume = %name, error = %e.0, "volume.collect.skipped");
+            return Ok(false);
+        }
     }
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
     let dp = kube::api::DeleteParams {
@@ -128,14 +142,27 @@ pub(crate) fn names_volume(vref: Option<&String>, own: &str, storage: Option<&cr
             Some(VolumeSource::CloneOf { volume: v, .. } | VolumeSource::SeededFrom { volume: v, .. }) if v == volume
         )
 }
+/// A real LIST answer carries the collection's resourceVersion; a `Status` body a client is
+/// willing to read as "zero items" does not. A collector that took the second for the first would
+/// delete on the strength of an error, so it is refused here rather than trusted.
+fn whole_listing<K: Clone>(l: &kube::core::ObjectList<K>) -> bool {
+    l.metadata.resource_version.is_some()
+}
 async fn parent_names_volume(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, ReconcileErr> {
     let names = names_volume;
     let lp = kube::api::ListParams::default();
+    let partial = || ReconcileErr("the parent listing carried no resourceVersion".into());
     let ws = Api::<crd::Workspace>::all(ctx.client.clone()).list(&lp).await.map_err(|e| ReconcileErr(e.to_string()))?;
+    if !whole_listing(&ws) {
+        return Err(partial());
+    }
     if ws.items.iter().any(|w| names(w.status.as_ref().and_then(|s| s.volume_ref.as_ref()), &w.name_any(), w.spec.storage.as_ref(), volume)) {
         return Ok(true);
     }
     let envs = Api::<crd::Environment>::all(ctx.client.clone()).list(&lp).await.map_err(|e| ReconcileErr(e.to_string()))?;
+    if !whole_listing(&envs) {
+        return Err(partial());
+    }
     Ok(envs.items.iter().any(|e| names(e.status.as_ref().and_then(|s| s.volume_ref.as_ref()), &e.name_any(), e.spec.storage.as_ref(), volume)))
 }
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
