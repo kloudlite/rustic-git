@@ -14,7 +14,10 @@
 //! family), `procs` (detached processes and their ring buffers), `stream` (the two WebSocket
 //! streams), `graft` (the child and the freshness triggers).
 pub mod guard;
+pub mod mcp;
+pub mod paths;
 pub mod server;
+pub mod tools;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
