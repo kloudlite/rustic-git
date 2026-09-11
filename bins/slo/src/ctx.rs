@@ -166,8 +166,15 @@ impl Ctx {
             other_email: email_of(&cfg.other_user),
             // One client for the whole run: connection reuse is the difference between a p95 that
             // measures the fleet and one that measures TLS handshakes.
+            // Bounded at every layer: a connect that does not complete in 5 s is an answer, and
+            // a pooled connection idle past 30 s is dropped before it can be reused dead — one
+            // `audit.row` sample on 2026-09-11 17:26 was a POST to an in-cluster ClusterIP that
+            // sat 20 s on the wire with the admin process idle.
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
+                .connect_timeout(Duration::from_secs(5))
+                .pool_idle_timeout(Duration::from_secs(30))
+                .tcp_keepalive(Duration::from_secs(30))
                 .build()
                 .map_err(|e| anyhow::anyhow!("http client: {e}"))?,
             // Reads `KUBECONFIG` (or the in-cluster ServiceAccount) itself, which is why `Config`

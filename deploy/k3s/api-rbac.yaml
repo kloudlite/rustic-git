@@ -125,7 +125,7 @@ rules:
   # user-role process writing one of these, because that process's ServiceAccount cannot.
   - apiGroups: ["kloudlite.io"]
     resources: ["quotas"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
   - apiGroups: ["kloudlite.io"]
     resources: ["quotarequests"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
