@@ -249,6 +249,11 @@ pub fn condition_since(
 }
 
 
+/// `t` with its sub-second part dropped — see `condition_now` for why a condition must never
+/// carry nanoseconds.
+pub fn whole_second(t: k8s_openapi::jiff::Timestamp) -> k8s_openapi::jiff::Timestamp {
+    k8s_openapi::jiff::Timestamp::from_second(t.as_second()).unwrap_or(t)
+}
 pub(super) fn condition_now(kind: &str, status: bool, reason: &str, message: &str, generation: i64) -> Condition {
     Condition {
         type_: kind.to_string(),
@@ -259,14 +264,32 @@ pub(super) fn condition_now(kind: &str, status: bool, reason: &str, message: &st
         // The API server rejects a condition with no transition time, and a reconcile has no
         // better clock than now. `jiff`, not chrono: k8s-openapi 0.28 wraps `jiff::Timestamp`
         // here, so this is the one place in the crate that does not use the workspace's chrono.
+        //
+        // WHOLE SECONDS, never nanoseconds. Measured against the k3s API on 2026-09-11: a
+        // server-side apply whose `lastTransitionTime` carries a fraction of a second is written
+        // on EVERY apply, byte-identical or not (the resourceVersion moves each time), while the
+        // same apply at second precision is a no-op after the first. Every write is a watch event
+        // on every node, and every node's controller applied again — `OwnerKeys/slo-probe` was
+        // patched 180 times a second for 24 minutes that morning, and the third node's keys loop
+        // sat in the API server's queue behind it for nine minutes with a revoked key still
+        // admitted. A second is all `kubectl wait` ever reads anyway.
         last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-            k8s_openapi::jiff::Timestamp::now(),
+            whole_second(k8s_openapi::jiff::Timestamp::now()),
         ),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A condition's transition time carries no fraction of a second: see `condition_now`.
+    #[test]
+    fn a_condition_is_stamped_at_whole_seconds() {
+        let c = condition("Ready", true, "Converged", "ok", 1);
+        assert_eq!(c.last_transition_time.0.subsec_nanosecond(), 0);
+        let t = k8s_openapi::jiff::Timestamp::from_second(1_700_000_000).unwrap() + k8s_openapi::jiff::SignedDuration::from_nanos(123_456_789);
+        assert_eq!(whole_second(t).subsec_nanosecond(), 0);
+        assert_eq!(whole_second(t).as_second(), 1_700_000_000);
+    }
     use super::*;
 
     /// The backoff on a repeatedly failing build reads `lastTransitionTime` to know how long it

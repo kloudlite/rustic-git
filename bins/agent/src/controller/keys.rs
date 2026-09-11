@@ -58,6 +58,7 @@ fn stale_owners(pool: &str, live: &HashSet<String>) -> Vec<String> {
 /// converge, under one field manager. That answers the only question asked of it — "is this key
 /// live" — because every node runs the same loop off the same watch within seconds.
 async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
+    let started = std::time::Instant::now();
     let owner = obj.name_any();
     let generation = obj.spec.generation;
     let prev = obj.status.as_ref().and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::KEYS_SYNCED));
@@ -69,6 +70,19 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
             (false, "WriteFailed", "could not write this node's keys file")
         }
     };
+    // The file is per NODE and was just written; the status is per CLUSTER and is only worth a
+    // write when it does not already say this. Every node converges on every event, and a status
+    // write IS an event on every node: with an unconditional patch here, three nodes echoed one
+    // another at 180 patches a second for 24 minutes on 2026-09-11 (see `crd::condition_now`
+    // for the nanosecond half of that loop). A status that already carries this generation and
+    // this reason is left alone, and the loop has nothing to feed on.
+    let settled = ok
+        && obj.status.as_ref().and_then(|s| s.observed_generation) == Some(generation)
+        && prev.is_some_and(|c| c.status == "True" && c.reason == reason);
+    if settled {
+        tracing::debug!(%owner, generation, reason, "keys.converged.unchanged");
+        return;
+    }
     let mut status = serde_json::json!({
         "conditions": [crd::condition_since(prev, crd::KEYS_SYNCED, ok, reason, msg, generation)],
     });
@@ -90,7 +104,16 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
     match api.patch_status(&owner, &params, &kube::api::Patch::Apply(&body)).await {
         // One line per event per node, so a node whose file lags is named rather than inferred
         // from file mtimes after the fact.
-        Ok(_) => tracing::info!(%owner, generation, reason, "keys.converged"),
+        Ok(_) => {
+            let ms = started.elapsed().as_millis() as u64;
+            tracing::info!(%owner, generation, reason, ms, "keys.converged");
+            // A converge that took this long was waiting on the API server, and the loop that
+            // runs it is single-file: nothing else converged meanwhile. Named, so a queued node
+            // is read from its own log rather than inferred from another node's silence.
+            if ms > 5_000 {
+                tracing::warn!(%owner, ms, "keys.converge.slow");
+            }
+        }
         // The object is gone, so there is nothing to say it in and nobody left to admit: the same
         // revoke the Delete event does, which a deletion this node was disconnected across never
         // delivered.
@@ -195,6 +218,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The echo loop's fuel: a status that already says this generation and reason is NOT
+    /// patched again. The file is still written (it is this node's), the API is not touched.
+    #[tokio::test]
+    async fn a_settled_status_is_not_patched_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, rec) = crate::testsupport::test_ctx(tmp.path(), "node-a", vec![]);
+        let api: Api<crd::OwnerKeys> = Api::all(ctx.client.clone());
+        let mut obj: crd::OwnerKeys = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeys",
+            "metadata": {"name": "acme"},
+            "spec": {"generation": 7, "authorizedKeys": "ssh-ed25519 AAAA a\n"},
+            "status": {"observedGeneration": 7, "conditions": [{
+                "type": crd::KEYS_SYNCED, "status": "True", "reason": "Applied", "message": "m",
+                "observedGeneration": 7, "lastTransitionTime": "2026-09-11T00:00:00Z"}]}
+        }))
+        .unwrap();
+        converge(&ctx, &api, obj.clone()).await;
+        assert!(rec.calls().iter().all(|c| !c.contains("PATCH")), "settled: no status write, got {:?}", rec.calls());
+        assert_eq!(std::fs::read_to_string(kloudlite_workspaces::k8s::keys_file(&ctx.pool, "acme")).unwrap(), "ssh-ed25519 AAAA a\n");
+        // A new generation is a real change and is written.
+        obj.spec.generation = 8;
+        converge(&ctx, &api, obj).await;
+        assert!(rec.calls().iter().any(|c| c.contains("PATCH")), "a new generation is patched, got {:?}", rec.calls());
+    }
 
     /// The 2026-09-08 outage in one test: the watch stream ends, and the loop must build a new one
     /// instead of returning and taking the resync tick down with it.

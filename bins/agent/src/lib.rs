@@ -249,7 +249,14 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     nix::ensure_gcroot();
     // The CRDs must be Established before the watch starts, or it fails at startup and the
     // controller sits idle looking healthy. Fail loudly here rather than in production.
-    let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
+    // `infer`, then a READ timeout: kube's default is none, so a request the API server queues —
+    // priority-and-fairness held one node's `OwnerKeys` status patch for nine minutes behind a
+    // patch storm on 2026-09-11 — blocks the loop that made it for as long as the server likes.
+    // 120 s never cuts a healthy watch: every watch here asks for `timeoutSeconds` 60
+    // (`controller::watch_config`), so the server ends it first.
+    let mut config = kube::Config::infer().await.map_err(|e| e.to_string())?;
+    config.read_timeout = Some(std::time::Duration::from_secs(120));
+    let client = kube::Client::try_from(config).map_err(|e| e.to_string())?;
     let has_pool = node_has_pool(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, has_pool, "node.pool");
     // Resolved BEFORE `Ctx`: `Ctx::new` reads the boot-marked fields (`default_image`,

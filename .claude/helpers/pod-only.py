@@ -66,7 +66,7 @@ elif tool == "NotebookEdit":
     deny("Notebook edits are not bridged to the dev pod; edit it there.")
 elif tool == "Bash":
     cmd = inp.get("command", "")
-    if any(k in cmd for k in ("kubectl exec", "exec.sh", "ship.sh", "sync.sh", "test.sh")):
+    if any(k in cmd for k in ("exec.sh", "ship.sh", "sync.sh", "test.sh")) or ("kubectl" in cmd and " exec " in cmd):
         sys.exit(0)
     import re
     if re.search(r"(^|[\s;&|(])cargo(\s|$)", cmd):
