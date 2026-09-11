@@ -395,6 +395,8 @@ pub(crate) async fn delete_snapshot(
     // EVERY parent on the volume, not just the caller's: a shared clone's worktree belongs to
     // another owner, and its head is just as much a running base as this owner's own.
     if live.iter().any(|p| p.head.as_deref() == Some(snapshot.as_str()) || p.base.as_deref() == Some(snapshot.as_str())) {
+        let parents: Vec<String> = live.iter().map(|p| format!("{}:{}", p.kind, p.display)).collect();
+        tracing::warn!(volume = %name, %snapshot, ?parents, "snapshot.delete.refused");
         return Err((StatusCode::CONFLICT, "this snapshot is the base of a running worktree").into_response());
     }
     let api: Api<crd::Snapshot> = Api::all(kube(&s)?.clone());
@@ -416,9 +418,15 @@ pub(crate) async fn delete_snapshot(
             && sn.is_snapshot()
             && sn.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error)
     });
-    if !remaining && live.is_empty() {
+    let volume_deleted = !remaining && live.is_empty();
+    if volume_deleted {
         delete_volume_cr(&s, &name).await?;
     }
+    // The one line that says why a detached volume did or did not go with its last snapshot:
+    // sixty seconds of a probe's deletes on 2026-09-11 10:03 left a Volume standing and nothing
+    // in any log said which half of this condition held.
+    let parents: Vec<String> = live.iter().map(|p| format!("{}:{}", p.kind, p.display)).collect();
+    tracing::info!(volume = %name, %snapshot, remaining, ?parents, volume_deleted, "snapshot.deleted");
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

@@ -322,8 +322,7 @@ pub async fn serve(
         // GET only. These are read-only views, and forwarding a POST as a GET (which is what
         // `any` did) would let a method the fleet never sees drive the cache.
         .fallback(axum::routing::get(handle))
-        .layer(tower_http::compression::CompressionLayer::new())
-        .layer(axum::middleware::from_fn_with_state("api", kloudlite_core::metrics::http_metrics));
+        .layer(tower_http::compression::CompressionLayer::new());
     // Only the admin process compiles the superadmin roster routes in at all — same reasoning as
     // `workspaces_router` in `bins/api`'s main.rs: a user-role process must not be able to answer
     // them even if a future auth bug forgets to check the claim.
@@ -344,6 +343,11 @@ pub async fn serve(
         Some(ws) => app.merge(ws),
         None => app,
     };
+    // OUTERMOST, and after the merge: until 2026-09-11 this sat above the merge, so every
+    // `/v1/workspaces`, `/v1/environments` and `/v1/volumes` write — the ones a stuck object is
+    // asked about — produced no `http.write` line while `/v1/tokens` did, and a probe's sixty
+    // seconds of snapshot deletes left no trace of what the api answered.
+    let app = app.layer(axum::middleware::from_fn_with_state("api", kloudlite_core::metrics::http_metrics));
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -650,7 +650,13 @@ async fn orphan_collected(c: &mut Ctx, volume: &str) {
                 }
                 for id in snapshots(c, &volume).await {
                     let url = api(c, &format!("/v1/volumes/{volume}/snapshots/{id}"));
-                    let _ = super::call(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None).await;
+                    // The answer is evidence, not a verdict: a 409 naming a parent, or a 2xx
+                    // that still leaves the Volume standing, is what the sixty seconds of
+                    // 2026-09-11 10:03 could not say.
+                    match super::raw(c, reqwest::Method::DELETE, &url, &c.probe_jwt.clone(), None, &[]).await {
+                        Ok((status, text)) => tracing::warn!(url, %status, answer = %text.chars().take(300).collect::<String>(), "slo.step.evidence"),
+                        Err(e) => tracing::warn!(url, error = %e, "slo.step.evidence"),
+                    }
                 }
                 // `retire_pass` deletes a Volume with no owner entry AND no snapshot, so the
                 // detach is the half that has to happen first — a Volume that still lists its

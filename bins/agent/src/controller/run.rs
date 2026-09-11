@@ -156,6 +156,12 @@ where
                 tracing::info!(kind, %name, %rv, age_ms, "event.seen");
             }
         }
+        // A delete is the write most often asked about after the fact, and the only trace it
+        // left was a later "not found in local store" — which says the object is gone, not
+        // when it was asked to go.
+        if let Some(t) = obj.meta().deletion_timestamp.as_ref() {
+            tracing::info!(kind, %name, %rv, deleted_at = %t.0, "event.deleting");
+        }
     }
     let start = std::time::Instant::now();
     let r = fut.await;
