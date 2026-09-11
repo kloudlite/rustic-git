@@ -20,7 +20,7 @@ flowchart LR
 | `web/` | Next.js app in `web/apps/web` |
 | `deploy/` | AKS and k3s manifests, `deploy/dev/` (the dev pod), `slo.md`, `alerts.md` |
 | `tests/` | integration suite and the two e2e scripts |
-| `docs/` | capacity model, migrations, design docs |
+| `docs/` | capacity model, migrations, design docs; `docs/product/` is the user-facing product documentation (concepts, how-to, tutorials, reference) |
 
 Code is built, tested and shipped from the `dev` pod on AKS, never a laptop: see
 `deploy/dev/README.md`. `CLAUDE.md` has the invariants and the deploy flow.
