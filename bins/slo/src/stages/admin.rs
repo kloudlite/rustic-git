@@ -266,7 +266,7 @@ fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
             state(bad)
         ));
     }
-    // Every state is one of the four the evaluator writes: an unrecognised word renders as a
+    // Every state is one of the three the evaluator writes: an unrecognised word renders as a
     // colourless cell nobody can act on.
     if let Some(bad) = rows.iter().find(|r| !STATES.contains(&state(r).as_str())) {
         return Err(anyhow!("a rule in {region} reports `{}`, which is not a state", state(bad)));
@@ -292,7 +292,11 @@ fn evaluating(rows: &[&Value], region: &str) -> anyhow::Result<()> {
 }
 
 /// The four words `history::alerts` writes, and the fill's own.
-const STATES: [&str; 4] = ["ok", "warn", "critical", "unknown"];
+/// The evaluator's own vocabulary (): a rule is , , or 
+/// when its window had no samples. A firing rule is a valid state — the fleet may well have a
+/// page open — and this check is about the WORDS, not the health;  failed on
+/// 2026-09-11 the first time any rule ever fired, because this list had the old severities.
+const STATES: [&str; 3] = ["ok", "firing", "unknown"];
 
 /// The rows of a list route, whatever it wraps them in: `/admin/requests` answers a bare array.
 fn rows(v: &Value) -> Vec<Value> {

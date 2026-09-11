@@ -115,10 +115,13 @@ fn now_ms() -> i64 {
 /// late" question needs.
 fn last_write_ms<K: Resource>(obj: &K) -> Option<i64> {
     let meta = obj.meta();
-    meta.managed_fields
-        .as_ref()
-        .and_then(|mf| mf.iter().filter_map(|m| m.time.as_ref().map(|t| t.0.as_millisecond())).max())
-        .or_else(|| meta.creation_timestamp.as_ref().map(|t| t.0.as_millisecond()))
+    // A delete sets  and bumps the resourceVersion without touching
+    // , so it is the newest write whenever it is set; every other write is
+    // recorded by its field manager.
+    let managed = meta.managed_fields.as_ref().and_then(|mf| mf.iter().filter_map(|m| m.time.as_ref().map(|t| t.0.as_millisecond())).max());
+    let deleted = meta.deletion_timestamp.as_ref().map(|t| t.0.as_millisecond());
+    let created = meta.creation_timestamp.as_ref().map(|t| t.0.as_millisecond());
+    [managed, deleted, created].into_iter().flatten().max()
 }
 
 /// Every reconcile of every kind passes through here, so the two questions a stuck object raises
