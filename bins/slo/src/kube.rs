@@ -168,4 +168,15 @@ mod tests {
         };
         assert_eq!(code(Some(failed)), 7);
     }
+
+    /// A hop that never reached the command is retried; the command's own words are not.
+    #[test]
+    fn only_a_failed_hop_to_the_kubelet_is_transient() {
+        for m in ["error sending request for url", "unexpected EOF", "connection reset by peer", "TLS handshake timeout", "connection refused", "error dialing backend: dial tcp"] {
+            assert!(transient(m), "{m}");
+        }
+        for m in ["command terminated with exit code 1", "cat: no such file", "permission denied", ""] {
+            assert!(!transient(m), "{m}");
+        }
+    }
 }
