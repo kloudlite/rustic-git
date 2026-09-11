@@ -332,7 +332,11 @@ pub(crate) fn a_workspace_pod_mounts_its_volume_at_workspace_and_only_there() {
     let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.host_path.is_some());
     assert_eq!(claims.count(), 1);
     let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
-    assert_eq!(mounts.iter().filter(|m| m.name == "live").count(), 1, "the nginx web-root mount is gone with nginx");
+    // One mount of the WHOLE subvolume, at the workspace path; every other `live` mount is a
+    // `.cache/` subPath (the registry, the editor servers) and never the root again.
+    let whole: Vec<_> = mounts.iter().filter(|m| m.name == "live" && m.sub_path.is_none()).collect();
+    assert_eq!(whole.len(), 1, "the nginx web-root mount is gone with nginx");
+    assert!(mounts.iter().all(|m| m.name != "live" || m.sub_path.is_none() || m.sub_path.as_deref().unwrap().starts_with(".cache/")));
     assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/dev" && m.read_only.is_none()));
 }
 
@@ -400,12 +404,9 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
     let mounts = s.containers[0].volume_mounts.clone().unwrap();
     let sub = |mp: &str| mounts.iter().find(|m| m.mount_path == mp).map(|m| (m.name.clone(), m.sub_path.clone()));
     assert_eq!(sub(HOME_CACHE_DIR), Some(("homecache".into(), Some("cache".into()))));
-    assert_eq!(sub("/home/kl/.cargo/registry"), Some(("homecache".into(), Some("cargo-registry".into()))));
-    assert_eq!(sub("/home/kl/.vscode-server"), Some(("homecache".into(), Some("vscode-server".into()))));
-    assert_eq!(sub("/home/kl/.cursor-server"), Some(("homecache".into(), Some("cursor-server".into()))));
-    assert_eq!(sub("/home/kl/.zed_server"), Some(("homecache".into(), Some("zed-server".into()))));
-    assert_eq!(sub("/home/kl/.windsurf-server"), Some(("homecache".into(), Some("windsurf-server".into()))));
-    assert_eq!(sub("/home/kl/.jetbrains"), Some(("homecache".into(), Some("jetbrains".into()))));
+    for (path, dir) in [("/home/kl/.cargo/registry", "cargo-registry"), ("/home/kl/.vscode-server", "vscode-server"), ("/home/kl/.cursor-server", "cursor-server"), ("/home/kl/.zed_server", "zed-server"), ("/home/kl/.windsurf-server", "windsurf-server"), ("/home/kl/.jetbrains", "jetbrains")] {
+        assert_eq!(sub(path), Some(("live".into(), Some(format!(".cache/{dir}")))), "{path} travels with the tree");
+    }
     assert_eq!(sub(HOME_STATE_DIR), Some(("homecache".into(), Some("state".into()))));
 }
 
@@ -414,21 +415,20 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
 pub(crate) fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
     let env = login_env("ws-1", "acme", "registry.kloudlite.io");
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
-    assert_eq!(get("XDG_CACHE_HOME"), format!("{HOME_CACHE_DIR}/xdg"));
     assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
-    // Global, project-independent, rebuildable in seconds: node-local homecache.
-    for (var, sub) in [
-        ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
-        ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
-        ("DENO_DIR", "deno"), ("YARN_CACHE_FOLDER", "yarn"), ("COMPOSER_CACHE_DIR", "composer"),
-        ("NUGET_PACKAGES", "nuget"), ("TMPDIR", "tmp"),
-    ] {
-        assert_eq!(get(var), format!("{HOME_CACHE_DIR}/{sub}"), "{var}");
-    }
-    assert_eq!(get("MAVEN_OPTS"), format!("-Dmaven.repo.local={HOME_CACHE_DIR}/m2"));
-    // Per-project build output lives WITH the project, under `{ws}/.cache/`, so a clone or a
-    // restore arrives warm — and never at a tool's own `./target`, which a repository may version.
+    // Every cache lives WITH the workspace, under `{ws}/.cache/`, so a clone or a restore arrives
+    // warm — and never at a tool's own `./target`, which a repository may version.
     let ws = workspace_dir("ws-1");
+    for (var, sub) in [
+        ("XDG_CACHE_HOME", "xdg"), ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
+        ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
+        ("DENO_DIR", "deno"), ("YARN_CACHE_FOLDER", "yarn"), ("COMPOSER_CACHE_DIR", "composer"), ("NUGET_PACKAGES", "nuget"),
+    ] {
+        assert_eq!(get(var), format!("{ws}/.cache/{sub}"), "{var}");
+    }
+    assert_eq!(get("MAVEN_OPTS"), format!("-Dmaven.repo.local={ws}/.cache/m2"));
+    // Only what must not travel stays node-local.
+    assert_eq!(get("TMPDIR"), format!("{HOME_CACHE_DIR}/tmp"));
     assert_eq!(get("CARGO_TARGET_DIR"), format!("{ws}/.cache/cargo-target"));
     assert_eq!(get("GOCACHE"), format!("{ws}/.cache/go-build"));
     assert_eq!(get("PLAYWRIGHT_BROWSERS_PATH"), format!("{ws}/.cache/ms-playwright"));

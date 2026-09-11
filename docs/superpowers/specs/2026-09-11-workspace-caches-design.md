@@ -1,6 +1,15 @@
-# Where a workspace's caches live (spec, draft 1)
+# Where a workspace's caches live (spec)
 
-Status: draft for approval. Nothing implemented.
+Status: implemented 2026-09-11 (8f94cb87, then the addendum below).
+
+## Addendum (2026-09-11, owner's decision): every cache travels with the workspace
+
+The three-way sort below was superseded the same day: "we need to move everything that can be
+cached into the workspace folder." Everything §"Stay on homecache" lists — the package stores,
+`RUSTUP_HOME`, `GOMODCACHE`, `XDG_CACHE_HOME`, the `~/.cargo/registry` mount and every editor
+server mount — moved to `{ws}/.cache/`; the mounts became `live` subPath mounts of that directory.
+homecache keeps only `TMPDIR` and shell state. This is the platform standard and is documented
+as such in `docs/product/concepts/workspaces.md`.
 
 ## Why
 

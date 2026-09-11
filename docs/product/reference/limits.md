@@ -4,7 +4,7 @@
 |---|---|
 | Workspace name | 1–63 characters of `[A-Za-z0-9._-]`, unique per owner |
 | Service name | DNS label, ≤ 63 characters |
-| Default disk (`quota_gb`) | 50 GB for a workspace (the tree plus its build output), 20 GB for an environment |
+| Default disk (`quota_gb`) | 50 GB for a workspace (the tree plus every cache under `.cache/`), 20 GB for an environment |
 | Global git ignore | `.cache/`, `graft/`, `.direnv/` in `~/.config/git/ignore` |
 | Default image | `ghcr.io/kloudlite/kloudlite-workspace` |
 | Package pin forms | `attr`, `attr@latest`, `attr@N`, `attr@N.N`, `attr@N.N.N` |

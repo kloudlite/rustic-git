@@ -7,12 +7,12 @@ A workspace is one running pod with your source tree, a Nix profile of the packa
 | Path | What | Persists |
 |---|---|---|
 | `/home/kl/workspaces/{name}` | Your tree, a btrfs subvolume sized by `quota_gb` | Across stop and start; snapshotted by push; replicated |
-| `/home/kl/workspaces/{name}/.cache` | Build output: `CARGO_TARGET_DIR`, `GOCACHE`, Playwright browsers. Ignored by git globally | With the tree: a clone or a restore arrives warm |
+| `/home/kl/workspaces/{name}/.cache` | Every cache: build output (`CARGO_TARGET_DIR`, `GOCACHE`), package stores (npm, pnpm, bun, yarn, pip, uv, deno, Go modules, Maven, Composer, NuGet), toolchains (`RUSTUP_HOME`, the cargo registry), browsers, editor servers (VS Code, Cursor, Zed, Windsurf, JetBrains) | With the tree: a clone or a restore arrives warm |
 | `/home/kl` | Your home for the region: dotfiles, editor settings, credentials (`~/.cargo`, `~/.gradle`) | Across every workspace of yours in the region |
-| Package stores, editor servers, shell history | `~/.local-cache` (npm, pnpm, bun, pip, uv, go modules, rustup, the cargo registry, VS Code and JetBrains servers), `~/.local/state` | Per node; re-downloaded in seconds elsewhere |
+| `~/.local-cache/tmp`, `~/.local/state` | Temporary files and shell history | Per node; nothing worth keeping |
 | `PATH` | The packages in `packages`, plus a base set | Rebuilt from the spec on every start |
 
-Three homes, one rule each. The tree holds your project and everything derived from it, so build output moves with it. The home holds small configuration and follows you to every workspace. The node-local cache holds what is big, global and cheap to rebuild.
+**The standard: a workspace carries its caches.** Everything a tool would cache — build output, downloaded packages, toolchains, editor servers — lives under `.cache/` inside the workspace directory, so it is snapshotted by push, replicated on the sync beat, and present the moment a clone, a restore or a start on another node comes up. The home holds small configuration and follows you to every workspace. Nothing rebuildable is left behind on a node.
 
 What the platform places inside the tree — `.cache/`, `graft/`, `.direnv/` — is ignored by git through `~/.config/git/ignore`, never through a repository's own `.gitignore`.
 

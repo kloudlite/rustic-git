@@ -385,8 +385,8 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
     state_is_local(&out, cache, state)
 }
 
-/// `XDG_CACHE_HOME` points into the local cache, `CARGO_TARGET_DIR` into the WORKSPACE DIR (build
-/// output travels with the tree since 2026-09-11), and the state directory is a MOUNT of its own.
+/// `XDG_CACHE_HOME` and `CARGO_TARGET_DIR` point into the WORKSPACE DIR (every cache travels
+/// with the tree since 2026-09-11), and the state directory is a MOUNT of its own.
 ///
 /// A pure function so the judgement is testable without a pod. The state half used to compare
 /// `readlink -f /home/kl/.local/state` against `/home/kl/.local/state` — the same string either
@@ -395,13 +395,13 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
 /// ride the per-(owner, node) `homecache` volume through a separate subPath, and a state directory
 /// that had fallen back to the shared NFS home would be a plain directory under it with no mount
 /// line of its own.
-fn state_is_local(out: &str, cache: &str, state: &str) -> Result<()> {
+fn state_is_local(out: &str, _cache: &str, state: &str) -> Result<()> {
     let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    match lines.first() {
-        Some(v) if v.starts_with(cache) => {}
-        other => return Err(anyhow!("XDG_CACHE_HOME is {other:?}, not under the local cache at {cache}")),
-    }
     let ws = kloudlite_workspaces::k8s::WORKSPACES_DIR;
+    match lines.first() {
+        Some(v) if v.starts_with(ws) && v.ends_with("/.cache/xdg") => {}
+        other => return Err(anyhow!("XDG_CACHE_HOME is {other:?}, not `{ws}/<name>/.cache/xdg`")),
+    }
     match lines.get(1) {
         Some(v) if v.starts_with(ws) && v.ends_with("/.cache/cargo-target") => {}
         other => return Err(anyhow!("CARGO_TARGET_DIR is {other:?}, not `{ws}/<name>/.cache/cargo-target`")),
@@ -863,19 +863,20 @@ mod tests {
     fn the_state_dir_has_to_be_a_local_mount() {
         let cache = "/home/kl/.local-cache";
         let state = "/home/kl/.local/state";
+        let xdg = "/home/kl/workspaces/ws-1/.cache/xdg";
         let target = "/home/kl/workspaces/ws-1/.cache/cargo-target";
-        let ok = format!("{cache}/xdg\n{target}\nmount /dev/sda1 btrfs\ncachemount /dev/sda1 btrfs\n");
+        let ok = format!("{xdg}\n{target}\nmount /dev/sda1 btrfs\ncachemount /dev/sda1 btrfs\n");
         assert!(state_is_local(&ok, cache, state).is_ok());
-        // The failure the redirect exists for: state fell back onto the shared export.
-        let nfs = format!("{cache}/xdg\n{target}\nmount 10.0.0.4:/homes nfs4\n");
+        // The failure the state redirect exists for: state fell back onto the shared export.
+        let nfs = format!("{xdg}\n{target}\nmount 10.0.0.4:/homes nfs4\n");
         assert!(state_is_local(&nfs, cache, state).is_err());
         // No mount line at all: a plain directory on the home, which is the same failure quieter.
-        let bare = format!("{cache}/xdg\n{target}\n");
+        let bare = format!("{xdg}\n{target}\n");
         assert!(state_is_local(&bare, cache, state).is_err());
-        // The global cache still has to point into the local cache …
+        // Both caches have to point into the WORKSPACE DIR — not the home, not the node-local
+        // cache they used to live in.
         let wrong = format!("/home/kl/.cache\n{target}\nmount /dev/sda1 btrfs\n");
         assert!(state_is_local(&wrong, cache, state).is_err());
-        // … and build output into the WORKSPACE DIR, not the local cache it used to live in.
         let old = format!("{cache}/xdg\n{cache}/cargo-target\nmount /dev/sda1 btrfs\n");
         assert!(state_is_local(&old, cache, state).is_err());
     }
