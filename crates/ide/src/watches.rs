@@ -86,6 +86,10 @@ impl Watches {
             if g.state == State::Stopped {
                 return;
             }
+            // A read is not a change: `access` fired on every `cat` and doubled the events an agent saw.
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                return;
+            }
             let kind = format!("{:?}", ev.kind).to_lowercase();
             let kind = kind.split('(').next().unwrap_or("other").to_string();
             for p in ev.paths {

@@ -45,7 +45,7 @@ enum Cmd {
         src: String,
         dst: Vec<String>,
     },
-    /// The workspace tool server: files, exec, watch and graft over MCP on loopback
+    /// The workspace tool server: files, exec, watch and graft over a plain HTTP tool API on loopback
     Ide {
         #[command(subcommand)]
         cmd: IdeCmd,

@@ -23,10 +23,10 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
 
 /// `kl-connect ws ide <target>`: the same ssh, carrying only a port forward to the workspace's
 /// tool server (`kl ide serve`, loopback 7788 in the pod) and no shell. ssh itself is the
-/// authentication; the printed line is what an agent needs to attach.
+/// authentication; the printed lines are what a session layer needs to reach it.
 pub async fn ide(target: &str, port: u16) -> Result<(), String> {
     let banner = format!(
-        "kl-connect: {target}'s tool server is at http://localhost:{port}/mcp while this runs.\n  claude mcp add --transport http workspace http://localhost:{port}/mcp\n  curl http://localhost:{port}/healthz"
+        "kl-connect: {target}'s tool API is at http://localhost:{port}/tools while this runs.\n  curl http://localhost:{port}/healthz\n  curl -X POST http://localhost:{port}/tools/exec -d '{{\"cmd\":\"ls\"}}'"
     );
     let args = vec!["-N".to_string(), "-L".to_string(), format!("{port}:127.0.0.1:7788")];
     ssh_with(target, &args, Some(banner)).await

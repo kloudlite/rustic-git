@@ -1,4 +1,4 @@
-//! The HTTP surface: `/healthz`, `/mcp`, and the two streams. Loopback only — see the crate doc.
+//! The HTTP surface: `/healthz`, `/tools`, and the two streams. Loopback only — see the crate doc.
 use crate::graft::Graft;
 use crate::procs::Procs;
 use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
@@ -38,7 +38,8 @@ impl App {
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/mcp", post(crate::mcp::handle))
+        .route("/tools", get(crate::api::list))
+        .route("/tools/{name}", post(crate::api::call))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
         .with_state(app)
@@ -74,32 +75,37 @@ mod tests {
         assert_eq!(v["root"], "/home/kl/workspaces/api");
     }
 
-    async fn rpc(app: &Arc<App>, body: serde_json::Value) -> serde_json::Value {
-        let r = router(app.clone()).oneshot(axum::http::Request::post("/mcp").header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
-        assert_eq!(r.status(), 200);
-        serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap()
+    async fn post(app: &Arc<App>, name: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let r = router(app.clone()).oneshot(axum::http::Request::post(format!("/tools/{name}")).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = r.status().as_u16();
+        (status, serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap())
     }
 
-    /// The whole MCP handshake a client makes, against a tempdir root.
+    /// The whole surface a session layer uses, against a tempdir root: list, call, and every
+    /// error as an HTTP status rather than a field inside a tool's own answer.
     #[tokio::test]
-    async fn mcp_initialize_lists_and_calls_the_file_tools() {
+    async fn the_tool_api_lists_calls_and_answers_errors_as_statuses() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("workspaces/api");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
         let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None }));
-        let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})).await;
-        assert_eq!(v["result"]["serverInfo"]["name"], "kl-ide");
-        let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
-        let names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_check_freshness", "graft_build", "graft_blast"]);
-        let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"path":"a.txt"}}})).await;
-        assert_eq!(v["result"]["isError"], false);
-        assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("two"));
-        let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read","arguments":{"path":"/etc/passwd"}}})).await;
-        assert_eq!(v["result"]["isError"], true);
-        let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":5,"method":"nope"})).await;
-        assert_eq!(v["error"]["code"], -32601);
+        let r = router(app.clone()).oneshot(axum::http::Request::get("/tools").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let names: Vec<&str> = v["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast"]);
+        assert_eq!(v["tools"][0]["schema"]["type"], "object");
+        let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt"})).await;
+        assert_eq!(s, 200);
+        assert!(v["content"].as_str().unwrap().contains("two"));
+        let (s, v) = post(&app, "read", serde_json::json!({"path": "/etc/passwd"})).await;
+        assert_eq!(s, 403, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("outside"), "{v}");
+        let (s, _) = post(&app, "read", serde_json::json!({})).await;
+        assert_eq!(s, 400);
+        let (s, _) = post(&app, "nope", serde_json::json!({})).await;
+        assert_eq!(s, 404);
     }
 }

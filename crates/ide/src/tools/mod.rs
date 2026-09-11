@@ -1,4 +1,4 @@
-//! One `ToolSet` per family; `Registry` is what `/mcp` dispatches on. Every call is logged once
+//! One `ToolSet` per family; `Registry` is what `/tools/{name}` dispatches on. Every call is logged once
 //! (`ide.call`: tool, ms, ok, bytes) — the pod log is the record, there is no metrics endpoint.
 pub mod exec;
 pub mod files;

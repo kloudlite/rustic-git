@@ -1,5 +1,5 @@
-//! The graft tools: six proxied to `graft mcp`, `graft_build` as a detached process, `graft_blast`
-//! as a job. Schemas are a fixed table (graft 0.18's own, copied) so `tools/list` answers while
+//! The graft tools: five proxied to `graft mcp`, `graft_build` as a detached process, `graft_blast`
+//! as a job. Schemas are a fixed table (graft 0.18's own, copied) so `GET /tools` answers while
 //! the child is still starting.
 use super::{opt_bool, opt_str, opt_u64, Tool, ToolError, ToolSet};
 use crate::graft::{Graft, GraphState};
@@ -14,7 +14,9 @@ pub struct GraftTools {
     pub procs: Arc<Procs>,
 }
 
-pub const PROXIED: [&str; 6] = ["graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_check_freshness"];
+// `graft_check_freshness` is deliberately absent: freshness is this server's job and `/healthz`
+// reports it; graft's own check wants the deep manifest and said "NO GRAPH" beside a ready graph.
+pub const PROXIED: [&str; 5] = ["graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map"];
 
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
@@ -27,7 +29,6 @@ pub fn table() -> Vec<Tool> {
         Tool { name: "graft_trace_calls", description: "Structural edges for a symbol: direct callers by default; direction \"out\" for callees; depth N or \"all\" for the transitive closure (blast radius before a change).", schema: obj(json!({ "symbol": {"type":"string"}, "direction": {"type":"string","enum":["in","out"]}, "depth": {}, "in": {"type":"string"} }), &["symbol"]) },
         Tool { name: "graft_file_api", description: "Signatures-only view of one file: every definition's signature and line span, about a tenth of the tokens of reading it.", schema: obj(json!({ "file": {"type":"string"} }), &["file"]) },
         Tool { name: "graft_repo_map", description: "Token-budgeted repo orientation: directory clusters, per-directory hubs, global hotspots.", schema: obj(json!({ "max_dirs": {"type":"integer"} }), &[]) },
-        Tool { name: "graft_check_freshness", description: "Is the graph in sync with the code? The drift report.", schema: obj(json!({}), &[]) },
         Tool { name: "graft_build", description: "Rebuild the graph as a detached process (answers {id}; read it with process_output). deep:true adds the LLM concept map and per-symbol summaries and needs GRAFT_PROVIDER/GRAFT_API_KEY in the workspace; no_reuse re-parses every file.", schema: obj(json!({ "deep": {"type":"boolean"}, "no_reuse": {"type":"boolean"} }), &[]) },
         Tool { name: "graft_blast", description: "Blast radius of a diff: what depends on the lines the change touched. base is a git ref (default HEAD); depth N or \"all\".", schema: obj(json!({ "base": {"type":"string"}, "depth": {} }), &[]) },
     ]
@@ -88,9 +89,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_table_carries_the_eight_graft_tools_with_object_schemas() {
+    fn the_table_carries_the_seven_graft_tools_with_object_schemas() {
         let t = table();
-        assert_eq!(t.len(), 8);
+        assert_eq!(t.len(), 7);
         for tool in &t {
             assert!(tool.name.starts_with("graft_"));
             assert_eq!(tool.schema["type"], "object");

@@ -40,7 +40,7 @@ kl-connect ws ide api            # tunnels the workspace's tool server to localh
 kl-connect ws ide api --port 7790
 ```
 
-Then `claude mcp add --transport http workspace http://localhost:7788/mcp`. See [Tool server](../agent-tools/ide-server.md).
+Then `curl http://localhost:7788/tools`. See [Tool server](../agent-tools/ide-server.md).
 
 ## Builder
 

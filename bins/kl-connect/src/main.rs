@@ -75,8 +75,8 @@ enum WsCmd {
     Proxy { id: String },
     /// Write ~/.ssh/kloudlite_config and Include it from ~/.ssh/config
     SshConfig,
-    /// Tunnel the workspace's tool server to localhost: `kl-connect ws ide api`, then
-    /// `claude mcp add --transport http workspace http://localhost:7788/mcp`
+    /// Tunnel the workspace's tool API to localhost: `kl-connect ws ide api`, then
+    /// `curl http://localhost:7788/tools`
     Ide {
         target: String,
         #[arg(long, default_value_t = 7788)]

@@ -334,9 +334,11 @@ folded in rather than being spent by a create nobody asked for.
 **Every workspace runs a tool server**: `kl ide serve` (`crates/ide`, the third verb of `kl`),
 started by the pod prelude as `kl` before sshd, on `127.0.0.1:7788` and nowhere else — the ssh
 tunnel a person already holds (`kl-connect ws ide <ws>`) is the boundary, so there is no second
-credential and no auth code in the crate. One MCP endpoint (`POST /mcp`, JSON-RPC, hand-rolled:
-initialize / tools/list / tools/call / ping) carries `read write edit glob grep exec process_*
-watch*` and graft's own tools, proxied from a `graft mcp` child on stdio; two WebSocket routes
+credential and no auth code in the crate. A plain HTTP tool API (`GET /tools` with schemas,
+`POST /tools/{name}` with the body as arguments; 404/400/403/500 + `{"error"}` when a tool did not
+run) carries `read write edit glob grep exec process_* watch*` and graft's own tools, proxied
+from a `graft mcp` child on stdio. The pod speaks NO MCP on purpose — MCP is the SESSION layer's,
+spoken once above every workspace a person holds and forwarded here; two WebSocket routes
 (`/stream/process/{id}`, `/stream/watch/{id}`) carry what streams. Every path is confined under
 the home (`paths::confine`, symlinks followed); a JOB is an `exec` that waits and answers its
 exit code, a PROCESS is `detach: true` with an id, a 4 MiB ring and a kill that reaches the

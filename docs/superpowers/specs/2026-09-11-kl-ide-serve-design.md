@@ -1,5 +1,13 @@
 # `kl ide serve` — the workspace tool server (spec, draft 2)
 
+> **Revised 2026-09-12.** The pod speaks no MCP. `POST /mcp` became a plain HTTP tool API — `GET /tools`
+> (names, descriptions, JSON schemas) and `POST /tools/{name}` (body = arguments, answer = the tool's
+> JSON; 404/400/403/500 with `{"error"}` when the tool did not run). MCP is the session layer's:
+> one server above every workspace a person holds, forwarding `workspace + tool + args` here.
+> `graft_check_freshness` was dropped (freshness is the server's, reported by `/healthz`); an `exec`
+> timeout answers at the deadline; `watch` no longer reports reads. Everywhere below, read "MCP
+> endpoint" as this API.
+
 Status: approved 2026-09-11; plan at `docs/superpowers/plans/2026-09-11-kl-ide-serve.md`.
 
 ## Why

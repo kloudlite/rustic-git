@@ -72,6 +72,7 @@ async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
     let out = child.stdout.take();
     let err = child.stderr.take();
     let read = async {
+        let child = &mut child;
         let (o, e) = tokio::join!(
             async { match out { Some(mut r) => { let mut b = Vec::new(); let _ = tokio::io::AsyncReadExt::read_to_end(&mut r, &mut b).await; b } None => Vec::new() } },
             async { match err { Some(mut r) => { let mut b = Vec::new(); let _ = tokio::io::AsyncReadExt::read_to_end(&mut r, &mut b).await; b } None => Vec::new() } }
@@ -88,10 +89,15 @@ async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
         }
         Err(_) => {
             if let Some(pid) = pid {
-                // SAFETY: the group this call created.
-                unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                // The caller asked for a deadline, so the answer comes AT the deadline: the TERM, the
+                // five-second grace and the KILL run behind it (measured: a 1 s timeout answered in 6 s).
+                tokio::spawn(async move {
+                    // SAFETY: the group this call created.
+                    unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    let _ = child.wait().await;
+                });
             }
             Ok(json!({ "exit_code": -1, "stdout": "", "stderr": format!("timed out after {timeout_ms} ms"), "truncated": false, "timed_out": true, "ms": started.elapsed().as_millis() as u64 }))
         }
@@ -105,7 +111,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
 impl ToolSet for Exec {
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr. With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
+            Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
             Tool { name: "process_list", description: "Every detached process: id, cmd, started_at, state (running|exited), exit_code.", schema: obj(json!({}), &[]) },
             Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). Answers stdout, stderr, next (offset), dropped, state, exit_code.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
             Tool { name: "process_write", description: "Write to a process's stdin.", schema: obj(json!({ "id": {"type":"string"}, "data": {"type":"string"} }), &["id","data"]) },

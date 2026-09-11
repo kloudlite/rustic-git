@@ -1,6 +1,6 @@
 # Run commands
 
-An agent drives a workspace two ways. The [tool server](ide-server.md) inside every workspace exposes exec, files, watch and the code graph over MCP through the ssh tunnel, typed and bounded. Plain ssh is the other: the same keys, the same audit path, and no second permission model. This page is the ssh way.
+An agent drives a workspace two ways. The [tool server](ide-server.md) inside every workspace exposes exec, files, watch and the code graph as a plain HTTP API through the ssh tunnel, typed and bounded. Plain ssh is the other: the same keys, the same audit path, and no second permission model. This page is the ssh way.
 
 ## One-off commands
 
