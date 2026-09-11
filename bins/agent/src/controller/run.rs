@@ -101,6 +101,15 @@ fn wake_stream<T: Send + 'static>(
 /// stopped delivering until its timeout rebuilt it.
 const LATE_EVENT_MS: i64 = 5_000;
 
+/// When this process started, unix millis. An object last written BEFORE that reaches the
+/// agent through its initial list, not through the watch, so its age says nothing about the
+/// watch: every binding a fresh agent listed at boot read as hours late on 2026-09-11 08:53.
+static STARTED_MS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
 /// When the API server last wrote this object: the newest `managedFields` time, which every
 /// write stamps, else the creation time. Second precision, which is all a "was this minutes
 /// late" question needs.
@@ -131,9 +140,9 @@ where
     let rv = obj.resource_version().unwrap_or_default();
     let fresh = ctx.seen.lock().unwrap_or_else(|p| p.into_inner()).insert(format!("{kind}/{name}"), rv.clone()) != Some(rv.clone());
     if fresh {
-        if let Some(written) = last_write_ms(obj) {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-            let age_ms = (now - written).max(0);
+        let started = *STARTED_MS.get_or_init(now_ms);
+        if let Some(written) = last_write_ms(obj).filter(|w| *w >= started) {
+            let age_ms = (now_ms() - written).max(0);
             metrics::histogram!("watch_event_age_seconds", "kind" => kind).record(age_ms as f64 / 1000.0);
             if age_ms > LATE_EVENT_MS {
                 metrics::counter!("watch_events_late_total", "kind" => kind).increment(1);
@@ -153,6 +162,7 @@ where
 }
 
 pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
+    let _ = STARTED_MS.set(now_ms());
     // Before the watches: a node with nothing to do must still be able to prove it is alive.
     heartbeat(&ctx.pool);
     spawn_heartbeat(ctx.clone());
