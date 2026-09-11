@@ -151,7 +151,7 @@ pub(super) fn prelude(name: &str) -> String {
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
-         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} HOME=$H exec kl ide serve >> $H/.local/state/kl-ide.log 2>&1' &\n\
+         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} exec kl ide serve >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }

@@ -452,6 +452,20 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     assert!(line.trim_start().starts_with("su kl "), "{line}");
     assert!(line.contains("KL_WORKSPACE=/home/kl/workspaces/api"), "{line}");
     assert!(line.trim_end().ends_with('&'), "backgrounded: {line}");
+    // `su -c '…'` runs a fresh shell: a prelude variable inside the quotes is empty there, and the
+    // log redirect then fails before `exec` — which is how build fb3673f1 shipped a server that
+    // never started. Everything the inner shell needs is rendered, not referenced.
+    assert!(!line.contains("$H"), "no prelude variable survives into su -c: {line}");
+    assert!(line.contains(">> /home/kl/.local/state/kl-ide.log"), "{line}");
+}
+
+/// `/etc/profile` sources every `/etc/profile.d/*.sh`: an `exit` in one ends the login shell itself,
+/// and `kl ide serve`'s `exec` runs its command under `sh -lc`.
+#[test]
+pub(crate) fn no_profile_d_script_exits_the_shell_that_sources_it() {
+    let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/workspace-image/kl-build.sh")).unwrap();
+    let exits: Vec<&str> = s.lines().filter(|l| l.trim_start().starts_with("exit")).collect();
+    assert!(exits.is_empty(), "{exits:?}");
 }
 
 /// The global git ignore: appended to the person's own file exactly once, never a per-repo line.

@@ -28,8 +28,11 @@ pub struct Exec {
 fn command(root: &std::path::Path, home: &std::path::Path, args: &Value) -> Result<(Command, String), ToolError> {
     let (mut cmd, line) = match args.get("cmd") {
         Some(Value::String(s)) => {
+            // Not a login shell: the server was started from the pod's prelude and already carries the
+            // login environment (`login_env`, the nix profile on PATH). `/etc/profile` would reset PATH
+            // to the system directories — `git: command not found` on build fb3673f1.
             let mut c = Command::new("sh");
-            c.arg("-lc").arg(s);
+            c.arg("-c").arg(s);
             (c, s.clone())
         }
         Some(Value::Array(a)) if !a.is_empty() => {

@@ -51,7 +51,7 @@ impl ToolSet for WatchTools {
                     let (mut command, line) = match cmd {
                         Value::String(s) => {
                             let mut c = tokio::process::Command::new("sh");
-                            c.arg("-lc").arg(s);
+                            c.arg("-c").arg(s); // plain shell, as `exec`: the server holds the login env
                             (c, s.clone())
                         }
                         Value::Array(a) if !a.is_empty() => {

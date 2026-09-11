@@ -386,16 +386,18 @@ pub async fn ide_server(c: &mut Ctx) {
     };
     c.step("ide.exec", EXEC, move |c| {
         async move {
-            let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"cmd":"true"}}}"#;
+            // Output, not only an exit code: build fb3673f1's login shell died in /etc/profile with
+            // status 0 and `true` passed on a server that ran nothing.
+            let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"cmd":"echo ide-$(id -un)"}}}"#;
             let script = format!("curl -sf -X POST http://127.0.0.1:7788/mcp -H 'content-type: application/json' -d '{body}'");
             let (code, out, err) = ws_exec(c, &id, &script, EXEC).await?;
             drop_ws(c, &id).await;
             if code != 0 {
                 return Err(anyhow!("the MCP call exited {code}: {}", err.trim()));
             }
-            // The tool's answer is JSON inside the MCP text block; the exit code is what matters.
-            if !out.contains("\\\"exit_code\\\":0") {
-                return Err(anyhow!("exec through the tool server did not answer exit_code 0: {}", out.trim()));
+            // The tool's answer is JSON inside the MCP text block, escaped twice.
+            if !out.contains("\\\"exit_code\\\":0") || !out.contains("ide-kl") {
+                return Err(anyhow!("exec through the tool server did not run as kl with exit_code 0: {}", out.trim()));
             }
             Ok(())
         }
