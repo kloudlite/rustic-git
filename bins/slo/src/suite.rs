@@ -84,7 +84,8 @@ pub const OVER_BUDGET: &str = "run budget exhausted";
 pub const HOURLY_IN_FLIGHT: &str = "an hourly run is in flight";
 pub const WEEKLY_IN_FLIGHT: &str = "a weekly drill is in flight";
 pub const MONTHLY_IN_FLIGHT: &str = "a monthly drill is in flight";
-/// The detail on every id a fast run skips because the fleet is mid-roll.
+/// The detail on every id a run skips because the fleet is mid-roll — every suite, since 2026-09-11:
+/// an hourly `ws.stop.p95` failed one second after the node's agent restarted in a roll.
 pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
 /// The detail every id carries when a run of the SAME suite is already going.
 ///
@@ -327,7 +328,7 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
             break;
         }
     }
-    if yield_to.is_none() && kind == Suite::Fast && rollout_in_flight(c).await {
+    if yield_to.is_none() && rollout_in_flight(c).await {
         yield_to = Some(ROLLOUT_IN_FLIGHT);
     }
     if yields_to(kind).is_empty() {
@@ -355,7 +356,7 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
         }
         // The same question the run asked before it started, asked again at every stage: a roll
         // that begins mid-run turns the rest of the journey into a measurement of the roll.
-        if i > 0 && kind == Suite::Fast && rollout_in_flight(c).await {
+        if i > 0 && rollout_in_flight(c).await {
             let skipped = skip_remaining_because(c, kind, &stages[i..], ROLLOUT_IN_FLIGHT);
             tracing::warn!(skipped, reason = ROLLOUT_IN_FLIGHT, "slo.run.yielded");
             hand_over(c);

@@ -12,7 +12,6 @@ use futures::future::BoxFuture;
 // The admin API's own ceiling, imported rather than repeated: a copy here would silently stop
 // matching the day the validator's changed, and the whole report would start being refused.
 use kloudlite_workspaces::history::slo::{StepReport, MAX_DETAIL};
-use kloudlite_workspaces::slo::catalogue::Suite;
 
 use crate::ctx::Ctx;
 
@@ -52,10 +51,11 @@ impl Ctx {
             Ok(Err(e)) => (false, format!("{e:#}")),
             Err(_) => (false, format!("timed out after {} ms", timeout.as_millis())),
         };
-        // A fast step that failed WHILE a roll is in flight is a sample of the roll, not of the
+        // A step that failed WHILE a roll is in flight is a sample of the roll, not of the
         // service — the run's own guard only looked before it started. Asked only on a failure,
-        // so a passing run costs nothing; the original detail stays, behind the reason.
-        if !ok && self.suite == Suite::Fast && crate::suite::rollout_in_flight(self).await {
+        // so a passing run costs nothing; the original detail stays, behind the reason. Every
+        // suite: an hourly stop failed one second after its node's agent restarted (2026-09-11).
+        if !ok && crate::suite::rollout_in_flight(self).await {
             self.skip(id, &format!("{}: {detail}", crate::suite::ROLLOUT_IN_FLIGHT));
             self.save_state();
             return false;
