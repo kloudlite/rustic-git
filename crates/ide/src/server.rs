@@ -1,5 +1,6 @@
 //! The HTTP surface: `/healthz`, `/mcp`, and the two streams. Loopback only — see the crate doc.
-use crate::tools::{files::Files, Registry};
+use crate::procs::Procs;
+use crate::tools::{exec::Exec, files::Files, Registry};
 use crate::Config;
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use std::sync::Arc;
@@ -7,17 +8,26 @@ use std::sync::Arc;
 pub struct App {
     pub cfg: Config,
     pub registry: Registry,
+    pub procs: Arc<Procs>,
 }
 
 impl App {
     pub fn new(cfg: Config) -> Self {
-        let registry = Registry::new(vec![Box::new(Files { root: cfg.root.clone(), home: cfg.home.clone() })]);
-        App { cfg, registry }
+        let procs = Arc::new(Procs::default());
+        let registry = Registry::new(vec![
+            Box::new(Files { root: cfg.root.clone(), home: cfg.home.clone() }),
+            Box::new(Exec { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone() }),
+        ]);
+        App { cfg, registry, procs }
     }
 }
 
 pub fn router(app: Arc<App>) -> Router {
-    Router::new().route("/healthz", get(healthz)).route("/mcp", post(crate::mcp::handle)).with_state(app)
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/mcp", post(crate::mcp::handle))
+        .route("/stream/process/{id}", get(crate::stream::process))
+        .with_state(app)
 }
 
 async fn healthz(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
@@ -68,7 +78,7 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["name"], "kl-ide");
         let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
         let names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep"]);
+        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill"]);
         let v = rpc(&app, serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read","arguments":{"path":"a.txt"}}})).await;
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("two"));

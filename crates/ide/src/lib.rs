@@ -16,7 +16,9 @@
 pub mod guard;
 pub mod mcp;
 pub mod paths;
+pub mod procs;
 pub mod server;
+pub mod stream;
 pub mod tools;
 
 use std::net::SocketAddr;
