@@ -1,4 +1,4 @@
-//! The HTTP surface: `/healthz`, `/tools`, and the two streams. Loopback only — see the crate doc.
+//! The HTTP surface: `/healthz`, `/tools`, `/fs`, and the two streams. Loopback only — see the crate doc.
 use crate::graft::Graft;
 use crate::procs::Procs;
 use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
@@ -40,6 +40,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/healthz", get(healthz))
         .route("/tools", get(crate::api::list))
         .route("/tools/{name}", post(crate::api::call))
+        .route("/fs/tree", get(crate::fs::tree))
+        .route("/fs/stat", get(crate::fs::stat))
+        .route("/fs/file", get(crate::fs::file))
+        .route("/fs/git", get(crate::fs::git_state))
+        .route("/fs/changes", get(crate::fs::changes))
+        .route("/fs/diff", get(crate::fs::diff))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
         .with_state(app)
@@ -107,5 +113,87 @@ mod tests {
         assert_eq!(s, 400);
         let (s, _) = post(&app, "nope", serde_json::json!({})).await;
         assert_eq!(s, 404);
+    }
+
+    async fn get(app: &Arc<App>, uri: &str, inm: Option<&str>) -> (u16, Option<String>, Vec<u8>) {
+        let mut req = axum::http::Request::get(uri);
+        if let Some(t) = inm {
+            req = req.header("if-none-match", t);
+        }
+        let r = router(app.clone()).oneshot(req.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let status = r.status().as_u16();
+        let etag = r.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_string);
+        (status, etag, axum::body::to_bytes(r.into_body(), 1 << 24).await.unwrap().to_vec())
+    }
+
+    /// The six `/fs` routes against a real repository: shapes, the conditional 304, every status.
+    #[tokio::test]
+    async fn the_fs_routes_render_a_repository_and_answer_304_on_a_repeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let root = home.join("workspaces/api");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let sh = |args: &[&str]| {
+            let o = std::process::Command::new("git").args(args).current_dir(&root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        sh(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("README.md"), "hi\n").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "one"]);
+        std::fs::write(root.join("README.md"), "hi\nmore\n").unwrap();
+        std::fs::write(root.join("src/new.rs"), "fn a() {}\n").unwrap();
+        let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: root.clone(), home: home.clone(), graft_dir: None }));
+
+        let (s, etag, b) = get(&app, "/fs/tree?depth=2", None).await;
+        assert_eq!(s, 200);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec![".git", "src", "README.md"]);
+        assert_eq!(v["entries"][1]["git"], "?");
+        assert_eq!(v["entries"][1]["entries"][0]["name"], "new.rs");
+        assert_eq!(v["entries"][2]["git"], "M");
+        let (s, _, b) = get(&app, "/fs/tree?depth=2", etag.as_deref()).await;
+        assert_eq!((s, b.len()), (304, 0));
+        assert_eq!(get(&app, "/fs/tree?depth=9", None).await.0, 400);
+        assert_eq!(get(&app, "/fs/tree?path=/etc", None).await.0, 403);
+
+        let (s, _, b) = get(&app, "/fs/stat?path=README.md", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, v["mime"].as_str().unwrap(), v["git"].as_str().unwrap()), (200, "text/markdown; charset=utf-8", "M"));
+        assert_eq!(get(&app, "/fs/stat?path=nope", None).await.0, 404);
+
+        let (s, etag, b) = get(&app, "/fs/file?path=README.md", None).await;
+        assert_eq!((s, b.as_slice()), (200, b"hi\nmore\n".as_slice()));
+        assert_eq!(get(&app, "/fs/file?path=README.md", etag.as_deref()).await.0, 304);
+        let (s, _, b) = get(&app, "/fs/file?path=README.md&at=HEAD", None).await;
+        assert_eq!((s, b.as_slice()), (200, b"hi\n".as_slice()));
+        assert_eq!(get(&app, "/fs/file?path=src/new.rs&at=HEAD", None).await.0, 404);
+        assert_eq!(get(&app, "/fs/file?path=src", None).await.0, 400);
+
+        let (s, _, b) = get(&app, "/fs/git", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, v["repo"].as_bool(), v["branch"].as_str(), v["dirty"].as_bool()), (200, Some(true), Some("main"), Some(true)));
+
+        let (s, _, b) = get(&app, "/fs/changes", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(s, 200);
+        let rows = v["changes"].as_array().unwrap();
+        assert_eq!(rows.iter().map(|r| (r["path"].as_str().unwrap(), r["additions"].as_u64().unwrap())).collect::<Vec<_>>(), vec![("README.md", 1), ("src/new.rs", 1)]);
+
+        let (s, _, b) = get(&app, "/fs/diff?path=README.md", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(s, 200);
+        assert!(v["patch"].as_str().unwrap().contains("+more"), "{v}");
+        let (_, _, b) = get(&app, "/fs/diff?path=src/new.rs", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert!(v["patch"].as_str().unwrap().contains("+fn a()"), "untracked diffs against /dev/null: {v}");
+        assert_eq!(get(&app, "/fs/diff?against=main", None).await.0, 400);
+
+        // Not a repository is an answer, not an error.
+        let plain = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.join("workspaces"), home: home.clone(), graft_dir: None }));
+        let (s, _, b) = get(&plain, "/fs/git", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, v["repo"].as_bool()), (200, Some(false)));
     }
 }

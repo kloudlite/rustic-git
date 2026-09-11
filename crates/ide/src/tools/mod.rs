@@ -26,6 +26,17 @@ impl std::fmt::Display for ToolError {
     }
 }
 
+/// The HTTP status a tool error is: 404 unknown, 400 bad arguments, 403 outside the home, 500 failed.
+pub fn status_of(e: &ToolError) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    match e {
+        ToolError::Unknown(_) => StatusCode::NOT_FOUND,
+        ToolError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ToolError::Denied(_) => StatusCode::FORBIDDEN,
+        ToolError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 pub struct Tool {
     pub name: &'static str,
     pub description: &'static str,

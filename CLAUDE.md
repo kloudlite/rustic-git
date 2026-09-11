@@ -346,7 +346,11 @@ process group. Graft's freshness is the SERVER's job — there is no hook runner
 `write`, `edit` and a finished job call `Graft::refresh_soon`, a tree watcher catches ssh and
 git, and a debounced `graft build` (cache reuse makes it incremental) runs at most every 2 s;
 `/healthz` says `graph: ready|building|drifted|absent|unavailable`. The server refuses to start
-without the global gitignore block (`guard::preflight`). `ide.serve.up` and `ide.exec` hold it
+without the global gitignore block (`guard::preflight`). Beside the tools, `/fs/*` (`crates/ide/src/fs/`:
+tree, stat, file, git, changes, diff) is what a CONSOLE renders a workspace from — read-only,
+every answer under an `ETag` with `If-None-Match` a 304, one `git status --porcelain=v2 -z -uall`
+per request and never a process per entry, not a repository is `repo: false` not an error; none of
+it is a tool and `GET /tools` never lists it. `ide.serve.up` and `ide.exec` hold it
 on the fleet from inside the pod. No PTY yet; no gateway route yet.
 
 `Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only

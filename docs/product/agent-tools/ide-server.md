@@ -38,6 +38,21 @@ Paths are relative to the workspace directory, or absolute under `/home/kl`. Any
 
 Two streams carry live output without polling: `GET /stream/process/{id}` and `GET /stream/watch/{id}`, WebSocket, one JSON object per frame. `GET /healthz` answers `ok`, the root, and the graph's state.
 
+## Workspace state
+
+Separate from the tools: six read-only `GET` routes a console or IDE renders a workspace from. They are not in `/tools` and an agent does not need them. Every answer carries an `ETag`, and a request with `If-None-Match` answers `304` with no body, so re-fetching after a change notification costs nothing when nothing changed. Errors are the same statuses as the tools: 403 outside your home, 404 nothing there, 400 a bad parameter, 413 a file over 10 MiB.
+
+| Route | Answers |
+|---|---|
+| `GET /fs/tree?path=.&depth=1` | One directory level (`depth` up to 3, 5 000 entries): `name`, `kind` (file, dir, symlink), `size`, `mtime`, `ignored`, `git` (one letter: `M`, `A`, `D`, `R`, `?`, or empty), `target` for a symlink, nested `entries` past depth 1. Directories first. Hidden entries included; ignored directories (`.cache`, `graft`, `node_modules`) are shown but not descended into. A directory shows `M` when anything below it changed, `?` when everything below it is new. |
+| `GET /fs/stat?path=` | One row of the tree, plus `mime` for a file. |
+| `GET /fs/file?path=&at=` | The bytes, with the sniffed `Content-Type`. `at=HEAD` (any ref, or `index`) answers the committed copy: the other side of a diff. Binary files are served as they are. |
+| `GET /fs/git` | `repo`, `branch` (null when detached), `head`, `upstream`, `ahead`, `behind`, `dirty`, `stashes`. A directory that is not a repository answers `repo: false`. |
+| `GET /fs/changes` | Every changed path with git's two status letters (`index`, `worktree`), `renamed_from`, and `additions`/`deletions`/`binary` — status and counts in one call. |
+| `GET /fs/diff?path=&against=HEAD` | One file's unified diff (`against` HEAD, `index` or `staged`); a new file diffs against `/dev/null`. No `path` is the whole tree. Capped at 200 000 bytes, `truncated: true` past it. |
+
+For live updates, `watch` on `.` with `GET /stream/watch/{id}` names each changed path; re-fetch that node with `/fs/stat`, its parent with `/fs/tree`, and `/fs/changes`.
+
 ## Limits
 
 | | |

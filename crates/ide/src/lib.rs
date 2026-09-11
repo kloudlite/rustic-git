@@ -11,10 +11,12 @@
 //!
 //! Design: `docs/superpowers/specs/2026-09-11-kl-ide-serve-design.md`. Module map: `guard`
 //! (the preconditions the server refuses to start without), `server` (axum routes), `api`
-//! (the tool routes), `paths` (confinement to the home), `tools/` (one file per tool
+//! (the tool routes), `fs/` (the workspace-state routes a UI renders from: tree, stat,
+//! file, git, changes, diff — read-only, conditional, not tools), `paths` (confinement to the home), `tools/` (one file per tool
 //! family), `procs` (detached processes and their ring buffers), `stream` (the two WebSocket
 //! streams), `graft` (the child and the freshness triggers).
 pub mod api;
+pub mod fs;
 pub mod graft;
 pub mod guard;
 pub mod paths;

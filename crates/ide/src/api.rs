@@ -7,7 +7,7 @@
 //! tool itself failed — always `{"error": "..."}`, so the caller never parses a tool's own answer
 //! to learn it did not run.
 use crate::server::App;
-use crate::tools::ToolError;
+use crate::tools::status_of;
 use axum::{extract::{Path, State}, http::StatusCode, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -21,14 +21,6 @@ pub async fn call(State(app): State<Arc<App>>, Path(name): Path<String>, body: O
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
     match app.registry.call(&name, args).await {
         Ok(v) => (StatusCode::OK, Json(v)),
-        Err(e) => {
-            let status = match &e {
-                ToolError::Unknown(_) => StatusCode::NOT_FOUND,
-                ToolError::Invalid(_) => StatusCode::BAD_REQUEST,
-                ToolError::Denied(_) => StatusCode::FORBIDDEN,
-                ToolError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, Json(json!({ "error": e.to_string() })))
-        }
+        Err(e) => (status_of(&e), Json(json!({ "error": e.to_string() }))),
     }
 }
