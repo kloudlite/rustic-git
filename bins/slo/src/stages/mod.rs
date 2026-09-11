@@ -109,6 +109,7 @@ pub(crate) async fn raw(
     body: Option<Value>,
     headers: &[(&str, String)],
 ) -> Result<(reqwest::StatusCode, String)> {
+    let method_name = method.to_string();
     let mut req = c.http.request(method, url);
     if !token.is_empty() {
         req = req.header("authorization", c.bearer(token));
@@ -126,9 +127,64 @@ pub(crate) async fn raw(
     // here can be a one-shot credential (`?poll=` on the CLI handshake) — but an error with no
     // address at all reads as "error sending request" and says nothing, which cost a live run its
     // triage. The path is what tells a reader the URL was malformed.
-    let r = req.send().await.map_err(|e| anyhow!("{} ({})", e.without_url(), path_of(url)))?;
+    // Every request is timed at two seams — headers back, body read — and three things are
+    // logged, because the 2026-09-11 17:26 `audit.row` sample was a POST that sat 20 s on the way
+    // to an idle in-cluster process and left NOTHING: slow answers (`slo.http.slow`, > 2 s),
+    // failures with the phase and reqwest's own classification (`slo.http.failed`), and a request
+    // still in flight when its step's ceiling cancelled it (`slo.http.abandoned`, from Drop — the
+    // one place a cancelled future can still speak).
+    let mut flight = InFlight { method: method_name.clone(), path: path_of(url).to_string(), started: std::time::Instant::now(), done: false };
+    let r = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            flight.done = true;
+            let (connect, timeout) = (e.is_connect(), e.is_timeout());
+            let e = e.without_url();
+            tracing::warn!(method = %method_name, path = %flight.path, phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
+            return Err(anyhow!("{e} ({})", path_of(url)));
+        }
+    };
+    let headers_ms = flight.started.elapsed().as_millis() as u64;
     let status = r.status();
-    Ok((status, r.text().await.unwrap_or_default()))
+    // A body that does not arrive is a failure of the request, never an empty answer: the old
+    // `unwrap_or_default` here turned a reset mid-body into a step that read "" and reasoned
+    // about it.
+    let text = match r.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            flight.done = true;
+            let e = e.without_url();
+            tracing::warn!(method = %method_name, path = %flight.path, phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
+            return Err(anyhow!("{e} while reading the body of {status} ({})", path_of(url)));
+        }
+    };
+    flight.done = true;
+    let total_ms = flight.started.elapsed().as_millis() as u64;
+    if total_ms > SLOW_HTTP_MS {
+        tracing::warn!(method = %method_name, path = %flight.path, %status, headers_ms, total_ms, "slo.http.slow");
+    }
+    Ok((status, text))
+}
+
+/// Anything over this is logged whatever its status: the step's own ceiling says a request was
+/// slow, this says WHICH and at which seam.
+const SLOW_HTTP_MS: u64 = 2_000;
+
+/// A request in flight. Dropped before `done` means the future was cancelled — a step ceiling
+/// fired with this request outstanding — and that is logged with how long it had waited.
+struct InFlight {
+    method: String,
+    path: String,
+    started: std::time::Instant,
+    done: bool,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if !self.done {
+            tracing::warn!(method = %self.method, path = %self.path, ms = self.started.elapsed().as_millis() as u64, "slo.http.abandoned");
+        }
+    }
 }
 
 /// A URL with its query string cut off — safe to put in a step detail.
@@ -777,6 +833,32 @@ fn stale(name: &str, now: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A request cancelled mid-flight must say so: the step ceiling that cancels it cannot.
+    #[tokio::test]
+    async fn an_abandoned_request_is_logged_from_drop() {
+        use std::sync::{Arc, Mutex};
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(b); Ok(b.len()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let b2 = buf.clone();
+        let sub = tracing_subscriber::fmt().with_writer(move || Sink(b2.clone())).with_ansi(false).finish();
+        let _g = tracing::subscriber::set_default(sub);
+        // A listener that accepts and never answers: the request is in flight until cancelled.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { let (_s, _) = l.accept().await.unwrap(); tokio::time::sleep(Duration::from_secs(30)).await; });
+        let c = crate::testkit::ctx().await;
+        let url = format!("http://{addr}/admin/requests/x/deny");
+        let fut = raw(&c, reqwest::Method::POST, &url, "", None, &[]);
+        let _ = tokio::time::timeout(Duration::from_millis(300), fut).await;
+        let out = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        assert!(out.contains("slo.http.abandoned"), "{out}");
+        assert!(out.contains("/admin/requests/x/deny"), "{out}");
+    }
+
     use super::*;
 
     #[test]
