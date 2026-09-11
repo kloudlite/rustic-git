@@ -39,7 +39,7 @@ export const NAV: { section: string; items: string[] }[] = [
   { section: "Environments", items: ["environments/create", "environments/services", "environments/lifecycle", "environments/clone-and-restore"] },
   { section: "Snapshots", items: ["snapshots/push", "snapshots/history", "snapshots/volumes"] },
   { section: "Connections", items: ["connections/attach", "connections/intercepts"] },
-  { section: "Agent tools", items: ["agent-tools/exec", "agent-tools/files", "agent-tools/images", "agent-tools/git"] },
+  { section: "Agent tools", items: ["agent-tools/ide-server", "agent-tools/exec", "agent-tools/files", "agent-tools/images", "agent-tools/git"] },
   { section: "Human tools", items: ["human-tools/console", "human-tools/kl-connect", "human-tools/editors"] },
   { section: "Platform", items: ["platform/regions", "platform/teams", "platform/quota", "platform/requests"] },
   {

@@ -331,6 +331,22 @@ owner never made it and cannot see it — which is why `default_quota`'s derived
 (40/80 for a person, 148/296 for a team) already have one builder's worth of `PodResources::default()`
 folded in rather than being spent by a create nobody asked for.
 
+**Every workspace runs a tool server**: `kl ide serve` (`crates/ide`, the third verb of `kl`),
+started by the pod prelude as `kl` before sshd, on `127.0.0.1:7788` and nowhere else — the ssh
+tunnel a person already holds (`kl-connect ws ide <ws>`) is the boundary, so there is no second
+credential and no auth code in the crate. One MCP endpoint (`POST /mcp`, JSON-RPC, hand-rolled:
+initialize / tools/list / tools/call / ping) carries `read write edit glob grep exec process_*
+watch*` and graft's own tools, proxied from a `graft mcp` child on stdio; two WebSocket routes
+(`/stream/process/{id}`, `/stream/watch/{id}`) carry what streams. Every path is confined under
+the home (`paths::confine`, symlinks followed); a JOB is an `exec` that waits and answers its
+exit code, a PROCESS is `detach: true` with an id, a 4 MiB ring and a kill that reaches the
+process group. Graft's freshness is the SERVER's job — there is no hook runner in a pod — so
+`write`, `edit` and a finished job call `Graft::refresh_soon`, a tree watcher catches ssh and
+git, and a debounced `graft build` (cache reuse makes it incremental) runs at most every 2 s;
+`/healthz` says `graph: ready|building|drifted|absent|unavailable`. The server refuses to start
+without the global gitignore block (`guard::preflight`). `ide.serve.up` and `ide.exec` hold it
+on the fleet from inside the pod. No PTY yet; no gateway route yet.
+
 `Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only
 writer, via `/v1/regions` (server-side apply, so a second POST of the same id retires or renames it
 rather than 409ing). Snapshot BYTES have

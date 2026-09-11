@@ -9,6 +9,7 @@ kl-connect ws list [--team SLUG]    List your workspaces
 kl-connect ws ssh TARGET [-- ARGS]  ssh into a workspace by name or id; ARGS go to ssh
 kl-connect ws ssh-config            Write ~/.ssh/kloudlite_config and Include it from ~/.ssh/config
 kl-connect ws proxy ID              ssh's ProxyCommand (used by the config; not for hand use)
+kl-connect ws ide TARGET [--port N] Tunnel the workspace's tool server to localhost (default 7788)
 kl-connect builder status [--team SLUG]
                                     The builder's state, readiness, and why it is not ready
 ```

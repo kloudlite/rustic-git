@@ -33,6 +33,15 @@ kl-connect ws ssh api -- -A -L 5432:db:5432
 kl-connect ws ssh-config
 ```
 
+## Tool server
+
+```bash [kl-connect]
+kl-connect ws ide api            # tunnels the workspace's tool server to localhost:7788
+kl-connect ws ide api --port 7790
+```
+
+Then `claude mcp add --transport http workspace http://localhost:7788/mcp`. See [Tool server](../agent-tools/ide-server.md).
+
 ## Builder
 
 ```bash [kl-connect]

@@ -5,7 +5,12 @@ The CLI inside a workspace. Builds run on your builder and push to your registry
 ```
 kl build -t NAME[:TAG]... [-f FILE] [--build-arg K=V]... [--platform P] [--no-cache] [CONTEXT]
 kl push SRC DST...
+kl ide serve [--bind 127.0.0.1:7788] [--graft-dir DIR]
 ```
+
+## `kl ide serve`
+
+The workspace tool server, started by the pod before sshd. Loopback only; reach it with `kl-connect ws ide`. See [Tool server](../../agent-tools/ide-server.md). It refuses to start unless it runs as `kl`, `KL_WORKSPACE` names an existing directory, and `~/.config/git/ignore` carries the platform block.
 
 ## `kl build`
 
