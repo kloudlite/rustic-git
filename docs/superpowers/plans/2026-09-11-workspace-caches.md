@@ -148,7 +148,7 @@ grep -qF '# kloudlite: derived state' "$H/.config/git/ignore" 2>/dev/null || cat
 - [ ] Console: `grep -rn "quota_gb\|quotaGb" web/apps/web/src/app/(shell)/[owner]/(org)/workspaces/actions.ts web/apps/web/src/components/app/workspace-list.tsx` — where the form default is set, make it 50; `cd web && bunx tsc --noEmit -p apps/web/tsconfig.json && bun run lint`.
 - [ ] Commit: `Default workspace quota is 50 GB: the tree plus its build output`.
 
-### Task 5: Probe `ws.cache.in_tree`
+### Task 5: Probe `ws.cache.travels`
 
 **Files:** Modify `crates/workspaces/src/slo/catalogue.rs`, `deploy/slo.md`, `bins/slo/src/stages/experience_ws.rs`, tests that count catalogue rows (`grep -rn "catalogue().len()\|const N_SLOS\|expected_count" crates/workspaces/src/slo bins/slo/src tests/`).
 
@@ -156,15 +156,15 @@ grep -qF '# kloudlite: derived state' "$H/.config/git/ignore" 2>/dev/null || cat
 ```rust
     // Build output lives in the workspace dir since 2026-09-11 and travels with a push: a
     // restore arrives warm. Read on the RESTORED copy, never the source.
-    Slo { id: "ws.cache.in_tree", feature: "Workspaces", sli: "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.cache.travels", feature: "Workspaces", sli: "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
 ```
 - [ ] `deploy/slo.md`: the matching table row (the catalogue test tells you the exact format on failure).
 - [ ] Stage step in `experience_ws.rs`, using the existing kube exec helper `ws.exec.ok` uses (`exec_ok` in `stages/workspace.rs` — lift its exec into a shared `pub(crate) async fn exec_in(c, ws_id, cmd) -> Result<String>` in `stages/mod.rs` if it is private):
 ```rust
-/// `ws.cache.in_tree`: write a marker under `{ws}/.cache`, push, restore, read it on the copy.
+/// `ws.cache.travels`: write a marker under `{ws}/.cache`, push, restore, read it on the copy.
 async fn cache_in_tree(c: &mut Ctx, ws: &str) {
     let ws = ws.to_string();
-    c.step("ws.cache.in_tree", Duration::from_secs(240), move |c| async move {
+    c.step("ws.cache.travels", Duration::from_secs(240), move |c| async move {
         exec_in(c, &ws, "mkdir -p $KL_WORKSPACE/.cache/cargo-target && echo warm > $KL_WORKSPACE/.cache/cargo-target/marker").await?;
         let snap = push_and_wait(c, &ws).await?;                       // the helper `ws.push.p95` uses
         let restored = restore_and_wait(c, &snap, &format!("{}-cache", c.prefix())).await?; // the helper `ws.restore` uses
@@ -190,7 +190,7 @@ async fn cache_in_tree(c: &mut Ctx, ws: &str) {
 ### Task 7: Ship, roll, verify
 
 - [ ] `deploy/dev/ship.sh` (full gate) → `deploy/pin.sh <sha> <sha>` in the pod → commit `Pin every tier to <sha>` → push `origin HEAD:master`, `platform HEAD:master`, `platform HEAD:main` → laptop `git pull` → `deploy/roll.sh`; k3s: `kubectl apply -f deploy/k3s/agent-daemonset.yaml` (the workspace image tag is a ClusterSettings/agent value; confirm with `grep -n workspace_image deploy/k3s/agent-daemonset.yaml`).
-- [ ] Verify on the fleet: create a workspace, `kubectl exec` → `echo $CARGO_TARGET_DIR` is `/home/kl/workspaces/<name>/.cache/cargo-target`; `git -C $KL_WORKSPACE status --short` shows nothing after `mkdir .cache graft .direnv`; the next hourly run passes `ws.cache.in_tree` (read from `otel_logs`, `slo.step.done`, `ok=true`).
+- [ ] Verify on the fleet: create a workspace, `kubectl exec` → `echo $CARGO_TARGET_DIR` is `/home/kl/workspaces/<name>/.cache/cargo-target`; `git -C $KL_WORKSPACE status --short` shows nothing after `mkdir .cache graft .direnv`; the next hourly run passes `ws.cache.travels` (read from `otel_logs`, `slo.step.done`, `ok=true`).
 - [ ] Record the outcome in memory (`[[edit-remotely-in-pod]]` style): what the fleet found that the tests did not.
 
 ## Self-review

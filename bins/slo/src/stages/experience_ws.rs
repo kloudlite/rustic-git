@@ -29,6 +29,8 @@ const REMOVE_CEILING: Duration = Duration::from_secs(90);
 const SEEDED_CEILING: Duration = Duration::from_secs(290);
 const KEY_CEILING: Duration = Duration::from_secs(290);
 const HOME_CEILING: Duration = Duration::from_secs(290);
+/// Create, write, push, restore, read: two `ready` waits and a snapshot cut inside one ceiling.
+const CACHE_CEILING: Duration = Duration::from_secs(290);
 
 /// How long a create is given to reach `ready` INSIDE a step. Below every ceiling above, so a
 /// workspace that never starts leaves room for the step to say so.
@@ -304,6 +306,59 @@ pub async fn home_persists(c: &mut Ctx) {
     .await;
 }
 
+/// `ws.cache.travels`: build output written under `{ws}/.cache` travels with a push and is there
+/// on a restore — the property the 2026-09-11 move of `CARGO_TARGET_DIR` into the tree exists for.
+/// Read on the RESTORED copy: the source proves nothing.
+pub async fn cache_in_tree(c: &mut Ctx) {
+    if c.kube.is_none() {
+        return c.skip("ws.cache.travels", "no kubeconfig");
+    }
+    let name = format!("{}-cache", c.prefix());
+    let want = c.run_id.clone();
+    c.step("ws.cache.travels", CACHE_CEILING, move |c| {
+        async move {
+            let src = create(c, &name, json!({ "packages": [] })).await?;
+            let write = format!("set -e\nmkdir -p \"$CARGO_TARGET_DIR\"\nprintf %s {want} > \"$CARGO_TARGET_DIR/marker\"\nsync \"$CARGO_TARGET_DIR/marker\"");
+            let (code, _, err) = ws_exec(c, &src, &write, EXEC).await?;
+            if code != 0 {
+                drop_ws(c, &src).await;
+                return Err(anyhow!("writing under the cache exited {code}: {}", err.trim()));
+            }
+            let out = push_then_restore(c, &src, &format!("{name}-r")).await;
+            drop_ws(c, &src).await;
+            let restored = out?;
+            let (code, out, err) = ws_exec(c, &restored, "cat \"$CARGO_TARGET_DIR/marker\"", EXEC).await?;
+            drop_ws(c, &restored).await;
+            if code != 0 {
+                return Err(anyhow!("the restored copy has no marker under its cache: exit {code}: {}", err.trim()));
+            }
+            if out.trim() != want {
+                return Err(anyhow!("the restored copy read back {:?}", out.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Push `src`, wait for the snapshot to turn ready, restore it under `name`, wait for `ready`;
+/// answers the restored workspace's id. The volume is named after the workspace.
+async fn push_then_restore(c: &mut Ctx, src: &str, name: &str) -> Result<String> {
+    let jwt = c.probe_jwt.clone();
+    let doc = post(c, &api(c, &format!("/v1/workspaces/{src}/push")), &jwt, json!({})).await.context("could not push")?;
+    let snap = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("the push answered no snapshot id"))?.to_string();
+    let history = api(c, &format!("/v1/volumes/{src}/history"));
+    poll_json(c, &history, &jwt, CACHE_CEILING / 2, |v| super::workspace::row_ready(v, &snap)).await.context("the snapshot never turned ready")?;
+    let body = json!({ "name": name, "snapshot_id": snap });
+    let doc = post(c, &api(c, "/v1/workspaces/restore"), &jwt, body).await.context("could not restore")?;
+    let id = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("the restore answered no workspace id"))?.to_string();
+    c.state.extra_workspaces.push(id.clone());
+    let ws = api(c, &format!("/v1/workspaces/{id}"));
+    poll_json(c, &ws, &jwt, CACHE_CEILING / 2, |v| v.get("state").and_then(Value::as_str) == Some("ready")).await?;
+    Ok(id)
+}
+
 /// The half that breaks under concurrency: the caches are LOCAL, not on the shared export.
 ///
 /// Two pods on two nodes racing one cache directory over NFS is the failure the redirect exists
@@ -330,7 +385,8 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
     state_is_local(&out, cache, state)
 }
 
-/// The two env vars point into the local cache, and the state directory is a MOUNT of its own.
+/// `XDG_CACHE_HOME` points into the local cache, `CARGO_TARGET_DIR` into the WORKSPACE DIR (build
+/// output travels with the tree since 2026-09-11), and the state directory is a MOUNT of its own.
 ///
 /// A pure function so the judgement is testable without a pod. The state half used to compare
 /// `readlink -f /home/kl/.local/state` against `/home/kl/.local/state` — the same string either
@@ -341,13 +397,14 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
 /// line of its own.
 fn state_is_local(out: &str, cache: &str, state: &str) -> Result<()> {
     let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    for (what, seen) in [("XDG_CACHE_HOME", lines.first()), ("CARGO_TARGET_DIR", lines.get(1))] {
-        match seen {
-            Some(v) if v.starts_with(cache) => {}
-            other => {
-                return Err(anyhow!("{what} is {other:?}, not under the local cache at {cache}"))
-            }
-        }
+    match lines.first() {
+        Some(v) if v.starts_with(cache) => {}
+        other => return Err(anyhow!("XDG_CACHE_HOME is {other:?}, not under the local cache at {cache}")),
+    }
+    let ws = kloudlite_workspaces::k8s::WORKSPACES_DIR;
+    match lines.get(1) {
+        Some(v) if v.starts_with(ws) && v.ends_with("/.cache/cargo-target") => {}
+        other => return Err(anyhow!("CARGO_TARGET_DIR is {other:?}, not `{ws}/<name>/.cache/cargo-target`")),
     }
     let mount = lines.iter().find(|l| l.starts_with("mount "));
     let Some(mount) = mount else {
@@ -806,17 +863,21 @@ mod tests {
     fn the_state_dir_has_to_be_a_local_mount() {
         let cache = "/home/kl/.local-cache";
         let state = "/home/kl/.local/state";
-        let ok = format!("{cache}/xdg\n{cache}/cargo-target\nmount /dev/sda1 btrfs\ncachemount /dev/sda1 btrfs\n");
+        let target = "/home/kl/workspaces/ws-1/.cache/cargo-target";
+        let ok = format!("{cache}/xdg\n{target}\nmount /dev/sda1 btrfs\ncachemount /dev/sda1 btrfs\n");
         assert!(state_is_local(&ok, cache, state).is_ok());
         // The failure the redirect exists for: state fell back onto the shared export.
-        let nfs = format!("{cache}/xdg\n{cache}/cargo-target\nmount 10.0.0.4:/homes nfs4\n");
+        let nfs = format!("{cache}/xdg\n{target}\nmount 10.0.0.4:/homes nfs4\n");
         assert!(state_is_local(&nfs, cache, state).is_err());
         // No mount line at all: a plain directory on the home, which is the same failure quieter.
-        let bare = format!("{cache}/xdg\n{cache}/cargo-target\n");
+        let bare = format!("{cache}/xdg\n{target}\n");
         assert!(state_is_local(&bare, cache, state).is_err());
-        // And the cache vars still have to point into the local cache.
-        let wrong = format!("/home/kl/.cache\n{cache}/cargo-target\nmount /dev/sda1 btrfs\n");
+        // The global cache still has to point into the local cache …
+        let wrong = format!("/home/kl/.cache\n{target}\nmount /dev/sda1 btrfs\n");
         assert!(state_is_local(&wrong, cache, state).is_err());
+        // … and build output into the WORKSPACE DIR, not the local cache it used to live in.
+        let old = format!("{cache}/xdg\n{cache}/cargo-target\nmount /dev/sda1 btrfs\n");
+        assert!(state_is_local(&old, cache, state).is_err());
     }
 
     /// `ws.seeded` reads the clone from the workspace's own subvolume — `~/workspaces/{name}` —

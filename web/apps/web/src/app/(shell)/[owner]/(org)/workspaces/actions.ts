@@ -208,7 +208,8 @@ export async function openInWorkspace(_prev: WsActionState, formData: FormData):
     team,
     name,
     region,
-    quota_gb: 10,
+    // 50, the platform default: build output lives inside the workspace since 2026-09-11.
+    quota_gb: 50,
     repo: `${owner}/${repo}`,
     branch,
   });

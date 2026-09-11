@@ -380,6 +380,9 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "ws.packages.update", feature: "Workspaces", sli: "`POST …/packages/update` answers with the lock unchanged for an exact pin", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.packages.pin.lockshape", feature: "Workspaces", sli: "The lock names a nixpkgs revision and a store path", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.seeded", feature: "Workspaces", sli: "A workspace created from a repo and branch has that clone checked out, and its doc names them", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // Build output lives in the workspace dir since 2026-09-11 and travels with a push: a restore
+    // arrives warm. Read on the RESTORED copy, never the source.
+    Slo { id: "ws.cache.travels", feature: "Workspaces", sli: "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.seed.failed", feature: "Workspaces", sli: "A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating`", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },

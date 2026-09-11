@@ -102,9 +102,11 @@ where
 }
 
 
-/// The legacy-Volume quota fallback (`FALLBACK_QUOTA_GB` in `api.rs`) — was already `20`, named
-/// here so `SnapshotState::of_workspace` and `api.rs` share the one number.
-pub const DEFAULT_WS_QUOTA_GB: u64 = 20;
+/// The workspace quota when nothing names one (`FALLBACK_QUOTA_GB` in `api.rs`, the console's
+/// default) and `SnapshotState::of_workspace`'s fallback for a legacy object. 50, not the 20 a
+/// source tree needs: since 2026-09-11 build output lives INSIDE the tree (`{ws}/.cache/`,
+/// `login_env`), so the number has to hold a Rust `target/` or a `node_modules/` as well.
+pub const DEFAULT_WS_QUOTA_GB: u64 = 50;
 /// `default_env_quota()`'s value in `api.rs` — both the `NewEnvironment.quota_gb` request-body
 /// default (an environment created without one gets this) and `SnapshotState::of_environment`'s
 /// fallback for a legacy `spec.storage`-less object; was already `20`, named here to share it.

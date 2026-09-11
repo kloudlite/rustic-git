@@ -119,7 +119,7 @@ existing homecache sweep. No CRD change, no data migration.
 - `Dockerfile` workspace stage: `/home/kl/.config/git/ignore` block, entrypoint append-once.
 - `crates/workspaces/src/crd/snapshot.rs` `DEFAULT_WS_QUOTA_GB` 20 → 50; console default.
 - `docs/product`: `concepts/workspaces.md` table (what persists where) and `reference/limits.md`.
-- Probe: `ws.cache.in_tree` (hourly) — a workspace builds a trivial Cargo crate, is cloned, and
+- Probe: `ws.cache.travels` (hourly) — a workspace builds a trivial Cargo crate, is cloned, and
   the clone's `{ws}/.cache/cargo-target` is non-empty before any build.
 - `CLAUDE.md` "Every person has one persistent home" paragraph: the three-homes rule.
 
