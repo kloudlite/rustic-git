@@ -1,7 +1,9 @@
-//! `kl` — the kloudlite workspace CLI. Two verbs, because a workspace has a builder and a
+//! `kl` — the kloudlite workspace CLI. Two build verbs, because a workspace has a builder and a
 //! registry and no container engine: `kl build` builds on the owner's builder and pushes,
 //! `kl push` copies an image the registry already holds to another name. Nothing here holds a
 //! token or calls the api; the docker credential helper (`docker-credential-kl`) is the login.
+//! The third verb is `kl ide serve`, the workspace tool server (`kloudlite_ide`), started by the
+//! pod prelude before sshd and reached through the ssh tunnel.
 
 mod docker;
 mod refs;
@@ -43,6 +45,23 @@ enum Cmd {
         src: String,
         dst: Vec<String>,
     },
+    /// The workspace tool server: files, exec, watch and graft over MCP on loopback
+    Ide {
+        #[command(subcommand)]
+        cmd: IdeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdeCmd {
+    /// Serve on 127.0.0.1:7788; reach it through `kl-connect ws ide <workspace>`
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:7788")]
+        bind: std::net::SocketAddr,
+        /// A graft context directory other than `$KL_WORKSPACE/graft`
+        #[arg(long)]
+        graft_dir: Option<std::path::PathBuf>,
+    },
 }
 
 const NO_DST: &str = "a build pushes as it finishes — `kl build -t hello:1 .`; `kl push` copies an image the registry already has to another name";
@@ -60,6 +79,10 @@ fn main() {
 
 fn real_main() -> Result<(), String> {
     let cli = Cli::parse();
+    // The server needs none of the docker setup below and must not wait on the builder.
+    if let Cmd::Ide { cmd: IdeCmd::Serve { bind, graft_dir } } = cli.cmd {
+        return serve_ide(bind, graft_dir);
+    }
     // Refused before anything touches docker: the sentence is the whole point of the verb.
     if let Cmd::Push { dst, .. } = &cli.cmd {
         if dst.is_empty() {
@@ -94,6 +117,8 @@ fn real_main() -> Result<(), String> {
             }
             Ok(())
         }
+        // Returned before the docker setup above; the match still has to say so.
+        Cmd::Ide { .. } => unreachable!("kl ide serve is handled before the docker setup"),
         Cmd::Push { src, dst } => {
             let src = refs::expand(&src, &host, &owner);
             for d in dst {
@@ -107,4 +132,20 @@ fn real_main() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// `kl ide serve`: resolve the pod's environment, refuse to start without the preconditions,
+/// then serve until killed. Logs are JSON on stderr, like every other binary's.
+fn serve_ide(bind: std::net::SocketAddr, graft_dir: Option<std::path::PathBuf>) -> Result<(), String> {
+    let root = std::path::PathBuf::from(env("KL_WORKSPACE")?);
+    let home = std::path::PathBuf::from(env("HOME")?);
+    let cfg = kloudlite_ide::Config { bind, root, home, graft_dir };
+    kloudlite_ide::guard::preflight(&cfg)?;
+    tracing_subscriber::fmt()
+        .json()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .init();
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(kloudlite_ide::serve(cfg)).map_err(|e| e.to_string())
 }

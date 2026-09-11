@@ -1,7 +1,7 @@
 [workspace]
 members = [
     ".",
-    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces", "crates/ide",
     "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/builder-gate", "bins/kl-connect", "bins/kl", "bins/slo",
 ]
 # This root package is ALSO the workspace root ([workspace] + [package] in one file), which makes
@@ -11,7 +11,7 @@ members = [
 # (the deploy image's build command) keeps working unchanged.
 default-members = [
     ".",
-    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces",
+    "crates/core", "crates/storage", "crates/gitbase", "crates/pulls", "crates/app", "crates/git", "crates/registry", "crates/api", "crates/workspaces", "crates/ide",
     "bins/server", "bins/api", "bins/worker", "bins/agent", "bins/gateway", "bins/builder-gate", "bins/kl-connect", "bins/kl", "bins/slo",
 ]
 resolver = "2"
@@ -112,6 +112,12 @@ slatedb-common = { version = "0.15", features = ["test-util"] }
 async-trait = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+# `kl ide serve` (crates/ide): the four it needs beyond the workspace set, all pure Rust so the
+# musl `kl` stays a static binary.
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 # Already in the lock via slatedb (its aws/azure features); declared directly for the
 # workspaces snapshot engine's layer store (Task 3), pinned to slatedb's version.
 #
