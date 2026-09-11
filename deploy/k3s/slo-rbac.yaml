@@ -74,8 +74,11 @@ rules:
   # `daemonsets`: the fast suite's rollout yield reads `kloudlite-agent`'s
   # updatedNumberScheduled/numberReady against desiredNumberScheduled — a run that starts while the
   # region's agents are rolling would measure the roll, so it skips every id instead.
+  # `deployments`: the roll guard reads the region's `kloudlite-gateway` and
+  # `kloudlite-builder-gate` before every stage and on every failed step; without this it logged
+  # `slo.rollout.check.failed` on every check and never skipped a roll-time sample (2026-09-11).
   - apiGroups: ["apps"]
-    resources: ["statefulsets", "daemonsets"]
+    resources: ["statefulsets", "daemonsets", "deployments"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     # `get` as well as `create`: the WebSocket exec the kube crate speaks is a GET upgrade, and

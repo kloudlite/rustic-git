@@ -162,7 +162,12 @@ pub async fn http_metrics(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let start = Instant::now();
+    // A request whose client goes away is DROPPED here mid-flight and would log nothing — which
+    // is how a 15 s `GET /admin/workloads` the probe abandoned left no trace on this side
+    // (2026-09-11). The guard says it happened and how far it got; it is disarmed on completion.
+    let mut abandoned = Abandoned { listener, class, method: method.clone(), path: path.clone(), start, armed: true };
     let res = next.run(req).await;
+    abandoned.armed = false;
     let status = res.status().as_u16();
     let labels = [("listener", listener), ("class", class), ("status", status_class(status))];
     metrics::counter!("http_requests_total", &labels).increment(1);
@@ -186,6 +191,25 @@ pub async fn http_metrics(
 /// A request slower than this is logged whatever its status: the histogram says the p99 moved,
 /// this says which request.
 const SLOW_REQUEST_MS: u64 = 1_000;
+
+struct Abandoned {
+    listener: &'static str,
+    class: &'static str,
+    method: axum::http::Method,
+    path: String,
+    start: Instant,
+    armed: bool,
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        if self.armed {
+            let ms = self.start.elapsed().as_millis() as u64;
+            metrics::counter!("http_requests_total", "listener" => self.listener, "class" => self.class, "status" => "abandoned").increment(1);
+            tracing::warn!(listener = self.listener, class = self.class, method = %self.method, path = %self.path, ms, "http.abandoned");
+        }
+    }
+}
 
 /// A bounded label set: the path itself would be one series per repository.
 fn route_class(path: &str) -> &'static str {
