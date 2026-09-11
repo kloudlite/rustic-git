@@ -18,6 +18,21 @@ pub async fn list(team: Option<&str>) -> Result<(), String> {
 }
 
 pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
+    ssh_with(target, args, None).await
+}
+
+/// `kl-connect ws ide <target>`: the same ssh, carrying only a port forward to the workspace's
+/// tool server (`kl ide serve`, loopback 7788 in the pod) and no shell. ssh itself is the
+/// authentication; the printed line is what an agent needs to attach.
+pub async fn ide(target: &str, port: u16) -> Result<(), String> {
+    let banner = format!(
+        "kl-connect: {target}'s tool server is at http://localhost:{port}/mcp while this runs.\n  claude mcp add --transport http workspace http://localhost:{port}/mcp\n  curl http://localhost:{port}/healthz"
+    );
+    let args = vec!["-N".to_string(), "-L".to_string(), format!("{port}:127.0.0.1:7788")];
+    ssh_with(target, &args, Some(banner)).await
+}
+
+async fn ssh_with(target: &str, args: &[String], banner: Option<String>) -> Result<(), String> {
     let cfg = config::load()?;
     // ONE api call before the handshake: the api resolves a name to an id, and the session it
     // mints rides to the ProxyCommand child in ssh's environment rather than being minted again.
@@ -56,6 +71,9 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
             crate::proxy::SESSION_ENV,
             serde_json::to_string(&s).map_err(|e| e.to_string())?,
         );
+    if let Some(b) = banner {
+        println!("{b}");
+    }
     // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status) and a
     // parent sitting in the middle only gets those wrong.
     #[cfg(unix)]

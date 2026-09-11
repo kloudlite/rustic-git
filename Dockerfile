@@ -134,7 +134,7 @@ ENTRYPOINT ["kloudlite-builder-gate"]
 # `k8s::prelude`, not here.
 FROM alpine:3.20 AS workspace
 ARG PROFILE=release
-RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx \
+RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx nodejs npm \
     && mkdir -p /var/empty \
     && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
     && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
@@ -156,6 +156,10 @@ COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
 # git's default `core.excludesFile`. `prelude` appends this block to the person's own file once;
 # a per-repository `.gitignore` line would be a diff they did not ask for, in every repository.
 COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
+# graft, for `kl ide serve`: the graph of every symbol and call edge an outside agent asks about,
+# proxied from `graft mcp` and kept fresh by the server. Pinned; the image is the version.
+RUN npm install -g @nanonets/graft@0.18.0 && npm cache clean --force
+ENV DO_NOT_TRACK=1
 
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a

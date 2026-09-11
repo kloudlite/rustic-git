@@ -440,6 +440,20 @@ pub(crate) fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
     assert_eq!(get("DO_NOT_TRACK"), "1");
 }
 
+/// The tool server starts as `kl`, in the workspace dir, before sshd takes pid 1 — and never as
+/// root, which its own preflight would refuse anyway.
+#[test]
+pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
+    let s = prelude("api");
+    let serve = s.find("exec kl ide serve").expect("kl ide serve is started");
+    let sshd = s.find("exec /nix/profile/current/bin/sshd").or_else(|| s.find("/bin/sshd -D")).expect("sshd is exec'd");
+    assert!(serve < sshd, "the server must start before sshd takes over");
+    let line = s.lines().find(|l| l.contains("kl ide serve")).unwrap();
+    assert!(line.trim_start().starts_with("su kl "), "{line}");
+    assert!(line.contains("KL_WORKSPACE=/home/kl/workspaces/api"), "{line}");
+    assert!(line.trim_end().ends_with('&'), "backgrounded: {line}");
+}
+
 /// The global git ignore: appended to the person's own file exactly once, never a per-repo line.
 #[test]
 pub(crate) fn the_prelude_appends_the_global_git_ignore_once() {

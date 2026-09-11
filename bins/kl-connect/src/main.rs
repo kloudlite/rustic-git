@@ -75,6 +75,13 @@ enum WsCmd {
     Proxy { id: String },
     /// Write ~/.ssh/kloudlite_config and Include it from ~/.ssh/config
     SshConfig,
+    /// Tunnel the workspace's tool server to localhost: `kl-connect ws ide api`, then
+    /// `claude mcp add --transport http workspace http://localhost:7788/mcp`
+    Ide {
+        target: String,
+        #[arg(long, default_value_t = 7788)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -91,6 +98,7 @@ async fn main() {
             WsCmd::Ssh { target, args } => ws::ssh(target, args).await,
             WsCmd::Proxy { id } => proxy::proxy(id).await,
             WsCmd::SshConfig => ws::ssh_config().await,
+            WsCmd::Ide { target, port } => ws::ide(target, *port).await,
         },
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
