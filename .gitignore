@@ -28,3 +28,6 @@ __pycache__/
 # Crash dumps a test binary leaves in the checkout; never a source file.
 core
 core.[0-9]*
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
