@@ -2015,7 +2015,7 @@ async fn a_pre_change_snapshot_restores_as_before() {
     let w = &s.rec.sent("POST", &format!("{API}/workspaces"))[0];
     assert_eq!(w["spec"]["image"], kloudlite_workspaces::model::default_ws_image());
     assert!(w["spec"]["packages"].as_array().is_none_or(|p| p.is_empty()), "{w}");
-    assert_eq!(w["spec"]["storage"]["quotaGb"], 20);
+    assert_eq!(w["spec"]["storage"]["quotaGb"], kloudlite_workspaces::crd::DEFAULT_WS_QUOTA_GB);
 }
 
 /// With the source gone, the region is not a guess: the detached `Volume` holding the bytes names
