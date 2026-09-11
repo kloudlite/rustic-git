@@ -296,6 +296,16 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
         tracing::info!(workload = "kloudlite-agent", "slo.rollout.in_flight");
         return Ok(true);
     }
+    // The region's other two rolled workloads. The gateway is what `gw.tunnel.p95` dials: its
+    // restart at 11:15:38 on 2026-09-11 was a 20 s timeout filed as a failure, because only the
+    // agent was asked.
+    for name in ["kloudlite-gateway", "kloudlite-builder-gate"] {
+        let d = Api::<Deployment>::namespaced(k3s.clone(), "kloudlite-system").get(name).await?;
+        if mid_rollout(deployment_counts(&d)) {
+            tracing::info!(workload = name, "slo.rollout.in_flight");
+            return Ok(true);
+        }
+    }
     Ok(false)
 }
 
@@ -339,6 +349,16 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
             tracing::warn!(budget_secs = budget.as_secs(), skipped, "slo.run.budget.spent");
             hand_over(c);
             // Under the LAST stage `skip_remaining` stamped, which is where the run stopped.
+            let last = c.stage.clone();
+            report(c, &last).await;
+            return;
+        }
+        // The same question the run asked before it started, asked again at every stage: a roll
+        // that begins mid-run turns the rest of the journey into a measurement of the roll.
+        if i > 0 && kind == Suite::Fast && rollout_in_flight(c).await {
+            let skipped = skip_remaining_because(c, kind, &stages[i..], ROLLOUT_IN_FLIGHT);
+            tracing::warn!(skipped, reason = ROLLOUT_IN_FLIGHT, "slo.run.yielded");
+            hand_over(c);
             let last = c.stage.clone();
             report(c, &last).await;
             return;
