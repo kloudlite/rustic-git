@@ -93,6 +93,7 @@ fn every_rule_queries_its_own_metric_with_its_own_grouping() {
         ("Http5xxRate", "otel_metrics_sum", "http_requests_total", &["INTERVAL 300 SECOND", "listener", "class", "'5xx'"]),
         ("MisdirectedWrites", "otel_metrics_sum", "http_requests_total", &["INTERVAL 600 SECOND", "'421'"]),
         ("ReconcileErrors", "otel_metrics_sum", "reconciles_total", &["INTERVAL 600 SECOND", "kind", "'error'"]),
+        ("LateWatchEvents", "otel_metrics_sum", "watch_events_late_total", &["INTERVAL 600 SECOND", "HAVING count() > 0"]),
         ("TunnelSaturation", "otel_metrics_gauge", "gateway_open_tunnels", &["INTERVAL 300 SECOND", "800"]),
         // kubeletstats publishes container restarts as a GAUGE, and the catalogue's window is the
         // whole hour rather than a bucket.
