@@ -1231,7 +1231,10 @@ data:
         # The collector's own queue is the buffer. Nothing of ours buffers telemetry — a dropped
         # sample is a gap in a chart, and building a durable queue for that would be the most
         # over-engineered thing in this repo.
-        retry_on_failure: { enabled: true }
+        # Fifteen minutes, not the five the collector defaults to: on 2026-09-11 06:47-06:57 the OTLP
+        # host answered nothing for ten minutes and the retries gave up, so ten minutes of samples
+        # were lost and the coverage probe read a scrape gap that never happened on the node.
+        retry_on_failure: { enabled: true, max_elapsed_time: 900s }
         sending_queue: { enabled: true, queue_size: 5000 }
 
     service:
@@ -1404,7 +1407,10 @@ data:
         endpoint: http://clickstack-otel-collector.clickstack.svc:4318
         headers:
           authorization: "${env:OTEL_INGESTION_KEY}"
-        retry_on_failure: { enabled: true }
+        # Fifteen minutes, not the five the collector defaults to: on 2026-09-11 06:47-06:57 the OTLP
+        # host answered nothing for ten minutes and the retries gave up, so ten minutes of samples
+        # were lost and the coverage probe read a scrape gap that never happened on the node.
+        retry_on_failure: { enabled: true, max_elapsed_time: 900s }
         sending_queue: { enabled: true, queue_size: 5000 }
 
     service:
