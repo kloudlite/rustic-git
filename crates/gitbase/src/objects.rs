@@ -140,11 +140,11 @@ fn index_objects(
         &mut gix_features::progress::Discard,
         &AtomicBool::new(false),
         Some(odb),
+        gix_hash::Kind::Sha1,
         gix_pack::bundle::write::Options {
             thread_limit: None,
             iteration_mode: gix_pack::data::input::Mode::Verify,
             index_version: gix_pack::index::Version::V2,
-            object_hash: gix_hash::Kind::Sha1,
             alloc_limit_bytes: Some(1024 * 1024 * 1024),
             compression: Default::default(),
         },

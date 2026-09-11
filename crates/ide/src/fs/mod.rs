@@ -211,19 +211,10 @@ pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap) -> Respons
     };
     let mut rows = Vec::with_capacity(st.changes.len());
     for c in &st.changes {
-        let (additions, deletions, binary) = if c.worktree == '?' {
-            // Untracked: git has no count, so the file itself is counted (bounded by MAX_FILE).
-            match std::fs::metadata(app.cfg.root.join(&c.path)).ok().filter(|m| m.len() <= MAX_FILE).and_then(|_| std::fs::read(app.cfg.root.join(&c.path)).ok()) {
-                Some(b) if b.iter().take(8192).any(|x| *x == 0) => (0, 0, true),
-                Some(b) => (b.iter().filter(|x| **x == b'\n').count() as u32, 0, false),
-                None => (0, 0, false),
-            }
-        } else {
-            match counts.iter().find(|(p, _)| *p == c.path) {
-                Some((_, Some((a, d)))) => (*a, *d, false),
-                Some((_, None)) => (0, 0, true),
-                None => (0, 0, false),
-            }
+        let (additions, deletions, binary) = match counts.iter().find(|(p, _)| *p == c.path) {
+            Some((_, Some((a, d)))) => (*a, *d, false),
+            Some((_, None)) => (0, 0, true),
+            None => (0, 0, false),
         };
         rows.push(json!({
             "path": c.path, "index": c.index, "worktree": c.worktree, "renamed_from": c.renamed_from,

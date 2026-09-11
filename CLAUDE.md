@@ -350,9 +350,11 @@ git, and a debounced `graft build` (cache reuse makes it incremental) runs at mo
 `/healthz` says `graph: ready|building|drifted|absent|unavailable`. The server refuses to start
 without the global gitignore block (`guard::preflight`). Beside the tools, `/fs/*` (`crates/ide/src/fs/`:
 tree, stat, file, git, changes, diff) is what a CONSOLE renders a workspace from — read-only,
-every answer under an `ETag` with `If-None-Match` a 304, one `git status --porcelain=v2 -z -uall`
-per request and never a process per entry, not a repository is `repo: false` not an error; none of
-it is a tool and `GET /tools` never lists it. `ide.serve.up` and `ide.exec` hold it
+every answer under an `ETag` with `If-None-Match` a 304, git read IN-PROCESS through gitoxide
+(`fs/git.rs`: one status walk per request, blob diffs in memory) — the owner's rule is that only
+graft runs as a child; every file and git action is Rust — not a repository is `repo: false` not an
+error; none of it is a tool and `GET /tools` never lists it. The `gix` facade this needed is what
+moved the workspace's `gix-*` pins to the 0.87 line (`gix_odb::at` takes the hash kind now). `ide.serve.up` and `ide.exec` hold it
 on the fleet from inside the pod. No PTY yet; no gateway route yet.
 
 `Region` is a cluster-scoped CRD (`crd::Region`) like everything else here — `bins/api` is its only

@@ -15,10 +15,11 @@ session layer proxies them as they are. Read-only, same confinement, same tunnel
 
 - Paths relative to the workspace directory or absolute under the home; anything else is
   `403 {"error"}` through `paths::confine`.
-- git is the `git` binary, `current_dir(root)`, bounded to 10 s. Not a repository is not an error:
+- git is read in-process through gitoxide (`gix`), never by running `git` — the owner's rule: every
+  file and git action is Rust; only graft is a child process. Not a repository is not an error:
   `repo: false` and every git field empty.
-- One git process per request, never per entry. The tree's letters and ignored flags come from one
-  `git status --porcelain=v2 -z --ignored=matching` over the requested level(s).
+- One status walk per request, never per entry. The tree's letters and ignored flags come from one
+  gitoxide status iteration (untracked files listed one by one, ignored directories collapsed).
 - Conditional requests: every answer carries an `ETag`; `If-None-Match` answers `304` with no body.
   For a file it is `"{size}-{mtime_ns}"` (no read); for tree/git/changes it is a hash of the body.
 - Caps: `depth` 1..3; 5 000 tree entries (`truncated: true`); file 10 MiB (413 past it); a diff

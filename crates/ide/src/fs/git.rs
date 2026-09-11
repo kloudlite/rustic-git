@@ -1,16 +1,12 @@
-//! git as the workspace sees it, through the `git` binary in the workspace directory — never a
-//! library: the worker's rule (libgit2 speaks no protocol v2) and one less thing to keep in step
-//! with the `git` a person runs over ssh. Every call is one process, bounded to ten seconds; a
-//! directory that is not a repository is an ANSWER (`repo: false`), not an error, because a fresh
-//! workspace before its first `git init` is a normal thing to render.
-use std::path::Path;
-use std::process::Output;
-use std::time::Duration;
-use tokio::process::Command;
-
-pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// The tree with nothing in it, so a repository with no commit yet still has a base to diff against.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+//! git as the workspace sees it, in Rust through gitoxide — no `git` process, so the routes are one
+//! process end to end and testable against a tempdir. Everything here is blocking work behind
+//! `spawn_blocking`; a directory that is not a repository is an ANSWER (`repo: false`), not an
+//! error, because a fresh workspace before its first `git init` is a normal thing to render.
+use gix::bstr::{BStr, ByteSlice};
+use gix::diff::blob::unified_diff::{ConsumeBinaryHunk, ContextSize};
+use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Change {
@@ -29,15 +25,9 @@ pub struct Status {
     pub ahead: u32,
     pub behind: u32,
     pub changes: Vec<Change>,
-    /// `--ignored=matching` rows: a file, or a directory with a trailing `/` when all of it is ignored.
+    /// Ignored paths: a file, or a directory with a trailing `/` when all of it is ignored.
     #[serde(skip)]
     pub ignored: Vec<String>,
-}
-
-impl Default for Change {
-    fn default() -> Self {
-        Change { path: String::new(), index: '.', worktree: '.', renamed_from: None }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,242 +51,270 @@ impl Against {
     }
 }
 
-async fn git(root: &Path, args: &[&str]) -> Result<Output, String> {
-    let run = Command::new("git").args(["--no-optional-locks", "-c", "core.quotepath=off"]).args(args).current_dir(root).env("GIT_TERMINAL_PROMPT", "0").output();
-    match tokio::time::timeout(GIT_TIMEOUT, run).await {
-        Ok(Ok(o)) => Ok(o),
-        Ok(Err(e)) => Err(format!("git: {e}")),
-        Err(_) => Err(format!("git {} took longer than {} s", args.first().unwrap_or(&""), GIT_TIMEOUT.as_secs())),
+/// The workspace directory itself, never a parent: `discover` would climb to a repository in the
+/// home and render the wrong tree.
+fn open(root: &Path) -> Option<gix::Repository> {
+    gix::open(root).ok()
+}
+
+async fn blocking<T: Send + 'static>(root: &Path, f: impl FnOnce(PathBuf) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || f(root)).await.map_err(|e| format!("git task: {e}"))?
+}
+
+fn s(b: &BStr) -> String {
+    b.to_str_lossy().into_owned()
+}
+
+/// The blob `rel` names at `at` (`HEAD`, any rev spec, or `index`); `None` when absent there.
+fn blob_at(repo: &gix::Repository, at: &str, rel: &str) -> Option<Vec<u8>> {
+    if at == "index" {
+        let index = repo.index_or_empty().ok()?;
+        let entry = index.entry_by_path(rel.into())?;
+        return repo.find_object(entry.id).ok().map(|o| o.data.clone());
     }
+    let id = repo.rev_parse_single(format!("{at}:{rel}").as_bytes().as_bstr()).ok()?;
+    repo.find_object(id).ok().filter(|o| o.kind == gix::object::Kind::Blob).map(|o| o.data.clone())
 }
 
-fn not_a_repo(o: &Output) -> bool {
-    // `status` says "fatal: not a git repository" (128); `diff` says "warning: Not a git
-    // repository" and exits 129 — one predicate for both.
-    !o.status.success() && String::from_utf8_lossy(&o.stderr).to_ascii_lowercase().contains("not a git repository")
+fn worktree_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    std::fs::read(root.join(rel)).ok()
 }
 
-/// `git status --porcelain=v2 --branch -z`, the one listing everything else here derives from.
-pub async fn status(root: &Path, with_ignored: bool) -> Result<Status, String> {
-    // `-uall`: an untracked directory is listed file by file, so a tree can letter each entry and
-    // the changes panel can count each new file rather than showing one `src/` row.
-    let mut args = vec!["status", "--porcelain=v2", "--branch", "-z", "-uall"];
+fn is_binary(b: &[u8]) -> bool {
+    b.iter().take(8192).any(|x| *x == 0)
+}
+
+fn walk_status(repo: &gix::Repository, with_ignored: bool) -> Result<(Vec<Change>, Vec<String>), String> {
+    use gix::diff::index::Change as Tree;
+    use gix::dir::entry::{Kind as DiskKind, Status as DirStatus};
+    use gix::status::index_worktree::Item as Wt;
+    use gix::status::{index_worktree::iter::Summary, UntrackedFiles};
+
+    let mut plat = repo.status(gix::progress::Discard).map_err(|e| format!("git status: {e}"))?.untracked_files(UntrackedFiles::Files);
     if with_ignored {
-        args.push("--ignored=matching");
+        plat = plat.dirwalk_options(|o| o.emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory)));
     }
-    let o = git(root, &args).await?;
-    if not_a_repo(&o) {
-        return Ok(Status::default());
+    let mut rows: BTreeMap<String, Change> = BTreeMap::new();
+    let mut ignored = Vec::new();
+    fn row(rows: &mut BTreeMap<String, Change>, path: String) -> &mut Change {
+        rows.entry(path.clone()).or_insert(Change { path, index: '.', worktree: '.', renamed_from: None })
     }
-    if !o.status.success() {
-        return Err(format!("git status: {}", String::from_utf8_lossy(&o.stderr).trim()));
-    }
-    Ok(parse_porcelain_v2(&o.stdout))
-}
-
-/// Pure: records are NUL-separated; a rename (`2 …`) carries its ORIGINAL path as the next record.
-pub fn parse_porcelain_v2(bytes: &[u8]) -> Status {
-    let mut st = Status { repo: true, ..Status::default() };
-    let recs: Vec<&str> = bytes.split(|b| *b == 0).map(|r| std::str::from_utf8(r).unwrap_or("")).collect();
-    let mut i = 0;
-    while i < recs.len() {
-        let r = recs[i];
-        i += 1;
-        if let Some(h) = r.strip_prefix("# ") {
-            let (k, v) = h.split_once(' ').unwrap_or((h, ""));
-            match k {
-                "branch.oid" if v != "(initial)" => st.head = Some(v.to_string()),
-                "branch.head" if v != "(detached)" => st.branch = Some(v.to_string()),
-                "branch.upstream" => st.upstream = Some(v.to_string()),
-                "branch.ab" => {
-                    for part in v.split(' ') {
-                        if let Some(n) = part.strip_prefix('+') {
-                            st.ahead = n.parse().unwrap_or(0);
-                        } else if let Some(n) = part.strip_prefix('-') {
-                            st.behind = n.parse().unwrap_or(0);
+    for item in plat.into_iter(Vec::new()).map_err(|e| format!("git status: {e}"))? {
+        let item = item.map_err(|e| format!("git status: {e}"))?;
+        match item {
+            gix::status::Item::TreeIndex(t) => match t {
+                Tree::Addition { location, .. } => row(&mut rows, s(&location)).index = 'A',
+                Tree::Deletion { location, .. } => row(&mut rows, s(&location)).index = 'D',
+                Tree::Modification { location, .. } => row(&mut rows, s(&location)).index = 'M',
+                Tree::Rewrite { source_location, location, copy, .. } => {
+                    let r = row(&mut rows, s(&location));
+                    r.index = if copy { 'C' } else { 'R' };
+                    r.renamed_from = Some(s(&source_location));
+                }
+            },
+            gix::status::Item::IndexWorktree(w) => {
+                if let Wt::DirectoryContents { entry, .. } = &w {
+                    if matches!(entry.status, DirStatus::Ignored(_)) {
+                        let mut p = s(entry.rela_path.as_ref());
+                        if entry.disk_kind == Some(DiskKind::Directory) {
+                            p.push('/');
                         }
+                        ignored.push(p);
+                        continue;
                     }
                 }
-                _ => {}
+                // `None` is an entry that only needs its stat refreshed — not a change.
+                let Some(sum) = w.summary() else { continue };
+                match w {
+                    Wt::Modification { rela_path, .. } => {
+                        let r = row(&mut rows, s(rela_path.as_ref()));
+                        match sum {
+                            Summary::Removed => r.worktree = 'D',
+                            Summary::TypeChange => r.worktree = 'T',
+                            Summary::Conflict => r.worktree = 'U',
+                            // Intent-to-add is an index fact with nothing in the tree yet: ` A`.
+                            Summary::IntentToAdd => r.index = 'A',
+                            _ => r.worktree = 'M',
+                        }
+                    }
+                    Wt::DirectoryContents { entry, .. } => {
+                        let r = row(&mut rows, s(entry.rela_path.as_ref()));
+                        r.index = '?';
+                        r.worktree = '?';
+                    }
+                    Wt::Rewrite { source, dirwalk_entry, copy, .. } => {
+                        let r = row(&mut rows, s(dirwalk_entry.rela_path.as_ref()));
+                        r.worktree = if copy { 'C' } else { 'R' };
+                        r.renamed_from = Some(s(source.rela_path()));
+                    }
+                }
             }
-            continue;
-        }
-        let mut f = r.splitn(2, ' ');
-        let (kind, rest) = (f.next().unwrap_or(""), f.next().unwrap_or(""));
-        match kind {
-            "?" => st.changes.push(Change { path: rest.to_string(), index: '?', worktree: '?', renamed_from: None }),
-            "!" => st.ignored.push(rest.to_string()),
-            "1" | "2" | "u" => {
-                let fields: Vec<&str> = rest.splitn(if kind == "1" { 8 } else if kind == "2" { 9 } else { 10 }, ' ').collect();
-                let xy = fields.first().copied().unwrap_or("..");
-                let path = fields.last().copied().unwrap_or("").to_string();
-                let mut xy = xy.chars();
-                let (index, worktree) = (xy.next().unwrap_or('.'), xy.next().unwrap_or('.'));
-                let renamed_from = if kind == "2" {
-                    let from = recs.get(i).copied().unwrap_or("").to_string();
-                    i += 1;
-                    Some(from)
-                } else {
-                    None
-                };
-                st.changes.push(Change { path, index, worktree, renamed_from });
-            }
-            _ => {}
         }
     }
-    st
+    Ok((rows.into_values().collect(), ignored))
 }
 
-/// Per-path line counts of the worktree against HEAD (the empty tree before the first commit).
-/// `None` is a binary file. Renames come back under the NEW path.
+/// Branch, head, upstream and its distance, plus every change — the one listing everything
+/// else here derives from.
+pub async fn status(root: &Path, with_ignored: bool) -> Result<Status, String> {
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok(Status::default()) };
+        let mut st = Status { repo: true, ..Status::default() };
+        let head = repo.head().map_err(|e| format!("HEAD: {e}"))?;
+        st.head = head.id().map(|id| id.to_string());
+        st.branch = head.referent_name().map(|n| s(n.shorten()));
+        if let (Some(name), Some(head_id)) = (head.referent_name(), head.id()) {
+            if let Some(Ok(up)) = repo.branch_remote_tracking_ref_name(name, gix::remote::Direction::Fetch) {
+                if let Ok(mut r) = repo.find_reference(up.as_ref()) {
+                    if let Ok(up_id) = r.peel_to_id() {
+                        st.upstream = Some(s(up.shorten()));
+                        let count = |from: gix::ObjectId, hide: gix::ObjectId| -> u32 {
+                            repo.rev_walk([from]).with_hidden([hide]).all().map(|w| w.filter(Result::is_ok).count() as u32).unwrap_or(0)
+                        };
+                        st.ahead = count(head_id.detach(), up_id.detach());
+                        st.behind = count(up_id.detach(), head_id.detach());
+                    }
+                }
+            }
+        }
+        let (changes, ignored) = walk_status(&repo, with_ignored)?;
+        st.changes = changes;
+        st.ignored = ignored;
+        Ok(st)
+    })
+    .await
+}
+
+/// Added and removed lines per changed path, worktree against HEAD; `None` is a binary file. An
+/// untracked file counts every line, a deleted one every line it had.
 pub async fn numstat(root: &Path) -> Result<Vec<(String, Option<(u32, u32)>)>, String> {
-    let mut o = git(root, &["diff", "--numstat", "-M", "-z", "HEAD"]).await?;
-    if not_a_repo(&o) {
-        return Ok(Vec::new());
-    }
-    if !o.status.success() {
-        o = git(root, &["diff", "--numstat", "-M", "-z", EMPTY_TREE]).await?;
-        if !o.status.success() {
-            return Err(format!("git diff --numstat: {}", String::from_utf8_lossy(&o.stderr).trim()));
-        }
-    }
-    Ok(parse_numstat(&o.stdout))
-}
-
-pub fn parse_numstat(bytes: &[u8]) -> Vec<(String, Option<(u32, u32)>)> {
-    let recs: Vec<&str> = bytes.split(|b| *b == 0).map(|r| std::str::from_utf8(r).unwrap_or("")).collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < recs.len() {
-        let r = recs[i];
-        i += 1;
-        if r.is_empty() {
-            continue;
-        }
-        let mut parts = r.splitn(3, '\t');
-        let a = parts.next().unwrap_or("");
-        let d = parts.next().unwrap_or("");
-        let mut path = parts.next().unwrap_or("").to_string();
-        if path.is_empty() {
-            // A rename: the old and the new path follow as two records; the new one is the file now.
-            i += 1;
-            path = recs.get(i).copied().unwrap_or("").to_string();
-            i += 1;
-        }
-        let counts = match (a.parse::<u32>(), d.parse::<u32>()) {
-            (Ok(a), Ok(d)) => Some((a, d)),
-            _ => None,
-        };
-        out.push((path, counts));
-    }
-    out
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok(Vec::new()) };
+        let (changes, _) = walk_status(&repo, false)?;
+        Ok(changes
+            .iter()
+            .map(|c| {
+                let before = blob_at(&repo, "HEAD", c.renamed_from.as_deref().unwrap_or(&c.path)).unwrap_or_default();
+                let after = worktree_bytes(&root, &c.path).unwrap_or_default();
+                if is_binary(&before) || is_binary(&after) {
+                    return (c.path.clone(), None);
+                }
+                // Counted off the same hunks `/fs/diff` renders, so the two never disagree.
+                match unified(&c.path, Some(&before), Some(&after)) {
+                    Ok((text, _)) => {
+                        let (mut add, mut del) = (0u32, 0u32);
+                        for l in text.lines() {
+                            if l.starts_with("+++") || l.starts_with("---") {
+                                continue;
+                            }
+                            match l.as_bytes().first() {
+                                Some(b'+') => add += 1,
+                                Some(b'-') => del += 1,
+                                _ => {}
+                            }
+                        }
+                        (c.path.clone(), Some((add, del)))
+                    }
+                    Err(_) => (c.path.clone(), None),
+                }
+            })
+            .collect())
+    })
+    .await
 }
 
 /// The bytes of `rel` at a ref (`index` for the staged copy). `None`: not there at that ref.
 pub async fn show(root: &Path, at: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
-    if at.starts_with('-') {
-        return Err("at: a ref never starts with -".into());
-    }
-    let spec = if at == "index" { format!(":{rel}") } else { format!("{at}:{rel}") };
-    let o = git(root, &["show", &spec]).await?;
-    if o.status.success() {
-        Ok(Some(o.stdout))
-    } else if o.status.code() == Some(128) {
-        Ok(None)
-    } else {
-        Err(format!("git show: {}", String::from_utf8_lossy(&o.stderr).trim()))
-    }
+    let (at, rel) = (at.to_string(), rel.to_string());
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok(None) };
+        Ok(blob_at(&repo, &at, &rel))
+    })
+    .await
 }
 
-/// A unified diff. An untracked file diffs against `/dev/null`, so a new file renders as all
-/// additions. Answers the patch and whether git called it binary.
-pub async fn diff(root: &Path, rel: Option<&str>, against: Against, untracked: bool) -> Result<(String, bool), String> {
-    let o = if untracked {
-        let rel = rel.ok_or("an untracked diff needs a path")?;
-        // `--no-index` exits 1 when the files differ — that is the success case here.
-        git(root, &["diff", "--no-index", "--", "/dev/null", rel]).await?
-    } else {
-        let mut args = vec!["diff"];
-        match against {
-            Against::Head => args.push("HEAD"),
-            Against::Index => {}
-            Against::Staged => args.push("--cached"),
-        }
-        if let Some(r) = rel {
-            args.push("--");
-            args.push(r);
-        }
-        let mut o = git(root, &args).await?;
-        if !o.status.success() && against != Against::Index && String::from_utf8_lossy(&o.stderr).contains("bad revision 'HEAD'") {
-            // No commit yet: everything is new against the empty tree.
-            let mut args = vec!["diff", if against == Against::Staged { "--cached" } else { "" }, EMPTY_TREE];
-            args.retain(|a| !a.is_empty());
-            if let Some(r) = rel {
-                args.push("--");
-                args.push(r);
+/// One file's unified diff, both sides in memory: `--- /dev/null` for a file that did not exist
+/// (an untracked file renders as all additions), `+++ /dev/null` for one that is gone.
+fn unified(path: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> Result<(String, bool), String> {
+    let (b, a) = (before.unwrap_or(b""), after.unwrap_or(b""));
+    let mut out = format!("diff --git a/{path} b/{path}\n");
+    if is_binary(b) || is_binary(a) {
+        out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+        return Ok((out, true));
+    }
+    out.push_str(&if before.is_some() { format!("--- a/{path}\n") } else { "--- /dev/null\n".to_string() });
+    out.push_str(&if after.is_some() { format!("+++ b/{path}\n") } else { "+++ /dev/null\n".to_string() });
+    let input = InternedInput::new(b, a);
+    let diff = gix::diff::blob::Diff::compute(Algorithm::Myers, &input);
+    let hunks = UnifiedDiff::new(&diff, &input, ConsumeBinaryHunk::new(String::new(), "\n"), ContextSize::symmetrical(3)).consume().map_err(|e| format!("diff: {e}"))?;
+    out.push_str(&hunks);
+    Ok((out, false))
+}
+
+/// A unified diff of one path, or of every change when `rel` is `None`. `_untracked` is decided
+/// here from the sides themselves and kept only for the caller's signature.
+pub async fn diff(root: &Path, rel: Option<&str>, against: Against, _untracked: bool) -> Result<(String, bool), String> {
+    let rel = rel.map(str::to_string);
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok((String::new(), false)) };
+        let sides = |path: &str| -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+            match against {
+                Against::Head => (blob_at(&repo, "HEAD", path), worktree_bytes(&root, path)),
+                Against::Index => (blob_at(&repo, "index", path), worktree_bytes(&root, path)),
+                Against::Staged => (blob_at(&repo, "HEAD", path), blob_at(&repo, "index", path)),
             }
-            o = git(root, &args).await?;
+        };
+        let paths: Vec<String> = match rel {
+            Some(r) => vec![r],
+            None => walk_status(&repo, false)?
+                .0
+                .into_iter()
+                .filter(|c| match against {
+                    Against::Head => true,
+                    Against::Index => c.worktree != '.',
+                    Against::Staged => c.index != '.' && c.index != '?',
+                })
+                .map(|c| c.path)
+                .collect(),
+        };
+        let mut out = String::new();
+        let mut binary = false;
+        for p in paths {
+            let (before, after) = sides(&p);
+            if before.is_none() && after.is_none() {
+                continue;
+            }
+            if before == after {
+                continue;
+            }
+            let (text, bin) = unified(&p, before.as_deref(), after.as_deref())?;
+            out.push_str(&text);
+            binary |= bin;
         }
-        o
-    };
-    if not_a_repo(&o) {
-        return Ok((String::new(), false));
-    }
-    match o.status.code() {
-        Some(0) | Some(1) => {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            let binary = text.lines().any(|l| l.starts_with("Binary files ") && l.ends_with(" differ"));
-            Ok((text, binary))
-        }
-        _ => Err(format!("git diff: {}", String::from_utf8_lossy(&o.stderr).trim())),
-    }
+        Ok((out, binary))
+    })
+    .await
 }
 
+/// Every entry in `refs/stash`'s reflog is one stash.
 pub async fn stash_count(root: &Path) -> u32 {
-    match git(root, &["stash", "list", "-z"]).await {
-        Ok(o) if o.status.success() => o.stdout.iter().filter(|b| **b == 0).count() as u32,
-        _ => 0,
-    }
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok(0) };
+        let Ok(r) = repo.find_reference("refs/stash") else { return Ok(0) };
+        Ok(r.log_iter().all().ok().flatten().map(|it| it.count() as u32).unwrap_or(0))
+    })
+    .await
+    .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn porcelain_v2_headers_changes_untracked_and_a_rename() {
-        let raw = b"# branch.oid 2261c195\0# branch.head main\0# branch.upstream origin/main\0# branch.ab +1 -2\0\
-1 .M N... 100644 100644 100644 abc def Cargo.toml\0\
-2 R. N... 100644 100644 100644 abc abc R100 new.rs\0old.rs\0\
-? scratch.txt\0! .cache/\0";
-        let s = parse_porcelain_v2(raw);
-        assert!(s.repo);
-        assert_eq!(s.branch.as_deref(), Some("main"));
-        assert_eq!(s.head.as_deref(), Some("2261c195"));
-        assert_eq!(s.upstream.as_deref(), Some("origin/main"));
-        assert_eq!((s.ahead, s.behind), (1, 2));
-        assert_eq!(s.changes.len(), 3);
-        assert_eq!((s.changes[0].path.as_str(), s.changes[0].index, s.changes[0].worktree), ("Cargo.toml", '.', 'M'));
-        assert_eq!((s.changes[1].path.as_str(), s.changes[1].index, s.changes[1].renamed_from.as_deref()), ("new.rs", 'R', Some("old.rs")));
-        assert_eq!((s.changes[2].path.as_str(), s.changes[2].worktree), ("scratch.txt", '?'));
-        assert_eq!(s.ignored, vec![".cache/"]);
-    }
-
-    #[test]
-    fn a_detached_head_has_no_branch_and_an_empty_listing_is_clean() {
-        let s = parse_porcelain_v2(b"# branch.oid abc\0# branch.head (detached)\0");
-        assert_eq!(s.branch, None);
-        assert_eq!(s.head.as_deref(), Some("abc"));
-        assert!(s.changes.is_empty());
-        let s = parse_porcelain_v2(b"# branch.oid (initial)\0# branch.head main\0");
-        assert_eq!(s.head, None);
-    }
-
-    #[test]
-    fn numstat_counts_marks_binary_and_follows_a_rename_to_its_new_name() {
-        let raw = b"3\t1\tCargo.toml\x00-\t-\tlogo.png\x005\t0\t\x00old.rs\x00new.rs\x00";
-        let n = parse_numstat(raw);
-        assert_eq!(n, vec![("Cargo.toml".to_string(), Some((3, 1))), ("logo.png".to_string(), None), ("new.rs".to_string(), Some((5, 0)))]);
+    fn sh(root: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git").args(args).current_dir(root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
 
     #[test]
@@ -307,33 +325,79 @@ mod tests {
         assert_eq!(Against::parse(Some("main")), None);
     }
 
-    /// A real repository: not-a-repo, then a commit, an edit, an untracked file, `show` and `diff`.
+    #[test]
+    fn a_unified_diff_has_the_headers_git_prints_and_marks_binary() {
+        let (t, bin) = unified("a.txt", Some(b"one\ntwo\n"), Some(b"one\nTWO\n")).unwrap();
+        assert!(t.starts_with("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ "), "{t}");
+        assert!(t.contains("-two\n+TWO\n") && !bin, "{t}");
+        let (t, _) = unified("n.txt", None, Some(b"new\n")).unwrap();
+        assert!(t.contains("--- /dev/null\n+++ b/n.txt\n") && t.contains("+new"), "{t}");
+        let (t, bin) = unified("b.bin", Some(b"\x00a"), Some(b"\x00b")).unwrap();
+        assert!(bin && t.contains("Binary files"), "{t}");
+    }
+
+    /// A real repository (git makes the fixture, gix reads it): not-a-repo, a commit, an edit, an
+    /// untracked file, a staged rename, `show`, `diff`, `numstat`.
     #[tokio::test]
-    async fn a_real_repository_answers_status_show_and_diff() {
+    async fn a_real_repository_answers_status_show_diff_and_counts() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         assert!(!status(&root, false).await.unwrap().repo);
         assert_eq!(diff(&root, None, Against::Head, false).await.unwrap(), (String::new(), false));
-        let sh = |args: &[&str]| {
-            let o = std::process::Command::new("git").args(args).current_dir(&root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
-            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        };
-        sh(&["init", "-q", "-b", "main"]);
+        sh(&root, &["init", "-q", "-b", "main"]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
-        sh(&["add", "a.txt"]);
-        sh(&["commit", "-q", "-m", "one"]);
+        std::fs::write(root.join("old.txt"), "keep me\nas is\nplease\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "junk/\n").unwrap();
+        sh(&root, &["add", "-A"]);
+        sh(&root, &["commit", "-q", "-m", "one"]);
         std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(root.join("b.txt"), "new\n").unwrap();
-        let s = status(&root, false).await.unwrap();
-        assert!(s.repo);
-        assert_eq!(s.branch.as_deref(), Some("main"));
-        assert_eq!(s.changes.iter().map(|c| (c.path.as_str(), c.worktree)).collect::<Vec<_>>(), vec![("a.txt", 'M'), ("b.txt", '?')]);
+        std::fs::create_dir_all(root.join("junk")).unwrap();
+        std::fs::write(root.join("junk/x"), "x").unwrap();
+        sh(&root, &["mv", "old.txt", "renamed.txt"]);
+        let st = status(&root, true).await.unwrap();
+        assert!(st.repo);
+        assert_eq!(st.branch.as_deref(), Some("main"));
+        assert!(st.head.is_some() && st.upstream.is_none());
+        let rows: Vec<(&str, char, char, Option<&str>)> = st.changes.iter().map(|c| (c.path.as_str(), c.index, c.worktree, c.renamed_from.as_deref())).collect();
+        assert_eq!(rows, vec![("a.txt", '.', 'M', None), ("b.txt", '?', '?', None), ("renamed.txt", 'R', '.', Some("old.txt"))], "{rows:?}");
+        assert_eq!(st.ignored, vec!["junk/"]);
         assert_eq!(show(&root, "HEAD", "a.txt").await.unwrap(), Some(b"one\n".to_vec()));
+        assert_eq!(show(&root, "index", "renamed.txt").await.unwrap(), Some(b"keep me\nas is\nplease\n".to_vec()));
         assert_eq!(show(&root, "HEAD", "b.txt").await.unwrap(), None);
         let (patch, binary) = diff(&root, Some("a.txt"), Against::Head, false).await.unwrap();
         assert!(patch.contains("+two") && !binary, "{patch}");
         let (patch, _) = diff(&root, Some("b.txt"), Against::Head, true).await.unwrap();
-        assert!(patch.contains("+new"), "{patch}");
-        assert_eq!(numstat(&root).await.unwrap(), vec![("a.txt".to_string(), Some((1, 0)))]);
+        assert!(patch.contains("--- /dev/null") && patch.contains("+new"), "{patch}");
+        let (patch, _) = diff(&root, Some("a.txt"), Against::Staged, false).await.unwrap();
+        assert_eq!(patch, "", "nothing staged for a.txt");
+        let (patch, _) = diff(&root, None, Against::Head, false).await.unwrap();
+        assert!(patch.contains("b/a.txt") && patch.contains("b/b.txt"), "{patch}");
+        assert_eq!(numstat(&root).await.unwrap(), vec![("a.txt".to_string(), Some((1, 0))), ("b.txt".to_string(), Some((1, 0))), ("renamed.txt".to_string(), Some((0, 0)))]);
+        assert_eq!(stash_count(&root).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_detached_head_has_no_branch_and_an_upstream_is_measured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        sh(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        sh(&root, &["add", "-A"]);
+        sh(&root, &["commit", "-q", "-m", "one"]);
+        // A fake upstream: the remote-tracking ref points one commit behind.
+        sh(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        sh(&root, &["config", "branch.main.remote", "origin"]);
+        sh(&root, &["config", "branch.main.merge", "refs/heads/main"]);
+        sh(&root, &["config", "remote.origin.url", "https://example.invalid/x.git"]);
+        sh(&root, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        sh(&root, &["commit", "-qam", "two"]);
+        let st = status(&root, false).await.unwrap();
+        assert_eq!((st.branch.as_deref(), st.upstream.as_deref(), st.ahead, st.behind), (Some("main"), Some("origin/main"), 1, 0));
+        sh(&root, &["checkout", "-q", "--detach", "HEAD~1"]);
+        let st = status(&root, false).await.unwrap();
+        assert_eq!(st.branch, None);
+        assert!(st.head.is_some());
     }
 }

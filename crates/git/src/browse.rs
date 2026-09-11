@@ -660,7 +660,7 @@ msg\n";
         use gix_object::Write as _;
         let dir = std::env::temp_dir().join(format!("rg-blob-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let odb = gix_odb::at(&dir).unwrap();
+        let odb = gix_odb::at(&dir, gix_hash::Kind::Sha1).unwrap();
         let tree_with = |name: &str, bytes: &[u8]| {
             let oid = odb.write_buf(gix_object::Kind::Blob, bytes).unwrap();
             odb.write(&gix_object::Tree {

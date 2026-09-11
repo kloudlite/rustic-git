@@ -27,13 +27,13 @@ russh = "0.62"
 # Exactly the version russh's own dependency tree already resolved to: adding this edge for the
 # agent's host keygen must not pull a second copy of it into the lock.
 ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "getrandom"] }
-gix-odb = { version = "0.83", features = ["parallel"] }
-gix-pack = "0.73"
-gix-object = "0.63"
+gix-odb = { version = "0.84", features = ["parallel"] }
+gix-pack = "0.74"
+gix-object = "0.64"
 gix-hash = { version = "0.26", features = ["sha1"] }
-gix-traverse = "0.60"
+gix-traverse = "0.61"
 gix-features = { version = "0.49", features = ["progress"] }
-gix-actor = "0.41"
+gix-actor = "0.42"
 flate2 = "1"
 futures = "0.3"
 # Three `rand` versions (0.8 here, 0.9 and 0.10 under russh/ssh-key/pgp) and two `rsa` (one a

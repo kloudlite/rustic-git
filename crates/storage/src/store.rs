@@ -232,7 +232,7 @@ impl Repo {
         format!("objects/{}/{}/pack", self.owner, self.name)
     }
     pub fn odb(&self) -> Result<gix_odb::Handle> {
-        Ok(gix_odb::at(&self.objects_dir)?)
+        Ok(gix_odb::at(&self.objects_dir, gix_hash::Kind::Sha1)?)
     }
 }
 

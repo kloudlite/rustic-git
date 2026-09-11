@@ -41,7 +41,7 @@ Two streams carry live output without polling: `GET /stream/process/{id}` and `G
 
 ## Workspace state
 
-Separate from the tools: six read-only `GET` routes a console or IDE renders a workspace from. They are not in `/tools` and an agent does not need them. Every answer carries an `ETag`, and a request with `If-None-Match` answers `304` with no body, so re-fetching after a change notification costs nothing when nothing changed. Errors are the same statuses as the tools: 403 outside your home, 404 nothing there, 400 a bad parameter, 413 a file over 10 MiB.
+Separate from the tools: six read-only `GET` routes a console or IDE renders a workspace from. They are not in `/tools` and an agent does not need them. Git is read in-process (gitoxide), never by running `git`, so a tree with thousands of entries costs one index walk. Every answer carries an `ETag`, and a request with `If-None-Match` answers `304` with no body, so re-fetching after a change notification costs nothing when nothing changed. Errors are the same statuses as the tools: 403 outside your home, 404 nothing there, 400 a bad parameter, 413 a file over 10 MiB.
 
 | Route | Answers |
 |---|---|

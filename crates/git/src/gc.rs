@@ -178,11 +178,11 @@ fn build_pack(repo: &Repo, ids: Ids) -> Result<(std::path::PathBuf, std::path::P
         &mut progress,
         &interrupt,
         None::<gix_odb::Handle>,
+        gix_hash::Kind::Sha1,
         gix_pack::bundle::write::Options {
             thread_limit: None,
             iteration_mode: gix_pack::data::input::Mode::Verify,
             index_version: gix_pack::index::Version::V2,
-            object_hash: gix_hash::Kind::Sha1,
             alloc_limit_bytes: None,
             compression: Default::default(),
         },

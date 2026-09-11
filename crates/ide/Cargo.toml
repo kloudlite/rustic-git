@@ -20,6 +20,9 @@ globset = { workspace = true }
 ignore = { workspace = true }
 notify = { workspace = true }
 regex = { workspace = true }
+gix = { version = "0.87", default-features = false, features = ["sha1", "status", "blob-diff", "dirwalk", "revision", "index", "worktree-mutation"] }
+# The hash kind lives in gix-hash's features; the workspace pin carries `sha1`.
+gix-hash = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

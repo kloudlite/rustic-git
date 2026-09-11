@@ -485,7 +485,6 @@ fn write_pack(
         thread_limit: None,
         iteration_mode: gix_pack::data::input::Mode::Verify,
         index_version: gix_pack::index::Version::V2,
-        object_hash: gix_hash::Kind::Sha1,
         alloc_limit_bytes: Some(1024 * 1024 * 1024), // 1 GiB per-object cap: reject zlib/delta bombs
         compression: Default::default(),
     };
@@ -500,6 +499,7 @@ fn write_pack(
         &mut progress,
         should_interrupt,
         Some(odb),
+        gix_hash::Kind::Sha1,
         opts,
     ) {
         Ok(o) => o,
