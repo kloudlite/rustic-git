@@ -158,7 +158,12 @@ COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
 COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
 # graft, for `kl ide serve`: the graph of every symbol and call edge an outside agent asks about,
 # proxied from `graft mcp` and kept fresh by the server. Pinned; the image is the version.
-RUN npm install -g @nanonets/graft@0.18.0 && npm cache clean --force
+# tree-sitter's grammars are native modules: node-gyp needs python3, make and g++ for the install
+# and nothing after it, so the toolchain is added and removed in the one layer.
+RUN apk add --no-cache --virtual .gyp python3 make g++ \
+    && npm install -g @nanonets/graft@0.18.0 \
+    && npm cache clean --force \
+    && apk del .gyp
 ENV DO_NOT_TRACK=1
 
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
