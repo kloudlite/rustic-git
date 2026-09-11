@@ -6,12 +6,15 @@ A workspace is one running pod with your source tree, a Nix profile of the packa
 
 | Path | What | Persists |
 |---|---|---|
-| `/home/kl/workspaces/{name}` | Your tree, a btrfs subvolume sized by `quota_gb` | Across stop and start; snapshotted by push |
-| `/home/kl` | Your home for the region: dotfiles, editor state, credentials | Across every workspace of yours in the region |
-| Tool caches, shell history | `~/.cache`, `~/.local/state`, `CARGO_TARGET_DIR`, and their kin | Per workspace and node, on local disk |
+| `/home/kl/workspaces/{name}` | Your tree, a btrfs subvolume sized by `quota_gb` | Across stop and start; snapshotted by push; replicated |
+| `/home/kl/workspaces/{name}/.cache` | Build output: `CARGO_TARGET_DIR`, `GOCACHE`, Playwright browsers. Ignored by git globally | With the tree: a clone or a restore arrives warm |
+| `/home/kl` | Your home for the region: dotfiles, editor settings, credentials (`~/.cargo`, `~/.gradle`) | Across every workspace of yours in the region |
+| Package stores, editor servers, shell history | `~/.local-cache` (npm, pnpm, bun, pip, uv, go modules, rustup, the cargo registry, VS Code and JetBrains servers), `~/.local/state` | Per node; re-downloaded in seconds elsewhere |
 | `PATH` | The packages in `packages`, plus a base set | Rebuilt from the spec on every start |
 
-The tree is what you version. The home is what makes the second workspace feel like the first. Caches are local because they are large and never worth moving.
+Three homes, one rule each. The tree holds your project and everything derived from it, so build output moves with it. The home holds small configuration and follows you to every workspace. The node-local cache holds what is big, global and cheap to rebuild.
+
+What the platform places inside the tree — `.cache/`, `graft/`, `.direnv/` — is ignored by git through `~/.config/git/ignore`, never through a repository's own `.gitignore`.
 
 ## Image
 

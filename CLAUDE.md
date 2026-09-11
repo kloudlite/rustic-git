@@ -423,14 +423,22 @@ the export directory exist (`ensure_shared_home` in `bins/agent/src/controller/w
 started before its node's NFS mount is up would hostPath an empty local directory and silently
 strand the owner's dotfiles, so `apply_workspace` parks a workspace in `Creating`/`HomeNotReady`
 until `ctx.homes_export` is set rather than ever starting one.
-Tool caches and the editors' remote servers must not live on the shared
-export — concurrent pods on different nodes would race the same cache directory and every cache
-hit would cross the network — so they are redirected (`login_env`'s `XDG_CACHE_HOME`,
-`CARGO_TARGET_DIR`, etc.) into a per-(owner, node) LOCAL cache subvolume, `{pool}/homecache/{owner}`
-(`Engine::ensure_homecache`), mounted at `k8s::HOME_CACHE_DIR`. Shell history and
-`~/.local/state` (`k8s::HOME_STATE_DIR`) are local for the same reason — one file, many terminals,
-many nodes — and share that same `homecache` volume via a separate subPath. Cross-region: each
-region has its own export and nothing syncs them.
+**Three homes, one rule each** (`login_env`). The NFS home keeps SMALL CONFIG (`~/.config`,
+`CARGO_HOME`, `GRADLE_USER_HOME` — both hold credentials). The WORKSPACE DIR keeps the project and
+whatever is derived from it: build output lives under `{ws}/.cache/` (`CARGO_TARGET_DIR`,
+`GOCACHE`, `PLAYWRIGHT_BROWSERS_PATH`), snapshotted and replicated with the tree, so a clone, a
+restore or a start on another node arrives warm — until 2026-09-11 it sat on the node-local cache
+and every move paid a full rebuild. The per-(owner, node) LOCAL cache subvolume,
+`{pool}/homecache/{owner}` (`Engine::ensure_homecache`, mounted at `k8s::HOME_CACHE_DIR`), keeps
+the big GLOBAL caches that re-download in seconds (`XDG_CACHE_HOME`, the package-manager stores,
+`RUSTUP_HOME`, the `~/.cargo/registry` mount, the editors' remote servers, `TMPDIR`): left on the
+export each would turn a cache hit into network I/O and race across nodes. Shell history and
+`~/.local/state` (`k8s::HOME_STATE_DIR`) ride the same volume through a separate subPath. What
+the platform places inside a workspace dir — `.cache/`, `graft/`, `.direnv/` — is ignored by git
+GLOBALLY: the image ships `/etc/kloudlite/gitignore-global` and `prelude` appends it once to
+`~/.config/git/ignore`; never a per-repository `.gitignore` line. `home.persists` and
+`ws.cache.travels` hold both halves on the fleet. Cross-region: each region has its own export
+and nothing syncs them.
 
 **Keys belong to the person, not a team or workspace.** `Credential.owner` is the email, ssh and
 signing alike, and `/v1/keys` refuses a body carrying `owner` (400) — tokens stay per owner the
