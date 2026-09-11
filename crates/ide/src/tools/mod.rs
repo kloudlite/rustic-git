@@ -3,6 +3,7 @@
 pub mod exec;
 pub mod files;
 pub mod graft;
+pub mod patch;
 pub mod watch;
 
 use futures::future::BoxFuture;

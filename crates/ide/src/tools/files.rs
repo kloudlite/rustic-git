@@ -90,7 +90,7 @@ pub fn write(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
 
 /// Temp file beside the target, then rename: a reader never sees a half-written file, and a
 /// crash leaves the old content.
-fn atomic_write(p: &Path, bytes: &[u8]) -> Result<(), ToolError> {
+pub(crate) fn atomic_write(p: &Path, bytes: &[u8]) -> Result<(), ToolError> {
     let tmp = p.with_extension(format!("{}.kl-ide-tmp", p.extension().and_then(|e| e.to_str()).unwrap_or("")));
     std::fs::write(&tmp, bytes).map_err(|e| io(e, &tmp))?;
     std::fs::rename(&tmp, p).map_err(|e| {
@@ -142,35 +142,6 @@ pub fn edit(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError> 
         return Ok(json!({ "path": staged[0].0, "applied": staged[0].3 }));
     }
     Ok(json!({ "files": staged.iter().map(|(p, _, _, n)| json!({ "path": p, "applied": n })).collect::<Vec<_>>(), "applied": staged.iter().map(|s| s.3).sum::<usize>() }))
-}
-
-/// A unified diff applied to the tree — for a large rewrite a diff is fewer tokens than old/new
-/// pairs, and it is what an agent already holds. `git apply` does the work (it needs no
-/// repository, and it refuses a path that climbs out of the directory); `--check` first, so a
-/// hunk that misses leaves nothing half-applied.
-pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError> {
-    let diff = str_arg(args, "diff")?;
-    if diff.len() as u64 > MAX_BYTES {
-        return Err(ToolError::Failed(format!("{} bytes, over the {} byte limit", diff.len(), MAX_BYTES)));
-    }
-    let cwd = confine(root, home, opt_str(args, "cwd").unwrap_or("."))?;
-    let run = |extra: &[&str]| -> Result<std::process::Output, ToolError> {
-        use std::io::Write;
-        let mut c = std::process::Command::new("git").args(["apply", "--whitespace=nowarn"]).args(extra).arg("-").current_dir(&cwd).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().map_err(|e| ToolError::Failed(format!("git apply: {e}")))?;
-        c.stdin.take().ok_or_else(|| ToolError::Failed("git apply: no stdin".into()))?.write_all(diff.as_bytes()).map_err(|e| ToolError::Failed(format!("git apply: {e}")))?;
-        c.wait_with_output().map_err(|e| ToolError::Failed(format!("git apply: {e}")))
-    };
-    let check = run(&["--check"])?;
-    if !check.status.success() {
-        return Err(ToolError::Failed(format!("patch does not apply: {}", String::from_utf8_lossy(&check.stderr).trim())));
-    }
-    let stat = run(&["--numstat"])?;
-    let files: Vec<String> = String::from_utf8_lossy(&stat.stdout).lines().filter_map(|l| l.split('\t').nth(2).map(str::to_string)).collect();
-    let applied = run(&[])?;
-    if !applied.status.success() {
-        return Err(ToolError::Failed(format!("git apply: {}", String::from_utf8_lossy(&applied.stderr).trim())));
-    }
-    Ok(json!({ "cwd": cwd, "files": files }))
 }
 
 pub fn glob(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError> {
@@ -280,7 +251,7 @@ impl ToolSet for Files {
                 "read" => read(&root, &home, &args),
                 "write" => write(&root, &home, &args),
                 "edit" => edit(&root, &home, &args),
-                "patch" => patch(&root, &home, &args),
+                "patch" => super::patch::patch(&root, &home, &args),
                 "glob" => glob(&root, &home, &args),
                 "grep" => grep(&root, &home, &args),
                 other => Err(ToolError::Unknown(other.to_string())),
@@ -341,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_across_files_is_atomic_and_patch_applies_a_unified_diff() {
+    fn edit_across_files_is_atomic() {
         let (_t, root, home) = tree();
         let e = edit(&root, &home, &json!({ "files": [
             { "path": "README.md", "edits": [{ "old": "# api", "new": "# API" }] },
@@ -355,14 +326,6 @@ mod tests {
         ] })).unwrap();
         assert_eq!(v["applied"], 2);
         assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "# API\n\nhello world\n");
-        let diff = "--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n # API\n \n-hello world\n+hello there\n";
-        let v = patch(&root, &home, &json!({ "diff": diff })).unwrap();
-        assert_eq!(v["files"], json!(["README.md"]));
-        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "# API\n\nhello there\n");
-        let e = patch(&root, &home, &json!({ "diff": diff })).unwrap_err();
-        assert!(e.to_string().contains("does not apply"), "{e}");
-        let e = patch(&root, &home, &json!({ "diff": "--- a/../../x\n+++ b/../../x\n@@ -0,0 +1 @@\n+y\n" })).unwrap_err();
-        assert!(e.to_string().contains("does not apply"), "a climbing path is refused by git apply: {e}");
     }
 
     #[test]
