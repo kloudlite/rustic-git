@@ -244,6 +244,10 @@ impl Procs {
     }
 }
 
+pub(crate) fn rand_id() -> u64 {
+    rand_u64()
+}
+
 fn rand_u64() -> u64 {
     // No rand dependency for an id: the clock and the pid are unique enough for one table.
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;

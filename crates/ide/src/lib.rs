@@ -20,6 +20,7 @@ pub mod procs;
 pub mod server;
 pub mod stream;
 pub mod tools;
+pub mod watches;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

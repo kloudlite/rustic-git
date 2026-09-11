@@ -1,11 +1,55 @@
 //! The two WebSocket streams. `/stream/process/{id}`: the ring from offset 0, then every frame
-//! as it arrives, then the exit. Text frames, lossy UTF-8, one JSON object each.
+//! as it arrives, then the exit. `/stream/watch/{id}`: the same shape over a watch's events.
+//! Text frames, lossy UTF-8, one JSON object each.
 use crate::procs::Frame;
 use crate::server::App;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use std::sync::Arc;
+
+pub async fn watch(State(app): State<Arc<App>>, Path(id): Path<String>, ws: WebSocketUpgrade) -> axum::response::Response {
+    match app.watches.get(&id) {
+        Some(w) => ws.on_upgrade(move |sock| pump_watch(sock, w)).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, format!("no watch {id}")).into_response(),
+    }
+}
+
+async fn pump_watch(mut sock: WebSocket, w: Arc<std::sync::Mutex<crate::watches::Watch>>) {
+    let (mut rx, replay, stopped) = {
+        let g = w.lock().unwrap_or_else(|q| q.into_inner());
+        let (events, _, _) = g.read_since(0);
+        (g.tx.subscribe(), events, g.state == crate::watches::State::Stopped)
+    };
+    for ev in replay {
+        if !send(&mut sock, ev).await {
+            return;
+        }
+    }
+    if stopped {
+        let _ = send(&mut sock, serde_json::json!({ "state": "stopped" })).await;
+        return;
+    }
+    loop {
+        match rx.recv().await {
+            Ok(ev) => {
+                if !send(&mut sock, ev).await {
+                    return;
+                }
+                if w.lock().unwrap_or_else(|q| q.into_inner()).state == crate::watches::State::Stopped {
+                    let _ = send(&mut sock, serde_json::json!({ "state": "stopped" })).await;
+                    return;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                if !send(&mut sock, serde_json::json!({ "dropped_events": n })).await {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
 
 pub async fn process(State(app): State<Arc<App>>, Path(id): Path<String>, ws: WebSocketUpgrade) -> axum::response::Response {
     match app.procs.get(&id) {
