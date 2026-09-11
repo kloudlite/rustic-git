@@ -34,6 +34,22 @@ Severity is impact × likelihood; cost is the fix's size (S < 1 h, M < 1 day, L 
 | 13 | INFO | security | Verified sound: registry `allow()` fails closed on directory errors (`unwrap_or(false)` both branches) and only challenges anonymous callers; `may_act_on` is owner/team/superadmin with the superadmin act logged; admin router refuses without the claim before any route; signin has per-IP and per-email limiters; gateway verifies the ssh-session JWT before splicing; builder gate fails closed without its secret; the pod-fence VAP re-checks caps/hostPath/gvisor at admission; the only `dangerouslySetInnerHTML` sites are shiki output and the theme bootstrap script; the passkey cookie is httpOnly+strict. | reads | Two things to confirm in Phase 3: the main web session token's storage (bearer header from where — cookie flags), and constant-time comparison of `KLOUDLITE_BUILDER_SECRET` on `/v1/internal/builders/*` | S |
 | 14 | INFO | deps | 735 packages in `Cargo.lock`, 872 crate versions in the tree; `cargo audit`/`cargo deny` results below. | `cargo tree` | Trim after the audit — likely duplicates of `syn`/`hashbrown`/`rustls` majors | S |
 
+## Phase 6 outcome (2026-09-11): the test hang, found
+
+Finding 8's intermittent hang was caught alive by the gate watcher (gdb on any test process alive
+past 90 s; the dev pod now carries `SYS_PTRACE`): the worker thread parked in
+`parking_lot::RawMutex::lock_slow` from `RawCache::drop` <- `cancel_task` <- `Handle::spawn` <-
+`foyer_memory::raw::get_or_fetch_inner`, the test thread waiting in `BlockingPool::shutdown`.
+`foyer-memory` 0.22.3 (SlateDB's block cache) holds its inflight mutex while it spawns the fetch
+task; a runtime that is shutting down cancels the task synchronously and drops the future on the
+same thread, whose `Drop` takes the same lock. Any process that ends while a block fetch is being
+spawned deadlocks: four different test binaries showed it, always at 0 % CPU, only under the
+parallel gate. Fixed in a fork on the exact 0.22.3 tag (`kloudlite/foyer`, branch
+`kloudlite-0.22.3`, wired through `[patch.crates-io]`) with a regression test that fails on the
+published crate, and upstream as https://github.com/foyer-rs/foyer/pull/1345 (0.22.6 still has
+it). The two bounds shipped on the way, peer keepalive/`TCP_USER_TIMEOUT` and the ownership map's
+write bound, stand on their own merits and were not the cause.
+
 ## Phase 5 outcome (2026-09-10, after the fleet cache)
 
 - **Finding 8**, `bins/api` untested: the role → surface choice is now `workspaces_router(role, state)`

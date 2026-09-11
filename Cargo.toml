@@ -204,3 +204,18 @@ inherits = "release"
 lto = false
 codegen-units = 16
 strip = false
+
+# foyer-memory 0.22.3 holds its inflight lock while it spawns the fetch task, which deadlocks the
+# spawning thread when the runtime is shutting down (tokio cancels and drops the task inline, and
+# the drop takes the same lock). Every test process that ended with a block fetch in flight sat at
+# 0 % CPU forever; a server pod would stall its own exit the same way. Our fork carries the one
+# statement fix and its test on top of the exact 0.22.3 tag. Every foyer crate comes from the
+# fork, not only foyer-memory: the workspace members depend on each other by path, so a lone
+# patch would put two foyer-common types in one build. Drop this once
+# https://github.com/foyer-rs/foyer/pull/1345 is released and slatedb picks it up.
+[patch.crates-io]
+foyer = { git = "https://github.com/kloudlite/foyer.git", rev = "dcc0a9705587d4589421a4621a78db5b76ac2421" }
+foyer-common = { git = "https://github.com/kloudlite/foyer.git", rev = "dcc0a9705587d4589421a4621a78db5b76ac2421" }
+foyer-memory = { git = "https://github.com/kloudlite/foyer.git", rev = "dcc0a9705587d4589421a4621a78db5b76ac2421" }
+foyer-storage = { git = "https://github.com/kloudlite/foyer.git", rev = "dcc0a9705587d4589421a4621a78db5b76ac2421" }
+foyer-tokio = { git = "https://github.com/kloudlite/foyer.git", rev = "dcc0a9705587d4589421a4621a78db5b76ac2421" }
