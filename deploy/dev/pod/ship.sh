@@ -16,6 +16,8 @@ git branch -r --contains "$SHA" | grep -q '^ *origin/' || { echo "HEAD is on no 
 
 if [ "${1:-}" != "--no-gate" ]; then
   echo "==> gate: clippy + tests (CI's exact commands)"
+  # Old test binaries are never collected by cargo; see prune-deps.py for the day they filled the disk.
+  /work/src/deploy/dev/pod/prune-deps.py
   # A test binary that aborts (panic = abort in the release profile) would leave a core.<pid> in
   # the checkout — ten empty ones reached a commit on 2026-09-08 through git add -A.
   ulimit -c 0
