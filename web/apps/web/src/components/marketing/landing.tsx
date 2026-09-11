@@ -56,7 +56,7 @@ export function Landing() {
                 size="lg"
                 className="border-edge transition-colors hover:border-edge-hover"
               >
-                <a href="https://kloudlite.io/docs">Read the docs</a>
+                <Link href="/docs">Read the docs</Link>
               </Button>
             </div>
           </div>

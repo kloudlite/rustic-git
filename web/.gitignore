@@ -4,3 +4,6 @@ node_modules
 dist
 *.tsbuildinfo
 .env*.local
+
+# the product docs, copied in by the ship and by web.yml for the image build (lib/docs.ts)
+apps/web/content/

@@ -14,7 +14,7 @@ export function MarketingHeader() {
       <div className="mx-auto flex h-14 max-w-page items-center gap-4 px-6">
         <Link href="/" aria-label="kloudlite home"><Logo className="h-5" /></Link>
         <nav className="ml-4 hidden items-center gap-5 text-sm2 text-muted-foreground md:flex">
-          <a href="https://kloudlite.io/docs" className={NAV_LINK}>Docs</a>
+          <Link href="/docs" className={NAV_LINK}>Docs</Link>
           <a href="https://kloudlite.io/pricing" className={NAV_LINK}>Pricing</a>
         </nav>
         <div className="flex-1" />
