@@ -21,3 +21,4 @@
 !target/dev-image/kl-connect
 !deploy/workspace-image/docker-credential-kl
 !deploy/workspace-image/kl-build.sh
+!deploy/workspace-image/gitignore-global
