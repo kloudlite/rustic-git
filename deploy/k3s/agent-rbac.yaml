@@ -95,7 +95,7 @@
 #   limitranges                            create,patch                 ensure (server-side apply)
 #   resourcequotas                         create,patch                 ensure (server-side apply)
 #   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports
-#   networkpolicies                        create,patch,list,delete                 ensure (incl. both halves of
+#   networkpolicies                        create,patch,list            ensure (incl. both halves of
 #                                                                       an attachment grant)
 #                                          delete                       delete_ignoring_404 — the
 #                                                                       unattached branch of EVERY
