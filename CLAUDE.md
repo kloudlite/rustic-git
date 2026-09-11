@@ -550,7 +550,7 @@ point-in-time scrape could not compute a `for 5m` and left nine of ten rules per
 `GET /admin/monitoring/signals` now only reads that table. **Every boundary is timestamped in the
 log**: an api listener logs each `/v1` write (`http.write`), every listener logs 5xx and anything
 over a second (`http.failed`, `http.slow`), and the agent logs, per object, when it first saw each
-resourceVersion and how long after the write (`event.seen`, `event.late` past 5 s — the
+resourceVersion and how long after the write (`event.seen`, `event.late` past 15 s — the
 `LateWatchEvents` alert), what every pass decided (`reconcile.pass`, `status.written`) and cost
 (`reconcile.done`, `reconcile.slow`); the history table keeps every `Ready` transition as a
 `{kind}.condition` row. A stuck object is answered from those, never from a theory. The console's charts are

@@ -96,10 +96,12 @@ fn wake_stream<T: Send + 'static>(
 /// inside each reconciler: the reconcilers return early from many places, and this is the one
 /// spot that sees every exit.
 /// An event older than this when the reconciler first sees it is a stalled watch, not a busy
-/// node: a fresh object reaches every agent within a second on this cluster (measured 0.3-0.6 s
-/// over thirty writes on 2026-09-11), and the only thing that makes it a minute is a stream that
-/// stopped delivering until its timeout rebuilt it.
-const LATE_EVENT_MS: i64 = 5_000;
+/// node. A fresh object reaches every agent within a second (measured 0.3-0.6 s over thirty
+/// writes on 2026-09-11), but the age is read at the START of the reconcile, and a reconcile of
+/// the same object already in flight — a btrfs cut, a checkout — holds the next one for a few
+/// seconds; three writes to one Volume read 5.4 s late that way on 2026-09-11 09:41. The stalls
+/// this is for were a minute long, so fifteen seconds keeps the signal and drops our own queue.
+const LATE_EVENT_MS: i64 = 15_000;
 
 /// When this process started, unix millis. An object last written BEFORE that reaches the
 /// agent through its initial list, not through the watch, so its age says nothing about the

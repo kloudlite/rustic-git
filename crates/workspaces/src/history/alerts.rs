@@ -368,7 +368,7 @@ pub const CATALOGUE: &[Rule] = &[
     Rule {
         name: "LateWatchEvents",
         tier: &[Tier::Region],
-        why: "An agent first saw an object more than five seconds after the API server wrote it: its watch stream had stalled, and everything behind that stream (a push, a start, a key) waited with it.",
+        why: "An agent first saw an object more than fifteen seconds after the API server wrote it: its watch stream had stalled, and everything behind that stream (a push, a start, a key) waited with it.",
         for_secs: STEP_SECS,
         sql: |region| whole_window(
             &format!(
