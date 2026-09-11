@@ -52,7 +52,7 @@ pub fn owner_ref_of_kind<K: Resource<DynamicType = ()>>(obj: &K) -> Result<Owner
 
 pub(crate) async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let api: Api<crd::Volume> = Api::all(ctx.client.clone());
-    finalizer(&api, crd::SUBVOLUME_FINALIZER, v, |event| async {
+    let r = finalizer(&api, crd::SUBVOLUME_FINALIZER, v, |event| async {
         match event {
             // Deleting a Volume blocks until cleanup_local has run: containers gone first (GC via
             // ownerReferences), then the subvolume, then the object disappears. That ordering is
@@ -62,8 +62,8 @@ pub(crate) async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Resu
             FinalizerEvent::Apply(v) => apply_volume(&v, &ctx).await,
         }
     })
-    .await
-    .map_err(|e| ReconcileErr(e.to_string()))
+    .await;
+    super::finalized(r)
 }
 
 /// A Volume nothing references any more — no owner entry, no snapshot that is or will be bytes,

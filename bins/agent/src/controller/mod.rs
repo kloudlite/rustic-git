@@ -390,3 +390,19 @@ pub struct Work {
 // ── environments ─────────────────────────────────────────────────────────
 
 // ── shared plumbing ──────────────────────────────────────────────────────
+
+/// The finalizer combinator's result as this crate reads it. Removing a finalizer from an object
+/// that is already gone is the outcome the cleanup asked for, not a failure: every delete of a
+/// Workspace, Environment or Volume used to log one "failed to remove finalizer … not found"
+/// after the object had gone, a second pass racing the first one's removal.
+pub(crate) fn finalized<E: std::error::Error + 'static>(
+    r: Result<kube::runtime::controller::Action, kube::runtime::finalizer::Error<E>>,
+) -> Result<kube::runtime::controller::Action, ReconcileErr> {
+    match r {
+        Ok(a) => Ok(a),
+        Err(kube::runtime::finalizer::Error::RemoveFinalizer(kube::Error::Api(ae))) if ae.code == 404 => {
+            Ok(kube::runtime::controller::Action::await_change())
+        }
+        Err(e) => Err(ReconcileErr(e.to_string())),
+    }
+}

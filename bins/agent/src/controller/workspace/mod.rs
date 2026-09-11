@@ -64,16 +64,15 @@ pub async fn reconcile_workspace(w: Arc<crd::Workspace>, ctx: Arc<Ctx>) -> Resul
             FinalizerEvent::Apply(w) => apply_workspace(&w, &ctx).await,
         }
     })
-    .await
-    .map_err(|e| ReconcileErr(e.to_string()));
-    out
+    .await;
+    super::finalized(out)
 }
 
 
 /// The same wrapper for an environment, whose worktree is its own id — see `reconcile_workspace`.
 pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let api: Api<crd::Environment> = Api::all(ctx.client.clone());
-    finalizer(&api, crd::WORKTREE_FINALIZER, e, |event| async {
+    let r = finalizer(&api, crd::WORKTREE_FINALIZER, e, |event| async {
         match event {
             FinalizerEvent::Cleanup(e) => {
                 let volume = e.status.as_ref().and_then(|s| s.volume_ref.clone());
@@ -82,8 +81,8 @@ pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> R
             FinalizerEvent::Apply(e) => super::apply_environment(&e, &ctx).await,
         }
     })
-    .await
-    .map_err(|e| ReconcileErr(e.to_string()))
+    .await;
+    super::finalized(r)
 }
 
 
