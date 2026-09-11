@@ -35,6 +35,8 @@ pub const IDS: &[&str] = &[
     "ws.packages.pin.lockshape",
     "ws.seeded",
     "ws.cache.travels",
+    "ide.serve.up",
+    "ide.exec",
     "ws.seed.failed",
     "key.platform.regenerate",
     "id.username",
@@ -109,6 +111,9 @@ pub async fn run(c: &mut Ctx) {
             "ws.packages.pin.unknown" | "ws.packages.pin.uncached" | "ws.packages.update" | "ws.packages.pin.lockshape" => {}
             "ws.seeded" => super::experience_ws::seeded(c).await,
             "ws.cache.travels" => super::experience_ws::cache_in_tree(c).await,
+            // One workspace, two assertions about its tool server.
+            "ide.serve.up" => super::experience_ws::ide_server(c).await,
+            "ide.exec" => {}
             "ws.seed.failed" => super::experience_ws::seed_failed(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
             "home.persists" => super::experience_ws::home_persists(c).await,

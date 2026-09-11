@@ -31,6 +31,8 @@ const KEY_CEILING: Duration = Duration::from_secs(290);
 const HOME_CEILING: Duration = Duration::from_secs(290);
 /// Create, write, push, restore, read: two `ready` waits and a snapshot cut inside one ceiling.
 const CACHE_CEILING: Duration = Duration::from_secs(290);
+/// A create plus the server's own start (a graft build on an empty tree is seconds).
+const IDE_CEILING: Duration = Duration::from_secs(240);
 
 /// How long a create is given to reach `ready` INSIDE a step. Below every ceiling above, so a
 /// workspace that never starts leaves room for the step to say so.
@@ -334,6 +336,66 @@ pub async fn cache_in_tree(c: &mut Ctx) {
             }
             if out.trim() != want {
                 return Err(anyhow!("the restored copy read back {:?}", out.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `ide.serve.up` and `ide.exec`: the workspace tool server (`kl ide serve`) is up inside a
+/// fresh pod and answers an exec through MCP. Both read from INSIDE the pod over loopback — the
+/// same bytes the ssh tunnel carries — so a broken prelude, a missing node/graft, or a server that
+/// starts and dies all show here rather than in a person's first session.
+pub async fn ide_server(c: &mut Ctx) {
+    if c.kube.is_none() {
+        c.skip("ide.serve.up", "no kubeconfig");
+        return c.skip("ide.exec", "no kubeconfig");
+    }
+    let name = format!("{}-ide", c.prefix());
+    let mut ws_id: Option<String> = None;
+    let up = c
+        .step("ide.serve.up", IDE_CEILING, |c| {
+            let name = name.clone();
+            async move {
+                let id = create(c, &name, json!({ "packages": [] })).await?;
+                c.state.extra_workspaces.push(id.clone());
+                let start = Instant::now();
+                let mut last = String::new();
+                while start.elapsed() < IDE_CEILING - Duration::from_secs(10) {
+                    let (code, out, err) = ws_exec(c, &id, "curl -sf http://127.0.0.1:7788/healthz", EXEC).await?;
+                    if code == 0 && out.contains("\"ok\":true") {
+                        return Ok(());
+                    }
+                    last = format!("exit {code}: {} {}", out.trim(), err.trim());
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(anyhow!("the tool server never answered /healthz; last: {last}"))
+            }
+            .boxed()
+        })
+        .await;
+    // `step` answers whether it passed; the id travels through the closure's return, so re-read
+    // it from the state the create pushed rather than threading a second channel.
+    if up {
+        ws_id = c.state.extra_workspaces.last().cloned();
+    }
+    let Some(id) = ws_id else {
+        return c.skip("ide.exec", "the tool server never came up");
+    };
+    c.step("ide.exec", EXEC, move |c| {
+        async move {
+            let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exec","arguments":{"cmd":"true"}}}"#;
+            let script = format!("curl -sf -X POST http://127.0.0.1:7788/mcp -H 'content-type: application/json' -d '{body}'");
+            let (code, out, err) = ws_exec(c, &id, &script, EXEC).await?;
+            drop_ws(c, &id).await;
+            if code != 0 {
+                return Err(anyhow!("the MCP call exited {code}: {}", err.trim()));
+            }
+            // The tool's answer is JSON inside the MCP text block; the exit code is what matters.
+            if !out.contains("\\\"exit_code\\\":0") {
+                return Err(anyhow!("exec through the tool server did not answer exit_code 0: {}", out.trim()));
             }
             Ok(())
         }

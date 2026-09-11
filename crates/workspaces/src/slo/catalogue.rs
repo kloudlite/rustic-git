@@ -383,6 +383,10 @@ pub const CATALOGUE: &[Slo] = &[
     // Build output lives in the workspace dir since 2026-09-11 and travels with a push: a restore
     // arrives warm. Read on the RESTORED copy, never the source.
     Slo { id: "ws.cache.travels", feature: "Workspaces", sli: "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The workspace tool server (`kl ide serve`): up inside a fresh pod, and answering the one
+    // call every agent makes first. Read from INSIDE the pod, the way the ssh tunnel would.
+    Slo { id: "ide.serve.up", feature: "Workspaces", sli: "`kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ide.exec", feature: "Workspaces", sli: "An MCP tools/call exec of `true` through the workspace's own tool server answers exit code 0", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.seed.failed", feature: "Workspaces", sli: "A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating`", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },

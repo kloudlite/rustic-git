@@ -146,6 +146,8 @@ first destructive stage.
 | `ws.packages.pin.lockshape` | Workspaces | The lock names a nixpkgs revision and a store path | 99.9 % | hourly | 14 · Experience |
 | `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out, and its doc names them | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `ws.cache.travels` | Workspaces | A file written under `{ws}/.cache` before a push is present in a workspace restored from that push | 95 % ≤ 240000 ms | hourly | 14 · Experience |
+| `ide.serve.up` | Workspaces | `kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create | 95 % ≤ 240000 ms | hourly | 14 · Experience |
+| `ide.exec` | Workspaces | An MCP tools/call exec of `true` through the workspace's own tool server answers exit code 0 | 99.9 % | hourly | 14 · Experience |
 | `ws.seed.failed` | Workspaces | A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating` | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `key.platform.regenerate` | Identity | Regenerating the platform key keeps seeding working | 99.9 % | hourly | 14 · Experience |
 | `team.create` | Teams | A team can be created by a person | 99.9 % | hourly | 14 · Experience |
