@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "graft": {
-      "command": "graft",
+      "command": "bash",
       "args": [
+        ".claude/helpers/graft-pod.sh",
         "mcp"
       ]
     }

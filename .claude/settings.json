@@ -1,11 +1,11 @@
 {
   "statusLine": {
     "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
+    "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" statusline"
   },
   "subagentStatusLine": {
     "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
+    "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" statusline"
   },
   "hooks": {
     "PostToolUse": [
@@ -14,8 +14,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" post-edit",
-            "timeout": 10000
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" hooks post-edit",
+            "timeout": 15000
           }
         ]
       },
@@ -24,8 +24,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" tool-savings",
-            "timeout": 8000
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" hooks tool-savings",
+            "timeout": 15000
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" prompt",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" hooks prompt",
             "timeout": 15000
           }
         ]
@@ -46,8 +46,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" session-start",
-            "timeout": 8000
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" hooks session-start",
+            "timeout": 15000
           }
         ]
       }
@@ -57,8 +57,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" stop",
-            "timeout": 8000
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-pod.sh\" hooks stop",
+            "timeout": 15000
           }
         ]
       }
