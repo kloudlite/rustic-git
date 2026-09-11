@@ -336,7 +336,9 @@ started by the pod prelude as `kl` before sshd, on `127.0.0.1:7788` and nowhere 
 tunnel a person already holds (`kl-connect ws ide <ws>`) is the boundary, so there is no second
 credential and no auth code in the crate. A plain HTTP tool API (`GET /tools` with schemas,
 `POST /tools/{name}` with the body as arguments; 404/400/403/500 + `{"error"}` when a tool did not
-run) carries `read write edit glob grep exec process_* watch*` and graft's own tools, proxied
+run) carries `read write edit patch glob grep exec process_* watch*` and graft's own tools —
+shaped to spend few tokens: `read` takes `paths`, `edit` takes `files` atomically, `patch` takes a
+unified diff, `exec` takes `head`/`tail`/`quiet` —, proxied
 from a `graft mcp` child on stdio. The pod speaks NO MCP on purpose — MCP is the SESSION layer's,
 spoken once above every workspace a person holds and forwarded here; two WebSocket routes
 (`/stream/process/{id}`, `/stream/watch/{id}`) carry what streams. Every path is confined under

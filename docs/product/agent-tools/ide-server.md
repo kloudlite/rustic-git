@@ -25,12 +25,13 @@ Paths are relative to the workspace directory, or absolute under `/home/kl`. Any
 
 | Tool | Does |
 |---|---|
-| `read` | A text file with line numbers; `offset` and `limit` page it. A binary file answers size and mime. |
+| `read` | A text file with line numbers; `offset` and `limit` page it. `paths` reads up to 50 files in one call, each answered on its own. A binary file answers size and mime. |
 | `write` | Create or overwrite a file, atomically; parents are created. |
-| `edit` | Exact string replacements, all or nothing; each `old` must occur once unless `replace_all`. |
+| `edit` | Exact string replacements, all or nothing across the call; `files: [{path, edits}]` edits up to 50 files atomically. Each `old` must occur once unless `replace_all`. |
+| `patch` | Apply a unified diff; checked first so nothing is half-applied. Fewer tokens than `edit` for a large rewrite. |
 | `glob` | Files matching a pattern, gitignore-aware, newest first. |
 | `grep` | Regex search; `mode` content, files or count; `glob` narrows; `context` adds lines. |
-| `exec` | Run a command as the workspace user. A job waits and answers `exit_code`, `stdout`, `stderr` (timeout 120 s, max 600 s; at the timeout it answers `timed_out: true` at once). `detach: true` answers an id and the command becomes a process. |
+| `exec` | Run a command as the workspace user. A job waits and answers `exit_code`, `stdout`, `stderr` (timeout 120 s, max 600 s; at the timeout it answers `timed_out: true` at once). `head` or `tail` keep only N lines of each stream; `quiet` answers the exit code alone, with stderr's last 20 lines on failure. `detach: true` answers an id and the command becomes a process. |
 | `process_list`, `process_output`, `process_write`, `process_kill` | Detached processes: list them, read output since a byte offset, write stdin, stop (TERM, then KILL). |
 | `watch`, `watch_poll`, `watch_stop` | File-system changes under paths (create, modify, remove; reads are not events), or a command's output lines filtered by a regex; `once` ends at the first event. |
 | `graft_find_code`, `graft_find_all`, `graft_trace_calls`, `graft_file_api`, `graft_repo_map` | The code graph: where a symbol is, every occurrence, who calls what, a file's signatures, the repo's shape. Freshness is the server's, read it from `/healthz`. |

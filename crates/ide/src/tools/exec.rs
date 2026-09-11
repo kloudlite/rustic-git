@@ -104,6 +104,41 @@ async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
     }
 }
 
+/// The token savers on a job's answer: `head`/`tail` keep only N lines of each stream (a
+/// `cargo test` answers its last twenty lines, not four megabytes); `quiet` drops both streams
+/// on success and keeps only stderr's last twenty lines on failure.
+pub fn trim_output(mut v: Value, args: &Value) -> Value {
+    fn keep(s: &str, head: Option<usize>, tail: Option<usize>) -> (String, bool) {
+        let lines: Vec<&str> = s.lines().collect();
+        let n = lines.len();
+        let kept: Vec<&str> = match (head, tail) {
+            (Some(h), _) if h < n => lines[..h].to_vec(),
+            (_, Some(t)) if t < n => lines[n - t..].to_vec(),
+            _ => return (s.to_string(), false),
+        };
+        (kept.join("\n"), true)
+    }
+    let head = opt_u64(args, "head").map(|n| n as usize);
+    let tail = opt_u64(args, "tail").map(|n| n as usize);
+    let quiet = opt_bool(args, "quiet");
+    let ok = v.get("exit_code").and_then(Value::as_i64) == Some(0);
+    let mut trimmed = false;
+    for key in ["stdout", "stderr"] {
+        let Some(s) = v.get(key).and_then(Value::as_str).map(str::to_string) else { continue };
+        let (out, t) = if quiet {
+            if key == "stderr" && !ok { keep(&s, None, Some(20)) } else { (String::new(), !s.is_empty()) }
+        } else {
+            keep(&s, head, tail)
+        };
+        trimmed |= t;
+        v[key] = json!(out);
+    }
+    if trimmed {
+        v["trimmed"] = json!(true);
+    }
+    v
+}
+
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required })
 }
@@ -111,7 +146,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
 impl ToolSet for Exec {
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
+            Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. head or tail keep only N lines of each stream; quiet answers the exit code alone (stderr's last 20 lines on failure). With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "head": {"type":"integer"}, "tail": {"type":"integer"}, "quiet": {"type":"boolean"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
             Tool { name: "process_list", description: "Every detached process: id, cmd, started_at, state (running|exited), exit_code.", schema: obj(json!({}), &[]) },
             Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). Answers stdout, stderr, next (offset), dropped, state, exit_code.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
             Tool { name: "process_write", description: "Write to a process's stdin.", schema: obj(json!({ "id": {"type":"string"}, "data": {"type":"string"} }), &["id","data"]) },
@@ -132,7 +167,7 @@ impl ToolSet for Exec {
                         return Ok(json!({ "id": id }));
                     }
                     let timeout = opt_u64(&args, "timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
-                    let r = job(cmd, timeout).await;
+                    let r = job(cmd, timeout).await.map(|v| trim_output(v, &args));
                     if let Some(f) = &self.after_change {
                         f();
                     }
@@ -172,6 +207,21 @@ impl ToolSet for Exec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_keeps_head_or_tail_and_quiet_keeps_only_a_failing_stderr() {
+        let out = json!({ "exit_code": 0, "stdout": "a\nb\nc\nd", "stderr": "" });
+        let v = trim_output(out.clone(), &json!({ "tail": 2 }));
+        assert_eq!((v["stdout"].as_str().unwrap(), v["trimmed"].as_bool()), ("c\nd", Some(true)));
+        let v = trim_output(out.clone(), &json!({ "head": 1 }));
+        assert_eq!(v["stdout"], "a");
+        let v = trim_output(out.clone(), &json!({ "tail": 10 }));
+        assert_eq!((v["stdout"].as_str().unwrap(), v.get("trimmed")), ("a\nb\nc\nd", None));
+        let v = trim_output(out, &json!({ "quiet": true }));
+        assert_eq!(v["stdout"], "");
+        let v = trim_output(json!({ "exit_code": 1, "stdout": "noise", "stderr": "e1\ne2" }), &json!({ "quiet": true }));
+        assert_eq!((v["stdout"].as_str().unwrap(), v["stderr"].as_str().unwrap()), ("", "e1\ne2"));
+    }
 
     fn exec_set() -> (tempfile::TempDir, Exec) {
         let tmp = tempfile::tempdir().unwrap();

@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(r.status(), 200);
         let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
         let names: Vec<&str> = v["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast"]);
+        assert_eq!(names, vec!["read", "write", "edit", "patch", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast"]);
         assert_eq!(v["tools"][0]["schema"]["type"], "object");
         let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt"})).await;
         assert_eq!(s, 200);
