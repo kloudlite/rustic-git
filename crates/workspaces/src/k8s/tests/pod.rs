@@ -403,6 +403,9 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
     assert_eq!(sub("/home/kl/.cargo/registry"), Some(("homecache".into(), Some("cargo-registry".into()))));
     assert_eq!(sub("/home/kl/.vscode-server"), Some(("homecache".into(), Some("vscode-server".into()))));
     assert_eq!(sub("/home/kl/.cursor-server"), Some(("homecache".into(), Some("cursor-server".into()))));
+    assert_eq!(sub("/home/kl/.zed_server"), Some(("homecache".into(), Some("zed-server".into()))));
+    assert_eq!(sub("/home/kl/.windsurf-server"), Some(("homecache".into(), Some("windsurf-server".into()))));
+    assert_eq!(sub("/home/kl/.jetbrains"), Some(("homecache".into(), Some("jetbrains".into()))));
     assert_eq!(sub(HOME_STATE_DIR), Some(("homecache".into(), Some("state".into()))));
 }
 
@@ -413,19 +416,37 @@ pub(crate) fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
     assert_eq!(get("XDG_CACHE_HOME"), format!("{HOME_CACHE_DIR}/xdg"));
     assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
+    // Global, project-independent, rebuildable in seconds: node-local homecache.
     for (var, sub) in [
         ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
-        ("CARGO_TARGET_DIR", "cargo-target"), ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"),
-        ("GRADLE_USER_HOME", "gradle"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
-        ("DENO_DIR", "deno"), ("PLAYWRIGHT_BROWSERS_PATH", "playwright"),
+        ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
+        ("DENO_DIR", "deno"), ("YARN_CACHE_FOLDER", "yarn"), ("COMPOSER_CACHE_DIR", "composer"),
+        ("NUGET_PACKAGES", "nuget"), ("TMPDIR", "tmp"),
     ] {
         assert_eq!(get(var), format!("{HOME_CACHE_DIR}/{sub}"), "{var}");
     }
-    // The configs half of the author's rule: cargo credentials and a person's GOPATH/src stay
-    // on the shared home, so neither var may be redirected onto the disposable volume.
+    assert_eq!(get("MAVEN_OPTS"), format!("-Dmaven.repo.local={HOME_CACHE_DIR}/m2"));
+    // Per-project build output lives WITH the project, under `{ws}/.cache/`, so a clone or a
+    // restore arrives warm — and never at a tool's own `./target`, which a repository may version.
+    let ws = workspace_dir("ws-1");
+    assert_eq!(get("CARGO_TARGET_DIR"), format!("{ws}/.cache/cargo-target"));
+    assert_eq!(get("GOCACHE"), format!("{ws}/.cache/go-build"));
+    assert_eq!(get("PLAYWRIGHT_BROWSERS_PATH"), format!("{ws}/.cache/ms-playwright"));
+    // Config, the home's half: cargo and gradle credentials, a person's GOPATH/src.
+    assert_eq!(get("GRADLE_USER_HOME"), format!("{HOME_DIR}/.gradle"));
     for var in ["CARGO_HOME", "GOPATH"] {
         assert!(env.iter().all(|e| e.name != var), "{var} must stay on the shared home");
     }
+    assert_eq!(get("DO_NOT_TRACK"), "1");
+}
+
+/// The global git ignore: appended to the person's own file exactly once, never a per-repo line.
+#[test]
+pub(crate) fn the_prelude_appends_the_global_git_ignore_once() {
+    let prelude = prelude("ws-1");
+    assert!(prelude.contains("grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore"), "{prelude}");
+    let shipped = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/workspace-image/gitignore-global")).unwrap();
+    assert_eq!(shipped, "# kloudlite: derived state the platform places inside a workspace directory\n.cache/\ngraft/\n.direnv/\n");
 }
 
 

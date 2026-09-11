@@ -152,6 +152,10 @@ RUN chmod 0755 /usr/local/bin/kl
 # person's home once and their own edits then survive forever, which is wrong for a config that
 # must track `BUILDKIT_HOST`/`KL_REGISTRY_HOST` on every login.
 COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
+# Derived state the platform places inside a workspace directory, ignored by git GLOBALLY —
+# git's default `core.excludesFile`. `prelude` appends this block to the person's own file once;
+# a per-repository `.gitignore` line would be a diff they did not ask for, in every repository.
+COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
 
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a

@@ -1,0 +1,4 @@
+# kloudlite: derived state the platform places inside a workspace directory
+.cache/
+graft/
+.direnv/

@@ -39,9 +39,20 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
         var("LANG", "C.UTF-8".into()),
         var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
         var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
-        // Every tool cache redirected off the shared NFS home and onto the node-local `homecache`
-        // volume — left pointed at the home, each of these turns a cache hit into network I/O and
-        // (worse) lets concurrent pods on different nodes race the same cache directory.
+        // Three homes, one rule each. The NFS home keeps small config. The WORKSPACE DIR keeps
+        // the project and what is derived from it — build output under `{ws}/.cache/`, so a
+        // clone, a restore or a start on another node arrives warm (it is snapshotted and
+        // replicated with the tree; a per-node cache was rebuilt from nothing on every move).
+        // `homecache`, node-local, keeps the big GLOBAL caches that re-download in seconds; left
+        // on the home each would turn a cache hit into network I/O and race across nodes.
+        //
+        // Under `{ws}/.cache/`, never a tool's own `./target`: nothing the platform places may
+        // collide with a directory a repository versions, and the global git ignore
+        // (`/etc/kloudlite/gitignore-global`, appended to `~/.config/git/ignore` by `prelude`) is
+        // one line per kind rather than one per tool.
+        var("CARGO_TARGET_DIR", format!("{}/.cache/cargo-target", workspace_dir(name))),
+        var("GOCACHE", format!("{}/.cache/go-build", workspace_dir(name))),
+        var("PLAYWRIGHT_BROWSERS_PATH", format!("{}/.cache/ms-playwright", workspace_dir(name))),
         var("XDG_CACHE_HOME", format!("{HOME_CACHE_DIR}/xdg")),
         var("npm_config_cache", format!("{HOME_CACHE_DIR}/npm")),
         var("PNPM_STORE_DIR", format!("{HOME_CACHE_DIR}/pnpm")),
@@ -49,17 +60,23 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
         // NOT CARGO_HOME: it holds `credentials.toml` and `config.toml` — configs, which is the
         // half of the home that must survive. Cargo has no separate knob for its registry cache,
         // so that part is kept off the export by a `homecache` mount at `~/.cargo/registry`
-        // instead (see `workspace_pod`), and only the build output is redirected by env.
-        var("CARGO_TARGET_DIR", format!("{HOME_CACHE_DIR}/cargo-target")),
+        // instead (see `workspace_pod`).
         var("RUSTUP_HOME", format!("{HOME_CACHE_DIR}/rustup")),
         // GOMODCACHE only, never GOPATH: GOPATH also holds `src/` and `bin/`, which are the
         // person's own files, and the module cache is the only large rebuildable part of it.
         var("GOMODCACHE", format!("{HOME_CACHE_DIR}/gomod")),
-        var("GRADLE_USER_HOME", format!("{HOME_CACHE_DIR}/gradle")),
+        // `GRADLE_USER_HOME` holds `gradle.properties` credentials — config, the home's half,
+        // the same shape as `CARGO_HOME`; Gradle's project cache is `{ws}/.gradle` on its own.
+        var("GRADLE_USER_HOME", format!("{HOME_DIR}/.gradle")),
+        var("MAVEN_OPTS", format!("-Dmaven.repo.local={HOME_CACHE_DIR}/m2")),
+        var("YARN_CACHE_FOLDER", format!("{HOME_CACHE_DIR}/yarn")),
+        var("COMPOSER_CACHE_DIR", format!("{HOME_CACHE_DIR}/composer")),
+        var("NUGET_PACKAGES", format!("{HOME_CACHE_DIR}/nuget")),
+        var("TMPDIR", format!("{HOME_CACHE_DIR}/tmp")),
+        var("DO_NOT_TRACK", "1".into()),
         var("UV_CACHE_DIR", format!("{HOME_CACHE_DIR}/uv")),
         var("PIP_CACHE_DIR", format!("{HOME_CACHE_DIR}/pip")),
         var("DENO_DIR", format!("{HOME_CACHE_DIR}/deno")),
-        var("PLAYWRIGHT_BROWSERS_PATH", format!("{HOME_CACHE_DIR}/playwright")),
         // History is per-node write traffic on every keystroke; keeping it off NFS is why it gets
         // its own var instead of riding HOME_CACHE_DIR — it isn't a cache, it's state worth keeping.
         var("HISTFILE", format!("{HOME_STATE_DIR}/shell_history")),
@@ -127,7 +144,8 @@ pub(super) fn prelude(name: &str) -> String {
          set -e\n\
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
-         mkdir -p $H/.config/fish $H/.config/zsh\n\
+         mkdir -p $H/.config/fish $H/.config/zsh $H/.config/git $H/.local-cache/tmp\n\
+         grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
@@ -542,6 +560,9 @@ pub fn workspace_pod(
                 VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cargo/registry".to_string(), sub_path: Some("cargo-registry".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.vscode-server".to_string(), sub_path: Some("vscode-server".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.cursor-server".to_string(), sub_path: Some("cursor-server".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.zed_server".to_string(), sub_path: Some("zed-server".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.windsurf-server".to_string(), sub_path: Some("windsurf-server".to_string()), ..Default::default() },
+                VolumeMount { name: "homecache".to_string(), mount_path: "/home/kl/.jetbrains".to_string(), sub_path: Some("jetbrains".to_string()), ..Default::default() },
                 VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
                 // This pod's own `~/workspaces`, over the shared home: the workspace's mount point
                 // is made inside it, so it never appears in the home and no sibling pod lists it.
