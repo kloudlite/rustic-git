@@ -431,7 +431,37 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // carries no node of its own, so there is no field to select on, and a label would be a second
     // copy of `Volume.spec.nodeName` that some write path forgets to stamp. `reconcile_snapshot`
     // filters against the node-scoped Volume store instead, at no API cost.
-    let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), crate::controller::watch_config())
+    // Built from its own stream rather than `Controller::new` for one reason: a Snapshot's DELETE
+    // is the event that makes a detached Volume collectable (`volume::collect_unreferenced`), and
+    // a controller never reconciles a deleted object — the Volume has to be woken by name. Only
+    // a Volume this node's store holds is woken; every node sees every Snapshot, and a wake for
+    // another node's Volume would be one "not found in local store" line per node per delete.
+    let (snap_store, snap_writer) = kube::runtime::reflector::store_shared(256);
+    let snap_sub = snap_writer.subscribe().ok_or("the snapshot store is not shared")?;
+    let snap_watch = {
+        use futures::TryStreamExt;
+        use kube::runtime::{watcher, WatchStreamExt};
+        let wake = ctx.wake_volume.clone();
+        let volumes = ctx.volumes.clone();
+        watcher(Api::<crd::Snapshot>::all(ctx.client.clone()), crate::controller::watch_config())
+            .default_backoff()
+            .reflect_shared(snap_writer)
+            .inspect_ok(move |ev| {
+                if let watcher::Event::Delete(s) = ev {
+                    let vol = kube::runtime::reflector::ObjectRef::<crd::Volume>::new(&s.spec.volume);
+                    if volumes.get(&vol).is_some() {
+                        let _ = wake.send(vol);
+                    }
+                }
+            })
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(kind = "Snapshot", reason = "watch", error = %e, "reconcile.queue.failed")
+                }
+            })
+    };
+    let snapshots = Controller::for_shared_stream(snap_sub, snap_store)
         .shutdown_on_signal()
         .run(|s, c| async move { observed("snapshot", &*s, &c, snapshot::reconcile_snapshot(s.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
@@ -460,6 +490,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let everything = async {
         tokio::join!(
             volume_watch,
+            snap_watch,
             volumes,
             workspaces,
             environments,

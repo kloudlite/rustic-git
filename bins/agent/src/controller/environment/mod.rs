@@ -38,12 +38,43 @@ pub(crate) use stop::*;
 pub(crate) use mounts::*;
 
 
+/// The environment-side half of every attachment grant in this namespace, held against the
+/// Workspace it names: gone, or attached elsewhere, and the grant goes. `/v1`'s `delete_ws` and
+/// detach remove it themselves, best-effort with a warning — and a warning is where that ended
+/// until 2026-09-11: nothing on the controller side ever revisited a grant the api failed to
+/// remove, so it stood until the environment itself was deleted. Same shape as the Volume
+/// collector added the same day: the api's cleanup is the fast path, the controller is the truth.
+async fn prune_attach_grants(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+    let ns = crd::env_namespace(&e.name_any());
+    let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
+    let list = match policies.list(&kube::api::ListParams::default()).await {
+        Ok(l) => l.items,
+        // No namespace yet is no grants yet.
+        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+        Err(err) => return Err(ReconcileErr(err.to_string())),
+    };
+    let workspaces: Api<crd::Workspace> = Api::all(ctx.client.clone());
+    for p in list {
+        let name = p.name_any();
+        let Some(ws) = name.strip_prefix("attach-") else { continue };
+        let keep = match workspaces.get_opt(ws).await.map_err(|err| ReconcileErr(err.to_string()))? {
+            Some(w) => crd::attached_environment(&w).as_deref() == Some(e.name_any().as_str()),
+            None => false,
+        };
+        if !keep {
+            tracing::info!(environment = %e.name_any(), workspace = %ws, "attach.grant.pruned");
+            delete_ignoring_404(&policies, &name).await?;
+        }
+    }
+    Ok(())
+}
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
     // Above every write, exactly as `apply_workspace` does — see `my_node`.
     let me = my_node(ctx).await;
     if me.dead {
         return Ok(Action::requeue(TICK));
     }
+    prune_attach_grants(e, ctx).await?;
     let gen = e.meta().generation.unwrap_or(0);
     // `spec.owner` reaches `ensure_homecache`'s `{pool}/homecache/{owner}` here too. Only the
     // owner: `EnvironmentSpec.name` is display text that reaches no path and no argv — the

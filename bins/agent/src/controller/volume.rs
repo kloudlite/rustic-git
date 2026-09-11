@@ -66,7 +66,82 @@ pub(crate) async fn reconcile_volume(v: Arc<crd::Volume>, ctx: Arc<Ctx>) -> Resu
     .map_err(|e| ReconcileErr(e.to_string()))
 }
 
+/// A Volume nothing references any more — no owner entry, no snapshot that is or will be bytes,
+/// no parent that names it — is deleted here, on the event that made it so, by the node it lives
+/// on. Until 2026-09-11 the only event-path collector was a side effect inside the api's
+/// snapshot-delete handler, and the agent's own rule lived only in the five-minute sweep
+/// (`collect_unreferenced_volumes`): three probe runs in two days watched an empty Volume stand
+/// for four and a half minutes after its last snapshot went, with nothing in the controller that
+/// would ever converge it. The sweep keeps its rule as the net; this is the same rule, run when
+/// the state changes rather than when the clock does.
+///
+/// Keep-biased everywhere it can be: a listing that fails is a requeue, never an empty set; a
+/// parent counts whether it names the volume through `status.volumeRef` (placed) or through its
+/// `spec.storage` source (a restore or clone the controller has not attached yet), the same two
+/// tests the api's `parents_of_volume` applies; and the delete carries the uid and resourceVersion
+/// it decided on, so an attach landing in between is a 409 here and a fresh look on the next event.
+async fn collect_unreferenced(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<bool, ReconcileErr> {
+    if v.metadata.deletion_timestamp.is_some()
+        || v.metadata.owner_references.as_ref().is_some_and(|r| !r.is_empty())
+        || v.spec.node_name != ctx.node
+    {
+        return Ok(false);
+    }
+    let name = v.name_any();
+    let snaps: Api<crd::Snapshot> = Api::all(ctx.client.clone());
+    let items = snaps
+        .list(&kube::api::ListParams::default().fields(&format!("spec.volume={name}")))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))?
+        .items;
+    if items.iter().any(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != Phase::Error)) {
+        return Ok(false);
+    }
+    if parent_names_volume(ctx, &name).await? {
+        return Ok(false);
+    }
+    let api: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let dp = kube::api::DeleteParams {
+        preconditions: Some(kube::api::Preconditions { uid: v.uid(), resource_version: v.resource_version() }),
+        ..Default::default()
+    };
+    match api.delete(&name, &dp).await {
+        Ok(_) => {
+            tracing::info!(volume = %name, reason = "unreferenced", "volume.collected");
+            Ok(true)
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(true),
+        // 409: the object moved under the precondition — somebody attached or pushed. Not an
+        // error; the event that moved it is already queued behind this one.
+        Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(false),
+        Err(e) => Err(ReconcileErr(e.to_string())),
+    }
+}
+/// Does any Workspace or Environment in the cluster stand on `volume`, placed or not?
+/// One parent's claim on a volume, before and after placement: `status.volumeRef` once the
+/// controller has resolved it, its own name (a parent's own volume is named after it) or its
+/// `spec.storage` source before that. Mirrors the api's `on_volume`.
+pub(crate) fn names_volume(vref: Option<&String>, own: &str, storage: Option<&crd::WorkspaceStorage>, volume: &str) -> bool {
+    vref.map(String::as_str).unwrap_or(own) == volume
+        || matches!(
+            storage.and_then(|s| s.source.as_ref()),
+            Some(VolumeSource::CloneOf { volume: v, .. } | VolumeSource::SeededFrom { volume: v, .. }) if v == volume
+        )
+}
+async fn parent_names_volume(ctx: &Arc<Ctx>, volume: &str) -> Result<bool, ReconcileErr> {
+    let names = names_volume;
+    let lp = kube::api::ListParams::default();
+    let ws = Api::<crd::Workspace>::all(ctx.client.clone()).list(&lp).await.map_err(|e| ReconcileErr(e.to_string()))?;
+    if ws.items.iter().any(|w| names(w.status.as_ref().and_then(|s| s.volume_ref.as_ref()), &w.name_any(), w.spec.storage.as_ref(), volume)) {
+        return Ok(true);
+    }
+    let envs = Api::<crd::Environment>::all(ctx.client.clone()).list(&lp).await.map_err(|e| ReconcileErr(e.to_string()))?;
+    Ok(envs.items.iter().any(|e| names(e.status.as_ref().and_then(|s| s.volume_ref.as_ref()), &e.name_any(), e.spec.storage.as_ref(), volume)))
+}
 pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    if collect_unreferenced(v, ctx).await? {
+        return Ok(Action::await_change());
+    }
     // Above every write — see `my_node`. The `returned` re-run below is exactly the pass that
     // rewrote the sweep's `Available=False/NodeDead` away on a node that had not actually come back.
     if my_node(ctx).await.dead {
@@ -809,6 +884,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// The three ways a parent stands on a volume, and the one way it does not.
+    #[test]
+    fn a_parent_names_its_volume_placed_or_not() {
+        use super::names_volume;
+        let vol = "ws-a".to_string();
+        let clone = crd::WorkspaceStorage { quota_gb: 1, source: Some(VolumeSource::CloneOf { volume: "ws-a".into(), commit: None }) };
+        assert!(names_volume(Some(&vol), "ws-b", None, "ws-a"), "placed: status.volumeRef");
+        assert!(names_volume(None, "ws-a", None, "ws-a"), "its own volume, before placement");
+        assert!(names_volume(None, "ws-b", Some(&clone), "ws-a"), "a clone not yet attached");
+        assert!(!names_volume(None, "ws-b", Some(&clone), "ws-c"), "another volume");
+    }
     use super::*;
     use crate::testsupport::test_ctx;
     use kloudlite_workspaces::kube_test::{get, mock_client, post, Route};
