@@ -95,12 +95,60 @@ fn wake_stream<T: Send + 'static>(
 /// Count and time one reconcile per kind. Wrapped here, at the five `.run` sites, rather than
 /// inside each reconciler: the reconcilers return early from many places, and this is the one
 /// spot that sees every exit.
-async fn timed<T, E>(kind: &'static str, fut: impl std::future::Future<Output = Result<T, E>>) -> Result<T, E> {
+/// An event older than this when the reconciler first sees it is a stalled watch, not a busy
+/// node: a fresh object reaches every agent within a second on this cluster (measured 0.3-0.6 s
+/// over thirty writes on 2026-09-11), and the only thing that makes it a minute is a stream that
+/// stopped delivering until its timeout rebuilt it.
+const LATE_EVENT_MS: i64 = 5_000;
+
+/// When the API server last wrote this object: the newest `managedFields` time, which every
+/// write stamps, else the creation time. Second precision, which is all a "was this minutes
+/// late" question needs.
+fn last_write_ms<K: Resource>(obj: &K) -> Option<i64> {
+    let meta = obj.meta();
+    meta.managed_fields
+        .as_ref()
+        .and_then(|mf| mf.iter().filter_map(|m| m.time.as_ref().map(|t| t.0.as_millisecond())).max())
+        .or_else(|| meta.creation_timestamp.as_ref().map(|t| t.0.as_millisecond()))
+}
+
+/// Every reconcile of every kind passes through here, so the two questions a stuck object raises
+/// are answered from the log alone: how long after the write did this node first see this
+/// resourceVersion (`event.seen`, `event.late` past `LATE_EVENT_MS`, the histogram
+/// `watch_event_age_seconds` and the counter `watch_events_late_total` for the alert), and how
+/// long did the pass take and how did it end (`reconcile.done`). A requeue of the same
+/// resourceVersion is not a new event and records no age.
+async fn observed<K, T, E>(
+    kind: &'static str,
+    obj: &K,
+    ctx: &Ctx,
+    fut: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, E>
+where
+    K: Resource<DynamicType = ()>,
+{
+    let name = obj.name_any();
+    let rv = obj.resource_version().unwrap_or_default();
+    let fresh = ctx.seen.lock().unwrap_or_else(|p| p.into_inner()).insert(format!("{kind}/{name}"), rv.clone()) != Some(rv.clone());
+    if fresh {
+        if let Some(written) = last_write_ms(obj) {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+            let age_ms = (now - written).max(0);
+            metrics::histogram!("watch_event_age_seconds", "kind" => kind).record(age_ms as f64 / 1000.0);
+            if age_ms > LATE_EVENT_MS {
+                metrics::counter!("watch_events_late_total", "kind" => kind).increment(1);
+                tracing::warn!(kind, %name, %rv, age_ms, "event.late");
+            } else {
+                tracing::info!(kind, %name, %rv, age_ms, "event.seen");
+            }
+        }
+    }
     let start = std::time::Instant::now();
     let r = fut.await;
     let result = if r.is_ok() { "ok" } else { "error" };
     metrics::counter!("reconciles_total", "kind" => kind, "result" => result).increment(1);
     metrics::histogram!("reconcile_duration_seconds", "kind" => kind).record(start.elapsed().as_secs_f64());
+    tracing::info!(kind, %name, %rv, ms = start.elapsed().as_millis() as u64, ok = r.is_ok(), "reconcile.done");
     r
 }
 
@@ -146,7 +194,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let volumes = Controller::for_shared_stream(vol_self, ctx.volumes.clone())
         .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
-        .run(|v, c| timed("volume", reconcile_volume(v, c)), error_policy, ctx.clone())
+        .run(|v, c| async move { observed("volume", &*v, &c, reconcile_volume(v.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
@@ -210,7 +258,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             })
         })
         .shutdown_on_signal()
-        .run(|w, c| timed("workspace", reconcile_workspace(w, c)), error_policy, ctx.clone())
+        .run(|w, c| async move { observed("workspace", &*w, &c, reconcile_workspace(w.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
@@ -285,7 +333,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             )
         })
         .shutdown_on_signal()
-        .run(|e, c| timed("environment", async move { reconcile_environment(e, c).await }), error_policy, ctx.clone())
+        .run(|e, c| async move { observed("environment", &*e, &c, reconcile_environment(e.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
@@ -303,7 +351,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let claim_ws = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), unplaced.clone())
             .shutdown_on_signal()
-            .run(|w, c| timed("claim", async move { claim::claim_workspace(&w, &c).await }), error_policy, ctx.clone())
+            .run(|w, c| async move { observed("claim", &*w, &c, claim::claim_workspace(&w, &c)).await }, error_policy, ctx.clone())
             .for_each(|r| async move {
                 // `error_policy` already logged a reconciler failure with its kind and name; what is
                 // left here is the queue and watch side, which it never sees.
@@ -347,7 +395,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             all_in_store(&bindings_store)
         })
         .shutdown_on_signal()
-        .run(|b, c| timed("binding", async move { binding::apply_binding(&b, &c).await }), error_policy, ctx.clone())
+        .run(|b, c| async move { observed("binding", &*b, &c, binding::apply_binding(&b, &c)).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
@@ -364,7 +412,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // filters against the node-scoped Volume store instead, at no API cost.
     let snapshots = Controller::new(Api::<crd::Snapshot>::all(ctx.client.clone()), crate::controller::watch_config())
         .shutdown_on_signal()
-        .run(|s, c| timed("snapshot", async move { snapshot::reconcile_snapshot(s, c).await }), error_policy, ctx.clone())
+        .run(|s, c| async move { observed("snapshot", &*s, &c, snapshot::reconcile_snapshot(s.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
@@ -377,7 +425,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let claim_env = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
-            .run(|e, c| async move { claim::claim_environment(&e, &c).await }, error_policy, ctx.clone())
+            .run(|e, c| async move { observed("claim-environment", &*e, &c, claim::claim_environment(&e, &c)).await }, error_policy, ctx.clone())
             .for_each(|r| async move {
                 // `error_policy` already logged a reconciler failure with its kind and name; what is
                 // left here is the queue and watch side, which it never sees.

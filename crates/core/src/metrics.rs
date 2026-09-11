@@ -159,18 +159,33 @@ pub async fn http_metrics(
     next: Next,
 ) -> Response {
     let class = route_class(req.uri().path());
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
     let start = Instant::now();
     let res = next.run(req).await;
-    let labels = [
-        ("listener", listener),
-        ("class", class),
-        ("status", status_class(res.status().as_u16())),
-    ];
+    let status = res.status().as_u16();
+    let labels = [("listener", listener), ("class", class), ("status", status_class(status))];
     metrics::counter!("http_requests_total", &labels).increment(1);
+    let ms = start.elapsed().as_millis() as u64;
     metrics::histogram!("http_request_duration_seconds", "listener" => listener, "class" => class)
         .record(start.elapsed().as_secs_f64());
+    // One line per request that somebody will ask about: every 5xx, anything over a second, and
+    // every write on the api listener (a `/v1` write is the moment an object changed, and the
+    // agent's `event.seen` measures from it). The path carries ids, never bodies or tokens.
+    let write = listener == "api" && !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
+    if status >= 500 {
+        tracing::warn!(listener, class, method = %method, %path, status, ms, "http.failed");
+    } else if ms > SLOW_REQUEST_MS {
+        tracing::warn!(listener, class, method = %method, %path, status, ms, "http.slow");
+    } else if write {
+        tracing::info!(listener, class, method = %method, %path, status, ms, "http.write");
+    }
     res
 }
+
+/// A request slower than this is logged whatever its status: the histogram says the p99 moved,
+/// this says which request.
+const SLOW_REQUEST_MS: u64 = 1_000;
 
 /// A bounded label set: the path itself would be one series per repository.
 fn route_class(path: &str) -> &'static str {

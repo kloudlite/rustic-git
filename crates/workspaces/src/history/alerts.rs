@@ -366,6 +366,23 @@ pub const CATALOGUE: &[Rule] = &[
         sql: |region| ratio_rule("reconciles_total", &["kind"], ("result", "error"), 0.2, region, 600),
     },
     Rule {
+        name: "LateWatchEvents",
+        tier: &[Tier::Region],
+        why: "An agent first saw an object more than five seconds after the API server wrote it: its watch stream had stalled, and everything behind that stream (a push, a start, a key) waited with it.",
+        for_secs: STEP_SECS,
+        sql: |region| whole_window(
+            &format!(
+                "SELECT greatest(max(Value) - min(Value), 0) AS d \
+                 FROM default.otel_metrics_sum \
+                 WHERE MetricName = 'watch_events_late_total' \
+                   AND ResourceAttributes['region'] = '{region}' \
+                   AND TimeUnix > now() - INTERVAL 600 SECOND \
+                 GROUP BY {SERIES}"
+            ),
+            "sum(d) > 0",
+        ),
+    },
+    Rule {
         name: "TunnelSaturation",
         tier: &[Tier::Region],
         why: "MAX_TUNNELS is 1000 per gateway pod; refusals start with 503 past it.",
