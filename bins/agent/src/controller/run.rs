@@ -9,6 +9,7 @@ use k8s_openapi::api::core::v1::{Node, Pod};
 use kloudlite_workspaces::k8s;
 use futures::StreamExt;
 use kube::runtime::controller::{Action, Controller};
+use kube::runtime::WatchStreamExt as _;
 use kube::{Api, Resource, ResourceExt};
 use kloudlite_workspaces::crd;
 use std::sync::Arc;
@@ -420,7 +421,15 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // parent, it is the thing that makes its namespace exist. Only the ones placed HERE,
         // because `teams_in_use` builds the namespace set from this node's workspaces — a
         // workspace elsewhere wakes ITS node's copy of this same reconciler.
-        .watches(Api::<crd::Workspace>::all(ctx.client.clone()), placed, {
+        // Generation-filtered: a binding's inputs are the workspace's SPEC (owner, team), and a
+        // status write bumps no generation. Unfiltered, every status write of every workspace
+        // during a probe run woke a full binding pass — two quota GETs and three applies each —
+        // and the region API server saw ~50 quota GETs a minute for six bindings (2026-09-12).
+        .watches_stream(
+            kube::runtime::watcher(Api::<crd::Workspace>::all(ctx.client.clone()), placed)
+                .applied_objects()
+                .predicate_filter(kube::runtime::predicates::generation, Default::default()),
+            {
             let region = ctx.region.clone();
             move |w: crd::Workspace| {
                 Some(kube::runtime::reflector::ObjectRef::<crd::OwnerBinding>::new(&crd::binding_name(
