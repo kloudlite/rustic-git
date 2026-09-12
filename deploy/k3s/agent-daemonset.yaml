@@ -119,7 +119,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-agent:bc5a506229c95db5d4ae20b423618c90020a6268@sha256:87fda1c6adb52a2eaa8924cc13b539a68e31ea655301e37aa0a1beeca9b827b3
+          image: ghcr.io/kloudlite/kloudlite-agent:eda555d77bfb897fc1b6508741e4fbb70c6ec26c@sha256:298116e5d01738ffe70cd5a4e3cbcff3a02f105fb8efda844af408de99495cb7
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -218,7 +218,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-workspace:bc5a506229c95db5d4ae20b423618c90020a6268@sha256:d61ab1a3cde9a9c3ffd55fd4d3a776ab118f6dddf28648bbe8c1cd00da7543f0
+              value: ghcr.io/kloudlite/kloudlite-workspace:eda555d77bfb897fc1b6508741e4fbb70c6ec26c@sha256:d61ab1a3cde9a9c3ffd55fd4d3a776ab118f6dddf28648bbe8c1cd00da7543f0
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
