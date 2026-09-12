@@ -2,6 +2,10 @@
 
 Three credentials, each scoped to one job. A session signs you into the console. A bearer token calls `/v1`. An ssh key opens a workspace and pushes to git. Keys and tokens belong to a person, never to a team or a workspace.
 
+## Console sign-in
+
+The console signs you in with a provider, a passkey, or an emailed sign-in link. A deployment with no OAuth provider yet may also offer email + a shared password, and that is gated by two variables together: `AUTH_SHARED_PASSWORD` (the password) and `AUTH_SHARED_PASSWORD_ENABLED=1` (the decision to open it). With either missing the provider is not registered at all — the sign-in page shows no password form — so a password left in a secret store never opens the door on its own. Addresses are still limited to `AUTH_ALLOWED_EMAILS`, and wrong passwords are counted and locked out per account.
+
 ## Bearer tokens
 
 Every `/v1` request carries `Authorization: Bearer <token>`. Two ways to get one:

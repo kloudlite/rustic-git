@@ -23,17 +23,35 @@ function refused(reason: string) {
 /** Five wrong preview passwords a minute per account (S-23); see `Lockout` for the ceiling. */
 const lockout = new Lockout(5, 60_000);
 
-/** Email + shared password, for a deployment that has no OAuth provider yet.
- *  Registered only when both halves are configured, so it cannot exist by
- *  accident, and it is real authentication rather than a bypass: the address
- *  must be on the allowlist AND the password must match. */
-function previewCredentials() {
-  const allowed = (process.env.AUTH_ALLOWED_EMAILS ?? "")
+/** The allow-list, as addresses. */
+function allowedEmails() {
+  return (process.env.AUTH_ALLOWED_EMAILS ?? "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
+}
+
+/** One shared password across every allow-listed account is a door, so it is opened
+ *  deliberately and never by a secret that happens to be present: review finding #72
+ *  (2026-09-12) added AUTH_SHARED_PASSWORD_ENABLED on top of the two values. With it
+ *  off the provider is not in the Auth.js config at all — not a provider that always
+ *  refuses — so the sign-in page shows no password form and a POST to
+ *  /api/auth/callback/credentials is an unknown provider. */
+export function sharedPasswordEnabled() {
+  return (
+    process.env.AUTH_SHARED_PASSWORD_ENABLED === "1" &&
+    (process.env.AUTH_SHARED_PASSWORD ?? "").length > 0 &&
+    allowedEmails().length > 0
+  );
+}
+
+/** Email + shared password, for a deployment that has no OAuth provider yet.
+ *  It is real authentication rather than a bypass: the address must be on the
+ *  allowlist AND the password must match. */
+function previewCredentials() {
+  if (!sharedPasswordEnabled()) return null;
+  const allowed = allowedEmails();
   const password = process.env.AUTH_SHARED_PASSWORD ?? "";
-  if (allowed.length === 0 || password.length === 0) return null;
 
   return Credentials({
     id: "credentials",
@@ -111,7 +129,7 @@ function assertionProvider(id: string, name: string) {
 /** A provider is only registered when its credentials are present. Registering one
  *  without them makes Auth.js fail at request time with an opaque error; leaving it
  *  out means the button can be hidden and the rest of sign-in still works. */
-function providers() {
+export function providers() {
   const list: NextAuthConfig["providers"] = [];
 
   if (process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET) {
@@ -132,12 +150,13 @@ function providers() {
 
 /** Which providers are actually usable, for the UI to read. Server-side only. */
 /** Whether email + password sign-in is available on this deployment. */
-export const passwordSignIn = Boolean(
-  process.env.AUTH_ALLOWED_EMAILS?.trim() && process.env.AUTH_SHARED_PASSWORD,
-);
+export const passwordSignIn = sharedPasswordEnabled();
 
 /** Whether a sign-in link can actually be emailed. Without it the email step has nowhere to
  *  go and says so, rather than minting links nobody receives. */
+// A deployment with the door open says so once at boot; the count, never the secret.
+if (passwordSignIn) logger.info("auth.shared_password.enabled", { allowed: allowedEmails().length });
+
 export const emailLinkSignIn = Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM);
 
 export const enabledProviders = {

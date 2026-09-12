@@ -112,7 +112,12 @@ spec:
               valueFrom: { secretKeyRef: { name: kloudlite-mail, key: resend-api-key, optional: true } }
             - name: RESEND_FROM
               valueFrom: { secretKeyRef: { name: kloudlite-mail, key: from, optional: true } }
-            # Email + password sign-in exists only while both of these are set.
+            # Email + password sign-in exists only while all three of these are set. The flag is
+            # the dev fleet's door until an OAuth provider exists (review finding #72,
+            # 2026-09-12): unset it and the credentials provider is not registered at all — no
+            # password form, and the callback answers as it does for a provider that is not there.
+            - name: AUTH_SHARED_PASSWORD_ENABLED
+              value: "1"
             - name: AUTH_ALLOWED_EMAILS
               valueFrom: { secretKeyRef: { name: kloudlite-web, key: allowed-emails, optional: true } }
             - name: AUTH_SHARED_PASSWORD
