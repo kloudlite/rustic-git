@@ -96,8 +96,11 @@ pub async fn ssh_config() -> Result<(), String> {
     // The generated blocks say `ProxyCommand kl …`, which ssh resolves through PATH — from a
     // desktop launcher's environment, not this shell's. Better a note now than "Connection closed
     // by remote host" later.
-    if !on_path("kl") {
-        println!("Note: `kl` is not on your PATH; ssh will not find the ProxyCommand.");
+    // `kl-connect`, not `kl`: the generated blocks run `kl-connect` as the ProxyCommand — `kl`
+    // is the in-workspace tool and is not even installed on a laptop, so this note fired for
+    // everybody and named the wrong binary (2026-09-12).
+    if !on_path("kl-connect") {
+        println!("Note: `kl-connect` is not on your PATH; ssh will not find the ProxyCommand.");
         println!(
             "      Add {} to PATH.",
             std::env::current_exe()

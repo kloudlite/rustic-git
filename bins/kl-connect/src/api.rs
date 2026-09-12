@@ -79,7 +79,11 @@ pub async fn list(
 }
 
 /// `target` is an id or a name; the api resolves either (see `api::ssh_session` on the server).
+///
+/// PERCENT-ENCODED into the path: the name comes from a person's command line, and a `/` or a `?`
+/// in it changed which endpoint was called rather than being sent as a name (2026-09-12).
 pub async fn ssh_session(cfg: &crate::config::Config, target: &str) -> Result<Session, Error> {
+    let target = path_segment(target);
     let r = client()
         .post(format!("{}/v1/workspaces/{target}/ssh-session", cfg.api))
         .bearer_auth(&cfg.token)
@@ -87,6 +91,17 @@ pub async fn ssh_session(cfg: &crate::config::Config, target: &str) -> Result<Se
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
     json(r).await
+}
+
+/// One path segment, percent-encoded. Everything outside the unreserved set is escaped, which is
+/// stricter than a URL needs and exactly what a segment carrying somebody's typed name wants.
+fn path_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// One condition off the builder's `Environment` status -- the same shape `GET

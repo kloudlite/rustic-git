@@ -43,12 +43,16 @@ pub fn build_argv(
     if no_cache {
         v.push("--no-cache".into());
     }
+    // `--` first: the context comes from a person's command line, and one that begins with a dash
+    // was read by docker as a flag of its own (2026-09-12).
+    v.push("--".into());
     v.push(context.into());
     v
 }
 
 pub fn promote_argv(src: &str, dst: &str) -> Vec<String> {
-    ["buildx", "imagetools", "create", "-t", dst, src].iter().map(|s| s.to_string()).collect()
+    // `--` for the same reason `build_argv` has one: `src` is whatever the person typed.
+    ["buildx", "imagetools", "create", "-t", dst, "--", src].iter().map(|s| s.to_string()).collect()
 }
 
 fn quiet(args: &[&str]) -> Result<bool, String> {
@@ -137,7 +141,7 @@ mod tests {
                 "--metadata-file", "/tmp/kl-meta.json",
                 "-t", "cr.khost.dev/alice/hello:1", "-t", "cr.khost.dev/alice/hello:latest",
                 "-f", "Dockerfile.prod", "--build-arg", "A=1", "--build-arg", "B=2",
-                "--platform", "linux/amd64", "--no-cache", "./app",
+                "--platform", "linux/amd64", "--no-cache", "--", "./app",
             ])
         );
     }
@@ -145,14 +149,14 @@ mod tests {
     #[test]
     fn build_argv_with_defaults_is_minimal() {
         let argv = build_argv(&s(&["cr.khost.dev/alice/hello:latest"]), None, &[], None, false, ".", "/tmp/m");
-        assert_eq!(argv, s(&["buildx", "build", "--builder", "kl", "--push", "--metadata-file", "/tmp/m", "-t", "cr.khost.dev/alice/hello:latest", "."]));
+        assert_eq!(argv, s(&["buildx", "build", "--builder", "kl", "--push", "--metadata-file", "/tmp/m", "-t", "cr.khost.dev/alice/hello:latest", "--", "."]));
     }
 
     #[test]
     fn promote_is_a_registry_side_copy() {
         assert_eq!(
             promote_argv("cr.khost.dev/alice/hello:1", "cr.khost.dev/alice/hello:latest"),
-            s(&["buildx", "imagetools", "create", "-t", "cr.khost.dev/alice/hello:latest", "cr.khost.dev/alice/hello:1"])
+            s(&["buildx", "imagetools", "create", "-t", "cr.khost.dev/alice/hello:latest", "--", "cr.khost.dev/alice/hello:1"])
         );
     }
 

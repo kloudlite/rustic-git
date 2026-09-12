@@ -45,6 +45,8 @@ impl Directory {
                 let cursor = m
                     .passkeys
                     .find(doc! { "user": user })
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .sort(doc! { "createdAt": -1 })
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
@@ -90,6 +92,8 @@ impl Directory {
                 let cursor = m
                     .pulls
                     .find(doc! { "repo": repo })
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .sort(doc! { "createdAt": -1 })
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;

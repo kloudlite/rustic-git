@@ -423,6 +423,25 @@ pub struct CliLogin {
     pub token_exp: u64,
 }
 
+/// How long one connection attempt may take. The driver's default is 30 s; a TCP connect to a
+/// reachable Cosmos account is milliseconds, and one that is not reachable will not become so.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a command may wait for a usable server before it fails. Bounds the whole failover
+/// window, which is what a caller actually waits on.
+const SERVER_SELECTION: std::time::Duration = std::time::Duration::from_secs(5);
+/// Cosmos closes idle connections aggressively; retiring ours first means a command never picks
+/// up a socket the server has already dropped.
+const MAX_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// The SERVER-side ceiling on one query, passed as `maxTimeMS` on every find this file issues.
+/// A query past it is killed on the server rather than merely abandoned by the client.
+pub(crate) const QUERY_MAX_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The most rows any one directory listing returns. Every listing here answers a page of a UI or
+/// one person's own things; none of them has a natural ceiling, and an account that accumulated
+/// one would have had the whole collection streamed into memory on every read (2026-09-12). A
+/// listing that hits this is short, which is strictly better than one that never returns.
+pub(crate) const LISTING_LIMIT: i64 = 500;
+
 impl Directory {
     /// `uri` is the Cosmos connection string; `db` the database name.
     pub async fn connect(uri: &str, db: &str) -> Result<Directory> {
@@ -431,6 +450,16 @@ impl Directory {
         // re-established quickly beats a large one full of dead sockets.
         opts.app_name = Some("kloudlite-api".into());
         opts.max_pool_size = Some(16);
+        // Every one of these is a BOUND, and none of them had a value: the driver's defaults for
+        // server selection and connect are 30 s each, so a Cosmos account that had gone away held
+        // a sign-in — and every request behind it — for half a minute at a time (2026-09-12).
+        // Chosen against the api's own request budget, not the driver's comfort: a directory that
+        // cannot answer inside `SERVER_SELECTION` is not going to answer.
+        opts.connect_timeout = Some(CONNECT_TIMEOUT);
+        opts.server_selection_timeout = Some(SERVER_SELECTION);
+        // The per-QUERY ceiling. `max_time` is enforced by the SERVER, so unlike a client-side
+        // timeout it also stops the work — a scan the client walked away from kept running.
+        opts.max_idle_time = Some(MAX_IDLE);
         // The driver's own command monitoring is the ONE choke point this client has: every
         // collection call in this file (and in `teams.rs`) ends as a command event carrying the
         // round trip the driver measured, so nothing has to be wrapped at the ~60 call sites.
@@ -452,7 +481,7 @@ impl Directory {
             meta: db.collection("meta"),
         };
         m.ensure_indexes().await?;
-        match m.lowercase_signing_fingerprints().await {
+        match m.lowercase_signing_fingerprints_once().await {
             Ok(0) => {}
             Ok(n) => tracing::info!(count = n, "directory.repair.completed"),
             Err(e) => tracing::warn!(error = %e, "directory.repair.failed"),
@@ -528,6 +557,11 @@ impl MongoCollections {
             .create_indexes(vec![
                 IndexModel::builder().keys(doc! { "owner": 1 }).build(),
                 IndexModel::builder().keys(doc! { "createdAt": -1 }).build(),
+                // `credentials_for` filters on `{owner, kind}` and sorts on `createdAt`, and
+                // Cosmos will not combine three single-field indexes to serve that — it scanned
+                // the owner's whole credential set and sorted it (2026-09-12). One compound
+                // index in the query's own order answers it outright.
+                IndexModel::builder().keys(doc! { "owner": 1, "kind": 1, "createdAt": -1 }).build(),
                 // Verifying a signature looks a key up by any fingerprint it
                 // answers to; without this that is a scan of every credential.
                 IndexModel::builder().keys(doc! { "fingerprints": 1 }).build(),
@@ -568,16 +602,34 @@ impl MongoCollections {
     /// touches a handful of rows, and nobody has to remember to run it. Logged and swallowed by
     /// the caller — a failed repair leaves signatures unverified, which is today's behaviour, not
     /// a reason to refuse to boot.
+    /// `lowercase_signing_fingerprints`, run at most once per cluster. The repair itself is a
+    /// `$regex` scan of the signing-key rows that NO index can back, and it ran on every connect
+    /// of every process forever — an unbounded scan paid daily to find nothing (2026-09-12). The
+    /// sentinel is written only after a clean pass, so a failed repair is retried on the next
+    /// boot rather than being marked done.
+    async fn lowercase_signing_fingerprints_once(&self) -> Result<usize> {
+        if self.meta.find_one(doc! { "_id": FPS_LOWERCASED }).await.map_err(|e| err(format!("mongo: {e}")))?.is_some() {
+            return Ok(0);
+        }
+        let fixed = self.lowercase_signing_fingerprints().await?;
+        self.meta
+            .update_one(doc! { "_id": FPS_LOWERCASED }, doc! { "$set": { "at": mongodb::bson::DateTime::now() } })
+            .upsert(true)
+            .await
+            .map_err(|e| err(format!("mongo: {e}")))?;
+        Ok(fixed)
+    }
+
     async fn lowercase_signing_fingerprints(&self) -> Result<usize> {
         use futures::TryStreamExt;
         let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
             .map_err(|e| err(format!("bson: {e}")))?;
         let mut cursor = self
             .credentials
-            // ponytail: a `$regex` scan of the signing-key rows on every connect — no index
-            // backs it, so it is O(signing keys). Fine at this scale and a no-op once clean;
-            // drop the call entirely (or gate it behind a one-time marker) if that stops holding.
+            // A `$regex` scan of the signing-key rows, which no index backs — run behind the
+            // `FPS_LOWERCASED` sentinel exactly once per cluster, never per connect.
             .find(doc! { "kind": kind, "fingerprints": { "$regex": "[A-Z]" } })
+            .max_time(QUERY_MAX_TIME)
             .await
             .map_err(|e| err(format!("mongo: {e}")))?;
         let mut fixed = 0;
@@ -602,6 +654,9 @@ pub(crate) fn lowercased(fingerprints: &[String]) -> Option<Vec<String>> {
 
 /// The `meta` row saying keys have been re-filed onto people and indexed under them.
 const KEYS_V2: &str = "keys_v2";
+
+/// The `meta` row saying every signing key's fingerprints are already lowercase.
+const FPS_LOWERCASED: &str = "fingerprints_lowercased";
 
 const DEP: &str = "mongo";
 

@@ -16,6 +16,5 @@ kloudlite-ide = { path = "../../crates/ide" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-[dev-dependencies]
+# The buildx metadata file: created, not named and hoped for — see `Cmd::Build` in main.rs.
 tempfile = { workspace = true }

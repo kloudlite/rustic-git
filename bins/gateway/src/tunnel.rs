@@ -230,7 +230,10 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
     let (mut tx, mut rx) = sock.split();
     let start = Instant::now();
     let (mut r#in, mut out) = (0u64, 0u64);
-    let mut buf = vec![0u8; MAX_FRAME];
+    // `BytesMut`, so a frame is `split_to`'d out of it rather than copied into a fresh `Vec`.
+    // `read_buf` appends into the spare capacity and `split_to` hands that region away; the
+    // reserve below puts a full frame's worth back for the next read.
+    let mut buf = bytes::BytesMut::with_capacity(MAX_FRAME);
     loop {
         // One timeout around the whole select, restarted each iteration: any frame in either
         // direction is what resets the idle clock, which is the definition we want.
@@ -254,7 +257,7 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
                     Some(Ok(_)) => true,
                     _ => false,
                 },
-                n = tcp.read(&mut buf) => match n {
+                n = { buf.reserve(MAX_FRAME); tcp.read_buf(&mut buf) } => match n {
                     // sshd hung up. Say so rather than dropping the socket: a bare TCP close
                     // reaches the CLI as a protocol error, a Close frame as a finished session.
                     Ok(0) | Err(_) => {
@@ -263,7 +266,11 @@ async fn pump(sock: WebSocket, mut tcp: tokio::net::TcpStream, slot: Slot) {
                     }
                     Ok(n) => {
                         out += n as u64;
-                        tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_ok()
+                        // `split_to` off a `BytesMut`, not `to_vec()`: every frame used to be a
+                        // fresh allocation and a copy of up to the buffer size, per frame, per
+                        // tunnel. This hands tungstenite the bytes the read already landed in
+                        // (2026-09-12).
+                        tx.send(Message::Binary(buf.split_to(n).freeze())).await.is_ok()
                     }
                 },
             }

@@ -960,7 +960,7 @@ fn is_last_superadmin(admins: &[kloudlite_pulls::directory::SuperAdmin], target:
     matches!(admins, [only] if is_same_user(&only.user, target))
 }
 
-async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) {
+async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) -> std::result::Result<(), Response> {
     let entry = kloudlite_workspaces::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),
@@ -971,7 +971,9 @@ async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str,
     };
     if let Err(e) = kloudlite_workspaces::audit::record(&api.store.os, &entry).await {
         tracing::error!(actor, action, target, error = %e, "audit.write.failed");
+        return Err((StatusCode::BAD_GATEWAY, "could not record the audit entry").into_response());
     }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -1014,11 +1016,15 @@ pub(crate) async fn add_superadmin(
         Ok(None) => return (StatusCode::UNPROCESSABLE_ENTITY, "that email has no account").into_response(),
         Err(e) => return db_err("check account", &user, e),
     }
+    // The audit row lands FIRST, and a row that cannot be written refuses the grant. An admin
+    // write that happened with nothing recording it is the one outcome an append-only log exists
+    // to prevent; a row for a grant that then failed is a false positive an operator can read
+    // against the failure line beside it, which is the cheaper of the two mistakes (2026-09-12).
+    if let Err(r) = write_audit(&api, &by, "add-superadmin", &user, note, "ok").await {
+        return r;
+    }
     match db.add_superadmin(&user, &by).await {
-        Ok(()) => {
-            write_audit(&api, &by, "add-superadmin", &user, note, "ok").await;
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => db_err("grant admin", &user, e),
     }
 }
@@ -1044,6 +1050,9 @@ pub(crate) async fn remove_superadmin(
     if is_same_user(&by, &user) {
         return (StatusCode::CONFLICT, "you cannot remove your own administrator claim").into_response();
     }
+    // Read first so the common refusal is a plain 409 that never touches the roster; the DELETE
+    // itself is the compare-and-swap that actually holds the rule (`remove_superadmin`), because
+    // this read and that write are two round trips with a race between them.
     let admins = match db.superadmins().await {
         Ok(a) => a,
         Err(e) => return db_err("list admins", &user, e),
@@ -1051,11 +1060,13 @@ pub(crate) async fn remove_superadmin(
     if is_last_superadmin(&admins, &user) {
         return (StatusCode::CONFLICT, "the last administrator cannot be removed").into_response();
     }
+    if let Err(r) = write_audit(&api, &by, "remove-superadmin", &user, note, "ok").await {
+        return r;
+    }
     match db.remove_superadmin(&user).await {
-        Ok(()) => {
-            write_audit(&api, &by, "remove-superadmin", &user, note, "ok").await;
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        // The CAS refused: somebody else's revoke landed between the read above and this write.
+        Ok(false) => (StatusCode::CONFLICT, "the last administrator cannot be removed").into_response(),
         Err(e) => db_err("revoke admin", &user, e),
     }
 }

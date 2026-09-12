@@ -169,6 +169,8 @@ impl Directory {
                     .teams
                     .find(doc! { "members.user": user })
                     .sort(doc! { "createdAt": -1 })
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
                 cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
@@ -202,6 +204,8 @@ impl Directory {
                 .clone_with_type::<Id>()
                 .find(doc! { "members.user": user })
                 .projection(doc! { "_id": 1 })
+                .limit(super::LISTING_LIMIT)
+                .max_time(super::QUERY_MAX_TIME)
                 .await
                 .map_err(|e| err(format!("mongo: {e}")))?
                 .map_ok(|i| i.slug)
@@ -231,6 +235,7 @@ impl Directory {
                 let cursor = m
                     .users
                     .find(doc! { "_id": { "$in": &emails } })
+                    .max_time(super::QUERY_MAX_TIME)
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
                 cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?
@@ -519,6 +524,8 @@ impl Directory {
                 let cursor = m
                     .invites
                     .find(doc! { "team": team, "expiresAt": { "$gt": now } })
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .sort(doc! { "createdAt": -1 })
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;

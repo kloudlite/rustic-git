@@ -34,6 +34,8 @@ impl Directory {
                     .credentials
                     .find(doc! { "owner": owner, "kind": kind })
                     .sort(doc! { "createdAt": -1 })
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
                 cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
@@ -94,6 +96,11 @@ impl Directory {
                 let cursor = m
                     .credentials
                     .find(doc! { "kind": kind, "fingerprints": { "$in": any } })
+                    // Bounded, though a fingerprint names at most a handful of rows: `signer_by_any`
+                    // answers `None` on more than one anyway, so an unbounded read could only ever
+                    // have cost more to reach the same answer.
+                    .limit(super::LISTING_LIMIT)
+                    .max_time(super::QUERY_MAX_TIME)
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
                 cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?

@@ -229,8 +229,10 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
         // This lane's own heartbeat; the probe counts fresh ones against the lane count, so a lane
         // that stops writing is noticed even while its siblings keep going. Errors ignored: a
         // probe that fails because the cache directory is unwritable is the right outcome, and
-        // logging it every 2s is not.
-        let _ = std::fs::write(alive, b"");
+        // logging it every 2s is not. `tokio::fs`, not `std::fs`: this runs on the runtime's
+        // worker thread, and a blocking write to an emptyDir that has gone unresponsive parks
+        // every other task on that thread with it (2026-09-12).
+        let _ = tokio::fs::write(alive, b"").await;
         // Reclaim work whose consumer died before it acked, so a crashed lane's nudges are not
         // stranded until the next full sweep pass.
         if last_claim.elapsed() >= RECLAIM_EVERY {
@@ -242,7 +244,7 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
             let ids: Vec<String> = claimed.iter().map(|(id, _)| id.clone()).collect();
             store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &ids).await;
             for (_, fields) in claimed {
-                let _ = std::fs::write(alive, b"");
+                let _ = tokio::fs::write(alive, b"").await;
                 handle_event(w, &fields).await;
             }
         }
@@ -265,7 +267,7 @@ async fn lane(w: &Worker, alive: &std::path::Path) {
         let ids: Vec<String> = delivered.iter().map(|(id, _)| id.clone()).collect();
         store.cache.xack(EVENTS_STREAM, EVENTS_GROUP, &ids).await;
         for (_, fields) in delivered {
-            let _ = std::fs::write(alive, b"");
+            let _ = tokio::fs::write(alive, b"").await;
             handle_event(w, &fields).await;
         }
     }
@@ -566,7 +568,20 @@ const CACHE_KEEP: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 
 /// The byte budget the merge caches are pruned to, least recently used first, whatever their age.
 /// 60 % of the 20 Gi emptyDir in the deploy yaml, leaving room for the worktree a rebase checks
 /// out beside the caches.
-const KLOUDLITE_MERGE_CACHE_BYTES: u64 = 12 << 30;
+///
+/// Named like an environment variable and read from none: an operator who sized the emptyDir
+/// differently had no way to say so, and the name said they did (2026-09-12). It is a real knob
+/// now — `KLOUDLITE_MERGE_CACHE_BYTES`, boot-time, because the gc lane reads it once per pass and
+/// a wrong value only ever costs a re-fetch.
+const MERGE_CACHE_BYTES_DEFAULT: u64 = 12 << 30;
+
+fn merge_cache_bytes() -> u64 {
+    std::env::var("KLOUDLITE_MERGE_CACHE_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b > 0)
+        .unwrap_or(MERGE_CACHE_BYTES_DEFAULT)
+}
 
 async fn gc_lane(
     store: &kloudlite_storage::store::Store,
@@ -582,7 +597,7 @@ async fn gc_lane(
         let gc_pass_gap =
             std::time::Duration::from_secs(central.load().gc_interval_secs);
         // Cheap and local — no object store, no fleet — so it rides the sweep it cannot slow down.
-        match kloudlite_pulls::merge_worker::prune(cache, CACHE_KEEP, KLOUDLITE_MERGE_CACHE_BYTES) {
+        match kloudlite_pulls::merge_worker::prune(cache, CACHE_KEEP, merge_cache_bytes()) {
             0 => {}
             n => tracing::info!(count = n, "gc.cache.pruned"),
         }

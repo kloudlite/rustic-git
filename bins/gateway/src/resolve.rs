@@ -22,6 +22,12 @@ pub struct Target {
 pub type Refusal = (StatusCode, &'static str);
 
 pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Result<Target, Refusal> {
+    // Checked before it becomes a path segment of a kube API URL. Every workspace id IS a DNS
+    // label — it names a cluster-scoped object — so this refuses nothing real, and it is the one
+    // thing between a token's `ws` claim and the API server's URL space (2026-09-12).
+    if !is_dns_label(ws_id) {
+        return Err((StatusCode::NOT_FOUND, "no such object"));
+    }
     let ws = Api::<Workspace>::all(client.clone()).get(ws_id).await.map_err(api_err)?;
     let status = ws.status.ok_or((StatusCode::CONFLICT, "no status yet"))?;
     if status.phase != Phase::Ready {
@@ -46,11 +52,34 @@ pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Resul
     Ok(Target { addr: SocketAddr::new(ip, ssh_port), owner: ws.spec.owner })
 }
 
+/// RFC 1123: at most 63 characters of lowercase alphanumerics and dashes, starting and ending
+/// with an alphanumeric. Kubernetes' own rule for the name of a cluster-scoped object.
+fn is_dns_label(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+}
+
 /// A 404 from the API server is the only one that means "there is no such thing"; every other
 /// failure is the API server's, not the caller's, and must not read as "your workspace is gone".
 fn api_err(e: kube::Error) -> Refusal {
     match e {
         kube::Error::Api(ae) if ae.code == 404 => (StatusCode::NOT_FOUND, "no such object"),
         _ => (StatusCode::BAD_GATEWAY, "kube api error"),
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::is_dns_label;
+
+    #[test]
+    fn only_a_dns_label_reaches_the_api_server() {
+        assert!(is_dns_label("ws-abc123"));
+        for bad in ["", "-x", "x-", "Ws1", "a/b", "a?b", "../secrets", &"a".repeat(64)] {
+            assert!(!is_dns_label(bad), "{bad} must be refused");
+        }
     }
 }

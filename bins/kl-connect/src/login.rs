@@ -112,13 +112,16 @@ pub async fn logout() -> Result<(), String> {
     Ok(())
 }
 
+/// This machine's name, for the token's label. From the environment, not a `hostname` process:
+/// forking a shell utility to read a string the shell already exported is a dependency on a
+/// binary that is not present everywhere (a minimal container, Windows) for no gain
+/// (2026-09-12).
 fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
+    ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .find(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
 }
 

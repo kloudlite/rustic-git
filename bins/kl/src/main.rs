@@ -97,18 +97,25 @@ fn real_main() -> Result<(), String> {
     match cli.cmd {
         Cmd::Build { tags, file, build_args, platform, no_cache, context } => {
             let refs: Vec<String> = tags.iter().map(|t| refs::expand(t, &host, &owner)).collect();
-            let meta = std::env::temp_dir().join(format!("kl-build-{}.json", std::process::id()));
-            let meta_s = meta.display().to_string();
+            // `NamedTempFile`, not a path built from the pid: `/tmp` is shared, the old name was
+            // guessable, and buildx follows a symlink planted at it — so another user on the same
+            // machine could choose where the build's metadata was written (2026-09-12). Created
+            // 0600 by this process and removed when it drops.
+            let meta = tempfile::Builder::new()
+                .prefix("kl-build-")
+                .suffix(".json")
+                .tempfile()
+                .map_err(|e| format!("could not create the build metadata file: {e}"))?;
+            let meta_s = meta.path().display().to_string();
             let code = docker::run(&docker::build_argv(&refs, file.as_deref(), &build_args, platform.as_deref(), no_cache, &context, &meta_s))?;
             if code != 0 {
                 std::process::exit(code);
             }
             // buildx writes `containerimage.digest` into the metadata file; one line per pushed
             // reference is what a script wants to capture.
-            let digest = std::fs::read_to_string(&meta)
+            let digest = std::fs::read_to_string(meta.path())
                 .ok()
                 .and_then(|m| m.split("\"containerimage.digest\":\"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string));
-            let _ = std::fs::remove_file(&meta);
             for r in refs {
                 match &digest {
                     Some(d) => println!("{r}@{d}"),

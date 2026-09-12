@@ -30,6 +30,8 @@ rustls = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
+# The tunnel's read buffer: a frame is split out of a `BytesMut` rather than copied into a `Vec`.
+bytes = { workspace = true }
 
 [dev-dependencies]
 kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
