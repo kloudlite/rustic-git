@@ -253,8 +253,8 @@ Phase 0 ships as soon as each batch is green; later phases may be reordered by t
 - [ ] Workspace image base pinned by digest; comment on the missing `USER`.
 - [ ] Secrets as projected files for `kloudlite-jwt`/`kloudlite-peer` (code reads a path with env fallback) — its own batch, rolls every tier.
 - [ ] OTel stack: one ConfigMap for the three differing values, or a test diffing the two files.
-- [ ] Shared-password sign-in keys deleted once the OAuth provider is live (owner decision).
-- [ ] Cloudflare Full (strict) for registry and HyperDX hosts with `ssl-redirect: "true"` in the same change (owner decision; verify with `dig` first).
+- [x] Shared-password sign-in KEPT and gated (owner decision 2026-09-12): the provider exists only when `AUTH_SHARED_PASSWORD` is set AND `AUTH_SHARED_PASSWORD_ENABLED=1`; deleted once an OAuth provider is live.
+- [x] Cloudflare SSL mode stays Flexible (owner decision 2026-09-12): the origin admits only Cloudflare's published IPv4 ranges at the load balancer (`deploy/ingress-nginx-service.yaml`, kept current by `deploy/cf-sync.sh`; a direct request to the origin IP times out), so the plain-HTTP hop is reachable from the edge alone. Full (strict) would also need an origin certificate per host; not worth a second cert chain for the same exposure.
 - [ ] `api-rbac` `pods: list` narrowed via an agent-side occupancy check.
 - [ ] `deploy/dev/slo.sh` deleted or documented; `default-members` dropped from `Cargo.toml`; `RUNBOOK.local.md` moved.
 - [ ] Verify: roll, `deploy/dev/run-job.sh fast` and `hourly`.
