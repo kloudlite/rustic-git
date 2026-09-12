@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { updateSession } from "@/auth";
 import { tokenOr } from "@/lib/api-token";
 import { claimUsername } from "@/lib/api";
+import { serverPatch } from "@/lib/session-patch";
 
 export type ClaimState = { error?: string; suggestion?: string } | null;
 
@@ -26,9 +27,8 @@ export async function claim(_prev: ClaimState, formData: FormData): Promise<Clai
      server-side before anything routes on it. Deliberately NOT passed through a
      redirect: a bearer token in a URL lands in browser history, the Referer
      header and every access log between here and there. */
-  await updateSession({
-    apiToken: r.value.token ?? undefined,
-    user: { username: r.value.user.username },
-  } as never);
+  await updateSession(
+    serverPatch({ apiToken: r.value.token ?? undefined, user: { username: r.value.user.username } }) as never,
+  );
   redirect(`/${r.value.user.username}`);
 }

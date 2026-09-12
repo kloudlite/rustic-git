@@ -73,8 +73,17 @@ export function hrefOf(slug: string): string {
 
 const titleCache = new Map<string, string>();
 
+/** A slug is a path the reader typed. Only the shape the NAV itself uses is allowed — letters,
+ *  digits, `-` and `/` — so a dot, a `%`, a backslash or a NUL never reaches `path.join`, and
+ *  the joined path is checked against the root as well, because the character class is an
+ *  argument and the containment check is a fact. */
+const SAFE_SLUG = /^[a-z0-9/-]*$/i;
+
 async function readFile(slug: string): Promise<string | null> {
-  const file = path.join(await root(), `${slug || "index"}.md`);
+  if (!SAFE_SLUG.test(slug)) return null;
+  const dir = await root();
+  const file = path.join(dir, `${slug || "index"}.md`);
+  if (!file.startsWith(dir + path.sep)) return null;
   try {
     return await fs.readFile(file, "utf8");
   } catch {
@@ -240,6 +249,7 @@ function sectionOf(slug: string, sections: NavSection[]): string {
 
 export async function page(slugParts: string[]): Promise<Page | null> {
   const slug = slugParts.join("/");
+  if (!SAFE_SLUG.test(slug)) return null;
   const sections = await nav();
   const order = await flat();
   const at = order.findIndex((i) => i.slug === slug || i.slug === `${slug}/index`);

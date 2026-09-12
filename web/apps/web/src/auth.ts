@@ -7,6 +7,7 @@ import { verifyAssertion } from "@/lib/assertion";
 import { Lockout } from "@/lib/lockout";
 import { log } from "@/lib/log";
 import { count } from "@/lib/metrics";
+import { isServerPatch, type SessionPatch } from "@/lib/session-patch";
 
 const logger = log("web::auth");
 
@@ -187,9 +188,12 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
       // signing out and back in.
       if (trigger === "update" && update) {
         // `update` is whatever updateSession() was handed; it is not a Session,
-        // and the api token must never become part of one.
-        const patch = update as { apiToken?: string; user?: { username?: string } };
-        if (patch.apiToken) token.apiToken = patch.apiToken;
+        // and the api token must never become part of one. It is not necessarily
+        // ours either: Auth.js exposes this trigger at POST /api/auth/session with
+        // a client-supplied body, so a browser can send any shape it likes —
+        // including `_server: true`. Only the signature says who minted it.
+        const patch = update as Partial<SessionPatch>;
+        if (patch.apiToken && isServerPatch(patch)) token.apiToken = patch.apiToken;
         if (patch.user?.username) token.username = patch.user.username;
         return token;
       }
