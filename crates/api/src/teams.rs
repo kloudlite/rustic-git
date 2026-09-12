@@ -109,7 +109,15 @@ pub(crate) async fn upsert_user(
             // Asked once, at the mint. The token is the only thing every later caller reads, so a
             // grant or a revocation takes effect on the next sign-in and nowhere else — which is
             // also its whole revocation story: the session's 12 h life is the window.
-            let admin = db.is_superadmin(&u.email).await.unwrap_or(false);
+            let admin = match db.is_superadmin(&u.email).await {
+                Ok(a) => a,
+                // A guess here is a 12 h token with the wrong claim and no log line; the sign-in
+                // is the one place the claim is read, so a directory that cannot answer refuses.
+                Err(e) => {
+                    tracing::error!(reason = "superadmin-claim", error = %e, "directory.read.failed");
+                    return (StatusCode::BAD_GATEWAY, "could not read the directory").into_response();
+                }
+            };
             let token = match api.jwt.as_deref() {
                 Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),
@@ -155,7 +163,15 @@ pub(crate) async fn claim_username(
         Ok(Some(u)) => {
             // A new token: the old one says they have no handle, and every caller
             // reads that claim rather than asking again.
-            let admin = db.is_superadmin(&u.email).await.unwrap_or(false);
+            let admin = match db.is_superadmin(&u.email).await {
+                Ok(a) => a,
+                // A guess here is a 12 h token with the wrong claim and no log line; the sign-in
+                // is the one place the claim is read, so a directory that cannot answer refuses.
+                Err(e) => {
+                    tracing::error!(reason = "superadmin-claim", error = %e, "directory.read.failed");
+                    return (StatusCode::BAD_GATEWAY, "could not read the directory").into_response();
+                }
+            };
             let token = match api.jwt.as_deref() {
                 Some(j) => match j.mint_admin(&u.email, &u.name, u.username.as_deref(), admin) {
                     Ok(t) => Some(t),

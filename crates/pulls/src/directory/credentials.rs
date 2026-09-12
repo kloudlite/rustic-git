@@ -74,38 +74,45 @@ impl Directory {
     /// would need a scan), `fingerprints_of` stores each key's 16-hex key-id
     /// suffix alongside its full fingerprint at registration, so this stays an
     /// exact, indexed `$in`.
+    ///
+    /// Attribution is by a FULL fingerprint when the signature carries one; a 16-hex key id is
+    /// only what an older signature can offer, and two keys can share one. A candidate set that
+    /// matches more than one row names nobody — a wrong "verified" badge is worse than none.
     pub async fn signer_by_any(&self, candidates: &[String]) -> Result<Option<Credential>> {
         use futures::TryStreamExt;
         if candidates.is_empty() {
             return Ok(None);
         }
-        match &self.backend {
+        let lower: Vec<String> = candidates.iter().map(|c| c.to_lowercase()).collect();
+        let full: Vec<String> = lower.iter().filter(|c| c.len() >= 40).cloned().collect();
+        let any = if full.is_empty() { lower } else { full };
+        let found: Vec<Credential> = match &self.backend {
             Backend::Mongo(m) => {
                 let kind = mongodb::bson::to_bson(&CredentialKind::SigningKey)
                     .map_err(|e| err(format!("bson: {e}")))?;
-                let any: Vec<mongodb::bson::Bson> = candidates
-                    .iter()
-                    .map(|c| mongodb::bson::Bson::String(c.to_lowercase()))
-                    .collect();
+                let any: Vec<mongodb::bson::Bson> = any.into_iter().map(mongodb::bson::Bson::String).collect();
                 let cursor = m
                     .credentials
                     .find(doc! { "kind": kind, "fingerprints": { "$in": any } })
                     .await
                     .map_err(|e| err(format!("mongo: {e}")))?;
-                let found: Vec<Credential> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
-                Ok(found.into_iter().next())
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?
             }
-            Backend::Memory(s) => {
-                let any: Vec<String> = candidates.iter().map(|c| c.to_lowercase()).collect();
-                Ok(s.lock()
-                    .unwrap()
-                    .credentials
-                    .values()
-                    .find(|c| {
-                        c.kind == CredentialKind::SigningKey
-                            && c.fingerprints.iter().any(|f| any.contains(f))
-                    })
-                    .cloned())
+            Backend::Memory(s) => s
+                .lock()
+                .unwrap()
+                .credentials
+                .values()
+                .filter(|c| c.kind == CredentialKind::SigningKey && c.fingerprints.iter().any(|f| any.contains(f)))
+                .cloned()
+                .collect(),
+        };
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(found.into_iter().next()),
+            n => {
+                tracing::warn!(rows = n, "signer.ambiguous");
+                Ok(None)
             }
         }
     }

@@ -124,6 +124,9 @@ pub fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
         // `verify_bindings` checks every certification on the user id against the
         // primary key (and fails an id carrying none).
         .filter(|u| u.verify_bindings(&key.primary_key).is_ok())
+        // A user id the key's owner revoked (a verified `CertRevocation` newer than its last
+        // certification) is not an address the key vouches for any more.
+        .filter(|u| !uid_revoked(u, &key.primary_key))
         .filter_map(|u| {
             let id = u.id.id();
             let s = String::from_utf8_lossy(id);
@@ -134,6 +137,28 @@ pub fn verified_emails(key: &SignedPublicKey) -> Vec<String> {
                 .or_else(|| s.contains('@').then(|| s.trim().to_lowercase()))
         })
         .collect()
+}
+
+/// Is this user id revoked by its own key: a verifying `CertRevocation` newer than the newest
+/// verifying certification (or with no certification left to outrank it)?
+fn uid_revoked(u: &pgp::types::SignedUser, primary: &pgp::packet::PublicKey) -> bool {
+    use pgp::packet::SignatureType;
+    use pgp::types::Tag;
+    let verified = u.signatures.iter().filter(|s| s.verify_certification(primary, Tag::UserId, &u.id).is_ok());
+    let (mut cert, mut revoked) = (None, None);
+    for s in verified {
+        let at = s.created();
+        if matches!(s.typ(), Some(SignatureType::CertRevocation)) {
+            revoked = revoked.max(at);
+        } else {
+            cert = cert.max(at);
+        }
+    }
+    match (revoked, cert) {
+        (Some(r), Some(c)) => r >= c,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// Check a signature against a registered key.
@@ -260,9 +285,13 @@ fn effective_expiry(key: &SignedPublicKey) -> Option<pgp::types::Duration> {
         .direct_signatures
         .iter()
         .filter(|s| s.verify_key(primary).is_ok());
+    // `verify_certification` accepts a `CertRevocation` too (rpgp's `is_certification` includes
+    // it), and a revocation carries no expiry — so a later uid revocation would be "the newest
+    // self-signature" and read an expired key as valid. Certifications only.
     let uid = key.details.users.iter().flat_map(|u| {
         u.signatures
             .iter()
+            .filter(|s| !matches!(s.typ(), Some(pgp::packet::SignatureType::CertRevocation)))
             .filter(move |s| s.verify_certification(primary, Tag::UserId, &u.id).is_ok())
     });
 
@@ -275,7 +304,9 @@ fn effective_expiry(key: &SignedPublicKey) -> Option<pgp::types::Duration> {
         it.filter_map(|s| Some((s.created()?, s))).max_by_key(|(c, _)| *c).map(|(_, s)| s)
     }
     let picked = newest(direct).or_else(|| newest(uid));
-    picked.and_then(|s| s.key_expiration_time())
+    // A zero duration is how a tool writes "no expiry" explicitly; read literally it would be
+    // "expired the second it was made".
+    picked.and_then(|s| s.key_expiration_time()).filter(|d| std::time::Duration::from(*d).as_secs() > 0)
 }
 
 /// Is a signing subkey live at `now`: bound, not revoked, not past its OWN expiry?
@@ -503,6 +534,39 @@ pub(crate) mod tests {
     fn bound_subkey_is_a_signer() {
         let key: SignedPublicKey = gen("d@example.com", SystemTime::now()).into();
         assert_eq!(signing_capable_subkeys(&key).len(), 1);
+    }
+
+    /// A uid self-signature with a 1 y expiry on a 2 y old key, then a uid REVOCATION newer than
+    /// it. rpgp counts the revocation as a certification, so it was "the newest self-signature"
+    /// with no expiry of its own, and an expired key read as valid.
+    fn key_with_uid_revoked_after_expiry() -> SignedPublicKey {
+        use pgp::types::Tag;
+        let two_years = Duration::from_secs(2 * 365 * 86400);
+        let mut sk = gen("h@example.com", SystemTime::now() - two_years);
+        let uid = sk.details.users[0].id.clone();
+        let sign = |sk: &SignedSecretKey, typ: SignatureType, at: SystemTime, expiry_secs: Option<u32>| {
+            let mut cfg = SignatureConfig::from_key(rand::thread_rng(), &sk.primary_key, typ).unwrap();
+            cfg.hashed_subpackets = vec![
+                Subpacket::regular(SubpacketData::SignatureCreationTime(Timestamp::try_from(at).unwrap())).unwrap(),
+                Subpacket::regular(SubpacketData::IssuerFingerprint(sk.primary_key.fingerprint())).unwrap(),
+            ];
+            if let Some(e) = expiry_secs {
+                cfg.hashed_subpackets.push(Subpacket::regular(SubpacketData::KeyExpirationTime(PgpDuration::from_secs(e))).unwrap());
+            }
+            cfg.sign_certification(&sk.primary_key, &sk.primary_key.public_key(), &Password::empty(), Tag::UserId, &uid).unwrap()
+        };
+        let now = SystemTime::now();
+        let cert = sign(&sk, SignatureType::CertPositive, now - two_years, Some(365 * 86400));
+        let revoke = sign(&sk, SignatureType::CertRevocation, now - Duration::from_secs(86400), None);
+        sk.details.users[0].signatures = vec![cert, revoke];
+        sk.into()
+    }
+
+    #[test]
+    fn a_uid_revocation_does_not_hide_the_keys_expiry_and_names_nobody() {
+        let key = key_with_uid_revoked_after_expiry();
+        assert_eq!(validity(&key, SystemTime::now()), Validity::Expired);
+        assert!(verified_emails(&key).is_empty(), "a revoked uid vouches for no address");
     }
 
     #[test]

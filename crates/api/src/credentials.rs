@@ -174,7 +174,11 @@ pub(crate) async fn remove_key(
     headers: axum::http::HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
-    revoke(api, headers, id, CredentialKind::SshKey).await
+    // `add_key` stores a signing key as `sign:{fingerprint}` with its own kind; until 2026-09-12
+    // this route hard-coded `SshKey`, so a signing key could be listed and never revoked, and a
+    // compromised one kept every commit it signed reading as verified.
+    let kind = if id.starts_with("sign:") { CredentialKind::SigningKey } else { CredentialKind::SshKey };
+    revoke(api, headers, id, kind).await
 }
 
 /// Re-project the namespaces this PERSON's keys reach, off the request path: the rows are already

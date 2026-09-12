@@ -1098,6 +1098,18 @@ async fn a_key_belongs_to_the_person_who_added_it() {
     let r = c.delete(format!("{base}/v1/keys/{id}")).bearer_auth(&token).send().await.unwrap();
     assert_eq!(r.status(), 204);
     assert_eq!(e.store.owner_for_fingerprint(&fp).await.unwrap(), None, "revoking takes the fleet's row too");
+
+    // The same key as a SIGNING key: its row is `sign:{fingerprint}`, and until 2026-09-12 the
+    // delete route hard-coded the ssh kind, so a signing key could be listed and never revoked.
+    let r = c.post(format!("{base}/v1/keys")).bearer_auth(&token).json(&serde_json::json!({ "key": line, "signing": true })).send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let made: serde_json::Value = r.json().await.unwrap();
+    let sid = made["_id"].as_str().unwrap().to_string();
+    assert!(sid.starts_with("sign:"), "{sid}");
+    let r = c.delete(format!("{base}/v1/keys/{sid}")).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(r.status(), 204, "a signing key is revocable through the one key route");
+    let listed: serde_json::Value = c.get(format!("{base}/v1/keys")).bearer_auth(&token).send().await.unwrap().json().await.unwrap();
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
 }
 
 /// Create, list, revoke, list again — the whole life of a token, through the routes rather than

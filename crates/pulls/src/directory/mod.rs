@@ -675,6 +675,30 @@ pub(crate) fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A 16-hex key id is not an identity: two registered keys can share one. A full
+    /// fingerprint decides; a key id alone that matches two rows names nobody.
+    #[tokio::test]
+    async fn a_shared_key_id_attributes_a_signature_to_nobody() {
+        let d = Directory::in_memory();
+        let row = |id: &str, fps: &[&str]| Credential {
+            id: id.into(),
+            kind: CredentialKind::SigningKey,
+            owner: "alice".into(),
+            created_by: "alice@example.com".into(),
+            name: "k".into(),
+            material: String::new(),
+            fingerprints: fps.iter().map(|f| f.to_string()).collect(),
+            created_at: mongodb::bson::DateTime::now(),
+        };
+        let a = "a".repeat(24) + "0123456789abcdef";
+        let b = "b".repeat(24) + "0123456789abcdef";
+        d.add_credential(&row("sign:a", &[&a, "0123456789abcdef"])).await.unwrap();
+        d.add_credential(&row("sign:b", &[&b, "0123456789abcdef"])).await.unwrap();
+        assert!(d.signer_by_any(&["0123456789abcdef".into()]).await.unwrap().is_none(), "ambiguous");
+        assert_eq!(d.signer_by_any(&[a.to_uppercase()]).await.unwrap().map(|c| c.id), Some("sign:a".into()));
+        assert_eq!(d.signer_by_any(&[b.clone(), "0123456789abcdef".into()]).await.unwrap().map(|c| c.id), Some("sign:b".into()), "the fingerprint decides, the key id only narrows");
+    }
+
     use super::{check_handle, Credential, CredentialKind, Directory};
 
     /// A key registered under a team moves to the person who added it; only ssh keys reach the

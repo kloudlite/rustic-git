@@ -297,13 +297,24 @@ pub async fn serve(
         .route(
             "/v1/cli/code",
             axum::routing::post(cli_code)
-                .layer(axum::middleware::from_fn_with_state(cli_code_limit, ratelimit::per_ip)),
+                .layer(axum::middleware::from_fn_with_state(cli_code_limit.clone(), ratelimit::per_ip)),
         )
         // Session-gated: the approval page reads it so it can name the DEVICE that is asking
         // before offering the button. Under `/code/` rather than beside it so the anonymous POST
         // and this stay one prefix apart from `/tokens`.
-        .route("/v1/cli/code/{code}", axum::routing::get(cli_pending_code))
-        .route("/v1/cli/approve", axum::routing::post(cli_approve))
+        // The same bucket as the anonymous POST: an account grinding `approve` or `code/{code}`
+        // against the code space was unthrottled, and each hit hands a stranger's terminal a
+        // token bound to the guesser.
+        .route(
+            "/v1/cli/code/{code}",
+            axum::routing::get(cli_pending_code)
+                .layer(axum::middleware::from_fn_with_state(cli_code_limit.clone(), ratelimit::per_ip)),
+        )
+        .route(
+            "/v1/cli/approve",
+            axum::routing::post(cli_approve)
+                .layer(axum::middleware::from_fn_with_state(cli_code_limit.clone(), ratelimit::per_ip)),
+        )
         .route("/v1/cli/token", axum::routing::get(cli_token))
         .route("/v1/cli/tokens", axum::routing::get(list_cli_tokens))
         .route("/v1/cli/tokens/{id}", axum::routing::delete(revoke_cli_token))
@@ -439,7 +450,9 @@ pub(crate) fn peer_only(api: &Api, headers: &axum::http::HeaderMap) -> std::resu
         return Err((StatusCode::UNAUTHORIZED, "peer secret required").into_response());
     }
     match headers.get(kloudlite_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) {
-        Some(u) if !u.trim().is_empty() => Ok(u.trim().to_string()),
+        // Lowercased as `mint` lowercases a subject: a credential row written under `Alice@x`
+        // is invisible to an `alice@x` session, and a key that cannot be listed cannot be revoked.
+        Some(u) if !u.trim().is_empty() => Ok(u.trim().to_lowercase()),
         _ => Err((StatusCode::BAD_REQUEST, "caller identity required").into_response()),
     }
 }
