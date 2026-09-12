@@ -144,12 +144,11 @@ hyperdx:
       # console user generates and far below what an unauthenticated scraper does.
       nginx.ingress.kubernetes.io/limit-rps: "50"
       nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
-      # The console is an operator surface, so the door is shut to everyone else: this is
-      # `ADMIN_CIDR` from deploy/k3s/env.sh (that file is not in git; the placeholder below is
-      # env.example.sh's). This value is a LITERAL — the chart is installed with `helm -f` and
-      # nothing substitutes it — so set it to the real operator CIDR before installing, the same
-      # way harden-node.sh is given one.
-      nginx.ingress.kubernetes.io/whitelist-source-range: "203.0.113.1/32"
+      # The console is an operator surface, so the door can be shut to everyone else with the
+      # line below, set to `ADMIN_CIDR` from deploy/k3s/env.sh (not in git). It ships commented
+      # out on purpose: the chart is installed with `helm -f` and nothing substitutes the value,
+      # so a placeholder here would lock every operator out on the next upgrade.
+      # nginx.ingress.kubernetes.io/whitelist-source-range: "<ADMIN_CIDR>"
       # No basic auth in front: HyperDX's own login is the gate. The first account was created
       # right after the install (the sign-up form is open only until then), and a second prompt
       # on every visit was judged not worth its cost.
