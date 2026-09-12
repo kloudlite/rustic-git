@@ -172,7 +172,6 @@ const CLUSTER_ENV_VARS: &[(&str, &str)] = &[
     ("nixTimeoutSecs", "WS_NIX_TIMEOUT"),
     ("nixpkgs", "WS_NIXPKGS"),
     ("basePackages", "WS_BASE_PACKAGES"),
-    ("maxPerOwner", "WS_MAX_PER_OWNER"),
     ("defaultImage", "WS_DEFAULT_IMAGE"),
     ("gitInitImage", "WS_GIT_INIT_IMAGE"),
     ("runtimeClass", "WS_RUNTIME_CLASS"),
@@ -188,13 +187,10 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "peerSendTimeoutSecs" => defaults::peer_send_timeout_secs().into(),
         "peerServeTimeoutSecs" => defaults::peer_serve_timeout_secs().into(),
         "peerReceiveSlack" => defaults::peer_receive_slack().into(),
-        "stopFlushTimeoutSecs" => defaults::stop_flush_timeout_secs().into(),
         "nixTimeoutSecs" => defaults::nix_timeout_secs().into(),
         "nixpkgs" => serde_json::Value::String(String::new()),
         "basePackages" => defaults::base_packages().into(),
         "defaultReplicas" => defaults::default_replicas().into(),
-        "maxPerOwner" => defaults::max_per_owner().into(),
-        "homeCacheGb" => defaults::home_cache_gb().into(),
         "quotaGbCeiling" => defaults::quota_gb_ceiling().into(),
         "defaultImage" => serde_json::Value::String(String::new()),
         "gitInitImage" => defaults::git_init_image().into(),
@@ -212,11 +208,8 @@ fn cluster_range(name: &str) -> Option<(f64, f64)> {
         "peerSendTimeoutSecs" => Some((60.0, 21_600.0)),
         "peerServeTimeoutSecs" => Some((60.0, 21_600.0)),
         "peerReceiveSlack" => Some((0.0, 60.0)),
-        "stopFlushTimeoutSecs" => Some((5.0, 300.0)),
         "nixTimeoutSecs" => Some((60.0, 7_200.0)),
         "defaultReplicas" => Some((1.0, 5.0)),
-        "maxPerOwner" => Some((1.0, 1_000.0)),
-        "homeCacheGb" => Some((1.0, 500.0)),
         "quotaGbCeiling" => Some((10.0, 5_000.0)),
         _ => None,
     }
@@ -281,6 +274,15 @@ mod tests {
                 row.name,
                 row.unit
             );
+        }
+    }
+
+    /// The three knobs nothing ever read, dropped 2026-09-12 — the console must not offer a
+    /// field the write path no longer accepts.
+    #[test]
+    fn the_dropped_knobs_are_not_in_the_schema() {
+        for row in cluster_rows() {
+            assert!(!matches!(row.name, "maxPerOwner" | "homeCacheGb" | "stopFlushTimeoutSecs"), "{} is still listed", row.name);
         }
     }
 

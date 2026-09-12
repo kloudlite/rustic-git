@@ -307,11 +307,8 @@ pub(crate) fn validate_cluster_patch(patch: &crd::ClusterSettingsSpec) -> Result
     range!(peer_send_timeout_secs, 60u64, 21600u64);
     range!(peer_serve_timeout_secs, 60u64, 21600u64);
     range!(peer_receive_slack, 0u64, 60u64);
-    range!(stop_flush_timeout_secs, 5u64, 300u64);
     range!(nix_timeout_secs, 60u64, 7200u64);
     range!(default_replicas, 1u32, 5u32);
-    range!(max_per_owner, 1u32, 1000u32);
-    range!(home_cache_gb, 1u32, 500u32);
     range!(quota_gb_ceiling, 10u32, 5000u32);
     // Unbounded pin string (constraints.md's exact carve-out): only non-emptiness is checked,
     // and only when the admin actually set it.
@@ -343,13 +340,10 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(peer_send_timeout_secs);
     over!(peer_serve_timeout_secs);
     over!(peer_receive_slack);
-    over!(stop_flush_timeout_secs);
     over!(nix_timeout_secs);
     over!(nixpkgs);
     over!(base_packages);
     over!(default_replicas);
-    over!(max_per_owner);
-    over!(home_cache_gb);
     over!(quota_gb_ceiling);
     over!(default_image);
     over!(git_init_image);

@@ -476,3 +476,30 @@ async fn cluster_settings_unknown_region_is_404_on_get_and_put() {
 
     assert!(s.rec.calls().iter().all(|c| !c.contains("clustersettings")), "the CR must never be asked about for an unknown region");
 }
+
+/// `maxPerOwner` was dropped (2026-09-12) and `ClusterSettingsSpec` sets no
+/// `deny_unknown_fields`, so a stale console or script sending it is not refused — it is
+/// accepted and the dead key is dropped. Asserted explicitly because "422" would be the other
+/// defensible answer and the choice must not drift silently.
+#[tokio::test]
+async fn put_cluster_with_a_dropped_knob_is_accepted_and_ignores_it() {
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            patch(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+        ],
+        None,
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/us", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"syncSecs": 90, "maxPerOwner": 5, "note": "test"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
+    assert_eq!(sent.len(), 1);
+    assert!(!sent[0].to_string().contains("maxPerOwner"), "the dropped knob must not be written back: {}", sent[0]);
+}

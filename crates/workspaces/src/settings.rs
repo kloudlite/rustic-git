@@ -17,13 +17,10 @@ pub struct AgentSettings {
     pub peer_send_timeout_secs: u64,
     pub peer_serve_timeout_secs: u64,
     pub peer_receive_slack: u64,
-    pub stop_flush_timeout_secs: u64,
     pub nix_timeout_secs: u64,
     pub nixpkgs: String,
     pub base_packages: String,
     pub default_replicas: u32,
-    pub max_per_owner: u32,
-    pub home_cache_gb: u32,
     pub quota_gb_ceiling: u32,
     /// Boot-marked (`CLUSTER_SETTING_META`) — read once at `Ctx` construction, not per reconcile.
     pub default_image: String,
@@ -43,7 +40,6 @@ impl AgentSettings {
     /// spec, never the other way around.
     pub fn from_env() -> Self {
         use kloudlite_core::settings::env_parsed as env_u64;
-        use kloudlite_core::settings::env_parsed as env_u32;
 
         Self {
             sync_secs: env_u64("WS_SYNC_SECS", crd::defaults::sync_secs()),
@@ -53,14 +49,10 @@ impl AgentSettings {
             peer_send_timeout_secs: env_u64("WS_PEER_SEND_TIMEOUT_SECS", crd::defaults::peer_send_timeout_secs()),
             peer_serve_timeout_secs: env_u64("WS_PEER_SERVE_TIMEOUT_SECS", crd::defaults::peer_serve_timeout_secs()),
             peer_receive_slack: env_u64("WS_PEER_RECEIVE_SLACK", crd::defaults::peer_receive_slack()),
-            // No env var reads a stop-flush deadline today — nothing enforces one yet.
-            stop_flush_timeout_secs: crd::defaults::stop_flush_timeout_secs(),
             nix_timeout_secs: env_u64("WS_NIX_TIMEOUT", crd::defaults::nix_timeout_secs()),
             nixpkgs: std::env::var("WS_NIXPKGS").unwrap_or_default(),
             base_packages: std::env::var("WS_BASE_PACKAGES").unwrap_or_else(|_| crd::defaults::base_packages()),
             default_replicas: crd::DEFAULT_REPLICAS,
-            max_per_owner: env_u32("WS_MAX_PER_OWNER", crd::defaults::max_per_owner()),
-            home_cache_gb: crd::defaults::home_cache_gb(),
             quota_gb_ceiling: crd::defaults::quota_gb_ceiling(),
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
@@ -87,13 +79,10 @@ impl AgentSettings {
         over!(peer_send_timeout_secs);
         over!(peer_serve_timeout_secs);
         over!(peer_receive_slack);
-        over!(stop_flush_timeout_secs);
         over!(nix_timeout_secs);
         over!(nixpkgs);
         over!(base_packages);
         over!(default_replicas);
-        over!(max_per_owner);
-        over!(home_cache_gb);
         over!(quota_gb_ceiling);
         over!(default_image);
         over!(git_init_image);

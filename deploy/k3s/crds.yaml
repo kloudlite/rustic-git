@@ -2369,20 +2369,6 @@
                         "nullable": true,
                         "type": "string"
                       },
-                      "homeCacheGb": {
-                        "description": "Home-cache local subvolume quota per (owner, node). 1..=500 GiB.",
-                        "format": "uint32",
-                        "minimum": 0.0,
-                        "nullable": true,
-                        "type": "integer"
-                      },
-                      "maxPerOwner": {
-                        "description": "Max workspaces+environments per owner in this region, until `Quota` fully replaces it.\n1..=1000.",
-                        "format": "uint32",
-                        "minimum": 0.0,
-                        "nullable": true,
-                        "type": "integer"
-                      },
                       "nixTimeoutSecs": {
                         "description": "Nix build timeout. 60..=7200 seconds.",
                         "format": "uint64",
@@ -2441,13 +2427,6 @@
                         "description": "k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); `None` = host kernel. **Boot**.",
                         "nullable": true,
                         "type": "string"
-                      },
-                      "stopFlushTimeoutSecs": {
-                        "description": "Deadline for a stop's flush before the pod is torn down anyway. 5..=300 seconds.",
-                        "format": "uint64",
-                        "minimum": 0.0,
-                        "nullable": true,
-                        "type": "integer"
                       },
                       "syncSecs": {
                         "description": "Sync-point cut beat interval. 10..=3600 seconds. `None` = admin never set it — the reader\nfalls back to env, then the built-in default (`AgentSettings::merged_with`).",

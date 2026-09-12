@@ -30,9 +30,6 @@ pub mod defaults {
     pub fn peer_receive_slack() -> u64 {
         3
     }
-    pub fn stop_flush_timeout_secs() -> u64 {
-        30
-    }
     pub fn nix_timeout_secs() -> u64 {
         1200
     }
@@ -44,12 +41,6 @@ pub mod defaults {
     }
     pub fn default_replicas() -> u32 {
         crate::crd::DEFAULT_REPLICAS
-    }
-    pub fn max_per_owner() -> u32 {
-        50
-    }
-    pub fn home_cache_gb() -> u32 {
-        20
     }
     pub fn quota_gb_ceiling() -> u32 {
         500
@@ -103,11 +94,6 @@ pub struct ClusterSettingsSpec {
     /// Slack added to the receive-side timeout over the serve-side one. 0..=60 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_receive_slack: Option<u64>,
-    /// Deadline for a stop's flush before the pod is torn down anyway. 5..=300 seconds.
-    // ponytail: no caller reads this yet; ships for the admin UI ahead of the enforcement it
-    // is meant for. Add the read when a stop-flush deadline is actually implemented.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_flush_timeout_secs: Option<u64>,
     /// Nix build timeout. 60..=7200 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nix_timeout_secs: Option<u64>,
@@ -121,13 +107,6 @@ pub struct ClusterSettingsSpec {
     /// Default `Volume.spec.replicas` for a newly created volume. 1..=5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_replicas: Option<u32>,
-    /// Max workspaces+environments per owner in this region, until `Quota` fully replaces it.
-    /// 1..=1000.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_per_owner: Option<u32>,
-    /// Home-cache local subvolume quota per (owner, node). 1..=500 GiB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home_cache_gb: Option<u32>,
     /// Ceiling `clamp_quota` enforces on a requested quota. 10..=5000 GiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_gb_ceiling: Option<u32>,
@@ -168,15 +147,29 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("peerSendTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("peerServeTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("peerReceiveSlack", kloudlite_core::settings::Mark::Live, &[]),
-    ("stopFlushTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("nixTimeoutSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("nixpkgs", kloudlite_core::settings::Mark::Live, &[]),
     ("basePackages", kloudlite_core::settings::Mark::Live, &[]),
     ("defaultReplicas", kloudlite_core::settings::Mark::Live, &[]),
-    ("maxPerOwner", kloudlite_core::settings::Mark::Live, &[]),
-    ("homeCacheGb", kloudlite_core::settings::Mark::Live, &[]),
     ("quotaGbCeiling", kloudlite_core::settings::Mark::Live, &[]),
     ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("runtimeClass", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `maxPerOwner`, `homeCacheGb` and `stopFlushTimeoutSecs` were dropped (2026-09-12) — no
+    /// reader ever consumed them. Nothing sets `deny_unknown_fields` on this spec, so a CR
+    /// stored before that still parses and the dead value is simply dropped; if anyone ever adds
+    /// `deny_unknown_fields` here, every such object becomes unreadable and this fails first.
+    #[test]
+    fn a_stored_spec_carrying_the_dropped_knobs_still_parses() {
+        let spec: ClusterSettingsSpec =
+            serde_json::from_value(serde_json::json!({"syncSecs": 90, "maxPerOwner": 5, "homeCacheGb": 7, "stopFlushTimeoutSecs": 11})).unwrap();
+        assert_eq!(spec.sync_secs, Some(90));
+        assert!(!serde_json::to_string(&spec).unwrap().contains("maxPerOwner"));
+    }
+}
