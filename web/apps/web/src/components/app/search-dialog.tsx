@@ -31,26 +31,29 @@ export function SearchDialog({
   onOpenChange: (open: boolean) => void;
   go: (href: string) => void;
 }) {
-  const [repos, setRepos] = useState<PaletteRepo[] | null>(null);
+  // Keyed by owner: one `repos` list outlived the owner it was fetched for, so switching teams
+  // and reopening the palette listed the previous team's repos under the new team's name until
+  // the fetch landed, and every reopen refetched a list already in hand (2026-09-12).
+  const [repos, setRepos] = useState<Record<string, PaletteRepo[]>>({});
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || repos[owner]) return;
     let stale = false;
     fetch(`/api/repos?owner=${encodeURIComponent(owner)}`)
       .then((r) => (r.ok ? r.json() : []))
       .then((v) => {
         // A proxy's HTML error page parses as nothing useful; only a list is a list.
-        if (!stale) setRepos(Array.isArray(v) ? v : []);
+        if (!stale) setRepos((m) => ({ ...m, [owner]: Array.isArray(v) ? v : [] }));
       })
       .catch(() => {
-        if (!stale) setRepos([]);
+        if (!stale) setRepos((m) => ({ ...m, [owner]: [] }));
       });
     return () => {
       stale = true;
     };
-  }, [open, owner]);
+  }, [open, owner, repos]);
 
-  const mine = repos ?? [];
+  const mine = repos[owner] ?? [];
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange} title="Search" description="Jump to a repository or section">

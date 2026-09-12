@@ -46,7 +46,9 @@ export function OpenInWorkspace({
   useEffect(() => {
     if (!open || envs !== null) return;
     let live = true;
-    environmentsFor(owner).then((e) => { if (live) setEnvs(e); });
+    // An unhandled rejection here would be a dialog that never leaves its loading state and a
+    // console error nobody reads; an empty list says "none to attach to" (2026-09-12).
+    environmentsFor(owner).then((e) => { if (live) setEnvs(e); }).catch(() => { if (live) setEnvs([]); });
     return () => { live = false; };
   }, [open, envs, owner]);
   return (

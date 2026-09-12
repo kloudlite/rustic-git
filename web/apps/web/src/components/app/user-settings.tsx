@@ -23,6 +23,7 @@ export function UserSettings({
   tokens,
   passkeys,
   cliTokens,
+  install,
   platformKey,
 }: {
   session: NonNullable<Session>;
@@ -32,6 +33,8 @@ export function UserSettings({
   tokens: ApiCredential[];
   passkeys: ApiPasskey[];
   cliTokens: ApiCliToken[];
+  /** The CLI install line this deployment answers on — see `lib/clone.ts`. */
+  install: string;
   /** Absent only when the API could not be reached; the section says so rather than vanishing. */
   platformKey?: ApiPlatformKey;
 }) {
@@ -236,7 +239,7 @@ export function UserSettings({
             title="CLI logins"
             description="Machines signed in with the kl command line. Each is a login of its own, revocable here without touching the others."
           >
-            <CliTokens tokens={cliTokens} />
+            <CliTokens tokens={cliTokens} install={install} />
           </Section>
         </div>
       </main>

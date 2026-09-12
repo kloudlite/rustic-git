@@ -11,14 +11,14 @@ export default async function RegistriesPage({ params }: { params: Promise<{ own
   const { owner } = await params;
   const { token } = await requireToken(`/${owner}/registries`);
 
-  const list = await images(token, owner);
+  // Independent reads: the host comes from the api tier's settings, the list from the browse
+  // API, and awaiting them in turn cost a serial round trip for nothing (2026-09-12).
+  const [list, host] = await Promise.all([images(token, owner), registryHost()]);
   if (!list.ok) {
     if (list.kind === "unauthorized") redirect("/login?from=expired");
     if (list.kind === "notFound") notFound();
     throw new Error(list.message);
   }
-
-  const host = await registryHost();
 
   // Full page width, like every other list in the namespace — the section tab
   // already names the page, so there is no title to repeat.

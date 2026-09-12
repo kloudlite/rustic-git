@@ -60,11 +60,21 @@ describe("scrapeAllowed", () => {
     expect(scrapeAllowed(h({}))).toBe(false);
   });
 
-  test("the public host is refused even on the container port", () => {
-    const was = process.env.AUTH_URL;
-    process.env.AUTH_URL = "https://dev.kloudlite.io";
+  test("a made-up name on the container port is refused", () => {
+    // `Host` is the caller's to write, so only a private address literal counts as the pod's own.
     expect(scrapeAllowed(h({ host: "dev.kloudlite.io:3000" }))).toBe(false);
+    expect(scrapeAllowed(h({ host: "8.8.8.8:3000" }))).toBe(false);
     expect(scrapeAllowed(h({ host: "10.42.0.7:3000" }))).toBe(true);
-    process.env.AUTH_URL = was;
+    expect(scrapeAllowed(h({ host: "localhost:3000" }))).toBe(true);
+    expect(scrapeAllowed(h({ host: "172.16.0.1:3000" }))).toBe(true);
+    expect(scrapeAllowed(h({ host: "172.32.0.1:3000" }))).toBe(false);
+  });
+
+  test("a configured token is the only way in", () => {
+    process.env.KLOUDLITE_METRICS_TOKEN = "s3cret";
+    expect(scrapeAllowed(h({ host: "10.42.0.7:3000" }))).toBe(false);
+    expect(scrapeAllowed(h({ authorization: "Bearer s3cret" }))).toBe(true);
+    expect(scrapeAllowed(h({ authorization: "Bearer nope" }))).toBe(false);
+    delete process.env.KLOUDLITE_METRICS_TOKEN;
   });
 });

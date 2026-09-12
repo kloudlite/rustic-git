@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import { page } from "@/lib/docs";
 import { Toc } from "@/components/docs/toc";
@@ -10,7 +11,9 @@ import { CopyButtons } from "@/components/docs/copy-buttons";
  *  the docs. */
 export async function DocsPage({ slug }: { slug: string[] }) {
   const p = await page(slug);
-  if (!p) return null;
+  // The 404 is here rather than in the route: a slug with no markdown behind it is this
+  // component's own fact, and the route re-deciding it rendered the page twice (2026-09-12).
+  if (!p) notFound();
   const isHome = p.slug === "";
   return (
     <>

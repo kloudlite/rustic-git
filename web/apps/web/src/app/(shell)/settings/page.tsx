@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { ownersFor } from "@/lib/owners";
 import { listCliTokens, listKeys, listPasskeys, listTokens, platformKey, type ApiCredential, type ApiResult } from "@/lib/api";
+import { installCommand } from "@/lib/clone";
 import { UserSettings } from "@/components/app/user-settings";
 import { listOrSignIn } from "@/lib/require-api";
 import { requireToken } from "@/lib/session";
@@ -12,7 +13,7 @@ export default async function Page() {
 
   // Nothing below needs another's answer, so it is one round trip deep, not seven: this page
   // was `owners → passkeys → cli → platform → (keys → signing → tokens) × owners` in sequence.
-  const [owners, passkeys, cliTokens, platform, keys, signing] = await Promise.all([
+  const [owners, passkeys, cliTokens, platform, keys, signing, install] = await Promise.all([
     ownersFor(session),
     // Passkeys are the person's, not a namespace's: one call, no owner.
     listPasskeys(token),
@@ -24,6 +25,7 @@ export default async function Page() {
     // Keys are the person's too — one call each, no owner, and every namespace accepts them.
     listKeys(token),
     listKeys(token, "signing"),
+    installCommand(),
   ]);
   // Tokens are still per namespace, so the page asks for every namespace this
   // person can act in and shows them as one list — which namespace each belongs
@@ -42,6 +44,7 @@ export default async function Page() {
       tokens={gather(perOwnerTokens)}
       passkeys={listOrSignIn(passkeys)}
       cliTokens={listOrSignIn(cliTokens)}
+      install={install}
       platformKey={platform.ok ? platform.value : undefined}
     />
   );

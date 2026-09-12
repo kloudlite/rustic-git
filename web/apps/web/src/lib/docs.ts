@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Marked, type Token, type Tokens, type TokenizerAndRendererExtension } from "marked";
@@ -105,14 +106,18 @@ function humanize(slug: string): string {
   return last.replace(/^\d+-/, "").replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export async function nav(): Promise<NavSection[]> {
+/** Every docs reader is `cache()`d: one render calls `nav()` from the layout, from `flat()`
+ *  for prev/next, and again from `searchIndex()` per page, and `page()` is called by the route
+ *  and by `DocsPage`. Without the per-request memo that is one `readFile` per call — the same
+ *  markdown read dozens of times to draw one page (2026-09-12). */
+export const nav = cache(async function nav(): Promise<NavSection[]> {
   return Promise.all(
     NAV.map(async (s) => ({
       section: s.section,
       items: await Promise.all(s.items.map(async (slug) => ({ slug, href: hrefOf(slug), title: slug === "" ? "Introduction" : await titleOf(slug) }))),
     })),
   );
-}
+});
 
 /** Every page once, in sidebar order, for prev/next. */
 async function flat(): Promise<NavItem[]> {
@@ -209,7 +214,9 @@ async function render(md: string, slug: string): Promise<{ html: string; heading
         const text = this.parser.parseInline(tokens);
         const to = rewriteHref(href, slug);
         const ext = /^https?:/.test(to) ? ` target="_blank" rel="noreferrer"` : "";
-        return `<a href="${to}"${title ? ` title="${title}"` : ""}${ext}>${text}</a>`;
+        // Both values are the markdown author's bytes going into an attribute: a `"` in either
+        // closes it and the rest of the link text becomes markup (2026-09-12).
+        return `<a href="${escapeHtml(to)}"${title ? ` title="${escapeHtml(title)}"` : ""}${ext}>${text}</a>`;
       },
       code(token: Tokens.Code): string {
         const t = token as Tokens.Code & { html?: string };
@@ -247,7 +254,7 @@ function sectionOf(slug: string, sections: NavSection[]): string {
   return "Docs";
 }
 
-export async function page(slugParts: string[]): Promise<Page | null> {
+export const page = cache(async function page(slugParts: string[]): Promise<Page | null> {
   const slug = slugParts.join("/");
   if (!SAFE_SLUG.test(slug)) return null;
   const sections = await nav();
@@ -266,10 +273,10 @@ export async function page(slugParts: string[]): Promise<Page | null> {
     return { slug, title: humanize(slug), description: `${items.length} pages`, html: `<div class="docs-cards">${list}</div>`, headings: [], section: humanize(slug), prev: null, next: null };
   }
   return null;
-}
+});
 
 /** Every page's title, section and h2/h3 headings: the search index the palette filters. */
-export async function searchIndex(): Promise<{ title: string; section: string; href: string; headings: { text: string; id: string }[] }[]> {
+export const searchIndex = cache(async function searchIndex(): Promise<{ title: string; section: string; href: string; headings: { text: string; id: string }[] }[]> {
   const out = [];
   const sections = await nav();
   for (const it of await flat()) {
@@ -280,4 +287,4 @@ export async function searchIndex(): Promise<{ title: string; section: string; h
     out.push({ title: it.title, section: sections.find((s) => s.items.some((x) => x.slug === it.slug))?.section ?? "Docs", href: it.href, headings });
   }
   return out;
-}
+});

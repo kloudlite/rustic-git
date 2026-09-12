@@ -56,6 +56,10 @@ function RestoreDialog({ owner, kind, row }: { owner: string; kind: ArchivedKind
       setSnaps(r.rows);
       // Newest first from the api, and the newest is what a restore almost always means.
       setSel(r.rows[0]?.id ?? "");
+    }).catch(() => {
+      // A throw is a failed read, not an empty volume — the same false claim of data loss the
+      // three states above exist to avoid (2026-09-12).
+      if (live) setSnapsError("Could not read this volume's snapshots.");
     });
     return () => {
       live = false;

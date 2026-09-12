@@ -8,12 +8,12 @@ import type { ApiCliToken } from "@/lib/api";
 /** The CLI logins this person has approved. There is no "add" here on purpose: a login
  *  starts at the terminal with `kl login` and is approved on /cli/authorize — this list is
  *  only the record of it, and the way to take one back. */
-export function CliTokens({ tokens }: { tokens: ApiCliToken[] }) {
+export function CliTokens({ tokens, install }: { tokens: ApiCliToken[]; install: string }) {
   return (
     <>
       <p className="text-sm2 text-muted-foreground">
         Install the CLI with{" "}
-        <code className="font-mono text-caption">curl -fsSL https://dev.kloudlite.io/install.sh | sh</code>,
+        <code className="font-mono text-caption">{install}</code>,
         then run <code className="font-mono text-caption">kl login</code>.
       </p>
 

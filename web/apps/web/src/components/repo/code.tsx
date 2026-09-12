@@ -1,12 +1,8 @@
 import Link from "next/link";
-import { isValidElement } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { File, Folder, CornerLeftUp } from "lucide-react";
 import { CloneMenu } from "@/components/repo/clone-menu";
 import { cloneUrls } from "@/lib/clone";
-import { CodeBlock } from "@/components/repo/code-block";
-import { MermaidBlock } from "@/components/repo/mermaid-block";
+import { MermaidBlocks } from "@/components/repo/mermaid-blocks";
 import { RefPicker } from "@/components/repo/ref-picker";
 import { FileSearch } from "@/components/repo/file-search";
 import { RepoAbout } from "@/components/repo/repo-about";
@@ -19,69 +15,21 @@ import {
 import { repoRail } from "@/lib/repo-rail";
 import { size, whenSeconds } from "@/lib/time";
 import type { ApiRepo } from "@/lib/api";
-import { fenceLang } from "@/lib/highlight";
+import { renderReadme } from "@/lib/readme";
 import { pathHref } from "@/lib/utils";
 
-/** A fence arrives as `<pre><code class="language-x">…</code></pre>`; the `pre` is where the
- *  whole block is in hand, so that is where it becomes a highlighted CodeBlock — the same
- *  highlighter as a source file, and inline code (a bare `code` with no `pre`) is untouched. */
-function Fence({ children }: { children?: React.ReactNode }) {
-  const inner = isValidElement<{ className?: string; children?: React.ReactNode }>(children) ? children.props : {};
-  const word = /language-(\w+)/.exec(inner.className ?? "")?.[1];
-  const code = String(inner.children ?? "").replace(/\n$/, "");
-  // A diagram, not code: drawn client-side, the fence's own source as the fallback.
-  if (word?.toLowerCase() === "mermaid") {
-    return (
-      <div className="border border-border bg-muted/30">
-        <MermaidBlock source={code} />
-      </div>
-    );
-  }
-  // A bare ``` fence has no language word and renders as text.
-  const lang = fenceLang(word);
-  return (
-    <div className="border border-border bg-muted/30">
-      <CodeBlock code={code} lang={lang} />
-    </div>
-  );
-}
-
-/** The README's elements in the page's own type scale — every tag the parser emits that has
- *  a look here, so a README from anywhere reads as part of the page. */
-const README: Components = {
-  h1: ({ children }) => <h1 className="text-title font-semibold tracking-title">{children}</h1>,
-  h2: ({ children }) => <h2 className="mt-2 border-b border-border pb-1.5 text-body font-semibold">{children}</h2>,
-  h3: ({ children }) => <h3 className="mt-1 text-sm2 font-semibold">{children}</h3>,
-  h4: ({ children }) => <h4 className="text-sm2 font-semibold">{children}</h4>,
-  p: ({ children }) => <p className="text-foreground/90">{children}</p>,
-  a: ({ href, children }) => (
-    <a href={href} rel="noopener noreferrer" className="text-primary underline-offset-4 hover:underline">{children}</a>
-  ),
-  ul: ({ children }) => <ul className="grid list-square gap-1 pl-5">{children}</ul>,
-  ol: ({ children }) => <ol className="grid list-decimal gap-1 pl-5">{children}</ol>,
-  blockquote: ({ children }) => <blockquote className="grid gap-2 border-l-2 border-border pl-4 text-muted-foreground">{children}</blockquote>,
-  hr: () => <hr className="border-border" />,
-  table: ({ children }) => <div className="overflow-x-auto"><table className="border-collapse text-caption">{children}</table></div>,
-  th: ({ children }) => <th className="border border-border bg-muted/40 px-2.5 py-1 text-left font-semibold">{children}</th>,
-  td: ({ children }) => <td className="border border-border px-2.5 py-1">{children}</td>,
-  // A README's images live wherever its author put them — no host list to allow, so the
-  // optimizer has nothing to work with and a plain img is the honest element.
-  // eslint-disable-next-line @next/next/no-img-element
-  img: ({ src, alt }) => <img src={typeof src === "string" ? src : undefined} alt={alt ?? ""} className="max-w-full" />,
-  code: ({ children }) => <code className="bg-muted px-1 font-mono text-caption">{children}</code>,
-  pre: Fence,
-};
-
-/** A README, as markdown. GFM, so tables and task lists render; raw HTML is dropped, not
- *  rendered, and `javascript:`-style hrefs never reach the page (react-markdown's default
- *  `urlTransform` keeps http, https, mailto, tel and relative). Nothing here touches innerHTML. */
-export function Markdown({ source }: { source: string }) {
+/** A README, as markdown: parsed and highlighted on the server by `lib/readme.ts`, which is why
+ *  `dangerouslySetInnerHTML` is acceptable here — raw HTML is dropped, every attribute is escaped
+ *  and only http/https/mailto/tel and relative URLs survive. */
+export async function Markdown({ source }: { source: string }) {
+  const html = await renderReadme(source);
   return (
     // `grid-cols-1` is `minmax(0, 1fr)`: a bare `grid` sizes its one implicit column to the
     // widest item's max-content — a fence's longest line — and the whole README, prose
     // included, ran past the card's edge on any long code line (2026-09-07).
     <div className="grid min-w-0 grid-cols-1 gap-4 text-sm2 leading-relaxed">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={README}>{source}</ReactMarkdown>
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+      <MermaidBlocks />
     </div>
   );
 }

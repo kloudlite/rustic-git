@@ -122,24 +122,36 @@ export function render(): string {
  *  as `{podIP}:{PORT}` and the ingress sends as the public name with no port at all.
  *
  *  Not `x-forwarded-*`: Next fills those in itself when they are absent, so they are present on
- *  every request and say nothing about who sent it. The public host is refused by name as well,
- *  in case something ever forwards `Host` through verbatim.
+ *  every request and say nothing about who sent it.
+ *
+ *  The port alone was the whole gate, and `Host` is the caller's to write: anything that reached
+ *  the container — a pod on the cluster network, a proxy asked to forward a made-up name — could
+ *  read the fleet's request counts by sending `Host: anything:3000` (2026-09-12). So the name
+ *  must ALSO be a private address literal, which is what the collector sends (`{podIP}:{PORT}`)
+ *  and what no public hostname ever is. A deployment that cannot arrange that sets
+ *  `KLOUDLITE_METRICS_TOKEN` and the scrape carries it as a bearer token instead; when the
+ *  variable is set the token is the only way in, so the gate can never be weakened by adding it.
  */
 export function scrapeAllowed(headers: Headers): boolean {
+  const secret = process.env.KLOUDLITE_METRICS_TOKEN ?? "";
+  if (secret) return headers.get("authorization") === `Bearer ${secret}`;
   const host = (headers.get("host") ?? "").toLowerCase();
   const port = host.includes(":") ? host.slice(host.lastIndexOf(":") + 1) : "";
   if (port !== (process.env.PORT ?? "3000")) return false;
-  const name = host.slice(0, host.length - port.length - 1);
-  return name !== publicHost();
+  return isPrivate(host.slice(0, host.length - port.length - 1));
 }
 
-function publicHost(): string {
-  const url = process.env.AUTH_URL ?? "";
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
+/** Loopback, RFC 1918 / RFC 4193 and the link-local ranges — the addresses a pod or a node can
+ *  hold, and nothing routable from the internet. A name, rather than an address, is never one. */
+function isPrivate(name: string): boolean {
+  const ip = name.startsWith("[") ? name.slice(1, -1) : name;
+  if (ip === "localhost" || ip === "::1") return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(ip) || ip.startsWith("fe80:")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (v4.slice(1).some((n) => Number(n) > 255)) return false;
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
 /** Only for tests: a fresh registry, so one test's counts are not another's. */

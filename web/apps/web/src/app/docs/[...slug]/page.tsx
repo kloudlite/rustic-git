@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
 import { page } from "@/lib/docs";
 import { DocsPage } from "@/components/docs/docs-page";
 
@@ -13,6 +12,5 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 
 export default async function DocsSlugPage({ params }: Params) {
   const { slug } = await params;
-  if (!(await page(slug))) notFound();
   return <DocsPage slug={slug} />;
 }

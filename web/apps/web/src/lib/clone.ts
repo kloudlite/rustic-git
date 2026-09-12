@@ -53,6 +53,14 @@ export async function registryHost() {
   return host(c.registryHost, "KLOUDLITE_REGISTRY_HOST");
 }
 
+/** How this deployment says to install the CLI. The host was hard-coded to one environment's
+ *  name, so every other deployment printed a line that installed somebody else's binary
+ *  (2026-09-12); it is the same `stored ?? env ?? default` host every clone URL uses. */
+export async function installCommand(): Promise<string> {
+  const c = await centralSettings();
+  return `curl -fsSL https://${host(c.cloneHost, "KLOUDLITE_CLONE_HOST")}/install.sh | sh`;
+}
+
 export async function cloneUrls(owner: string, repo: string): Promise<CloneUrls> {
   const c = await centralSettings();
   const httpHost = host(c.cloneHost, "KLOUDLITE_CLONE_HOST");
