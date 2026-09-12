@@ -480,7 +480,7 @@ Cloudflare — no LoadBalancer, no tunnel connector. Operator steps, once per re
 ## Two things that bite
 
 **The agent Secret is not in this directory.** `kloudlite-agent` in `kube-system` carries
-`WS_REGION` and `WS_PEER_SECRET`, and it is created by hand because it holds a secret. The agent
+`WS_REGION`, `WS_RUNTIME_CLASS` and `WS_PEER_SECRET` (the only keys the DaemonSet reads; the peer secret arrives as a projected file, the other two as env), and it is created by hand because it holds a secret. The agent
 holds no registry URL, no agent token and no Azure credential any more: its commit history is the
 `Volume`'s own status.
 
