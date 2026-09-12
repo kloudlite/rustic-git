@@ -6,6 +6,11 @@
 #   pod/ship.sh --no-gate  # skip test + clippy (they already passed this cycle)
 set -euo pipefail
 cd /work/src
+# The gate's own target dir, never the shared /work/target: cargo keys a workspace member by its
+# workspace-RELATIVE path, so a fix/* worktree building `crates/git` at the same time overwrites
+# the very rlib the gate is linking against — the ship of 2026-09-12 05:07 failed to compile
+# tests/store.rs against a signature that existed only on another branch. Disk is the price.
+export CARGO_TARGET_DIR=/work/target-ship
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
 # Any origin branch, not only master: a feature branch is verified on the fleet BEFORE it merges
