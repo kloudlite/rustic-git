@@ -1,6 +1,9 @@
 //! `GET /v1/quota` against a mocked API server (`kloudlite_workspaces::kube_test`) with a stub
 //! `Directory` for team membership.
 
+mod common;
+use common::{token, admin_token};
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState, Directory, TeamRole};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
@@ -78,16 +81,6 @@ async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt, rec }
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
-}
-
-/// A superadmin token, minted the way the api tier mints one at sign-in — used only to prove the
-/// ordinary router has no route for it to land on, not to exercise any admin behavior here.
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 fn region_route() -> Route {
@@ -410,7 +403,6 @@ async fn a_denied_request_does_not_block_the_next_one() {
         .status();
     assert_eq!(code, 201);
 }
-
 
 /// The mirror of `api_admin.rs`'s `the_admin_router_has_never_heard_of_v1`: an ordinary /v1 process
 /// has no admin route compiled into it at all, so a routing bug on that side cannot reach one

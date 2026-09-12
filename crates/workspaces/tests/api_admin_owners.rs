@@ -2,6 +2,9 @@
 //! `PUT /admin/quota/{owner}` — `api::admin::router` against a mocked kube API, same harness
 //! shape `api_admin.rs`/`api_admin_audit.rs` use.
 
+mod common;
+use common::admin_token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, Route};
@@ -41,10 +44,6 @@ async fn keys_store() -> Arc<kloudlite_storage::store::Store> {
             .await
             .unwrap(),
     )
-}
-
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {

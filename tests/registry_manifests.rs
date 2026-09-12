@@ -180,7 +180,7 @@ async fn a_public_image_pulls_anonymously_and_still_refuses_a_push() {
 /// made a legitimate document unpushable.
 #[tokio::test]
 async fn an_annotation_keyed_digest_does_not_refuse_the_push() {
-    let (base, _e, c, token, _m, _d) = pushed().await;
+    let (base, e, c, token, _m, _d) = pushed().await;
     let body = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": MEDIA,
@@ -189,10 +189,31 @@ async fn an_annotation_keyed_digest_does_not_refuse_the_push() {
     })
     .to_string()
     .into_bytes();
+    let ad = Digest::of(&body);
     let r = c.put(format!("{base}/v2/acme/nginx/manifests/annotated"))
         .basic_auth("acme", Some(&token)).header("content-type", MEDIA)
-        .body(body).send().await.unwrap();
+        .body(body.clone()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::CREATED);
+
+    // CREATED alone only said the walk did not refuse (2026-09-12). The other half of the rule is
+    // that the annotation is SKIPPED, not held: a blob row keyed by a string `Digest::parse`
+    // rejects would scope a pull to a layer that does not exist, and GC walks these rows.
+    let db = e.store.image_db("acme", "nginx").await.unwrap();
+    let mut it = db.scan_prefix("image/blob/", ..).await.unwrap();
+    let mut named_by_this_manifest = Vec::new();
+    while let Some(kv) = it.next().await.unwrap() {
+        let k = String::from_utf8_lossy(&kv.key).to_string();
+        if k.ends_with(&format!("/{ad}")) {
+            named_by_this_manifest.push(k);
+        }
+    }
+    assert!(named_by_this_manifest.is_empty(), "the annotation became a blob row: {named_by_this_manifest:?}");
+
+    // And the manifest itself is stored and returned verbatim, so the push was not a silent no-op.
+    let g = c.get(format!("{base}/v2/acme/nginx/manifests/annotated"))
+        .basic_auth("acme", Some(&token)).send().await.unwrap();
+    assert_eq!(g.status(), StatusCode::OK);
+    assert_eq!(g.bytes().await.unwrap().to_vec(), body);
 }
 
 #[tokio::test]

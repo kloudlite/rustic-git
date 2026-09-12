@@ -1,6 +1,9 @@
 //! `GET/PUT /admin/settings/central` and `/admin/settings/clusters/{region}` against a mocked
 //! kube API (and, for the central scope, a mocked server-tier peer route) — Task 6 Step 4.
 
+mod common;
+use common::admin_token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, admin::PeerClient, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
@@ -11,10 +14,6 @@ const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 fn jwt() -> Arc<Jwt> {
     Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap())
-}
-
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 async fn keys_store() -> Arc<kloudlite_storage::store::Store> {

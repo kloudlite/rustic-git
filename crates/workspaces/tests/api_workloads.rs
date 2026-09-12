@@ -2,6 +2,9 @@
 //! server — the recorder is what proves "409, nothing written" is enforced by `roll_readers`
 //! itself (zero patch calls on a conflict), not merely documented.
 
+mod common;
+use common::admin_token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, patch, Recorder, Route};
@@ -36,10 +39,6 @@ async fn admin_server(routes: Vec<Route>) -> Server {
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt, rec }
-}
-
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 /// Ready == desired: the roll patches the annotation and answers 200.

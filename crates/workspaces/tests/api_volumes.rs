@@ -5,6 +5,9 @@
 //! Snapshots became the only mechanism. The cluster is also what says whether a parent still exists — a display
 //! detail for the listing, and a refusal for the deletes.
 
+mod common;
+use common::{delete, get_json, token};
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState};
 use kloudlite_workspaces::kube_test::{get as kget, mock_client, Recorder, Route};
@@ -80,20 +83,6 @@ async fn server(routes: Vec<Route>) -> Server {
     Server { base: format!("http://{addr}"), jwt, rec }
 }
 
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
-}
-
-async fn get_json(s: &Server, tok: &str, path: &str) -> (reqwest::StatusCode, Value) {
-    let resp = reqwest::Client::new().get(format!("{}{path}", s.base)).bearer_auth(tok).send().await.unwrap();
-    let status = resp.status();
-    (status, resp.json().await.unwrap_or(Value::Null))
-}
-
-async fn delete(s: &Server, tok: &str, path: &str) -> reqwest::StatusCode {
-    reqwest::Client::new().delete(format!("{}{path}", s.base)).bearer_auth(tok).send().await.unwrap().status()
-}
-
 /// THE bug this listing exists for: a volume whose workspace was deleted is still listed, still
 /// counted, and still says what it was — the snapshots outlive the parent.
 #[tokio::test]
@@ -113,7 +102,7 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes").await;
     assert_eq!(status, 200, "{body}");
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 2, "the deleted parent's volume is still a row: {body}");
@@ -144,11 +133,11 @@ async fn a_superadmin_cannot_widen_the_volume_listing_with_owner() {
     .await;
     let root = s.jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap();
 
-    let (status, _) = get_json(&s, &root, "/v1/volumes?owner=karthik").await;
+    let (status, _) = get_json(&s.base, &root, "/v1/volumes?owner=karthik").await;
     assert_eq!(status, 404, "a superadmin claim is not membership in karthik's owner set");
 
     // Their own is still their own.
-    let (status, body) = get_json(&s, &root, "/v1/volumes?owner=root").await;
+    let (status, body) = get_json(&s.base, &root, "/v1/volumes?owner=root").await;
     assert_eq!(status, 200, "{body}");
 }
 
@@ -173,7 +162,7 @@ async fn volume_rows_carry_the_snapshot_count_and_last_push() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes").await;
     assert_eq!(status, 200, "{body}");
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 1, "a volume with only sync points is not a row: {body}");
@@ -205,7 +194,7 @@ async fn a_deleted_parents_kind_comes_from_the_frozen_state_then_the_id_prefix()
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    let (status, body) = get_json(&s, &tok, "/v1/volumes").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes").await;
     assert_eq!(status, 200, "{body}");
     let rows = body.as_array().unwrap();
     let by = |n: &str| rows.iter().find(|r| r["name"] == n).unwrap_or_else(|| panic!("{n} missing: {body}")).clone();
@@ -233,7 +222,7 @@ async fn the_listing_filters_by_kind() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    let (status, body) = get_json(&s, &tok, "/v1/volumes?kind=environment").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes?kind=environment").await;
     assert_eq!(status, 200, "{body}");
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 1, "only the environments: {body}");
@@ -254,7 +243,7 @@ async fn deleting_a_snapshot_that_is_a_running_worktrees_head_is_a_409() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409);
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -276,8 +265,8 @@ async fn a_restore_that_has_not_checked_out_yet_still_protects_its_base() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "an unplaced restore's base");
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1").await, 409, "and the volume under it");
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "an unplaced restore's base");
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1").await, 409, "and the volume under it");
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -299,7 +288,7 @@ async fn a_sync_point_cannot_be_deleted_by_hand() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/sync-ws-1").await, 409);
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1/snapshots/sync-ws-1").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -321,9 +310,9 @@ async fn deleting_a_snapshot_removes_its_record_and_keeps_the_volume() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "bob"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 404, "not bob's");
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/nope").await, 404, "unknown id");
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "bob"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 404, "not bob's");
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/nope").await, 404, "unknown id");
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
 
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the record only: {deletes:?}");
@@ -345,8 +334,8 @@ async fn a_foreign_worktree_on_the_volume_refuses_both_deletes() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "another owner's running base");
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1").await, 409, "another owner's live worktree");
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 409, "another owner's running base");
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1").await, 409, "another owner's live worktree");
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -372,13 +361,13 @@ async fn history_and_refs_skip_sync_points_and_baselines() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-1/history").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes/ws-1/history").await;
     assert_eq!(status, 200, "{body}");
     let ids: Vec<&str> = body.as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(ids, vec!["ws-1-a"], "the push only: {body}");
 
     // The sync point is the NEWEST record, so a tip that did not filter would name it.
-    let (status, body) = get_json(&s, &tok, "/v1/volumes/ws-1/refs").await;
+    let (status, body) = get_json(&s.base, &tok, "/v1/volumes/ws-1/refs").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["main"], "ws-1-a", "refs never name a sync point: {body}");
 }
@@ -403,7 +392,7 @@ async fn deleting_the_last_snapshot_of_a_detached_volume_deletes_the_volume() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
 
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(
@@ -425,7 +414,7 @@ async fn deleting_the_last_snapshot_of_an_attached_volume_keeps_the_volume() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
 
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is still in use: {deletes:?}");
@@ -442,7 +431,7 @@ async fn deleting_a_volume_with_a_parent_is_a_409() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1").await, 409);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -465,7 +454,7 @@ async fn deleting_a_detached_volume_deletes_it() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/env-1").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/env-1").await, 204);
 
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {API}/volumes/env-1")], "one delete takes the lot: {deletes:?}");
@@ -483,9 +472,9 @@ async fn a_foreign_volume_is_not_found_on_delete() {
     .await;
     let tok = token(&s.jwt, "karthik");
 
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1").await, 404, "alice's volume");
-    assert_eq!(delete(&s, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 404);
-    assert_eq!(get_json(&s, &tok, "/v1/volumes/ws-1/history").await.0, 404);
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1").await, 404, "alice's volume");
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1/snapshots/ws-1-a").await, 404);
+    assert_eq!(get_json(&s.base, &tok, "/v1/volumes/ws-1/history").await.0, 404);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -538,7 +527,7 @@ async fn a_legacy_migration_baseline_cannot_be_deleted_by_hand() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1").await, 409);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -557,7 +546,7 @@ async fn a_working_copy_appearing_mid_delete_keeps_the_volume() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
 
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is in use again: {deletes:?}");
@@ -582,7 +571,7 @@ async fn a_foreign_snapshot_on_the_volume_refuses_the_volume_delete() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1").await, 409);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1").await, 409);
     assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
 }
 
@@ -604,7 +593,7 @@ async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
     ])
     .await;
 
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
     let deletes: Vec<String> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is alice's too: {deletes:?}");
 }
@@ -621,7 +610,7 @@ async fn list_volumes_drops_a_mislabelled_snapshot() {
         kget(format!("{API}/environments"), env_list(vec![])),
     ])
     .await;
-    let (status, body) = get_json(&s, &token(&s.jwt, "karthik"), "/v1/volumes").await;
+    let (status, body) = get_json(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes").await;
     assert_eq!(status, 200, "{body}");
     let names: Vec<&str> = body.as_array().unwrap().iter().map(|v| v["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["ws-1"], "alice's volume is not karthik's: {body}");
@@ -641,7 +630,7 @@ async fn the_delete_paths_select_on_the_volume_ref() {
         ok("DELETE", format!("{API}/volumes/ws-1")),
     ])
     .await;
-    assert_eq!(delete(&s, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
+    assert_eq!(delete(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes/ws-1/snapshots/ws-1-a").await, 204);
 
     let listed: Vec<String> = s
         .rec
@@ -669,6 +658,6 @@ async fn a_volume_with_two_worktrees_names_the_one_that_owns_it() {
         kget(format!("{API}/environments"), env_list(vec![])),
     ])
     .await;
-    let (_, body) = get_json(&s, &token(&s.jwt, "karthik"), "/v1/volumes").await;
+    let (_, body) = get_json(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes").await;
     assert_eq!(body[0]["display_name"], "source", "the volume's own parent names it: {body}");
 }

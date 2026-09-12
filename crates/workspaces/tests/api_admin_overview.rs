@@ -1,6 +1,9 @@
 //! `GET /admin/overview` — one round trip composing pending requests, attention items, recent
 //! audit and fleet numbers, same harness shape `api_admin_owners.rs`/`api_admin_clusters.rs` use.
 
+mod common;
+use common::admin_token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, Route};
@@ -36,10 +39,6 @@ async fn admin_server(routes: Vec<Route>, keys: Option<Arc<kloudlite_storage::st
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt }
-}
-
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {

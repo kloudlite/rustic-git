@@ -292,10 +292,13 @@ async fn a_second_reconcile_of_a_running_generation_does_not_start_a_second_oper
     let v = volume(1);
 
     // Stand in for an operation already in flight for this exact {uid, generation}.
+    // Held open by a channel the test owns rather than a 2 s sleep (2026-09-12): the operation is
+    // in flight for exactly as long as this scope, so the assertion never races a timer.
+    let (_hold, block) = std::sync::mpsc::channel::<()>();
     ctx.running.lock().unwrap().insert(
         "uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+        (1, tokio::task::spawn_blocking(move || {
+            let _ = block.recv();
             Ok(Done::default())
         })),
     );
@@ -463,11 +466,14 @@ async fn deleting_a_volume_waits_for_an_in_flight_operation() {
     let (ctx, _rec) = ctx(tmp.path(), vec![patch_ok(VOL_STATUS)]);
     let v = volume(1);
 
-    // A push still in flight for this volume.
+    // A push still in flight for this volume: held by a channel, not a 700 ms sleep (2026-09-12),
+    // so "still running when cleanup ran" is a fact and not a timing bet. Dropping `hold` below
+    // is what ends it, so the second half of the test runs against a genuinely finished handle.
+    let (hold, block) = std::sync::mpsc::channel::<()>();
     ctx.running.lock().unwrap().insert(
         "uid-1".to_string(),
-        (1, tokio::task::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_millis(700));
+        (1, tokio::task::spawn_blocking(move || {
+            let _ = block.recv();
             Ok(Done::default())
         })),
     );
@@ -483,6 +489,7 @@ async fn deleting_a_volume_waits_for_an_in_flight_operation() {
 
     // Once it finishes, the same call drains the handle and proceeds instead of requeueing
     // forever — while deleting, the finalizer routes every pass here, so nothing else could.
+    drop(hold);
     wait_idle(&ctx).await;
     kloudlite_agent::controller::cleanup_volume(&v, &ctx).await.unwrap();
     assert!(ctx.running.lock().unwrap().is_empty(), "the finished handle must be drained by cleanup");

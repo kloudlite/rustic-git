@@ -1,6 +1,9 @@
 //! `/v1/requests` against a mocked API server. The stub `Directory` is the one `api_quota.rs`
 //! uses: `karthik` is an admin of team `acme`, `bob` a plain member.
 
+mod common;
+use common::token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState, Directory, TeamRole};
 use kloudlite_workspaces::kube_test::{get, mock_client, post, Recorder, Route};
@@ -65,10 +68,6 @@ async fn server(routes: Vec<Route>) -> Server {
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt, rec }
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 fn list_of(items: Vec<Value>) -> Value {

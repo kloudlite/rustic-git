@@ -1,6 +1,8 @@
-//! Snapshot/checkout primitive tests: real btrfs on a loopback pool. Every test opens with
-//! `have_btrfs()` and returns cleanly when it's false (this Mac, any non-root CI runner) — they
-//! run for real on the btrfs review VM. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
+//! Snapshot/checkout primitive tests: real btrfs on a loopback pool. Every btrfs test is
+//! `#[ignore]`d and asserts `have_btrfs()` rather than returning quietly (2026-09-12): a silent
+//! skip counted fourteen tests as passing on every machine that could not run one of them, so an
+//! unprivileged run now reports them as ignored and the btrfs review VM runs them with
+//! `--ignored`, where an unmet prerequisite is a failure and not a green. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
 //! integration test files cannot share code across `tests/*.rs`.
 
 use kloudlite_workspaces::engine::{Engine, Pool, have_btrfs};
@@ -46,11 +48,9 @@ fn engine(pool: Pool) -> Engine {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn snapshot_checkout_round_trip_preserves_content() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -74,11 +74,9 @@ fn snapshot_checkout_round_trip_preserves_content() {
 /// F1: snapshot_worktree must converge, not fail, when the snapshot already exists — the shape of
 /// a retry after a crash between the snapshot landing and the CR's status update.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn snapshot_worktree_is_idempotent_on_an_existing_snapshot() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -96,27 +94,37 @@ fn snapshot_worktree_is_idempotent_on_an_existing_snapshot() {
 
 /// F3: drop_snapshot of a snapshot that never existed (or was already dropped) is a no-op — retry
 /// convergence, same shape as `snapshot_worktree`'s.
+///
+/// "Returned Ok" alone was not a test of that (2026-09-12): a `drop_snapshot` that deleted the
+/// whole `snap/` directory, or the worktree, would have passed it. The volume is populated first
+/// and everything else asserted intact afterwards.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn drop_snapshot_of_an_absent_snapshot_is_a_no_op() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
+    e.checkout("v1", None, "ws1").unwrap();
+    std::fs::write(e.pool.worktree("v1", "ws1").join("f.txt"), b"payload").unwrap();
+    e.snapshot_worktree("v1", "ws1", "keep-1").unwrap();
+    e.snapshot_worktree("v1", "ws1", "keep-2").unwrap();
+
     e.drop_snapshot("v1", "no-such-snapshot").unwrap();
+
+    for n in ["keep-1", "keep-2"] {
+        assert!(e.pool.snap("v1", n).join("f.txt").exists(), "{n} was taken by a no-op drop");
+    }
+    assert!(e.pool.worktree("v1", "ws1").join("f.txt").exists(), "the worktree was taken by a no-op drop");
 }
 
 /// `drop_worktree` is what reclaims a shared-volume clone's worktree on delete (no
 /// ownerReference reaches `{pool}/vol/{volume}/live/{ws}`). Same retry-convergence shape as
 /// `drop_snapshot`: gone once, and a second call against the same (now-absent) path is still Ok.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -137,11 +145,9 @@ fn drop_worktree_deletes_the_subvolume_and_is_ok_on_absent_retry() {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn checkout_of_missing_snapshot_errors_without_creating_anything() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -151,11 +157,9 @@ fn checkout_of_missing_snapshot_errors_without_creating_anything() {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn bootstrap_checkout_makes_an_empty_worktree() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -169,11 +173,9 @@ fn bootstrap_checkout_makes_an_empty_worktree() {
 /// FROM must leave that checkout fully readable, because a checkout is its own snapshot the
 /// instant `btrfs subvolume snapshot` returns.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn drop_snapshot_leaves_a_checkout_from_it_fully_readable() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -189,11 +191,9 @@ fn drop_snapshot_leaves_a_checkout_from_it_fully_readable() {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn local_snapshots_lists_cut_snapshots() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -207,11 +207,9 @@ fn local_snapshots_lists_cut_snapshots() {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn checkout_refuses_an_existing_worktree_path() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
 
@@ -228,11 +226,9 @@ fn checkout_refuses_an_existing_worktree_path() {
 /// from an earlier, crashed attempt first, so the same run exercises `swap_worktree`'s
 /// discard-and-redo branch, not just the clean path.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn swap_worktree_restores_old_content_and_leaves_no_staging_or_backup() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
     let volume = "vol-1";
@@ -271,11 +267,9 @@ fn swap_worktree_restores_old_content_and_leaves_no_staging_or_backup() {
 /// An old-layout volume (`live` itself is the RW subvolume) moves to the snapshot model's
 /// `live/{volume}` worktree layout, and the content survives the move untouched.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn migrate_volume_moves_old_layout_live_into_a_worktree() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
     let volume = "v1";
@@ -296,11 +290,9 @@ fn migrate_volume_moves_old_layout_live_into_a_worktree() {
 /// Idempotent: a volume already on the new layout (or already migrated) is left alone, and a
 /// second call reports nothing-to-do.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn migrate_volume_is_idempotent() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
     let volume = "v1";
@@ -318,11 +310,9 @@ fn migrate_volume_is_idempotent() {
 /// Crash recovery: a partial migration (the first rename landed, the second didn't) is completed
 /// by the next call rather than re-touching the already-renamed subvolume.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn migrate_volume_recovers_from_a_partial_rename() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
     let volume = "v1";
@@ -345,11 +335,9 @@ fn migrate_volume_recovers_from_a_partial_rename() {
 /// single-target arm; a migrated volume (`live` is a directory of worktrees) gets the limit
 /// applied to each worktree individually.
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn set_quota_picks_the_arm_by_the_layout_actually_on_disk() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let lb = LoopbackPool::new();
     let e = engine(lb.pool());
     // The fixture's fresh filesystem has qgroups OFF (like a pool where `btrfs quota enable` was

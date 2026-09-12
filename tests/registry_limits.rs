@@ -1,6 +1,7 @@
 //! `max_layer` is a process-global `OnceLock`, so these run in their own binary with a cap small
-//! enough to trip from a test body. Both tests set the same value: the first caller wins and the
-//! second must agree.
+//! enough to trip from a test body. Every test sets the same value, but four threads racing
+//! `set_var` is still a data race (2026-09-12), so the write goes through one `Once`: the first
+//! caller writes it, the rest block until it has landed and only then start a server that reads it.
 mod common;
 use axum::http::StatusCode;
 use kloudlite_registry::Digest;
@@ -8,7 +9,8 @@ use kloudlite_registry::Digest;
 const CAP: &str = "16";
 
 async fn authed() -> (String, common::TestEnv, reqwest::Client, String) {
-    std::env::set_var("KLOUDLITE_MAX_LAYER", CAP);
+    static CAP_SET: std::sync::Once = std::sync::Once::new();
+    CAP_SET.call_once(|| std::env::set_var("KLOUDLITE_MAX_LAYER", CAP));
     let (base, e) = common::serve_public().await;
     let token = e.store.create_token("acme").await.unwrap();
     (base, e, reqwest::Client::new(), token)

@@ -1,6 +1,6 @@
-//! Engine op tests that touch btrfs directly. Every test opens with `have_btrfs()` and returns
-//! cleanly when it's false (this Mac, any non-root CI runner) — they run for real on the btrfs
-//! review VM. Fixture copied from `engine_snapshot.rs`'s `LoopbackPool`: integration test files
+//! Engine op tests that touch btrfs directly. `#[ignore]`d and asserting `have_btrfs()` rather
+//! than returning quietly (2026-09-12), for the reason `engine_snapshot.rs` records: run with
+//! `--ignored` on the btrfs review VM. Fixture copied from `engine_snapshot.rs`'s `LoopbackPool`: integration test files
 //! cannot share code across `tests/*.rs`.
 
 use kloudlite_workspaces::engine::{Engine, Pool, have_btrfs};
@@ -47,11 +47,9 @@ fn engine() -> (Engine, LoopbackPool) {
 }
 
 #[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
 fn ensure_homecache_creates_a_subvolume_with_the_four_dirs_owned_by_the_uid() {
-    if !have_btrfs() {
-        eprintln!("skipping: btrfs/root unavailable");
-        return;
-    }
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
     let (engine, _tmp) = engine(); // the file's existing btrfs-pool fixture
     engine.ensure_homecache("alice", 1000).unwrap();
     let root = engine.pool.root.join("homecache/alice");

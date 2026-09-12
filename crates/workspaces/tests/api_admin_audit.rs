@@ -2,6 +2,9 @@
 //! `api::admin::router` against a mocked kube API and an in-memory object store, same harness
 //! shape `api_settings.rs` uses for the settings scope.
 
+mod common;
+use common::admin_token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, patch, Route};
@@ -12,10 +15,6 @@ const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 fn jwt() -> Arc<Jwt> {
     Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap())
-}
-
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 async fn keys_store() -> Arc<kloudlite_storage::store::Store> {

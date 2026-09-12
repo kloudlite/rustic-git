@@ -1,5 +1,8 @@
 //! `/v1` push/history/refs served from the snapshot model — the only model there is.
 
+mod common;
+use common::token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, Recorder, Route};
@@ -82,10 +85,6 @@ fn workspace_state(image: &str, packages: &[&str], quota_gb: u64) -> Value {
         "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
         "quotaGb": quota_gb,
     })
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 /// `push`, `clone` and `restore` all now go through `guard_alloc`, which reads the volume and
@@ -622,6 +621,10 @@ async fn a_plain_stopped_workspace_still_starts() {
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new().post(format!("{}/v1/workspaces/ws-1/start", s.base)).bearer_auth(&tok).send().await.unwrap();
     assert_eq!(r.status(), 202);
+    // 202 alone said only "not refused" (2026-09-12): a start that patched nothing, or patched
+    // `desiredState` to the wrong value, passed it. What was WRITTEN is the whole handler.
+    let patch = &s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1"))[0];
+    assert_eq!(patch["spec"]["desiredState"], "running", "start did not ask for running: {patch}");
 }
 
 /// The sync-beat shape a clone grafts onto: a Ready TRANSIENT of the source worktree. `snapshot()`

@@ -2,6 +2,9 @@
 //! and heavy to spin up for a unit test — see `ApiState::directory`'s doc), against
 //! a mocked API server for the objects the handlers write.
 
+mod common;
+use common::token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState, Directory};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
@@ -130,10 +133,6 @@ async fn server(with_membership: bool, routes: Vec<Route>) -> Server {
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt, rec }
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 #[tokio::test]

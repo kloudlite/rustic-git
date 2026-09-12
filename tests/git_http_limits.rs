@@ -39,6 +39,32 @@ async fn status_line(s: &mut TcpStream) -> String {
 /// is asserting. Every test in this binary takes this first.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Retry `send` until it answers `want`, or give up after five seconds and return the last
+/// response so the caller's own `assert_eq!` reports what it actually got.
+async fn poll_status<F, R>(send: &F, want: u16) -> reqwest::Response
+where
+    F: Fn() -> R,
+    R: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    poll_until(send, move |s| s == want).await
+}
+
+async fn poll_until<F, R>(send: &F, ok: impl Fn(u16) -> bool) -> reqwest::Response
+where
+    F: Fn() -> R,
+    R: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    let mut last = send().await.unwrap();
+    for _ in 0..250 {
+        if ok(last.status().as_u16()) {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        last = send().await.unwrap();
+    }
+    last
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_anonymous_push_is_refused_before_its_body_is_read() {
     let _serial = SERIAL.lock().await;
@@ -57,7 +83,6 @@ async fn a_third_concurrent_push_gets_503() {
     // Two authenticated pushes hold both default permits by never delivering their bodies.
     let a = open_push(&base, Some(&token)).await;
     let _b = open_push(&base, Some(&token)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let push = || {
         reqwest::Client::new()
             .post(format!("{base}/alice/web.git/git-receive-pack"))
@@ -65,13 +90,16 @@ async fn a_third_concurrent_push_gets_503() {
             .body("0000")
             .send()
     };
-    let r = push().await.unwrap();
-    assert_eq!(r.status(), 503);
+    // Poll for the state, do not sleep towards it (2026-09-12): the two holders take their
+    // permits when the server gets round to their headers, which is not a fixed 200 ms. A poll
+    // that never sees the state fails saying so, where the sleep quietly asserted the wrong thing.
+    let r = poll_status(&push, 503).await;
+    assert_eq!(r.status(), 503, "the permits were never exhausted");
     assert_eq!(r.headers().get("retry-after").unwrap(), "5");
     // Dropping a holder frees its permit: the next push is served.
     drop(a);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_ne!(push().await.unwrap().status(), 503);
+    let r = poll_until(&push, |s| s != 503).await;
+    assert_ne!(r.status(), 503, "the freed permit was never handed on");
 }
 
 /// The push body is not read into memory any more, so the cap cannot be a 413 up front: it is

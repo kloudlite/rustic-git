@@ -27,8 +27,27 @@ async fn every_watch_is_scoped_to_this_node_or_label_selected() {
         ],
     );
     let running = tokio::spawn(kloudlite_agent::controller::run(ctx));
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // Wait for the SIGNAL, not for 600 ms (2026-09-12): the controllers are up once every kind
+    // has been asked for at least once, which is also the precondition every assertion below
+    // needs. A slow box used to abort before the last watch opened.
+    let wanted = [
+        "/apis/kloudlite.io/v1alpha1/volumes",
+        "/apis/kloudlite.io/v1alpha1/workspaces",
+        "/apis/kloudlite.io/v1alpha1/environments",
+        "/apis/kloudlite.io/v1alpha1/snapshots",
+        "/api/v1/pods",
+    ];
+    let mut opened = false;
+    for _ in 0..400 {
+        let reqs = rec.requests();
+        if wanted.iter().all(|p| reqs.iter().any(|r| r.starts_with(&format!("GET {p}?")))) {
+            opened = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     running.abort();
+    assert!(opened, "not every watch opened: {:?}", rec.requests());
 
     let reqs = rec.requests();
     let of = |path: &str| -> Vec<String> { reqs.iter().filter(|r| r.starts_with(&format!("GET {path}?"))).cloned().collect() };

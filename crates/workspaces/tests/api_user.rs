@@ -4,6 +4,9 @@
 //! Every mutation's whole output is an object in the API server, so the assertions are about what
 //! the handler POSTed or PATCHed, read back off the mock's recorder.
 
+mod common;
+use common::token;
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{router, ApiState, Directory};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
@@ -239,10 +242,6 @@ async fn a_teammate_cannot_restore_another_members_workspace_snapshot() {
         .unwrap();
     assert_eq!(resp.status(), 404, "{}", resp.text().await.unwrap());
     assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "nothing written");
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
 }
 
 /// A superadmin token, minted the way the api tier mints one at sign-in — same helper as
@@ -582,7 +581,6 @@ async fn an_environment_restore_refuses_an_escaping_mount() {
     assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
-
 
 /// A snapshot id in nobody's history the caller can read is a 404, and nothing is written — the
 /// same answer another owner's snapshot id gets, deliberately indistinguishable.
@@ -1365,7 +1363,6 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
     assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-1");
 }
 
-
 struct StubKeys;
 
 #[async_trait::async_trait]
@@ -1412,7 +1409,6 @@ impl Directory for StubKeys {
         Ok(())
     }
 }
-
 
 /// `karthik` is in `team1` and in a team whose name is long enough that the personal form of the
 /// name would have to be DNS-hashed. Carries `StubKeys`' material too: one directory, so one stub.

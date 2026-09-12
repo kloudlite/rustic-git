@@ -145,13 +145,20 @@ async fn snapshot_get_streams_the_send_output() {
 /// connection and stops reading.
 fn fake_btrfs_send_slow(dir: &std::path::Path) -> String {
     let path = dir.join("btrfs-send-slow");
-    let script = r#"#!/bin/sh
+    // The marker path is baked in rather than passed through the environment: this binary's
+    // tests run on parallel threads and a `set_var` from one of them is a data race on the rest.
+    let marker = dir.join("send-started");
+    let script = format!(
+        r#"#!/bin/sh
 if [ "$1" = "send" ]; then
     printf x
+    : > "{}"
     sleep 60
     exit 0
 fi
-"#;
+"#,
+        marker.display()
+    );
     std::fs::write(&path, script).unwrap();
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
@@ -166,6 +173,7 @@ fi
 async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = fake_btrfs_send_slow(tmp.path());
+    let started = tmp.path().join("send-started");
     std::fs::create_dir_all(tmp.path().join("vol/v1/snap/c1")).unwrap();
     let settings = LiveSettings::new(AgentSettings { peer_serve_timeout_secs: 1, ..AgentSettings::from_env() });
     let (state, _rec) = state_with(tmp.path(), bin, vec![], settings);
@@ -181,9 +189,18 @@ async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
             axum::body::to_bytes(resp.into_body(), usize::MAX).await
         }
     });
-    // Long enough for the first request to have taken the lock, short enough to be inside the
-    // fake script's 60 s sleep: the point is that the SECOND request is not blocked behind it.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The first request has taken the lock once its `btrfs send` is running — the script says so
+    // by touching the marker. Waiting on that rather than on 300 ms (2026-09-12) means a loaded
+    // box cannot make this test pass for the wrong reason, by never reaching the lock at all.
+    let mut sending = false;
+    for _ in 0..500 {
+        if started.exists() {
+            sending = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(sending, "the first pull never started its send, so nothing held the lock");
 
     let second = tokio::time::timeout(
         std::time::Duration::from_secs(5),

@@ -1,6 +1,9 @@
 //! `api::admin::router` in isolation: every request answers 401/403 without the claim, and every
 //! `/v1` path 404s here — the two routers must never both answer the same URL.
 
+mod common;
+use common::{token, admin_token};
+
 use kloudlite_core::jwt::Jwt;
 use kloudlite_workspaces::api::{admin::router, ApiState, Directory, TeamRole};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
@@ -72,15 +75,6 @@ async fn admin_server(routes: Vec<Route>) -> Server {
     let app = router(Arc::new(state));
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
     Server { base: format!("http://{addr}"), jwt, rec }
-}
-
-fn token(jwt: &Jwt, username: &str) -> String {
-    jwt.mint(&format!("{username}@example.com"), "Test User", Some(username)).unwrap()
-}
-
-/// A superadmin token, minted the way the api tier mints one at sign-in.
-fn admin_token(jwt: &Jwt) -> String {
-    jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap()
 }
 
 fn list_of(kind: &str, items: Vec<Value>) -> Value {
