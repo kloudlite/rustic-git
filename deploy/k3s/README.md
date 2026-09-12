@@ -150,6 +150,25 @@ kubectl apply -f system-netpol.yaml
 
 Then start the agent on the new node (the DaemonSet schedules it once the labels above are set).
 
+## gVisor (`WS_RUNTIME_CLASS`)
+
+Tenant pods run under gVisor, and it is per NODE and per region — `agent-daemonset.yaml` sets
+nothing, on purpose, because an inline env would override the Secret every region sets for
+itself. On each pooled node, once:
+
+```sh
+./install-gvisor.sh                                      # its header is the whole recipe
+kubectl label node <this node> kloudlite.io/gvisor=true  # runtimeclass.yaml schedules on it
+```
+
+Then, once per cluster, `kubectl apply -f runtimeclass.yaml` and put `WS_RUNTIME_CLASS=gvisor`
+in the `kloudlite-agent` Secret in `kube-system`. Order matters: the Secret LAST. A node without
+the label cannot serve the RuntimeClass, so a workspace placed there stays Pending with no error
+anywhere but the pod's events.
+
+*Check:* `kubectl get pod -A -l kloudlite.io/kind -o custom-columns=NAME:.metadata.name,RC:.spec.runtimeClassName`
+shows `gvisor` on every row and no `<none>`.
+
 ## Control-plane backup
 
 The CRDs are one SQLite file on one VM. `backup-controlplane.sh` copies it (plus the cluster

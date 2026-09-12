@@ -50,6 +50,14 @@ spec:
   selector:
     matchLabels:
       app: kloudlite-agent
+  # Explicit, not the default (2026-09-12): one node at a time, and "done" means the readiness
+  # probe below has passed — the kubelet otherwise calls a pod ready the moment the container
+  # starts, which for a controller is long before it has converged anything, so a bad build
+  # rolled across every node before the liveness probe's five-minute window expired.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -161,15 +169,21 @@ spec:
             # `KL_REGISTRY_HOST`, the docker credential helper's `credHelpers` key.
             - name: WS_REGISTRY_HOST
               value: cr.khost.dev
-            # `WS_RUNTIME_CLASS=gvisor` is deliberately NOT set here. Unset, tenant pods run under
-            # runc and share the host kernel (audit S-29); set, every tenant pod names the
-            # `gvisor` RuntimeClass and stays Pending on any node that cannot serve it. So it is
-            # per-cluster, and goes in the `kloudlite-agent` Secret next to WS_REGION (an inline
-            # env would override envFrom, same as WS_REGION) only once EVERY pool node has had
-            # install-gvisor.sh run, carries `kloudlite.io/gvisor=true` (runtimeclass.yaml's
-            # nodeSelector) and runtimeclass.yaml is applied. Verify after the agent restarts:
+            # `WS_RUNTIME_CLASS` is absent from this file on purpose, and absent is NOT the same
+            # as unset: the fleet RUNS gvisor, set in the `kloudlite-agent` Secret next to
+            # WS_REGION, because an inline env here would override `envFrom` and force every
+            # region to the same answer. Unset, tenant pods run under runc and share the host
+            # kernel (audit S-29); set, every tenant pod names the `gvisor` RuntimeClass and
+            # stays Pending on any node that cannot serve it — so it is per-cluster, and the
+            # prerequisites are per NODE: install-gvisor.sh run, `kloudlite.io/gvisor=true`
+            # labelled (runtimeclass.yaml's nodeSelector) and runtimeclass.yaml applied. The
+            # recipe is that script's header and README's "gVisor". Read what a region actually
+            # runs, never this file:
+            #   kubectl -n kube-system get secret kloudlite-agent -o jsonpath='{.data.WS_RUNTIME_CLASS}' | base64 -d
             #   kubectl get pod -n ws-<owner> -o jsonpath='{.items[*].spec.runtimeClassName}'
-            # prints `gvisor`, and `dmesg` inside a workspace prints gVisor's banner.
+            # The second prints `gvisor` when it is in force, and `dmesg` inside a workspace
+            # prints gVisor's banner.
+
             # Where a `GitRepo` workspace's init container clones from, over SSH, with the
             # owner's platform key. The repo is `owner/name`, never a URL, so this is the only
             # thing that decides which host is reachable — a workspace cannot be pointed at an
@@ -200,14 +214,14 @@ spec:
             # this container already mounts, so the cache outlives the pod. ~400 MB.
             - name: XDG_CACHE_HOME
               value: /nix/var/kloudlite/cache
-            # What every workspace gets before its own list. Explicit here rather than the
-            # binary's default so a change is a yaml diff someone reviews, and so the two nodes
-            # cannot drift: the set is part of every profile's hash.
             # What `ws-{id}` runs when a workspace names no image: the platform's own image,
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
               value: ghcr.io/kloudlite/kloudlite-workspace:4a5cf5824b8c61d6fcfbc4645045d7909002ae88@sha256:2805c704d9f6b20769ec3a06e1ce3004cdeb1e7118276c0310dde69d42103478
+            # What every workspace gets before its own list. Explicit here rather than the
+            # binary's default so a change is a yaml diff someone reviews, and so the two nodes
+            # cannot drift: the set is part of every profile's hash.
             - name: WS_BASE_PACKAGES
               value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
             - name: WS_REPLICA_SECS
@@ -268,8 +282,16 @@ spec:
             - name: pool
               mountPath: /wspool-prod
               mountPropagation: Bidirectional
-            # btrfs send/receive and loop-mounting a restored block image both need the host's
-            # device nodes.
+            # btrfs's ioctls go through the mounted pool path, not the device — but btrfs-progs
+            # still scans /dev to resolve a filesystem's devices, and anything that reports usage
+            # opens the device path /proc/mounts names for /wspool-prod.
+            # ponytail: all of /dev in a privileged pod (2026-09-12 review #64). The narrowing is
+            # /dev/btrfs-control plus the pool device, and `mkfs.btrfs -L wspool` in
+            # format-pool.sh makes /dev/disk/by-label/wspool the one device path identical on
+            # every node — but the device visible in the container would then not be the path
+            # /proc/mounts names, and a wrong guess here breaks storage on every workspace of the
+            # node. Try it on ONE node, with a create, a push and a restore as the test, before
+            # changing it fleet-wide.
             - name: dev
               mountPath: /dev
             # The host store seeded by seed-store, shared with the nix-daemon container below.
@@ -288,6 +310,19 @@ spec:
                 - test $(( $(date +%s) - $(stat -c %Y /wspool-prod/.agent-heartbeat) )) -lt 300
             initialDelaySeconds: 60
             periodSeconds: 60
+            failureThreshold: 3
+          # The same heartbeat, read tighter and from the start: this is what makes the rolling
+          # update wait for a controller that actually ticked. No file yet (`stat` fails) is not
+          # ready, which is the case that matters — a build that dies before its first reconcile
+          # must stop the roll at node one rather than at the liveness probe's fifth minute.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - test $(( $(date +%s) - $(stat -c %Y /wspool-prod/.agent-heartbeat) )) -lt 120
+            initialDelaySeconds: 10
+            periodSeconds: 10
             failureThreshold: 3
         - name: nix-daemon
           # The SAME digest as seed-store: the daemon must be the version that wrote the store.

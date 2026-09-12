@@ -564,6 +564,13 @@ spec:
   # Surge, never dip: with one replica the default 25%/25% rounds to "kill the old pod, then
   # start the new one", and every merge clicked in that window waits for the stranded-job
   # re-announce instead of running. The two pods overlapping is fine — jobs are claimed atomically.
+  #
+  # No PodDisruptionBudget, deliberately (2026-09-12 review #68), the same trade-off the admin
+  # Deployment's comment records: a PDB cannot express surge, and `maxUnavailable: 0` on a
+  # single replica makes every node drain hang forever waiting for a second pod that the
+  # Deployment will never create. What a roll protects is protected above; what an eviction
+  # costs is one re-announce beat (`announce_stranded_merges`, 15 s), not a lost merge — the
+  # claim/outcome record is on the owning node, never in this pod.
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
@@ -980,8 +987,12 @@ spec:
                 port:
                   number: 80
 ---
-# The AKS collectors: deploy/k3s/otel-agent.yaml, copied, with THREE changes and no others — keep
-# it that way, and diff the two files when either is edited:
+# The AKS collectors: deploy/k3s/otel-agent.yaml, copied and then diverged. The comment here used
+# to claim THREE changes and no others; by 2026-09-12 there were eight (review #71), which is what
+# a comment as the only enforcement buys. `the_two_otel_stacks_grant_the_same_cluster_role` in
+# crates/workspaces/tests/crd_yaml.rs now holds the one half that must never drift — the
+# ClusterRole, where a difference is a privilege this tier has and the region's does not. The rest
+# is deliberately different, and diffing the two files is still the way to review an edit:
 #
 #   1. namespace `kloudlite` instead of `kube-system` (this cluster has no pooled nodes, so the
 #      agent's DaemonSet namespace is meaningless here and the workloads it scrapes live here).
@@ -989,6 +1000,13 @@ spec:
 #   3. the exporters point at the gateway's ClusterIP, not `otel-dev.kloudlite.io`: the gateway
 #      runs in this same cluster, so leaving through the ingress would cost a TLS handshake and a
 #      round trip through nginx to arrive back three namespaces away.
+#   4. the prometheus receiver keeps this cluster's namespaces, not `kube-system|kloudlite-system`.
+#   5. five `azuremonitor/*` receivers and an `httpcheck` one, and the metrics pipeline that reads
+#      them: Redis, Cosmos, Storage and the edge are AKS-side dependencies with no k3s equivalent.
+#   6. the cluster collector runs 0.128.0, not the DaemonSet's 0.109.0 — `azuremonitor` needs it,
+#      and only the DaemonSet is pinned old by the kubeletstats utilization metrics.
+#   7. the AZURE_* env on the cluster collector, for those receivers.
+#   8. the SLO probe below, which exists only here.
 #
 # The DaemonSet/Deployment split and the header table in the k3s file are this role too; neither
 # is repeated.
@@ -1472,16 +1490,25 @@ spec:
               valueFrom: { secretKeyRef: { name: kloudlite-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
-            - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+            # /var/log alone: /var/log/pods is UNDER it, so the second hostPath was the same
+            # bytes mounted twice (2026-09-12 review #97). The filelog receiver's include paths
+            # are absolute and unchanged.
             - { name: varlog, mountPath: /var/log, readOnly: true }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 512Mi }
+          # The same four lines every other workload in this tree carries (2026-09-12 review
+          # #67). The collector image already runs as uid 10001, and nothing in this config
+          # writes to disk — there is no `file_storage` extension, so the sending queue is in
+          # memory — which is what makes a read-only root filesystem free here.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: conf
           configMap: { name: kloudlite-otel-agent }
-        - name: varlogpods
-          hostPath: { path: /var/log/pods }
         - name: varlog
           hostPath: { path: /var/log }
 ---
@@ -1524,6 +1551,15 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
+          # The same four lines every other workload in this tree carries (2026-09-12 review
+          # #67). The collector image already runs as uid 10001, and nothing in this config
+          # writes to disk — there is no `file_storage` extension, so the sending queue is in
+          # memory — which is what makes a read-only root filesystem free here.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: conf
           configMap: { name: kloudlite-otel-cluster }

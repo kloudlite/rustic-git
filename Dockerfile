@@ -132,7 +132,10 @@ ENTRYPOINT ["kloudlite-builder-gate"]
 # agent builds per workspace and mounts read-only, so this image stays stock apart from the above.
 # Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
 # `k8s::prelude`, not here.
-FROM alpine:3.20 AS workspace
+# Pinned by digest like every other stage (2026-09-12 review #69): a tag is a pointer Docker Hub
+# can move, and this is the image a person's whole working day runs inside. Looked up 2026-09-12
+# with the same recipe as nixos/nix in deploy/k3s/agent-daemonset.yaml; the tag stays for humans.
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS workspace
 ARG PROFILE=release
 RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx nodejs npm \
     && mkdir -p /var/empty \
@@ -165,6 +168,11 @@ RUN apk add --no-cache --virtual .gyp python3 make g++ \
     && npm cache clean --force \
     && apk del .gyp
 ENV DO_NOT_TRACK=1
+# No `USER kl`, unlike every other stage here, and that is the design rather than an omission
+# (2026-09-12 review #69): this image's entrypoint is `k8s::prelude`, which chowns the mounted
+# volume and the home, seeds rc files and writes the SSH host key before it execs sshd — all of
+# which need root. sshd is what drops to `kl`, for the only session a person ever gets, and the
+# pod is confined by gVisor plus the workspace admission policy rather than by this line.
 
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a

@@ -161,17 +161,32 @@ spec:
                   key: WS_REGION
             - name: RUST_BACKTRACE
               value: "1"
+          # Headroom above the request, not equal to it (2026-09-12 review #73): this process
+          # counts open tunnels per workspace and per owner, and the connect tokens it has spent,
+          # IN MEMORY (`bins/gateway/src/tunnel.rs`) — an OOM-kill drops every one of those, so a
+          # burst of tunnels must be throttled by the scheduler's request, never killed at the
+          # limit. Raise the request, not the limit, if it is ever seen steady above 256Mi.
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
-              memory: 256Mi
+              memory: 512Mi
           livenessProbe:
             httpGet:
               path: /healthz
               port: 8080
             periodSeconds: 20
+          # Readiness as well as liveness (2026-09-12 review #65): with `Recreate` and one
+          # replica the Service's endpoint is this pod, and without a readiness gate it is
+          # published the instant the container starts — a connect arriving in that window is
+          # refused rather than queued.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 3
           securityContext:
             # The container binds 8080 (the hostPort mapping to 80 is the CNI's), so nothing here
             # needs to bind a privileged port — but the binary carries a NET_BIND_SERVICE FILE

@@ -394,16 +394,25 @@ spec:
               valueFrom: { secretKeyRef: { name: kloudlite-otel, key: key } }
           volumeMounts:
             - { name: conf, mountPath: /conf }
-            - { name: varlogpods, mountPath: /var/log/pods, readOnly: true }
+            # /var/log alone: /var/log/pods is UNDER it, so the second hostPath was the same
+            # bytes mounted twice (2026-09-12 review #97). The filelog receiver's include paths
+            # are absolute and unchanged.
             - { name: varlog, mountPath: /var/log, readOnly: true }
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 512Mi }
+          # The same four lines every other workload in this tree carries (2026-09-12 review
+          # #67). The collector image already runs as uid 10001, and nothing in this config
+          # writes to disk — there is no `file_storage` extension, so the sending queue is in
+          # memory — which is what makes a read-only root filesystem free here.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: conf
           configMap: { name: kloudlite-otel-agent }
-        - name: varlogpods
-          hostPath: { path: /var/log/pods }
         - name: varlog
           hostPath: { path: /var/log }
 ---
@@ -437,6 +446,15 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }
+          # The same four lines every other workload in this tree carries (2026-09-12 review
+          # #67). The collector image already runs as uid 10001, and nothing in this config
+          # writes to disk — there is no `file_storage` extension, so the sending queue is in
+          # memory — which is what makes a read-only root filesystem free here.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
       volumes:
         - name: conf
           configMap: { name: kloudlite-otel-cluster }

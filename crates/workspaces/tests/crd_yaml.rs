@@ -402,3 +402,33 @@ fn the_bootstrap_defaults_are_the_specs_table() {
     let t = kloudlite_workspaces::crd::default_quota(true);
     assert_eq!((t.workspaces, t.environments, t.snapshots, t.disk_gb, t.cpu, t.memory_gb), (20, 8, 80, 400, 148, 296));
 }
+
+/// The OTel stack is two hand-maintained copies — `deploy/k3s/otel-agent.yaml` and the AKS copy
+/// inside `deploy/kloudlite.yaml` — and a comment claiming "three changes and no others" was the
+/// only thing holding them together until it had drifted to eight (2026-09-12 review #71). Most
+/// of that drift is deliberate: different namespace, different region, Azure-only receivers. The
+/// ClusterRole is the half where a difference is not a variant but a PRIVILEGE one cluster's
+/// collectors hold and the other's do not, granted by a copy nobody re-read. So that is what is
+/// pinned here, textually: there is no YAML parser in this tree on purpose (see the note on
+/// `generated_crds_match_the_committed_manifest`).
+#[test]
+fn the_two_otel_stacks_grant_the_same_cluster_role() {
+    fn role(path: &str) -> String {
+        let s = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let at = s
+            .find("kind: ClusterRole\nmetadata:\n  name: kloudlite-otel-agent\n")
+            .unwrap_or_else(|| panic!("{path}: no kloudlite-otel-agent ClusterRole"));
+        let rest = &s[at..];
+        let end = rest.find("\n---\n").unwrap_or(rest.len());
+        // Comments and blank lines are where the two files are allowed to differ; the rules are not.
+        rest[..end]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    let k3s = role(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/otel-agent.yaml"));
+    let aks = role(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/kloudlite.yaml"));
+    assert_eq!(k3s, aks, "the AKS collectors' ClusterRole has drifted from deploy/k3s/otel-agent.yaml");
+}
