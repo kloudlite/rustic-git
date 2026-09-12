@@ -17,7 +17,12 @@ pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Resu
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let path = k8s::keys_file(pool, owner);
-    std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap())?;
+    // No `unwrap`: a path with no parent is a bug in `keys_file`, and a panic inside the keys
+    // reconciler takes the whole controller down rather than failing this one owner.
+    let dir = std::path::Path::new(&path)
+        .parent()
+        .ok_or_else(|| std::io::Error::other(format!("{path} has no parent directory")))?;
+    std::fs::create_dir_all(dir)?;
     let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
     f.write_all(contents.as_bytes())?;
     f.sync_all()?;

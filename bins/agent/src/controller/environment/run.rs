@@ -74,12 +74,6 @@ async fn materialise(
     // HeadUnknown guard: an environment claimed onto this node for a volume with snapshots but no
     // recorded head yet must wait for Task 5/6 to write one rather than checking out empty next
     // to real history. Task 4 left this arm to this task — see `apply_workspace`'s twin.
-    // The worktree is the environment's OWN name on whatever volume it resolved to — `id` for an
-    // environment that owns its volume (the same string), the SOURCE's volume for a restored one,
-    // which holds a SECOND worktree of it. Never `(id, id)`: that checked a restored environment
-    // out on top of the source's live worktree, two environments writing one subvolume. It is also
-    // the name `sync.rs`'s `live_worktrees` writes into `Snapshot.spec.worktree`, so every path
-    // below — checkout, mount, mkdir, stop cut, drop — uses this one string.
     // Lazy per-volume migration, resolve the effective head, checkout and quota — identical for a
     // Workspace and an Environment down to the guard conditions; see `worktree_gate`.
     let gate = super::super::worktree_gate(
@@ -319,8 +313,6 @@ async fn apply_services(
     owner_ref: &OwnerReference,
     ctx: &Arc<Ctx>,
 ) -> Result<(), ReconcileErr> {
-    // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
-    // three states below, and the rendering is a straight read of that decision.
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
     for svc in &e.spec.services {

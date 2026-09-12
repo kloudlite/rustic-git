@@ -25,15 +25,12 @@ pub use wake::wake_peers;
 // Some of these are not dialled through `crate::peer::…` by any caller today (tests reach the
 // submodule directly, `use super::<mod>::*`), but the path is the contract this split promised to
 // hold: every name a caller outside this module could already reach stays reachable the same way.
-#[allow(unused_imports)]
 pub(crate) use placement::{
-    decommissioning, live_nodes, newest_transient, node_dead_secs, node_is_dead, placeable_nodes, pool_nodes, preferred_node,
-    unplaceable, up_to_date, up_to_date_nodes,
+    decommissioning, newest_transient, node_dead_secs, node_is_dead, placeable_nodes, preferred_node, unplaceable, up_to_date,
+    up_to_date_nodes,
 };
-#[allow(unused_imports)]
-pub(crate) use sweeps::{mark_parent, sweep_volumes, unplace_parent, volume_decision, VolumeVerdict};
-#[allow(unused_imports)]
-pub(crate) use wake::{after_pass, Next, MIN_WAKE_GAP, RETRY_SOON};
+pub(crate) use sweeps::{sweep_volumes, unplace_parent};
+pub(crate) use wake::{after_pass, Next};
 pub(crate) use crd::newest_transient_of;
 
 use crate::controller::Ctx;
