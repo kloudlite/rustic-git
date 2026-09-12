@@ -24,7 +24,6 @@ pub mod claim;
 pub mod controller;
 pub mod decommission;
 pub mod janitor;
-mod kubeclient;
 pub mod listing;
 pub mod nix;
 pub mod peer;
@@ -281,12 +280,11 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // (`controller::watch_config`), so the server ends it first.
     let mut config = kube::Config::infer().await.map_err(|e| e.to_string())?;
     config.read_timeout = Some(std::time::Duration::from_secs(120));
-    // Through `BoundedLayer`: `read_timeout` is the connection's bound, and a request the server
-    // QUEUES needs one of its own — see `kubeclient`.
-    let client = kube::client::ClientBuilder::try_from(config)
-        .map_err(|e| e.to_string())?
-        .with_layer(&kubeclient::BoundedLayer)
-        .build();
+    // Through the fleet's one bounded constructor: `read_timeout` is the connection's bound, and a
+    // request the server QUEUES needs one of its own — 30 s per non-watch call, `kube.slow` past
+    // 2 s (`k8s::client`). The keys step of one reconcile blocked 60 s on 2026-09-12 and every
+    // other object on the node aged behind it.
+    let client = kloudlite_workspaces::k8s::client::bounded_client(config).map_err(|e| e.to_string())?;
     let has_pool = node_has_pool(&client, &cfg.node).await;
     tracing::info!(node = %cfg.node, has_pool, "node.pool");
     // Resolved BEFORE `Ctx`: `Ctx::new` reads the boot-marked fields (`default_image`,
