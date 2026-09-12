@@ -6,38 +6,65 @@
 //! left a node tainted" is an outage nobody would think to look for. So the three mutations are
 //! paired here rather than at their call sites, around a body that may do anything.
 //!
+//! Every mark a drill leaves NAMES THE RUN that left it (2026-09-12): the taint's value, the
+//! node label and the NetworkPolicy's name all carry `run-{run_id}`, so a sweep can tell its own
+//! litter from a drill another suite is in the middle of. Before that the sweep untainted and
+//! uncordoned blind, and a fast run's teardown could undo a weekly drill's cordon while the
+//! weekly step was still inside it.
+//!
 //! They sit behind a trait for one reason: `drills_always_undo` has to watch the pairing hold when
 //! the middle errors, and a real API server cannot be asked to fail on demand.
 
 use std::future::Future;
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-/// The drill taint. `NoExecute` because the drill is pretending the node died: a `NoSchedule` taint
-/// would leave every pod already on it running, which is the one thing a dead node does not do.
+/// The drill taint, and the label a cordon or a decommission is written down with. `NoExecute`
+/// because the drill is pretending the node died: a `NoSchedule` taint would leave every pod
+/// already on it running, which is the one thing a dead node does not do.
+///
+/// One string for both: a node carries at most one drill's marks, and a reader that finds either
+/// wants the same answer — which run put it there.
 pub const DRILL_TAINT: &str = "kloudlite.io/slo-drill";
 
-/// The three fleet mutations a drill makes, and nothing else. Each takes `on`, so the undo is the
-/// same call with the flag flipped — a separate `untaint` method is a second place to get wrong.
+/// What a node is carrying from some drill: the taint's value and the label's, each `Some` only
+/// when that mark is actually on the node. Both are a run id (`run-{suite}-{unix}`), which is what
+/// lets a sweep recognise its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub node: String,
+    pub taint: Option<String>,
+    pub label: Option<String>,
+}
+
+/// The fleet mutations a drill makes, and nothing else. Each takes the run that is making it —
+/// `Some(run)` sets, `None` clears — so the undo is the same call with the run dropped and a
+/// separate `untaint` method is not a second place to get wrong.
 #[async_trait]
 pub trait Cluster: Send + Sync {
-    async fn taint(&self, node: &str, on: bool) -> Result<()>;
+    async fn taint(&self, node: &str, run: Option<&str>) -> Result<()>;
     async fn cordon(&self, node: &str, on: bool) -> Result<()>;
     /// The product's own drain verb: `kloudlite.io/decommission=true`, the label the agent watches
     /// and `peer::unplaceable` reads. A CORDON is invisible to placement — the first live weekly
     /// run cordoned a node, killed the pod on it and watched nothing reschedule for 148 s — so a
     /// drill that wants a worktree to move must set this, not `spec.unschedulable`.
     async fn decommission(&self, node: &str, on: bool) -> Result<()>;
+    /// The `kloudlite.io/slo-drill={run}` LABEL. A cordon and a decommission are both states an
+    /// operator reaches by hand, so unlike the taint they cannot be recognised from their own
+    /// shape — this label is what says "a drill did this, and here is which run". It replaced an
+    /// emptyDir file (2026-09-12): the file lived in the pod whose death is the exact case the
+    /// sweep exists for, and it named no run, so any run's teardown undid any run's cordon.
+    async fn mark(&self, node: &str, run: Option<&str>) -> Result<()>;
     /// `Some(spec)` creates the NetworkPolicy, `None` deletes it.
     async fn netpol(&self, ns: &str, name: &str, spec: Option<Value>) -> Result<()>;
-    /// Every node still carrying `DRILL_TAINT`. The sweep's half that needs no memory: a drill
-    /// whose pod was killed between the taint and the untaint left no file behind, but it did
-    /// leave the taint, and the taint names itself.
-    async fn tainted_nodes(&self) -> Result<Vec<String>>;
+    async fn netpol_names(&self, ns: &str) -> Result<Vec<String>>;
+    /// Every node carrying either drill mark. The sweep's input, and the half that needs no
+    /// memory: a drill whose pod was killed between the mark and the undo left nothing behind
+    /// except the marks themselves, and the marks name their run.
+    async fn drill_marks(&self) -> Result<Vec<Mark>>;
 }
 
 /// The minute every `undoing` step's ceiling adds on top of its body cap. `Ctx::step` drops the
@@ -78,43 +105,49 @@ where
 pub async fn with_taint<T>(
     k: &dyn Cluster,
     node: &str,
+    run: &str,
     cap: Duration,
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    k.taint(node, true).await?;
-    undoing(cap, body, || k.taint(node, false)).await
+    k.taint(node, Some(run)).await?;
+    undoing(cap, body, || k.taint(node, None)).await
 }
 
 /// Make a node unplaceable the way the platform does, for the length of `body`.
 ///
-/// The label is written down first, exactly as the cordon is: a label an operator set by hand and
-/// one a killed drill left behind look identical, and teardown's sweep is what clears it.
+/// The label goes on FIRST and comes off LAST, exactly as the cordon's does: a drill killed
+/// between the two mutations must leave the marked state, never the unmarked one, or the sweep
+/// has nothing to find.
 pub async fn with_decommission<T>(
     k: &dyn Cluster,
-    tmp: &Path,
     node: &str,
+    run: &str,
     cap: Duration,
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    note_cordon(tmp, node);
+    k.mark(node, Some(run)).await?;
     k.decommission(node, true).await?;
-    undoing(cap, body, || k.decommission(node, false)).await
+    undoing(cap, body, || async {
+        k.decommission(node, false).await?;
+        k.mark(node, None).await
+    })
+    .await
 }
 
-/// `tmp` is where the cordon is WRITTEN DOWN before it is made — an `unschedulable` node looks
-/// exactly like one an operator cordoned by hand, so unlike the taint it cannot be recognised
-/// later. The parent process reads that file in teardown, which is the only thing that can clean
-/// up after a child that died mid-drill.
 pub async fn with_cordon<T>(
     k: &dyn Cluster,
-    tmp: &Path,
     node: &str,
+    run: &str,
     cap: Duration,
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    note_cordon(tmp, node);
+    k.mark(node, Some(run)).await?;
     k.cordon(node, true).await?;
-    undoing(cap, body, || k.cordon(node, false)).await
+    undoing(cap, body, || async {
+        k.cordon(node, false).await?;
+        k.mark(node, None).await
+    })
+    .await
 }
 
 pub async fn with_netpol<T>(
@@ -129,58 +162,60 @@ pub async fn with_netpol<T>(
     undoing(cap, body, || k.netpol(ns, name, None)).await
 }
 
-/// The nodes this run has cordoned, on disk. Best effort in both directions: a file that cannot be
-/// written costs the sweep its second half, and the taint sweep still runs.
-const CORDONED: &str = "drill.json";
-
-fn note_cordon(tmp: &Path, node: &str) {
-    let path = tmp.join(CORDONED);
-    let mut nodes = cordoned(tmp);
-    if !nodes.iter().any(|n| n == node) {
-        nodes.push(node.to_string());
-    }
-    if let Err(e) = serde_json::to_vec(&nodes).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
-        tracing::warn!(op = "write", name = %path.display(), error = %e, "slo.drill.note.failed");
-    }
-}
-
-fn cordoned(tmp: &Path) -> Vec<String> {
-    std::fs::read(tmp.join(CORDONED))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
-}
-
-/// Undo the two node mutations unconditionally, whatever this run did or did not get to.
+/// Undo the node mutations THIS run's marks name, whatever this run did or did not get to.
 ///
 /// Teardown runs this on EVERY run, not only the monthly one: a drill's own undo is the first
 /// thing a killed pod loses, and a node left tainted or cordoned is an outage nobody would think
-/// to look for. Best effort and logged throughout — teardown's job is the report, and an error
-/// propagated from here would lose it.
-pub async fn sweep_nodes(k: &dyn Cluster, tmp: &Path) {
-    let tainted = match k.tainted_nodes().await {
+/// to look for. `mine` is what keeps that from becoming the opposite bug — a fast run's teardown
+/// lifting the cordon a weekly drill is standing inside — so it answers true only for this run's
+/// own id and for one old enough that no run can still be holding it. Best effort and logged
+/// throughout: teardown's job is the report, and an error propagated from here would lose it.
+pub async fn sweep_nodes(k: &dyn Cluster, mine: &dyn Fn(&str) -> bool) {
+    let marks = match k.drill_marks().await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(op = "list", error = %format!("{e:#}"), "slo.drill.sweep.failed");
+            return;
+        }
+    };
+    for m in marks {
+        if m.taint.as_deref().is_some_and(&mine) {
+            match k.taint(&m.node, None).await {
+                Ok(()) => tracing::info!(kind = "taint", name = %m.node, "slo.drill.swept"),
+                Err(e) => tracing::warn!(kind = "taint", name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+            }
+        }
+        if !m.label.as_deref().is_some_and(&mine) {
+            continue;
+        }
+        // Both, blind: the one label records either mutation, and a decommission label left on a
+        // node is a node placement will never use again.
+        for (kind, out) in [
+            ("cordon", k.cordon(&m.node, false).await),
+            ("decommission", k.decommission(&m.node, false).await),
+            ("mark", k.mark(&m.node, None).await),
+        ] {
+            match out {
+                Ok(()) => tracing::info!(kind, name = %m.node, "slo.drill.swept"),
+                Err(e) => tracing::warn!(kind, name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+            }
+        }
+    }
+}
+
+/// The same rule for the policies: delete only the ones whose NAME this run owns.
+pub async fn sweep_netpols(k: &dyn Cluster, ns: &str, mine: &dyn Fn(&str) -> bool) {
+    let names = match k.netpol_names(ns).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(op = "list", error = %format!("{e:#}"), "slo.drill.sweep.failed");
-            vec![]
+            return;
         }
     };
-    for node in tainted {
-        match k.taint(&node, false).await {
-            Ok(()) => tracing::info!(kind = "taint", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "taint", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
-        }
-    }
-    for node in cordoned(tmp) {
-        match k.cordon(&node, false).await {
-            Ok(()) => tracing::info!(kind = "cordon", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "cordon", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
-        }
-        // Both, blind: the same file records either mutation, and a label left on a node is a node
-        // placement will never use again.
-        match k.decommission(&node, false).await {
-            Ok(()) => tracing::info!(kind = "decommission", name = %node, "slo.drill.swept"),
-            Err(e) => tracing::warn!(kind = "decommission", name = %node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
+    for name in names.into_iter().filter(|n| mine(n)) {
+        match k.netpol(ns, &name, None).await {
+            Ok(()) => tracing::info!(kind = "netpol", name = %name, "slo.drill.swept"),
+            Err(e) => tracing::warn!(kind = "netpol", name = %name, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
         }
     }
 }
@@ -214,28 +249,36 @@ pub fn incluster() -> Result<kube::Client> {
 /// drills, the in-cluster AKS one for the Redis policy.
 #[async_trait]
 impl Cluster for kube::Client {
-    async fn taint(&self, node: &str, on: bool) -> Result<()> {
-        // A merge patch of the whole `taints` array, because that is the only shape the field has:
-        // there is no per-taint address, so removing one means writing the list without it. The
-        // read-then-write is safe here in a way it would not be for a controller — this is a drill
-        // node nothing else is editing for the length of the drill.
+    async fn taint(&self, node: &str, run: Option<&str>) -> Result<()> {
+        // A JSON patch of the ONE taint, not a merge patch of the whole array (2026-09-12): the
+        // array has no per-taint address, so the old read-then-write rewrote every taint on the
+        // node from a list it had read a moment earlier — a `NoSchedule` somebody else added in
+        // between was silently dropped. The `test` makes the removal fail rather than take the
+        // wrong element when the list has moved under us.
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let obj = api.get(node).await?;
-        let mut taints = obj.spec.and_then(|s| s.taints).unwrap_or_default();
-        taints.retain(|t| t.key != DRILL_TAINT);
-        if on {
-            taints.push(k8s_openapi::api::core::v1::Taint {
-                key: DRILL_TAINT.into(),
-                value: Some("true".into()),
-                effect: "NoExecute".into(),
-                ..Default::default()
-            });
-        }
-        api.patch(
-            node,
-            &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(&json!({ "spec": { "taints": taints } })),
-        )
+        let taints = obj.spec.and_then(|s| s.taints).unwrap_or_default();
+        let at = taints.iter().position(|t| t.key == DRILL_TAINT);
+        let ops = match (run, at) {
+            (Some(run), _) => {
+                let one = json!({ "key": DRILL_TAINT, "value": run, "effect": "NoExecute" });
+                match at {
+                    // Replacing in place keeps the index stable for a concurrent reader.
+                    Some(i) => json!([{ "op": "replace", "path": format!("/spec/taints/{i}"), "value": one }]),
+                    None if taints.is_empty() => json!([{ "op": "add", "path": "/spec/taints", "value": [one] }]),
+                    None => json!([{ "op": "add", "path": "/spec/taints/-", "value": one }]),
+                }
+            }
+            // Nothing to remove is the state the undo wanted.
+            (None, None) => return Ok(()),
+            (None, Some(i)) => json!([
+                { "op": "test", "path": format!("/spec/taints/{i}/key"), "value": DRILL_TAINT },
+                { "op": "remove", "path": format!("/spec/taints/{i}") },
+            ]),
+        };
+        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(
+            serde_json::from_value(ops)?,
+        ))
         .await?;
         Ok(())
     }
@@ -270,18 +313,46 @@ impl Cluster for kube::Client {
         Ok(())
     }
 
-    async fn tainted_nodes(&self) -> Result<Vec<String>> {
+    async fn mark(&self, node: &str, run: Option<&str>) -> Result<()> {
+        let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
+        let value = run.map(Value::from).unwrap_or(Value::Null);
+        api.patch(
+            node,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DRILL_TAINT: value } } })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn drill_marks(&self) -> Result<Vec<Mark>> {
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let list = api.list(&kube::api::ListParams::default()).await?;
         Ok(list
             .items
             .iter()
-            .filter(|n| {
-                n.spec
+            .filter_map(|n| {
+                let taint = n
+                    .spec
                     .as_ref()
                     .and_then(|s| s.taints.as_ref())
-                    .is_some_and(|t| t.iter().any(|t| t.key == DRILL_TAINT))
+                    .and_then(|t| t.iter().find(|t| t.key == DRILL_TAINT))
+                    .map(|t| t.value.clone().unwrap_or_default());
+                let label = n.metadata.labels.as_ref().and_then(|l| l.get(DRILL_TAINT)).cloned();
+                (taint.is_some() || label.is_some())
+                    .then(|| Mark { node: kube::ResourceExt::name_any(n), taint, label })
             })
+            .collect())
+    }
+
+    async fn netpol_names(&self, ns: &str) -> Result<Vec<String>> {
+        let api: kube::Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
+            kube::Api::namespaced(self.clone(), ns);
+        Ok(api
+            .list(&kube::api::ListParams::default())
+            .await?
+            .items
+            .iter()
             .map(kube::ResourceExt::name_any)
             .collect())
     }
@@ -327,8 +398,9 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub struct FakeKube {
         pub calls: Mutex<Vec<String>>,
-        /// What `tainted_nodes` answers — the sweep's input, set by a test rather than by a taint.
-        pub tainted: Mutex<Vec<String>>,
+        /// What `drill_marks` answers — the sweep's input, set by a test rather than by a drill.
+        pub marks: Mutex<Vec<Mark>>,
+        pub policies: Mutex<Vec<String>>,
     }
 
     impl FakeKube {
@@ -342,12 +414,12 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl Cluster for FakeKube {
-        async fn taint(&self, node: &str, on: bool) -> Result<()> {
-            self.record(format!("taint {node} {on}"));
+        async fn taint(&self, node: &str, run: Option<&str>) -> Result<()> {
+            self.record(format!("taint {node} {}", run.unwrap_or("-")));
             Ok(())
         }
-        async fn tainted_nodes(&self) -> Result<Vec<String>> {
-            Ok(self.tainted.lock().expect("lock").clone())
+        async fn drill_marks(&self) -> Result<Vec<Mark>> {
+            Ok(self.marks.lock().expect("lock").clone())
         }
         async fn cordon(&self, node: &str, on: bool) -> Result<()> {
             self.record(format!("cordon {node} {on}"));
@@ -357,11 +429,20 @@ pub(crate) mod tests {
             self.record(format!("decommission {node} {on}"));
             Ok(())
         }
+        async fn mark(&self, node: &str, run: Option<&str>) -> Result<()> {
+            self.record(format!("mark {node} {}", run.unwrap_or("-")));
+            Ok(())
+        }
         async fn netpol(&self, ns: &str, name: &str, spec: Option<Value>) -> Result<()> {
             self.record(format!("netpol {ns}/{name} {}", spec.is_some()));
             Ok(())
         }
+        async fn netpol_names(&self, _ns: &str) -> Result<Vec<String>> {
+            Ok(self.policies.lock().expect("lock").clone())
+        }
     }
+
+    const RUN: &str = "run-monthly-1000";
 
     /// The whole contract of this module, and the reason it exists as one: a drill whose middle
     /// step FAILS still leaves the fleet as it found it. Written against a failing body on purpose
@@ -369,15 +450,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn drills_always_undo() {
         let k = FakeKube::default();
-        let tmp = tmpdir("undo");
         let cap = Duration::from_secs(30);
         let boom = || async { Err::<(), _>(anyhow::anyhow!("the drill's middle step failed")) };
 
         for out in [
-            with_taint(&k, "node-a", cap, boom()).await,
-            with_cordon(&k, &tmp, "node-a", cap, boom()).await,
-            with_decommission(&k, &tmp, "node-a", cap, boom()).await,
-            with_netpol(&k, "kloudlite", "slo-drill-redis", json!({}), cap, boom()).await,
+            with_taint(&k, "node-a", RUN, cap, boom()).await,
+            with_cordon(&k, "node-a", RUN, cap, boom()).await,
+            with_decommission(&k, "node-a", RUN, cap, boom()).await,
+            with_netpol(&k, "kloudlite", "run-monthly-1000-redis", json!({}), cap, boom()).await,
         ] {
             // The BODY's failure is what comes back — the drill measured something and it failed.
             assert!(out.unwrap_err().to_string().contains("middle step"));
@@ -385,23 +465,20 @@ pub(crate) mod tests {
         assert_eq!(
             k.calls(),
             [
-                "taint node-a true",
-                "taint node-a false",
+                "taint node-a run-monthly-1000",
+                "taint node-a -",
+                "mark node-a run-monthly-1000",
                 "cordon node-a true",
                 "cordon node-a false",
+                "mark node-a -",
+                "mark node-a run-monthly-1000",
                 "decommission node-a true",
                 "decommission node-a false",
-                "netpol kloudlite/slo-drill-redis true",
-                "netpol kloudlite/slo-drill-redis false",
+                "mark node-a -",
+                "netpol kloudlite/run-monthly-1000-redis true",
+                "netpol kloudlite/run-monthly-1000-redis false",
             ]
         );
-    }
-
-    fn tmpdir(what: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("slo-drill-{what}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).expect("tmp");
-        d
     }
 
     /// THE failure mode this module's `cap` exists for. `Ctx::step` runs a step inside its own
@@ -419,7 +496,7 @@ pub(crate) mod tests {
                 Box::pin(async move {
                     // The drill's own ceiling is well inside the step's, which is the rule every
                     // caller follows: body cap + 60 s.
-                    with_taint(k.as_ref(), "node-a", Duration::from_secs(30), async {
+                    with_taint(k.as_ref(), "node-a", RUN, Duration::from_secs(30), async {
                         tokio::time::sleep(Duration::from_secs(600)).await;
                         Ok(())
                     })
@@ -429,19 +506,41 @@ pub(crate) mod tests {
             .await;
         assert!(!ok, "an overrunning drill is a failed sample");
         assert!(c.steps[0].detail.contains("timed out"), "{}", c.steps[0].detail);
-        assert_eq!(k.calls(), ["taint node-a true", "taint node-a false"]);
+        assert_eq!(k.calls(), ["taint node-a run-monthly-1000", "taint node-a -"]);
     }
 
     /// The other half of H2: a run that died mid-drill left no undo behind, so teardown does it —
-    /// the taint by its own key, the cordon from the file the drill wrote before it made one.
+    /// from the marks themselves, which is all a dead pod leaves.
     #[tokio::test]
     async fn teardown_sweeps_a_taint_and_a_cordon_a_dead_run_left() {
         let k = FakeKube::default();
-        *k.tainted.lock().expect("lock") = vec!["node-a".into()];
-        let tmp = tmpdir("sweep");
-        note_cordon(&tmp, "node-b");
-        sweep_nodes(&k, &tmp).await;
-        assert_eq!(k.calls(), ["taint node-a false", "cordon node-b false", "decommission node-b false"]);
+        *k.marks.lock().expect("lock") = vec![
+            Mark { node: "node-a".into(), taint: Some(RUN.into()), label: None },
+            Mark { node: "node-b".into(), taint: None, label: Some(RUN.into()) },
+        ];
+        sweep_nodes(&k, &|v| v == RUN).await;
+        assert_eq!(
+            k.calls(),
+            ["taint node-a -", "cordon node-b false", "decommission node-b false", "mark node-b -"]
+        );
+    }
+
+    /// The bug the run id in every mark exists for: a fast run's teardown must NOT lift the cordon
+    /// a weekly drill is standing inside, and must not untaint a node another run tainted a second
+    /// ago. `mine` is the whole of that judgement, so it is asserted here on a foreign mark.
+    #[tokio::test]
+    async fn a_sweep_leaves_another_runs_marks_alone() {
+        let k = FakeKube::default();
+        *k.marks.lock().expect("lock") = vec![Mark {
+            node: "node-a".into(),
+            taint: Some("run-weekly-9999".into()),
+            label: Some("run-weekly-9999".into()),
+        }];
+        *k.policies.lock().expect("lock") = vec!["run-weekly-9999-redis".into(), "run-fast-1-redis".into()];
+        let mine = |v: &str| v.starts_with("run-fast-1");
+        sweep_nodes(&k, &mine).await;
+        sweep_netpols(&k, "kloudlite", &mine).await;
+        assert_eq!(k.calls(), ["netpol kloudlite/run-fast-1-redis false"], "someone else's drill was undone");
     }
 
     /// A drill that worked and could not clean up after itself is NOT a pass: the fleet is left
@@ -451,11 +550,10 @@ pub(crate) mod tests {
         struct Stuck;
         #[async_trait]
         impl Cluster for Stuck {
-            async fn taint(&self, _: &str, on: bool) -> Result<()> {
-                if on {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("the API server refused the untaint"))
+            async fn taint(&self, _: &str, run: Option<&str>) -> Result<()> {
+                match run {
+                    Some(_) => Ok(()),
+                    None => Err(anyhow::anyhow!("the API server refused the untaint")),
                 }
             }
             async fn cordon(&self, _: &str, _: bool) -> Result<()> {
@@ -464,14 +562,20 @@ pub(crate) mod tests {
             async fn decommission(&self, _: &str, _: bool) -> Result<()> {
                 Ok(())
             }
+            async fn mark(&self, _: &str, _: Option<&str>) -> Result<()> {
+                Ok(())
+            }
             async fn netpol(&self, _: &str, _: &str, _: Option<Value>) -> Result<()> {
                 Ok(())
             }
-            async fn tainted_nodes(&self) -> Result<Vec<String>> {
+            async fn netpol_names(&self, _: &str) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn drill_marks(&self) -> Result<Vec<Mark>> {
                 Ok(vec![])
             }
         }
-        let e = with_taint(&Stuck, "node-a", Duration::from_secs(30), async { Ok(()) }).await.unwrap_err();
+        let e = with_taint(&Stuck, "node-a", RUN, Duration::from_secs(30), async { Ok(()) }).await.unwrap_err();
         assert!(format!("{e:#}").contains("could not undo itself"), "{e:#}");
     }
 }

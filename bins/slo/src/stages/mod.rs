@@ -287,7 +287,8 @@ pub async fn boot(c: &mut Ctx) {
         tracing::error!(op = "mkdir", name = %c.tmp.display(), error = %e, "slo.boot.failed");
     }
     let now = chrono::Utc::now().timestamp();
-    let swept = sweep_all(c, move |name| stale(name, now)).await;
+    let suite = c.suite;
+    let swept = sweep_all(c, move |name| stale(name, suite, now)).await;
     tracing::info!(count = swept, "slo.boot.completed");
 }
 
@@ -317,20 +318,18 @@ pub async fn teardown(c: &mut Ctx) {
 /// whatever the child did — and unconditionally, because the run that left the mess is by
 /// definition not the run that is cleaning it up.
 async fn undo_drills(c: &mut Ctx) {
+    // Only what THIS run's marks name, or litter too old for any run of this suite to hold
+    // (2026-09-12): the sweep used to untaint and uncordon every node it found, so a fast run's
+    // teardown — which happens every five minutes — could lift the decommission a weekly drill
+    // was standing inside and report the product broken for the fast run's own interference.
+    let mine = owns(c, chrono::Utc::now().timestamp());
     if let Some(k) = c.kube.clone() {
-        crate::drill::sweep_nodes(&k, &c.tmp).await;
+        crate::drill::sweep_nodes(&k, &mine).await;
     }
     // The NetworkPolicy is on the OTHER cluster — the one the probe runs in — so it needs its own
     // client, and not having one is the ordinary case outside a pod.
     match crate::drill::incluster() {
-        Ok(k) => {
-            use crate::drill::Cluster;
-            for name in [crate::stages::monthly::NETPOL, crate::stages::monthly::CH_NETPOL] {
-                if let Err(e) = k.netpol("kloudlite", name, None).await {
-                    tracing::warn!(kind = "netpol", name = %name, error = %format!("{e:#}"), "slo.drill.sweep.failed");
-                }
-            }
-        }
+        Ok(k) => crate::drill::sweep_netpols(&k, "kloudlite", &mine).await,
         Err(e) => tracing::debug!(error = %format!("{e:#}"), "slo.drill.sweep.skipped"),
     }
 }
@@ -818,17 +817,31 @@ async fn list(c: &Ctx, k: &Kind, owner: &str, jwt: &str) -> Vec<(String, String)
         .collect()
 }
 
-/// `run-{suite}-{unix}-…` older than `STALE_SECS`. Both the suite AND the timestamp have to
-/// parse: the sweep only ever deletes what it can positively identify as its own litter, and
-/// `run-` is a prefix a person could plausibly give a repo of their own.
-fn stale(name: &str, now: i64) -> bool {
+/// `run-{suite}-{unix}-…` of THIS suite, older than `STALE_SECS`.
+///
+/// Both the suite AND the timestamp have to parse: the sweep only ever deletes what it can
+/// positively identify as its own litter, and `run-` is a prefix a person could plausibly give a
+/// repo of their own. And the suite has to be the CALLER's (2026-09-12): every suite runs as its
+/// own tenant pair, so a fast run that deleted an hourly run's leftovers was reaching into
+/// another journey's objects on nothing but an age test — and the monthly suite's own deadline is
+/// twice `STALE_SECS`, so "too old to belong to a live run" was not even true across suites.
+fn stale(name: &str, mine: Suite, now: i64) -> bool {
     let Some(rest) = name.strip_prefix("run-") else { return false };
     let mut parts = rest.split('-');
     let (Some(suite), Some(ts)) = (parts.next(), parts.next()) else { return false };
-    if Suite::parse(suite).is_none() {
+    if Suite::parse(suite) != Some(mine) {
         return false;
     }
     ts.parse::<i64>().map(|t| now - t > STALE_SECS).unwrap_or(false)
+}
+
+/// The one predicate every drill sweep asks of a mark: is this name THIS run's, or old enough
+/// that no run of this suite can still be holding it? A taint's value is exactly the run prefix
+/// and a policy's name is `{prefix}-redis`, so one rule covers both.
+pub(crate) fn owns(c: &Ctx, now: i64) -> impl Fn(&str) -> bool {
+    let (prefix, suite) = (c.prefix(), c.suite);
+    let dashed = format!("{prefix}-");
+    move |v: &str| v == prefix || v.starts_with(&dashed) || stale(v, suite, now)
 }
 
 #[cfg(test)]
@@ -864,16 +877,35 @@ mod tests {
     #[test]
     fn only_a_probe_object_past_the_deadline_is_stale() {
         let now = 10_000_000;
-        assert!(stale("run-fast-1000-repo", now));
-        assert!(stale("run-fast-1000", now));
+        let fast = Suite::Fast;
+        assert!(stale("run-fast-1000-repo", fast, now));
+        assert!(stale("run-fast-1000", fast, now));
         // Inside the window: another run may still be using it.
-        assert!(!stale(&format!("run-fast-{}-repo", now - 60), now));
+        assert!(!stale(&format!("run-fast-{}-repo", now - 60), fast, now));
         // Not ours, and not shaped like ours.
-        assert!(!stale("someones-repo", now));
+        assert!(!stale("someones-repo", fast, now));
         // A `run-` prefix somebody else chose: the suite segment is not one of ours.
-        assert!(!stale("run-anything-1000-x", now));
-        assert!(!stale("run-fast-notanumber-repo", now));
-        assert!(!stale("run-fast", now));
+        assert!(!stale("run-anything-1000-x", fast, now));
+        assert!(!stale("run-fast-notanumber-repo", fast, now));
+        assert!(!stale("run-fast", fast, now));
+        // A SIBLING suite's litter is never this run's to take: the suites are separate tenants
+        // walking separate journeys, and the monthly deadline is twice `STALE_SECS`.
+        assert!(!stale("run-hourly-1000-repo", fast, now));
+        assert!(!stale("run-fast-1000-repo", Suite::Hourly, now));
+    }
+
+    /// The drill sweep's rule, on the three shapes a mark comes in.
+    #[tokio::test]
+    async fn a_run_owns_its_own_marks_and_stale_ones_of_its_own_suite() {
+        let mut c = crate::testkit::ctx().await;
+        c.suite = Suite::Fast;
+        c.run_id = "fast-10000000".into();
+        let mine = owns(&c, 10_000_000);
+        assert!(mine("run-fast-10000000"), "its own taint value");
+        assert!(mine("run-fast-10000000-redis"), "its own policy name");
+        assert!(mine("run-fast-1000-redis"), "litter of its own suite, past the deadline");
+        assert!(!mine("run-hourly-1000-redis"), "another suite's litter");
+        assert!(!mine("run-fast-9999999-redis"), "a fast run still in flight");
     }
 }
 

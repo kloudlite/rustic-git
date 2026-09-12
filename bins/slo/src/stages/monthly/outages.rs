@@ -47,6 +47,7 @@ pub(crate) async fn clickhouse_down(c: &mut Ctx) {
         let quota = api(c, "/v1/quota");
         let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
         let name = format!("{}-chd", c.prefix());
+        let policy = ch_netpol(&c.prefix());
         async move {
             let body = async {
                 // Long enough that a pooled connection has certainly failed over.
@@ -69,7 +70,7 @@ pub(crate) async fn clickhouse_down(c: &mut Ctx) {
                     code => Err(anyhow!("`/admin/history/*` answered {code} with ClickHouse down, not 503: {}", text.chars().take(160).collect::<String>())),
                 }
             };
-            drill::with_netpol(&k, "kloudlite", CH_NETPOL, deny_clickhouse(&ips), body_cap, body).await
+            drill::with_netpol(&k, "kloudlite", &policy, deny_clickhouse(&ips), body_cap, body).await
         }
         .boxed()
     })
@@ -125,6 +126,7 @@ pub(crate) async fn redis_down(c: &mut Ctx) {
     let name = format!("{}-redis", c.prefix());
     let body_cap = REDIS_DOWN + Duration::from_secs(300);
     c.step("drill.redis.down", step_cap(body_cap), move |c| {
+        let policy = redis_netpol(&c.prefix());
         async move {
             let body = async {
                 // Long enough that anything holding a Redis connection has noticed, then the work
@@ -132,7 +134,7 @@ pub(crate) async fn redis_down(c: &mut Ctx) {
                 tokio::time::sleep(REDIS_DOWN).await;
                 without_redis(c, &name).await
             };
-            drill::with_netpol(&k, "kloudlite", NETPOL, deny_egress(&ips), body_cap, body).await
+            drill::with_netpol(&k, "kloudlite", &policy, deny_egress(&ips), body_cap, body).await
         }
         .boxed()
     })

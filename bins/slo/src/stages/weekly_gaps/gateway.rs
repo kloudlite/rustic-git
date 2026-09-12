@@ -14,8 +14,15 @@ pub(crate) async fn gw_caps(c: &mut Ctx, cold: Option<&str>) {
         return c.skip("gw.caps", "no cold workspace");
     };
     let key = c.cfg.ssh_key_path.clone();
-    c.step("gw.caps", TUNNEL_CEILING, move |c| {
+    // `step_cap`, not the bare body ceiling (2026-09-12): the step used to be capped at exactly
+    // the body's own budget, so the ceiling that fired was the STEP's — which drops the future and
+    // takes the compensation with it, leaving the workspace this drill started running on a pool
+    // node until teardown noticed.
+    c.step("gw.caps", step_cap(TUNNEL_CEILING), move |c| {
+        let stop = api(c, &format!("/v1/workspaces/{ws}/stop"));
+        let stop_jwt = c.probe_jwt.clone();
         async move {
+            let body = async {
             // Started first: stage 7 parks the workspace's pod as soon as its own ids are done
             // (the region's nodes cannot hold four at once), and a tunnel needs something running.
             let doc = api(c, &format!("/v1/workspaces/{ws}"));
@@ -81,6 +88,14 @@ pub(crate) async fn gw_caps(c: &mut Ctx, cold: Option<&str>) {
                 return Err(anyhow!("an eleventh tunnel to one workspace stayed open: the cap of {MAX_PER_WS} is not being enforced"));
             }
             Ok(())
+        };
+        // The start above is a fleet mutation like a taint is: the region's pool nodes are 8 vCPU
+        // and a workspace asks for 2, so one this drill left running is a workspace a later stage
+        // cannot place. Paired here, so it goes back on every path out including the timeout.
+        drill::undoing(TUNNEL_CEILING, body, || async {
+            post(c, &stop, &stop_jwt, Value::Null).await.map(|_| ()).context("the tunnelled workspace was left running")
+        })
+        .await
         }
         .boxed()
     })

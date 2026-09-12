@@ -49,7 +49,11 @@ const REUSE_CEILING: Duration = Duration::from_secs(120);
 /// The cross-node body: a stop that converges and a start that converges, one after the other,
 /// each given half. The STEP gets a minute on top (`step_cap`) so `Ctx::step`'s own timeout can
 /// never fire first and drop the uncordon with it.
-const CROSS_BODY: Duration = Duration::from_secs(300);
+/// Both polls plus slack, because BOTH now run inside the drill's cancellable region: the stop
+/// poll used to sit in front of `with_decommission`, so the step's own ceiling (body + 60 s) could
+/// fire while the start poll was still running and drop the undo with it — the node kept the
+/// decommission label, and only teardown's sweep took it off (2026-09-12).
+const CROSS_BODY: Duration = Duration::from_secs(2 * 150 + 60);
 const CROSS_POLL: Duration = Duration::from_secs(150);
 const EXEC_CEILING: Duration = Duration::from_secs(30);
 /// The catalogue bounds `cp.failover` at 30 s, and that bound IS the wait: a lease that has not
@@ -577,20 +581,20 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
     let moved = {
         let (ws, owner) = (ws.to_string(), owner.clone());
         c.step("ws.cross.node", step_cap(CROSS_BODY), move |c| {
-            let (jwt, tmp) = (c.probe_jwt.clone(), c.tmp.clone());
+            let (jwt, run) = (c.probe_jwt.clone(), c.prefix());
             let (stop, start) = (
                 api(c, &format!("/v1/workspaces/{ws}/stop")),
                 api(c, &format!("/v1/workspaces/{ws}/start")),
             );
             let doc = api(c, &format!("/v1/workspaces/{ws}"));
             async move {
-                post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
-                poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
-                    v.get("state").and_then(Value::as_str) == Some("stopped")
-                })
-                .await
-                .context("it never stopped")?;
                 let body = async {
+                    post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
+                    poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
+                        v.get("state").and_then(Value::as_str) == Some("stopped")
+                    })
+                    .await
+                    .context("it never stopped")?;
                     post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
                     // Ready AND elsewhere, in one predicate: a workspace that came back on the
                     // cordoned node is this SLI failing, not a slow start.
@@ -601,7 +605,7 @@ async fn cross_node(c: &mut Ctx, ws: Option<&str>) {
                     .await
                     .with_context(|| format!("it did not come back ready on a node other than {owner}"))
                 };
-                drill::with_decommission(&k, &tmp, &owner, CROSS_BODY, body).await
+                drill::with_decommission(&k, &owner, &run, CROSS_BODY, body).await
             }
             .boxed()
         })
@@ -655,20 +659,20 @@ async fn env_cross_node(c: &mut Ctx) {
         return c.skip("env.cross.node", "the environment names no node");
     };
     c.step("env.cross.node", step_cap(CROSS_BODY), move |c| {
-        let (jwt, tmp) = (c.probe_jwt.clone(), c.tmp.clone());
+        let (jwt, run) = (c.probe_jwt.clone(), c.prefix());
         let (stop, start) = (
             api(c, &format!("/v1/environments/{env}/stop")),
             api(c, &format!("/v1/environments/{env}/start")),
         );
         let doc = api(c, &format!("/v1/environments/{env}"));
         async move {
-            post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
-            poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
-                v.get("state").and_then(Value::as_str) == Some("stopped")
-            })
-            .await
-            .context("it never stopped")?;
             let body = async {
+                post(c, &stop, &jwt, Value::Null).await.context("could not stop it")?;
+                poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
+                    v.get("state").and_then(Value::as_str) == Some("stopped")
+                })
+                .await
+                .context("it never stopped")?;
                 post(c, &start, &jwt, Value::Null).await.context("could not start it")?;
                 poll_json(c, &doc, &jwt, CROSS_POLL, |v| {
                     v.get("state").and_then(Value::as_str) == Some("running")
@@ -693,7 +697,7 @@ async fn env_cross_node(c: &mut Ctx) {
                 Ok(())
             };
             // The label, not a cordon — the same reason `ws.cross.node` uses it.
-            drill::with_decommission(&k, &tmp, &owner, CROSS_BODY, body).await
+            drill::with_decommission(&k, &owner, &run, CROSS_BODY, body).await
         }
         .boxed()
     })

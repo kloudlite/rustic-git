@@ -168,7 +168,10 @@ pub(crate) async fn limits(c: &mut Ctx) {
     let name = format!("{}-limits", c.prefix());
     let dir = c.tmp.join("img-limits");
     let host = super::super::registry::host(c);
-    c.step("git.limits", READ_CEILING, move |c| {
+    // `step_cap`, because the blob this id uploads is now deleted in a compensation: the step's
+    // own ceiling drops the future, so the body needs a ceiling of its own that fires first or a
+    // slow run leaves 5 MiB of blob per week behind (2026-09-12).
+    c.step("git.limits", step_cap(READ_CEILING), move |c| {
         let crane = super::super::registry::authed(c);
         let base = super::super::registry::base(c);
         async move {
@@ -180,6 +183,9 @@ pub(crate) async fn limits(c: &mut Ctx) {
                 .await
                 .context("could not mint a registry token")?;
             let v2 = format!("{base}/v2/{probe}/{name}");
+            let digest = super::super::registry::sha256(&vec![b'x'; OVER_MANIFEST]);
+            let blob = format!("{v2}/blobs/{digest}");
+            let body = async {
             // A manifest over its own 4 MiB ceiling: refused, and by the MANIFEST limit.
             let big = vec![b'x'; OVER_MANIFEST];
             let r = c
@@ -196,7 +202,6 @@ pub(crate) async fn limits(c: &mut Ctx) {
             }
             // The same number of bytes as a BLOB: accepted, because that limit is a different one.
             let session = start_upload(c, &v2, &token).await?;
-            let digest = super::super::registry::sha256(&big);
             let put = format!("{session}{}digest={digest}", if session.contains('?') { "&" } else { "?" });
             let (status, text, _) = raw_v2(c, reqwest::Method::PUT, &put, &token, Some(big)).await?;
             if !status.is_success() {
@@ -205,8 +210,15 @@ pub(crate) async fn limits(c: &mut Ctx) {
                     text.chars().take(160).collect::<String>()
                 ));
             }
-            let _ = raw_v2(c, reqwest::Method::DELETE, &format!("{v2}/blobs/{digest}"), &token, None).await;
             Ok(())
+            };
+            drill::undoing(READ_CEILING, body, || async {
+                raw_v2(c, reqwest::Method::DELETE, &blob, &token, None)
+                    .await
+                    .map(|_| ())
+                    .context("the 5 MiB probe blob was left in the registry")
+            })
+            .await
         }
         .boxed()
     })

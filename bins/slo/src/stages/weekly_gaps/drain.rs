@@ -125,17 +125,20 @@ pub(crate) async fn moved_image(c: &mut Ctx) {
             // Warm: this pull opens the image's database on whichever node owns it now.
             let _ = std::fs::remove_dir_all(&dest);
             crane.pull(&reference, &dest).await.context("the image would not pull before the move")?;
-            // Every pod out and back, one at a time — the ownership map moves with them. Inside
-            // `undoing` like every other fleet mutation: a body that times out mid-restart must
-            // still leave the tier waited out rather than half rolled.
+            // The tier ROLLS, the way a deploy rolls it — `roll.zero.errors`' own verb — rather
+            // than the probe deleting every pod by name (2026-09-12): the ownership map moves
+            // either way, but only the roll respects the StatefulSet's ordering, and only the
+            // roll is the event this id claims to measure. Inside `undoing` like every other
+            // fleet mutation: a body that times out mid-restart must still leave the tier waited
+            // out rather than half rolled.
             let settle = || async { settled(&sts).await.context("the srv tier was left mid-restart") };
             let body = async {
-                for (pod, _) in pod_names(&pods).await? {
-                    pods.delete(&pod, &kube::api::DeleteParams::default())
-                        .await
-                        .map_err(|e| anyhow!("could not restart {pod}: {e}"))?;
-                    settled(&sts).await.with_context(|| format!("the tier did not come back after {pod}"))?;
-                }
+                settled(&sts).await.context("the srv tier was already mid-roll, so this is not our roll")?;
+                let before = pod_names(&pods).await?;
+                start_roll(&sts).await?;
+                wait_rolled(&pods, &sts, &before, ROLL_CAP - Duration::from_secs(120))
+                    .await
+                    .context("the tier did not come back after the roll")?;
                 let _ = std::fs::remove_dir_all(&dest);
                 crane
                     .pull(&reference, &dest)

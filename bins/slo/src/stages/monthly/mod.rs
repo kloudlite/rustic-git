@@ -76,17 +76,24 @@ pub async fn run(c: &mut Ctx) {
 }
 
 
-/// The second policy this probe ever writes, deleted on every path out and blind in teardown.
-pub const CH_NETPOL: &str = "slo-drill-clickhouse";
+/// The second policy this probe ever writes, deleted on every path out and by the run's own sweep.
+///
+/// Named after the RUN (2026-09-12), like the taint's value and the drill label: a fixed name made
+/// every run's teardown delete every run's policy, so a fast run five minutes into a monthly Redis
+/// drill lifted the deny and the drill measured a fleet that was never cut off.
+pub fn ch_netpol(prefix: &str) -> String {
+    format!("{prefix}-denych")
+}
 
 
 /// The reason every id that needs a genuinely dead node carries, naming where the recipe lives.
 pub(super) const NODE_LEVEL_DRILL: &str = "a dead node needs the operator's node-level drill: stop the kubelet on one pool node — recipe in deploy/k3s/README.md";
 
 
-/// The one NetworkPolicy this probe ever writes, named here because teardown deletes it blind on
-/// every run — including runs that never went near a drill.
-pub const NETPOL: &str = "slo-drill-redis";
+/// The Redis deny, named the same way and for the same reason as `ch_netpol`.
+pub fn redis_netpol(prefix: &str) -> String {
+    format!("{prefix}-denyredis")
+}
 
 
 #[cfg(test)]

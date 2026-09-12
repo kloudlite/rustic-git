@@ -36,7 +36,15 @@ pub(crate) async fn decommission(c: &mut Ctx) {
         let jwt = c.admin_jwt.clone();
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
         let reason = json!({ "reason": format!("slo probe decommission drill {}", c.run_id) });
+        let run = c.prefix();
         async move {
+            // The node is marked BEFORE anything touches it, for the same reason
+            // `with_cordon` marks: a cordon is a state an operator reaches by hand, so only this
+            // label says which run left it and lets that run's own sweep take it back.
+            {
+                use crate::drill::Cluster;
+                k.mark(&node, Some(&run)).await.context("could not mark the drill node")?;
+            }
             // The undo is established BEFORE the first decommission POST, not after it. The gate
             // being OPEN is the very failure this id exists to catch — and it is also the state a
             // node an earlier run left stamped `drained` is in — so a POST outside this region
@@ -46,7 +54,11 @@ pub(crate) async fn decommission(c: &mut Ctx) {
                 use crate::drill::Cluster;
                 let uncordon = k.cordon(&node, false).await.context("the node was left CORDONED");
                 let undrained = verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING");
-                uncordon.and(undrained)
+                // Last, so a mark is only dropped once both mutations are back: the sweep reads
+                // the label to find a cordon a killed run left, and a label removed first would
+                // make the cordon invisible to it (2026-09-12).
+                let unmarked = k.mark(&node, None).await.context("the drill mark was left on the node");
+                uncordon.and(undrained).and(unmarked)
             };
             let body = async {
                 // Before the drain: nothing has stamped `drained`, so this must be refused.

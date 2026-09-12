@@ -48,18 +48,7 @@ pub(crate) async fn roll_zero_errors(c: &mut Ctx) {
         async move {
             settled(&sts).await.context("the srv tier was already mid-roll, so this is not our roll")?;
             let before = pod_names(&pods).await?;
-            let stamp = chrono::Utc::now().to_rfc3339();
-            sts.patch(
-                SRV,
-                &PatchParams::default(),
-                &Patch::Merge(&json!({
-                    "spec": { "template": { "metadata": { "annotations": {
-                        "kloudlite.io/restarted-at": stamp,
-                    }}}}
-                })),
-            )
-            .await
-            .map_err(|e| anyhow!("the roll could not be started: {e}"))?;
+            start_roll(&sts).await?;
             let settle = || async {
                 settled(&sts).await.context("the srv tier was left mid-roll")
             };
@@ -69,6 +58,58 @@ pub(crate) async fn roll_zero_errors(c: &mut Ctx) {
         .boxed()
     })
     .await;
+}
+
+
+/// Start a rolling restart of the srv tier the way the settings machinery does — a merge patch of
+/// `kloudlite.io/restarted-at` on the pod template.
+///
+/// Shared with `reg.moved.image` (2026-09-12), which used to delete every srv pod by name. A
+/// delete bypasses the StatefulSet's own rollout ordering and its `podManagementPolicy`, so the
+/// drill could have two pods down at once and measured a tier it had half torn down rather than
+/// one that rolled; it also needed `pods: delete` on the probe's identity for a call the deploy
+/// itself never makes.
+pub(crate) async fn start_roll(sts: &Api<StatefulSet>) -> Result<()> {
+    let stamp = chrono::Utc::now().to_rfc3339();
+    sts.patch(
+        SRV,
+        &PatchParams::default(),
+        &Patch::Merge(&json!({
+            "spec": { "template": { "metadata": { "annotations": {
+                "kloudlite.io/restarted-at": stamp,
+            }}}}
+        })),
+    )
+    .await
+    .map_err(|e| anyhow!("the roll could not be started: {e}"))?;
+    Ok(())
+}
+
+
+/// Wait until every pod carrying one of `before`'s UIDs is gone and the tier is full again.
+///
+/// By UID, never by name — `kloudlite-srv-0` is deleted and recreated under the same name, so a
+/// name test can never become true. `settled` alone is not enough right after `start_roll`: the
+/// StatefulSet controller has not reacted yet, so its status still describes the OLD pods and
+/// reads as finished.
+pub(crate) async fn wait_rolled(
+    pods: &Api<Pod>,
+    sts: &Api<StatefulSet>,
+    before: &[(String, String)],
+    cap: Duration,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    let olds: Vec<&String> = before.iter().map(|(_, uid)| uid).collect();
+    loop {
+        let now = pod_names(pods).await?;
+        if now.iter().all(|(_, uid)| !olds.contains(&uid)) && now.len() >= before.len() {
+            return settled(sts).await;
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("the roll did not finish in {} s", cap.as_secs()));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 
