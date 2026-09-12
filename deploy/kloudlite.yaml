@@ -101,9 +101,6 @@ spec:
               value: /var/cache/kloudlite
             - name: KLOUDLITE_PEER_SVC
               value: kloudlite.kloudlite.svc.cluster.local
-            # Stopgap (2026-09-12): kept until every server reader takes the projected file; the file wins when both exist.
-            - name: KLOUDLITE_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
             # Stopgap (2026-09-12): the server's config reader still takes this from the environment;
             # removed again once every reader goes through the projected file.
             - name: KLOUDLITE_PEER_SECRET
