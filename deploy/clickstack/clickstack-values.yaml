@@ -139,6 +139,17 @@ hyperdx:
       # ingress in deploy/kloudlite.yaml documents. TLS is the edge's; the origin cert only
       # exists so the record can go Full later without a second change.
       nginx.ingress.kubernetes.io/ssl-redirect: "false"
+      # Same pair the app and registry ingresses in deploy/kloudlite.yaml carry: per client IP
+      # (real IP via deploy/ingress-nginx-config.yaml), 50 r/s with a 5x burst — far above what a
+      # console user generates and far below what an unauthenticated scraper does.
+      nginx.ingress.kubernetes.io/limit-rps: "50"
+      nginx.ingress.kubernetes.io/limit-burst-multiplier: "5"
+      # The console is an operator surface, so the door is shut to everyone else: this is
+      # `ADMIN_CIDR` from deploy/k3s/env.sh (that file is not in git; the placeholder below is
+      # env.example.sh's). This value is a LITERAL — the chart is installed with `helm -f` and
+      # nothing substitutes it — so set it to the real operator CIDR before installing, the same
+      # way harden-node.sh is given one.
+      nginx.ingress.kubernetes.io/whitelist-source-range: "203.0.113.1/32"
       # No basic auth in front: HyperDX's own login is the gate. The first account was created
       # right after the install (the sign-up form is open only until then), and a second prompt
       # on every visit was judged not worth its cost.

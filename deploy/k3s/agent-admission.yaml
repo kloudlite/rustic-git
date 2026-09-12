@@ -51,8 +51,15 @@ spec:
         resources: ["workspaces", "environments", "volumes", "ownerbindings", "ownerkeys", "snapshots",
                     "volumereplicas"]
   matchConditions:
-    - name: from-the-agent
-      expression: "request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-agent'"
+    # The SLO probe is fenced by the same policy, not by a second one: its role holds
+    # `workspaces: patch` (for the dry-run in `sec.agent.spec`), which RBAC reads as "may rewrite
+    # any Workspace spec" and nothing else refuses. It has none of the agent's carve-outs to lose
+    # — it never writes a Volume, a finalizer or a label — so being judged by the agent's rules
+    # simply denies it every spec write, which is what the probe's own sample asserts.
+    - name: from-the-agent-or-the-probe
+      expression: >-
+        request.userInfo.username in ['system:serviceaccount:kube-system:kloudlite-agent',
+                                      'system:serviceaccount:kube-system:kloudlite-slo']
   validations:
     # A create has no oldObject, so it gets its own arm. The only Volume the agent authors is a
     # PARENT'S CHILD (`ensure_child_volume`, which sets an ownerReference and lets garbage

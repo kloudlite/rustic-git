@@ -124,6 +124,17 @@
 #                                                                       controller wrote, for a service
 #                                                                       of an environment it reconciles,
 #                                                                       in a namespace it reconciles
+#   endpoints                              delete                       intercept controller: the
+#                                                                       legacy Endpoints object
+#                                                                       Kubernetes abandons for an
+#                                                                       intercepted Service, deleted
+#                                                                       by the Service's own name so
+#                                                                       the mirroring controller
+#                                                                       cannot rebuild a slice
+#                                                                       naming the stopped pod
+#                                                                       (agent-admission.yaml's
+#                                                                       DELETE fence pins the
+#                                                                       namespace)
 #   secrets                                get,create                   ensure_ssh — NOT here: bound
 #                                                                       per `ws-*` namespace by the
 #                                                                       agent itself (below)

@@ -17,8 +17,14 @@
 # | the namespace quota `owner-quota` is projected| resourcequotas: get, list                          |
 # | team.namespace.reaped: the wt- namespace is gone| namespaces: get, list                            |
 # | teardown deletes the requests this run opened | requests, quotarequests: get, list, delete         |
-# | dead-node drill deletes ONE agent pod         | pods: delete in kube-system, DaemonSet's pods only |
+# | the roll guard reads gateway/builder-gate     | deployments: get, list                             |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
+#
+# There is no `pods: delete`: the monthly dead-node drill is a hard skip
+# (`bins/slo/src/stages/monthly/nodes.rs`, `c.skip("drill.dead.node", …)`), so the
+# `kloudlite-slo-drill` Role and its binding — delete on every pod in kube-system, the agent
+# DaemonSet's included — were a standing grant for a call nothing makes. Restore them with the
+# drill, not before.
 #
 # `pods/exec` is cluster-wide because a workspace pod lives in `ws-slo-probe` and an environment's
 # in `env-{id}`, a namespace that exists for one run — a per-namespace Role could not be written
@@ -95,6 +101,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
+  # Scheduled for removal with plan batch 2.3: `sec.agent.spec` is to assert the admission refusal
+  # with a SelfSubjectAccessReview (or a purpose-made SA) instead of impersonating the agent, and
+  # this grant goes with the probe change — not before it, or the id stops sampling.
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["impersonate"]
@@ -108,33 +117,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: kloudlite-slo
-subjects:
-  - kind: ServiceAccount
-    name: kloudlite-slo
-    namespace: kube-system
----
-# The one delete: the monthly dead-node drill removes the agent pod on the node it tainted. Pod
-# names are generated, so this cannot be narrowed by resourceName; it is narrowed by namespace
-# instead — the agent DaemonSet is the only kloudlite workload in kube-system on a region.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: kloudlite-slo-drill
-  namespace: kube-system
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kloudlite-slo-drill
-  namespace: kube-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: kloudlite-slo-drill
 subjects:
   - kind: ServiceAccount
     name: kloudlite-slo
