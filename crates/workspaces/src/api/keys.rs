@@ -147,15 +147,44 @@ pub async fn run_beat(s: Arc<ApiState>) {
 /// them, every one empty, one per hourly probe run since 2026-09-05. The rule mirrors the
 /// `OwnerKeys` prune above — an object no Workspace resolves to has nothing reading it, and the
 /// next workspace create rebuilds it — with two extra guards, because a namespace delete cascades
-/// to everything inside it: `ws-` (a person's own, which holds their `user-key` Secret) is never
-/// a candidate whatever else is true, and one younger than a beat is left alone, which closes the
-/// window between `apply_binding` creating a namespace and the workspace that needed it becoming
-/// listable.
-fn stale_namespaces(keep: &BTreeSet<String>, seen: &[(String, i64)], max_age: i64) -> Vec<String> {
+/// to everything inside it: a PERSON's own `ws-` namespace (which holds their `user-key` Secret)
+/// is never a candidate whatever else is true, and one younger than a beat is left alone, which
+/// closes the window between `apply_binding` creating a namespace and the workspace that needed
+/// it becoming listable.
+///
+/// `ws-` is not only a person's, though: `ws_namespace` also returns `ws-{owner}` when the team
+/// IS the owner, so a workspace owned by a team slug lands in one too — and because nothing here
+/// would touch a `ws-` name, a region held 89 leaked `ws-run-hourly-*-team` namespaces by
+/// 2026-09-12, one per hourly probe run, each re-walked by every agent every tick. `teams` is the
+/// directory's answer for the `ws-` owners that pass the other guards; an owner the directory
+/// does not call a team — including every owner it could not answer for — stays exempt.
+fn stale_namespaces(
+    keep: &BTreeSet<String>,
+    seen: &[(String, i64)],
+    max_age: i64,
+    teams: &BTreeSet<String>,
+) -> Vec<String> {
     seen.iter()
-        .filter(|(name, age)| name.starts_with("wt-") && !keep.contains(name) && *age >= max_age)
+        .filter(|(name, age)| !keep.contains(name) && *age >= max_age)
+        .filter(|(name, _)| match name.strip_prefix("ws-") {
+            Some(owner) => teams.contains(owner),
+            None => name.starts_with("wt-"),
+        })
         .map(|(name, _)| name.clone())
         .collect()
+}
+
+/// The `ws-` owners the directory calls teams, asked only for the namespaces that already pass
+/// the age and keep guards — the leak is a handful of names, and a lookup per namespace per beat
+/// would make this beat's latency the region's namespace count.
+async fn team_owners(s: &ApiState, keep: &BTreeSet<String>, seen: &[(String, i64)], max_age: i64) -> BTreeSet<String> {
+    let owners: Vec<String> = seen
+        .iter()
+        .filter(|(name, age)| !keep.contains(name) && *age >= max_age)
+        .filter_map(|(name, _)| name.strip_prefix("ws-").map(str::to_string))
+        .collect();
+    let answers = futures::future::join_all(owners.iter().map(|o| super::scope::is_team(s, o))).await;
+    owners.into_iter().zip(answers).filter(|(_, team)| *team).map(|(o, _)| o).collect()
 }
 
 /// The namespace half of the same beat: see `stale_namespaces` for the rule and why it is safe.
@@ -194,8 +223,10 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             (n.name_any(), age)
         })
         .collect();
+    let max_age = KEYS_RESYNC_SECS as i64;
+    let teams = team_owners(s, &keep, &seen, max_age).await;
     let api: Api<Namespace> = Api::all(c.clone());
-    for name in stale_namespaces(&keep, &seen, KEYS_RESYNC_SECS as i64) {
+    for name in stale_namespaces(&keep, &seen, max_age, &teams) {
         // The last guard, and the reason it is here rather than in the rule above: a Workspace
         // that lost its labels is invisible to the keep set but its POD is not, and a namespace
         // delete would take the pod with it. Unreadable counts as occupied — a guard that cannot
@@ -213,7 +244,10 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             }
         }
         match api.delete(&name, &Default::default()).await {
-            Ok(_) => tracing::info!(namespace = %name, "keys.namespace.pruned"),
+            Ok(_) => {
+                let owner_kind = if name.starts_with("ws-") { "team" } else { "member" };
+                tracing::info!(namespace = %name, %owner_kind, "keys.namespace.pruned");
+            }
             Err(kube::Error::Api(e)) if e.code == 404 => {}
             Err(e) => tracing::warn!(namespace = %name, error = %e, "keys.namespace.prune.failed"),
         }
@@ -332,7 +366,26 @@ mod tests {
             ("wt-bob-dead".to_string(), 9999),  // the only stale one
             ("wt-bob-young".to_string(), 10),   // too new to judge
         ];
-        assert_eq!(stale_namespaces(&keep, &seen, 300), vec!["wt-bob-dead".to_string()]);
+        assert_eq!(stale_namespaces(&keep, &seen, 300, &BTreeSet::new()), vec!["wt-bob-dead".to_string()]);
+    }
+
+    /// The 2026-09-12 leak: a workspace owned by a TEAM slug gets `ws-{team}` from `ws_namespace`,
+    /// and the old rule skipped every `ws-` name, so 89 of them piled up. A person's stays exempt
+    /// in exactly the same state, and a team's that a Workspace still resolves to is kept.
+    #[test]
+    fn a_team_owned_ws_namespace_is_stale_but_a_persons_never_is() {
+        let teams = BTreeSet::from(["run-hourly-1-team".to_string(), "acme".to_string()]);
+        let seen = vec![
+            ("ws-run-hourly-1-team".to_string(), 9999), // team-owned, nothing resolves to it
+            ("ws-bob".to_string(), 9999),               // a person, same state — exempt
+            ("ws-acme".to_string(), 9999),              // team-owned, but a workspace names it
+            ("ws-run-hourly-2-team".to_string(), 10),   // team-owned but too new to judge
+        ];
+        let keep = BTreeSet::from(["ws-acme".to_string()]);
+        assert_eq!(
+            stale_namespaces(&keep, &seen, 300, &teams),
+            vec!["ws-run-hourly-1-team".to_string()]
+        );
     }
 
     /// An empty keep set is the shape a region with no workspaces has, and it must NOT turn every
@@ -340,7 +393,7 @@ mod tests {
     #[test]
     fn an_empty_keep_set_still_spares_every_personal_namespace() {
         let seen = vec![("ws-bob".to_string(), 9999), ("wt-bob-x".to_string(), 9999)];
-        assert_eq!(stale_namespaces(&BTreeSet::new(), &seen, 300), vec!["wt-bob-x".to_string()]);
+        assert_eq!(stale_namespaces(&BTreeSet::new(), &seen, 300, &BTreeSet::new()), vec!["wt-bob-x".to_string()]);
     }
 
     /// The object is the file plus a generation and nothing else: no ownerReference (it outlives
