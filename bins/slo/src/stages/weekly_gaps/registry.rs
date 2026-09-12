@@ -109,10 +109,19 @@ pub(crate) async fn start_upload(c: &Ctx, v2: &str, token: &str) -> Result<Strin
         return Err(anyhow!("starting an upload answered {status} with location {location:?}"));
     }
     // The registry may answer an absolute URL or a path; both are legal, and only one is a URL.
-    Ok(match location.starts_with("http") {
+    let origin = v2.split("/v2/").next().unwrap_or_default();
+    let session = match location.starts_with("http") {
         true => location,
-        false => format!("{}{location}", v2.split("/v2/").next().unwrap_or_default()),
-    })
+        false => format!("{origin}{location}"),
+    };
+    // And it must be OUR registry (2026-09-12): the next call PATCHes 2 KiB and then a 5 MiB blob
+    // to whatever this header names, with the probe's bearer token on it — a `Location` pointing
+    // somewhere else is a credential and a body handed to a third party, and the probe followed
+    // it without looking.
+    if !session.starts_with(origin) {
+        return Err(anyhow!("an upload session was located at {session:?}, off the registry's own origin {origin:?}"));
+    }
+    Ok(session)
 }
 
 

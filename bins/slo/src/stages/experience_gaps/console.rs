@@ -48,7 +48,7 @@ pub(crate) async fn admin_stop_environment(c: &mut Ctx) {
     };
     c.step("admin.stop.environment", ADMIN_ENV_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let one = api(c, &format!("/v1/environments/{env}"));
         let stop = admin(c, &format!("/admin/environments/{env}/stop"));
         async move {
@@ -80,7 +80,7 @@ pub(crate) async fn admin_delete(c: &mut Ctx) {
     let name = format!("{}-ad", c.prefix());
     c.step("admin.delete.workload", ADMIN_DELETE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let region = c.cfg.region.clone();
         let workspaces = api(c, "/v1/workspaces");
         let environments = api(c, "/v1/environments");
@@ -136,7 +136,7 @@ pub(crate) async fn admin_delete(c: &mut Ctx) {
 pub(crate) async fn screens(c: &mut Ctx) {
     let probe = c.probe_user.clone();
     c.step("admin.screens", READ_CEILING, move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let owners = admin(c, "/admin/owners");
         let owner = admin(c, &format!("/admin/owners/{probe}"));
         let clusters = admin(c, "/admin/clusters");
@@ -171,7 +171,7 @@ pub(crate) async fn screens(c: &mut Ctx) {
 /// are drawn from. A save that would roll a reader it cannot see is a save that never lands.
 pub(crate) async fn workloads(c: &mut Ctx) {
     c.step("admin.workloads.read", READ_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/workloads");
         async move {
             let rows = get(c, &url, &jwt).await.context("could not read the workloads")?;
@@ -218,7 +218,7 @@ pub(crate) async fn workloads(c: &mut Ctx) {
 /// has already filed at least one row by the time this runs.
 pub(crate) async fn audit_export(c: &mut Ctx) {
     c.step("audit.export", READ_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/audit.csv?limit=50");
         async move {
             let (status, body) = raw(c, reqwest::Method::GET, &url, &jwt, None, &[]).await?;
@@ -252,7 +252,7 @@ pub(crate) async fn decide_kinds(c: &mut Ctx) {
     c.step("req.decide.kinds", DECIDE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let other = c.other_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let team = api(c, &format!("/v1/teams/{slug}"));
         async move {
             post(c, &api(c, "/v1/teams"), &jwt, json!({ "slug": slug, "name": "slo probe requests" }))
@@ -330,7 +330,7 @@ pub(crate) fn denied_with(request: &Value, note: &str) -> Result<()> {
 /// filed one: a request nobody will ever see.
 pub(crate) async fn legacy_union(c: &mut Ctx) {
     c.step("req.legacy.union", READ_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let legacy = admin(c, "/admin/quota-requests");
         let migrate = admin(c, "/admin/requests/migrate");
         let queue = admin(c, "/admin/requests");
@@ -364,7 +364,7 @@ pub(crate) async fn region_status(c: &mut Ctx) {
     let region = c.cfg.region.clone();
     c.step("region.status", READ_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let list = api(c, "/v1/regions");
         let detail = admin(c, &format!("/admin/clusters/{region}"));
         async move {

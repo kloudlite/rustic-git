@@ -55,7 +55,7 @@ async fn queue(c: &mut Ctx) -> Option<String> {
     let reason = format!("{} slo probe", c.prefix());
     c.step("req.queue", QUEUE_CEILING, move |c| {
             let jwt = c.probe_jwt.clone();
-            let admin_jwt = c.admin_jwt.clone();
+            let admin_jwt = c.admin_jwt();
             let url = api(c, "/v1/requests");
             let queue = admin(c, "/admin/requests");
             let body = serde_json::json!({
@@ -100,7 +100,7 @@ async fn queue(c: &mut Ctx) -> Option<String> {
 async fn audit_row(c: &mut Ctx, id: &str) {
     let id = id.to_string();
     let ok = c.step("audit.row", AUDIT_CEILING, move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let deny = admin(c, &format!("/admin/requests/{id}/deny"));
         // `action` and `target` are exactly what `deny_request` records, so a row that comes back
         // is this deny's own and not some other admin's.
@@ -188,7 +188,7 @@ async fn dual_written(c: &Ctx, url: &str, jwt: &str, target: &str) -> Result<()>
 /// transition's `ts` to `SignalRow` and compare its age here.
 async fn signals(c: &mut Ctx) {
     c.step("signals.fresh", SIGNALS_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let region = c.cfg.region.clone();
         let url = admin(c, "/admin/monitoring/signals");
         async move {
@@ -213,7 +213,7 @@ async fn signals(c: &mut Ctx) {
 /// whole path — collector, ClickHouse, the query — is up.
 async fn history(c: &mut Ctx) {
     c.step("history.api", HISTORY_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/history/audit_events?range=7d&step=1d");
         async move {
             let v = get(c, &url, &jwt).await.context("the history API would not answer")?;

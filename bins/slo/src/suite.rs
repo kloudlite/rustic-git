@@ -143,7 +143,7 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
 /// the answer is `false` on any error, because a probe that cannot ask must still probe.
 pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
     let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=3", suite.as_str()));
-    let v = match stages::get(c, &url, &c.admin_jwt).await {
+    let v = match stages::get(c, &url, &c.admin_jwt()).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(suite = suite.as_str(), error = %format!("{e:#}"), "slo.inflight.check.failed");

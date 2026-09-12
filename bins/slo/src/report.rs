@@ -68,7 +68,7 @@ impl Ctx {
             match self
                 .http
                 .put(&url)
-                .header("authorization", self.bearer(&self.admin_jwt))
+                .header("authorization", self.bearer(&self.admin_jwt()))
                 .json(&report)
                 .send()
                 .await

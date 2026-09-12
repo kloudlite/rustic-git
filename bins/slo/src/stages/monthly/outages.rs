@@ -42,7 +42,7 @@ pub(crate) async fn clickhouse_down(c: &mut Ctx) {
     let body_cap = Duration::from_secs(180);
     c.step("drill.clickhouse.down", step_cap(body_cap), move |c| {
         let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let repos = api(c, "/v1/repos");
         let quota = api(c, "/v1/quota");
         let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
@@ -123,6 +123,9 @@ pub(crate) async fn redis_down(c: &mut Ctx) {
         Ok(ips) => ips,
         Err(e) => return c.skip("drill.redis.down", &format!("{e:#}")),
     };
+    // Whichever srv pod the API server names first. `None` — an unreadable listing — falls back
+    // to the whole tier, the old behaviour, rather than skipping the drill.
+    let victim = one_srv_pod(&k).await;
     let name = format!("{}-redis", c.prefix());
     let body_cap = REDIS_DOWN + Duration::from_secs(300);
     c.step("drill.redis.down", step_cap(body_cap), move |c| {
@@ -134,7 +137,7 @@ pub(crate) async fn redis_down(c: &mut Ctx) {
                 tokio::time::sleep(REDIS_DOWN).await;
                 without_redis(c, &name).await
             };
-            drill::with_netpol(&k, "kloudlite", &policy, deny_egress(&ips), body_cap, body).await
+            drill::with_netpol(&k, "kloudlite", &policy, deny_egress(&ips, victim.as_deref()), body_cap, body).await
         }
         .boxed()
     })
@@ -148,16 +151,25 @@ pub(crate) async fn redis_down(c: &mut Ctx) {
 /// deny rule: an egress policy is an allow-list, and `except` inside a wide CIDR is the only way to
 /// punch one hole in it. DNS is opened separately — without it the pods cannot resolve anything at
 /// all, and the drill would be measuring a DNS outage rather than a Redis one.
-pub(crate) fn deny_egress(ips: &[String]) -> Value {
-    json!({
-        "podSelector": { "matchExpressions": [
+pub(crate) fn deny_egress(ips: &[String], srv_pod: Option<&str>) -> Value {
+    // ONE srv pod when we can name one (2026-09-12): the drill's claim is that a process keeps
+    // working with Redis down, and cutting the WHOLE tier off at once turns a controlled drill
+    // into a region-wide outage for its three minutes — a fast run that started underneath it
+    // measured the drill. The worker and the admin process still go in whole: neither serves a
+    // person, and the admin one is the `history` consumer group the drill is about.
+    let mut selector = json!({ "matchExpressions": [
             // `kloudlite-admin` too: it is the `history` consumer group, and the claim about it is
             // that it IDLES with Redis down — which nothing was measuring, because the policy did
             // not reach it.
             // `kloudlite`, not `kloudlite-srv`: the srv pods carry the tier's name, not the
             // StatefulSet's (`app: kloudlite, role: server` in deploy/kloudlite.yaml).
             { "key": "app", "operator": "In", "values": ["kloudlite", "kloudlite-worker", "kloudlite-admin"] }
-        ]},
+        ]});
+    if let Some(pod) = srv_pod {
+        selector = json!({ "matchLabels": { "statefulset.kubernetes.io/pod-name": pod } });
+    }
+    json!({
+        "podSelector": selector,
         "policyTypes": ["Egress"],
         "egress": [
             { "to": [{ "ipBlock": {
@@ -171,6 +183,18 @@ pub(crate) fn deny_egress(ips: &[String]) -> Value {
     })
 }
 
+
+/// One `kloudlite-srv` pod by name, for the policy's `podSelector`. Best effort: without a name
+/// the drill falls back to the whole tier.
+async fn one_srv_pod(k: &kube::Client) -> Option<String> {
+    let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k.clone(), "kloudlite");
+    api.list(&kube::api::ListParams::default().labels("app=kloudlite,role=server").limit(1))
+        .await
+        .ok()?
+        .items
+        .first()
+        .map(kube::ResourceExt::name_any)
+}
 
 /// The addresses `host` resolves to, through the same `dig` stage 10 uses.
 pub(crate) async fn resolve(c: &Ctx, host: &str) -> Result<Vec<String>> {
@@ -253,7 +277,7 @@ pub(crate) async fn without_redis(c: &Ctx, name: &str) -> Result<()> {
     // stream unreachable it must keep answering its own reads rather than wedging on the consumer.
     // A 503 is the no-ClickHouse deployment and is fine; a 500 or a hang is the claim being false.
     let history = admin(c, "/admin/history/audit_events?range=1d&step=1h");
-    let (status, text) = super::super::raw(c, reqwest::Method::GET, &history, &c.admin_jwt, None, &[]).await?;
+    let (status, text) = super::super::raw(c, reqwest::Method::GET, &history, &c.admin_jwt(), None, &[]).await?;
     match status.as_u16() {
         503 => Ok(()),
         code if (200..300).contains(&code) => Ok(()),

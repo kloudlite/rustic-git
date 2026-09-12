@@ -13,7 +13,7 @@
 # | ws.replicated names the peer that holds a cut | volumereplicas: get, list                          |
 # | the keys projection lands and the agent acks  | ownerkeys: get, list, watch                        |
 # | env.attach.pair reads the attach-{ws} policy  | networkpolicies: get, list                         |
-# | cordon (weekly), taint (monthly)              | nodes: get, list, patch                            |
+# | cordon (weekly), taint (monthly), drill label | nodes: get, list, patch                            |
 # | the namespace quota `owner-quota` is projected| resourcequotas: get, list                          |
 # | team.namespace.reaped: the wt- namespace is gone| namespaces: get, list                            |
 # | teardown deletes the requests this run opened | requests, quotarequests: get, list, delete         |
@@ -98,12 +98,24 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list"]
+  # `nodes: patch` is the widest grant on this role and it cannot be narrowed by RBAC: the API
+  # server authorizes a patch by resource and name, never by which FIELD or label it touches, and
+  # the drills choose their node at run time (`monthly::idle_node`), so there is no `resourceNames`
+  # list to write. What bounds it instead lives in the probe: every mutation goes through
+  # `bins/slo/src/drill.rs`, which pairs each one with its undo, writes the taint as a JSON patch
+  # of the single `kloudlite.io/slo-drill` taint rather than a merge of the whole array, and marks
+  # the node with `kloudlite.io/slo-drill={run}` so only the run that made a mark can sweep it
+  # (2026-09-12). Fencing this properly needs a ValidatingAdmissionPolicy on nodes, not a role.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "patch"]
-  # Scheduled for removal with plan batch 2.3: `sec.agent.spec` is to assert the admission refusal
-  # with a SelfSubjectAccessReview (or a purpose-made SA) instead of impersonating the agent, and
-  # this grant goes with the probe change — not before it, or the id stops sampling.
+  # KEPT, deliberately, after batch 2.3 (2026-09-12). The intended replacement was a
+  # SelfSubjectAccessReview, and it cannot do this job: SSAR answers what RBAC allows, while
+  # `sec.agent.spec` measures what the ValidatingAdmissionPolicy REFUSES — two different layers,
+  # and the policy only runs on a real (dry-run) write as the agent. Dropping the grant would turn
+  # the id into a permanent skip, which is a security check nobody is making dressed as a tidier
+  # role. Narrow it the only way that is left — `resourceNames` pins it to the agent's own
+  # ServiceAccount — and revisit if the admission policy ever grows a dry-run-as-me surface.
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["impersonate"]

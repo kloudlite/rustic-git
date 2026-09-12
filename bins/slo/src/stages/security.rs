@@ -293,7 +293,7 @@ async fn admin_claim(c: &mut Ctx) {
 async fn user_process(c: &mut Ctx) {
     c.step("sec.user.process", REFUSAL_CEILING, |c| {
         let url = api(c, "/admin/overview");
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         async move {
             let (status, _) = raw(c, reqwest::Method::GET, &url, &jwt, None, &[]).await?;
             if status.as_u16() != 404 {

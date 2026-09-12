@@ -326,15 +326,18 @@ async fn origin(c: &mut Ctx) {
 async fn ssh_lb(c: &mut Ctx) {
     let (host, port) = c.cfg.ssh_endpoint();
     let (host, port) = (host.to_string(), port);
-    c.step("edge.ssh.lb", SSH_DIAL * 2, move |c| {
-        let bash = c.programs.bash.clone();
+    c.step("edge.ssh.lb", SSH_DIAL * 2, move |_| {
         async move {
-            // bash's own /dev/tcp, so nothing needs `nc` in the image.
-            let script = format!("exec 3<>/dev/tcp/{host}/{port}");
-            tools::plain(&bash, &["-c", &script], SSH_DIAL)
-                .await
-                .with_context(|| format!("could not connect to {host}:{port}"))?;
-            Ok(())
+            // `TcpStream::connect`, not bash's `/dev/tcp` (2026-09-12): the dial IS the assertion,
+            // and routing it through a shell meant the step measured a fork, a shell start and a
+            // format string built from the configured host — and reported a shell's exit code
+            // rather than the connect error a reader needs.
+            let addr = format!("{host}:{port}");
+            match tokio::time::timeout(SSH_DIAL, tokio::net::TcpStream::connect(&addr)).await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e)) => Err(anyhow!("could not connect to {addr}: {e}")),
+                Err(_) => Err(anyhow!("{addr} did not accept a connection within {} s", SSH_DIAL.as_secs())),
+            }
         }
         .boxed()
     })
@@ -348,7 +351,7 @@ async fn ssh_lb(c: &mut Ctx) {
 async fn log_latency(c: &mut Ctx) {
     let run_id = c.run_id.clone();
     c.step("tel.log.latency", TEL_CEILING, move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, &format!("/admin/slo/marker/{run_id}"));
         async move {
             tracing::info!(run_id = %run_id, "slo.marker");
@@ -372,7 +375,7 @@ async fn log_latency(c: &mut Ctx) {
 /// the failure that matters (a collector that stopped seeing a whole workload).
 async fn pod_coverage(c: &mut Ctx) {
     c.step("tel.pod.coverage", READ_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let (workloads, coverage) =
             (admin(c, "/admin/workloads"), admin(c, "/admin/slo/coverage"));
         async move {
@@ -433,7 +436,7 @@ async fn pipeline(c: &mut Ctx) {
         }),
     ] {
         c.step(id, PIPELINE_CEILING, move |c| {
-            let jwt = c.admin_jwt.clone();
+            let jwt = c.admin_jwt();
             let url = admin(c, "/admin/slo/pipeline");
             async move {
                 let v = get(c, &url, &jwt).await.context("could not read the pipeline")?;

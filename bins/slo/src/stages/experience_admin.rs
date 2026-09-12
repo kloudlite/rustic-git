@@ -85,7 +85,7 @@ pub async fn request_approve(c: &mut Ctx) {
 async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result<()> {
     let probe = c.probe_user.clone();
     let jwt = c.probe_jwt.clone();
-    let admin_jwt = c.admin_jwt.clone();
+    let admin_jwt = c.admin_jwt();
     let region = c.cfg.region.clone();
     let quota_url = api(c, "/v1/quota");
     let ws_url = api(c, "/v1/workspaces");
@@ -206,7 +206,7 @@ pub async fn admin_stop(c: &mut Ctx) {
     let name = format!("{}-a", c.prefix());
     c.step("admin.stop.workspace", STOP_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let admin_jwt = c.admin_jwt.clone();
+        let admin_jwt = c.admin_jwt();
         let region = c.cfg.region.clone();
         let ws_url = api(c, "/v1/workspaces");
         async move {
@@ -244,7 +244,7 @@ pub async fn admin_stop(c: &mut Ctx) {
 pub async fn superadmin_grant(c: &mut Ctx) {
     let other_email = c.other_email.clone();
     c.step("superadmin.grant", GRANT_CEILING, |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let one = admin(c, &format!("/api/admin/superadmins/{other_email}"));
         let all = admin(c, "/api/admin/superadmins");
         async move {

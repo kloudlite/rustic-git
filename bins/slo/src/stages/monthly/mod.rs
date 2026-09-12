@@ -189,12 +189,17 @@ mod tests {
     /// CNAME chain prints the intermediate NAMES alongside the addresses.
     #[test]
     fn the_redis_policy_only_ever_excepts_addresses() {
-        let spec = deny_egress(&["10.0.0.7".into(), "10.0.0.8".into()]);
+        let spec = deny_egress(&["10.0.0.7".into(), "10.0.0.8".into()], None);
         let except = spec.pointer("/egress/0/to/0/ipBlock/except").and_then(Value::as_array).expect("except");
         assert_eq!(except.len(), 2);
         assert_eq!(except[0], "10.0.0.7/32");
         // DNS stays open: a pod that cannot resolve is a DNS outage, not the Redis one being drilled.
         assert!(spec.to_string().contains("\"port\":53"), "{spec}");
+        // Named a pod, the deny reaches THAT pod and nothing else: a drill that cut the whole srv
+        // tier off was a region-wide outage rather than a controlled one (2026-09-12).
+        let one = deny_egress(&["10.0.0.7".into()], Some("kloudlite-srv-0"));
+        assert_eq!(one.pointer("/podSelector/matchLabels/statefulset.kubernetes.io~1pod-name").and_then(Value::as_str), Some("kloudlite-srv-0"));
+        assert!(one.pointer("/podSelector/matchExpressions").is_none(), "the whole tier was still selected: {one}");
     }
 
     /// Only `repo_created`, and only this repo's. The PR half of the feed is stream-only on

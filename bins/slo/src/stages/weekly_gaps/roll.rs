@@ -269,7 +269,7 @@ pub(crate) async fn workload_roll(c: &mut Ctx) {
         return c.skip("admin.workload.roll", "no kubeconfig to read the restart annotation from");
     };
     c.step("admin.workload.roll", step_cap(Duration::from_secs(240)), move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let workloads = admin(c, "/admin/workloads");
         let roll = admin(c, &format!("/admin/workloads/{region}/kloudlite-agent/roll"));
         let k3s = k3s.clone();

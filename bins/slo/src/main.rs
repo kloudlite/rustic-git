@@ -268,7 +268,7 @@ async fn bootstrap(cfg: Config) -> i32 {
         })
         .collect();
     let body = serde_json::json!({ "users": users });
-    match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt)).json(&body).send().await {
+    match c.http.post(&url).header("authorization", c.bearer(&c.admin_jwt())).json(&body).send().await {
         Ok(r) if r.status().is_success() => tracing::info!(kind = "users", "slo.bootstrap.completed"),
         Ok(r) => {
             let status = r.status().as_u16();

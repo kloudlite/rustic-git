@@ -22,6 +22,15 @@ use anyhow::Result;
 const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 0600 on anything holding a credential. The pod's `/tmp` is an emptyDir shared by every
+/// container in it, and a world-readable token there outlives nothing but is readable by
+/// everything (2026-09-12).
+pub fn restrict(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 pub struct Crane {
     pub bin: String,
     /// `DOCKER_CONFIG`. Two of these exist per run: the logged-in one, and an empty one that is
@@ -44,10 +53,21 @@ impl Crane {
         crate::tools::run(&self.bin, &args, &self.env(), None, timeout).await
     }
 
-    /// Writes `{config_dir}/config.json`. The password is the personal token stage 1 minted;
-    /// `crane auth login` takes it on the argv, which is why `tools::scrub` knows about `-p`.
+    /// Writes `{config_dir}/config.json` — the same file `crane auth login` would write, written
+    /// directly (2026-09-12).
+    ///
+    /// `crane auth login -p <token>` put a live registry credential on an argv, where it is
+    /// readable by anything that can list processes in the pod and where only `tools::scrub`
+    /// stood between it and a step detail. The file is the credential's only home, 0600, in a
+    /// directory this run owns and deletes.
     pub async fn login(&self, registry: &str, user: &str, password: &str) -> Result<()> {
-        self.run(&["auth", "login", registry, "-u", user, "-p", password], READ_TIMEOUT).await?;
+        use base64::Engine;
+        std::fs::create_dir_all(&self.config_dir)?;
+        let auth = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+        let doc = serde_json::json!({ "auths": { registry: { "auth": auth } } });
+        let path = self.config_dir.join("config.json");
+        std::fs::write(&path, serde_json::to_vec(&doc)?)?;
+        restrict(&path)?;
         Ok(())
     }
 

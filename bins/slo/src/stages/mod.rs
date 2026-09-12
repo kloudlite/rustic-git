@@ -271,8 +271,10 @@ async fn evidence(c: &Ctx, url: &str, last: &Value) {
 /// shape — a read that converges — and an async closure over `&Ctx` is exactly the thing that does
 /// not survive being boxed into a `Send` step future.
 ///
-/// The interval is fixed and short: these waits are seconds, and a backoff would turn a 900 ms
-/// convergence into a 2 s sample and quietly reshape every latency SLO built on one.
+/// The interval is 250 ms for the first five seconds and one second after that (2026-09-12): the
+/// tight beat is what keeps a 900 ms convergence from being reported as a 2 s one, and past five
+/// seconds nothing is being measured to that precision any more — a five-minute wait used to cost
+/// 1 200 requests of the api tier, four times a minute, for no extra resolution.
 pub(crate) async fn poll_json(
     c: &Ctx,
     url: &str,
@@ -301,7 +303,15 @@ pub(crate) async fn poll_json(
             evidence(c, url, &last).await;
             return Err(anyhow!("not there after {} ms: {why}", cap.as_millis()));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(poll_beat(start.elapsed())).await;
+    }
+}
+
+/// 250 ms while a convergence could still be measured that finely, one second after.
+pub(crate) fn poll_beat(waited: Duration) -> Duration {
+    match waited < Duration::from_secs(5) {
+        true => Duration::from_millis(250),
+        false => Duration::from_secs(1),
     }
 }
 
@@ -381,13 +391,13 @@ async fn undo_grants(c: &mut Ctx) {
     // probe never writes and the PUT body never mentions.
     let want = experience_admin::probe_quota();
     let detail = admin(c, &format!("/admin/owners/{probe}"));
-    let same = get(c, &detail, &c.admin_jwt.clone()).await.ok().and_then(|v| v.get("limit").cloned()).is_some_and(|have| {
+    let same = get(c, &detail, &c.admin_jwt()).await.ok().and_then(|v| v.get("limit").cloned()).is_some_and(|have| {
         want.as_object().unwrap().iter().all(|(k, v)| have.get(k) == Some(v))
     });
     if !same {
         let url = admin(c, &format!("/admin/quota/{probe}"));
         let body = serde_json::json!({ "spec": want, "note": "slo probe quota restore" });
-        match call(c, reqwest::Method::PUT, &url, &c.admin_jwt.clone(), Some(body)).await {
+        match call(c, reqwest::Method::PUT, &url, &c.admin_jwt(), Some(body)).await {
             Ok(_) => tracing::info!(kind = "quota", name = probe, "slo.teardown.restored"),
             Err(e) => tracing::warn!(kind = "quota", op = "restore", error = %format!("{e:#}"), "slo.teardown.failed"),
         }
@@ -395,7 +405,7 @@ async fn undo_grants(c: &mut Ctx) {
     // Read first: the DELETE is an admin write with an audit row of its own, and filing one per
     // run for an account that is not on the roster is noise in the log a human reads.
     let all = admin(c, "/api/admin/superadmins");
-    let listed = get(c, &all, &c.admin_jwt.clone()).await.ok().is_some_and(|v| {
+    let listed = get(c, &all, &c.admin_jwt()).await.ok().is_some_and(|v| {
         v.as_array().unwrap_or(&vec![]).iter().any(|r| {
             r.get("_id").and_then(Value::as_str).is_some_and(|u| u.eq_ignore_ascii_case(&other_email))
         })
@@ -403,7 +413,7 @@ async fn undo_grants(c: &mut Ctx) {
     if listed {
         let one = admin(c, &format!("/api/admin/superadmins/{other_email}"));
         let body = serde_json::json!({ "note": "slo probe teardown" });
-        match call(c, reqwest::Method::DELETE, &one, &c.admin_jwt.clone(), Some(body)).await {
+        match call(c, reqwest::Method::DELETE, &one, &c.admin_jwt(), Some(body)).await {
             Ok(_) => tracing::info!(kind = "superadmin", name = other_email, "slo.teardown.restored"),
             Err(e) => tracing::warn!(kind = "superadmin", op = "revoke", error = %format!("{e:#}"), "slo.teardown.failed"),
         }
@@ -762,7 +772,7 @@ async fn deny_requests<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: &str,
         match c
             .http
             .post(&url)
-            .header("authorization", c.bearer(&c.admin_jwt))
+            .header("authorization", c.bearer(&c.admin_jwt()))
             .json(&serde_json::json!({ "note": "slo probe teardown" }))
             .send()
             .await

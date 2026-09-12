@@ -865,7 +865,7 @@ async fn env_quota_refused(c: &mut Ctx, ws: &str) {
             // down to what the run already holds. Not the second tenant's zero quota: `may_act_on`
             // refuses another owner's workspace long before `guard_alloc` is reached, so that
             // would measure ownership and call it quota.
-            let admin_jwt = c.admin_jwt.clone();
+            let admin_jwt = c.admin_jwt();
             let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
             let body = serde_json::json!({ "spec": pinched(c, &jwt).await?, "note": "slo probe quota.refused" });
             super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(body))

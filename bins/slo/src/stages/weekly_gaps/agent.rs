@@ -27,25 +27,31 @@ pub(crate) async fn retain(c: &mut Ctx, cold: Option<&str>) {
             let pushes = Some(super::super::experience_env::push_once(c, &ws, "retain").await.context("could not push")?);
             let volume = volume_id(&get(c, &doc, &jwt).await.context("could not read the workspace")?)?;
             let history = api(c, &format!("/v1/volumes/{volume}/history"));
-            // Long enough that several sync beats have certainly cut and pruned.
-            tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
+            // The RULE is the signal (2026-09-12): this used to sleep out two minutes and look
+            // once, so it asserted after a wait it had chosen and said nothing about how long the
+            // fleet actually needed. `settle` polls the rule and answers that number.
             let api: kube::Api<crd::Snapshot> = kube::Api::all(k.clone());
-            let all = api
-                .list(&kube::api::ListParams::default())
-                .await
-                .map_err(|e| anyhow!("could not list the snapshots: {e}"))?;
-            let mine: Vec<&crd::Snapshot> =
-                all.items.iter().filter(|s| s.spec.volume == volume).collect();
-            let mut per_worktree: std::collections::HashMap<String, usize> = Default::default();
-            for s in mine.iter().filter(|s| s.spec.transient) {
-                let ready = s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready);
-                if ready {
-                    *per_worktree.entry(s.spec.worktree.clone()).or_default() += 1;
+            let took = settle(SWEEP_CAP - Duration::from_secs(60), "retain has stopped pruning", || {
+                let (api, volume) = (api.clone(), volume.clone());
+                async move {
+                    let all = api
+                        .list(&kube::api::ListParams::default())
+                        .await
+                        .map_err(|e| anyhow!("could not list the snapshots: {e}"))?;
+                    let mut per_worktree: std::collections::HashMap<String, usize> = Default::default();
+                    for s in all.items.iter().filter(|s| s.spec.volume == volume && s.spec.transient) {
+                        if s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready) {
+                            *per_worktree.entry(s.spec.worktree.clone()).or_default() += 1;
+                        }
+                    }
+                    Ok(per_worktree
+                        .iter()
+                        .find(|(_, n)| **n > 1)
+                        .map(|(wt, n)| format!("{n} Ready sync points remain for worktree {wt:?}")))
                 }
-            }
-            if let Some((wt, n)) = per_worktree.iter().find(|(_, n)| **n > 1) {
-                return Err(anyhow!("{n} Ready sync points remain for worktree {wt:?}: retain has stopped pruning"));
-            }
+            })
+            .await?;
+            tracing::info!(secs = took.as_secs(), "slo.retain.settled");
             // And the push is still there — the half that loses somebody's cut if it is wrong.
             let Some(push) = pushes else { return Ok(()) };
             let doc = get(c, &history, &jwt).await.context("could not read the history")?;
@@ -77,31 +83,38 @@ pub(crate) async fn janitor(c: &mut Ctx) {
     c.step("agent.janitor", step_cap(SWEEP_CAP), move |_| {
         async move {
             use kloudlite_workspaces::crd;
-            tokio::time::sleep(SWEEP_CAP - Duration::from_secs(60)).await;
             let vols: kube::Api<crd::Volume> = kube::Api::all(k.clone());
             let snaps: kube::Api<crd::Snapshot> = kube::Api::all(k.clone());
-            let p = kube::api::ListParams::default();
-            let volumes: Vec<String> = vols
-                .list(&p)
-                .await
-                .map_err(|e| anyhow!("could not list the volumes: {e}"))?
-                .items
-                .iter()
-                .map(kube::ResourceExt::name_any)
-                .collect();
-            let orphans: Vec<String> = snaps
-                .list(&p)
-                .await
-                .map_err(|e| anyhow!("could not list the snapshots: {e}"))?
-                .items
-                .iter()
-                .filter(|s| kube::ResourceExt::name_any(*s).starts_with(&prefix))
-                .filter(|s| !volumes.contains(&s.spec.volume))
-                .map(kube::ResourceExt::name_any)
-                .collect();
-            if !orphans.is_empty() {
-                return Err(anyhow!("a snapshot record outlived its volume: {}", orphans.join(", ")));
-            }
+            // The janitor's own beat is the wait, and the ORPHANS are the signal — the fixed
+            // two-minute sleep asserted after a wait it chose and reported nothing about how long
+            // the sweep really took (2026-09-12).
+            let took = settle(SWEEP_CAP - Duration::from_secs(60), "a snapshot record outlived its volume", || {
+                let (vols, snaps, prefix) = (vols.clone(), snaps.clone(), prefix.clone());
+                async move {
+                    let p = kube::api::ListParams::default();
+                    let volumes: Vec<String> = vols
+                        .list(&p)
+                        .await
+                        .map_err(|e| anyhow!("could not list the volumes: {e}"))?
+                        .items
+                        .iter()
+                        .map(kube::ResourceExt::name_any)
+                        .collect();
+                    let orphans: Vec<String> = snaps
+                        .list(&p)
+                        .await
+                        .map_err(|e| anyhow!("could not list the snapshots: {e}"))?
+                        .items
+                        .iter()
+                        .filter(|s| kube::ResourceExt::name_any(*s).starts_with(&prefix))
+                        .filter(|s| !volumes.contains(&s.spec.volume))
+                        .map(kube::ResourceExt::name_any)
+                        .collect();
+                    Ok((!orphans.is_empty()).then(|| orphans.join(", ")))
+                }
+            })
+            .await?;
+            tracing::info!(secs = took.as_secs(), "slo.janitor.settled");
             Ok(())
         }
         .boxed()

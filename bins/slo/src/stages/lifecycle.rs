@@ -206,7 +206,9 @@ async fn volume_gone(c: &Ctx, jwt: &str, name: &str, cap: Duration, what: &str) 
         if start.elapsed() >= cap {
             return Err(anyhow!("{what} is still listed after {} ms", cap.as_millis()));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Two seconds: each beat is a whole `/v1/volumes` LISTING, and a finalizer dropping a
+        // subvolume takes tens of seconds — the tight beat bought nothing but load (2026-09-12).
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
@@ -222,7 +224,7 @@ async fn gone(c: &Ctx, url: &str, jwt: &str, cap: Duration, what: &str) -> Resul
         if start.elapsed() >= cap {
             return Err(anyhow!("{what} still answers {status} after {} ms", cap.as_millis()));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(super::poll_beat(start.elapsed())).await;
     }
 }
 

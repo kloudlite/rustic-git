@@ -396,7 +396,7 @@ pub(super) const NO_HISTORY: &str =
 pub(super) async fn reads(c: &mut Ctx) {
     let region = c.cfg.region.clone();
     c.step("admin.reads", READ_CEILING, move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let (nodes, schema) = (admin(c, "/admin/nodes"), admin(c, "/admin/settings/schema"));
         let status = admin(c, &format!("/admin/clusters/{region}/status"));
         let unknown = admin(c, "/admin/history/no-such-series?range=1d&step=1h");

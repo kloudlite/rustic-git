@@ -33,7 +33,7 @@ pub(crate) async fn decommission(c: &mut Ctx) {
         Err(e) => return c.skip("cluster.decommission", &format!("{e:#}")),
     };
     c.step("cluster.decommission", step_cap(DRAIN_CAP), move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
         let reason = json!({ "reason": format!("slo probe decommission drill {}", c.run_id) });
         let run = c.prefix();
@@ -163,7 +163,7 @@ pub(crate) async fn drain(c: &mut Ctx) {
     };
     let before = pod_uid(&k, c, &ws).await;
     c.step("drill.drain", step_cap(DRAIN_CAP), move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let probe_jwt = c.probe_jwt.clone();
         let base = admin(c, &format!("/admin/clusters/{region}/nodes/{node}"));
         let doc = api(c, &format!("/v1/workspaces/{ws}"));
@@ -258,7 +258,13 @@ pub(crate) async fn idle_node(k: &kube::Client, avoid: Option<&str>) -> Result<S
     use kloudlite_workspaces::crd;
     let busy = running_nodes(k).await?;
     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
-    let list = api.list(&kube::api::ListParams::default()).await.map_err(|e| anyhow!("could not list the nodes: {e}"))?;
+    // The POOL only, filtered by the API server rather than by this process (2026-09-12): the
+    // control plane and every other node were fetched in full and then thrown away, and the drill
+    // asks this on a cluster whose node list is the biggest object it reads.
+    let list = api
+        .list(&kube::api::ListParams::default().labels("kloudlite.io/pool=true"))
+        .await
+        .map_err(|e| anyhow!("could not list the pool nodes: {e}"))?;
     list.items
         .iter()
         .find(|n| {

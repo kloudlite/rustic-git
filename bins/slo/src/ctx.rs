@@ -90,7 +90,14 @@ pub struct Ctx {
     pub other_email: String,
     /// The second tenant, for `sec.cross.owner`. Never used to create anything teardown sweeps.
     pub other_jwt: String,
-    pub admin_jwt: String,
+    /// The superadmin session, minted ON FIRST USE and cached (2026-09-12). It used to be minted
+    /// at boot for every run of every suite, so the fast probe — which touches one admin route —
+    /// held a superadmin credential in memory for its whole journey, and a run that never reached
+    /// an admin route held one for nothing. `OnceLock` rather than a `Mutex`: it is written once
+    /// and read from `&Ctx` closures all over the stages.
+    admin_jwt: std::sync::OnceLock<String>,
+    /// The minter itself, kept so the token above can be made later.
+    jwt: Jwt,
     pub started: DateTime<Utc>,
     pub steps: Vec<StepReport>,
     pub state: State,
@@ -167,13 +174,16 @@ impl Ctx {
             .and_then(|ts| ts.parse::<i64>().ok())
             .and_then(|ts| DateTime::from_timestamp(ts, 0))
             .unwrap_or_else(Utc::now);
+        // Minted here rather than in the struct literal so `jwt` itself can be MOVED into the
+        // context afterwards: it is what mints the superadmin session on first use.
+        let probe_jwt = mint(&email_of(&cfg.probe_user), &cfg.probe_user)?;
+        let other_jwt = mint(&email_of(&cfg.other_user), &cfg.other_user)?;
         Ok(Ctx {
+            jwt,
             run_id: run_id.unwrap_or_else(|| format!("{}-{}", suite.as_str(), started.timestamp())),
-            probe_jwt: mint(&email_of(&cfg.probe_user), &cfg.probe_user)?,
-            other_jwt: mint(&email_of(&cfg.other_user), &cfg.other_user)?,
-            admin_jwt: jwt
-                .mint_admin(&email_of(&cfg.probe_user), &cfg.probe_user, Some(&cfg.probe_user), true)
-                .map_err(|e| anyhow::anyhow!("mint admin: {e}"))?,
+            probe_jwt,
+            other_jwt,
+            admin_jwt: std::sync::OnceLock::new(),
             probe_user: cfg.probe_user.clone(),
             other_user: cfg.other_user.clone(),
             probe_email: email_of(&cfg.probe_user),
@@ -233,6 +243,26 @@ impl Ctx {
             }
             Some(at) => at.elapsed() < ROLL_WINDOW,
         }
+    }
+
+    /// The superadmin session, minted the first time something asks for one.
+    ///
+    /// Infallible on purpose: the secret was already parsed at boot (`Jwt::new`), so the only way
+    /// this can fail is a bug, and a `Result` here would put a `?` in every admin step for a
+    /// branch that cannot be taken. A mint that somehow fails yields an empty token, which every
+    /// admin route answers 401 to — a loud failure, never a silent superadmin.
+    pub fn admin_jwt(&self) -> String {
+        self.admin_jwt
+            .get_or_init(|| {
+                match self.jwt.mint_admin(&self.probe_email, &self.probe_user, Some(&self.probe_user), true) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(error = %e, "slo.admin.mint.failed");
+                        String::new()
+                    }
+                }
+            })
+            .clone()
     }
 
     pub fn bearer(&self, token: &str) -> String {

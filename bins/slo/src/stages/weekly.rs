@@ -107,7 +107,7 @@ async fn settings_revert(c: &mut Ctx) {
         // (the change landing, then the old value coming back) plus the reads between them, and
         // two full caps plus the undo would overrun the step's own ceiling and report a timeout
         // where the fleet had given a verdict.
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/settings/central");
         let revert = admin(c, "/admin/settings/central/revert");
         async move {
@@ -178,7 +178,7 @@ async fn settings_revert(c: &mut Ctx) {
 async fn settings_roll(c: &mut Ctx) {
     let region = c.cfg.region.clone();
     c.step("settings.roll", step_cap(ROLL_CAP), move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let workloads = admin(c, "/admin/workloads");
         let roll = admin(c, &format!("/admin/workloads/{region}/{AGENT}/roll"));
         let settings = admin(c, &format!("/admin/settings/clusters/{region}"));
@@ -735,7 +735,7 @@ async fn failover(c: &mut Ctx) {
         Err(e) => return c.skip("cp.failover", &format!("no in-cluster client: {e:#}")),
     };
     c.step("cp.failover", FAILOVER_CAP + Duration::from_secs(30), move |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/slo/pipeline");
         async move {
             let was = leader(c, &url, &jwt).await.context("nothing reports holding the lease")?;
@@ -777,7 +777,7 @@ async fn leader(c: &Ctx, url: &str, jwt: &str) -> Result<String> {
 /// and then stopped answering still leaves the fleet on its own value.
 async fn settings_live(c: &mut Ctx) {
     c.step("settings.live", step_cap(SETTINGS_CAP), |c| {
-        let jwt = c.admin_jwt.clone();
+        let jwt = c.admin_jwt();
         let url = admin(c, "/admin/settings/central");
         async move {
             let doc = get(c, &url, &jwt).await.context("could not read the settings")?;
