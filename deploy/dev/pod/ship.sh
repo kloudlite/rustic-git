@@ -11,6 +11,9 @@ cd /work/src
 # the very rlib the gate is linking against — the ship of 2026-09-12 05:07 failed to compile
 # tests/store.rs against a signature that existed only on another branch. Disk is the price.
 export CARGO_TARGET_DIR=/work/target-ship
+# A one-shot gate never benefits from incremental artifacts; they cost ~40 GB per build and filled
+# the disk on the second ship of 2026-09-12 (linking failed at 98 %).
+export CARGO_INCREMENTAL=0
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
 # Any origin branch, not only master: a feature branch is verified on the fleet BEFORE it merges
