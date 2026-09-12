@@ -73,6 +73,10 @@ fn csv_field(s: &str) -> String {
 /// every row since the log began (3,900 on 2026-09-08, 17 s) and timed out on the log's growth
 /// alone.
 ///
+/// Both go through `audit::list`, so a `limit` gets its day walk for free — it stops after the
+/// days that fill the cap instead of listing the window's whole month. Without one this is still
+/// the full walk: the caller asked for everything, and it is the export.
+///
 /// ponytail: every row is held in memory, re-fetched through `list`'s own paging (1000 rows/page)
 /// rather than a bulk export path — fine at the volumes one admin's `from`/`to` window
 /// produces; only add streaming if narrowing the window stops being enough.

@@ -87,61 +87,55 @@ impl std::fmt::Display for ListError {
     }
 }
 
+/// How far back one read may walk, in day prefixes. 400 is the audit retention — the rows are
+/// kept forever, but nothing older than that window is what an operator is paging through, and
+/// without a bound a sparse or empty log would list one prefix per day back to the epoch (a
+/// `from` of `1970-01` used to be a 240-month scan; this is the same guard one granularity down).
+const MAX_DAYS_WALKED: usize = 400;
+
 /// `from`/`to` as `yyyy-mm` or `yyyy-mm-dd` (a full RFC 3339 timestamp works too — only its first
-/// 10 characters are read), named in the error so a 422 can point at the field.
-fn parse_month_of(field: &str, s: &str) -> Result<(i32, u32), ListError> {
-    use chrono::Datelike;
+/// 10 characters are read), named in the error so a 422 can point at the field. A bare `yyyy-mm`
+/// means the WHOLE month, so it resolves to the first day for `from` and the last for `to`.
+fn parse_day_of(field: &str, s: &str, end_of_month: bool) -> Result<chrono::NaiveDate, ListError> {
     let bad = || ListError::InvalidFilter(format!("{field} must be yyyy-mm or yyyy-mm-dd"));
-    let head = match s.len() {
-        7 => format!("{s}-01"),
-        n if n >= 10 => s[0..10].to_string(),
-        _ => return Err(bad()),
-    };
-    let d = chrono::NaiveDate::parse_from_str(&head, "%Y-%m-%d").map_err(|_| bad())?;
-    Ok((d.year(), d.month()))
+    match s.len() {
+        7 => {
+            let first = chrono::NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d").map_err(|_| bad())?;
+            Ok(if end_of_month {
+                first.checked_add_months(chrono::Months::new(1)).and_then(|d| d.pred_opt()).ok_or_else(bad)?
+            } else {
+                first
+            })
+        }
+        n if n >= 10 => chrono::NaiveDate::parse_from_str(&s[0..10], "%Y-%m-%d").map_err(|_| bad()),
+        _ => Err(bad()),
+    }
 }
 
-/// `yyyy-mm` prefixes to walk, newest first, between the validated `from`/`to` window (defaulting
-/// to the last 3 months when neither is given — "the last quarter" is the common case, and a
-/// truly historical query is what `from` is for). `from` after `to` is a valid, empty window, not
-/// an error and not a walk back to the beginning of time — the caller asked for nothing.
-fn months(filter: &AuditFilter) -> Result<Vec<String>, ListError> {
-    use chrono::Datelike;
-    let now = chrono::Utc::now();
-    let (to_y, to_m) = match &filter.to {
-        Some(s) => parse_month_of("to", s)?,
-        None => (now.year(), now.month()),
+/// The day prefixes to walk, newest first: `{yyyy-mm}/{yyyy-mm-dd}`, which is a key prefix because
+/// the key embeds an RFC 3339 `ts` right after the month. Walking days rather than whole months is
+/// what lets `list` stop after one listing when the caller asked for one screenful (2026-09-12:
+/// `GET /admin/audit` was 3–7 s, one full-month listing per query, growing with the log).
+/// `from` after `to` is a valid, empty window, not an error and not a walk back to the beginning
+/// of time — the caller asked for nothing.
+fn days(filter: &AuditFilter) -> Result<Vec<String>, ListError> {
+    let today = chrono::Utc::now().date_naive();
+    let to = match &filter.to {
+        Some(s) => parse_day_of("to", s, true)?,
+        None => today,
     };
-    let (from_y, from_m) = match &filter.from {
-        Some(s) => parse_month_of("from", s)?,
-        None => {
-            let d = now - chrono::Duration::days(90);
-            (d.year(), d.month())
-        }
+    let from = match &filter.from {
+        Some(s) => parse_day_of("from", s, false)?,
+        // No window given: the last quarter, the common case — a truly historical query is what
+        // `from` is for.
+        None => today - chrono::Duration::days(90),
     };
-    let to = format!("{to_y:04}-{to_m:02}");
-    let from = format!("{from_y:04}-{from_m:02}");
-    if from > to {
-        return Ok(Vec::new());
-    }
-
-    let (mut y, mut m) = (to_y, to_m);
     let mut out = Vec::new();
-    loop {
-        let cur = format!("{y:04}-{m:02}");
-        out.push(cur.clone());
-        if cur <= from || out.len() > 240 {
-            // The length cap is a hard stop against a malformed/ancient `from` walking this loop
-            // back to year zero one month at a time — `from > to` above already handles the
-            // common "swapped the two" mistake, this is only for a truly stale `from`.
-            break;
-        }
-        if m == 1 {
-            m = 12;
-            y -= 1;
-        } else {
-            m -= 1;
-        }
+    let mut d = to;
+    while d >= from && out.len() < MAX_DAYS_WALKED {
+        out.push(d.format("%Y-%m/%Y-%m-%d").to_string());
+        let Some(prev) = d.pred_opt() else { break };
+        d = prev;
     }
     Ok(out)
 }
@@ -150,83 +144,119 @@ fn parse_entry(bytes: &[u8]) -> Option<AuditEntry> {
     serde_json::from_slice(bytes).ok()
 }
 
-/// Reads the requested month prefixes newest-first, filters `actor`/`action`/`target` in memory,
-/// and pages by `limit` with a cursor that is the last object key this page CONSUMED — the next
-/// page resumes at the key after it. Naming the first unread key instead would drop exactly one
-/// row per page boundary, since the resume skips past whatever the cursor names. An unrecognised
-/// `cursor` (the row it named is gone, or it never existed) answers with an empty page rather than
-/// silently restarting at page 1 — a caller paging forward must not loop.
+/// The `{yyyy-mm}/{yyyy-mm-dd}` a cursor key sits in, so a resume can skip the newer days without
+/// listing them at all.
+fn day_of_key(key: &str) -> Option<&str> {
+    key.strip_prefix("audit/")?.get(0..18)
+}
+
+/// Walks day prefixes newest-first, filtering `actor`/`action`/`target` in memory, and stops as
+/// soon as `limit` rows past the cursor are in hand — so a screenful costs one day's listing, not
+/// a month's. A filter that matches nothing recent simply keeps walking, bounded by
+/// `MAX_DAYS_WALKED` and by the window's own `from`.
 ///
-/// ponytail: a full-month scan per query, no per-field index — add one if a fleet's monthly audit
-/// volume ever makes this slow in practice, not ahead of evidence it does.
+/// Pages by a cursor that is the last object key this page CONSUMED — the next page resumes at the
+/// key after it. Naming the first unread key instead would drop exactly one row per page boundary,
+/// since the resume skips past whatever the cursor names. An unrecognised `cursor` (the row it
+/// named is gone, or it never existed) answers with an empty page rather than silently restarting
+/// at page 1 — a caller paging forward must not loop.
 pub async fn list(
     os: &Arc<dyn ObjectStore>,
     filter: AuditFilter,
     cursor: Option<String>,
     limit: usize,
 ) -> Result<AuditPage, ListError> {
-    let mut keys: Vec<String> = Vec::new();
-    for month in months(&filter)? {
-        let prefix = OsPath::from(format!("audit/{month}"));
-        let mut listing = os.list(Some(&prefix));
-        while let Some(m) = futures::StreamExt::next(&mut listing).await {
-            keys.push(m?.location.to_string());
-        }
-    }
-    // Newest first: the key embeds `ts` right after the month prefix, so a reverse lexicographic
-    // sort is reverse time order within and across the walked months.
-    keys.sort_unstable_by(|a, b| b.cmp(a));
-    let start = match &cursor {
-        None => 0,
-        Some(c) => match keys.iter().position(|k| k == c) {
-            Some(i) => i + 1,
-            // Unknown cursor: nothing to resume from, so the page is empty rather than page 1 —
-            // silently restarting would look to a paging client like the list looped.
-            None => keys.len(),
-        },
-    };
-
+    let cursor_day = cursor.as_deref().and_then(day_of_key).map(str::to_string);
+    let empty = || AuditPage { rows: Vec::new(), next_cursor: None };
     let mut rows = Vec::new();
     let mut next_cursor = None;
     // The last key CONSUMED, filtered-out rows included: a resume must skip them too, or every
     // page would re-walk the same non-matching keys.
     let mut last_consumed: Option<String> = None;
-    // One object per row, so the fetch is what a page costs: `buffered` keeps the order the keys
-    // are in (newest first) while holding a batch of GETs in flight — one at a time was 4 ms a
-    // row against S3, 17 s for a quarter's export.
-    let tail: Vec<String> = keys.drain(start.min(keys.len())..).collect();
-    let mut fetched = futures::StreamExt::buffered(
-        futures::stream::iter(tail.into_iter().map(|key| {
-            let os = os.clone();
-            async move {
-                let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
-                Ok::<_, ListError>((key, bytes))
+    let mut resumed = cursor.is_none();
+
+    'days: for day in days(&filter)? {
+        // Everything newer than the cursor was already paged; not listing those prefixes at all is
+        // the point of resuming at the cursor's own day.
+        if cursor_day.as_deref().is_some_and(|c| day.as_str() > c) {
+            continue;
+        }
+        // object_store matches a `list` prefix on SEGMENT boundaries, so `audit/{month}/{day}` is
+        // not a prefix it would accept — the day is only part of the key's last segment. The day
+        // is still a byte prefix, so it is reached as an OFFSET into the month instead: S3 sends
+        // that as `start-after` server-side, and the listing is ascending, so the first key that
+        // no longer carries the day's prefix ends the day and the rest of the month is never read.
+        let month = OsPath::from(format!("audit/{}", &day[0..7]));
+        let day_prefix = format!("audit/{day}");
+        let mut keys: Vec<String> = Vec::new();
+        let mut listing = os.list_with_offset(Some(&month), &OsPath::from(day_prefix.as_str()));
+        while let Some(m) = futures::StreamExt::next(&mut listing).await {
+            let key = m?.location.to_string();
+            if !key.starts_with(&day_prefix) {
+                break;
             }
-        })),
-        32,
-    );
-    while let Some(next) = futures::StreamExt::next(&mut fetched).await {
-        if rows.len() >= limit {
-            next_cursor = last_consumed.clone();
-            break;
+            keys.push(key);
         }
-        let (key, bytes) = next?;
-        let Some(entry) = parse_entry(&bytes) else {
-            tracing::warn!(name = %key, "audit.read.failed");
-            last_consumed = Some(key);
-            continue;
+        // Newest first: the key embeds `ts` right after the month prefix, so a reverse
+        // lexicographic sort within a day, walked newest day first, is reverse time order overall.
+        keys.sort_unstable_by(|a, b| b.cmp(a));
+
+        let start = if resumed {
+            0
+        } else {
+            match keys.iter().position(|k| Some(k.as_str()) == cursor.as_deref()) {
+                Some(i) => {
+                    resumed = true;
+                    i + 1
+                }
+                None => return Ok(empty()),
+            }
         };
-        last_consumed = Some(key);
-        if filter.actor.as_deref().is_some_and(|a| entry.actor != a) {
+        if start >= keys.len() {
             continue;
         }
-        if filter.action.as_deref().is_some_and(|a| entry.action != a) {
-            continue;
+
+        // One object per row, so the fetch is what a page costs: `buffered` keeps the order the
+        // keys are in (newest first) while holding a batch of GETs in flight — one at a time was
+        // 4 ms a row against S3, 17 s for a quarter's export.
+        let tail: Vec<String> = keys.split_off(start);
+        let mut fetched = futures::StreamExt::buffered(
+            futures::stream::iter(tail.into_iter().map(|key| {
+                let os = os.clone();
+                async move {
+                    let bytes = os.get(&OsPath::from(key.as_str())).await?.bytes().await?.to_vec();
+                    Ok::<_, ListError>((key, bytes))
+                }
+            })),
+            32,
+        );
+        while let Some(next) = futures::StreamExt::next(&mut fetched).await {
+            if rows.len() >= limit {
+                next_cursor = last_consumed.clone();
+                break 'days;
+            }
+            let (key, bytes) = next?;
+            let Some(entry) = parse_entry(&bytes) else {
+                tracing::warn!(name = %key, "audit.read.failed");
+                last_consumed = Some(key);
+                continue;
+            };
+            last_consumed = Some(key);
+            if filter.actor.as_deref().is_some_and(|a| entry.actor != a) {
+                continue;
+            }
+            if filter.action.as_deref().is_some_and(|a| entry.action != a) {
+                continue;
+            }
+            if filter.target.as_deref().is_some_and(|t| entry.target != t) {
+                continue;
+            }
+            rows.push(entry);
         }
-        if filter.target.as_deref().is_some_and(|t| entry.target != t) {
-            continue;
-        }
-        rows.push(entry);
+    }
+    // A cursor whose day fell outside the window is as unknown as one whose key is gone.
+    if !resumed {
+        return Ok(empty());
     }
     Ok(AuditPage { rows, next_cursor })
 }
@@ -263,18 +293,32 @@ mod tests {
         assert_eq!(back.result, "ok");
     }
 
-    /// An explicit `from`/`to` walks exactly that span, oldest boundary included.
+    /// An explicit `from`/`to` walks exactly that span in day prefixes, newest first, both
+    /// boundaries included — and a bare `yyyy-mm` `to` means the whole month, not its first day.
     #[test]
-    fn months_walks_the_explicit_span() {
-        let f = AuditFilter { from: Some("2026-06".into()), to: Some("2026-08-15".into()), ..Default::default() };
-        assert_eq!(months(&f).unwrap(), vec!["2026-08", "2026-07", "2026-06"]);
+    fn days_walks_the_explicit_span() {
+        let f = AuditFilter { from: Some("2026-08-30".into()), to: Some("2026-09-02".into()), ..Default::default() };
+        assert_eq!(
+            days(&f).unwrap(),
+            vec!["2026-09/2026-09-02", "2026-09/2026-09-01", "2026-08/2026-08-31", "2026-08/2026-08-30"]
+        );
+        let m = AuditFilter { from: Some("2026-08".into()), to: Some("2026-08".into()), ..Default::default() };
+        assert_eq!(days(&m).unwrap().len(), 31, "a bare month means every one of its days");
     }
 
     /// `from` after `to` is a valid, empty window — not a 422 and not a walk to year zero.
     #[test]
-    fn months_with_from_after_to_is_empty() {
+    fn days_with_from_after_to_is_empty() {
         let f = AuditFilter { from: Some("2026-08".into()), to: Some("2026-06".into()), ..Default::default() };
-        assert_eq!(months(&f).unwrap(), Vec::<String>::new());
+        assert_eq!(days(&f).unwrap(), Vec::<String>::new());
+    }
+
+    /// The bound, not the window, is what stops an ancient `from` — otherwise an empty log would
+    /// be one listing per day back to the epoch.
+    #[test]
+    fn days_stops_at_the_bound() {
+        let f = AuditFilter { from: Some("1970-01".into()), ..Default::default() };
+        assert_eq!(days(&f).unwrap().len(), MAX_DAYS_WALKED);
     }
 
     /// The cursor contract: walking the log a page at a time must yield exactly the unpaged
@@ -315,8 +359,181 @@ mod tests {
 
     /// A malformed date names the field in the 422 the caller turns this into.
     #[test]
-    fn months_rejects_a_malformed_date() {
+    fn days_rejects_a_malformed_date() {
         let f = AuditFilter { from: Some("not-a-date".into()), ..Default::default() };
-        assert!(matches!(months(&f), Err(ListError::InvalidFilter(msg)) if msg.contains("from")));
+        assert!(matches!(days(&f), Err(ListError::InvalidFilter(msg)) if msg.contains("from")));
+    }
+
+    /// A store that remembers which prefixes were listed: the whole point of the day walk is the
+    /// listings it DOESN'T make, which no assertion on the rows can see.
+    #[derive(Debug)]
+    struct Recorder {
+        inner: slatedb::object_store::memory::InMemory,
+        listed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl std::fmt::Display for Recorder {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Recorder")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for Recorder {
+        async fn put_opts(
+            &self,
+            location: &OsPath,
+            payload: PutPayload,
+            opts: slatedb::object_store::PutOptions,
+        ) -> slatedb::object_store::Result<slatedb::object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            location: &OsPath,
+            opts: slatedb::object_store::PutMultipartOptions,
+        ) -> slatedb::object_store::Result<Box<dyn slatedb::object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+        async fn get_opts(
+            &self,
+            location: &OsPath,
+            options: slatedb::object_store::GetOptions,
+        ) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, slatedb::object_store::Result<OsPath>>,
+        ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<OsPath>> {
+            self.inner.delete_stream(locations)
+        }
+        fn list(
+            &self,
+            prefix: Option<&OsPath>,
+        ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+        /// The day walk reaches a day as an offset into its month, so the OFFSET is what says which
+        /// days were touched — recording the prefix alone would show only the month.
+        fn list_with_offset(
+            &self,
+            prefix: Option<&OsPath>,
+            offset: &OsPath,
+        ) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::ObjectMeta>> {
+            self.listed.lock().unwrap().push(offset.to_string());
+            self.inner.list_with_offset(prefix, offset)
+        }
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&OsPath>,
+        ) -> slatedb::object_store::Result<slatedb::object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(
+            &self,
+            from: &OsPath,
+            to: &OsPath,
+            options: slatedb::object_store::CopyOptions,
+        ) -> slatedb::object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// 3 days x 5 rows, newest day first. Returns the store and the day prefixes written.
+    async fn three_days(actor_3_days_ago: &str) -> (Arc<dyn ObjectStore>, Arc<Recorder>, Vec<String>) {
+        let rec = Arc::new(Recorder {
+            inner: slatedb::object_store::memory::InMemory::new(),
+            listed: std::sync::Mutex::new(Vec::new()),
+        });
+        let os: Arc<dyn ObjectStore> = rec.clone();
+        let today = chrono::Utc::now().date_naive();
+        let mut prefixes = Vec::new();
+        for back in 0..3i64 {
+            let d = today - chrono::Duration::days(back);
+            prefixes.push(format!("audit/{}", d.format("%Y-%m/%Y-%m-%d")));
+            for i in 0..5 {
+                let entry = AuditEntry {
+                    ts: format!("{}T10:0{i}:00Z", d.format("%Y-%m-%d")),
+                    actor: if back == 2 { actor_3_days_ago.to_string() } else { "op@example.com".into() },
+                    action: "deny".into(),
+                    target: format!("d{back}r{i}"),
+                    reason: None,
+                    result: "ok".into(),
+                };
+                record(&os, &entry).await.unwrap();
+            }
+        }
+        (os, rec, prefixes)
+    }
+
+    fn listed(rec: &Recorder) -> Vec<String> {
+        rec.listed.lock().unwrap().clone()
+    }
+
+    /// One screenful must cost one day's listing. This is the whole fix (2026-09-12): the old walk
+    /// listed the entire month before it knew it had enough.
+    #[tokio::test]
+    async fn a_short_limit_lists_only_todays_prefix() {
+        let (os, rec, prefixes) = three_days("op@example.com").await;
+        rec.listed.lock().unwrap().clear();
+        let page = list(&os, AuditFilter::default(), None, 4).await.unwrap();
+        assert_eq!(page.rows.len(), 4);
+        assert_eq!(listed(&rec), vec![prefixes[0].clone()]);
+    }
+
+    /// Rows come back newest-first ACROSS a day boundary, not just within one day — the day walk
+    /// is what has to preserve that now, since each day is sorted on its own.
+    #[tokio::test]
+    async fn order_is_reverse_lexicographic_across_a_day_boundary() {
+        let (os, _rec, _) = three_days("op@example.com").await;
+        let page = list(&os, AuditFilter::default(), None, 100).await.unwrap();
+        assert_eq!(page.rows.len(), 15);
+        let ts: Vec<&str> = page.rows.iter().map(|r| r.ts.as_str()).collect();
+        let mut sorted = ts.clone();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(ts, sorted);
+    }
+
+    /// A cursor resumes in its OWN day and never re-lists the newer ones.
+    #[tokio::test]
+    async fn a_cursor_resumes_in_its_own_day() {
+        let (os, rec, prefixes) = three_days("op@example.com").await;
+        let first = list(&os, AuditFilter::default(), None, 7).await.unwrap();
+        let cursor = first.next_cursor.clone().expect("more rows remain");
+        assert!(day_of_key(&cursor).unwrap().ends_with(&prefixes[1][6..]), "the 8th row is yesterday's");
+        rec.listed.lock().unwrap().clear();
+        // Two of yesterday's three remaining rows: the page fills inside that one day, so the walk
+        // never reaches the day before it either.
+        let page = list(&os, AuditFilter::default(), Some(cursor), 2).await.unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert!(!listed(&rec).contains(&prefixes[0]), "today was already paged");
+        assert_eq!(listed(&rec), vec![prefixes[1].clone()]);
+    }
+
+    /// A filter that only matches old rows keeps walking day by day until it has its matches —
+    /// exactly three prefixes here, never the whole window.
+    #[tokio::test]
+    async fn a_filter_walks_day_by_day_until_it_matches() {
+        let (os, rec, prefixes) = three_days("audit@example.com").await;
+        rec.listed.lock().unwrap().clear();
+        let f = AuditFilter { actor: Some("audit@example.com".into()), ..Default::default() };
+        let page = list(&os, f, None, 4).await.unwrap();
+        assert_eq!(page.rows.len(), 4);
+        assert_eq!(listed(&rec), prefixes);
+    }
+
+    /// An empty log walks the bound and stops — never one listing per day back to the epoch.
+    #[tokio::test]
+    async fn the_bound_stops_an_empty_walk() {
+        let rec = Arc::new(Recorder {
+            inner: slatedb::object_store::memory::InMemory::new(),
+            listed: std::sync::Mutex::new(Vec::new()),
+        });
+        let os: Arc<dyn ObjectStore> = rec.clone();
+        let f = AuditFilter { from: Some("1970-01".into()), ..Default::default() };
+        let page = list(&os, f, None, 10).await.unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(listed(&rec).len(), MAX_DAYS_WALKED);
     }
 }
