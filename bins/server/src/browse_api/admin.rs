@@ -1,5 +1,5 @@
 //! Owning-node repo administration: visibility, create/delete, and branch protection.
-use super::{hidden, open_ro};
+use super::{hidden, open_ro, open_rw};
 use crate::router::internal;
 use kloudlite_core::httpx::Trusted;
 use crate::App;
@@ -348,9 +348,9 @@ pub(super) async fn api_protect(
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
-    // The gate its GET sibling `api_protections` takes: setting a rule is at least as private as
-    // reading one, and until 2026-09-12 only the read was gated.
-    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+    // Write-gated: setting a rule is a write, and until 2026-09-12 only the read sibling
+    // `api_protections` was gated at all.
+    if let Err(r) = open_rw(&app, &trusted, &headers, &owner, &name).await {
         return r;
     }
     let Some(pattern) = q.get("pattern").map(|s| s.trim()).filter(|s| !s.is_empty()) else {

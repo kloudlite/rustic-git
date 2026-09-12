@@ -64,6 +64,25 @@ pub(super) async fn open_ro(
     }
 }
 
+/// `open_ro`'s write-side twin: `read_only = false`, so a PUBLIC repo admits nobody it would not
+/// admit to a push. Every browse-route write (protect, merge, patch) takes this one; a public repo
+/// read-gated on a write was how a stranger could merge into it (2026-09-12).
+pub(super) async fn open_rw(
+    app: &App,
+    trusted: &Trusted,
+    headers: &HeaderMap,
+    owner: &str,
+    name: &str,
+) -> Result<Repo, Response> {
+    match open(app, trusted, headers, owner, name, false).await {
+        Ok(r) => Ok(r),
+        Err(r) if r.status() == StatusCode::UNAUTHORIZED => Err(r),
+        Err(r) if r.status() == StatusCode::INTERNAL_SERVER_ERROR => Err(r),
+        Err(r) if r.status() == StatusCode::SERVICE_UNAVAILABLE => Err(r),
+        Err(_) => Err(hidden()),
+    }
+}
+
 /// Run a blocking `browse` call against the repo's odb. A lookup failure (unknown oid, unknown
 /// path, wrong object kind) collapses to 404; a real read failure — a corrupt or unreadable pack —
 /// is a 500, because a bug that hides behind a 404 is a bug nobody finds.

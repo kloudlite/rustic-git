@@ -1,5 +1,5 @@
 //! Branch comparison, fast-forward/squash merges, and the single-commit patch API.
-use super::{hidden, odb_json, open_ro};
+use super::{hidden, odb_json, open_ro, open_rw};
 use crate::router::internal;
 use kloudlite_core::httpx::Trusted;
 use crate::App;
@@ -68,9 +68,9 @@ pub(super) async fn api_merge(
     Path((owner, name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    // Gated like `branchdelete`: a write of refs and objects with the peer secret alone was the
-    // one undocumented exception among the browse routes (2026-09-12).
-    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+    // Write-gated: a write of refs and objects with the peer secret alone was the one
+    // undocumented exception among the browse routes (2026-09-12).
+    if let Err(r) = open_rw(&app, &trusted, &headers, &owner, &name).await {
         return r;
     }
     let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
@@ -271,7 +271,7 @@ pub(super) async fn api_patch(
     let Some((owner, name)) = crate::protocol::parse_repo_pair(&owner, &name) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
-    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+    if let Err(r) = open_rw(&app, &trusted, &headers, &owner, &name).await {
         return r;
     }
     let repo = match app.store.open_repo(&owner, &name).await {
