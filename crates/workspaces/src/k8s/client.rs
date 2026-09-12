@@ -90,12 +90,68 @@ where
     }
 }
 
-/// `kube::Client::try_from(config)`, with the bound above. The one constructor every process of
-/// ours should use, so no client is built without it by accident — the api tier and the agent
-/// both, which is why nothing in this module knows anything about either.
-pub fn bounded_client(mut config: kube::Config) -> kube::Result<kube::Client> {
-    config.connect_timeout = Some(KUBE_CONNECT_TIMEOUT);
-    Ok(kube::client::ClientBuilder::try_from(config)?.with_layer(&BoundLayer).build())
+/// Idle connections are dropped from the pool well before any NAT or conntrack table on the path
+/// could forget them, so a request is never written onto a connection only one end still believes
+/// in.
+pub const KUBE_POOL_IDLE: Duration = Duration::from_secs(30);
+
+/// The kube client the api tier and the agent both use: kube's own default stack — base URI,
+/// retry, auth, extra headers — rebuilt here for one reason, the connector.
+///
+/// kube builds its `HttpConnector` inside a private function and sets no keepalive on it, and its
+/// connection pool is HTTP/1.1. So when an API connection dies without a RST — the region's control
+/// plane closing an idle socket, a NAT forgetting the flow — the pool still hands it out, the
+/// request is written into nothing, and the caller waits out the full call bound. On 2026-09-12
+/// that was about five `did not answer in 30s` an hour across the agents, 23 of 30 of them a
+/// 46 KB `GET /api/v1/nodes` the API server itself answers in 0.2 s, with the server logging
+/// `use of closed network connection` for the same peers. It failed `ws.push.p95`,
+/// `env.attach` and `request.approve` on the SLO probe.
+///
+/// The fix is the one the peer path already carries (`kloudlite_core::peer::bound_dead_peer`):
+/// TCP keepalive so a dead connection is noticed in about thirty seconds of idle, a user timeout
+/// so unacknowledged writes fail on the same clock, and a pool idle timeout so a connection is
+/// retired before a middlebox can strand it. None of them caps a live watch.
+///
+/// Dropped from kube's stack on purpose: gzip decompression and the HTTP proxy tunnel (neither
+/// feature is enabled in this workspace), the debug-level trace spans, and an exec-plugin
+/// credential's expiry (no process of ours authenticates through an exec plugin).
+pub fn bounded_client(config: kube::Config) -> kube::Result<kube::Client> {
+    use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
+    use kube::client::ConfigExt as _;
+    use kloudlite_core::peer::{KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES};
+
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_keepalive(Some(KEEPALIVE_IDLE));
+    http.set_keepalive_interval(Some(KEEPALIVE_INTERVAL));
+    http.set_keepalive_retries(Some(KEEPALIVE_RETRIES));
+    // Linux only: the fleet is Linux, and the Mac editor's checker must not paint a real option red.
+    #[cfg(target_os = "linux")]
+    http.set_tcp_user_timeout(Some(kloudlite_core::peer::USER_TIMEOUT));
+
+    let https = config.rustls_https_connector_with_connector(http)?;
+    let mut connector = hyper_timeout::TimeoutConnector::new(https);
+    connector.set_connect_timeout(Some(KUBE_CONNECT_TIMEOUT));
+    connector.set_read_timeout(config.read_timeout);
+    connector.set_write_timeout(config.write_timeout);
+
+    let hyper = hyper_util::client::legacy::Builder::new(TokioExecutor::new())
+        .pool_idle_timeout(KUBE_POOL_IDLE)
+        .build::<_, kube::client::Body>(connector);
+
+    let service = tower::ServiceBuilder::new()
+        .layer(config.base_uri_layer())
+        .option_layer(config.default_retry.then(|| {
+            tower::retry::RetryLayer::new(kube::client::retry::RetryPolicy::server_retry())
+        }))
+        .option_layer(config.auth_layer()?)
+        .layer(config.extra_headers_layer()?)
+        .map_err(tower::BoxError::from)
+        .service(hyper);
+
+    Ok(kube::client::ClientBuilder::new(service, config.default_namespace.clone())
+        .with_layer(&BoundLayer)
+        .build())
 }
 
 /// `kube::Client::try_default()`, bounded. In-cluster config when the pod has a ServiceAccount,

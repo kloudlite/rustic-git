@@ -36,8 +36,12 @@ reqwest = { workspace = true }
 # optional. `http-body-util` is `kube_test`'s alone — it is compiled into the library (not behind
 # `#[cfg(test)]`) because the `/v1` integration tests in tests/ build an `ApiState` around a
 # mocked client.
-tower = { workspace = true }
+tower = { workspace = true, features = ["retry"] }
 http = { version = "1" }
+# `k8s::client::bounded_client` rebuilds kube's client stack to put keepalive on the connector;
+# these are the exact crates and versions kube-client 4.2 builds it from.
+hyper-util = { version = "0.1.20", features = ["client-legacy", "http1", "tokio"] }
+hyper-timeout = "0.5.2"
 http-body-util = { version = "0.1", optional = true }
 
 [features]

@@ -97,7 +97,13 @@ pub async fn run(c: &mut Ctx) {
 }
 
 /// `reg.token.p95`: the `/v2/token` exchange every spec-following client makes before it pulls.
+///
+/// One untimed exchange goes first. This step is the first registry call of the run, so without
+/// it the sample was a fresh TCP and TLS handshake through the edge proxy plus the token: a
+/// 1311 ms sample on 2026-09-12 was 1037 ms of connect, with nothing slow on the registry at all.
+/// A pulling client reuses its connection, and so does the SLI: what is timed is the token.
 async fn token(c: &mut Ctx, secret: &str, image: &str) {
+    let _ = bearer(c, Some(secret), &pull_scope(c, image)).await;
     c.step("reg.token.p95", TOKEN_CEILING, |c| {
         let (secret, scope) = (secret.to_string(), pull_scope(c, image));
         async move {

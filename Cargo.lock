@@ -4540,6 +4540,8 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
+ "hyper-timeout",
+ "hyper-util",
  "json-patch",
  "k8s-openapi",
  "kloudlite-core",
