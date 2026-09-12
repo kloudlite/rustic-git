@@ -55,7 +55,12 @@ pub(crate) async fn run_environment(
     let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
-    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. }));
+    // An intercept in FORCE holds the tick as much as one in its grace window: the workspace it
+    // points at lives in another namespace and nothing here watches it, so the pass that notices
+    // it gone and hands the service back must be a timed one. Until 2026-09-12 the per-pass
+    // status writes echoed back as watch events and hid this; once those stopped, a stopped
+    // intercepting workspace left the environment intercepted forever (env.intercept.fallback).
+    let holding = plan.values().any(|d| matches!(d, Intercepting::Keep { .. } | Intercepting::Force { .. }));
     Ok(if all_ready && !holding { Action::await_change() } else { Action::requeue(TICK) })
 }
 

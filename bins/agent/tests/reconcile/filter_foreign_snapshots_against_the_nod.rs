@@ -251,8 +251,12 @@ async fn an_intercept_in_force_stops_the_real_service_and_points_the_slice_at_th
     ]);
     let (ctx, rec) = ctx(tmp.path(), routes);
 
-    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
+    let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
 
+    // The pass that hands the service back when the workspace vanishes is a TIMED one: nothing
+    // in this namespace announces a pod that lives in ws-alice. Waiting for a change here left an
+    // environment intercepted for good on 2026-09-12 (env.intercept.fallback).
+    assert_ne!(action, kube::runtime::controller::Action::await_change(), "an intercept in force keeps the tick");
     let sts = rec.sent("PATCH", WEB_STS);
     assert_eq!(sts.last().unwrap()["spec"]["replicas"], 0, "the real service is stopped: {:?}", sts.last());
     let svc = rec.sent("PATCH", WEB_SVC);
