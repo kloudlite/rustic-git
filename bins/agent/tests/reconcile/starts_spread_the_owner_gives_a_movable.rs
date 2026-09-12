@@ -458,12 +458,17 @@ async fn a_restored_workspace_attaches_itself_to_the_source_volume() {
 
     let patches = rec.sent("PATCH", VOL_WS_SRC);
     assert_eq!(patches.len(), 1, "one attach patch: {:?}", rec.calls());
-    assert_eq!(patches[0][0]["op"], "add");
+    // Guarded: a `test` that the key is absent, then the `add` — two parents attaching to one
+    // detached volume at once must not overwrite each other's entry.
+    assert_eq!(patches[0][0]["op"], "test");
     assert_eq!(patches[0][0]["path"], "/metadata/ownerReferences");
-    assert_eq!(patches[0][0]["value"][0]["uid"], "ws-uid-1");
-    assert_eq!(patches[0][0]["value"][0]["kind"], "Workspace");
+    assert!(patches[0][0]["value"].is_null(), "{:?}", patches[0][0]);
+    assert_eq!(patches[0][1]["op"], "add");
+    assert_eq!(patches[0][1]["path"], "/metadata/ownerReferences");
+    assert_eq!(patches[0][1]["value"][0]["uid"], "ws-uid-1");
+    assert_eq!(patches[0][1]["value"][0]["kind"], "Workspace");
     // Only ONE ownerReference may be the controller, and that is the volume's creator's.
-    assert_eq!(patches[0][0]["value"][0]["controller"], false);
+    assert_eq!(patches[0][1]["value"][0]["controller"], false);
 }
 
 /// The attach is idempotent: the entry it wrote is read back on the next pass and nothing is

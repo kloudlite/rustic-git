@@ -604,10 +604,14 @@ where
     // `add` creates the key and is the whole patch there; the guarded form is for the case where
     // there is an existing list to lose.
     if current.is_empty() {
-        let ops = json_patch::Patch(vec![json_patch::PatchOperation::Add(json_patch::AddOperation {
-            path: path.parse().expect("static pointer parses"),
-            value,
-        })]);
+        // Guarded like the other arm: an `add` on an existing array REPLACES it, so two parents
+        // attaching to one detached volume at once each wrote a one-element list and the loser's
+        // entry vanished — a volume a live worktree ran on with no owner (2026-09-12). The `test`
+        // against null passes only while the key is absent; a 422 means someone got there first.
+        let ops = json_patch::Patch(vec![
+            json_patch::PatchOperation::Test(json_patch::TestOperation { path: path.parse().expect("static pointer parses"), value: serde_json::Value::Null }),
+            json_patch::PatchOperation::Add(json_patch::AddOperation { path: path.parse().expect("static pointer parses"), value }),
+        ]);
         match api.patch(name, &PatchParams::default(), &Patch::Json::<crd::Volume>(ops)).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(s)) if s.code == 422 || s.code == 409 => Ok(false),

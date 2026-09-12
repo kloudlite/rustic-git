@@ -401,7 +401,10 @@ async fn sweep_orphan_snapshots(ctx: &Arc<Ctx>, known: &HashSet<String>, snapsho
             continue;
         }
         let name = s.name_any();
-        match api.delete(&name, &Default::default()).await {
+        // The uid it decided on: a Snapshot recreated under this name after the listing is a
+        // different object, and a delete without the precondition would take it (2026-09-12).
+        let dp = kube::api::DeleteParams { preconditions: Some(kube::api::Preconditions { uid: s.uid(), resource_version: None }), ..Default::default() };
+        match api.delete(&name, &dp).await {
             Ok(_) => tracing::info!(volume = %s.spec.volume, snapshot = %name, reason = "no-volume-cr", "snapshot.dropped"),
             Err(e) if matches!(&e, kube::Error::Api(st) if st.code == 404) => {}
             Err(e) => tracing::warn!(snapshot = %name, reason = "no-volume-cr", error = %e, "snapshot.drop.failed"),
@@ -683,7 +686,12 @@ async fn finalize_released(ctx: &Arc<Ctx>, v: &crd::Volume, rows: &[crd::VolumeR
 async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, snapshots: &[crd::Snapshot], live: &[String]) {
     let floor = replica_interval(&ctx.settings).as_secs() as i64;
     let now = k8s_openapi::jiff::Timestamp::now();
-    let hosted = beat.hosted_volumes();
+    // Cluster-wide, like the event-driven collector's `parent_names_volume`: a parent on ANOTHER
+    // node (or unplaced) that names this volume pins it just the same. `hosted_volumes` is this
+    // node's parents only and was the wrong test here (2026-09-12).
+    let named = |id: &str| {
+        beat.all_parents.iter().any(|p| crate::controller::volume::names_volume(Some(&p.volume), &p.name, None, id))
+    };
     let snapshotted: HashSet<&str> = snapshots
         .iter()
         .filter(|s| s.is_snapshot() && s.status.as_ref().is_none_or(|st| st.phase != crd::Phase::Error))
@@ -695,7 +703,7 @@ async fn collect_unreferenced_volumes(ctx: &Arc<Ctx>, beat: &crate::listing::Bea
             continue; // already going; the delete below would only race its own finalizer
         }
         let has_owner = v.metadata.owner_references.as_ref().is_some_and(|refs| !refs.is_empty());
-        if has_owner || hosted.contains(&id) || snapshotted.contains(id.as_str()) {
+        if has_owner || named(&id) || snapshotted.contains(id.as_str()) {
             continue;
         }
         let old_enough = v

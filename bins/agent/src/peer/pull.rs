@@ -40,10 +40,17 @@ pub fn receive_ceiling(quota_gb: u64, settings: &crate::controller::Settings) ->
     (quota_gb * slack * 1024 * 1024 * 1024).max(1024 * 1024 * 1024)
 }
 
-async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) {
+/// `Ok(())` only when the subvolume is gone: a partial receive left under the snapshot's real
+/// name is reported as held and Synced on the next beat, so a cleanup that did not land is the
+/// caller's error, not a shrug.
+async fn delete_subvolume(btrfs_bin: &str, path: &std::path::Path) -> Result<(), String> {
     let parts: Vec<&str> = btrfs_bin.split_whitespace().collect();
-    let Some((prog, prefix)) = parts.split_first() else { return };
-    let _ = tokio::process::Command::new(prog).args(prefix).arg("subvolume").arg("delete").arg(path).status().await;
+    let Some((prog, prefix)) = parts.split_first() else { return Err("empty btrfs_bin".into()) };
+    match tokio::process::Command::new(prog).args(prefix).arg("subvolume").arg("delete").arg(path).status().await {
+        Ok(st) if st.success() => Ok(()),
+        Ok(st) => Err(format!("btrfs subvolume delete {}: {st}", path.display())),
+        Err(e) => Err(format!("btrfs subvolume delete {}: {e}", path.display())),
+    }
 }
 
 /// `replica_secs`, `stored ?? env ?? default`.
@@ -486,14 +493,32 @@ pub async fn pull_one(
 
     metrics::histogram!("snapshot_transfer_duration_seconds", "direction" => "pull")
         .record(started.elapsed().as_secs_f64());
-    if !ok {
-        let after = subvolume_names(&dir);
-        for n in after.iter().filter(|n| !before.contains(n)) {
-            delete_subvolume(btrfs_bin, &dir.join(n)).await;
-        }
-        return Err("btrfs receive failed".to_string());
+    // What the stream CREATED is checked on both paths: a peer holding the secret answers this
+    // request with whatever `btrfs send` stream it likes, and a receive that lands under any name
+    // but the one asked for would be advertised as that snapshot on the next beat (2026-09-12).
+    let after = subvolume_names(&dir);
+    let created: Vec<&String> = after.iter().filter(|n| !before.contains(n)).collect();
+    let expected = ok && created.len() == 1 && created[0] == name;
+    if expected {
+        return Ok(());
     }
-    Ok(())
+    let mut failures = Vec::new();
+    for n in &created {
+        if let Err(e) = delete_subvolume(btrfs_bin, &dir.join(n)).await {
+            tracing::warn!(%volume, snapshot = %name, created = %n, error = %e, "pull.cleanup.failed");
+            failures.push(e);
+        }
+    }
+    let why = if !ok {
+        "btrfs receive failed".to_string()
+    } else {
+        format!("btrfs receive created {:?}, not {name}", created.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    };
+    if failures.is_empty() {
+        Err(why)
+    } else {
+        Err(format!("{why}; cleanup failed: {}", failures.join("; ")))
+    }
 }
 
 /// Create-or-update THIS node's own `VolumeReplica` — the sole writer, per the module doc.

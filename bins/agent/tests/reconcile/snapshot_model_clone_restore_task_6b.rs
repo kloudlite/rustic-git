@@ -122,8 +122,9 @@ async fn a_restored_environment_records_its_graft_snapshot_as_head() {
     // Design rule 6, the environment twin: the restore becomes an owner of the source's Volume.
     let attach = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/volumes/env-src");
     assert_eq!(attach.len(), 1, "one attach patch: {:?}", rec.calls());
-    assert_eq!(attach[0][0]["value"][0]["uid"], "env-uid-1");
-    assert_eq!(attach[0][0]["value"][0]["kind"], "Environment");
+    assert_eq!(attach[0][0]["op"], "test", "guarded attach: {:?}", attach[0]);
+    assert_eq!(attach[0][1]["value"][0]["uid"], "env-uid-1");
+    assert_eq!(attach[0][1]["value"][0]["kind"], "Environment");
     // Task 2c: the restore holds its own worktree of the source's volume. Nothing it does may
     // reach the SOURCE's live subvolume — two environments writing one is the bug this proves gone.
     assert!(tmp.path().join("vol/env-src/live/env-src/marker").exists(), "the source's live worktree was touched");

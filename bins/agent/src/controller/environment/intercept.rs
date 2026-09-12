@@ -215,6 +215,16 @@ pub(crate) async fn intercept_policies(
 ) -> Result<(), ReconcileErr> {
     let here: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
     let mut in_force: std::collections::HashSet<String> = Default::default();
+    // A `Keep` renders what the last pass rendered — and that includes its grants: the workspace
+    // the status names is still being served, so its policies are in force, not stale. Deleting
+    // them on an API blip cut the intercepted traffic the rendering was keeping (2026-09-12).
+    for (svc, d) in plan {
+        if matches!(d, Intercepting::Keep { .. }) {
+            if let Some(by) = prev.service_status.iter().find(|s| s.name == *svc).and_then(|s| s.intercepted_by.clone()) {
+                in_force.insert(by);
+            }
+        }
+    }
     for d in plan.values() {
         let Intercepting::Force { ws, .. } = d else { continue };
         let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
@@ -255,7 +265,10 @@ pub(crate) async fn intercept_policies(
         // until somebody deleted the workspace. One pass only — the next has no record to clean.
         let ws = match ws {
             Some(w) => Some(w),
-            None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.unwrap_or(None),
+            // An API error is not "gone": read as gone, the workspace-side policy that opens this
+            // environment's namespace to that pod would never be deleted, and this pass is the
+            // one that had a record to clean (2026-09-12). The error keeps the record for a retry.
+            None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.map_err(|e| ReconcileErr(e.to_string()))?,
         };
         // A workspace that is GONE takes its half with it: the policy is ownerReferenced.
         if let Some(w) = ws {

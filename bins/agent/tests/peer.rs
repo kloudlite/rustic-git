@@ -346,3 +346,52 @@ async fn a_truncated_receive_deletes_the_partial_and_fails() {
     assert!(err.contains("btrfs receive failed"), "{err}");
     assert!(!engine.pool.snap("v1", "c1").exists(), "the partial must not survive a failed receive");
 }
+
+/// A fake `btrfs` whose `receive` SUCCEEDS but lands the stream under a name other than the one
+/// asked for — what a peer holding the secret can make a real `btrfs receive` do — and whose
+/// `subvolume delete` optionally refuses, to model a cleanup that did not land.
+fn write_fake_btrfs_receive_stranger(dir: &std::path::Path, delete_fails: bool) -> String {
+    let path = dir.join(if delete_fails { "btrfs-stranger-nodel" } else { "btrfs-stranger" });
+    let delete = if delete_fails { "exit 1" } else { "rm -rf \"$3\"; exit 0" };
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"receive\" ]; then\n    mkdir -p \"$2/stranger\"\n    exit 0\nfi\nif [ \"$1\" = \"subvolume\" ] && [ \"$2\" = \"delete\" ]; then\n    {delete}\nfi\n"
+    );
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+/// A receive that exits 0 but created a subvolume other than the snapshot asked for is refused
+/// and the stranger deleted: until 2026-09-12 the created names were only compared on the
+/// failure path, so this node would have advertised `stranger` as held on the next beat.
+#[tokio::test]
+async fn a_receive_that_lands_under_another_name_is_refused_and_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = write_fake_btrfs_receive_stranger(tmp.path(), false);
+    let engine = Engine::new(EnginePool::new(tmp.path()));
+    let server = serve_one_body(b"some stream").await;
+    let settings = test_settings();
+    let err = pull_one(&engine, &fake, &peer_http_client().unwrap(), &server.addr, "s3cret", "v1", "c1", None, receive_ceiling(0, &settings), Duration::from_secs(60))
+        .await
+        .expect_err("a stranger's name is not the snapshot asked for");
+    assert!(err.contains("created [\"stranger\"], not c1"), "{err}");
+    assert!(!engine.pool.snap("v1", "stranger").exists(), "the stranger must be removed");
+}
+
+/// The cleanup's own failure is part of the error, not a `let _`: the name stays on disk, and
+/// the caller must know it did rather than count it as held.
+#[tokio::test]
+async fn a_cleanup_that_fails_is_reported_with_the_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = write_fake_btrfs_receive_stranger(tmp.path(), true);
+    let engine = Engine::new(EnginePool::new(tmp.path()));
+    let server = serve_one_body(b"some stream").await;
+    let settings = test_settings();
+    let err = pull_one(&engine, &fake, &peer_http_client().unwrap(), &server.addr, "s3cret", "v1", "c1", None, receive_ceiling(0, &settings), Duration::from_secs(60))
+        .await
+        .expect_err("refused");
+    assert!(err.contains("cleanup failed"), "{err}");
+    assert!(err.contains("subvolume delete"), "{err}");
+}
