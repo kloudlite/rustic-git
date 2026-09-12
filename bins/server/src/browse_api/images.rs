@@ -66,9 +66,13 @@ pub(super) async fn images(
     };
     let names: Vec<String> = markers.iter().map(|m| m.name.clone()).collect();
     let (page, truncated) = crate::registry::paginate(&names, &q);
+    // A set, not `page.contains` per marker: that was a linear scan of the page for every marker,
+    // so an owner with a few thousand images paid O(n^2) string compares to render one page
+    // (2026-09-12).
+    let page_set: std::collections::HashSet<&str> = page.iter().map(String::as_str).collect();
     let out: Vec<ImageSummary> = markers
         .into_iter()
-        .filter(|m| page.contains(&m.name))
+        .filter(|m| page_set.contains(m.name.as_str()))
         .map(|m| ImageSummary {
             name: m.name,
             manifests: m.manifests as usize,

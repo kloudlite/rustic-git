@@ -20,11 +20,20 @@ pub(super) struct Ref {
     kind: &'static str,
 }
 
+/// Every branch and tag, `?n=` capped.
+///
+/// A repo with a tag per CI build has tens of thousands of refs, and this answered all of them in
+/// one JSON body — megabytes, built and held in memory per request (2026-09-12). Clamped like
+/// `api_files`'s `cap` and `api_lastmod`'s `budget`: a caller may ask for fewer, never for more
+/// than `REFS_CAP`.
+const REFS_CAP: usize = 5_000;
+
 pub(super) async fn api_refs(
     State(app): State<Arc<App>>,
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let repo = match open_ro(&app, &trusted, &headers, &owner, &name).await {
         Ok(r) => r,
@@ -34,8 +43,10 @@ pub(super) async fn api_refs(
         Ok(r) => r,
         Err(e) => return internal(e),
     };
+    let n = q.get("n").and_then(|v| v.parse::<usize>().ok()).unwrap_or(REFS_CAP).clamp(1, REFS_CAP);
     let out: Vec<Ref> = refs
         .into_iter()
+        .take(n)
         .map(|(name, oid)| Ref {
             kind: if name.starts_with("refs/tags/") { "tag" } else { "branch" },
             name,
@@ -172,7 +183,11 @@ pub(super) async fn api_files(
     let path = q.get("path").cloned().unwrap_or_default();
     // Clamped rather than refused, exactly as `log` clamps `n`.
     let cap = q.get("cap").and_then(|v| v.parse::<usize>().ok()).unwrap_or(5000).clamp(1, 20_000);
-    odb_json(repo, move |odb| crate::browse::files_at(odb, oid, &path, cap)).await
+    // OPT-IN: a size is an object-header read per blob, so the default answer paid up to `cap` of
+    // them for a number most callers (the file tree, the repo rail) never render. Only the
+    // language breakdown wants them, and it asks (2026-09-12).
+    let sizes = q.get("sizes").is_some_and(|v| v == "1");
+    odb_json(repo, move |odb| crate::browse::files_at(odb, oid, &path, cap, sizes)).await
 }
 
 #[derive(Serialize)]

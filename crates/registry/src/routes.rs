@@ -37,12 +37,21 @@ pub async fn image_listing(
     // An unmarked (pre-backfill) image has no visibility record, so it defaults private just like
     // a freshly-pushed one — an unauthenticated caller must never see it, exactly as `index::list`
     // already withholds a marked-private name from that caller.
-    let unmarked: Vec<String> = if include_private {
+    let mut unmarked: Vec<String> = if include_private {
         // ponytail: fallback dies with the backfill
         image_names(app, owner).await?.into_iter().filter(|n| !marked.contains(n)).collect()
     } else {
         Vec::new()
     };
+    // WINDOWED to the caller's page before a single stat is issued. The marker half has always
+    // honoured `last`/`n`; this half stat-ed every unmarked image the owner had, so a `?n=2`
+    // catalog page cost one LIST per image in the account (2026-09-12). Same `after`/`take` rule
+    // as `index::list_page`, so the two halves page identically.
+    unmarked.sort();
+    if let Some(after) = q.get("last") {
+        unmarked.retain(|name| name.as_str() > after.as_str());
+    }
+    unmarked.truncate(n);
     // One listing per image, bounded at 16 — the same cap and the same reason as
     // `gc::stats_of`, which this now IS: a serial loop put the catalog page behind N sequential
     // round trips, and an unbounded fan-out put it behind N simultaneous ones.

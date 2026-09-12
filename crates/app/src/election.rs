@@ -376,6 +376,16 @@ impl App {
         }
     }
 
+    /// Still the same leader we decided under. Every map write is bounded by `WRITE_BOUND`, so a
+    /// write can land after the lease that authorised it has moved to another pod; the epoch
+    /// checked BEFORE a write says nothing about the moment after it. Caller holds `leader_lock`.
+    pub(super) fn still_leading(&self, epoch: u64) -> Result<()> {
+        match self.leader_epoch() {
+            e if e == epoch => Ok(()),
+            _ => Err(err("no longer the leader")),
+        }
+    }
+
     /// A map operation's result, with a fence turned into a demotion. Caller holds `leader_lock`.
     pub(super) async fn fenced_check<T>(&self, r: Result<T>) -> Result<T> {
         if let Err(e) = &r {

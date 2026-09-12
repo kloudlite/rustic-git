@@ -23,6 +23,11 @@ fn key(subject: &Digest, referrer: &Digest) -> Vec<u8> {
     format!("image/referrer/{subject}/{referrer}").into_bytes()
 }
 const PREFIX: &str = "image/referrer/";
+
+/// The most referrers one answer may carry. A subject accumulates one row per signature,
+/// attestation and SBOM, and the spec makes this response pageable precisely because that set has
+/// no natural ceiling. A client that wants more follows the `Link`.
+const REFERRERS_CAP: usize = 1_000;
 fn subject_prefix(subject: &Digest) -> String {
     format!("{PREFIX}{subject}/")
 }
@@ -79,14 +84,29 @@ pub async fn list(
     let Some(d) = Digest::parse(&digest) else {
         return super::oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
+    // `n` bounds the SCAN, not just the answer: a subject with thousands of signatures and
+    // attestations was read whole into memory on every pull of it, with no way for a client to
+    // ask for less (2026-09-12). One row past the page, so a full page is distinguishable from
+    // the last one and the `Link` below is only emitted when there really is more.
+    let n = q.get("n").and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(REFERRERS_CAP).min(REFERRERS_CAP);
+    let after = q.get("last").cloned();
     let mut out = match crate::fenced_retry(&app, &owner, &name, false, || async {
-        let mut out = vec![];
+        let mut out: Vec<(String, serde_json::Value)> = vec![];
         if app.store.image_exists(&owner, &name).await? {
             let db = app.store.image_db(&owner, &name).await?;
-            let mut it = db.scan_prefix(subject_prefix(&d), ..).await?;
+            let prefix = subject_prefix(&d);
+            let mut it = db.scan_prefix(prefix.clone(), ..).await?;
             while let Some(kv) = it.next().await? {
+                if out.len() > n {
+                    break;
+                }
+                let Ok(key) = std::str::from_utf8(&kv.key) else { continue };
+                let Some(referrer) = key.strip_prefix(prefix.as_str()) else { continue };
+                if after.as_deref().is_some_and(|a| referrer <= a) {
+                    continue;
+                }
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&kv.value) {
-                    out.push(v);
+                    out.push((referrer.to_string(), v));
                 }
             }
         }
@@ -97,6 +117,9 @@ pub async fn list(
         Ok(out) => out,
         Err(r) => return r,
     };
+    // The one row past the page, dropped: what it proves is that a `Link` is owed.
+    let truncated = (out.len() > n).then(|| { out.truncate(n); out.last().map(|(k, _)| k.clone()) }).flatten();
+    let mut out: Vec<serde_json::Value> = out.into_iter().map(|(_, v)| v).collect();
     let filter = q.get("artifactType").cloned();
     if let Some(f) = &filter {
         out.retain(|v| v.get("artifactType").and_then(|a| a.as_str()) == Some(f.as_str()));
@@ -114,6 +137,15 @@ pub async fn list(
         .into_response();
     // Announcing the filter is required: a client must be able to tell a filtered answer from a
     // server that ignored the parameter.
+    if let Some(last) = truncated {
+        // Built from a stored digest and the caller's own `n`; a value no header can carry drops
+        // the Link rather than the pod, exactly as `_catalog`'s does.
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+            "</v2/{owner}/{name}/referrers/{d}?n={n}&last={last}>; rel=\"next\""
+        )) {
+            r.headers_mut().insert(header::LINK, v);
+        }
+    }
     if filter.is_some() {
         r.headers_mut().insert(
             header::HeaderName::from_static("oci-filters-applied"),

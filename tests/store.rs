@@ -486,7 +486,7 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
     let base = gix_object::FindExt::find_commit(&odb, &head, &mut buf).unwrap().tree();
 
     // What the fixture starts with, so the assertions below are about the patch.
-    let before: Vec<String> = kloudlite_vcs::browse::files_at(&odb, head, "", 1000)
+    let before: Vec<String> = kloudlite_vcs::browse::files_at(&odb, head, "", 1000, false)
         .unwrap().into_iter().map(|e| e.name).collect();
     assert!(before.contains(&"src/main.rs".to_string()), "fixture has src/main.rs: {before:?}");
 
@@ -512,7 +512,7 @@ async fn a_patch_edits_adds_and_deletes_in_one_commit() {
 
     let fresh = s.open_repo("alice", "patched").await.unwrap().unwrap();
     let odb2 = fresh.odb().unwrap();
-    let after: Vec<String> = kloudlite_vcs::browse::files_at(&odb2, oid, "", 1000)
+    let after: Vec<String> = kloudlite_vcs::browse::files_at(&odb2, oid, "", 1000, false)
         .unwrap().into_iter().map(|e| e.name).collect();
     assert!(after.contains(&"deep/nested/new.txt".to_string()), "new nested file: {after:?}");
     assert!(after.contains(&"src/main.rs".to_string()), "edited file still there: {after:?}");

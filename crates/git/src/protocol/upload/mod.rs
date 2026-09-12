@@ -37,6 +37,17 @@ pub fn advertise(out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+/// A ref name the client wrote in shorthand, resolved the way git resolves one: the name as
+/// given, then under each of the standard prefixes, in git's own order. The old rule was
+/// `name.ends_with("/{r}")`, which matched ANY ref whose last segment happened to agree — so
+/// `deepen-not main` could resolve to `refs/remotes/origin/main`, or to whichever such ref the
+/// listing happened to hold first, and cut the history at the wrong commit (2026-09-12).
+fn resolve_shorthand(refs: &[(String, ObjectId)], r: &str) -> Option<ObjectId> {
+    const PREFIXES: [&str; 5] = ["", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/"];
+    let at = |name: &str| refs.iter().find(|(n, _)| n == name).map(|(_, o)| *o);
+    PREFIXES.iter().find_map(|p| at(&format!("{p}{r}")))
+}
+
 pub fn serve(
     store: &Store,
     repo: &Repo,
@@ -102,6 +113,10 @@ fn fetch(
     let mut want_refs: Vec<String> = Vec::new();
     let mut include_tag = false;
     let mut filter: Option<Filter> = None;
+    // Listed ONCE, before the argument loop, and shared with the resolution below. `deepen-not`
+    // used to list every ref of the repo per occurrence, and a client may send one per branch it
+    // already has (2026-09-12).
+    let all_refs = block_on(store.list_refs(repo))?;
     for a in args {
         if let Some(h) = a.strip_prefix("want ") {
             wants.push(ObjectId::from_hex(h.as_bytes()).map_err(|e| err(e.to_string()))?);
@@ -127,11 +142,8 @@ fn fetch(
             let r = r.trim();
             match ObjectId::from_hex(r.as_bytes()) {
                 Ok(o) => deepen.not.push(o),
-                Err(_) => match block_on(store.list_refs(repo))?
-                    .into_iter()
-                    .find(|(name, _)| name == r || name.ends_with(&format!("/{r}")))
-                {
-                    Some((_, o)) => deepen.not.push(o),
+                Err(_) => match resolve_shorthand(&all_refs, r) {
+                    Some(o) => deepen.not.push(o),
                     // Refusing beats ignoring. A cutoff we cannot resolve would
                     // otherwise turn a request for a small clone into a silent
                     // full transfer — the client asked for less and would be
@@ -161,7 +173,6 @@ fn fetch(
         // no-progress, thin-pack, ofs-delta, include-tag, sideband-all: accepted/ignored
     }
     let odb = repo.odb()?;
-    let all_refs = block_on(store.list_refs(repo))?;
     let tips: Vec<ObjectId> = all_refs.iter().map(|(_, o)| *o).collect();
 
     // Resolved before anything else uses `wants`, so a want-ref is indistinguishable
@@ -376,4 +387,31 @@ pub(crate) fn reachable_set(
     let mut set: std::collections::HashSet<ObjectId> = ids.into_iter().collect();
     set.extend(counts.into_iter().map(|c| c.id));
     Ok(set)
+}
+
+#[cfg(test)]
+mod shorthand_tests {
+    use super::*;
+
+    fn oid(b: u8) -> ObjectId {
+        ObjectId::from_hex(format!("{:02x}", b).repeat(20).as_bytes()).unwrap()
+    }
+
+    /// A bare name resolves under git's own prefixes, in git's own order — never by matching the
+    /// last segment of some unrelated ref.
+    #[test]
+    fn a_bare_name_is_a_branch_not_a_remote() {
+        let refs = vec![
+            ("refs/remotes/origin/main".to_string(), oid(1)),
+            ("refs/heads/main".to_string(), oid(2)),
+            ("refs/tags/v1".to_string(), oid(3)),
+        ];
+        assert_eq!(resolve_shorthand(&refs, "main"), Some(oid(2)));
+        assert_eq!(resolve_shorthand(&refs, "v1"), Some(oid(3)));
+        assert_eq!(resolve_shorthand(&refs, "refs/heads/main"), Some(oid(2)));
+        assert_eq!(resolve_shorthand(&refs, "nope"), None);
+        // A ref that only exists under remotes is still reachable by its own full name, and by
+        // shorthand only once nothing nearer answers.
+        assert_eq!(resolve_shorthand(&refs, "origin/main"), Some(oid(1)));
+    }
 }

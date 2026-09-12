@@ -19,9 +19,33 @@ pub const LEASE_TTL: Duration = Duration::from_secs(10);
 /// How long one map write may take before the writer is judged stalled. A SlateDB write awaits
 /// its own flusher for durability, with no bound of its own; a flusher that has stopped — an
 /// object store that hangs, a task that died — would otherwise hold `leader_lock` forever and
-/// every claim, renew and release in the fleet behind it. One lease TTL: a leader whose map has
-/// not accepted a write for that long has already lost the right to decide anything.
-pub const WRITE_BOUND: Duration = LEASE_TTL;
+/// every claim, renew and release in the fleet behind it. STRICTLY under one lease TTL —
+/// `LEASE_TTL - RENEW_EVERY`, asserted below — so a stalled write is noticed and the leader has
+/// stood down while its own lease is still live. At exactly `LEASE_TTL` the lease had already
+/// lapsed by the time the timeout fired, and the demotion said nothing anyone could act on
+/// (2026-09-12).
+pub const WRITE_BOUND: Duration = Duration::from_secs(7);
+const _: () = assert!(WRITE_BOUND.as_secs() + RENEW_EVERY.as_secs() <= LEASE_TTL.as_secs());
+
+/// The earliest wall clock this build will decide ownership under: 2026-01-01T00:00:00Z.
+///
+/// `now_ms` degrades to 0 on a clock behind the epoch (a container started before NTP), and a
+/// zero clock makes EVERY lease read as expired — so a claim would be granted over a live owner
+/// and fence it, and every owner in the fleet in turn. A clock that cannot be believed must
+/// decide nothing; the caller answers the asker with an error and it retries once the node's
+/// clock is real (2026-09-12).
+pub const CLOCK_FLOOR_MS: u64 = 1_767_225_600_000;
+
+/// `now_ms`, refused rather than returned when the clock is below `CLOCK_FLOOR_MS`. Every
+/// ownership DECISION goes through this; the diagnostics and the metrics may still use `now_ms`.
+pub fn decision_now_ms(now_ms: u64) -> crate::Result<u64> {
+    if now_ms < CLOCK_FLOOR_MS {
+        return Err(crate::err(format!(
+            "ownership: this node's clock reads {now_ms} ms, before {CLOCK_FLOOR_MS} — refusing to decide ownership"
+        )));
+    }
+    Ok(now_ms)
+}
 
 /// The error a stalled write surfaces as; `is_stalled` is how the leader tells it from a fence.
 const STALLED: &str = "ownership: map write stalled";
@@ -431,14 +455,26 @@ impl OwnershipStore {
     /// Every entry currently in the map, for pruning and for `/healthz` diagnostics.
     pub async fn all(&self) -> crate::Result<Vec<(String, Entry)>> {
         let prefix = "own/";
-        let role = self.role.read().await;
-        let mut iter = match &*role {
-            Role::Writer(db) => db.scan_prefix(prefix, ..).await?,
+        // The handle is CLONED out of the role lock and the guard dropped before the scan: a full
+        // map scan behind that lock blocked every promote, demote and routing read for as long as
+        // it took, and the scan is the one map operation whose cost grows with the fleet
+        // (2026-09-12). The clone is an `Arc` — a scan through a handle that is retired mid-pass
+        // errors, which is exactly what the caller already handles.
+        enum Handle {
+            W(std::sync::Arc<slatedb::Db>),
+            R(std::sync::Arc<slatedb::DbReader>),
+        }
+        let handle = match &*self.role.read().await {
+            Role::Writer(db) => Handle::W(db.clone()),
             Role::Reader { slot, .. } => match slot.read().await.clone() {
-                Some(r) => r.scan_prefix(prefix, ..).await?,
+                Some(r) => Handle::R(r),
                 None => return Ok(Vec::new()),
             },
             Role::Solo => return Ok(Vec::new()),
+        };
+        let mut iter = match &handle {
+            Handle::W(db) => db.scan_prefix(prefix, ..).await?,
+            Handle::R(r) => r.scan_prefix(prefix, ..).await?,
         };
         let mut out = Vec::new();
         while let Some(kv) = iter.next().await? {
@@ -568,3 +604,26 @@ mod write_bound_tests {
     }
 }
 
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    /// A map write must time out while the lease that authorised it is still live, or the
+    /// demotion it triggers says nothing anyone can act on.
+    #[test]
+    fn a_write_is_bounded_inside_one_lease() {
+        assert!(WRITE_BOUND < LEASE_TTL);
+        assert!(WRITE_BOUND + RENEW_EVERY <= LEASE_TTL);
+    }
+
+    /// A clock below the floor decides nothing: it would read every live lease as expired and
+    /// grant the repo away from its owner.
+    #[test]
+    fn a_clock_before_the_floor_decides_nothing() {
+        assert!(decision_now_ms(0).is_err());
+        assert!(decision_now_ms(CLOCK_FLOOR_MS - 1).is_err());
+        assert!(decision_now_ms(CLOCK_FLOOR_MS).is_ok());
+        // The floor is in the past for every build that ships with it, so a healthy node passes.
+        assert!(decision_now_ms(now_ms()).is_ok());
+    }
+}

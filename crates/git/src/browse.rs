@@ -219,7 +219,7 @@ pub fn log(odb: &gix_odb::Handle, from: ObjectId, n: usize) -> Result<Vec<Commit
 /// `cap` bounds the result rather than the recursion depth — a repo with more
 /// files than that returns what it reached, breadth-first, so the answer is a fair
 /// sample rather than one deep branch.
-pub fn files_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize) -> Result<Vec<Entry>> {
+pub fn files_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize, sizes: bool) -> Result<Vec<Entry>> {
     let Some(root) = tree_id_at(odb, oid, path) else { return Ok(vec![]) };
     let mut out: Vec<Entry> = Vec::new();
     // Carries the tree ID, not the path: resolving `a/b/c` from the root for every
@@ -244,7 +244,9 @@ pub fn files_at(odb: &gix_odb::Handle, oid: ObjectId, path: &str, cap: usize) ->
             }
         }
     }
-    with_sizes(odb, &mut out);
+    if sizes {
+        with_sizes(odb, &mut out);
+    }
     Ok(out)
 }
 

@@ -138,9 +138,24 @@ pub fn browse_routes() -> Router<Arc<App>> {
         .route("/api/{owner}/volumes", get(volumes))
         .route("/api/{owner}/{name}/volumehistory", get(volumehistory))
         .route("/api/{owner}/{name}/imagetags", get(imagetags))
-        .route("/api/{owner}/{name}/imagetagdelete", post(imagetagdelete))
-        .route("/api/{owner}/{name}/imagedelete", post(imagedelete))
-        .route("/api/{owner}/{name}/imagevisibility", post(imagevisibility))
+        // A body limit on each of the three image writes. Without one they inherited axum's 2 MB
+        // default and buffered a body nothing would ever read (2026-09-12); the two that take no
+        // body at all get zero, the same rule `/protect` already carried.
+        //
+        // `imagetagdelete`'s body IS its argument — one tag name. A tag is at most 128 characters
+        // by the OCI grammar; the slack is for trailing whitespace a client may send.
+        .route(
+            "/api/{owner}/{name}/imagetagdelete",
+            post(imagetagdelete).layer(axum::extract::DefaultBodyLimit::max(256)),
+        )
+        .route(
+            "/api/{owner}/{name}/imagedelete",
+            post(imagedelete).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
+        .route(
+            "/api/{owner}/{name}/imagevisibility",
+            post(imagevisibility).layer(axum::extract::DefaultBodyLimit::max(0)),
+        )
         .route("/api/{owner}/{name}/refs", get(api_refs))
         .route("/api/{owner}/{name}/tree/{oid}", get(api_tree_root))
         .route("/api/{owner}/{name}/tree/{oid}/{*path}", get(api_tree))

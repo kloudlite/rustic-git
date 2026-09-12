@@ -255,20 +255,34 @@ pub async fn list_page(
         }
     }
 
-    async fn names(os: &Arc<dyn ObjectStore>, prefix: Path) -> crate::Result<Vec<Path>> {
-        os.list(Some(&prefix))
+    /// How many marker NAMES one listing pass may hold, per visibility prefix. Names are cheap,
+    /// but an owner with a runaway number of repos would otherwise build an unbounded `Vec` per
+    /// request, and every page rebuilt it from the start (2026-09-12). Far above any honest
+    /// account; a listing that hits it is short, which the caller's `Link` already expresses.
+    const LIST_CAP: usize = 10_000;
+
+    /// The names under one prefix, starting AFTER `after` — the object store's own start-after
+    /// (a real S3 parameter, not a client-side filter), so paging past the first page no longer
+    /// re-lists everything before it.
+    async fn names(os: &Arc<dyn ObjectStore>, prefix: Path, after: Option<&str>) -> crate::Result<Vec<Path>> {
+        let stream = match after {
+            Some(a) => os.list_with_offset(Some(&prefix), &prefix.clone().join(a)),
+            None => os.list(Some(&prefix)),
+        };
+        stream
             .map(|r| r.map(|m| m.location))
+            .take(LIST_CAP)
             .collect::<Vec<_>>()
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| crate::err(format!("index: {e}")))
     }
-    let public_names = names(os, Path::from(format!("index/public/{}/{owner}/", kind.seg()))).await?;
+    let public_names = names(os, Path::from(format!("index/public/{}/{owner}/", kind.seg())), after).await?;
     // Listed even when private entries are not being returned: the private prefix is what makes
     // a crashed flip (both markers present) read as private, and that fail-closed rule has to
     // hold hardest for exactly the caller who may not see private names.
-    let private_names = names(os, Path::from(format!("index/private/{}/{owner}/", kind.seg()))).await?;
+    let private_names = names(os, Path::from(format!("index/private/{}/{owner}/", kind.seg())), after).await?;
 
     // A private marker wins over a same-named public one (fail-closed on a crashed flip), so
     // drop any public entry whose name also has a private one before fetching bodies.

@@ -130,11 +130,15 @@ async fn a_listing_reports_the_size_the_bytes_actually_are() {
     }
     assert!(checked > 0, "the fixture should have a blob to check");
 
-    // The whole-tree walk carries sizes too — the language breakdown is byte
-    // counts, so an absent size there silently drops a file from the totals.
-    let files = browse::files_at(&odb, head, "", 5000).unwrap();
+    // The whole-tree walk carries sizes when ASKED — the language breakdown is byte counts, so
+    // an absent size there silently drops a file from the totals — and pays nothing for them
+    // when not, which is every other caller.
+    let files = browse::files_at(&odb, head, "", 5000, true).unwrap();
     assert!(files.iter().any(|f| f.name == "src/main.rs"), "paths are full, not just names");
     assert!(files.iter().all(|f| f.size.is_some()), "every file needs a size");
+    let bare = browse::files_at(&odb, head, "", 5000, false).unwrap();
+    assert_eq!(bare.len(), files.len(), "the same entries either way");
+    assert!(bare.iter().all(|f| f.size.is_none()), "no size is read unless one was asked for");
 }
 
 /// A binary file is named in the diff and its contents are not.

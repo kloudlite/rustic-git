@@ -12,11 +12,12 @@ use super::hidden;
 use crate::router::internal;
 use crate::App;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
+use std::collections::HashMap;
 use futures::StreamExt;
 use kloudlite_core::httpx::Trusted;
 use kloudlite_workspaces::registry::{volume_marker_prefix, VolExt};
@@ -53,6 +54,7 @@ pub(super) async fn volumes(
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
     Path(owner): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     match crate::registry::auth::caller(&app, &trusted, &headers).await {
         Ok(Some(who)) if who == owner => {}
@@ -75,11 +77,23 @@ pub(super) async fn volumes(
             dated.insert(name.to_string(), meta.last_modified.timestamp_millis());
         }
     }
-    let out: Vec<VolumeSummary> = names
+    // `?n=&last=` like `images`, `Link` when truncated. An owner with a workspace per branch has
+    // a volume per workspace, and this answered every one of them in a single body (2026-09-12).
+    let mut names = names;
+    names.sort();
+    let (page, truncated) = crate::registry::paginate(&names, &q);
+    let out: Vec<VolumeSummary> = page
         .into_iter()
         .map(|name| VolumeSummary { latest_ms: dated.get(&name).copied().filter(|ms| *ms > 0), name })
         .collect();
-    Json(out).into_response()
+    let mut r = Json(out).into_response();
+    if let Some(last) = truncated {
+        let n = q.get("n").cloned().unwrap_or_default();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("</api/{owner}/volumes?n={n}&last={last}>; rel=\"next\"")) {
+            r.headers_mut().insert(axum::http::header::LINK, v);
+        }
+    }
+    r
 }
 
 /// `GET /api/{owner}/{name}/volumehistory` — one volume's snapshots, newest first.
@@ -96,6 +110,7 @@ pub(super) async fn volumehistory(
     axum::Extension(trusted): axum::Extension<Trusted>,
     headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     match crate::registry::auth::caller(&app, &trusted, &headers).await {
         Ok(Some(who)) if who == owner => {}
@@ -108,7 +123,15 @@ pub(super) async fn volumehistory(
         return hidden();
     }
     match app.store.history(&owner, &name).await {
-        Ok(records) => Json(records).into_response(),
+        // Newest first, so `?n=` is "the newest n" and needs no cursor: a volume pushed every few
+        // minutes for a year has a record per push, and the Snapshots page renders a screenful.
+        // Clamped rather than refused, like every other browse bound here.
+        Ok(mut records) => {
+            const HISTORY_CAP: usize = 500;
+            let n = q.get("n").and_then(|v| v.parse::<usize>().ok()).unwrap_or(HISTORY_CAP).clamp(1, HISTORY_CAP);
+            records.truncate(n);
+            Json(records).into_response()
+        }
         Err(e) => internal(e),
     }
 }

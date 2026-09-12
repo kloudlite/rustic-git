@@ -365,15 +365,32 @@ impl App {
     /// or was partitioned away. Keeps the map bounded by what is actually open.
     pub async fn prune_once(&self) -> Result<()> {
         let _g = self.leader_lock.lock().await;
-        self.writing_epoch()?;
-        let now = self.now_ms();
+        let epoch = self.writing_epoch()?;
+        let now = ownership::decision_now_ms(self.now_ms())?;
         let all = self.fenced_check(self.ownership.all().await).await?;
         // The writer is the only one that can sweep, so its count is the one honest size of the map.
         metrics::gauge!("ownership_map_size").set(all.len() as f64);
+        // Each delete is bounded, but the PASS was not: a sweep of N expired entries held
+        // `leader_lock` for up to N x `WRITE_BOUND`, and every claim, renew and release in the
+        // fleet queues behind that lock. The pass gets ONE lease TTL as a whole and leaves the
+        // rest to the next beat — a prune is a backstop, never urgent (2026-09-12).
+        let deadline = std::time::Instant::now() + ownership::LEASE_TTL;
+        let mut left = 0usize;
         for (repo, e) in all {
-            if ownership::is_expired(&e, now) {
-                self.fenced_check(self.ownership.delete(&repo).await).await?;
+            if !ownership::is_expired(&e, now) {
+                continue;
             }
+            if std::time::Instant::now() >= deadline {
+                left += 1;
+                continue;
+            }
+            self.fenced_check(self.ownership.delete(&repo).await).await?;
+            // Re-checked after every write: a bounded write can outlast the lease it was decided
+            // under, and a demoted leader must stop deleting other people's entries.
+            self.still_leading(epoch)?;
+        }
+        if left > 0 {
+            tracing::info!(left, "ownership.prune.deferred");
         }
         Ok(())
     }
@@ -398,7 +415,7 @@ impl App {
         // total. `demote` takes the same lock, so an epoch seen here is still held at the write.
         let _g = self.leader_lock.lock().await;
         let epoch = self.writing_epoch()?;
-        let now = self.now_ms();
+        let now = ownership::decision_now_ms(self.now_ms())?;
         let cur = self.fenced_check(self.ownership.get(repo).await).await?;
         let g = if force {
             ownership::decide_force_claim(cur.as_ref(), asker, now)
@@ -414,6 +431,10 @@ impl App {
             };
             metrics::counter!("ownership_claims_total", "result" => result).increment(1);
             self.fenced_check(self.ownership.put(repo, e).await).await?;
+            // A write may take up to `WRITE_BOUND`; the lease that authorised it may have moved in
+            // that window. Answering `Granted` off an epoch that is no longer ours would hand a
+            // repo out in the name of a leader that no longer exists (2026-09-12).
+            self.still_leading(epoch)?;
             tracing::debug!(repo = %repo, node = %e.node, epoch, "ownership.granted");
         } else {
             metrics::counter!("ownership_claims_total", "result" => "heldby").increment(1);
@@ -428,8 +449,8 @@ impl App {
         // reads and a single write, which is about what one put cost. Every entry's
         // compare-and-set stays atomic: nothing else writes the map between the read and the batch.
         let _g = self.leader_lock.lock().await;
-        self.writing_epoch()?;
-        let now = self.now_ms();
+        let epoch = self.writing_epoch()?;
+        let now = ownership::decision_now_ms(self.now_ms())?;
         let mut lost = Vec::new();
         let mut renewed = Vec::new();
         for repo in repos {
@@ -440,15 +461,17 @@ impl App {
             }
         }
         self.fenced_check(self.ownership.put_many(&renewed).await).await?;
+        self.still_leading(epoch)?;
         Ok(lost)
     }
 
     pub async fn grant_release(&self, repo: &str, asker: &str) -> Result<()> {
         let _g = self.leader_lock.lock().await;
-        self.writing_epoch()?;
+        let epoch = self.writing_epoch()?;
         let cur = self.fenced_check(self.ownership.get(repo).await).await?;
         if ownership::may_release(cur.as_ref(), asker) {
             self.fenced_check(self.ownership.delete(repo).await).await?;
+            self.still_leading(epoch)?;
         }
         Ok(())
     }

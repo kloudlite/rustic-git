@@ -4,7 +4,17 @@
 //! so re-serializing a parsed manifest — even to identical-looking JSON — changes the digest and
 //! breaks every client that verifies one. Nothing here parses a manifest except to read `subject`
 //! for the referrers index.
-use super::store::{blob_path, ImageExt};
+use super::store::{blob_path, manifest_prefix, ImageExt};
+
+/// Whether this image holds any sha512-digested manifest at all. One LIST, stopped at the first
+/// object: the by-tag push path asks before paying a second full-body hash. `false` on a read
+/// error is correct here and not a suppressed failure — it only means "do not take the optional
+/// sha512 branch", and the sha256 answer the caller falls back to is the spec's default.
+async fn has_sha512_manifest(app: &App, owner: &str, name: &str) -> bool {
+    use futures::StreamExt;
+    let prefix = manifest_prefix(owner, name).join("sha512");
+    app.store.os.list(Some(&prefix)).next().await.is_some_and(|r| r.is_ok())
+}
 use super::{
     auth, oci_err,
     store::{manifest_path, Digest},
@@ -158,7 +168,11 @@ pub async fn put_manifest(
             let sha256 = Digest::of(&body);
             if app.store.os.head(&manifest_path(&owner, &name, &sha256)).await.is_ok() {
                 sha256
-            } else {
+            } else if has_sha512_manifest(&app, &owner, &name).await {
+                // Gated on the image ACTUALLY holding a sha512 manifest: almost none do, and
+                // hashing every by-tag push a second time (sha512 over the whole body) to then
+                // HEAD an object that was never going to be there was pure cost on the hot push
+                // path (2026-09-12). One bounded LIST decides it.
                 match Digest::of_algo("sha512", &body) {
                     Some(sha512)
                         if app.store.os.head(&manifest_path(&owner, &name, &sha512)).await.is_ok() =>
@@ -167,6 +181,8 @@ pub async fn put_manifest(
                     }
                     _ => sha256,
                 }
+            } else {
+                sha256
             }
         }
     };

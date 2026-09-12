@@ -163,7 +163,12 @@ pub async fn check_repo(store: &Store, owner: &str, name: &str) -> Result<Vec<De
     let db = store.db_for(owner, name).await?;
     // The row scan first: a repo with no open change — most of them, on every 30 s pass — must
     // not pay a pack sync to learn there is nothing to check.
-    let open = open_only(&db, usize::MAX).await?;
+    // Bounded: the pass can only ACT on `CHECK_LIMIT` changes, so reading every open change in a
+    // repo to then drop all but the first few was a scan whose cost grew with the repo and whose
+    // result did not (2026-09-12). Headroom over `CHECK_LIMIT` because an `Unchanged` change
+    // costs nothing and does not count against the limit, so the scan has to reach past them.
+    const SCAN_LIMIT: usize = CHECK_LIMIT * 20;
+    let open = open_only(&db, SCAN_LIMIT).await?;
     if open.is_empty() {
         return Ok(Vec::new());
     }
