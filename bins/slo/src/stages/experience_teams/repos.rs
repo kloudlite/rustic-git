@@ -468,13 +468,27 @@ pub(crate) async fn verify(c: &mut Ctx) {
         let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/api/{probe}/{name}/signature/{oid}"));
+        // The answer never names the oid (it is the signature and its payload, or `null` for an
+        // unsigned commit), so "answers for THIS commit" is proved the other way round: an oid
+        // nobody pushed must not get the same 200. A first attempt at this check (2026-09-12)
+        // looked for the oid in the body and could never pass.
+        let unknown = {
+            let mut o: Vec<char> = oid.trim().chars().collect();
+            if let Some(last) = o.last_mut() {
+                *last = if *last == '0' { '1' } else { '0' };
+            }
+            api(c, &format!("/api/{probe}/{name}/signature/{}", o.into_iter().collect::<String>()))
+        };
         async move {
             let doc = get(c, &url, &jwt).await?;
-            // A 200 alone says nothing: a handler that answered an empty document, or one about
-            // some other commit, would keep this green forever. The endpoint's own answer has to
-            // name the oid it was asked about (2026-09-12).
-            let named = doc.to_string().contains(oid.trim());
-            named.then_some(()).ok_or_else(|| anyhow!("the signature answer does not name {oid}: {}", clip(&doc.to_string())))
+            if !(doc.is_null() || doc.get("payload_base64").is_some()) {
+                return Err(anyhow!("the signature answer is neither unsigned nor a signature: {}", clip(&doc.to_string())));
+            }
+            let (status, _) = raw(c, reqwest::Method::GET, &unknown, &jwt, None, &[]).await?;
+            if status != reqwest::StatusCode::NOT_FOUND {
+                return Err(anyhow!("an oid nobody pushed answered {status}, so the endpoint is not looking the commit up"));
+            }
+            Ok(())
         }
         .boxed()
     })
