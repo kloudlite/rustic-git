@@ -134,13 +134,15 @@ pub(crate) async fn worktree_gate(
     // pod restart finding its own worktree already there) into a no-op rather than an error.
     let (engine, vol_id, wt_id, head) = (ctx.engine.clone(), id.clone(), parent_name.to_string(), effective_head.clone());
     let quota_gb = volume.spec.quota_gb;
-    let result = tokio::task::spawn_blocking(move || {
+    // Timed: the btrfs snapshot under `ws_lock` is the one step of a start or restore that waits
+    // on another holder of the volume's lock, and until 2026-09-11 the one nobody timed.
+    let result = super::timed("checkout", parent_name, tokio::task::spawn_blocking(move || {
         engine.checkout(&vol_id, head.as_deref(), &wt_id)?;
         // Quota the worktree the instant it exists — waiting for the volume's next reconcile pass
         // would leave a freshly checked-out worktree briefly unquota'd.
         engine.set_quota_worktree(&vol_id, &wt_id, quota_gb)?;
         Ok::<_, kloudlite_workspaces::engine::ops::EngErr>(())
-    })
+    }))
     .await
     .map_err(|e| ReconcileErr(e.to_string()))?;
     match result {

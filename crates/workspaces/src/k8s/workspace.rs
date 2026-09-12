@@ -141,6 +141,7 @@ pub(super) fn prelude(name: &str) -> String {
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' '[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish\n\
          printf '%s\\n' 'format = \"$directory$git_branch$git_status$cmd_duration$line_break$character\"' > /etc/starship.toml\n\
+         echo prelude.seed.start\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
          export PATH={path}\n\
@@ -151,7 +152,9 @@ pub(super) fn prelude(name: &str) -> String {
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
+         echo prelude.chown.done\n\
          su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} exec kl ide serve >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
+         echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
 }

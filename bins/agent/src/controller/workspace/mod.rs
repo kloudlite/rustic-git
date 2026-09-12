@@ -90,7 +90,11 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // FIRST, above every write: see `my_node`. A partitioned agent that keeps reconciling erases
     // the sweep's `NodeDead` on the very next tick, which is how `/v1` came to accept `start` on a
     // node the cluster reads as dead.
-    let me = my_node(ctx).await;
+    // Every await between here and the first status write is timed: a restore sat 58 s in this
+    // pass with nothing logged (2026-09-11, `reconcile.done ms=57995`, no `reconcile.slow`), and
+    // the three timed steps below were not where the time went.
+    let wsname = w.name_any();
+    let me = super::timed("my_node", &wsname, my_node(ctx)).await;
     if me.dead {
         return Ok(Action::requeue(TICK));
     }
@@ -120,8 +124,11 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         .await;
     }
     let ws_api = Api::<crd::Workspace>::all(ctx.client.clone());
-    heal_labels(&ws_api, w, &w.spec.owner, &w.spec.team, "workspace").await?;
-    heal_attached_label(&ws_api, w).await?;
+    super::timed("heal_labels", &wsname, async {
+        heal_labels(&ws_api, w, &w.spec.owner, &w.spec.team, "workspace").await?;
+        heal_attached_label(&ws_api, w).await
+    })
+    .await?;
     let mut prev = w.status.clone().unwrap_or_default();
     // Stopping is a home push and a pod delete — it needs neither the disk nor the namespace. Run
     // it BEFORE those gates: a workspace whose Volume failed permanently would otherwise be
@@ -129,16 +136,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     if w.spec.desired_state == DesiredState::Stopped {
         return stop_workspace(w, prev, gen, ctx).await;
     }
-    let vol = match resolve_volume(
-        w,
-        &w.spec.owner,
-        &w.spec.team,
-        &w.spec.region,
-        &w.spec.storage,
-        &prev.node_name.clone(),
-        &prev.conditions.clone(),
-        gen,
-        ctx,
+    let vol = match super::timed(
+        "resolve_volume",
+        &wsname,
+        resolve_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, &w.spec.storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, ctx),
     )
     .await?
     {
@@ -167,7 +168,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // nothing else, matching the environment's: a workspace parked in `Creating` has no bytes
     // anywhere to spread toward. A listing that could not be completed moves nothing — an unseen
     // sibling may be a running pod.
-    if super::start_spread("Workspace", &w.name_any(), &id, &vol, prev.phase, ctx).await?.is_some() {
+    if super::timed("start_spread", &wsname, super::start_spread("Workspace", &w.name_any(), &id, &vol, prev.phase, ctx)).await?.is_some() {
         // Nothing left to do here: this object is unplaced now and the new node's claim watch
         // picks it up. Await the change rather than requeueing at an object that is no longer ours.
         return Ok(Action::await_change());
@@ -179,7 +180,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // mapping one binding to every waiting Workspace of that owner is a list per binding event, and
     // the wait is bounded by one tick. Wire a `spec.owner`-indexed reflector if first-workspace
     // latency ever shows up as a complaint.
-    if !binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner, &w.spec.team).await? {
+    if !super::timed("namespace_ready", &wsname, binding::namespace_ready(ctx, &w.spec.region, &w.spec.owner, &w.spec.team)).await? {
         let st = crd::WorkspaceStatus {
             phase: crd::Phase::Creating,
             observed_generation: None,

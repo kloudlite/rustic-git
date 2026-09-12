@@ -105,8 +105,14 @@ pub fn ws_lock(pool: &Pool, ws: &str) -> Result<std::fs::File, String> {
     let path = pool.root.join("vol").join(format!("{ws}.lock"));
     let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     use std::os::fd::AsRawFd;
+    let waited = std::time::Instant::now();
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err("flock failed".into());
+    }
+    // A wait here is another holder's btrfs operation on the same volume; past two seconds it is
+    // the thing a stuck start or restore is waiting on, and it says so.
+    if waited.elapsed() > std::time::Duration::from_secs(2) {
+        tracing::warn!(lock = %path.display(), ms = waited.elapsed().as_millis() as u64, "lock.slow");
     }
     Ok(f)
 }
