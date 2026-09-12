@@ -6,7 +6,9 @@
 //! the INDEX; every sum re-reads `spec.owner`, because a label is a view and never authorization.
 
 use crate::crd;
-use crate::k8s::OWNER_LABEL;
+use crate::crd::VOLUME_LABEL;
+use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
+use std::collections::HashSet;
 use kube::api::{Api, ListParams};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
@@ -126,19 +128,32 @@ fn ceil_div(n: u64, d: u64) -> u64 {
     n.div_ceil(d)
 }
 
-/// Everything `owner` is using right now. Four list calls, all label-selected.
+/// Everything `owner` is using right now — label-selected listings, decided on spec.
+///
+/// Who an object is CHARGED to: a team environment is stamped `spec.owner = team`, but a team
+/// workspace (and its volume) is stamped with the person who made it plus `spec.team = team` —
+/// the home and the keys stay the person's. So a team's count comes through the team label and
+/// the person's count skips what the team is charged for, and a snapshot is charged to whoever
+/// its volume is charged to. Until 2026-09-12 only `spec.owner` was summed, which meant a team's
+/// workspaces, disk and snapshots were never counted against anyone at all.
 pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> {
+    use kube::ResourceExt;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let vols: Api<crd::Volume> = Api::all(c.clone());
     let snaps: Api<crd::Snapshot> = Api::all(c.clone());
     let lp = owned_by(owner);
+    let team_lp = ListParams::default().labels(&format!("{TEAM_LABEL}={owner}"));
+    let charged = |o: &str, team: &str| if team.is_empty() { o == owner } else { team == owner };
 
     let (mut millis, mut mib) = (0u64, 0u64);
     let mut u = Usage::default();
+    // Two selectors can answer the same object (a fake that ignores selectors, a label healed
+    // late); the name decides once.
+    let mut seen: HashSet<String> = HashSet::new();
 
-    for w in ws.list(&lp).await?.items {
-        if w.spec.owner != owner {
+    for w in ws.list(&lp).await?.items.into_iter().chain(ws.list(&team_lp).await?.items) {
+        if !charged(&w.spec.owner, &w.spec.team) || !seen.insert(format!("ws/{}", w.name_any())) {
             continue;
         }
         u.workspaces += 1;
@@ -169,19 +184,39 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
             }
         }
     }
-    for v in vols.list(&lp).await?.items {
-        if v.spec.owner != owner {
+    // Detached volumes included: disk kept by snapshots after a working copy is deleted is still
+    // the owner's disk, and deleting the snapshots is how they get it back.
+    let mut charged_volumes: Vec<String> = Vec::new();
+    let mut known_volumes: HashSet<String> = HashSet::new();
+    for v in vols.list(&lp).await?.items.into_iter().chain(vols.list(&team_lp).await?.items) {
+        known_volumes.insert(v.name_any());
+        if !charged(&v.spec.owner, &v.spec.team) || !seen.insert(format!("vol/{}", v.name_any())) {
             continue;
         }
-        // Detached volumes included: disk kept by snapshots after a working copy is deleted is
-        // still the owner's disk, and deleting the snapshots is how they get it back.
         u.disk_gb += v.spec.quota_gb;
+        charged_volumes.push(v.name_any());
     }
-    for s in snaps.list(&lp).await?.items {
+    // A snapshot follows its volume; one whose volume is in no listing at all (a fixture, a volume
+    // mid-collection) falls back to its own `spec.owner`, the rule this had before teams. A volume
+    // that IS listed and charged to someone else takes its snapshots with it.
+    let mut count_snapshot = |s: &crd::Snapshot| {
         // `is_snapshot`, not `!spec.transient`: a legacy baseline is a sync point by shape rather
         // than by flag, and the agent's own sync points are never anyone's allocation.
-        if s.spec.owner == owner && s.is_snapshot() {
+        if s.is_snapshot() && seen.insert(format!("snap/{}", s.name_any())) {
             u.snapshots += 1;
+        }
+    };
+    for s in snaps.list(&lp).await?.items {
+        if s.spec.owner == owner && !known_volumes.contains(&s.spec.volume) {
+            count_snapshot(&s);
+        }
+    }
+    for chunk in charged_volumes.chunks(40) {
+        let sel = ListParams::default().labels(&format!("{VOLUME_LABEL} in ({})", chunk.join(",")));
+        for s in snaps.list(&sel).await?.items {
+            if chunk.contains(&s.spec.volume) {
+                count_snapshot(&s);
+            }
         }
     }
     u.cpu = ceil_div(millis, 1000) as u32;

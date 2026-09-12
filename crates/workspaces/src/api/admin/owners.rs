@@ -93,9 +93,11 @@ pub(crate) async fn fleet(cache: Option<&fleet::FleetCache>, client: &kube::Clie
 }
 
 /// `quota::usage`'s per-item accounting, done once over every owner's objects instead of once per
-/// owner — same rules (live workspaces/environments cost cpu/mem, every volume counts its disk
-/// regardless of state, a snapshot counts only when `is_snapshot`), just grouped by `spec.owner`
-/// in memory rather than re-listed per owner with a label selector.
+/// owner — the SAME rules (a team workspace or volume is charged to `spec.team`, the hidden
+/// builder never spends an `environments` slot, a service's own resources beat the env unit, a
+/// snapshot follows its volume and counts only when `is_snapshot`), grouped in memory rather than
+/// re-listed per owner. A number here that differs from the gate's is a grant made off the wrong
+/// figure, which is what this page existed to avoid.
 fn fold_usage(
     ws: &[crd::Workspace],
     envs: &[crd::Environment],
@@ -106,30 +108,39 @@ fn fold_usage(
     let mut mib: HashMap<String, u64> = HashMap::new();
     let mut out: HashMap<String, crate::quota::Usage> = HashMap::new();
 
+    let charged = |owner: &str, team: &str| if team.is_empty() { owner.to_string() } else { team.to_string() };
     for w in ws {
-        let u = out.entry(w.spec.owner.clone()).or_default();
+        let key = charged(&w.spec.owner, &w.spec.team);
+        let u = out.entry(key.clone()).or_default();
         u.workspaces += 1;
         if w.spec.desired_state == crd::DesiredState::Running {
-            *millis.entry(w.spec.owner.clone()).or_default() += crate::quota::millicores(&w.spec.resources.cpu_limit);
-            *mib.entry(w.spec.owner.clone()).or_default() += crate::quota::mebibytes(&w.spec.resources.memory_limit);
+            *millis.entry(key.clone()).or_default() += crate::quota::millicores(&w.spec.resources.cpu_limit);
+            *mib.entry(key).or_default() += crate::quota::mebibytes(&w.spec.resources.memory_limit);
         }
     }
     for e in envs {
         let u = out.entry(e.spec.owner.clone()).or_default();
-        u.environments += 1;
+        if e.spec.system.is_none() {
+            u.environments += 1;
+        }
         if e.spec.desired_state == crd::DesiredState::Running {
-            let unit = crate::k8s::env_unit_resources();
-            let n = e.spec.services.len() as u64;
-            *millis.entry(e.spec.owner.clone()).or_default() += n * crate::quota::millicores(&unit.cpu_limit);
-            *mib.entry(e.spec.owner.clone()).or_default() += n * crate::quota::mebibytes(&unit.memory_limit);
+            for svc in &e.spec.services {
+                let unit = svc.resources.clone().unwrap_or_else(crate::k8s::env_unit_resources);
+                *millis.entry(e.spec.owner.clone()).or_default() += crate::quota::millicores(&unit.cpu_limit);
+                *mib.entry(e.spec.owner.clone()).or_default() += crate::quota::mebibytes(&unit.memory_limit);
+            }
         }
     }
+    let mut volume_charge: HashMap<String, String> = HashMap::new();
     for v in vols {
-        out.entry(v.spec.owner.clone()).or_default().disk_gb += v.spec.quota_gb;
+        let key = charged(&v.spec.owner, &v.spec.team);
+        out.entry(key.clone()).or_default().disk_gb += v.spec.quota_gb;
+        volume_charge.insert(kube::ResourceExt::name_any(v), key);
     }
     for s in snaps {
         if s.is_snapshot() {
-            out.entry(s.spec.owner.clone()).or_default().snapshots += 1;
+            let key = volume_charge.get(&s.spec.volume).cloned().unwrap_or_else(|| s.spec.owner.clone());
+            out.entry(key).or_default().snapshots += 1;
         }
     }
     for (owner, u) in out.iter_mut() {

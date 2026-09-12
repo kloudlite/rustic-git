@@ -149,6 +149,50 @@ async fn quota_reports_the_default_limits_and_the_computed_use() {
     assert_eq!(doc["used"]["memoryGb"], 8);
 }
 
+/// A team workspace is stamped with the person who made it and `spec.team`; it, its volume and
+/// its snapshots are the TEAM's allocation and nobody else's. Until 2026-09-12 they were counted
+/// against no one: the gate charged the team and the fold summed `spec.owner`.
+#[tokio::test]
+async fn a_team_workspace_counts_against_the_team_and_not_its_maker() {
+    let mut team_ws = ws_obj("ws-t", "karthik", "running");
+    team_ws["spec"]["team"] = json!("acme");
+    team_ws["metadata"]["labels"]["kloudlite.io/team"] = json!("acme");
+    let mut team_vol = vol_obj("ws-t", "karthik", 40);
+    team_vol["spec"]["team"] = json!("acme");
+    let snap = json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+        "metadata": {"name": "snap-t", "labels": {"kloudlite.io/owner": "karthik", "kloudlite.io/volume": "ws-t"}},
+        "spec": {"volume": "ws-t", "owner": "karthik", "worktree": "ws-t", "transient": false},
+        "status": {"phase": "ready"}
+    });
+    let routes = vec![
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "stopped"), team_ws])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("ws-1", "karthik", 20), team_vol])),
+        get(format!("{API}/snapshots"), list_of("Snapshot", vec![snap])),
+        not_found(format!("{API}/quotas/karthik")),
+        not_found(format!("{API}/quotas/default-user")),
+        not_found(format!("{API}/quotas/acme")),
+        not_found(format!("{API}/quotas/default-team")),
+    ];
+    let s = server(true, routes).await;
+    let read = |owner: &str| {
+        let url = if owner == "karthik" { format!("{}/v1/quota", s.base) } else { format!("{}/v1/quota?owner={owner}", s.base) };
+        let tok = token(&s.jwt, "karthik");
+        async move { reqwest::Client::new().get(url).bearer_auth(tok).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let team = read("acme").await;
+    assert_eq!(team["used"]["workspaces"], 1, "{team}");
+    assert_eq!(team["used"]["diskGb"], 40, "{team}");
+    assert_eq!(team["used"]["snapshots"], 1, "{team}");
+    assert_eq!(team["used"]["cpu"], 4, "the running team workspace occupies the team's capacity: {team}");
+    let mine = read("karthik").await;
+    assert_eq!(mine["used"]["workspaces"], 1, "the maker's own count skips the team's: {mine}");
+    assert_eq!(mine["used"]["diskGb"], 20, "{mine}");
+    assert_eq!(mine["used"]["snapshots"], 0, "{mine}");
+    assert_eq!(mine["used"]["cpu"], 0, "{mine}");
+}
+
 /// A team's numbers are the team's. The caller is a member, so the read is allowed and the
 /// fallback is the TEAM default, not their personal one.
 #[tokio::test]
