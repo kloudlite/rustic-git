@@ -212,11 +212,6 @@ pub fn yields_to(kind: Suite) -> &'static [(Suite, &'static str)] {
     }
 }
 
-/// Backwards-compatible name for the fast suite's oldest yield.
-pub async fn hourly_in_flight(c: &Ctx) -> bool {
-    suite_in_flight(c, Suite::Hourly).await
-}
-
 /// A drill waits for a fast or hourly run already in flight to finish before its first
 /// destructive stage, bounded by one fast deadline: cancelling a run mid-journey would file a
 /// failed sample for the drill's reason, and a drill that starts a minute late loses nothing.

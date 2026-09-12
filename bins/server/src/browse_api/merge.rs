@@ -85,14 +85,10 @@ pub(super) async fn api_merge(
 
 /// The merge itself, without HTTP.
 ///
-/// Two callers, and both are on the node that owns the repo: `api_merge` above, and the owner's
-/// own merge lane (`announce_stranded_merges` in `lanes.rs`), which claims a queued job from the repo's database
-/// and lands it by calling straight in here. The lane deliberately does NOT go back out through
-/// the router to reach code in the same process.
-///
-/// The refusal is a status and a sentence, because both callers pass it on to a person: the
-/// HTTP one as a response, the lane by writing it onto the job as `detail`.
-pub(crate) async fn perform(
+/// One caller, `api_merge` above, on the node that owns the repo. Kept separate from the handler
+/// because the refusal is a status and a SENTENCE a person reads, composed here once; the merge
+/// lane used to call straight in here too, and now announces the job to the worker instead.
+async fn perform(
     app: &App,
     owner: &str,
     name: &str,

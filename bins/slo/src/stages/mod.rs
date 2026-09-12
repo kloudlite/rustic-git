@@ -21,6 +21,13 @@ pub(crate) fn id_of(doc: &Value) -> Result<String> {
     doc.get("id").and_then(Value::as_str).map(str::to_string).ok_or_else(|| anyhow!("the answer carried no id"))
 }
 
+/// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
+/// times out by DROPPING the step's future, so an outer timeout that fired first would take the
+/// undo with it — the drill's own cap has to be the one that wins.
+pub(crate) fn step_cap(body: Duration) -> Duration {
+    body + Duration::from_secs(60)
+}
+
 /// The `state` field of a workspace or environment document is `want`.
 pub(crate) fn state_is(v: &Value, want: &str) -> bool {
     v.get("state").and_then(Value::as_str) == Some(want)

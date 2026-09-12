@@ -17,7 +17,8 @@ use futures::FutureExt;
 use rand::RngCore;
 use serde_json::Value;
 
-use super::{admin, api, get, poll_json, post};
+use super::registry::sha256;
+use super::{admin, api, get, poll_json, post, step_cap};
 use crate::ctx::Ctx;
 use crate::{drill, tools};
 
@@ -68,13 +69,6 @@ const REVERT_HALF: Duration = Duration::from_secs(SETTINGS_CAP.as_secs() / 2);
 /// How long the agent DaemonSet gets to finish the roll `settings.roll` starts, and to be seen
 /// mid-roll before it does. A DaemonSet across a handful of nodes, not a deployment of one.
 const ROLL_CAP: Duration = Duration::from_secs(240);
-
-/// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
-/// times out by DROPPING the step's future, so an outer timeout that fired first would take the
-/// undo with it — the drill's cap has to be the one that wins.
-fn step_cap(body: Duration) -> Duration {
-    body + Duration::from_secs(60)
-}
 
 pub async fn run(c: &mut Ctx) {
     large_push(c).await;
@@ -368,11 +362,6 @@ async fn gc_sweep(c: &mut Ctx) {
 /// Long enough that `gc_lane` has certainly swept this owner — it walks every owner in turn with a
 /// gap between them — and short enough that the weekly run still fits its hour.
 const GC_PASS: Duration = Duration::from_secs(180);
-
-fn sha256(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
-}
 
 // ── git and registry ────────────────────────────────────────────────────
 

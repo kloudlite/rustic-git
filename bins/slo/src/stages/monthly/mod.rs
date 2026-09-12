@@ -17,7 +17,7 @@ use chrono::Utc;
 use futures::{FutureExt, TryStreamExt};
 use serde_json::{json, Value};
 
-use super::{admin, api, get, poll_json, post};
+use super::{admin, api, get, poll_json, post, step_cap};
 use crate::ctx::Ctx;
 use crate::{drill, tools};
 
@@ -55,14 +55,6 @@ pub(super) const FEED_FALLBACK: Duration = Duration::from_secs(150);
 /// Long enough that a fleet leaning on Redis for anything load-bearing would show it, short enough
 /// that the CronJob's two hours still fit the dead-node drill after it.
 pub(super) const REDIS_DOWN: Duration = Duration::from_secs(300);
-
-
-/// A step's ceiling for a body that has an undo: always the body's own plus a minute. `Ctx::step`
-/// times out by DROPPING the step's future, so an outer timeout that fired first would take the
-/// undo with it — the drill's own cap has to be the one that wins.
-pub(super) fn step_cap(body: Duration) -> Duration {
-    body + Duration::from_secs(60)
-}
 
 
 pub async fn run(c: &mut Ctx) {

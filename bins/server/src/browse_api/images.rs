@@ -240,32 +240,13 @@ pub(super) async fn imagedelete(
         Ok(_) => return hidden(),
         Err(r) => return r,
     }
-    if !app.store.image_exists(&owner, &name).await.unwrap_or(false) {
-        // No rows, but the listing may still name it: a ghost marker (a reconcile that ran
-        // between a delete's halves) is exactly what the owner deleting the entry expects to
-        // clear. The owner is already established above, so this hides nothing from a stranger.
-        if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Img, &owner, &name).await {
-            return internal(e);
-        }
-        // And whatever storage the ghost still has: a database whose rows cannot be read (a
-        // missing compacted file) is `image_exists == Err`, lands here, and would otherwise keep
-        // its objects, its pool entry and a marker-lane warning every 30 s for good.
-        use slatedb::object_store::ObjectStore;
-        use futures::{StreamExt, TryStreamExt};
-        let prefix = kloudlite_registry::store::manifest_prefix(&owner, &name);
-        let doomed = app.store.os.list(Some(&prefix)).map_ok(|m| m.location).boxed();
-        let mut results = app.store.os.delete_stream(doomed);
-        while let Some(r) = results.next().await {
-            match r {
-                Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
-                Err(e) => return internal(e.into()),
-            }
-        }
-        if let Err(e) = app.store.purge_image_storage(&owner, &name).await {
-            return internal(e);
-        }
-        return StatusCode::NO_CONTENT.into_response();
-    }
+    // A GHOST is an image with no readable rows but a listing entry left behind (a reconcile that
+    // ran between a delete's halves, or a database whose rows cannot be read at all — that is
+    // `image_exists == Err`). Both halves do the same three things; only the database call at the
+    // end differs, so they share one body: clearing the marker is exactly what the owner deleting
+    // the entry expects, and the owner is already established above, so this hides nothing from a
+    // stranger.
+    let ghost = !app.store.image_exists(&owner, &name).await.unwrap_or(false);
     // Marker first: a crash after this point leaves orphaned manifest/db bytes for GC to sweep,
     // never a listing entry for storage that's (partly) gone.
     if let Err(e) = crate::index::remove(&app.store, crate::index::Kind::Img, &owner, &name).await {
@@ -285,7 +266,13 @@ pub(super) async fn imagedelete(
             Err(e) => return internal(e.into()),
         }
     }
-    match app.store.delete_image(&owner, &name).await {
+    // A ghost's storage, its pool entry and its marker-lane warning every 30 s would otherwise
+    // stay for good; a live image's rows and storage go through `delete_image`.
+    let done = match ghost {
+        true => app.store.purge_image_storage(&owner, &name).await,
+        false => app.store.delete_image(&owner, &name).await,
+    };
+    match done {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),
     }

@@ -124,10 +124,6 @@ pub fn mebibytes(q: &str) -> u64 {
     q.parse::<u64>().unwrap_or(0) / (1024 * 1024)
 }
 
-fn ceil_div(n: u64, d: u64) -> u64 {
-    n.div_ceil(d)
-}
-
 /// Everything `owner` is using right now — label-selected listings, decided on spec.
 ///
 /// Who an object is CHARGED to: a team environment is stamped `spec.owner = team`, but a team
@@ -231,8 +227,8 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
             }
         }
     }
-    u.cpu = ceil_div(millis, 1000) as u32;
-    u.memory_gb = ceil_div(mib, 1024) as u32;
+    u.cpu = millis.div_ceil(1000) as u32;
+    u.memory_gb = mib.div_ceil(1024) as u32;
     Ok(u)
 }
 
