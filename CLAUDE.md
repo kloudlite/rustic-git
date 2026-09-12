@@ -102,6 +102,11 @@ head.
   a 413 is the handler's.
 - The browse API mounts on the **peer listener only**; the public listener 404s `/api/`.
   Credentials live as plain object-store keys (any node authenticates), not in SlateDB.
+- **A reflector cache that has not finished its first list is UNKNOWN, never empty.** Every read of
+  one goes through `Ctx::workspaces()`/`environments()`, which hand back `None` until then
+  (`controller::store_ready`); an intercept decides `Keep` and a listing falls back to a LIST. Read
+  as "empty", an unlisted cache would release every intercept in the region and shorten the parent
+  listing the retire and unclaim sweeps decide from, on every agent restart.
 - **Markers under `index/` are views for listings, never authorization.** Owning nodes write them
   and reconcile their visibility; the GC worker reconciles their structure.
 - **The same rule governs the CRDs' `kloudlite.io/owner` and `/kind` labels.** `spec.owner` is the
@@ -294,7 +299,12 @@ which the environment's controller stamps itself on the pass that first finds no
 workspace whose node died leaves no pod object and no controller to date the outage) and the real
 service comes back up — but the wish STAYS, because a transient blip must never discard what the
 person asked for, and it takes hold again when the workspace returns. Only
-`DELETE /v1/environments/{id}/intercepts/{service}` removes a wish.
+`DELETE /v1/environments/{id}/intercepts/{service}` removes a wish. The intercepting Workspace is
+read from an UNFILTERED cluster-wide reflector cache on every agent (`Ctx::workspaces()`, opened in
+`controller/run.rs`), never a GET per pass and never the controller's own node-scoped store: the
+workspace serving an intercept may be claimed by any node. `listing::parents_matching` reads the
+same pair of caches (`Ctx::environments()` is the other) instead of two cluster-wide LISTs per
+volume decision, falling back to a LIST only while a cache has not finished its first list.
 
 Image builds run on a hidden per-owner builder, not on the workspace pod: `crd::builder_id(slug)`
 names it `bld-{slug}`, `EnvironmentSpec::system` (`crd::BUILDER_SYSTEM`) is the one field that makes

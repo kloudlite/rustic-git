@@ -27,6 +27,7 @@ pub type Settings = LiveSettings<AgentSettings>;
 
 pub(crate) mod environment;
 pub use environment::apply_environment;
+pub use environment::{decide_intercept, Intercepting};
 pub(crate) use environment::{stopped_condition, write_env_status};
 pub(crate) mod workspace;
 pub use workspace::{apply_workspace, cleanup_workspace_worktree, reconcile_environment, reconcile_workspace};
@@ -259,6 +260,19 @@ pub struct Ctx {
     pub node_writer: Mutex<Option<kube::runtime::reflector::store::Writer<k8s_openapi::api::core::v1::Node>>>,
     /// The writing half, until `run` takes it and drives the watch into it (tests feed it directly).
     pub volume_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Volume>>>,
+    /// EVERY Workspace and Environment in the cluster, from the two unfiltered reflectors `run`
+    /// opens (2026-09-12). Unfiltered on purpose: the two readers are an environment's intercept —
+    /// whose workspace may be claimed by any node — and `listing::parents_matching`, whose
+    /// per-volume decisions are cluster-wide by definition. Both used to pay a GET or a pair of
+    /// cluster-wide LISTs per pass; the agent's own `watches` on these kinds already streamed them.
+    ///
+    /// Read through `workspaces()`/`environments()` and NEVER without `store_ready` — an empty
+    /// store is "not known yet", never "gone", and the decisions hanging off it release an
+    /// intercept and retire a replica.
+    pub workspace_store: kube::runtime::reflector::Store<crd::Workspace>,
+    pub workspace_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Workspace>>>,
+    pub environment_store: kube::runtime::reflector::Store<crd::Environment>,
+    pub environment_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Environment>>>,
     /// What `ensure` last applied, by kind/namespace/name: the hash of the desired object and when.
     /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
     /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
@@ -316,9 +330,17 @@ impl Ctx {
         // Plain `store()`, not shared: nothing reconciles ON this node object — the two parents
         // already watch it for their own wakes — so there is no subscriber to dispatch to.
         let (node_store, node_writer) = kube::runtime::reflector::store();
+        // Plain `store()` for both: nothing reconciles ON these copies — the Workspace and
+        // Environment controllers have their own node-scoped streams — so there is no subscriber.
+        let (workspace_store, workspace_writer) = kube::runtime::reflector::store();
+        let (environment_store, environment_writer) = kube::runtime::reflector::store();
         Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
+            workspace_store,
+            workspace_writer: Mutex::new(Some(workspace_writer)),
+            environment_store,
+            environment_writer: Mutex::new(Some(environment_writer)),
             node_store,
             node_writer: Mutex::new(Some(node_writer)),
             applied: Mutex::new(HashMap::new()),
@@ -360,6 +382,48 @@ impl Ctx {
             w.apply_watcher_event(&watcher::Event::Apply(v));
         }
     }
+
+    /// The cluster-wide Workspace cache. `None` while the reflector has not finished its first
+    /// list — every caller must treat that as "unknown", not "empty".
+    pub fn workspaces(&self) -> Option<&kube::runtime::reflector::Store<crd::Workspace>> {
+        store_ready(&self.workspace_store).then_some(&self.workspace_store)
+    }
+
+    pub fn environments(&self) -> Option<&kube::runtime::reflector::Store<crd::Environment>> {
+        store_ready(&self.environment_store).then_some(&self.environment_store)
+    }
+
+    /// Seed the two cluster-wide stores by hand, as a finished initial list would. For tests,
+    /// which have no watch to feed them; a no-op once `run` has taken the writers. Applying
+    /// `InitDone` is what makes the store READY, so a test that wants the not-ready path simply
+    /// does not call this.
+    pub fn remember_parents(&self, workspaces: Vec<crd::Workspace>, environments: Vec<crd::Environment>) {
+        fn seed<K>(w: &Mutex<Option<kube::runtime::reflector::store::Writer<K>>>, items: Vec<K>)
+        where
+            K: kube::Resource<DynamicType = ()> + Clone + 'static,
+        {
+            if let Some(w) = w.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+                w.apply_watcher_event(&watcher::Event::Init);
+                for i in items {
+                    w.apply_watcher_event(&watcher::Event::InitApply(i));
+                }
+                w.apply_watcher_event(&watcher::Event::InitDone);
+            }
+        }
+        seed(&self.workspace_writer, workspaces);
+        seed(&self.environment_writer, environments);
+    }
+}
+
+/// Has this reflector finished its first list? `wait_until_ready` is a one-shot latch, so polling
+/// it once is the synchronous read of it — and a reconciler cannot await readiness anyway: the
+/// answer it needs is "do I know yet", not "tell me when".
+pub fn store_ready<K>(s: &kube::runtime::reflector::Store<K>) -> bool
+where
+    K: kube::Resource<DynamicType = ()> + Clone + 'static,
+{
+    use futures::FutureExt;
+    s.wait_until_ready().now_or_never().is_some()
 }
 
 /// What a finished volume operation has to say about the pool, drained into status on a later pass.

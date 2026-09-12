@@ -29,6 +29,8 @@ mod services;
 pub(crate) use services::*;
 mod intercept;
 pub(crate) use intercept::*;
+// pub so the store-backed intercept decision is assertable from the integration suite.
+pub use intercept::{decide_intercept, Intercepting};
 
 
 mod stop;

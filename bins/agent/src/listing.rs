@@ -100,73 +100,77 @@ pub async fn parents_on_volume(ctx: &Arc<Ctx>, volume: &str) -> Option<Vec<Paren
 
 /// Both listings' one body. `on_node` is the local re-check, not the selector: a cluster on an
 /// older CRD would ignore the field selector and hand back every node's objects.
+///
+/// Read from the two cluster-wide reflector caches when they are ready, and only LIST while they
+/// are not (2026-09-12): `all_parents` ran twice per volume decision, and the agent already streams
+/// both kinds for its own watches. The fallback is not belt-and-braces — a reconcile or a beat can
+/// run in the seconds before the first list lands, and answering `None` there would stall the pull,
+/// sync and decommission beats rather than just costing them a round trip. Keep-bias is unchanged
+/// either way: `None` still means "could not see the cluster", never "the cluster is empty".
 async fn parents_matching(ctx: &Arc<Ctx>, mine: &ListParams, on_node: Option<&str>) -> Option<Vec<Parent>> {
     let mut out = Vec::new();
-    match Api::<crd::Workspace>::all(ctx.client.clone()).list(mine).await {
-        Ok(list) => {
-            for w in &list.items {
-                let Some(st) = w.status.as_ref() else { continue };
-                let (Some(volume), Ok(owner_ref)) =
-                    (st.volume_ref.clone(), crate::controller::owner_ref_of_kind(w))
-                else {
-                    continue;
-                };
-                if on_node.is_some_and(|n| st.node_name != n) {
-                    continue;
-                }
-                out.push(Parent {
-                    kind: "Workspace",
-                    name: w.name_any(),
-                    volume,
-                    owner: w.spec.owner.clone(),
-                    node_name: st.node_name.clone(),
-                    head: st.head.clone(),
-                    phase: st.phase,
-                    pod_ref: st.pod_ref.clone(),
-                    owner_ref,
-                    replicated: is_replicated(&st.conditions),
-                    state: crd::SnapshotState::of_workspace(w),
-                });
+    match ctx.workspaces() {
+        Some(store) => out.extend(store.state().iter().filter_map(|w| workspace_parent(w))),
+        None => match Api::<crd::Workspace>::all(ctx.client.clone()).list(mine).await {
+            Ok(list) => out.extend(list.items.iter().filter_map(workspace_parent)),
+            Err(e) => {
+                tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
+                return None;
             }
-        }
-        Err(e) => {
-            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
-            return None;
-        }
+        },
     }
-    match Api::<crd::Environment>::all(ctx.client.clone()).list(mine).await {
-        Ok(list) => {
-            for e in &list.items {
-                let Some(st) = e.status.as_ref() else { continue };
-                let (Some(volume), Ok(owner_ref)) =
-                    (st.volume_ref.clone(), crate::controller::owner_ref_of_kind(e))
-                else {
-                    continue;
-                };
-                if on_node.is_some_and(|n| st.node_name != n) {
-                    continue;
-                }
-                out.push(Parent {
-                    kind: "Environment",
-                    name: e.name_any(),
-                    volume,
-                    owner: e.spec.owner.clone(),
-                    node_name: st.node_name.clone(),
-                    head: st.head.clone(),
-                    phase: st.phase,
-                    pod_ref: None,
-                    owner_ref,
-                    replicated: is_replicated(&st.conditions),
-                    state: crd::SnapshotState::of_environment(e),
-                });
+    match ctx.environments() {
+        Some(store) => out.extend(store.state().iter().filter_map(|e| environment_parent(e))),
+        None => match Api::<crd::Environment>::all(ctx.client.clone()).list(mine).await {
+            Ok(list) => out.extend(list.items.iter().filter_map(environment_parent)),
+            Err(e) => {
+                tracing::warn!(kind = "Environment", error = %e, "listing.failed");
+                return None;
             }
-        }
-        Err(e) => {
-            tracing::warn!(kind = "Environment", error = %e, "listing.failed");
-            return None;
-        }
+        },
+    }
+    // The predicate the field selector expressed, applied in memory — the store is unfiltered, and
+    // a cluster on an older CRD would have ignored the selector anyway.
+    if let Some(n) = on_node {
+        out.retain(|p| p.node_name == n);
     }
     Some(out)
+}
+
+fn workspace_parent(w: &crd::Workspace) -> Option<Parent> {
+    let st = w.status.as_ref()?;
+    let (volume, owner_ref) = (st.volume_ref.clone()?, crate::controller::owner_ref_of_kind(w).ok()?);
+    Some(Parent {
+        kind: "Workspace",
+        name: w.name_any(),
+        volume,
+        owner: w.spec.owner.clone(),
+        node_name: st.node_name.clone(),
+        head: st.head.clone(),
+        phase: st.phase,
+        pod_ref: st.pod_ref.clone(),
+        owner_ref,
+        replicated: is_replicated(&st.conditions),
+        state: crd::SnapshotState::of_workspace(w),
+    })
+}
+
+fn environment_parent(e: &crd::Environment) -> Option<Parent> {
+    let st = e.status.as_ref()?;
+    let (volume, owner_ref) = (st.volume_ref.clone()?, crate::controller::owner_ref_of_kind(e).ok()?);
+    Some(Parent {
+        kind: "Environment",
+        name: e.name_any(),
+        volume,
+        owner: e.spec.owner.clone(),
+        node_name: st.node_name.clone(),
+        head: st.head.clone(),
+        phase: st.phase,
+        pod_ref: None,
+        owner_ref,
+        replicated: is_replicated(&st.conditions),
+        state: crd::SnapshotState::of_environment(e),
+    })
 }
 
 fn is_replicated(conditions: &[crd::Condition]) -> bool {

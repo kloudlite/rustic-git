@@ -153,6 +153,19 @@ pub(crate) fn one_intercept() -> serde_json::Value {
 
 /// Everything a running environment reconcile needs before it reaches the services, plus write
 /// routes for both halves of an intercept. The Workspace and pod routes are per-test.
+/// The intercepting Workspace comes from the cluster-wide reflector cache now (2026-09-12), not a
+/// GET per pass — so a fixture that served `WS_OBJ` 200 seeds the store with that same object
+/// instead, and one that served an error simply leaves the store unlisted, which is the cache's
+/// own "I know nothing" and decides exactly what the error used to.
+pub(crate) fn intercept_ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    let ws = routes.iter().find(|r| r.path == WS_OBJ && r.status == 200).map(|r| r.body.clone());
+    let (c, rec) = ctx(pool, routes);
+    if let Some(body) = ws {
+        c.remember_parents(vec![serde_json::from_value(body).expect("a Workspace")], vec![]);
+    }
+    (c, rec)
+}
+
 pub(crate) fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
     let ns = crd::env_namespace("env-1");
     let ready_sts = serde_json::json!({
@@ -249,7 +262,7 @@ async fn an_intercept_in_force_stops_the_real_service_and_points_the_slice_at_th
         kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
         kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
 
@@ -282,7 +295,7 @@ async fn removing_the_wish_restores_the_real_service_and_deletes_the_slice() {
         Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(serde_json::json!([]), Some("ws-1")), &ctx).await.unwrap();
 
@@ -311,7 +324,7 @@ async fn a_stopped_workspace_releases_the_intercept_without_touching_the_wish() 
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
     let e = intercept_env(one_intercept(), Some("ws-1"));
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
@@ -343,7 +356,7 @@ async fn a_pod_missing_for_less_than_the_grace_moves_nothing() {
         kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 5)),
         kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx)
         .await
@@ -370,7 +383,7 @@ async fn a_pod_missing_for_longer_than_the_grace_brings_the_real_service_back() 
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx).await.unwrap();
 
@@ -392,7 +405,7 @@ async fn an_unreadable_workspace_changes_nothing_and_requeues() {
         status: 500,
         body: serde_json::json!({"kind": "Status", "code": 500, "message": "etcd leader changed"}),
     }]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx)
         .await
@@ -423,7 +436,7 @@ async fn a_long_ready_workspace_that_has_just_lost_its_pod_is_held_not_dated_fro
         kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws_ready("running", Some("env-1"), 600, true)),
         kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx)
         .await
@@ -448,7 +461,7 @@ async fn the_slice_is_written_before_the_service_loses_its_selector() {
         kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
         kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
 
@@ -471,7 +484,7 @@ async fn a_held_pass_that_rendered_no_intercept_last_time_deletes_the_stale_slic
         status: 500,
         body: serde_json::json!({"kind": "Status", "code": 500, "message": "etcd leader changed"}),
     }]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
 
@@ -508,7 +521,7 @@ async fn an_intercept_deletes_the_endpoints_kubernetes_abandoned_and_keeps_its_o
         Route { method: "DELETE", path: abandoned.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: endpoints.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
 
@@ -537,7 +550,7 @@ async fn an_intercept_with_no_clock_anywhere_falls_back_once_our_own_record_is_o
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
     let mut e = intercept_env(one_intercept(), Some("ws-1"));
     e.status.as_mut().unwrap().service_status[0].unreachable_since =
         Some(k8s_openapi::jiff::Timestamp::now().as_second() - 600);
@@ -563,7 +576,7 @@ async fn the_pass_that_first_sees_no_clock_records_one_and_holds() {
         kloudlite_workspaces::kube_test::get(WS_OBJ, ws),
         kloudlite_workspaces::kube_test::not_found("/api/v1/namespaces/ws-alice/pods/ws-1-0"),
     ]);
-    let (ctx, rec) = ctx(tmp.path(), routes);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), Some("ws-1")), &ctx).await.unwrap();
 

@@ -29,6 +29,7 @@ mod attachment;
 mod snapshot_model_clone_restore_task_6b;
 mod starts_spread_the_owner_gives_a_movable;
 mod filter_foreign_snapshots_against_the_nod;
+mod the_agent_decides_from_stores;
 #[allow(unused_imports)]
 use attachment::*;
 #[allow(unused_imports)]
@@ -61,6 +62,8 @@ use the_stop_before_teardown_snapshot::*;
 use the_workspace_reconciler_and_its_volume::*;
 #[allow(unused_imports)]
 use what_the_node_asks_the_api_server_for::*;
+#[allow(unused_imports)]
+use the_agent_decides_from_stores::*;
 
 fn test_settings() -> LiveSettings<AgentSettings> {
     LiveSettings::new(AgentSettings::from_env())

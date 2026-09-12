@@ -17,7 +17,7 @@ pub(crate) const INTERCEPT_GRACE_SECS: i64 = 30;
 
 /// What this pass decided about one intercept — the spec's three states, plus the one thing an
 /// unreadable API answer is allowed to do, which is nothing.
-pub(crate) enum Intercepting {
+pub enum Intercepting {
     /// In force: the real service off, the slice pointing at this pod.
     Force { ws: Box<crd::Workspace>, pod_ip: String },
     /// Either nothing is known (an API error) or the pod has not been unreachable long enough.
@@ -152,13 +152,24 @@ pub(crate) fn invalid_port_map(svc: &model::Service, ic: &crd::Intercept) -> Opt
 
 /// One intercept's fate, from the Workspace and its pod. Never errors: an unreadable answer is
 /// `Keep`, which changes nothing at all.
-pub(crate) async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Intercepting {
+pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::EnvironmentStatus, ctx: &Arc<Ctx>) -> Intercepting {
     let off = |reason, message: String, w: Option<crd::Workspace>| Intercepting::Off { reason, message, ws: w.map(Box::new) };
-    let w = match Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&ic.workspace).await {
-        Ok(Some(w)) => w,
-        Ok(None) => return off("WorkspaceGone", format!("{} no longer exists", ic.workspace), None),
-        Err(_) => return Intercepting::Keep { since: None },
+    // From the cluster-wide cache, not a GET per pass (2026-09-12): the intercepting workspace may
+    // be claimed by any node, so the controller's own node-scoped store cannot answer, and the
+    // environment reconciles on every one of that workspace's transitions.
+    //
+    // A store that has NOT finished its first list is `Keep`, never `WorkspaceGone`: an empty cache
+    // is "not known yet", and reading it as "gone" would scale the real service back up and drop
+    // an intercept that is perfectly healthy.
+    let Some(store) = ctx.workspaces() else {
+        tracing::debug!(workspace = %ic.workspace, "store.not_ready");
+        return Intercepting::Keep { since: None };
     };
+    let w = match store.get(&kube::runtime::reflector::ObjectRef::new(&ic.workspace)) {
+        Some(w) => (*w).clone(),
+        None => return off("WorkspaceGone", format!("{} no longer exists", ic.workspace), None),
+    };
+    tracing::debug!(workspace = %ic.workspace, source = "store", "intercept.decided");
     if w.spec.desired_state == DesiredState::Stopped {
         return off("WorkspaceStopped", format!("{} is stopped", ic.workspace), Some(w));
     }
@@ -294,7 +305,13 @@ pub(crate) async fn intercept_policies(
             // An API error is not "gone": read as gone, the workspace-side policy that opens this
             // environment's namespace to that pod would never be deleted, and this pass is the
             // one that had a record to clean (2026-09-12). The error keeps the record for a retry.
-            None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.map_err(|e| ReconcileErr(e.to_string()))?,
+            // The cache when it is ready; the GET only while it is not (2026-09-12). Falling back
+            // rather than skipping keeps the one pass that has a record to clean from being the
+            // pass that ran during a relist.
+            None => match ctx.workspaces() {
+                Some(store) => store.get(&kube::runtime::reflector::ObjectRef::new(&id)).map(|w| (*w).clone()),
+                None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.map_err(|e| ReconcileErr(e.to_string()))?,
+            },
         };
         // A workspace that is GONE takes its half with it: the policy is ownerReferenced.
         if let Some(w) = ws {

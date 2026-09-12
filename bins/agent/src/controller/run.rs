@@ -521,11 +521,45 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             })
     });
+    // The two UNFILTERED parent caches (2026-09-12). Bare watches, not controllers: nothing
+    // reconciles on them — they exist so an environment's intercept can read a Workspace claimed by
+    // ANOTHER node without a GET per pass, and so `listing::parents_matching` stops making two
+    // cluster-wide LISTs per volume decision. No `wait_until_ready` await before the controllers
+    // start: every reader checks `store_ready` at the point of use anyway (it must, since a
+    // reconcile can run before this watch has listed), and blocking the whole agent on two list
+    // calls would hold up the volume work that needs neither.
+    let parents_watch = {
+        use kube::runtime::{watcher, WatchStreamExt};
+        let ws_writer =
+            ctx.workspace_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the workspace writer is already taken")?;
+        let env_writer =
+            ctx.environment_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the environment writer is already taken")?;
+        let ws = watcher(Api::<crd::Workspace>::all(ctx.client.clone()), crate::controller::watch_config())
+            .default_backoff()
+            .reflect(ws_writer)
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(kind = "Workspace", reason = "cache", error = %e, "reconcile.queue.failed")
+                }
+            });
+        let env = watcher(Api::<crd::Environment>::all(ctx.client.clone()), crate::controller::watch_config())
+            .default_backoff()
+            .reflect(env_writer)
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(kind = "Environment", reason = "cache", error = %e, "reconcile.queue.failed")
+                }
+            });
+        async { tokio::join!(ws, env); }
+    };
     let everything = async {
         tokio::join!(
             volume_watch,
             node_watch,
             snap_watch,
+            parents_watch,
             volumes,
             workspaces,
             environments,

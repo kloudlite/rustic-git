@@ -57,10 +57,18 @@ async fn every_watch_is_scoped_to_this_node_or_label_selected() {
     for r in volumes.iter().filter(|r| !r.contains("limit=1&") && !r.ends_with("limit=1")) {
         assert!(r.contains("fieldSelector=spec.nodeName%3Dnode-a"), "an unscoped Volume request: {r}");
     }
-    let parents = [of("/apis/kloudlite.io/v1alpha1/workspaces"), of("/apis/kloudlite.io/v1alpha1/environments")].concat();
-    assert!(!parents.is_empty(), "no parent watch opened: {reqs:?}");
-    for r in &parents {
-        assert!(r.contains("fieldSelector=status.nodeName%3D"), "an unscoped parent request: {r}");
+    // Each parent kind is watched node-scoped for its own controller, and ONCE cluster-wide for
+    // the two caches every node needs (2026-09-12): an environment's intercept reads a Workspace
+    // claimed by another node, and `listing::parents_matching` decides per volume, cluster-wide.
+    // So the rule here is "the controller's own watch is scoped", not "nothing is unscoped" — and
+    // the unscoped ones are counted, so a third one cannot appear unnoticed.
+    for kind in ["workspaces", "environments"] {
+        let rs = of(&format!("/apis/kloudlite.io/v1alpha1/{kind}"));
+        assert!(!rs.is_empty(), "no {kind} watch opened: {reqs:?}");
+        assert!(
+            rs.iter().any(|r| r.contains("fieldSelector=status.nodeName%3Dnode-a")),
+            "the {kind} controller's own watch is not node-scoped: {rs:?}"
+        );
     }
     for r in of("/apis/apps/v1/statefulsets") {
         assert!(r.contains("labelSelector=kloudlite.io%2Fkind%3Denvironment"), "every StatefulSet in the cluster: {r}");
