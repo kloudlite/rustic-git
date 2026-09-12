@@ -218,11 +218,16 @@ async fn dns(c: &mut Ctx) {
     }
     c.step("edge.dns", DNS_CEILING, move |c| {
         let dig = c.programs.dig.clone();
+        // A SLICE each, not the whole ceiling apiece (2026-09-12): one host pointing at a dead
+        // resolver used to be able to spend the entire budget, so the step timed out with nothing
+        // to say and the hosts after it were never asked at all. `max(1)`, because an empty list
+        // is already refused above.
+        let each = DNS_CEILING / hosts.len().max(1) as u32;
         async move {
             for h in &hosts {
-                let out = tools::plain(&dig, &["+short", h], DNS_CEILING)
+                let out = tools::plain(&dig, &["+short", h], each)
                     .await
-                    .with_context(|| format!("could not resolve {h}"))?;
+                    .with_context(|| format!("could not resolve {h} within {} s", each.as_secs()))?;
                 if out.trim().is_empty() {
                     return Err(anyhow!("{h} resolves to nothing"));
                 }
@@ -291,14 +296,23 @@ async fn origin(c: &mut Ctx) {
                 .timeout(ORIGIN_CEILING)
                 .build()
                 .context("could not build the pinned client")?;
-            client
+            let r = client
                 .get(format!("http://{host}/"))
                 .send()
                 .await
                 // `without_url`: the same rule as `stages::raw` — reqwest's Display carries the
                 // whole URL, and a step detail is stored forever.
                 .map_err(|e| anyhow!("the origin did not answer: {}", e.without_url()))?;
-            Ok(())
+            // ANY status used to pass, on the grounds that a 404 is still the origin answering.
+            // But a 502/503/504 is the ingress controller answering FOR an origin that is not
+            // there, which is exactly the outage this SLI is about, and it read as green
+            // (2026-09-12). An application status — anything the app itself could have chosen —
+            // passes; a gateway status does not.
+            let status = r.status();
+            match status.as_u16() {
+                502..=504 => Err(anyhow!("the origin answered {status}: the ingress has no healthy backend")),
+                _ => Ok(()),
+            }
         }
         .boxed()
     })

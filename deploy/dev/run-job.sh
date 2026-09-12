@@ -4,7 +4,10 @@
 # On the first failed step the probe POD is force-killed (a plain `delete job` leaves it running
 # through its grace period — it went on to run a drain drill and labelled a node), the Job is
 # deleted, the run's row is closed and its objects swept (deploy/dev/pod/close-run.py), and any
-# decommission label a drill left on a node is removed. Exit 0 only on `state: passed`.
+# decommission label a drill left on a node is removed. Exit 0 only on `state: passed` — a run
+# that SKIPPED any step finishes `skipped` and exits 2, because a run made of no samples is not
+# evidence the fleet is well (hourly-1789188203 met a roll guard after stage 2, skipped the rest
+# and printed "hourly passed", 2026-09-12).
 set -uo pipefail
 SUITE=${1:?suite}
 case "$SUITE" in fast) T=slo-probe;; hourly) T=slo-hourly;; weekly|monthly) T=slo-drill;; *) echo "unknown suite $SUITE" >&2; exit 2;; esac
@@ -44,7 +47,10 @@ kubectl -n kloudlite logs -f "$P" 2>/dev/null | tee "$LOG" | grep -E --line-buff
   case "$l" in *'"ok":false'*|*slo.run.finished*) break;; esac
 done
 RUN=$(grep -o '"run_id":"[^"]*"' "$LOG" | head -1 | cut -d'"' -f4)
-VERDICT=$(grep -o 'slo.run.finished.*"state":"[a-z]*"' "$LOG" | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)
+FIN=$(grep -o 'slo.run.finished.*' "$LOG" | head -1)
+VERDICT=$(echo "$FIN" | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)
+WHY=$(echo "$FIN" | grep -o '"skipped_id":"[^"]*","reason":"[^"]*"' | sed 's/"skipped_id":"//;s/","reason":"/: /;s/"$//')
+COUNTS=$(echo "$FIN" | grep -o '"passed":[0-9]*,"failed":[0-9]*,"skipped":[0-9]*' | tr -d '"')
 rm -f "$LOG"
 if [ -z "$VERDICT" ]; then
   kubectl -n kloudlite delete pod "$P" --grace-period=0 --force >/dev/null 2>&1
@@ -56,4 +62,9 @@ K3S="${K3S_KUBECONFIG:-$(dirname "$0")/../../.local/k3s.yaml}"
 for n in $(kubectl --kubeconfig "$K3S" get nodes -l kloudlite.io/decommission=true -o name 2>/dev/null); do
   kubectl --kubeconfig "$K3S" label "$n" kloudlite.io/decommission- >/dev/null && kubectl --kubeconfig "$K3S" annotate "$n" kloudlite.io/decommission-status- >/dev/null; echo "undid a drill's decommission label on $n"
 done
-case "$VERDICT" in passed) kubectl -n kloudlite delete job "$J" >/dev/null 2>&1; echo "$SUITE passed ($RUN)"; exit 0;; "") exit 1;; *) echo "$SUITE $VERDICT ($RUN)"; exit 2;; esac
+case "$VERDICT" in
+  passed) kubectl -n kloudlite delete job "$J" >/dev/null 2>&1; echo "$SUITE passed ($RUN)"; exit 0;;
+  skipped) echo "$SUITE skipped ($RUN): ${WHY:-no reason recorded} [${COUNTS:-}]"; exit 2;;
+  "") exit 1;;
+  *) echo "$SUITE $VERDICT ($RUN) [${COUNTS:-}]"; exit 2;;
+esac

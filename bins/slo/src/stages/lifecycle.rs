@@ -408,6 +408,13 @@ async fn stop(c: &mut Ctx, ws: &str) {
 /// the owner computes — never inferred from anything else, because that condition is what
 /// placement itself reads before letting the workspace start elsewhere.
 async fn replicated(c: &mut Ctx, ws: &str) {
+    // The owner's `Replicated` condition alone is only half of this SLI — the other half is a
+    // PEER naming the cut, and without a kubeconfig there is nothing to ask. `named_by_a_replica`
+    // used to answer `Ok(())` there, so a probe with no cluster access reported the promise kept
+    // (2026-09-12).
+    if c.kube.is_none() {
+        return c.skip("ws.replicated", "no kubeconfig: no VolumeReplica can be read to confirm the cut");
+    }
     let ws = ws.to_string();
     c.step("ws.replicated", REPLICATED_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
@@ -436,10 +443,10 @@ async fn replicated(c: &mut Ctx, ws: &str) {
 
 /// A `VolumeReplica` on some OTHER node names this worktree's cut by name.
 ///
-/// Without a kubeconfig there is nothing to read — a deployment gap, not a breach — so the
-/// condition the step already checked stands alone and this adds nothing.
+/// The caller has already refused to run without a kubeconfig, so a missing one here is the
+/// probe losing its client mid-step — an error, never a silent pass.
 async fn named_by_a_replica(c: &Ctx, ws: &str) -> Result<()> {
-    let Some(k) = c.kube.as_ref() else { return Ok(()) };
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig to read a VolumeReplica from"))?;
     let api: kube::Api<crd::VolumeReplica> = kube::Api::all(k.clone());
     let list = api
         .list(&kube::api::ListParams::default())

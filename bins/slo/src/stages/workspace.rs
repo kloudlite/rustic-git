@@ -589,7 +589,10 @@ pub(crate) fn ssh_args(kl: &str, key: &str, id: &str) -> Vec<String> {
         "-o",
         "BatchMode=yes",
         "-o",
-        &format!("ProxyCommand={kl} ws proxy {id}"),
+        // The id is INTERPOLATED into a command ssh runs through a shell, so it is checked
+        // against the shape the api hands out before it gets there (2026-09-12) — an id carrying
+        // a space or a metacharacter would be a command this probe ran on its own behalf.
+        &format!("ProxyCommand={kl} ws proxy {}", safe_id(id)),
         &format!("kl@{id}"),
         "true",
     ]
@@ -906,6 +909,16 @@ async fn pinched(c: &Ctx, jwt: &str) -> Result<Value> {
     o.insert("workspaces".into(), ws.into());
     o.insert("snapshots".into(), snaps.into());
     Ok(spec)
+}
+
+/// `^[a-z0-9-]+$`, or a name that cannot be one. Every id `/v1` mints is `ws-{hex}`; anything
+/// else is a compromised or confused answer, and the safe thing to hand a shell is a string that
+/// resolves to nothing rather than one that runs.
+pub(crate) fn safe_id(id: &str) -> &str {
+    match id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && !id.is_empty() {
+        true => id,
+        false => "invalid-workspace-id",
+    }
 }
 
 #[cfg(test)]

@@ -42,13 +42,17 @@ pub(crate) async fn drain_handover(c: &mut Ctx) {
                 // before the first poll is a grace period shorter than the probe's beat, not a
                 // failed handover — so a 404/refused dial ends the wait rather than failing it.
                 let saw = draining(c, &ip, DRAIN_CAP / 2).await?;
+                if !saw {
+                    // Asserted BEFORE the repo read, so the message names what actually failed:
+                    // a pod that answered `/healthz` for the whole window without ever saying
+                    // `draining` never took itself out of the Service, which is the handover this
+                    // id is about (2026-09-12 — the check came after and read as an afterthought).
+                    return Err(anyhow!("{victim} answered /healthz for {} s without ever reporting `draining`, so it never left the Service", (DRAIN_CAP / 2).as_secs()));
+                }
                 // And the repo still reads, which is the half a person would notice.
                 let (status, text) = super::super::raw(c, reqwest::Method::GET, &refs, &jwt, None, &[]).await?;
                 if !status.is_success() {
                     return Err(anyhow!("a repo stopped reading while a pod drained: {status}: {}", text.chars().take(120).collect::<String>()));
-                }
-                if !saw {
-                    return Err(anyhow!("{victim} never reported `draining` on /healthz"));
                 }
                 Ok(())
             };

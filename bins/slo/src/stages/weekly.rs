@@ -393,20 +393,20 @@ async fn large_push(c: &mut Ctx) {
     if !work.is_dir() {
         return c.skip("git.push.large", "stage 2 left no working tree");
     }
+    // The SSH half needs a PINNED host key, and learning one from the host being measured is the
+    // substitution `ssh.hostkey` exists to catch. Without a pin only the HTTP half can run — and
+    // this SLI is "a big push works over BOTH doors", so half of it passing is not it passing
+    // (2026-09-12): it used to log `slo.weekly.degraded` and file a green sample anyway.
     let hosts = match crate::stages::git::known_hosts(c).await {
-        Ok(p) => Some(p),
-        // The SSH half needs a PINNED host key, and learning one from the host being measured is
-        // the substitution `ssh.hostkey` exists to catch. Without a pin the step is the HTTP half
-        // alone, which is a weaker measurement than the SLI asks for — so it says so in the log.
+        Ok(p) => p,
         Err(e) => {
-            tracing::warn!(reason = "no pinned host key", error = %format!("{e:#}"), "slo.weekly.degraded");
-            None
+            return c.skip("git.push.large", &format!("no pinned host key, so the SSH half cannot run: {e:#}"))
         }
     };
     let http = format!("{}/{probe}/{name}.git", c.cfg.git_url.trim_end_matches('/'));
     c.step("git.push.large", PUSH_CEILING, move |c| {
         let key = c.cfg.ssh_key_path.clone();
-        let ssh = hosts.as_ref().map(|h| (crate::stages::git::ssh_url(c, &name), crate::stages::git::ssh_command(c, &key, h)));
+        let ssh = (crate::stages::git::ssh_url(c, &name), crate::stages::git::ssh_command(c, &key, &hosts));
         let branch = format!("large-{}", c.run_id);
         let args = crate::stages::git::authed(c, &["push", "-q", &http, &branch]);
         let (git, env) = (c.programs.git.clone(), crate::stages::git::git_env(c));
@@ -417,7 +417,7 @@ async fn large_push(c: &mut Ctx) {
             g(vec!["add".into(), "-A".into()]).await?;
             g(vec!["commit".into(), "-q".into(), "-m".into(), "large".into()]).await?;
             crate::stages::git::git(c, args, Some(&work)).await.context("the HTTP push failed")?;
-            let Some((url, cmd)) = ssh else { return Ok(()) };
+            let (url, cmd) = ssh;
             // The SSH half carries the full 100 MiB: no proxy sits in front of that listener, so
             // it is the door a person uses when the edge refuses theirs.
             fill(&work.join("large.bin"), LARGE_COMMIT_BYTES).context("could not write the large file")?;
@@ -859,7 +859,7 @@ mod tests {
                 "reg.moved.image",
                 "reg.blob.session",
                 "git.gc.packs",
-                "git.limits",
+                "reg.limits",
                 "admin.workload.roll",
                 "ws.spread",
                 "snap.retain",

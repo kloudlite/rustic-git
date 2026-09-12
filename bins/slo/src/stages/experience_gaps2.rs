@@ -388,6 +388,11 @@ pub(super) async fn kl_commands(c: &mut Ctx) {
 /// The 404 at the end is the half worth having: `/admin/history/{series}` interpolates the caller's
 /// name into SQL through an allow-list because that path has no bound parameters, so a name that
 /// is NOT on the list must be a 404 and never a query.
+/// What `admin.reads` is demoted to when the history layer is not deployed: the allow-list half
+/// of the SLI could not be attempted, and a `503` is not evidence it holds.
+pub(super) const NO_HISTORY: &str =
+    "the history layer answered 503, so the series allow-list was never consulted";
+
 pub(super) async fn reads(c: &mut Ctx) {
     let region = c.cfg.region.clone();
     c.step("admin.reads", READ_CEILING, move |c| {
@@ -418,13 +423,22 @@ pub(super) async fn reads(c: &mut Ctx) {
             let (code, body) = raw(c, reqwest::Method::GET, &unknown, &jwt, None, &[]).await?;
             match code.as_u16() {
                 404 => Ok(()),
-                503 => Ok(()),
+                // `503 history unavailable` is the contract for a deployment with no ClickHouse —
+                // the allow-list was never consulted, so nothing about it was measured. It used to
+                // pass, which made the id green on every cluster that has no history layer at all
+                // (2026-09-12). The step reports it, and the stage demotes it to a skip.
+                503 => Err(anyhow!("{NO_HISTORY}")),
                 other => Err(anyhow!("an unknown history series answered {other}, not 404: {}", body.chars().take(200).collect::<String>())),
             }
         }
         .boxed()
     })
     .await;
+    // No ClickHouse is a deployment's shape, not a broken allow-list — the step names it and the
+    // sample becomes a skip rather than either a pass or a failure.
+    if c.steps.iter().rev().find(|s| s.slo_id == "admin.reads").is_some_and(|s| s.detail.contains(NO_HISTORY)) {
+        c.demote_to_skip("admin.reads", NO_HISTORY);
+    }
 }
 
 #[cfg(test)]

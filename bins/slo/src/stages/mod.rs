@@ -84,6 +84,12 @@ pub(crate) async fn call(
 ) -> Result<Value> {
     let (status, text) = raw(c, method, url, token, body, &[]).await?;
     if !status.is_success() {
+        // A refusal from a credential-minting route may still carry the credential — the CLI
+        // handshake answers a token on a 200 and echoes what it was given on some 4xx — so those
+        // are reported by status and path alone (2026-09-12).
+        if !quotable(url) {
+            return Err(anyhow!("{status} from {}", path_of(url)));
+        }
         return Err(anyhow!("{status}: {}", text.chars().take(300).collect::<String>()));
     }
     // Every route here answers JSON except the ones that answer nothing (204, and the api's
@@ -133,7 +139,7 @@ pub(crate) async fn raw(
     // failures with the phase and reqwest's own classification (`slo.http.failed`), and a request
     // still in flight when its step's ceiling cancelled it (`slo.http.abandoned`, from Drop — the
     // one place a cancelled future can still speak).
-    let mut flight = InFlight { method: method_name.clone(), path: path_of(url).to_string(), started: std::time::Instant::now(), done: false };
+    let mut flight = InFlight { method: method_name.clone(), path: path_of(url), started: std::time::Instant::now(), done: false };
     let r = match req.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -141,7 +147,7 @@ pub(crate) async fn raw(
             let (connect, timeout) = (e.is_connect(), e.is_timeout());
             let e = e.without_url();
             tracing::warn!(method = %method_name, path = %flight.path, phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
-            return Err(anyhow!("{e} ({})", path_of(url)));
+            return Err(anyhow!("{e} ({})", flight.path));
         }
     };
     let headers_ms = flight.started.elapsed().as_millis() as u64;
@@ -155,7 +161,7 @@ pub(crate) async fn raw(
             flight.done = true;
             let e = e.without_url();
             tracing::warn!(method = %method_name, path = %flight.path, phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
-            return Err(anyhow!("{e} while reading the body of {status} ({})", path_of(url)));
+            return Err(anyhow!("{e} while reading the body of {status} ({})", flight.path));
         }
     };
     flight.done = true;
@@ -187,9 +193,35 @@ impl Drop for InFlight {
     }
 }
 
-/// A URL with its query string cut off — safe to put in a step detail.
-pub(crate) fn path_of(url: &str) -> &str {
-    url.split('?').next().unwrap_or(url)
+/// The prefixes whose NEXT path segment is itself a credential — a CLI handshake code, an invite
+/// token. Everything under them is redacted in a detail and quoted nowhere.
+const SECRET_PATHS: [&str; 3] = ["/v1/cli/", "/v1/invites/", "/v2/token"];
+
+/// A URL with its query string cut off and any credential-bearing segment replaced — safe to put
+/// in a step detail.
+///
+/// The query has always been cut (`?poll=` on the CLI handshake is a one-shot credential); the
+/// PATH needed the same treatment (2026-09-12), because `/v1/cli/approve/{code}` and
+/// `/v1/invites/{token}` carry theirs in a segment, and a step detail is stored forever.
+pub(crate) fn path_of(url: &str) -> String {
+    let path = url.split('?').next().unwrap_or(url);
+    let Some(at) = SECRET_PATHS.iter().find_map(|p| path.find(p).map(|i| i + p.len())) else {
+        return path.to_string();
+    };
+    // Under one of those prefixes every LONG segment is redacted and every short one kept: the
+    // short ones are route words a reader needs (`approve`, `tokens`, `accept`), the long ones are
+    // the code or the token. A length rule rather than a list, because a route word nobody added
+    // here must fail closed.
+    let (head, rest) = path.split_at(at);
+    let kept: Vec<String> =
+        rest.split('/').map(|s| if s.len() > 8 { "<redacted>".to_string() } else { s.to_string() }).collect();
+    format!("{head}{}", kept.join("/"))
+}
+
+/// Whether a body from this URL may be quoted at all. The answer to a credential-minting route is
+/// the credential, so a non-2xx from one is reported by STATUS alone.
+pub(crate) fn quotable(url: &str) -> bool {
+    !SECRET_PATHS.iter().any(|p| url.contains(p))
 }
 
 /// `{api_url}{path}`, with the trailing slash the deployment may or may not have set removed once.
@@ -950,5 +982,19 @@ mod http_tests {
         assert!(!detail.contains("SECRETPOLLVALUE"), "the poll secret leaked: {detail}");
         assert!(!detail.contains("poll="), "the query leaked: {detail}");
         assert!(detail.contains("/v1/cli/token"), "the path is what makes a bad URL visible: {detail}");
+    }
+
+    /// The PATH carries credentials too: the CLI approve code and an invite token are segments,
+    /// not query parameters, and a step detail is stored forever.
+    #[test]
+    fn a_credential_in_a_path_segment_is_redacted() {
+        assert_eq!(path_of("https://x/v1/cli/approve/ABCDEFGHIJKL"), "https://x/v1/cli/approve/<redacted>");
+        assert_eq!(path_of("https://x/v1/invites/tok-0123456789/accept"), "https://x/v1/invites/<redacted>/accept");
+        // Short, readable route segments stay: they are what make a bad URL visible.
+        assert_eq!(path_of("https://x/v1/cli/token?poll=SECRET"), "https://x/v1/cli/token");
+        assert_eq!(path_of("https://x/v1/workspaces/ws-abc"), "https://x/v1/workspaces/ws-abc");
+        // And nothing from those routes is ever quoted.
+        assert!(!quotable("https://x/v1/cli/approve/ABCDEFGHIJKL"));
+        assert!(quotable("https://x/v1/workspaces"));
     }
 }

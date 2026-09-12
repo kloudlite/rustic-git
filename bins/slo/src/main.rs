@@ -198,7 +198,21 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
     });
     let failed = c.failed();
     let state = kloudlite_slo::report::run_state(true, failed > 0 || c.run_failed, &c.steps).as_str();
-    tracing::info!(run_id = %c.run_id, state, failed, "slo.run.finished");
+    // The counts and the first skip's own words, because `skipped` is a verdict an operator has
+    // to act on and "which id, and why" is the whole of what they need (2026-09-12).
+    let skipped = c.steps.iter().filter(|s| s.skipped).count();
+    let passed = c.steps.iter().filter(|s| s.ok).count();
+    let first = c.steps.iter().find(|s| s.skipped);
+    tracing::info!(
+        run_id = %c.run_id,
+        state,
+        passed,
+        failed,
+        skipped,
+        skipped_id = first.map(|s| s.slo_id.as_str()).unwrap_or_default(),
+        reason = first.map(|s| s.detail.as_str()).unwrap_or_default(),
+        "slo.run.finished"
+    );
     match () {
         // Report first: an unstored run is the failure a human must act on, even if it also had
         // a failing step somebody would otherwise be paged for.

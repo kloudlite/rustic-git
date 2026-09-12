@@ -40,6 +40,11 @@ pub enum RunState {
     /// a run that measured nothing must not read as a pass — two of these in a row looked like a
     /// green fast suite while the platform was never touched.
     Yielded,
+    /// SOME id was skipped. Also not a pass (2026-09-12): hourly-1789188203 hit the roll guard
+    /// after stage 2, skipped every step from there on, and finished `passed` with `failed: 0` —
+    /// so `run-job.sh` printed "hourly passed" for a run that proved nothing. A skipped step is
+    /// no sample, and a run made of no samples cannot be evidence the fleet is well.
+    Skipped,
 }
 
 impl RunState {
@@ -49,6 +54,7 @@ impl RunState {
             RunState::Passed => "passed",
             RunState::Failed => "failed",
             RunState::Yielded => "yielded",
+            RunState::Skipped => "skipped",
         }
     }
 
@@ -59,9 +65,32 @@ impl RunState {
             "passed" => RunState::Passed,
             "failed" => RunState::Failed,
             "yielded" => RunState::Yielded,
+            "skipped" => RunState::Skipped,
             _ => RunState::Running,
         }
     }
+}
+
+/// Why a step was skipped, as a value rather than as English.
+///
+/// `run_state` used to decide whether a whole run had measured anything by asking whether every
+/// detail `contains("in flight")` — so rewording one skip reason would have turned a run that
+/// yielded into a run that passed, silently, which is the exact false green this probe exists to
+/// prevent (2026-09-12). Defaulted, so a report from an older probe still parses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Not a skip, or a skip from a probe that predates this field.
+    #[default]
+    None,
+    /// Another run of this or a longer suite, or a rollout, held the platform: nothing was
+    /// measured, and the run must not read as a pass.
+    InFlight,
+    /// The run's wall-clock budget ran out before the step was reached.
+    Budget,
+    /// The platform's own shape or an earlier step's failure — a missing kubeconfig, a one-node
+    /// region, a workspace the create never produced. Already counted where it happened.
+    Precondition,
 }
 
 /// One step's outcome. `skipped` steps are stored but excluded from every count — a step the probe
@@ -77,6 +106,10 @@ pub struct StepReport {
     /// The journey stage this step ran in ("5 · Workspace"), so a failed run reads as a place in
     /// the journey rather than as an id somebody has to look up.
     pub stage: String,
+    /// Why it was skipped, when it was. Not a stored column: the console renders `detail`, and
+    /// the one reader that needs the machine answer (`run_state`) runs in the probe itself.
+    #[serde(default)]
+    pub reason: SkipReason,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -231,7 +264,14 @@ pub fn validate(r: &RunReport) -> Result<(), String> {
 /// write of a run wins — which is what makes the probe's running → passed/failed updates work at
 /// all, and what makes a retried report a no-op.
 pub async fn upsert(h: &History, r: &RunReport) -> Result<(), HistoryError> {
-    let failed = r.steps.iter().find(|s| !s.ok && !s.skipped);
+    // The first FAILURE if there is one, else — for a `skipped` run — the first skip, because the
+    // console renders these two columns as "why", and for a run that measured nothing the honest
+    // why is the reason it stopped measuring.
+    let failed = r
+        .steps
+        .iter()
+        .find(|s| !s.ok && !s.skipped)
+        .or_else(|| (r.state == RunState::Skipped).then(|| r.steps.iter().find(|s| s.skipped)).flatten());
     let run = serde_json::json!({
         "run_id": r.run_id,
         "suite": r.suite,
@@ -582,6 +622,9 @@ pub async fn run_steps(
             skipped: num(r.get(4)) == 1,
             detail: text(r.get(5)),
             stage: text(r.get(6)),
+            // Not a column: the reason is the PROBE's own working value, and nothing that reads
+            // a stored run needs it.
+            reason: SkipReason::None,
         })
         .collect();
     Ok(Some((run, steps)))
@@ -614,6 +657,7 @@ mod tests {
             skipped: false,
             detail: String::new(),
             stage: "1 · Identity".into(),
+            reason: SkipReason::None,
         }
     }
 

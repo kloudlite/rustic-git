@@ -11,7 +11,8 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 // The admin API's own ceiling, imported rather than repeated: a copy here would silently stop
 // matching the day the validator's changed, and the whole report would start being refused.
-use kloudlite_workspaces::history::slo::{StepReport, MAX_DETAIL};
+use kloudlite_workspaces::history::slo::{SkipReason, StepReport, MAX_DETAIL};
+use kloudlite_workspaces::slo::catalogue;
 
 use crate::ctx::Ctx;
 
@@ -55,21 +56,39 @@ impl Ctx {
         // service — the run's own guard only looked before it started. Asked only on a failure,
         // so a passing run costs nothing; the original detail stays, behind the reason. Every
         // suite: an hourly stop failed one second after its node's agent restarted (2026-09-11).
-        if !ok && crate::suite::rollout_in_flight(self).await {
-            self.skip(id, &format!("{}: {detail}", crate::suite::ROLLOUT_IN_FLIGHT));
+        // Bounded by ONE window per run (2026-09-12): a fleet wedged mid-roll used to turn every
+        // failing sample of every run into a skip, so the console went quiet exactly when it
+        // should have gone red.
+        if !ok && crate::suite::rollout_in_flight(self).await && self.roll_window_open() {
+            let why = format!("{}: {detail}", crate::suite::ROLLOUT_IN_FLIGHT);
+            self.skip_because(id, &why, SkipReason::InFlight);
             self.save_state();
             return false;
         }
-        tracing::info!(slo_id = id, ok, ms, detail = %detail, "slo.step.done");
-        metrics::counter!("slo_steps_total", "ok" => if ok { "true" } else { "false" }).increment(1);
+        // A step that WORKED but took longer than the catalogue promises is a bad sample, not a
+        // good one (2026-09-12): the step's own ceiling is a generous timeout so a slow-but-alive
+        // fleet is still measured, and until now the only thing that noticed the target was the
+        // console's own maths — so a run whose every latency id was five times its target reported
+        // `passed`. The ceiling stays the timeout; the TARGET is what judges the sample.
+        // `ok` is what the JOURNEY asks — the workspace exists, so the next step may use it —
+        // and `good` is the SAMPLE. Only the sample is judged against the target: failing the
+        // journey on a slow-but-working fleet would cascade a skip through every dependent id and
+        // cost the run its other measurements.
+        let (good, detail) = match catalogue::find(id).and_then(|s| s.target.max_ms) {
+            Some(max) if ok && ms > max => (false, format!("took {ms} ms, past its {max} ms target")),
+            _ => (ok, detail),
+        };
+        tracing::info!(slo_id = id, ok = good, ms, detail = %detail, "slo.step.done");
+        metrics::counter!("slo_steps_total", "ok" => if good { "true" } else { "false" }).increment(1);
         self.steps.push(StepReport {
             slo_id: id.to_string(),
             ts,
-            ok,
+            ok: good,
             ms,
             skipped: false,
             detail: clip(detail),
             stage: self.stage.clone(),
+            reason: SkipReason::None,
         });
         // After every step, not every stage: a child the parent kills at the wall-clock budget
         // hands over the names it recorded a second ago rather than the ones its last stage
@@ -87,7 +106,28 @@ impl Ctx {
         self.steps.iter().any(|s| s.slo_id == id && s.ok)
     }
 
+    /// Turn the sample this run just filed for `id` into a SKIP.
+    ///
+    /// For a step whose assertion has two halves and whose second half could not be ATTEMPTED —
+    /// a Kubernetes read with no kubeconfig. The alternative is a green sample for a property
+    /// nobody checked, which is the false green this probe exists to prevent (2026-09-12).
+    pub fn demote_to_skip(&mut self, id: &str, why: &str) {
+        let Some(s) = self.steps.iter_mut().rev().find(|s| s.slo_id == id) else { return };
+        tracing::info!(slo_id = id, reason = why, "slo.step.demoted");
+        (s.ok, s.skipped, s.reason) = (false, true, SkipReason::Precondition);
+        s.detail = clip(why.to_string());
+    }
+
+    /// The ordinary skip: a precondition an earlier step of this run did not produce, or the
+    /// platform's own shape. Counted as a pass by `run_state`, because the failure — if there was
+    /// one — was already counted where it happened.
     pub fn skip(&mut self, id: &'static str, why: &str) {
+        self.skip_because(id, why, SkipReason::Precondition)
+    }
+
+    /// The same, with the machine-readable reason. `run_state` decides whether the whole run
+    /// measured anything from THIS, never from the English in `detail`.
+    pub fn skip_because(&mut self, id: &'static str, why: &str, reason: SkipReason) {
         tracing::info!(slo_id = id, reason = why, "slo.step.skipped");
         self.steps.push(StepReport {
             slo_id: id.to_string(),
@@ -97,6 +137,7 @@ impl Ctx {
             skipped: true,
             detail: clip(why.to_string()),
             stage: self.stage.clone(),
+            reason,
         });
     }
 

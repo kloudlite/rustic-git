@@ -9,6 +9,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use kloudlite_workspaces::api::workloads::{Kind, KNOWN_CENTRAL};
+use kloudlite_workspaces::history::slo::SkipReason;
 use kloudlite_workspaces::slo::catalogue::{journey, Suite};
 use kube::api::Api;
 
@@ -78,6 +79,10 @@ pub fn suite(kind: Suite) -> Vec<Stage> {
 /// deployment that forgot to.
 pub const DEFAULT_BUDGET_SECS: u64 = 780;
 
+/// What one stage may cost before it is starving the stages after it. The fast suite's whole
+/// budget is 780 s across eleven stages, so a stage near this has taken the run.
+pub const STAGE_BUDGET: Duration = Duration::from_secs(700);
+
 /// The reason every id a spent budget cost is skipped with.
 pub const OVER_BUDGET: &str = "run budget exhausted";
 /// The detail on every id a fast run skips because an hourly run is in flight.
@@ -116,17 +121,17 @@ pub fn over_budget(c: &Ctx, budget: Duration) -> bool {
 /// having fired. Ids come from the catalogue rather than from the stage code, because a stage that
 /// never ran cannot say what it would have reported.
 pub fn skip_remaining(c: &mut Ctx, kind: Suite, remaining: &[Stage]) -> usize {
-    skip_remaining_because(c, kind, remaining, OVER_BUDGET)
+    skip_remaining_because(c, kind, remaining, OVER_BUDGET, SkipReason::Budget)
 }
 
-pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why: &str) -> usize {
+pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why: &str, reason: SkipReason) -> usize {
     let catalogue = journey(kind);
     let mut skipped = 0;
     for stage in remaining {
         c.stage = stage.name.to_string();
         let ids = catalogue.iter().find(|(name, _)| *name == stage.name).map(|(_, ids)| ids.clone());
         for id in ids.unwrap_or_default() {
-            c.skip(id, why);
+            c.skip_because(id, why, reason);
             skipped += 1;
         }
     }
@@ -264,14 +269,26 @@ fn mid_rollout(c: Counts) -> bool {
 /// during one measures the roll rather than the service. So the fast run yields, the same way it
 /// yields to an hourly run — and the hourly, weekly and monthly never do, because their window is
 /// the operator's own choice. `false` on any error: a probe that cannot ask must still probe.
-pub async fn rollout_in_flight(c: &Ctx) -> bool {
-    match rollout_check(c).await {
+/// How long an answer is reused. The guard is asked before every stage and on every failed step,
+/// and each ask is five reads of two API servers — a stage with twenty failing steps made a
+/// hundred of them (2026-09-12). Far shorter than a roll, far longer than a burst of failures.
+const ROLLOUT_CACHE: Duration = Duration::from_secs(10);
+
+pub async fn rollout_in_flight(c: &mut Ctx) -> bool {
+    if let Some((at, v)) = c.rollout_cache {
+        if at.elapsed() < ROLLOUT_CACHE {
+            return v;
+        }
+    }
+    let v = match rollout_check(c).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "slo.rollout.check.failed");
             false
         }
-    }
+    };
+    c.rollout_cache = Some((std::time::Instant::now(), v));
+    v
 }
 
 async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
@@ -335,7 +352,7 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
         wait_for_shorter_runs(c, kind).await;
     }
     if let Some(why) = yield_to {
-        let skipped = skip_remaining_because(c, kind, &stages, why);
+        let skipped = skip_remaining_because(c, kind, &stages, why, SkipReason::InFlight);
         tracing::warn!(skipped, reason = why, "slo.run.yielded");
         hand_over(c);
         let last = c.stage.clone();
@@ -355,19 +372,31 @@ pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
             return;
         }
         // The same question the run asked before it started, asked again at every stage: a roll
-        // that begins mid-run turns the rest of the journey into a measurement of the roll.
-        if i > 0 && rollout_in_flight(c).await {
-            let skipped = skip_remaining_because(c, kind, &stages[i..], ROLLOUT_IN_FLIGHT);
-            tracing::warn!(skipped, reason = ROLLOUT_IN_FLIGHT, "slo.run.yielded");
+        // that begins mid-run turns THAT stage into a measurement of the roll. Only that stage
+        // (2026-09-12) — abandoning the rest of the journey meant one roll that started in stage 2
+        // cost the console every id from 2 to 10, when the roll was usually over by stage 4 — and
+        // only inside the run's one downgrade window, so a fleet that never settles is measured
+        // rather than skipped forever.
+        if i > 0 && rollout_in_flight(c).await && c.roll_window_open() {
+            let skipped =
+                skip_remaining_because(c, kind, &stages[i..=i], ROLLOUT_IN_FLIGHT, SkipReason::InFlight);
+            tracing::warn!(stage = stage.name, skipped, reason = ROLLOUT_IN_FLIGHT, "slo.stage.yielded");
             hand_over(c);
-            let last = c.stage.clone();
-            report(c, &last).await;
-            return;
+            report(c, stage.name).await;
+            continue;
         }
         c.stage = stage.name.to_string();
         let started = std::time::Instant::now();
         (stage.run)(c).await;
-        tracing::info!(stage = stage.name, failed = c.failed(), duration_ms = started.elapsed().as_millis() as u64, "slo.stage.done");
+        let took = started.elapsed();
+        tracing::info!(stage = stage.name, failed = c.failed(), duration_ms = took.as_millis() as u64, "slo.stage.done");
+        // A stage is one slice of a budget the pod's own `activeDeadlineSeconds` bounds, and a
+        // stage that eats most of one starves every stage after it of its samples. Logged rather
+        // than enforced: cutting a stage short would drop ids silently, which is the hole the
+        // budget skips exist to avoid — this is the line that says WHICH stage to go and look at.
+        if took > STAGE_BUDGET {
+            tracing::warn!(stage = stage.name, duration_secs = took.as_secs(), budget_secs = STAGE_BUDGET.as_secs(), "slo.stage.overran");
+        }
         // Before the PUT, not after: if the report is what is broken, the parent still gets every
         // step this run measured.
         hand_over(c);

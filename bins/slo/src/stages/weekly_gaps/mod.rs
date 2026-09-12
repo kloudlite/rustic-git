@@ -156,7 +156,7 @@ mod tests {
                 "reg.moved.image",
                 "reg.blob.session",
                 "git.gc.packs",
-                "git.limits",
+                "reg.limits",
                 "admin.workload.roll",
                 "ws.spread",
                 "snap.retain",

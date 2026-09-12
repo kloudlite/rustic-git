@@ -4,7 +4,7 @@
 //! keyed on the probe's own coordinates, so a lost PUT is repaired by the next one and there is
 //! no partial state to reconcile on either side.
 
-use kloudlite_workspaces::history::slo::{RunReport, RunState};
+use kloudlite_workspaces::history::slo::{RunReport, RunState, SkipReason};
 
 use crate::ctx::Ctx;
 
@@ -24,16 +24,27 @@ fn backoff(attempt: u32, unit: std::time::Duration) -> Option<std::time::Duratio
     BACKOFF.get(attempt as usize - 1).map(|n| unit * *n as u32)
 }
 
-/// A finished run that skipped EVERY id for an in-flight reason yielded — it measured nothing.
-/// Steps skipped for any other reason (a missing kubeconfig, a one-node region) still count as a
-/// pass: those are the platform's shape, not another run in the way.
+/// The run's own verdict, in precedence order: a failure beats everything, a run that yielded
+/// wholesale is `yielded`, and a run that skipped ANY id at all is `skipped` — never `passed`.
+///
+/// The last rule is 2026-09-12's: hourly-1789188203 met the roll guard after stage 2, skipped
+/// every step from there on and finished `passed` with `failed: 0`, so the operator's own
+/// `run-job.sh` printed "hourly passed" for a run that proved nothing. A skipped step is NO
+/// SAMPLE, and a verdict built out of no samples is not evidence the fleet is well — the skips
+/// are still not counted as failures, they simply stop the run being called a pass.
 pub fn run_state(finished: bool, failed: bool, steps: &[kloudlite_workspaces::history::slo::StepReport]) -> RunState {
     match (finished, failed) {
         (false, _) => RunState::Running,
         (true, true) => RunState::Failed,
-        (true, false) if !steps.is_empty() && steps.iter().all(|s| s.skipped && s.detail.contains("in flight")) => {
+        // The REASON, never the English in `detail` (2026-09-12): rewording a skip message must
+        // not silently turn a run that measured nothing into a run that passed.
+        (true, false)
+            if !steps.is_empty()
+                && steps.iter().all(|s| s.skipped && s.reason == SkipReason::InFlight) =>
+        {
             RunState::Yielded
         }
+        (true, false) if steps.iter().any(|s| s.skipped) => RunState::Skipped,
         (true, false) => RunState::Passed,
     }
 }
@@ -120,18 +131,29 @@ mod tests {
     use super::run_state;
     use crate::testkit::{ctx, stub};
     use axum::http::StatusCode;
-    use kloudlite_workspaces::history::slo::{RunState, StepReport};
+    use kloudlite_workspaces::history::slo::{RunState, SkipReason, StepReport};
 
     fn step(ok: bool, skipped: bool, detail: &str) -> StepReport {
-        StepReport {
-            slo_id: "x".into(),
-            ts: chrono::Utc::now(),
-            ok,
-            ms: 0,
-            skipped,
-            detail: detail.into(),
-            stage: "1".into(),
-        }
+        let reason = match (skipped, detail.contains("in flight")) {
+            (true, true) => SkipReason::InFlight,
+            (true, false) => SkipReason::Precondition,
+            _ => SkipReason::None,
+        };
+        StepReport { slo_id: "x".into(), ts: chrono::Utc::now(), ok, ms: 0, skipped, detail: detail.into(), stage: "1".into(), reason }
+    }
+
+    /// The reason is what decides it — a yielded run whose English was reworded is still a
+    /// yielded run, and a `Precondition` skip that happens to mention a flight is not one.
+    #[test]
+    fn the_reason_decides_a_yield_not_the_wording() {
+        let mut reworded = step(true, true, "a longer run of this suite already has the platform");
+        reworded.reason = SkipReason::InFlight;
+        assert_eq!(run_state(true, false, &[reworded]), RunState::Yielded);
+        let mut shaped = step(true, true, "the workspace this id needs is in flight");
+        shaped.reason = SkipReason::Precondition;
+        // Not `Yielded` — the wording says "in flight" and the reason does not — and not a pass
+        // either, because an id was skipped.
+        assert_eq!(run_state(true, false, &[shaped]), RunState::Skipped);
     }
 
     #[test]
@@ -140,11 +162,22 @@ mod tests {
         assert_eq!(run_state(true, false, &yielded), RunState::Yielded);
         assert_eq!(run_state(false, false, &yielded), RunState::Running, "still running while it reports");
         let mixed = vec![step(true, true, "an hourly run is in flight"), step(true, false, "")];
-        assert_eq!(run_state(true, false, &mixed), RunState::Passed, "one measured id is a sample");
+        assert_eq!(run_state(true, false, &mixed), RunState::Skipped, "a partly skipped run is not a pass");
         let shape = vec![step(true, true, "no kubeconfig")];
-        assert_eq!(run_state(true, false, &shape), RunState::Passed, "a skip for the platform's shape still passes");
+        assert_eq!(run_state(true, false, &shape), RunState::Skipped, "a run that skipped an id is not a pass");
         assert_eq!(run_state(true, true, &yielded), RunState::Failed);
         assert_eq!(run_state(true, false, &[]), RunState::Passed, "no steps at all is the old behaviour");
+    }
+
+    /// The fleet's own case, 2026-09-12: a roll after stage 2 left one measured step and a pile
+    /// of skips, and the run read `passed`. `failed` still wins over `skipped`.
+    #[test]
+    fn one_skipped_step_is_not_a_pass_and_a_failure_still_wins() {
+        let one = vec![step(true, false, ""), step(true, true, "a rollout is in flight: could not push")];
+        assert_eq!(run_state(true, false, &one), RunState::Skipped);
+        assert_eq!(run_state(true, true, &one), RunState::Failed, "a failure outranks a skip");
+        let clean = vec![step(true, false, ""), step(true, false, "")];
+        assert_eq!(run_state(true, false, &clean), RunState::Passed);
     }
 
     #[tokio::test]

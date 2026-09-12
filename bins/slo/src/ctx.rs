@@ -116,10 +116,24 @@ pub struct Ctx {
     /// abort, a non-zero exit. The step list alone cannot express "the journey stopped", so
     /// without this a run that crashed on its first stage would be reported as passed.
     pub run_failed: bool,
+    /// The last `rollout_in_flight` answer and when it was taken. The guard is asked before every
+    /// stage AND on every failed step, and each ask is four or five reads of the API server; a
+    /// stage with twenty failing steps made a hundred (2026-09-12). Ten seconds is far shorter
+    /// than a roll and far longer than a burst of failures.
+    pub rollout_cache: Option<(std::time::Instant, bool)>,
+    /// When this run's ONE downgrade window opened. A roll is a real event with a beginning and
+    /// an end, so a run gets a single window in which a failure may be read as the roll's rather
+    /// than the service's — without that, a fleet stuck mid-roll for an hour turned every failing
+    /// sample of every run into a skip, and the console went quiet instead of red.
+    pub roll_window: Option<std::time::Instant>,
     /// Set when a mid-run report could not be filed. The run does NOT stop for it — teardown and
     /// the final report are what make a broken run visible — but the process must still exit 3.
     pub report_failed: bool,
 }
+
+/// How long the run's single downgrade window stays open. One srv roll is minutes; this is
+/// generous enough to cover one and short enough that a fleet that never comes back is measured.
+pub const ROLL_WINDOW: Duration = Duration::from_secs(600);
 
 pub const PROBE_USER: &str = "slo-probe";
 pub const OTHER_USER: &str = "slo-other";
@@ -198,6 +212,8 @@ impl Ctx {
             programs: crate::tools::Programs::default(),
             run_failed: false,
             report_failed: false,
+            rollout_cache: None,
+            roll_window: None,
             cfg,
         })
     }
@@ -205,6 +221,18 @@ impl Ctx {
     /// The prefix every object this run creates carries, and the one teardown sweeps by.
     pub fn prefix(&self) -> String {
         format!("run-{}", self.run_id)
+    }
+
+    /// May this run still read a failure as the roll's? Opens the window on the first ask.
+    pub fn roll_window_open(&mut self) -> bool {
+        match self.roll_window {
+            None => {
+                self.roll_window = Some(std::time::Instant::now());
+                tracing::warn!(run_id = %self.run_id, "slo.roll.window.opened");
+                true
+            }
+            Some(at) => at.elapsed() < ROLL_WINDOW,
+        }
     }
 
     pub fn bearer(&self, token: &str) -> String {

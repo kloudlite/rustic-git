@@ -154,7 +154,7 @@ pub(crate) async fn raw_v2(
 }
 
 
-/// `git.limits`: the three body ceilings are three knobs, and a 413 comes from the right one.
+/// `reg.limits`: the three body ceilings are three knobs, and a 413 comes from the right one.
 ///
 /// Only the manifest limit is testable in band — `max_layer` is 5 GiB and the git `max_body` is
 /// 2 GiB, and a probe that sent either would be measuring the CronJob's disk. What the id catches
@@ -162,7 +162,7 @@ pub(crate) async fn raw_v2(
 /// shows immediately as a blob of manifest size being refused, or a manifest of blob size accepted.
 pub(crate) async fn limits(c: &mut Ctx) {
     let Some(secret) = c.state.token_value.clone() else {
-        return c.skip("git.limits", "no personal token");
+        return c.skip("reg.limits", "no personal token");
     };
     let probe = c.probe_user.clone();
     let name = format!("{}-limits", c.prefix());
@@ -171,7 +171,7 @@ pub(crate) async fn limits(c: &mut Ctx) {
     // `step_cap`, because the blob this id uploads is now deleted in a compensation: the step's
     // own ceiling drops the future, so the body needs a ceiling of its own that fires first or a
     // slow run leaves 5 MiB of blob per week behind (2026-09-12).
-    c.step("git.limits", step_cap(READ_CEILING), move |c| {
+    c.step("reg.limits", step_cap(READ_CEILING), move |c| {
         let crane = super::super::registry::authed(c);
         let base = super::super::registry::base(c);
         async move {

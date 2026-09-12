@@ -468,7 +468,15 @@ pub(crate) async fn verify(c: &mut Ctx) {
         let probe = c.probe_user.clone();
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/api/{probe}/{name}/signature/{oid}"));
-        async move { get(c, &url, &jwt).await.map(|_| ()) }.boxed()
+        async move {
+            let doc = get(c, &url, &jwt).await?;
+            // A 200 alone says nothing: a handler that answered an empty document, or one about
+            // some other commit, would keep this green forever. The endpoint's own answer has to
+            // name the oid it was asked about (2026-09-12).
+            let named = doc.to_string().contains(oid.trim());
+            named.then_some(()).ok_or_else(|| anyhow!("the signature answer does not name {oid}: {}", clip(&doc.to_string())))
+        }
+        .boxed()
     })
     .await;
 }

@@ -59,6 +59,7 @@ pub async fn run(c: &mut Ctx) {
 }
 
 async fn fast(c: &mut Ctx) {
+    let no_kube = c.kube.is_none();
     if !create(c).await {
         for id in AFTER_CREATE {
             c.skip(id, "the environment never became ready");
@@ -71,11 +72,17 @@ async fn fast(c: &mut Ctx) {
         }
         return;
     };
+    if no_kube {
+        c.demote_to_skip("env.create.p95", NO_STS);
+    }
     exec_ok(c, &env).await;
     dns(c, &env).await;
     attach(c, &env).await;
     push(c, &env).await;
     clone(c, &env).await;
+    if no_kube {
+        c.demote_to_skip("env.clone.p95", NO_STS);
+    }
 }
 
 /// `env.exec.ok`: a command inside a running service pod — `ws.exec.ok`'s twin, and the smallest
@@ -93,7 +100,10 @@ async fn exec_ok(c: &mut Ctx, env: &str) {
             let (code, out, err) =
                 crate::kube::exec(k, &ns, &pod, None, &["sh", "-c", "echo slo"], SVC_EXEC_CEILING).await?;
             if code != 0 || out.trim() != "slo" {
-                return Err(anyhow!("exec exited {code}: {}", err.trim()));
+                // STDOUT is the assertion — the command echoes a word and the word is what is
+                // compared — so a mismatch that named only stderr left a reader with nothing to
+                // look at (2026-09-12).
+                return Err(anyhow!("exec exited {code} with stdout {:?}, wanted \"slo\": {}", out.trim(), err.trim()));
             }
             Ok(())
         }
@@ -145,6 +155,10 @@ async fn clone(c: &mut Ctx, env: &str) {
 pub(super) async fn service_ready(c: &Ctx, env: &str, cap: Duration) -> Result<()> {
     sts_ready(c, env, SERVICE, cap).await
 }
+
+/// The skip a step whose "with its services ready" half could not be attempted is demoted to.
+/// The record half still ran; what is refused is calling that a kept promise (2026-09-12).
+const NO_STS: &str = "no kubeconfig: the service's replica could not be confirmed ready";
 
 /// The same for one named service — the intercept journey's environment has two.
 async fn sts_ready(c: &Ctx, env: &str, svc: &str, cap: Duration) -> Result<()> {
@@ -679,10 +693,21 @@ async fn builder_hidden(c: &mut Ctx) {
         return;
     }
     let id = format!("bld-{}", c.probe_user);
+    // The POSITIVE control (2026-09-12): five 404s prove nothing on their own — a route that was
+    // unmounted, a base URL that was wrong or a token the tier rejected would answer exactly the
+    // same way, and the id would report the builder hidden by a hole. The run's own environment is
+    // read through the SAME route first, and it must be there.
+    let visible = c.state.environment.clone();
     c.step("builder.hidden", BUILDER_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let id = id.clone();
         async move {
+            if let Some(env) = &visible {
+                let (status, text) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/environments/{env}")), &jwt, None, &[]).await?;
+                if !status.is_success() {
+                    return Err(anyhow!("the control read of {env} answered {status}, so the 404s below would say nothing: {}", text.chars().take(200).collect::<String>()));
+                }
+            }
             let listed = get(c, &api(c, "/v1/environments"), &jwt).await.context("could not list environments")?;
             if listed.as_array().is_some_and(|rows| {
                 rows.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str()))

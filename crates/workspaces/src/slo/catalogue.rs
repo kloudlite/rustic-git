@@ -490,7 +490,7 @@ pub const CATALOGUE: &[Slo] = &[
     // Only the manifest ceiling is testable in band: `max_layer` is 5 GiB and the git `max_body`
     // 2 GiB, and a probe that sent either would be measuring the CronJob's disk. What this catches
     // is the failure people have actually hit — the three limits collapsing into one.
-    Slo { id: "git.limits", feature: "Git hosting", sli: "A manifest over its own limit is refused 413 while a blob of the same size is accepted — the two ceilings are different knobs", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "reg.limits", feature: "Container registry", sli: "A manifest over its own limit is refused 413 while a blob of the same size is accepted — the two ceilings are different knobs", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "gw.caps", feature: "Workspaces", sli: "The gateway refuses a tunnel past its per-workspace cap and keeps the ones already open", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "admin.workload.roll", feature: "Admin", sli: "A roll of one reader restarts exactly that workload and it returns ready", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "ws.spread", feature: "Workspaces", sli: "A stopped workspace whose volume nothing holds comes back on a different node", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
