@@ -146,13 +146,25 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     let team_lp = ListParams::default().labels(&format!("{TEAM_LABEL}={owner}"));
     let charged = |o: &str, team: &str| if team.is_empty() { o == owner } else { team == owner };
 
+    // The six listings are independent reads; serially awaited they were six round trips on a
+    // path every create and every quota page runs (2026-09-12). Concurrency only — the counts are
+    // still recomputed from the CRDs on every request, never cached.
+    let (ws_own, ws_team, env_own, vol_own, vol_team, snap_own) = futures::try_join!(
+        ws.list(&lp),
+        ws.list(&team_lp),
+        envs.list(&lp),
+        vols.list(&lp),
+        vols.list(&team_lp),
+        snaps.list(&lp),
+    )?;
+
     let (mut millis, mut mib) = (0u64, 0u64);
     let mut u = Usage::default();
     // Two selectors can answer the same object (a fake that ignores selectors, a label healed
     // late); the name decides once.
     let mut seen: HashSet<String> = HashSet::new();
 
-    for w in ws.list(&lp).await?.items.into_iter().chain(ws.list(&team_lp).await?.items) {
+    for w in ws_own.items.into_iter().chain(ws_team.items) {
         if !charged(&w.spec.owner, &w.spec.team) || !seen.insert(format!("ws/{}", w.name_any())) {
             continue;
         }
@@ -162,7 +174,7 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
             mib += mebibytes(&w.spec.resources.memory_limit);
         }
     }
-    for e in envs.list(&lp).await?.items {
+    for e in env_own.items {
         if e.spec.owner != owner {
             continue;
         }
@@ -188,7 +200,7 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // the owner's disk, and deleting the snapshots is how they get it back.
     let mut charged_volumes: Vec<String> = Vec::new();
     let mut known_volumes: HashSet<String> = HashSet::new();
-    for v in vols.list(&lp).await?.items.into_iter().chain(vols.list(&team_lp).await?.items) {
+    for v in vol_own.items.into_iter().chain(vol_team.items) {
         known_volumes.insert(v.name_any());
         if !charged(&v.spec.owner, &v.spec.team) || !seen.insert(format!("vol/{}", v.name_any())) {
             continue;
@@ -206,7 +218,7 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
             u.snapshots += 1;
         }
     };
-    for s in snaps.list(&lp).await?.items {
+    for s in snap_own.items {
         if s.spec.owner == owner && !known_volumes.contains(&s.spec.volume) {
             count_snapshot(&s);
         }

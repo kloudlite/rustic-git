@@ -247,8 +247,11 @@ pub(crate) async fn guard_alloc(
     want: &[(crate::quota::Dim, u64)],
 ) -> Result<(), Response> {
     let c = kube(s)?;
-    let limit = crate::quota::effective(c, owner, team).await.map_err(kube_err)?;
-    let used = crate::quota::usage(c, owner).await.map_err(kube_err)?;
+    // The limit and the usage are independent reads of the same cluster; awaiting them in turn
+    // made every create/clone/restore/push pay both round trips end to end (2026-09-12). Still
+    // computed from the CRDs on every request — concurrency is not a cache.
+    let (limit, used) = futures::try_join!(crate::quota::effective(c, owner, team), crate::quota::usage(c, owner))
+        .map_err(kube_err)?;
     for (dim, adding) in want {
         if let Err(msg) = crate::quota::check(*dim, &limit, &used, *adding) {
             // The single gate every create/restore/clone/push passes through, so one counter here
@@ -310,12 +313,9 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     let (c, jti) = state.jwt.verify_any_user(tok.trim()).map_err(|_| unauthorized())?;
     // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
     // IS its expiry. Without a directory to ask, a CLI token authenticates nothing here.
-    // ponytail: one directory read per CLI request, no cache — same tradeoff `teams_for` takes;
-    // add a short-TTL cache if it shows up hot, remembering it delays a revocation by its TTL.
     if let Some(jti) = jti {
-        match &state.directory {
-            Some(check) if check.is_live(&jti).await => {}
-            _ => return Err(unauthorized()),
+        if !cli_token_live(state, &jti).await {
+            return Err(unauthorized());
         }
     }
     let superadmin = c.superadmin;
@@ -325,6 +325,34 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     Ok(Caller { name, superadmin })
 }
 
+
+/// How long a CLI `jti` the directory called live is trusted without asking again. Short on
+/// purpose: this is exactly how late a revocation can take effect, and `kl-connect` makes several
+/// `/v1` calls per command, each of which was its own directory round trip before (2026-09-12).
+const CLI_LIVE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Positive answers only, and only for `CLI_LIVE_TTL`. A "no" is never remembered, so a token the
+/// directory refuses stays refused on every request, and an unwired directory still authenticates
+/// nothing.
+async fn cli_token_live(state: &ApiState, jti: &str) -> bool {
+    let now = std::time::Instant::now();
+    if let Ok(seen) = state.cli_live.lock() {
+        if seen.get(jti).is_some_and(|at| now.duration_since(*at) < CLI_LIVE_TTL) {
+            return true;
+        }
+    }
+    let Some(dir) = &state.directory else { return false };
+    if !dir.is_live(jti).await {
+        return false;
+    }
+    if let Ok(mut seen) = state.cli_live.lock() {
+        // Swept here rather than on a beat: the map only ever holds the jtis this process has
+        // actually seen, and a process nobody calls has nothing to sweep.
+        seen.retain(|_, at| now.duration_since(*at) < CLI_LIVE_TTL);
+        seen.insert(jti.to_string(), now);
+    }
+    true
+}
 
 pub(super) fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()

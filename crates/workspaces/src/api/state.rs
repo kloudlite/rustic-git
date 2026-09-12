@@ -200,6 +200,12 @@ pub struct ApiState {
     /// The admin role's reflector stores over the primary cluster; `None` in the user role and
     /// in tests, where every admin reader lists instead (`admin::fleet::all`).
     pub fleet: Option<Arc<crate::api::admin::fleet::FleetCache>>,
+    /// CLI `jti`s seen LIVE, and when. Positive answers only, for `CLI_LIVE_TTL`: every `/v1`
+    /// request from `kl-connect` was a directory round trip of its own before this (2026-09-12).
+    /// A revocation is therefore honoured within one TTL rather than instantly — the deliberate
+    /// price named in `caller`'s own ponytail marker — while a token the directory has never
+    /// blessed is refused on every request, since nothing negative is ever remembered.
+    pub(crate) cli_live: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 
@@ -219,6 +225,7 @@ impl ApiState {
             builder_secret: None,
             resolver: None,
             fleet: None,
+            cli_live: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

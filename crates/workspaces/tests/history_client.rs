@@ -32,7 +32,7 @@ async fn canned(status: u16, reply: &'static str) -> (String, Seen) {
 #[tokio::test]
 async fn insert_qualifies_the_table_and_sends_one_line_per_row() {
     let (url, seen) = canned(200, "").await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     h.insert(
         "events",
         &[
@@ -53,7 +53,7 @@ async fn insert_qualifies_the_table_and_sends_one_line_per_row() {
 #[tokio::test]
 async fn an_empty_insert_makes_no_request_at_all() {
     let (url, seen) = canned(200, "").await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     h.insert("events", &[]).await.unwrap();
     assert!(seen.lock().unwrap().is_empty(), "an empty batch must not cost a round trip");
 }
@@ -63,7 +63,7 @@ async fn query_returns_the_json_compact_data_rows_and_passes_sql_through() {
     let reply = r#"{"meta":[{"name":"ts","type":"DateTime"},{"name":"value","type":"Float64"}],
                     "data":[["2026-09-04 10:00:00",3],["2026-09-04 11:00:00",5]],"rows":2}"#;
     let (url, seen) = canned(200, reply).await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     let rows = h.query("SELECT MetricName FROM otel_metrics_sum").await.unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1][1], serde_json::json!(5));
@@ -79,7 +79,7 @@ async fn query_returns_the_json_compact_data_rows_and_passes_sql_through() {
 #[tokio::test]
 async fn a_server_error_is_an_error_not_an_empty_result() {
     let (url, _) = canned(500, "Code: 60. DB::Exception: Unknown table").await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     match h.query("SELECT 1").await {
         Err(HistoryError::Server { status, body }) => {
             assert_eq!(status, 500);
@@ -98,7 +98,7 @@ async fn from_env_is_none_without_a_url() {
 #[tokio::test]
 async fn migrate_applies_every_statement_once() {
     let (url, seen) = canned(200, r#"{"meta":[],"data":[],"rows":0}"#).await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     let applied = schema::migrate(&h).await.unwrap();
     assert_eq!(applied as usize, schema::MIGRATIONS.len());
     let bodies = seen.lock().unwrap().clone();
@@ -168,7 +168,7 @@ async fn migrations_apply_against_a_real_clickhouse() {
 #[tokio::test]
 async fn an_empty_body_is_zero_rows_and_healthy() {
     let (url, _) = canned(200, "").await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     assert!(h.query("CREATE DATABASE IF NOT EXISTS kloudlite").await.unwrap().is_empty());
     assert!(h.healthy().await);
 }
@@ -178,14 +178,14 @@ async fn an_empty_body_is_zero_rows_and_healthy() {
 #[tokio::test]
 async fn healthy_is_false_when_the_server_refuses() {
     let (url, _) = canned(500, "Code: 516. DB::Exception: Authentication failed").await;
-    assert!(!History::new(&url, "default", "").healthy().await);
+    assert!(!History::new(&url, "default", "").unwrap().healthy().await);
 }
 
 /// The table name is interpolated into SQL. It is refused on an allow-list, never escaped.
 #[tokio::test]
 async fn an_unsafe_table_name_is_refused_before_any_request() {
     let (url, seen) = canned(200, "").await;
-    let h = History::new(&url, "default", "");
+    let h = History::new(&url, "default", "").unwrap();
     assert!(h
         .insert("kloudlite.events; DROP", &[serde_json::json!({})])
         .await

@@ -215,7 +215,7 @@ async fn admin_write_dual_writes_an_events_row() {
     ];
     let keys = keys_store().await;
     let (ch_url, seen) = canned(200, "").await;
-    let history = Arc::new(kloudlite_workspaces::history::History::new(&ch_url, "default", ""));
+    let history = Arc::new(kloudlite_workspaces::history::History::new(&ch_url, "default", "").unwrap());
     let s = admin_server_with_history(routes, keys, Some(history)).await;
 
     let resp = reqwest::Client::new()
@@ -246,7 +246,7 @@ async fn admin_write_survives_a_dead_clickhouse() {
     ];
     let keys = keys_store().await;
     let (ch_url, _seen) = canned(500, "DB::Exception: down").await;
-    let history = Arc::new(kloudlite_workspaces::history::History::new(&ch_url, "default", ""));
+    let history = Arc::new(kloudlite_workspaces::history::History::new(&ch_url, "default", "").unwrap());
     let s = admin_server_with_history(routes, keys, Some(history)).await;
 
     let resp = reqwest::Client::new()

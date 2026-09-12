@@ -68,9 +68,9 @@ fn by_creation_oldest_first(a: &crd::QuotaRequest, b: &crd::QuotaRequest) -> std
 async fn pending_oldest_first(s: &ApiState) -> Result<Vec<super::super::QuotaRequestDoc>, Response> {
     let filter = RequestFilter { owner: None, state: Some(crd::RequestState::Pending), kind: None };
     let mut rows = list_all_quota_requests_inner(s, &filter).await?;
-    rows.sort_by(by_creation_oldest_first);
+    rows.sort_by(|a, b| by_creation_oldest_first(a, b));
     rows.truncate(3);
-    Ok(rows.iter().map(super::super::request_doc).collect())
+    Ok(rows.iter().map(|r| super::super::request_doc(r)).collect())
 }
 
 fn workload_attention(rows: &[super::super::workloads::WorkloadDoc]) -> impl Iterator<Item = AttentionItem> + '_ {

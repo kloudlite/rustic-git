@@ -160,7 +160,7 @@ mod tick {
     #[tokio::test]
     async fn one_tick_inserts_a_usage_row_and_a_fleet_row() {
         let (ch_url, ch_seen) = canned_clickhouse().await;
-        let history = Arc::new(History::new(&ch_url, "default", ""));
+        let history = Arc::new(History::new(&ch_url, "default", "").unwrap());
 
         let routes: Vec<Route> = vec![
             // `owners::fleet`

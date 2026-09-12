@@ -28,6 +28,18 @@ mod slo;
 /// write that already landed. `s.keys` unset (dev without an object store configured) means
 /// there is nowhere to log to and nothing to block either, so this is a silent no-op then too —
 /// every deployed admin process has `KLOUDLITE_S3_URL` wired (`deploy/kloudlite.yaml`).
+/// Above this, one of `audit`'s two writes is logged with the store it was waiting on. An admin
+/// write that takes seconds is answered from a log line, never from a theory (CLAUDE.md, "every
+/// boundary is timestamped in the log").
+const SLOW_AWAIT_MS: u128 = 2_000;
+
+fn warn_if_slow(store: &'static str, action: &str, target: &str, start: std::time::Instant) {
+    let ms = start.elapsed().as_millis();
+    if ms >= SLOW_AWAIT_MS {
+        tracing::warn!(store, action, target, ms, "audit.slow");
+    }
+}
+
 pub(crate) async fn audit(
     s: &ApiState,
     actor: &str,
@@ -49,7 +61,12 @@ pub(crate) async fn audit(
         reason,
         result,
     };
-    if let Err(e) = crate::audit::record(&store.os, &entry).await {
+    // Timed: 2026-09-12's silent twenty-second admin write had no line naming which await it
+    // spent them in. `SLOW_AWAIT_MS` is the same outlier threshold `kube_bound` uses.
+    let start = std::time::Instant::now();
+    let wrote = crate::audit::record(&store.os, &entry).await;
+    warn_if_slow("object-store", action, target, start);
+    if let Err(e) = wrote {
         tracing::error!(actor, action, target, error = %e, "audit.write.failed");
     }
 
@@ -64,7 +81,10 @@ pub(crate) async fn audit(
             &entry.target,
             &entry.result,
         );
-        if let Err(e) = crate::history::events::write_events(h, &[row]).await {
+        let start = std::time::Instant::now();
+        let wrote = crate::history::events::write_events(h, &[row]).await;
+        warn_if_slow("clickhouse", action, target, start);
+        if let Err(e) = wrote {
             tracing::warn!(table = "audit", action, target, error = %e, "history.write.failed");
         }
     }
@@ -675,7 +695,7 @@ pub(crate) struct RequestFilter {
 pub(crate) async fn list_all_quota_requests_inner(
     s: &ApiState,
     f: &RequestFilter,
-) -> Result<Vec<crd::QuotaRequest>, Response> {
+) -> Result<Vec<Arc<crd::QuotaRequest>>, Response> {
     let mut rows = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.quota_requests).await?;
     rows.retain(|r| {
         f.owner.as_deref().is_none_or(|o| r.spec.owner == o)
@@ -690,7 +710,7 @@ async fn list_all_quota_requests(
     Query(f): Query<RequestFilter>,
 ) -> Result<Response, Response> {
     let rows = list_all_quota_requests_inner(&s, &f).await?;
-    Ok(Json(rows.iter().map(request_doc).collect::<Vec<_>>()).into_response())
+    Ok(Json(rows.iter().map(|r| request_doc(r)).collect::<Vec<_>>()).into_response())
 }
 
 /// A legacy `QuotaRequest` wearing the generic doc — the migration has not necessarily run, and a
@@ -724,10 +744,10 @@ fn legacy_doc(r: &crd::QuotaRequest) -> RequestDoc {
 /// fleet-wide row count is small and neither CRD carries a label to select a kind or a state on.
 pub(crate) async fn list_requests_inner(s: &ApiState, f: &RequestFilter) -> Result<Vec<RequestDoc>, Response> {
     let mut rows: Vec<RequestDoc> =
-        fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.requests).await?.iter().map(generic_doc).collect();
+        fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.requests).await?.iter().map(|r| generic_doc(r)).collect();
     if f.kind.is_none_or(|k| k == crd::RequestKind::Quota) {
         let legacy = RequestFilter { owner: f.owner.clone(), state: f.state, kind: None };
-        rows.extend(list_all_quota_requests_inner(s, &legacy).await?.iter().map(legacy_doc));
+        rows.extend(list_all_quota_requests_inner(s, &legacy).await?.iter().map(|r| legacy_doc(r)));
     }
     rows.retain(|r| {
         f.owner.as_deref().is_none_or(|o| r.owner == o)

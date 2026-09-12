@@ -59,7 +59,7 @@ async fn get(base: &str, path: &str, jwt: &Jwt) -> (u16, String) {
 
 async fn with_history(data: Value) -> (String, Arc<Jwt>, Arc<std::sync::Mutex<Vec<String>>>) {
     let (url, seen) = clickhouse(data).await;
-    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "u", "p")));
+    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "u", "p").unwrap()));
     let (base, jwt) = serve(state).await;
     (base, jwt, seen)
 }

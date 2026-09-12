@@ -1,7 +1,9 @@
 //! Pure builders from the domain types to Kubernetes objects.
 //!
 //! No client, no I/O, no environment reads — every input arrives as an argument, which is what
-//! makes the security-relevant paths here exhaustively testable.
+//! makes the security-relevant paths here exhaustively testable. The one exception is `client`,
+//! which BUILDS the kube client every tier talks through (api and agent alike) and holds no
+//! domain type of its own.
 //!
 //! A workspace is a btrfs subvolume on one node, mounted straight in with `hostPath` — the pods
 //! carry their own `nodeSelector` (see `placement`) so the scheduler enforces placement, and the
@@ -38,6 +40,9 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+/// The bounded kube client — shared by `bins/api` and `bins/agent`, so it lives here rather than
+/// in either.
+pub mod client;
 mod namespace;
 mod secrets;
 mod workspace;

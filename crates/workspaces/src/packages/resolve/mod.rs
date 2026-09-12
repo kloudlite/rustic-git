@@ -153,16 +153,20 @@ impl Resolver {
     /// `KLOUDLITE_NIXHUB_URL` (default `https://search.devbox.sh`). Here rather than in
     /// `bins/api` so the http client and the clock stay this crate's dependencies.
     pub fn from_env(os: Arc<dyn ObjectStore>) -> Self {
+        // ONE client for both indexes: a `reqwest::Client` is a connection pool, and building a
+        // second one meant Nixhub and the binary cache each warmed their own TLS sessions and
+        // never shared an idle connection (2026-09-12). Cloning shares the pool.
+        let client = reqwest::Client::new();
         Resolver {
             cache: os.clone(),
             nixhub: Arc::new(Nixhub {
-                client: reqwest::Client::new(),
+                client: client.clone(),
                 base: std::env::var("KLOUDLITE_NIXHUB_URL")
                     .unwrap_or_else(|_| "https://search.devbox.sh".to_string()),
             }),
             mirror: Arc::new(Mirror::new(os)),
             binaries: Arc::new(NixosCache {
-                client: reqwest::Client::new(),
+                client,
                 base: std::env::var("KLOUDLITE_BINARY_CACHE_URL")
                     .unwrap_or_else(|_| "https://cache.nixos.org".to_string()),
             }),

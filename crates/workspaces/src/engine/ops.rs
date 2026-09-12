@@ -35,6 +35,14 @@ impl EngErr {
     }
 }
 
+/// A pool path as an argv string. Ours are always UTF-8, but `to_str().unwrap()` made an
+/// unrepresentable path a PANIC inside the agent's reconcile loop — and the agent is a privileged
+/// DaemonSet, so the panic takes the node's whole convergence with it — where the same path is
+/// perfectly refusable (2026-09-12).
+pub(crate) fn path_str(p: &std::path::Path) -> Result<&str, EngErr> {
+    p.to_str().ok_or_else(|| EngErr::other(format!("{}: path is not valid UTF-8", p.display())))
+}
+
 pub(crate) fn run(argv: &[&str]) -> Result<(), EngErr> {
     let out = std::process::Command::new(argv[0])
         .args(&argv[1..])
@@ -97,7 +105,7 @@ impl Engine {
         // existing `live` is the expected steady state, not a conflict. Keep-biased: never delete
         // and recreate — that would be data loss dressed up as convergence.
         if !self.pool.live(id).exists() {
-            run(&["btrfs", "subvolume", "create", self.pool.live(id).to_str().unwrap()])?;
+            run(&["btrfs", "subvolume", "create", path_str(&self.pool.live(id))?])?;
         }
         Ok(())
     }
@@ -119,7 +127,7 @@ impl Engine {
         // state and would otherwise let a plain dir sit there unnoticed.
         if !root.exists() {
             if self.has_btrfs {
-                run(&["btrfs", "subvolume", "create", root.to_str().unwrap()])?;
+                run(&["btrfs", "subvolume", "create", path_str(&root)?])?;
             } else {
                 tracing::warn!(path = %root.display(), reason = "no-btrfs-root", "homecache.not_subvolume");
                 std::fs::create_dir(&root).map_err(EngErr::io)?;
@@ -179,7 +187,7 @@ impl Engine {
             return Err(EngErr::other(format!("{}: no live subvolume to limit", live.display())));
         }
         let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
-        Ok(run(&["btrfs", "qgroup", "limit", &limit, live.to_str().unwrap()]).err().map(|e| e.0))
+        Ok(run(&["btrfs", "qgroup", "limit", &limit, path_str(&live)?]).err().map(|e| e.0))
     }
 
     /// Limit every worktree subvolume this pool currently has checked out for `id`
@@ -203,7 +211,8 @@ impl Engine {
             if entry.file_name().to_str().is_some_and(|n| n.starts_with('.')) {
                 continue;
             }
-            if let Err(e) = run(&["btrfs", "qgroup", "limit", &limit, entry.path().to_str().unwrap()]) {
+            let path = entry.path();
+            if let Err(e) = run(&["btrfs", "qgroup", "limit", &limit, path_str(&path)?]) {
                 first_failure.get_or_insert(e.0);
             }
         }
@@ -216,14 +225,14 @@ impl Engine {
     pub fn set_quota_worktree(&self, volume: &str, ws: &str, quota_gb: u64) -> Result<Option<String>, EngErr> {
         let path = self.pool.worktree(volume, ws);
         let limit = if quota_gb == 0 { "none".to_string() } else { format!("{quota_gb}G") };
-        Ok(run(&["btrfs", "qgroup", "limit", &limit, path.to_str().unwrap()]).err().map(|e| e.0))
+        Ok(run(&["btrfs", "qgroup", "limit", &limit, path_str(&path)?]).err().map(|e| e.0))
     }
 
     /// Commit the pool's open transaction. `generation` reads the COMMITTED number, and btrfs
     /// commits on its own only every ~30s — so a read without this can miss a write made just
     /// before it. `snapshot::snapshot_worktree` calls this before every snapshot for the same reason.
     pub fn sync_pool(&self) -> Result<(), EngErr> {
-        run(&["btrfs", "filesystem", "sync", self.pool.root.to_str().unwrap()])
+        run(&["btrfs", "filesystem", "sync", path_str(&self.pool.root)?])
     }
 
     /// The btrfs generation of a worktree subvolume: a counter the filesystem bumps on every
@@ -237,7 +246,7 @@ impl Engine {
 
     fn generation_of(&self, subvol: &std::path::Path) -> Result<u64, EngErr> {
         let out = std::process::Command::new("btrfs")
-            .args(["subvolume", "show", subvol.to_str().unwrap()])
+            .args(["subvolume", "show", path_str(subvol)?])
             .output()
             .map_err(EngErr::io)?;
         if !out.status.success() {
@@ -267,7 +276,7 @@ impl Engine {
         // A replayed reconcile must converge, not fail: `dst` already existing means a previous
         // attempt got this far. Keep it — see `create_subvol`.
         if !self.pool.live(dst_id).exists() {
-            run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), self.pool.live(dst_id).to_str().unwrap()])?;
+            run(&["btrfs", "subvolume", "snapshot", path_str(&src)?, path_str(&self.pool.live(dst_id))?])?;
         }
         Ok(())
     }
@@ -309,7 +318,7 @@ impl Engine {
         std::fs::create_dir_all(self.pool.voldir(dst_id)).map_err(EngErr::io)?;
         // Converge on a replayed reconcile, exactly as `clone_local_ids` does.
         if !self.pool.live(dst_id).exists() {
-            run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), self.pool.live(dst_id).to_str().unwrap()])?;
+            run(&["btrfs", "subvolume", "snapshot", path_str(&src)?, path_str(&self.pool.live(dst_id))?])?;
         }
         Ok(())
     }

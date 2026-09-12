@@ -49,35 +49,37 @@ pub(crate) struct ClusterRow {
 /// The per-region facts every row and the detail both need, read once. `Workspace`/`Environment`
 /// carry `spec.region`, so the region filter is a spec read — never the label view.
 struct RegionFacts {
-    nodes: Vec<Node>,
-    workspaces: Vec<crd::Workspace>,
-    environments: Vec<crd::Environment>,
+    nodes: Vec<Arc<Node>>,
+    workspaces: Vec<Arc<crd::Workspace>>,
+    environments: Vec<Arc<crd::Environment>>,
 }
 
-/// The client that answers for a region — `client_for_region` for an active one, which is the
-/// single upgrade point a region -> client map will land on. An INACTIVE region still has to
-/// render (and still has to be drainable: deactivate-then-drain is the retirement sequence), and
-/// `client_for_region` refuses one on purpose, so it falls back to the same handle here.
-async fn region_client<'a>(s: &'a ApiState, r: &crd::Region) -> Result<&'a kube::Client, Response> {
-    match r.spec.status == "active" {
-        true => super::client_for_region(s, &r.name_any()).await,
-        false => kube(s),
-    }
+/// The client that answers for a region — this tier holds ONE, and the caller has already read
+/// the `Region` object, which is the whole check `client_for_region` makes. Calling that here
+/// meant one extra `Region` GET per row on every render of the Clusters list, and two on every
+/// detail (2026-09-12). An INACTIVE region still has to render, and still has to be drainable
+/// (deactivate-then-drain is the retirement sequence), so status does not change the answer.
+fn region_client<'a>(s: &'a ApiState, _r: &crd::Region) -> Result<&'a kube::Client, Response> {
+    kube(s)
 }
 
-/// A region that EXISTS, active or not, plus its client. `not_found` for one that does not.
+/// A region that EXISTS, active or not, plus its client. `not_found` for one that does not. One
+/// `Region` read for the whole route.
 async fn region_of<'a>(s: &'a ApiState, region: &str) -> Result<(crd::Region, &'a kube::Client), Response> {
     let r = Api::<crd::Region>::all(kube(s)?.clone()).get_opt(region).await.map_err(kube_err)?.ok_or_else(not_found)?;
-    let client = region_client(s, &r).await?;
+    let client = region_client(s, &r)?;
     Ok((r, client))
 }
 
-async fn facts(client: &kube::Client, region: &str) -> Result<RegionFacts, Response> {
-    let nodes = Api::<Node>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let mut workspaces =
-        Api::<crd::Workspace>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let mut environments =
-        Api::<crd::Environment>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+/// Through `fleet::all`, so the admin process answers these three from its reflector stores
+/// instead of listing them cluster-wide per request (the `user` role and the tests have no cache
+/// and list exactly as before).
+async fn facts(s: &ApiState, client: &kube::Client, region: &str) -> Result<RegionFacts, Response> {
+    let (nodes, mut workspaces, mut environments) = futures::try_join!(
+        fleet::all(s.fleet.as_deref(), client, |c| &c.nodes),
+        fleet::all(s.fleet.as_deref(), client, |c| &c.workspaces),
+        fleet::all(s.fleet.as_deref(), client, |c| &c.environments),
+    )?;
     workspaces.retain(|w| w.spec.region == region);
     environments.retain(|e| e.spec.region == region);
     Ok(RegionFacts { nodes, workspaces, environments })
@@ -119,12 +121,12 @@ fn settings_lag(generation: Option<i64>, observed: Option<i64>) -> String {
 async fn one_row(
     s: &ApiState,
     r: &crd::Region,
-    all_ws: &[crd::Workspace],
-    all_envs: &[crd::Environment],
+    all_ws: &[Arc<crd::Workspace>],
+    all_envs: &[Arc<crd::Environment>],
     nodes: &[super::NodeDoc],
 ) -> Result<ClusterRow, Response> {
     let region = r.name_any();
-    let client = region_client(s, r).await?;
+    let client = region_client(s, r)?;
     let working_copies = (all_ws.iter().filter(|w| w.spec.region == region && live_workspace(w)).count()
         + all_envs.iter().filter(|e| e.spec.region == region && live_environment(e)).count()) as i64;
     let (agents_ready, agents_desired) = agent_counts(s, &region).await;
@@ -167,8 +169,8 @@ fn error_row(r: &crd::Region, why: String) -> ClusterRow {
 /// never re-lists either CRD.
 pub(crate) async fn cluster_rows_degraded(
     s: &ApiState,
-    all_ws: &[crd::Workspace],
-    all_envs: &[crd::Environment],
+    all_ws: &[Arc<crd::Workspace>],
+    all_envs: &[Arc<crd::Environment>],
 ) -> (Vec<ClusterRow>, Vec<super::NodeDoc>, Vec<String>) {
     let Ok(client) = kube(s) else {
         return (Vec::new(), Vec::new(), vec!["clusters: kubernetes not configured".into()]);
@@ -179,7 +181,7 @@ pub(crate) async fn cluster_rows_degraded(
     };
     let mut errors = Vec::new();
     let nodes: Vec<super::NodeDoc> = match fleet::all(s.fleet.as_deref(), client, |c| &c.nodes).await {
-        Ok(l) => l.iter().map(super::node_doc).collect(),
+        Ok(l) => l.iter().map(|n| super::node_doc(n)).collect(),
         Err(_) => {
             errors.push("nodes: could not list nodes".into());
             Vec::new()
@@ -243,17 +245,19 @@ pub(crate) struct ClusterDetail {
 pub(crate) async fn cluster_detail(State(s): State<Arc<ApiState>>, Path(region): Path<String>) -> Result<Response, Response> {
     check_path_segment(&region)?;
     let (r, client) = region_of(&s, &region).await?;
-    let f = facts(client, &region).await?;
-    let volumes: Vec<crd::Volume> =
-        Api::<crd::Volume>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
-    let replicas: Vec<crd::VolumeReplica> =
-        Api::<crd::VolumeReplica>::all(client.clone()).list(&ListParams::default()).await.map_err(kube_err)?.items;
+    let (f, volumes, replicas) = futures::try_join!(
+        facts(&s, client, &region),
+        fleet::all(s.fleet.as_deref(), client, |c| &c.volumes),
+        fleet::all(s.fleet.as_deref(), client, |c| &c.replicas),
+    )?;
 
     // A parent's volume is what pins it to a node, so "working copies here" is counted the way the
-    // agent's own drain counter counts it: the volume's `spec.nodeName`, never the parent's.
-    let volume_node = |name: &Option<String>| {
-        name.as_ref().and_then(|n| volumes.iter().find(|v| v.name_any() == *n)).map(|v| v.spec.node_name.clone())
-    };
+    // agent's own drain counter counts it: the volume's `spec.nodeName`, never the parent's. As a
+    // MAP: the linear `find` ran once per (node, parent) pair, which on a region with a few
+    // hundred volumes is the page's whole cost (2026-09-12).
+    let volume_node: std::collections::HashMap<String, String> =
+        volumes.iter().map(|v| (v.name_any(), v.spec.node_name.clone())).collect();
+    let volume_node = |name: &Option<String>| name.as_ref().and_then(|n| volume_node.get(n)).cloned();
     let nodes = f
         .nodes
         .iter()

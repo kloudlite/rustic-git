@@ -95,7 +95,7 @@ async fn without_clickhouse_every_slo_route_is_503() {
 #[tokio::test]
 async fn a_report_filed_under_the_wrong_run_is_refused() {
     let url = clickhouse(json!([])).await;
-    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "", "")));
+    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "", "").unwrap()));
     let (base, jwt) = serve(state).await;
     let r = reqwest::Client::new()
         .put(format!("{base}/admin/slo/runs/fast-1"))
@@ -123,7 +123,7 @@ async fn a_report_filed_under_the_wrong_run_is_refused() {
 #[tokio::test]
 async fn an_unknown_run_is_a_404() {
     let url = clickhouse(json!([])).await;
-    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "", "")));
+    let state = ApiState::new(jwt()).with_history(Arc::new(History::new(&url, "", "").unwrap()));
     let (base, jwt) = serve(state).await;
     let r = reqwest::Client::new()
         .get(format!("{base}/admin/slo/runs/fast-9"))
@@ -150,7 +150,7 @@ async fn a_failed_report_is_stored_and_notified_once() {
     let (hook, got) = webhook().await;
     let url = clickhouse(json!([])).await;
     let state = ApiState::new(jwt())
-        .with_history(Arc::new(History::new(&url, "", "")))
+        .with_history(Arc::new(History::new(&url, "", "").unwrap()))
         .with_slo_webhook(Some(hook));
     let (base, jwt) = serve(state).await;
     let mut body = report("fast-3");
@@ -181,7 +181,7 @@ async fn a_passing_report_notifies_nobody() {
     let (hook, got) = webhook().await;
     let url = clickhouse(json!([])).await;
     let state = ApiState::new(jwt())
-        .with_history(Arc::new(History::new(&url, "", "")))
+        .with_history(Arc::new(History::new(&url, "", "").unwrap()))
         .with_slo_webhook(Some(hook));
     let (base, jwt) = serve(state).await;
     let mut body = report("fast-4");

@@ -5,7 +5,7 @@
 //! `docs/superpowers/specs/2026-09-03-durable-snapshots-design.md`) so a retry after a crash finds
 //! the CR and can redo the snapshot; this module only ever touches btrfs.
 
-use crate::engine::ops::{EngErr, is_subvolume, run};
+use crate::engine::ops::{path_str, EngErr, is_subvolume, run};
 use crate::engine::{Engine, ws_lock};
 
 /// A checkout that would land on an existing worktree path — the caller treats "already there"
@@ -45,7 +45,7 @@ impl Engine {
         self.sync_pool()?;
         std::fs::create_dir_all(self.pool.snap_dir(volume)).map_err(EngErr::io)?;
         let src = self.pool.worktree(volume, ws);
-        run(&["btrfs", "subvolume", "snapshot", "-r", src.to_str().unwrap(), dst.to_str().unwrap()])
+        run(&["btrfs", "subvolume", "snapshot", "-r", path_str(&src)?, path_str(&dst)?])
     }
 
     /// Create worktree `ws` from snapshot `name` (an RW snapshot of `snap/{name}`), or an empty

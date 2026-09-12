@@ -309,7 +309,7 @@ async fn current_signals_maps_stored_rows_onto_the_response_shape() {
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
 
-    let rows = current_signals(&History::new(&format!("http://{addr}"), "u", "p"))
+    let rows = current_signals(&History::new(&format!("http://{addr}"), "u", "p").unwrap())
         .await
         .expect("a canned result parses");
     assert_eq!(rows.len(), 2);

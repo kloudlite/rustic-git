@@ -17,6 +17,6 @@ fn history_is_absent_by_default() {
 
 #[test]
 fn with_history_attaches_it() {
-    let h = Arc::new(History::new("http://127.0.0.1:8123", "default", ""));
+    let h = Arc::new(History::new("http://127.0.0.1:8123", "default", "").unwrap());
     assert!(ApiState::new(jwt()).with_history(h).history.is_some());
 }

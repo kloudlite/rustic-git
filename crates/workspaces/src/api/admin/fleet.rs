@@ -100,17 +100,18 @@ pub(crate) async fn all<K>(
     cache: Option<&FleetCache>,
     client: &kube::Client,
     pick: impl Fn(&FleetCache) -> &Store<K>,
-) -> Result<Vec<K>, Response>
+) -> Result<Vec<Arc<K>>, Response>
 where
     K: Resource<DynamicType = ()> + Clone + std::fmt::Debug + Send + Sync + serde::de::DeserializeOwned + 'static,
 {
     if let Some(c) = cache.filter(|c| c.is_ready()) {
-        // `state()` is a consistent copy of the store's `Arc<K>`s; a store the watch has not
-        // filled yet would read as empty, which is why readiness gates this.
-        return Ok(pick(c).state().iter().map(|o| (**o).clone()).collect());
+        // `state()` already hands back the store's own `Arc<K>`s — returning them means a reader
+        // shares the objects instead of deep-copying every one of them per request, which on the
+        // Owners page was six full copies of the fleet (2026-09-12).
+        return Ok(pick(c).state());
     }
     let api: Api<K> = Api::all(client.clone());
-    Ok(api.list(&kube::api::ListParams::default()).await.map_err(kube_err)?.items)
+    Ok(api.list(&kube::api::ListParams::default()).await.map_err(kube_err)?.items.into_iter().map(Arc::new).collect())
 }
 
 #[cfg(test)]

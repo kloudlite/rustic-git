@@ -59,10 +59,10 @@ pub(crate) struct Fleet {
     // Raw rows, kept alongside the folded `usage_by_owner` so a caller that needs a dimension
     // `Fleet` does not fold (Overview's per-region split — `crate::quota::Usage` has no region)
     // reads the same six list calls instead of re-listing them.
-    pub(crate) ws: Vec<crd::Workspace>,
-    pub(crate) envs: Vec<crd::Environment>,
-    pub(crate) vols: Vec<crd::Volume>,
-    pub(crate) snaps: Vec<crd::Snapshot>,
+    pub(crate) ws: Vec<Arc<crd::Workspace>>,
+    pub(crate) envs: Vec<Arc<crd::Environment>>,
+    pub(crate) vols: Vec<Arc<crd::Volume>>,
+    pub(crate) snaps: Vec<Arc<crd::Snapshot>>,
 }
 
 ///  is the admin process's stores when it has them; a caller without an  (the
@@ -85,8 +85,8 @@ pub(crate) async fn fleet(cache: Option<&fleet::FleetCache>, client: &kube::Clie
     owners.extend(envs.iter().map(|e| e.spec.owner.clone()));
     owners.extend(vols.iter().map(|v| v.spec.owner.clone()));
 
-    let pending_owners = reqs.into_iter().filter(is_pending).map(|r| r.spec.owner).collect();
-    let quota_by_name = quotas.into_iter().map(|q| (q.name_any(), q.spec)).collect();
+    let pending_owners = reqs.iter().filter(|r| is_pending(r)).map(|r| r.spec.owner.clone()).collect();
+    let quota_by_name = quotas.iter().map(|q| (q.name_any(), q.spec.clone())).collect();
     let usage_by_owner = fold_usage(&ws, &envs, &vols, &snaps);
 
     Ok(Fleet { quota_by_name, pending_owners, usage_by_owner, owners, ws, envs, vols, snaps })
@@ -99,10 +99,10 @@ pub(crate) async fn fleet(cache: Option<&fleet::FleetCache>, client: &kube::Clie
 /// re-listed per owner. A number here that differs from the gate's is a grant made off the wrong
 /// figure, which is what this page existed to avoid.
 fn fold_usage(
-    ws: &[crd::Workspace],
-    envs: &[crd::Environment],
-    vols: &[crd::Volume],
-    snaps: &[crd::Snapshot],
+    ws: &[Arc<crd::Workspace>],
+    envs: &[Arc<crd::Environment>],
+    vols: &[Arc<crd::Volume>],
+    snaps: &[Arc<crd::Snapshot>],
 ) -> HashMap<String, crate::quota::Usage> {
     let mut millis: HashMap<String, u64> = HashMap::new();
     let mut mib: HashMap<String, u64> = HashMap::new();
@@ -135,7 +135,7 @@ fn fold_usage(
     for v in vols {
         let key = charged(&v.spec.owner, &v.spec.team);
         out.entry(key.clone()).or_default().disk_gb += v.spec.quota_gb;
-        volume_charge.insert(kube::ResourceExt::name_any(v), key);
+        volume_charge.insert(kube::ResourceExt::name_any(&**v), key);
     }
     for s in snaps {
         if s.is_snapshot() {
@@ -156,9 +156,14 @@ pub(crate) async fn owner_rows(s: &ApiState) -> Result<Vec<OwnerRow>, Response> 
     let client = kube(s)?;
     let f = fleet(s.fleet.as_deref(), client).await?;
 
-    let mut rows = Vec::with_capacity(f.owners.len());
-    for owner in f.owners {
-        let directory_says = scope::is_team(s, &owner).await;
+    // One `is_team` per row, awaited in turn, made this page's latency the owner count times a
+    // directory round trip (2026-09-12). The lookups are independent, so they go out together.
+    let owners: Vec<String> = f.owners.into_iter().collect();
+    let says: Vec<bool> =
+        futures::future::join_all(owners.iter().map(|o| scope::is_team(s, o))).await;
+
+    let mut rows = Vec::with_capacity(owners.len());
+    for (owner, directory_says) in owners.into_iter().zip(says) {
         let is_team = team_of(&owner, directory_says);
         let own = f.quota_by_name.get(&owner).cloned();
         let source = if own.is_some() { "own" } else { "default" };
@@ -260,7 +265,7 @@ pub(crate) async fn owner_detail(
     requests.retain(|r| r.spec.owner == owner);
     requests.sort_by(|a, b| b.metadata.creation_timestamp.cmp(&a.metadata.creation_timestamp));
     requests.truncate(5);
-    let requests: Vec<_> = requests.iter().map(super::super::request_doc).collect();
+    let requests: Vec<_> = requests.iter().map(|r| super::super::request_doc(r)).collect();
 
     let audit = match s.keys.as_ref() {
         Some(store) => {

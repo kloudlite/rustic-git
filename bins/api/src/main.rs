@@ -352,7 +352,11 @@ async fn run() -> Result<()> {
             // `None` is a legitimate dev configuration (no cluster) — workspace and environment
             // routes answer 503 rather than not existing. The volume routes keep working without
             // it: the cluster only says whether a snapshot's parent is still around.
-            match kube::Client::try_default().await {
+            // `k8s::client::try_default`, never `kube::Client::try_default`: kube's own read
+            // timeout is sized for watches (295 s), so an unbounded get/patch against a region
+            // cluster is a request nobody hears back from — 2026-09-12's twenty-second silent
+            // `/admin/requests/{id}/deny`.
+            match kloudlite_workspaces::k8s::client::try_default().await {
                 Ok(c) => {
                     // The admin pages read the fleet from reflector stores rather than listing
                     // six kinds per request; the user role serves no such page and keeps no cache.
@@ -381,7 +385,7 @@ async fn run() -> Result<()> {
             // (deploy/kloudlite.yaml), so this succeeds only there.
             if role == "admin" {
                 match kube::Config::incluster() {
-                    Ok(cfg) => match kube::Client::try_from(cfg) {
+                    Ok(cfg) => match kloudlite_workspaces::k8s::client::bounded_client(cfg) {
                         Ok(c) => state = state.with_aks(c),
                         Err(e) => tracing::warn!(reason = "in-cluster-config-rejected", error = %e, "kube.unavailable"),
                     },

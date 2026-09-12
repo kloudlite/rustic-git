@@ -109,15 +109,15 @@ fn fleet_inputs(rows: Vec<clusters::ClusterRow>, f: &owners::Fleet) -> Vec<Fleet
     rows.into_iter()
         .map(|r| {
             let region = r.region;
-            let vols_here: Vec<&crate::crd::Volume> = f.vols.iter().filter(|v| v.spec.region == region).collect();
+            let vols_here: Vec<&crate::crd::Volume> = f.vols.iter().filter(|v| v.spec.region == region).map(|v| &**v).collect();
             let disk_gb = vols_here.iter().map(|v| v.spec.quota_gb).sum();
             let vol_names: std::collections::HashSet<String> =
                 vols_here.iter().map(|v| kube::ResourceExt::name_any(*v)).collect();
             let snapshots =
                 f.snaps.iter().filter(|s| s.is_snapshot() && vol_names.contains(&s.spec.volume)).count() as u32;
 
-            let ws_here: Vec<&crate::crd::Workspace> = f.ws.iter().filter(|w| w.spec.region == region).collect();
-            let envs_here: Vec<&crate::crd::Environment> = f.envs.iter().filter(|e| e.spec.region == region).collect();
+            let ws_here: Vec<&crate::crd::Workspace> = f.ws.iter().filter(|w| w.spec.region == region).map(|w| &**w).collect();
+            let envs_here: Vec<&crate::crd::Environment> = f.envs.iter().filter(|e| e.spec.region == region).map(|e| &**e).collect();
             let live_workspaces = ws_here.iter().filter(|w| live_workspace(w)).count() as u32;
             let live_environments = envs_here.iter().filter(|e| live_environment(e)).count() as u32;
 

@@ -86,18 +86,24 @@ pub struct History {
 }
 
 impl History {
-    pub fn new(url: &str, user: &str, password: &str) -> History {
-        History {
+    /// `None` when the HTTP client cannot be built (a TLS backend that will not initialise).
+    /// That used to `expect`, which made an environment problem a panic in the admin process
+    /// instead of the same "no history wired" state the whole tier already handles — and history
+    /// is optional everywhere by design (2026-09-12).
+    pub fn new(url: &str, user: &str, password: &str) -> Option<History> {
+        // A default client would silently have NO timeout, which is the one property this client
+        // exists to guarantee.
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .inspect_err(|e| tracing::error!(error = %e, "history.client.failed"))
+            .ok()?;
+        Some(History {
             url: url.trim_end_matches('/').to_string(),
             user: user.to_string(),
             password: password.to_string(),
-            // A default client would silently have NO timeout, which is the one property this
-            // client exists to guarantee; a TLS backend that cannot initialise is a boot failure.
-            client: reqwest::Client::builder()
-                .timeout(TIMEOUT)
-                .build()
-                .expect("reqwest client"),
-        }
+            client,
+        })
     }
 
     /// `None` is a supported configuration, not a failure: see the module doc. The credentials come
@@ -108,7 +114,7 @@ impl History {
             .filter(|u| !u.is_empty())?;
         let user = std::env::var("KLOUDLITE_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("KLOUDLITE_CLICKHOUSE_PASSWORD").unwrap_or_default();
-        Some(History::new(&url, &user, &password))
+        History::new(&url, &user, &password)
     }
 
     /// One POST of `sql` as the body. Credentials go in headers rather than the query string so the
