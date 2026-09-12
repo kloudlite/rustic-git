@@ -34,8 +34,11 @@ pub(crate) async fn to_owner(
 }
 
 /// Ask the node that owns this repo to do something; the caller reads the outcome off the status.
-pub(crate) async fn ask_owner(api: &Api, path: String) -> std::result::Result<u16, Response> {
-    let r = to_owner(api, api.client.post(format!("{}{path}", api.upstream)), None).await?;
+/// Always AS `owner`: every caller has already passed `settings_caller` (or is the api's own
+/// cleanup), and the node gates its writes on that identity — protect, merge and patch went
+/// write-gated on 2026-09-12 and an anonymous forward became a 401 the probe filed as a 502.
+pub(crate) async fn ask_owner(api: &Api, owner: &str, path: String) -> std::result::Result<u16, Response> {
+    let r = to_owner(api, api.client.post(format!("{}{path}", api.upstream)), Some(owner)).await?;
     Ok(r.status().as_u16())
 }
 

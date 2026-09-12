@@ -227,7 +227,7 @@ pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibili
             let path = format!("/api/{}/{}/delete", encode(owner), encode(name));
             // Best effort, and its own failure is already logged by `ask_owner`: this request is
             // being refused either way.
-            let _ = ask_owner(api, path).await;
+            let _ = ask_owner(api, owner, path).await;
             tracing::error!(reason = "create-repo", owner = %owner, name = %name, status = other, "upstream.request.failed");
             (StatusCode::BAD_GATEWAY, "could not create repository").into_response()
         }
@@ -367,7 +367,7 @@ pub(crate) async fn update_repo(
     if let Some(p) = public {
         let vis = if p { "public" } else { "private" };
         let path = format!("/api/{}/{}/visibility?visibility={vis}", encode(&owner), encode(&name));
-        match ask_owner(&api, path).await {
+        match ask_owner(&api, &owner, path).await {
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
@@ -381,7 +381,7 @@ pub(crate) async fn update_repo(
     // it is written before the index row that mirrors it.
     if let Some(d) = body.description.as_deref() {
         let path = format!("/api/{}/{}/description?description={}", encode(&owner), encode(&name), encode(d));
-        match ask_owner(&api, path).await {
+        match ask_owner(&api, &owner, path).await {
             Ok(200..=299) => {}
             Ok(404) => return (StatusCode::NOT_FOUND, "no such repository").into_response(),
             Ok(s) => {
@@ -409,7 +409,7 @@ pub(crate) async fn delete_repo(
         return r;
     }
     let path = format!("/api/{}/{}/delete", encode(&owner), encode(&name));
-    match ask_owner(&api, path).await {
+    match ask_owner(&api, &owner, path).await {
         Ok(200..=299) => {}
         Ok(s) => {
             tracing::error!(reason = "delete", owner = %owner, name = %name, status = s, "upstream.request.failed");
@@ -493,7 +493,7 @@ pub(crate) async fn set_protection(
             path.push_str("&no_delete=0");
         }
     }
-    match ask_owner(&api, path).await {
+    match ask_owner(&api, &owner, path).await {
         Ok(200..=299) => StatusCode::NO_CONTENT.into_response(),
         Ok(400) => (StatusCode::BAD_REQUEST, "that is not a branch pattern").into_response(),
         Ok(404) => (StatusCode::NOT_FOUND, "no such repository").into_response(),
@@ -755,6 +755,30 @@ mod tests {
         let (status, deleted) = create_against(Some(500)).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(deleted, "a definite failure still unwinds the name");
+    }
+
+    /// Every owner-node forward carries the owner it acts as: a node write-gated on identity
+    /// answered an anonymous `protect` forward with 401, which the probe filed as a 502
+    /// (2026-09-12). The fake node refuses exactly as the real one does.
+    #[tokio::test]
+    async fn an_owner_forward_names_the_owner() {
+        use axum::routing::post;
+        let app = axum::Router::new().route(
+            "/api/{owner}/{name}/protect",
+            post(|headers: axum::http::HeaderMap| async move {
+                if headers.get(kloudlite_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) != Some("alice") {
+                    return StatusCode::UNAUTHORIZED;
+                }
+                StatusCode::NO_CONTENT
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let mut api = test_api_with_secret("s").await;
+        api.upstream = url;
+        let status = crate::forward::ask_owner(&api, "alice", "/api/alice/web/protect?pattern=main".into()).await.unwrap();
+        assert_eq!(status, 204);
     }
 
     /// A node that answers the open-pull listing with `pulls` and `branchdelete` with

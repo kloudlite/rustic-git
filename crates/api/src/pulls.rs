@@ -158,7 +158,7 @@ pub(crate) async fn merge_pull(
         encode(strategy),
         encode(&who.email)
     );
-    match ask_owner(&api, path).await {
+    match ask_owner(&api, &owner, path).await {
         Ok(200..=299) => (StatusCode::ACCEPTED, "merging").into_response(),
         // Not open, or a merge is already in flight. Asking twice must not queue
         // it twice, and saying so is more use than a second "accepted".
@@ -194,7 +194,7 @@ pub(crate) async fn close_pull(
         encode(&name),
         encode(&who.email)
     );
-    match ask_owner(&api, path).await {
+    match ask_owner(&api, &owner, path).await {
         Ok(200..=299) => StatusCode::NO_CONTENT.into_response(),
         Ok(409) => (StatusCode::CONFLICT, "this change is not open").into_response(),
         Ok(404) => not_found(),
