@@ -52,6 +52,19 @@ VERDICT=$(echo "$FIN" | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)
 WHY=$(echo "$FIN" | grep -o '"skipped_id":"[^"]*","reason":"[^"]*"' | sed 's/"skipped_id":"//;s/","reason":"/: /;s/"$//')
 COUNTS=$(echo "$FIN" | grep -o '"passed":[0-9]*,"failed":[0-9]*,"skipped":[0-9]*' | tr -d '"')
 rm -f "$LOG"
+# A dead log stream is not a verdict: `kubectl logs -f` dropped mid-stage on 2026-09-12 during
+# the Experience stage's silent minutes and this script killed a run that finished `passed` ten
+# seconds later. While the pod still runs, wait for it, then read the whole log once.
+if [ -z "$VERDICT" ]; then
+  for _ in $(seq 1 90); do
+    case "$(kubectl -n kloudlite get pod "$P" -o jsonpath='{.status.phase}' 2>/dev/null)" in Running) sleep 10;; *) break;; esac
+  done
+  FIN=$(kubectl -n kloudlite logs "$P" 2>/dev/null | grep -o 'slo.run.finished.*' | head -1)
+  VERDICT=$(echo "$FIN" | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)
+  WHY=$(echo "$FIN" | grep -o '"skipped_id":"[^"]*","reason":"[^"]*"' | sed 's/"skipped_id":"//;s/","reason":"/: /;s/"$//')
+  COUNTS=$(echo "$FIN" | grep -o '"passed":[0-9]*,"failed":[0-9]*,"skipped":[0-9]*' | tr -d '"')
+  [ -n "$VERDICT" ] && echo "log stream dropped; verdict read from the finished pod"
+fi
 if [ -z "$VERDICT" ]; then
   kubectl -n kloudlite delete pod "$P" --grace-period=0 --force >/dev/null 2>&1
   kubectl -n kloudlite delete job "$J" --wait=false >/dev/null 2>&1
