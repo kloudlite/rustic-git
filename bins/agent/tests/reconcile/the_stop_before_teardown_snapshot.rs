@@ -124,6 +124,33 @@ async fn a_stop_whose_cut_is_not_ready_still_tears_nothing_down() {
     assert_eq!(rec.sent("PATCH", ENV_STATUS_PATH).last().unwrap()["status"]["conditions"][0]["reason"], "FlushBeforeStop");
 }
 
+/// A generation bump on an ALREADY stopped environment still tears down (2026-09-12). The common
+/// shape is a spec edit that ADDS a service: stamping `observed_generation` and returning made
+/// this the last pass, so the new service's StatefulSet — applied by whatever wrote it — ran on
+/// in a stopped environment. And `Replicated` is recomputed here, because with the generation
+/// stamped this is the branch every later pass takes.
+#[tokio::test]
+async fn a_generation_bump_while_stopped_still_tears_the_services_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    materialise_env(tmp.path());
+    let mut o = env_json(serde_json::json!({"phase": "stopped", "nodeName": "node-a", "observedGeneration": 1}));
+    o["metadata"]["generation"] = serde_json::json!(2);
+    o["spec"]["desiredState"] = serde_json::json!("stopped");
+    o["spec"]["services"] = serde_json::json!([{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": []}]);
+    let e: crd::Environment = serde_json::from_value(o).unwrap();
+    let ready = stop_snapshot(serde_json::json!({"phase": "ready", "readyAt": rfc3339_ago(1)}));
+    let (ctx, rec) = ctx(tmp.path(), env_flush_routes(ready, replica_list(&[])));
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {DEP_DEL}")), "the teardown still runs: {:?}", rec.calls());
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    let last = st.last().unwrap();
+    assert_eq!(last["status"]["observedGeneration"], 2);
+    let conds = last["status"]["conditions"].as_array().unwrap();
+    assert!(conds.iter().any(|c| c["type"] == "Replicated"), "recomputed before the stamp: {conds:?}");
+}
+
 /// A builder is an `Environment` created `Stopped` from birth: no pod ever ran, no worktree was
 /// ever materialised, and `btrfs subvolume snapshot` of a path that does not exist fails forever.
 /// It must reach `Stopped` in one pass, cut nothing, and clear the unfulfillable stop request an

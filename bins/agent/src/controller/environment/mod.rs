@@ -207,6 +207,44 @@ mod tests {
         assert!(live.join("volumes/dbdata").is_dir());
     }
 
+    /// Dedup is by folder, so the SECOND service on a folder never reached the check — and the
+    /// first one's mkdir had already run by then. Every mount is validated before any is made
+    /// (2026-09-12).
+    #[test]
+    fn an_invalid_mount_behind_a_valid_duplicate_is_still_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
+        assert!(mkdir_env_mounts(&live, &[svc("dbdata"), svc("../../etc")]).is_err());
+        assert!(!live.join("volumes/dbdata").exists(), "nothing is created once any mount is refused");
+    }
+
+    fn ported(ports: &[u16]) -> model::Service {
+        let mut s = svc("dbdata");
+        s.ports = ports.to_vec();
+        s
+    }
+
+    fn intercept(ports: &[(u16, u16)]) -> crd::Intercept {
+        crd::Intercept {
+            service: "db".into(),
+            workspace: "ws-1".into(),
+            ports: ports.iter().map(|(s, w)| crd::PortMap { service: *s, workspace: *w }).collect(),
+        }
+    }
+
+    /// The slice matches the service's port to the workspace's by the port NAME `p{port}`, so a
+    /// rewrite of a port the service does not declare renders a slice matching nothing — the real
+    /// service scaled to zero and the traffic delivered nowhere. Refused up front instead.
+    #[test]
+    fn a_port_rewrite_is_checked_against_what_the_service_declares() {
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(8080, 3000)])).is_none());
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[])).is_none(), "no rewrite forwards 1:1");
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(9090, 3000)])).is_some(), "not a declared port");
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(0, 3000)])).is_some(), "0 is not a port");
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(8080, 0)])).is_some(), "0 is not a port");
+    }
+
     /// The clock the grace measures against. The last case is the one that matters: a workspace
     /// whose node died has no pod and no `Ready=False` of its own, so the FIRST pass records now
     /// (nothing has been waited yet, the grace runs in full) and every later pass measures from

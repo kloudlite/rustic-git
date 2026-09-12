@@ -144,9 +144,24 @@ pub(crate) fn may_mount() -> bool {
         .is_some_and(|caps| caps & (1u64 << CAP_SYS_ADMIN) != 0)
 }
 
+/// How long a failed or attempted repair suppresses the next one. `mount_homes` is re-entered from
+/// every workspace reconcile, and each attempt is a `umount -f -l` plus a `mount.nfs` against an
+/// export that is — by the time we are here — not answering. Without this window a region-wide NFS
+/// outage turned every reconcile in the process into a queue behind one multi-second mount, and
+/// the reconciler stopped doing anything else (2026-09-12).
+const HOME_REPAIR_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
-    static REPAIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = REPAIR.lock().unwrap_or_else(|e| e.into_inner());
+    // The instant of the last attempt, not a plain lock: a second caller finding the repair in
+    // flight is told so and returns, rather than waiting out a mount it would then redo.
+    static REPAIR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let mut last = match REPAIR.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return Err(format!("the shared home at {pool} is being repaired by another pass"));
+        }
+    };
     let target = homes_root(pool);
     let Some(target_str) = target.to_str() else {
         return Err(format!("{} is not valid UTF-8", target.display()));
@@ -157,10 +172,19 @@ pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
     // an answer). Creating the directory first is what made the agent die with a bare
     // "File exists (os error 17)" and never reach the repair that would have fixed it.
     let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
-    if already_mounted(&mounts, target_str) {
-        if mount_answers(target_str) {
-            return Ok(());
+    if already_mounted(&mounts, target_str) && mount_answers(target_str) {
+        return Ok(());
+    }
+    // Everything past here mounts or unmounts, and each of those is seconds against a server that
+    // is not answering. One attempt per window, whatever the shape — the caller is told why rather
+    // than being handed a success it did not get.
+    if let Some(at) = *last {
+        if at.elapsed() < HOME_REPAIR_BACKOFF {
+            return Err(format!("the shared home at {target_str} is not ready; the last mount attempt was {}s ago", at.elapsed().as_secs()));
         }
+    }
+    *last = Some(std::time::Instant::now());
+    if already_mounted(&mounts, target_str) {
         // Listed but dead — the previous agent pod's namespace took the transport with it. Lazy
         // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
         // forced stops the kernel waiting on a server that will never answer this client again.

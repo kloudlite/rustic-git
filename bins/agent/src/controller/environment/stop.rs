@@ -39,9 +39,22 @@ pub(crate) async fn stop_environment(
     // common way here (`restore_gate` above bumps the generation), and pushing the freshly
     // restored subvolume as a new snapshot is a snapshot nobody asked for. Observe and stop.
     if prev.phase == crd::Phase::Stopped {
-        let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), ..prev };
+        // The teardown still runs (2026-09-12): a generation bump while stopped is usually a spec
+        // edit, and one that ADDS a service adds a StatefulSet nothing else would ever delete —
+        // stamping `observed_generation` first made this pass the last one, so the new service ran
+        // in a stopped environment until somebody started and stopped it again.
+        for svc in &e.spec.services {
+            forget_applied(ctx, "StatefulSet", ns, &svc.name);
+            delete_ignoring_404(deployments, &svc.name).await?;
+        }
+        // And `Replicated` is recomputed before the stamp for the same reason: with
+        // `observed_generation` matching, the branch above is what every later pass takes, so a
+        // condition left at the old generation here would be the one this object keeps.
+        let replicated = replicated_condition(ctx, &id, &e.name_any(), vol.spec.replicas, &prev.conditions, gen).await?;
+        let conditions = replaced(&cleared_node_dead(&prev.conditions), replicated);
+        let st = crd::EnvironmentStatus { observed_generation: Some(gen), volume_ref: Some(id), conditions, ..prev };
         write_env_status(e, st, ctx).await?;
-        return Ok(Action::await_change());
+        return Ok(Action::requeue(TICK));
     }
     // Scaled to zero and DRAINED before the push, not after: the pushed record is what a
     // restore on another node reads back as this environment's last state, and a snapshot

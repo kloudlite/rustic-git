@@ -200,6 +200,11 @@ async fn a_stalled_puller_does_not_hold_the_volume_send_lock() {
 /// same test don't collide on the script's filename) and returns the tempdir so the caller can
 /// create snapshot subvolumes under it.
 fn router_with_fake_btrfs(label: &str) -> (axum::Router, tempfile::TempDir) {
+    router_with_fake_btrfs_and_routes(label, vec![])
+}
+
+/// Same, with the API server answers the handler makes (the ceiling's one Volume GET).
+fn router_with_fake_btrfs_and_routes(label: &str, routes: Vec<Route>) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(format!("btrfs-send-{label}"));
     let script = r#"#!/bin/sh
@@ -212,7 +217,7 @@ fi
     let mut perms = std::fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
-    let (state, _rec) = state(tmp.path(), path.to_string_lossy().into_owned(), vec![]);
+    let (state, _rec) = state(tmp.path(), path.to_string_lossy().into_owned(), routes);
     (router(state), tmp)
 }
 
@@ -225,12 +230,34 @@ async fn send_request(app: &axum::Router, path: &str) -> axum::http::Response<Bo
 /// is a wasted transfer.
 #[tokio::test]
 async fn a_ceiling_below_the_volumes_quota_is_refused_with_413() {
-    let (app, tmp) = router_with_fake_btrfs("ok");
+    let vol = kloudlite_workspaces::kube_test::get(
+        "/apis/kloudlite.io/v1alpha1/volumes/v1",
+        serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1",
+            "kind": "Volume",
+            "metadata": {"name": "v1"},
+            "spec": {"owner": "o", "nodeName": "node-b", "region": "r", "quotaGb": 8, "replicas": 2},
+        }),
+    );
+    let (app, tmp) = router_with_fake_btrfs_and_routes("ok", vec![vol]);
     std::fs::create_dir_all(tmp.path().join("vol").join("v1").join("snap").join("c1")).unwrap();
 
     let resp = send_request(&app, "/peer/v1/snapshot/v1/c1?max=1").await;
 
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "a ceiling that cannot fit the volume is refused up front");
+}
+
+/// The other half of that judgement (2026-09-12): with the Volume unreadable, the quota is
+/// UNKNOWN, not zero. Refusing on a guess costs a replica its only source; the puller's own
+/// `take(max + 1)` still bounds what lands on its pool, so the send goes ahead.
+#[tokio::test]
+async fn an_unreadable_volume_does_not_refuse_the_send() {
+    let (app, tmp) = router_with_fake_btrfs("unreadable");
+    std::fs::create_dir_all(tmp.path().join("vol").join("v1").join("snap").join("c1")).unwrap();
+
+    let resp = send_request(&app, "/peer/v1/snapshot/v1/c1?max=1").await;
+
+    assert_eq!(resp.status(), StatusCode::OK, "an unknown quota judges nothing");
 }
 
 // -------------------------------------------------------------------------------------------

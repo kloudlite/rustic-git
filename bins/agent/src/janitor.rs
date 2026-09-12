@@ -309,11 +309,34 @@ pub(crate) fn drop_stale_worktrees(engine: &Engine, volume: &str, owner: &str, m
     count
 }
 
+/// The longest a single `btrfs subvolume delete` may run before it is killed. A delete of a large
+/// subvolume is seconds of work queued behind the cleaner thread, not minutes; a delete that
+/// exceeds this is a wedged filesystem, and waiting it out blocks the whole janitor thread — every
+/// other sweep with it — for the life of the pod (2026-09-12).
+const DELETE_TIMEOUT_SECS: &str = "300";
+
 fn btrfs_delete(path: &std::path::Path, id: &str) {
     // `arg`, not `args([… path.to_str().unwrap()])`: `Command::arg` takes `AsRef<OsStr>`, so the
     // UTF-8 conversion — and its panic, inside the path a finalizer depends on — was never needed.
-    match std::process::Command::new("btrfs").arg("subvolume").arg("delete").arg(path).output() {
+    // Under `timeout -s KILL`: this is a blocking call on the janitor's own thread, and `btrfs`
+    // has no deadline of its own. KILL rather than TERM because a `btrfs subvolume delete` that
+    // has stopped answering has stopped answering signals it can ignore.
+    match std::process::Command::new("timeout")
+        .args(["-s", "KILL", DELETE_TIMEOUT_SECS, "btrfs", "subvolume", "delete"])
+        .arg(path)
+        .output()
+    {
         Ok(out) if out.status.success() => {}
+        // `btrfs` missing under `timeout` is timeout's own 127 — the same "not a real node" case
+        // the spawn-error arm below covers when `timeout` itself is missing.
+        #[cfg(test)]
+        Ok(out) if out.status.code() == Some(127) => {
+            if let Err(e) = std::fs::remove_dir_all(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(volume = %id, path = %path.display(), reason = "remove_dir_all", error = %e, "volume.cleanup.failed");
+                }
+            }
+        }
         Ok(out) => tracing::warn!(
             volume = %id,
             path = %path.display(),
@@ -321,7 +344,7 @@ fn btrfs_delete(path: &std::path::Path, id: &str) {
             stderr = %String::from_utf8_lossy(&out.stderr),
             "volume.cleanup.failed"
         ),
-        // Test-only: no `btrfs` on PATH means this is the crate's own Mac test run, where a
+        // Test-only: no `btrfs` on PATH means this is the crate's own test run, where a
         // plain `remove_dir_all` is the only thing a subvolume path can mean. Never in
         // production — there, a missing `btrfs` is a broken node, not a directory to rm -rf.
         #[cfg(test)]

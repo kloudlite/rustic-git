@@ -335,8 +335,10 @@ async fn apply_services(
         // `agent-rbac.yaml` has not been applied yet would strand it there forever. Written first,
         // a failure leaves the real service serving and the next pass repairs it. The release
         // path is the mirror of this: the selector is back before the slice is deleted.
-        if let Some(Intercepting::Force { pod_ip, .. }) = decided {
-            let ic = wishes[svc.name.as_str()];
+        // `get`, not the index: a `Force` decision always has its wish beside it today, but the
+        // two maps are built in one loop and a panic in a reconciler takes the whole controller
+        // down — an absent wish means there is nothing to render, not a crash (2026-09-12).
+        if let (Some(Intercepting::Force { pod_ip, .. }), Some(ic)) = (decided, wishes.get(svc.name.as_str())) {
             ensure(&slices, &k8s::intercept_slice(svc, &e.name_any(), &e.spec.owner, owner_ref, ic, Some(pod_ip)), ctx).await?;
         }
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server

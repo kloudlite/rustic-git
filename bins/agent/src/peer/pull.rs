@@ -470,23 +470,46 @@ pub async fn pull_one(
     let mut reader =
         tokio::io::AsyncReadExt::take(StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other)), max_bytes + 1);
     let started = std::time::Instant::now();
-    let copy_result = tokio::io::copy(&mut reader, &mut stdin).await;
+    // The COPY and the child's own exit are both bounded by `timeout`, not just the HTTP request
+    // (2026-09-12): `btrfs receive` that stops reading wedges the copy, and one that never exits
+    // after EOF wedges `wait()` — either one held this volume's pull slot for the life of the
+    // process, because the request timeout can only fire on a body still being read. Killed on
+    // expiry so the partial is deletable by the cleanup below.
+    let copy_result = match tokio::time::timeout(timeout, tokio::io::copy(&mut reader, &mut stdin)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "btrfs receive stalled")),
+    };
     let _ = stdin.shutdown().await;
     drop(stdin);
+    // Every arm below waits for the child; `reap` is that wait with the same bound, so a receive
+    // that ignores EOF is killed rather than waited on forever.
+    async fn reap(child: &mut tokio::process::Child, timeout: Duration, volume: &str, name: &str) -> bool {
+        match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(st) => st.map(|s| s.success()).unwrap_or(false),
+            Err(_) => {
+                tracing::warn!(%volume, snapshot = %name, reason = "receive-timeout", "pull.failed");
+                if let Err(e) = child.kill().await {
+                    tracing::warn!(%volume, snapshot = %name, error = %e, "pull.kill.failed");
+                }
+                false
+            }
+        }
+    }
     let ok = match copy_result {
         Ok(n) if n > max_bytes => {
             tracing::warn!(%volume, snapshot = %name, bytes = max_bytes, reason = "ceiling", "pull.failed");
-            let _ = child.wait().await;
+            reap(&mut child, timeout, volume, name).await;
             false
         }
         Ok(n) => {
             // Counted whatever `btrfs receive` then makes of them: these are wire bytes, and a
             // transfer that arrived and failed to apply still cost the link exactly this much.
             metrics::counter!("snapshot_transfer_bytes_total", "direction" => "pull").increment(n);
-            matches!(child.wait().await, Ok(s) if s.success())
+            reap(&mut child, timeout, volume, name).await
         }
-        Err(_) => {
-            let _ = child.wait().await;
+        Err(e) => {
+            tracing::warn!(%volume, snapshot = %name, reason = "copy", error = %e, "pull.failed");
+            reap(&mut child, timeout, volume, name).await;
             false
         }
     };

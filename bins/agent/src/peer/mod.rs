@@ -181,10 +181,31 @@ async fn snapshot(
     // so BEFORE streaming. A truncated body after a 200 costs both sides the whole transfer, and
     // the puller cannot tell it from a crashed `btrfs send`. One Volume GET, on a path that is
     // about to spawn a root `btrfs send` and stream tens of GiB — not a cost worth avoiding.
+    //
+    // Bounded, and "unknown" is not zero (2026-09-12): a wedged API server would otherwise hold a
+    // root `btrfs send` handler open for the life of the request, and an unreadable answer read as
+    // `quota_gb: 0` silently judges every volume against the 1 GiB floor. With no answer we do not
+    // judge at all and stream — the puller's own `take(max + 1)` is the bound that protects its
+    // pool either way, and refusing here on a guess is the one outcome that loses a replica.
     if let Some(max) = q.max {
-        let quota =
-            Api::<crd::Volume>::all(state.client.clone()).get_opt(&volume).await.ok().flatten().map(|v| v.spec.quota_gb).unwrap_or(0);
-        if max < receive_ceiling(quota, &state.settings) {
+        const QUOTA_GET_TIMEOUT: Duration = Duration::from_secs(10);
+        let volumes: Api<crd::Volume> = Api::all(state.client.clone());
+        let quota = match tokio::time::timeout(QUOTA_GET_TIMEOUT, volumes.get_opt(&volume)).await {
+            Ok(Ok(Some(v))) => Some(v.spec.quota_gb),
+            Ok(Ok(None)) => {
+                tracing::warn!(%volume, snapshot = %name, reason = "volume-absent", "peer.send.ceiling.unknown");
+                None
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%volume, snapshot = %name, reason = "volume-read", error = %e, "peer.send.ceiling.unknown");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(%volume, snapshot = %name, reason = "timeout", "peer.send.ceiling.unknown");
+                None
+            }
+        };
+        if quota.is_some_and(|q| max < receive_ceiling(q, &state.settings)) {
             return (StatusCode::PAYLOAD_TOO_LARGE, Body::empty()).into_response();
         }
     }

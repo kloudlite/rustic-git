@@ -86,7 +86,7 @@ pub(crate) fn intercept_condition(plan: &std::collections::HashMap<&str, Interce
     let mut names: Vec<&str> = plan.keys().copied().collect();
     names.sort_unstable();
     for n in &names {
-        if let Intercepting::Off { reason, message, .. } = &plan[n] {
+        if let Some(Intercepting::Off { reason, message, .. }) = plan.get(n) {
             return Some(crd::condition("Intercepted", false, reason, &format!("{n}: {message}"), gen));
         }
     }
@@ -114,13 +114,39 @@ pub(crate) async fn intercept_plan<'a>(
     let mut wishes: std::collections::HashMap<&str, &crd::Intercept> = std::collections::HashMap::new();
     let mut plan: std::collections::HashMap<&str, Intercepting> = std::collections::HashMap::new();
     for ic in &e.spec.intercepts {
-        if !e.spec.services.iter().any(|s| s.name == ic.service) || wishes.contains_key(ic.service.as_str()) {
+        let Some(svc) = e.spec.services.iter().find(|s| s.name == ic.service) else { continue };
+        if wishes.contains_key(ic.service.as_str()) {
             continue;
         }
         wishes.insert(&ic.service, ic);
+        // A port rewrite is checked HERE, before anything renders it (2026-09-12). `k8s`'s slice
+        // matches the service's port to the workspace's by the port name `p{port}`, so a rewrite
+        // naming a port the service does not declare silently produces a slice that matches
+        // nothing — the real service scaled to 0 and the traffic delivered nowhere. Settled `Off`
+        // with the reason instead, which leaves the real service up and says why.
+        if let Some(bad) = invalid_port_map(svc, ic) {
+            plan.insert(&ic.service, Intercepting::Off { reason: "PortsInvalid", message: bad, ws: None });
+            continue;
+        }
         plan.insert(&ic.service, decide_intercept(ic, &e.name_any(), prev, ctx).await);
     }
     (wishes, plan)
+}
+
+
+/// The first `ports` entry this service cannot honour, as the message to put in the condition.
+/// `0` is not a port on either side, and a `service` port the service does not declare has nothing
+/// to rewrite.
+pub(crate) fn invalid_port_map(svc: &model::Service, ic: &crd::Intercept) -> Option<String> {
+    for p in &ic.ports {
+        if p.service == 0 || p.workspace == 0 {
+            return Some(format!("port rewrite {}->{} is not a port", p.service, p.workspace));
+        }
+        if !svc.ports.contains(&p.service) {
+            return Some(format!("{} does not listen on {}", svc.name, p.service));
+        }
+    }
+    None
 }
 
 
