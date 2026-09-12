@@ -348,9 +348,13 @@ fn is_dotgit_variant(p: &str) -> bool {
             return true;
         }
     }
-    // HFS treats these codepoints as invisible, so ".g\u{200D}it" reads as
-    // ".git" on disk. Strip the ones git's fsck/checkout guard against.
-    const HFS_IGNORABLE: [char; 5] = ['\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{206a}'];
+    // HFS treats these codepoints as invisible, so ".g\u{200D}it" reads as ".git" on disk. The
+    // table is git's own `is_hfs_ignored_codepoint` (path.c), all sixteen of it — a five-entry
+    // subset let `.g\u{200e}it` through until 2026-09-12.
+    const HFS_IGNORABLE: [char; 16] = [
+        '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+        '\u{206a}', '\u{206b}', '\u{206c}', '\u{206d}', '\u{206e}', '\u{206f}', '\u{feff}',
+    ];
     if p.chars().any(|c| HFS_IGNORABLE.contains(&c)) {
         let stripped: String = p.chars().filter(|c| !HFS_IGNORABLE.contains(c)).collect();
         if stripped.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git") {
@@ -366,11 +370,17 @@ fn split_path(path: &str) -> Result<Vec<&str>> {
     }
     let parts: Vec<&str> = path.split('/').collect();
     for p in &parts {
+        // NTFS drops trailing dots and spaces, so `".. "` IS the parent directory there; the
+        // dot checks run on the trimmed name. `:` opens an alternate data stream (`.git::$DATA`)
+        // and is refused outright, as git does.
+        let trimmed = p.trim_end_matches(['.', ' ']);
         let bad = p.is_empty()
-            || *p == "."
-            || *p == ".."
+            || trimmed.is_empty()
+            || trimmed == "."
+            || trimmed == ".."
             || is_dotgit_variant(p)
             || p.contains('\\')
+            || p.contains(':')
             || p.bytes().any(|b| b < 0x20 || b == 0x7f);
         if bad {
             return Err(err(format!("{path} is not a valid path")));
@@ -389,6 +399,16 @@ mod dotgit_variant_tests {
 
     fn allows(path: &str) {
         assert!(split_path(path).is_ok(), "expected {path:?} to be allowed");
+    }
+
+    #[test]
+    fn rejects_every_platform_spelling_of_dotgit_and_the_parent() {
+        for p in [".g\u{200e}it/x", ".g\u{202e}it/x", ".g\u{206b}it/x", ".git::$DATA/x", ".git:$INDEX_ALLOCATION/x", "a/.. /x", "a/.../x", "a/. /x", "GIT~1/x", ".git./x", ".git /x"] {
+            assert!(split_path(p).is_err(), "expected {p:?} to be rejected");
+        }
+        for p in ["a.b/c", "x:y".replace(':', "-").as_str(), "git~/x", "dot.git/x", "a../x"] {
+            assert!(split_path(p).is_ok(), "expected {p:?} to be allowed");
+        }
     }
 
     #[test]

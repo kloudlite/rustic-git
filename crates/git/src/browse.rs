@@ -317,6 +317,13 @@ type Side = (ObjectId, bool);
 
 /// Files that differ between `old` and `new`, as (path, old blob, new blob). Hand-rolled rather
 /// than `gix-diff`: it is a merge on two sorted entry lists, and one less dependency to track.
+/// Deeper than this and the walk stops with an error rather than the stack: git's own ceiling is
+/// 4096, but each level here holds a map of both sides, and a tree this deep is a crafted one.
+const MAX_TREE_DEPTH: usize = 512;
+/// Changed paths kept for one diff. Past it the walk stops and the diff says it was cut — the
+/// 4 MiB text cap used to apply only while FORMATTING, after every path was already in memory.
+const MAX_DIFF_FILES: usize = 20_000;
+
 fn changed_files(
     odb: &gix_odb::Handle,
     old: Option<ObjectId>,
@@ -324,6 +331,20 @@ fn changed_files(
     prefix: &str,
     out: &mut Vec<(String, Option<ObjectId>, Option<ObjectId>)>,
 ) -> Result<()> {
+    changed_files_bounded(odb, old, new, prefix, out, 0)
+}
+
+fn changed_files_bounded(
+    odb: &gix_odb::Handle,
+    old: Option<ObjectId>,
+    new: ObjectId,
+    prefix: &str,
+    out: &mut Vec<(String, Option<ObjectId>, Option<ObjectId>)>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(nf("tree too deep"));
+    }
     let read = |id: Option<ObjectId>| -> Result<Vec<(String, Side)>> {
         let Some(id) = id else { return Ok(vec![]) };
         let mut buf = Vec::new();
@@ -342,6 +363,9 @@ fn changed_files(
         sides.entry(name).or_default().1 = Some(s);
     }
     for (name, (o, n)) in sides {
+        if out.len() >= MAX_DIFF_FILES {
+            return Ok(());
+        }
         let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
         if o.as_ref().map(|s| s.0) == n.as_ref().map(|s| s.0) {
             continue;
@@ -355,7 +379,7 @@ fn changed_files(
             (None, None) => out.push((path, blob_id(&o), blob_id(&n))),
             (ot, nt) => {
                 let empty = ObjectId::empty_tree(new.kind());
-                changed_files(odb, ot, nt.unwrap_or(empty), &path, out)?;
+                changed_files_bounded(odb, ot, nt.unwrap_or(empty), &path, out, depth + 1)?;
                 if let Some(b) = blob_id(&o) {
                     out.push((path, Some(b), None));
                 } else if let Some(b) = blob_id(&n) {
@@ -541,6 +565,7 @@ fn diff_trees_inner(
 ) -> Result<String> {
     let mut files = Vec::new();
     changed_files(odb, parent_tree, tree, "", &mut files)?;
+    let cut_by_count = files.len() >= MAX_DIFF_FILES;
     let mut diff = String::new();
     for (path, old, new) in files {
         // ponytail: 4 MiB ceiling on the whole diff, checked between files; a single file past
@@ -600,6 +625,9 @@ fn diff_trees_inner(
             &input,
             imara_diff::UnifiedDiffBuilder::new(&input),
         ));
+    }
+    if cut_by_count && !diff.ends_with("[diff truncated]\n") {
+        diff.push_str("\n[diff truncated]\n");
     }
     Ok(diff)
 }

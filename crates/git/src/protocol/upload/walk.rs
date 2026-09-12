@@ -181,8 +181,22 @@ pub(super) struct Shallow {
 /// Breadth-first by design: `depth` is measured in commits from the tip, so every
 /// commit at distance n must be seen before any at n+1. A depth-first walk would
 /// cut one long branch and leave a short one whole.
-pub(super) fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen) -> Result<Shallow> {
+/// Commits one request may walk before it is refused: a `deepen-not` naming a commit that is
+/// not an ancestor, or a `want` that is not a tip and not a commit, walked the whole history
+/// with nothing counting it (2026-09-12). Well past any real repository's height, well short of
+/// the CPU a stranger may buy per request.
+pub(super) const MAX_WALK: usize = 2_000_000;
+
+fn over_budget(walked: usize, what: &str) -> crate::Error {
+    format!("upload-pack: {what} walked more than {walked} commits").into()
+}
+
+pub(super) fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen, interrupt: &std::sync::atomic::AtomicBool) -> Result<Shallow> {
     use std::collections::{HashMap, HashSet, VecDeque};
+    let mut walked = 0usize;
+    // `deepen-since` reads every parent's time before it is queued and again when it is popped;
+    // a merge-heavy history decoded each commit once per child.
+    let mut time_of: HashMap<ObjectId, i64> = HashMap::new();
 
     let cut: HashSet<ObjectId> = d.not.iter().copied().collect();
     // With `deepen-relative` the client is asking for n MORE commits, so its
@@ -207,8 +221,19 @@ pub(super) fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen
                 continue;
             }
         }
+        walked += 1;
+        super::walked(1);
+        if walked > MAX_WALK {
+            return Err(over_budget(walked, "shallow"));
+        }
+        if walked.is_multiple_of(1024) && interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("upload-pack: interrupted".into());
+        }
         let Ok(obj) = gix_object::FindExt::find(odb, &id, &mut buf) else { continue };
         let Ok(gix_object::ObjectRef::Commit(commit)) = obj.decode() else { continue };
+        if let Ok(t) = commit.time() {
+            time_of.insert(id, t.seconds);
+        }
 
         depth_of.insert(id, depth);
 
@@ -232,15 +257,21 @@ pub(super) fn shallow_walk(odb: &gix_odb::Handle, wants: &[ObjectId], d: &Deepen
             // enters the pack or gets reported as the boundary itself. `id`
             // (the youngest commit still >= since) becomes the boundary instead.
             let too_old = d.since.is_some_and(|since| {
-                gix_object::FindExt::find(odb, &p, &mut pbuf)
-                    .ok()
-                    .and_then(|o| {
-                        o.decode().ok().and_then(|dec| match dec {
-                            gix_object::ObjectRef::Commit(c) => c.time().ok(),
-                            _ => None,
+                let t = match time_of.get(&p) {
+                    Some(t) => Some(*t),
+                    None => gix_object::FindExt::find(odb, &p, &mut pbuf)
+                        .ok()
+                        .and_then(|o| {
+                            o.decode().ok().and_then(|dec| match dec {
+                                gix_object::ObjectRef::Commit(c) => c.time().ok().map(|t| t.seconds),
+                                _ => None,
+                            })
                         })
-                    })
-                    .is_some_and(|t| t.seconds < since)
+                        .inspect(|t| {
+                            time_of.insert(p, *t);
+                        }),
+                };
+                t.is_some_and(|t| t < since)
             });
             if cut.contains(&p) || too_old {
                 boundary.push(id);
@@ -287,12 +318,17 @@ pub(super) fn reachable_commits(
             found.insert(t);
         }
     }
+    let mut walked = 0usize;
     for info in gix_traverse::commit::Simple::new(commits, odb.clone()) {
         if want.is_empty() {
             break;
         }
         let id = info?.id;
         super::walked(1);
+        walked += 1;
+        if walked > MAX_WALK {
+            return Err(over_budget(walked, "want"));
+        }
         if want.remove(&id) {
             found.insert(id);
         }

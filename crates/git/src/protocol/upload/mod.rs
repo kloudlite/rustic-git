@@ -20,6 +20,9 @@ pub(crate) use walk::{commit_range as range_over, Range};
 /// `have`s. Counted so a test can pin that cost to the size of the change and not the repo.
 pub static WALKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Non-tip, non-commit wants one fetch may name before the whole-repository closure is refused.
+pub(crate) const MAX_LOOSE_WANTS: usize = 64;
+
 pub(crate) fn walked(n: usize) {
     WALKED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
 }
@@ -225,6 +228,13 @@ fn fetch(
         let commits = reachable_commits(&odb, &tips, &unknown)?;
         let rest: Vec<ObjectId> = unknown.into_iter().filter(|w| !commits.contains(w)).collect();
         if !rest.is_empty() {
+            // The closure below is every tree and blob the repository reaches — a full clone's
+            // work, from one request. A promisor fetch names a handful of blobs; a request naming
+            // more is not one, and is refused before the walk rather than after it.
+            if rest.len() > MAX_LOOSE_WANTS {
+                pktline::write_text(out, &format!("ERR upload-pack: too many wants that are not tips ({} > {MAX_LOOSE_WANTS})", rest.len()))?;
+                return Ok(());
+            }
             let ours_set = reachable_set(&odb, &tips)?;
             if let Some(w) = rest.iter().find(|w| !ours_set.contains(*w)) {
                 pktline::write_text(out, &format!("ERR upload-pack: not our ref {}", w.to_hex()))?;
@@ -237,7 +247,7 @@ fn fetch(
     // reported BEFORE the pack: the client has to know where its history is cut
     // before it starts reading objects that stop there.
     let shallow = if deepen.asked() || !deepen.client_shallow.is_empty() {
-        Some(walk::shallow_walk(&odb, &wants, &deepen)?)
+        Some(walk::shallow_walk(&odb, &wants, &deepen, interrupt)?)
     } else {
         None
     };
