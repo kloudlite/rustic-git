@@ -1,3 +1,4 @@
+use crate::LockOrRecover;
 use crate::{err, Result};
 use futures::{StreamExt, TryStreamExt};
 use slatedb::object_store::{path::Path as OsPath, ObjectStore, ObjectStoreExt};
@@ -151,7 +152,7 @@ impl Store {
     /// makes it safe to remove: any caller still using that lock holds a clone, and a caller that
     /// arrives later simply creates a fresh one and serialises against itself as before.
     pub fn keyed_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut m = self.keyed_locks.lock().unwrap();
+        let mut m = self.keyed_locks.lock_or_recover();
         // Swept only past a size no honest in-flight set reaches — an every-acquisition retain
         // was O(live keys) on every ref write. Entries with one strong count are held by nobody
         // but this map, so dropping them can never break a caller (it holds a clone).
@@ -350,6 +351,7 @@ pub fn valid_owner(s: &str) -> bool {
 #[cfg(test)]
 mod open_repo_tests {
     use super::Store;
+    use crate::LockOrRecover;
     use std::sync::atomic::Ordering::SeqCst;
     use std::sync::Arc;
 
@@ -371,7 +373,7 @@ mod open_repo_tests {
         assert_eq!(counting.index_gets.load(SeqCst), 2, "warm reopens read no marker");
         // The synced pack list is dropped the moment the index changes.
         s.record_pack("a", "r", "pack-x.pack", 0).await.unwrap();
-        assert!(s.packs.lock().unwrap().is_empty());
+        assert!(s.packs.lock_or_recover().is_empty());
     }
 }
 

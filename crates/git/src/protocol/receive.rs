@@ -316,8 +316,14 @@ impl PackGuard {
 impl Drop for PackGuard {
     fn drop(&mut self) {
         if let Some((pack, idx)) = &self.0 {
-            let _ = std::fs::remove_file(pack);
-            let _ = std::fs::remove_file(idx);
+            // Named, not swallowed: a pack that could not be removed keeps this node's odb serving
+            // objects the object store never received, and the only way anyone learns which file
+            // to look at is this line (2026-09-12).
+            for p in [pack, idx] {
+                if let Err(e) = std::fs::remove_file(p) {
+                    tracing::warn!(path = %p.display(), error = %e, "receive.pack.cleanup.failed");
+                }
+            }
         }
     }
 }
@@ -338,8 +344,12 @@ fn apply(
     // delete exactly what it added and nothing reachable from an existing ref.
     let mut this_push_pack = PackGuard(None);
     if updates.iter().any(|u| u.new.is_some()) {
-        // input may have no more bytes if client sends only deletes; peek
-        let has_data = input.fill_buf().map(|b| !b.is_empty()).unwrap_or(false);
+        // input may have no more bytes if client sends only deletes; peek.
+        // A read ERROR here is ours or the transport's, never "the client sent no pack": swallowed
+        // as `false`, a disconnect mid-push or a body over the cap ran the connectivity walk
+        // against an empty pack and reported "missing necessary objects" — blaming the pusher for
+        // a read that failed (2026-09-12).
+        let has_data = !input.fill_buf()?.is_empty();
         if has_data {
             if let Some((pack, idx)) = write_pack(repo, input, interrupt)? {
                 this_push_pack.0 = Some((pack, idx));
@@ -510,7 +520,9 @@ fn write_pack(
         Err(e) => return Err(Box::new(ClientPack(e.to_string()))),
     };
     if let Some(k) = outcome.keep_path {
-        let _ = std::fs::remove_file(k);
+        if let Err(e) = std::fs::remove_file(&k) {
+            tracing::warn!(path = %k.display(), error = %e, "receive.keep.cleanup.failed");
+        }
     }
     match (outcome.data_path, outcome.index_path) {
         (Some(p), Some(i)) => Ok(Some((p, i))),

@@ -5,6 +5,10 @@ pub fn err(msg: impl Into<String>) -> Error {
     msg.into().into()
 }
 
+/// HS256 gives no warning about a weak key, so the shortest secret the fleet accepts is named
+/// once, here, and enforced at boot as well as in `Jwt::new`.
+pub const JWT_SECRET_MIN: usize = 32;
+
 /// Fleet mode may not fall back to a per-process JWT secret.
 ///
 /// `App::new` invents a random secret when `KLOUDLITE_JWT_SECRET` is unset. On one node that is
@@ -17,11 +21,21 @@ pub fn err(msg: impl Into<String>) -> Error {
 /// Takes its inputs rather than reading the environment so the rule is testable and so both
 /// binaries apply the same one.
 pub fn require_jwt_secret(peer_svc: &str, jwt_secret: &str) -> Result<()> {
-    if !peer_svc.is_empty() && jwt_secret.is_empty() {
-        return Err(err(
-            "KLOUDLITE_JWT_SECRET is required with KLOUDLITE_PEER_SVC (without it each node \
-             mints tokens the others reject)",
-        ));
+    if !peer_svc.is_empty() {
+        if jwt_secret.is_empty() {
+            return Err(err(
+                "KLOUDLITE_JWT_SECRET is required with KLOUDLITE_PEER_SVC (without it each node \
+                 mints tokens the others reject)",
+            ));
+        }
+        // The same floor `Jwt::new` enforces, applied HERE so a too-short secret refuses the boot
+        // by name instead of reaching `App::new`'s `expect` and dying as a bare panic
+        // (2026-09-12).
+        if jwt_secret.len() < JWT_SECRET_MIN {
+            return Err(err(format!(
+                "KLOUDLITE_JWT_SECRET must be at least {JWT_SECRET_MIN} bytes"
+            )));
+        }
     }
     Ok(())
 }
@@ -48,7 +62,9 @@ mod tests {
         assert!(require_jwt_secret("kloudlite-peer", "").is_err());
         // Solo mode has nobody to disagree with, so the per-process fallback stays.
         assert!(require_jwt_secret("", "").is_ok());
-        assert!(require_jwt_secret("kloudlite-peer", "s3cret").is_ok());
+        // Set but too short is "without one" too: it would panic in `Jwt::new` instead.
+        assert!(require_jwt_secret("kloudlite-peer", "s3cret").is_err());
+        assert!(require_jwt_secret("kloudlite-peer", &"x".repeat(JWT_SECRET_MIN)).is_ok());
     }
 
     #[test]

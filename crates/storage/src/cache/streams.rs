@@ -2,6 +2,7 @@
 //! and the plain feed read. The `Cache` half that deals in keys — generation, get, put — is in
 //! `mod.rs`; everything stream-shaped is here.
 
+use crate::LockOrRecover;
 use super::{run, run_within, Cache, CMD_TIMEOUT, MAINTENANCE_TIMEOUT};
 
 impl Cache {
@@ -14,7 +15,7 @@ impl Cache {
             // `~` (approximate trim) has no meaning in-process; trim exactly, which is a superset
             // of what the real MAXLEN ~ guarantees and therefore never masks a bug the real one
             // would hide.
-            let mut g = m.lock().unwrap();
+            let mut g = m.lock_or_recover();
             let id = format!("{}-0", crate::ownership::now_ms());
             // The mem-stream stores owned pairs (entries come back owned from Redis on the real
             // path too — see `from_fields`), so the static keys are converted at this boundary,
@@ -163,7 +164,7 @@ impl Cache {
     /// before a caller reads it is just not shown, the same as it never happened.
     pub async fn xrevrange(&self, stream: &str, count: usize) -> Vec<(String, Vec<(String, String)>)> {
         if let Some(m) = &self.mem_stream {
-            let g = m.lock().unwrap();
+            let g = m.lock_or_recover();
             return g.iter().rev().take(count).cloned().collect();
         }
         let Some(mut c) = self.conn.clone() else { return Vec::new() };

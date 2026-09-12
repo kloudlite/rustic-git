@@ -175,7 +175,11 @@ impl App {
         // it is fixed at startup and nothing changes it once the `App` is shared.
         dir: pulls::Source,
     ) -> Self {
-        let jwt_secret = std::env::var("KLOUDLITE_JWT_SECRET").unwrap_or_else(|_| {
+        // `.filter`, not a bare `unwrap_or_else`: a variable set to the empty string (a Secret
+        // key present with no value) is "unset" here, not a zero-length signing key that panics
+        // in `Jwt::new` below (2026-09-12). Fleet mode never reaches the fallback — `main.rs`
+        // refuses the boot first.
+        let jwt_secret = std::env::var("KLOUDLITE_JWT_SECRET").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
             use rand::Rng;
             rand::thread_rng()
                 .sample_iter(rand::distributions::Alphanumeric)
@@ -203,7 +207,7 @@ impl App {
             missing_seen: Default::default(),
             owner_asks: Default::default(),
             skew_ms: std::sync::atomic::AtomicU64::new(0),
-            jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("jwt secret")),
+            jwt: Arc::new(jwt::Jwt::new(&jwt_secret).expect("KLOUDLITE_JWT_SECRET is not a usable signing key")),
             leader_lock: tokio::sync::Mutex::new(()),
             claim_gate: tokio::sync::Semaphore::new(MAX_WAITING_CLAIMS),
             dir,

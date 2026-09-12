@@ -1,5 +1,6 @@
 //! Lease-taking: opening a repo's database, single-flighted, through fencing detection.
 
+use crate::LockOrRecover;
 use super::{path, Entry, FencedError, Pool};
 use crate::Result;
 use slatedb::object_store::ObjectStoreExt;
@@ -42,7 +43,7 @@ impl Pool {
         }
         let key = format!("{owner}/{name}");
         let entry = {
-            let mut map = self.entries.lock().unwrap();
+            let mut map = self.entries.lock_or_recover();
             let e = map
                 .entry(key.clone())
                 .or_insert_with(|| {
@@ -55,7 +56,7 @@ impl Pool {
                     })
                 })
                 .clone();
-            *e.last_used.lock().unwrap() = Instant::now();
+            *e.last_used.lock_or_recover() = Instant::now();
             e
         };
         // Outside the map lock: opening is slow, and holding the lock across it would serialise
@@ -69,10 +70,10 @@ impl Pool {
                 // while this task sat between taking the entry and opening it has already
                 // removed it, and opening now would CREATE the database that delete just walked.
                 // `adopt` would close it again, but the manifest write has happened by then.
-                if self.deleting.lock().unwrap().contains(&key) {
+                if self.deleting.lock_or_recover().contains(&key) {
                     return Err(crate::err(format!("{key}: repository is being deleted")));
                 }
-                let ours = self.entries.lock().unwrap().get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry));
+                let ours = self.entries.lock_or_recover().get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry));
                 if !ours {
                     return Err(FencedError { repo: key.clone() }.into());
                 }
@@ -85,7 +86,7 @@ impl Pool {
             // failing, and removing the successor's entry would make `adopt` close its healthy
             // database and report a fence that only a local open error caused.
             .inspect_err(|_| {
-                let mut map = self.entries.lock().unwrap();
+                let mut map = self.entries.lock_or_recover();
                 if map.get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry)) {
                     map.remove(&key);
                 }
@@ -106,7 +107,7 @@ impl Pool {
     // sibling's fresh healthy entry — one extra flap, self-healing. Upgrade: have `on_fenced`
     // evict only when the slot's own handle actually reports closed.
     pub(super) async fn adopt(&self, key: &str, entry: &Arc<Entry>, handle: Arc<Db>) -> Result<Arc<Db>> {
-        let current = self.entries.lock().unwrap().get(key).is_some_and(|e| Arc::ptr_eq(e, entry));
+        let current = self.entries.lock_or_recover().get(key).is_some_and(|e| Arc::ptr_eq(e, entry));
         if current {
             return Ok(handle);
         }
@@ -152,8 +153,8 @@ impl Pool {
     /// later into an error rather than a fresh database.
     pub async fn delete(&self, owner: &str, name: &str) -> Result<()> {
         let key = format!("{owner}/{name}");
-        self.deleting.lock().unwrap().insert(key.clone());
-        let entry = self.entries.lock().unwrap().remove(&key);
+        self.deleting.lock_or_recover().insert(key.clone());
+        let entry = self.entries.lock_or_recover().remove(&key);
         if let Some(e) = entry {
             Self::close_bounded(e).await;
         }
@@ -172,7 +173,7 @@ impl Pool {
             Ok(())
         }
         .await;
-        self.deleting.lock().unwrap().remove(&key);
+        self.deleting.lock_or_recover().remove(&key);
         deleted
     }
 
@@ -207,7 +208,7 @@ impl Pool {
     pub async fn evict_if_same(&self, owner: &str, name: &str, observed: &Arc<Db>) {
         let key = format!("{owner}/{name}");
         let entry = {
-            let mut map = self.entries.lock().unwrap();
+            let mut map = self.entries.lock_or_recover();
             match map.get(&key) {
                 Some(e) if e.db.get().is_some_and(|cur| Arc::ptr_eq(cur, observed)) => map.remove(&key),
                 _ => None,

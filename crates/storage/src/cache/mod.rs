@@ -18,6 +18,7 @@
 //! call" rather than substituting a generation — otherwise a transient Redis blip would make a
 //! purged repo's pre-purge entries reachable again.
 
+use crate::LockOrRecover;
 use redis::aio::ConnectionManagerConfig;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -63,7 +64,7 @@ pub struct Cache {
 }
 
 fn mem_get(m: &Mem, k: &str) -> Option<Vec<u8>> {
-    let mut g = m.lock().unwrap();
+    let mut g = m.lock_or_recover();
     match g.get(k) {
         Some((v, exp)) if *exp > Instant::now() => Some(v.clone()),
         Some(_) => {
@@ -197,7 +198,7 @@ impl Cache {
     async fn put_key(&self, k: String, val: &[u8], ttl_secs: u64) {
         if let Some(m) = &self.mem {
             let exp = Instant::now() + Duration::from_secs(ttl_secs);
-            let mut g = m.lock().unwrap();
+            let mut g = m.lock_or_recover();
             // Entries otherwise only expire when that exact key is read again, so keys written and
             // never re-read stay forever — and unlike Redis, nothing else evicts them. Drop the
             // expired ones on insert once the map is larger than any test needs; an entry past its
@@ -223,7 +224,7 @@ impl Cache {
         let Some(gen) = self.generation(repo).await else { return }; // cannot key it; nothing to drop
         let k = key(gen, repo, "refs");
         if let Some(m) = &self.mem {
-            m.lock().unwrap().remove(&k);
+            m.lock_or_recover().remove(&k);
             return;
         }
         let Some(mut c) = self.conn.clone() else { return };
@@ -252,7 +253,7 @@ impl Cache {
             let next = cur + 1;
             // No TTL in Redis; a decade here stands in for "never evicted".
             let exp = Instant::now() + Duration::from_secs(10 * 365 * 24 * 3600);
-            m.lock().unwrap().insert(k, (next.to_string().into_bytes(), exp));
+            m.lock_or_recover().insert(k, (next.to_string().into_bytes(), exp));
             return Ok(());
         }
         let Some(mut c) = self.conn.clone() else { return Ok(()) };
@@ -503,7 +504,7 @@ mod tests {
                         }
                         let req = String::from_utf8_lossy(&buf[..n]).to_string();
                         let reply: Vec<u8> = if req.to_uppercase().contains("EVAL") {
-                            rec.lock().unwrap().push(req.clone());
+                            rec.lock_or_recover().push(req.clone());
                             b"$4\r\nbody\r\n".to_vec()
                         } else {
                             b"+OK\r\n".repeat(req.matches("\r\n*").count() + 1)
@@ -519,7 +520,7 @@ mod tests {
         assert!(c.conn.is_some(), "the stub must connect, or this tests nothing");
         assert_eq!(c.get("alice/web", "refs").await.as_deref(), Some(&b"body"[..]));
 
-        let calls = seen.lock().unwrap().clone();
+        let calls = seen.lock_or_recover().clone();
         assert_eq!(calls.len(), 1, "one script call, no fallback GETs: {calls:?}");
         // EVALSHA <sha> <numkeys> ARGV... — no KEYS, and the three ARGV in this order.
         let repo = calls[0].find("alice/web").expect("repo argument");

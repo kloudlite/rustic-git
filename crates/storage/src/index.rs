@@ -75,6 +75,18 @@ fn body(m: &Marker) -> Vec<u8> {
 /// Decodes a marker body. Unknown keys are ignored (forward compat); missing keys default
 /// (`manifests`/`updated_ms` to 0). `name` and `public` come from the path, not the body, since
 /// `public` in the body only records what was true when it was written.
+/// One line and the rest, `\n`-separated; `None` once nothing is left. Hand-rolled rather than
+/// `lines()` because `decode` needs the UNSPLIT remainder the moment it reaches `description`.
+fn split_line(s: &str) -> Option<(&str, &str)> {
+    if s.is_empty() {
+        return None;
+    }
+    Some(match s.split_once('\n') {
+        Some((l, rest)) => (l.strip_suffix('\r').unwrap_or(l), rest),
+        None => (s, ""),
+    })
+}
+
 fn decode(name: &str, public: bool, bytes: &[u8]) -> crate::Result<Marker> {
     let s = std::str::from_utf8(bytes).map_err(|e| crate::err(format!("index marker: {e}")))?;
     let mut created_by = String::new();
@@ -82,14 +94,24 @@ fn decode(name: &str, public: bool, bytes: &[u8]) -> crate::Result<Marker> {
     let mut manifests = 0u64;
     let mut updated_ms = 0i64;
     let mut description = String::new();
-    for line in s.lines() {
+    // `description` is written LAST and may contain anything, so everything after its `=` is the
+    // description and parsing STOPS there. A marker written before `body` filtered control
+    // characters can carry a newline in it, and continuing the loop read the text after that
+    // newline as fields of its own — a forged `public=`/`created_by=` line inside a description
+    // the writer chose (2026-09-12).
+    let mut rest = s;
+    while let Some((line, tail)) = split_line(rest) {
+        rest = tail;
         let Some((k, v)) = line.split_once('=') else { continue };
         match k {
             "created_by" => created_by = v.to_string(),
             "created_ms" => created_ms = v.parse().unwrap_or(0),
             "manifests" => manifests = v.parse().unwrap_or(0),
             "updated_ms" => updated_ms = v.parse().unwrap_or(0),
-            "description" => description = v.to_string(),
+            "description" => {
+                description = if tail.is_empty() { v.to_string() } else { format!("{v}\n{tail}") };
+                break;
+            }
             _ => {}
         }
     }
@@ -477,5 +499,36 @@ pub(crate) mod tests {
         assert_eq!(l[0].created_by, "alice@example.com", "the real creator survives");
         assert_eq!(l[0].created_ms, 1755772800000);
         assert!(!l[0].description.contains('\n'));
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+
+    /// A description carrying a newline — only a marker written before `body` filtered control
+    /// characters can — must not be able to set any other field.
+    #[test]
+    fn a_newline_in_a_description_forges_nothing() {
+        let body = b"v=1\npublic=false\ncreated_by=alice\ncreated_ms=7\nmanifests=1\nupdated_ms=9\ndescription=hi\ncreated_by=mallory\npublic=true";
+        let m = decode("web", false, body).unwrap();
+        assert_eq!(m.created_by, "alice");
+        assert!(!m.public);
+        assert_eq!(m.description, "hi\ncreated_by=mallory\npublic=true");
+    }
+
+    /// The ordinary case still round-trips, `=` in the description included.
+    #[test]
+    fn a_plain_marker_round_trips() {
+        let m = Marker {
+            name: "web".into(),
+            public: true,
+            created_by: "alice".into(),
+            created_ms: 7,
+            description: "a=b".into(),
+            manifests: 3,
+            updated_ms: 9,
+        };
+        assert_eq!(decode("web", true, &body(&m)).unwrap(), m);
     }
 }

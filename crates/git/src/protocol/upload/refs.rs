@@ -41,11 +41,14 @@ pub(super) fn head_target(refs: &[(String, ObjectId)]) -> String {
     } else if has("master") {
         "refs/heads/master".to_string()
     } else {
+        // The branch above already answered the no-branches case, so this `find` succeeds — but
+        // an `unwrap` that depends on a sibling branch staying correct is one edit from a panic
+        // in the advertisement path, and the default is the right answer either way.
         refs.iter()
             .map(|(n, _)| n)
             .find(|n| n.starts_with("refs/heads/"))
             .cloned()
-            .unwrap()
+            .unwrap_or_else(|| format!("refs/heads/{default}"))
     }
 }
 

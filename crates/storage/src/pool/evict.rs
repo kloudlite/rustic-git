@@ -1,5 +1,6 @@
 //! Eviction, `max_warm` pressure, and release-on-close.
 
+use crate::LockOrRecover;
 use super::Pool;
 use slatedb::Db;
 use std::sync::atomic::Ordering;
@@ -15,7 +16,7 @@ impl Pool {
     }
 
     pub(super) async fn enforce_bound(self: &Arc<Self>) {
-        if self.entries.lock().unwrap().len() > self.max_warm() {
+        if self.entries.lock_or_recover().len() > self.max_warm() {
             let picked = self.evictable(Instant::now());
             self.retire(picked).await
         }
@@ -30,12 +31,12 @@ impl Pool {
     /// Removing it here would make the pool re-open a database it is about to close — two handles
     /// on one repo, and a fence.
     pub(super) fn evictable(&self, now: Instant) -> Vec<(String, Arc<Db>)> {
-        let map = self.entries.lock().unwrap();
+        let map = self.entries.lock_or_recover();
         let mut idle: Vec<(Instant, String)> = map
             .iter()
             .filter(|(_, e)| !e.releasing.load(Ordering::SeqCst))
             .filter(|(_, e)| e.db.get().is_none_or(|db| Arc::strong_count(db) == 1))
-            .map(|(k, e)| (*e.last_used.lock().unwrap(), k.clone()))
+            .map(|(k, e)| (*e.last_used.lock_or_recover(), k.clone()))
             .collect();
         idle.sort_by_key(|(t, _)| *t); // oldest first
         let over = map.len().saturating_sub(self.max_warm());
@@ -95,7 +96,7 @@ impl Pool {
         // Tracked so shutdown can wait for it: a retire dropped mid-sleep would never close its
         // databases (WAL replay on the next open), and a `close()` running alongside one would
         // release and close the same entries twice.
-        let mut v = self.retires.lock().unwrap();
+        let mut v = self.retires.lock_or_recover();
         v.retain(|h| !h.is_finished());
         v.push(h);
     }
@@ -106,7 +107,7 @@ impl Pool {
         let mut skipped = Vec::new();
         for (key, h) in picked {
             {
-                let mut map = self.entries.lock().unwrap();
+                let mut map = self.entries.lock_or_recover();
                 // Two references are expected: the map's and our own clone in `picked`. A third is
                 // a request that arrived DURING the drain — which is the whole point of the drain,
                 // so let it finish. Un-flag the entry and leave it warm for a later sweep.
@@ -131,7 +132,7 @@ impl Pool {
     /// guess — which is a flake with a margin. Takes the handles, so a caller that races `close()`
     /// simply finds nothing to wait for there.
     pub async fn await_retires(&self) {
-        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
+        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock_or_recover());
         for h in in_flight {
             // Bounded like `close()`: a stuck close must fail the assert, not hang the test.
             let _ = tokio::time::timeout(crate::ownership::DRAIN * 3, h).await;
@@ -145,12 +146,12 @@ impl Pool {
         self.closed.store(true, Ordering::SeqCst);
         // Let any drain already in flight finish first, so it is not dropped mid-sleep and cannot
         // race this pass into a double release. Bounded: shutdown must not hang on a stuck close.
-        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock().unwrap());
+        let in_flight: Vec<_> = std::mem::take(&mut *self.retires.lock_or_recover());
         for h in in_flight {
             let _ = tokio::time::timeout(crate::ownership::DRAIN * 3, h).await;
         }
         let all: Vec<(String, Arc<Db>)> = {
-            let map = self.entries.lock().unwrap();
+            let map = self.entries.lock_or_recover();
             map.iter()
                 // Same rule as `evictable`: only an entry with a handle may be flagged. One whose
                 // open is still in flight would otherwise be flagged, skipped here, and then
@@ -185,7 +186,7 @@ impl Pool {
                 hook.release(repo.clone()).await;
             }
         }
-        self.entries.lock().unwrap().clear(); // slots whose open never completed
+        self.entries.lock_or_recover().clear(); // slots whose open never completed
     }
 
     /// A flush shares the sweeper's task, so it gets a deadline for the same reason the leader's
@@ -206,10 +207,10 @@ impl Pool {
     pub async fn flush_stale(self: &Arc<Self>) {
         let now = Instant::now();
         let due: Vec<(String, Arc<Db>)> = {
-            let map = self.entries.lock().unwrap();
+            let map = self.entries.lock_or_recover();
             map.iter()
                 .filter(|(_, e)| !e.releasing.load(Ordering::SeqCst))
-                .filter(|(_, e)| now.duration_since(*e.last_flush.lock().unwrap()) >= self.flush_every())
+                .filter(|(_, e)| now.duration_since(*e.last_flush.lock_or_recover()) >= self.flush_every())
                 .filter_map(|(k, e)| e.db.get().map(|db| (k.clone(), db.clone())))
                 .collect()
         };
@@ -219,8 +220,8 @@ impl Pool {
             });
             match tokio::time::timeout(Self::FLUSH_PATIENCE, flush).await {
                 Ok(Ok(())) => {
-                    if let Some(e) = self.entries.lock().unwrap().get(&key) {
-                        *e.last_flush.lock().unwrap() = Instant::now();
+                    if let Some(e) = self.entries.lock_or_recover().get(&key) {
+                        *e.last_flush.lock_or_recover() = Instant::now();
                     }
                 }
                 // Left un-stamped on purpose, both ways: a flush that failed or timed out did not

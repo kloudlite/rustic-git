@@ -17,6 +17,7 @@
 //! * **A bound.** A burst across many repos would otherwise pin one memtable, cache and set of
 //!   background tasks per repo. Eviction is by idle time, and by count once `max_warm` is passed.
 
+use crate::LockOrRecover;
 use crate::Result;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
@@ -268,11 +269,11 @@ impl Pool {
     /// built around this pool. Unset (single node, admin commands) means eviction closes straight
     /// away, exactly as it did before leases existed.
     pub fn set_release_hook(&self, h: Weak<dyn ReleaseHook>) {
-        *self.hook.lock().unwrap() = Some(h);
+        *self.hook.lock_or_recover() = Some(h);
     }
 
     fn hook(&self) -> Option<Arc<dyn ReleaseHook>> {
-        self.hook.lock().unwrap().as_ref().and_then(Weak::upgrade)
+        self.hook.lock_or_recover().as_ref().and_then(Weak::upgrade)
     }
 
     /// Whether this pool has been closed on the way out. A closed pool never reopens, so a node in
@@ -283,7 +284,7 @@ impl Pool {
 
     /// How many repo databases this node is holding open. Reported by `/healthz`.
     pub fn warm_count(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock_or_recover().len()
     }
 
     /// Whether a repo's database exists, without opening it.
@@ -448,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn an_open_in_flight_is_not_marked_releasing() {
         let p = pool_with(Duration::ZERO, 64); // everything is idle enough to evict
-        p.entries.lock().unwrap().insert(
+        p.entries.lock_or_recover().insert(
             "alice/web".to_string(),
             Arc::new(Entry {
                 db: tokio::sync::OnceCell::new(),
@@ -480,7 +481,7 @@ mod tests {
         // Deliberately NOT in the map: the shape an evict leaves behind. A DIFFERENT entry sits
         // under the same key, as a reopen after the evict would leave it — so what is being pinned
         // here is slot identity, not merely the key being absent.
-        p.entries.lock().unwrap().insert(
+        p.entries.lock_or_recover().insert(
             "alice/web".to_string(),
             Arc::new(Entry {
                 db: tokio::sync::OnceCell::new(),
@@ -611,7 +612,7 @@ mod tests {
     async fn an_open_during_a_delete_creates_nothing() {
         let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let p = Arc::new(Pool::new(os.clone(), false));
-        p.deleting.lock().unwrap().insert("alice/web".to_string());
+        p.deleting.lock_or_recover().insert("alice/web".to_string());
         assert!(p.get("alice", "web").await.is_err(), "an open during a delete must fail");
         assert_eq!(p.warm_count(), 0);
         assert_eq!(db_files(&os, "alice", "web").await, 0, "the open must not have created a database");

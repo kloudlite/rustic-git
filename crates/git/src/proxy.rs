@@ -27,6 +27,10 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 pub async fn serve_peer_streams(app: Arc<App>, listener: TcpListener) -> Result<()> {
     loop {
         let (sock, _) = listener.accept().await?;
+        // The same dead-peer bounds the DIALLING side gets in `stream_to_peer`. Without them an
+        // accepted session whose caller vanished without a RST holds a task and a repo handle
+        // forever; keepalive is per socket, so the accepting end has to set its own.
+        bound_dead_peer(&sock);
         let app = app.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_peer_stream(app, sock).await {

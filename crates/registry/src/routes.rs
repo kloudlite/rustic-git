@@ -49,7 +49,17 @@ pub async fn image_listing(
     let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
     let stats = crate::gc::stats_of(&app.store, owner, &names).await;
     for (name, stat) in unmarked.into_iter().zip(stats) {
-        let (count, newest) = stat.unwrap_or((0, None));
+        // A failed stat is NOT "zero manifests, never updated": that fabricates a listing row a
+        // person reads as an empty image, which is how an object-store blip showed a tenant's
+        // catalogue as emptied (2026-09-12). Skip the name and say why — the next listing, once
+        // the store answers, carries it again.
+        let (count, newest) = match stat {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(owner = %owner, image = %name, error = %e, "image.stat.failed");
+                continue;
+            }
+        };
         markers.push(crate::index::Marker {
             name,
             public: false,

@@ -218,8 +218,18 @@ pub(super) async fn api_description(
         // The repo DB is the truth, but every listing and `GET /v1/repos/{owner}/{name}` reads
         // the marker — so a description that only landed in the DB never read back anywhere.
         Ok(()) => {
-            let public = app.store.is_public(&owner, &name).await.unwrap_or(false);
-            write_marker(&app, &owner, &name, public, None, Some(&description)).await;
+            // A read that FAILED is not "private": writing the marker from that guess flips a
+            // public repo out of every listing, and nothing puts it back until someone touches
+            // visibility again (2026-09-12). The description is in the DB either way, and the
+            // marker lane rewrites it from DB truth on its next pass.
+            match app.store.is_public(&owner, &name).await {
+                Ok(public) => {
+                    write_marker(&app, &owner, &name, public, None, Some(&description)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(owner = %owner, repo = %name, reason = "read", error = %e, "index.marker.skipped");
+                }
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => internal(e),

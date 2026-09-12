@@ -244,11 +244,10 @@ pub async fn announce_stranded_merges(app: &App) {
         let Some((crate::index::Kind::Repo, owner, name)) = kind_of(&key) else { continue };
         let stranded =
             match crate::pulls::stranded_merges(&app.store, owner, name, App::MERGE_LEASE).await {
-                Ok(v) if v.is_empty() => continue, // nothing waiting; no reason to pace
                 Ok(v) => v,
                 Err(e) => {
                     tracing::warn!(owner = %owner, repo = %name, error = %e, "merge.stranded.scan.failed");
-                    continue;
+                    Vec::new()
                 }
             };
         for pr in stranded {
@@ -278,6 +277,9 @@ pub async fn announce_stranded_merges(app: &App) {
                 tracing::warn!(owner = %owner, repo = %name, number = pr.number, error = %e, "merge.announce.failed");
             }
         }
+        // Paced whatever the scan found. The scan IS the work — a `pull/` prefix read per repo —
+        // so skipping the gap when it came back empty (the common case) ran the whole warm set
+        // back to back against the same object store request traffic uses (2026-09-12).
         tokio::time::sleep(kloudlite_app::RECONCILE_GAP).await;
     }
 }

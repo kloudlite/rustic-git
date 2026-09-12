@@ -9,4 +9,4 @@ pub mod pktline;
 pub mod settings;
 #[cfg(feature = "ssh")]
 pub mod sshkeys;
-pub use err::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result};
+pub use err::{err, hex, require_jwt_secret, require_jwt_secret_from_env, Error, Result, JWT_SECRET_MIN};

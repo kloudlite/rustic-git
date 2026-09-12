@@ -357,21 +357,31 @@ impl Store {
         Ok(out)
     }
 
-    pub async fn set_protection(&self, owner: &str, name: &str, p: &Protection) -> Result<()> {
-        if p.pattern.trim().is_empty() {
+    /// What may be a protection pattern, for BOTH the set and the remove path.
+    ///
+    /// Remove built its key from an unchecked pattern, so a caller could aim `delete` at a key
+    /// outside this repo's protection prefix — the exact injection set has always refused
+    /// (2026-09-12). One function, so the two can never drift.
+    fn check_pattern(pattern: &str) -> Result<()> {
+        if pattern.trim().is_empty() {
             return Err(err("a branch pattern is required"));
         }
         // `/` is the key separator, and a pattern carrying one would be
         // indistinguishable from a different repo's key.
-        if p.pattern.contains("//") || p.pattern.starts_with('/') {
+        if pattern.contains("//") || pattern.starts_with('/') {
             return Err(err("that is not a branch pattern"));
         }
         // `matches` honours a trailing `*` and nothing else; a pattern with one elsewhere would
         // be stored, match nothing, and read as protection to whoever wrote it.
-        let stem = p.pattern.strip_suffix('*').unwrap_or(&p.pattern);
+        let stem = pattern.strip_suffix('*').unwrap_or(pattern);
         if stem.contains('*') {
             return Err(err("only a trailing * is supported in a branch pattern"));
         }
+        Ok(())
+    }
+
+    pub async fn set_protection(&self, owner: &str, name: &str, p: &Protection) -> Result<()> {
+        Self::check_pattern(&p.pattern)?;
         self.db_for(owner, name)
             .await?
             .put(protect_key(owner, name, &p.pattern), &p.encode())
@@ -380,6 +390,7 @@ impl Store {
     }
 
     pub async fn remove_protection(&self, owner: &str, name: &str, pattern: &str) -> Result<()> {
+        Self::check_pattern(pattern)?;
         self.db_for(owner, name)
             .await?
             .delete(protect_key(owner, name, pattern))
@@ -453,6 +464,22 @@ impl Store {
                 Ok(updates.iter().map(|_| Some(msg.clone())).collect())
             }
             Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod protection_pattern_tests {
+    use super::Store;
+
+    /// The same rule on both paths: what cannot be SET cannot be aimed at `delete` either.
+    #[test]
+    fn a_pattern_that_escapes_the_key_is_refused() {
+        for bad in ["", "  ", "/main", "a//b", "re*ease", "*/main"] {
+            assert!(Store::check_pattern(bad).is_err(), "{bad} should be refused");
+        }
+        for ok in ["main", "release/*", "v1.*"] {
+            assert!(Store::check_pattern(ok).is_ok(), "{ok} should be allowed");
         }
     }
 }
