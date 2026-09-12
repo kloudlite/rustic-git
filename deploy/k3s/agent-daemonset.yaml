@@ -293,13 +293,12 @@ spec:
             # btrfs's ioctls go through the mounted pool path, not the device — but btrfs-progs
             # still scans /dev to resolve a filesystem's devices, and anything that reports usage
             # opens the device path /proc/mounts names for /wspool-prod.
-            # ponytail: all of /dev in a privileged pod (2026-09-12 review #64). The narrowing is
-            # /dev/btrfs-control plus the pool device, and `mkfs.btrfs -L wspool` in
-            # format-pool.sh makes /dev/disk/by-label/wspool the one device path identical on
-            # every node — but the device visible in the container would then not be the path
-            # /proc/mounts names, and a wrong guess here breaks storage on every workspace of the
-            # node. Try it on ONE node, with a create, a push and a restore as the test, before
-            # changing it fleet-wide.
+            # All of /dev, deliberately (review #64, decided 2026-09-12): the pool device is
+            # /dev/sda on session-0 and /dev/sdb on the other nodes (Azure reorders data disks
+            # across reboots), a DaemonSet hostPath is ONE static path for every node, and the
+            # by-label/by-id links only point back into /dev. Nothing narrower can name the disk
+            # /proc/mounts names on every node, and the pod is privileged for btrfs regardless,
+            # so the mount adds no privilege it does not already hold.
             - name: dev
               mountPath: /dev
             # The host store seeded by seed-store, shared with the nix-daemon container below.

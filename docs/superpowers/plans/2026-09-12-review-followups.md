@@ -42,7 +42,9 @@ Today `controller/environment/intercept.rs:157,179,297` GET the intercepting Wor
 - [ ] Replace the three GETs and the two LISTs; keep `tracing` at each decision (`intercept.decided` with `source=store`).
 - [ ] `cargo test -p kloudlite-agent-bin`, clippy. Ship, pin, roll k3s. Verify: hourly passes `env.intercept*` and `vol.*` ids; ClickStack `otel_metrics` (or `kube.slow`/apiserver request rate in the region) drops for the agent's `GET workspaces` calls — record before/after counts on the board.
 
-### Batch 3: mount the pool device, not `/dev` (#64)
+### Batch 3: mount the pool device, not `/dev` (#64) — CLOSED 2026-09-12, not narrowable
+
+The pool device is `/dev/sda` on session-0 and `/dev/sdb` on env-0/session-1 (Azure data disks reorder across reboots); a DaemonSet hostPath is one static path for every node and `by-label`/`by-id` links resolve back into `/dev`. Recorded on the mount in `agent-daemonset.yaml`; the steps below are kept for the record and are not to be run.
 
 The DaemonSet mounts all of `/dev` into a privileged pod (`deploy/k3s/agent-daemonset.yaml:296-306`, the `ponytail:` marker). The narrowing is `/dev/btrfs-control` plus the pool device; `format-pool.sh` labels the pool `wspool`, so `/dev/disk/by-label/wspool` is the one path identical on every node — but the device the container sees must match what `/proc/mounts` names for `/wspool-prod`, or btrfs tooling that resolves the mount's device fails.
 
