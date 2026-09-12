@@ -69,10 +69,7 @@ spec:
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.
               value: az://rustic-git
-            - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
-            - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+            # The object-store credentials are files in the `secrets` volume below.
             # Close a repo's database once nobody has touched it for this long. Reopening costs
             # a few object-store round trips; holding it costs a memtable. 5 minutes is the
             # default in code, set explicitly here so it is visible where it is operated.
@@ -97,8 +94,7 @@ spec:
             # token routes to the node owning the image. Unset, each pod invents its own secret at
             # startup, so a token minted by one is refused by the other and every push 401s after
             # a successful login.
-            - name: KLOUDLITE_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_JWT_SECRET.
             - name: KLOUDLITE_HOST_KEY
               value: /etc/kloudlite/host_key
             - name: KLOUDLITE_CACHE_DIR
@@ -109,15 +105,13 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.name } }   # the stable pod name, which the lease records as the holder
             # This cluster runs networkPolicy: none, so anything on the pod network can reach the
             # peer ports; the shared secret is what keeps a stray client from forwarding traffic in.
-            - name: KLOUDLITE_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_PEER_SECRET.
             # The git nodes are where invalidation happens: a push drops the repo's `refs` entry,
             # and a visibility flip or delete bumps its generation. Without this the api tier caches
             # answers that nothing can ever purge, and `set-visibility private` silently orphans
             # nothing — a disabled cache reports success, because for reads that is the correct
             # behaviour. Same secret the api tier reads.
-            - name: KLOUDLITE_REDIS_URL
-              valueFrom: { secretKeyRef: { name: kloudlite-redis, key: url, optional: true } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_REDIS_URL.
             # The owning node copies a repo's pre-move pull requests out of the directory on first
             # touch, so THIS is where the migration reads from. Deliberately NOT `optional: true`:
             # an absent variable is indistinguishable from "single-node, nothing to migrate", and
@@ -126,8 +120,8 @@ spec:
             # stop the pod, not quietly empty the repositories. Configured-but-unreachable is the
             # other case and is already loud: git keeps serving, pull routes fail until restart.
             # Removable once every repo carries `meta/pulls_migrated` and `pulls_for` is deleted.
-            - name: KLOUDLITE_MONGO_URI
-              valueFrom: { secretKeyRef: { name: kloudlite-mongo, key: uri } }
+            # ... as a file in the `secrets` volume below, where its source is deliberately NOT
+            # `optional` for the reason above: a missing secret must stop the pod.
             # Sized from measurement, not taste. The receive path buffers the whole pack, and peak
             # memory ran about 3x the pack size: a 500MB push peaked at 1.46Gi. The default cap is
             # 2GiB, which is well past what the 4Gi limit survives — a 1.5GB push OOMKilled the pod
@@ -233,6 +227,7 @@ spec:
           volumeMounts:
             - { name: hostkey, mountPath: /etc/kloudlite, readOnly: true }
             - { name: cache, mountPath: /var/cache/kloudlite }
+            - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
           # The image's KLOUDLITE_CACHE_DIR pins /var/cache/kloudlite, so the mount must land
           # exactly there — with a read-only root the directory has to be a mount.
       volumes:
@@ -253,6 +248,39 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: 20Gi
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: kloudlite-storage
+                  items:
+                    - { key: account, path: AZURE_STORAGE_ACCOUNT_NAME }
+                    - { key: key, path: AZURE_STORAGE_ACCOUNT_KEY }
+              - secret:
+                  name: kloudlite-jwt
+                  items:
+                    - { key: secret, path: KLOUDLITE_JWT_SECRET }
+              - secret:
+                  name: kloudlite-peer
+                  items:
+                    - { key: secret, path: KLOUDLITE_PEER_SECRET }
+              - secret:
+                  name: kloudlite-redis
+                  optional: true
+                  items:
+                    - { key: url, path: KLOUDLITE_REDIS_URL }
+              - secret:
+                  name: kloudlite-mongo
+                  items:
+                    - { key: uri, path: KLOUDLITE_MONGO_URI }
 ---
 # A drain may take one server at a time. Each server owns repos; losing two at once doubles the
 # set of repos that must be force-claimed by the survivors, and the rolling update already moves
@@ -424,10 +452,7 @@ spec:
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.
               value: az://rustic-git
-            - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
-            - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+            # The object-store credentials are files in the `secrets` volume below.
             # Browse routes live on the git nodes' PEER listener (8081), never the public one, so
             # this must point at the peer Service, not the LoadBalancer.
             - name: KLOUDLITE_UPSTREAM
@@ -440,34 +465,29 @@ spec:
             # Who may register regions (admin-gated route); everything else is owner-scoped.
             - name: KLOUDLITE_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
-            - name: KLOUDLITE_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_PEER_SECRET.
             # What `/v1/internal/builders/*` requires — the build gate's only credential. The gate
             # itself runs in the k3s region, so this Secret exists in BOTH clusters with the SAME
             # value (`deploy/k3s/builder-gate.yaml` reads the same name and key); rotating it means
             # writing both and rolling both. Without it those four routes are not mounted at all.
-            - name: KLOUDLITE_BUILDER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-builder-gate, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_BUILDER_SECRET.
             # Optional: without it every request still answers, just always from a git node
             # instead of the cache. See the Redis Deployment/config below for the policy this
             # relies on.
-            - name: KLOUDLITE_REDIS_URL
-              # `optional` is what makes the comment above true: without it a missing secret keeps
-              # the pod out of Ready forever, which is not "answers without the cache".
-              valueFrom: { secretKeyRef: { name: kloudlite-redis, key: url, optional: true } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_REDIS_URL, whose source is
+            # `optional` — that is what makes the comment above true: without it a missing secret
+            # keeps the pod out of Ready forever, which is not "answers without the cache".
             # Teams and users live in Cosmos (Mongo API). Optional for the same reason
             # the cache is: without it the browse routes still answer and only /v1/*
             # reports unavailable. A database outage must not stop reads.
-            - name: KLOUDLITE_MONGO_URI
-              valueFrom: { secretKeyRef: { name: kloudlite-mongo, key: uri, optional: true } }
+            # ... as an `optional` file in the `secrets` volume below, KLOUDLITE_MONGO_URI.
             - name: KLOUDLITE_MONGO_DB
               value: kloudlite
             # Signs the identity tokens the web app presents — and, on the git
             # nodes, the registry's bearer tokens. One key across every process
             # that mints or verifies one. Required: a pod that starts without it
             # mints tokens nobody else can verify, which is a silent outage.
-            - name: KLOUDLITE_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_JWT_SECRET.
             # The workspace CRDs live in the k3s workload cluster, not this one. `Config::infer`
             # tries a kubeconfig BEFORE in-cluster config, so pointing KUBECONFIG at the mounted
             # file is what makes /v1 write to that cluster instead of this pod's own API server —
@@ -497,6 +517,7 @@ spec:
           volumeMounts:
             - { name: cache, mountPath: /var/cache/kloudlite }
             - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+            - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
       volumes:
         # The image's KLOUDLITE_CACHE_DIR points here and the root filesystem is read-only, so
         # the directory must be a mount even though this tier reads repos through the git nodes
@@ -511,6 +532,44 @@ spec:
           secret:
             secretName: kloudlite-k3s-kubeconfig
             defaultMode: 0400
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: kloudlite-storage
+                  items:
+                    - { key: account, path: AZURE_STORAGE_ACCOUNT_NAME }
+                    - { key: key, path: AZURE_STORAGE_ACCOUNT_KEY }
+              - secret:
+                  name: kloudlite-jwt
+                  items:
+                    - { key: secret, path: KLOUDLITE_JWT_SECRET }
+              - secret:
+                  name: kloudlite-peer
+                  items:
+                    - { key: secret, path: KLOUDLITE_PEER_SECRET }
+              - secret:
+                  name: kloudlite-builder-gate
+                  items:
+                    - { key: secret, path: KLOUDLITE_BUILDER_SECRET }
+              - secret:
+                  name: kloudlite-redis
+                  optional: true
+                  items:
+                    - { key: url, path: KLOUDLITE_REDIS_URL }
+              - secret:
+                  name: kloudlite-mongo
+                  optional: true
+                  items:
+                    - { key: uri, path: KLOUDLITE_MONGO_URI }
 ---
 # A drain may not evict both api pods at once: this tier is the whole browse API and every /v1
 # write, and without the budget a two-node drain is a reschedule-long outage of both.
@@ -611,23 +670,19 @@ spec:
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.
               value: az://rustic-git
-            - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
-            - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+            # The object-store credentials are files in the `secrets` volume below.
             # The peer listener, like the api tier: the merge route is peer-only.
             - name: KLOUDLITE_UPSTREAM
               value: http://kloudlite:8081
-            - name: KLOUDLITE_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
+            # ... as a file in the `secrets` volume below, KLOUDLITE_PEER_SECRET — which is also
+            # why it is not in this process's environment: every `git` it spawns inherits that.
             - name: KLOUDLITE_CACHE_DIR
               value: /var/cache/kloudlite
             # Optional here too (see api/git tiers): without it a lane still runs, just on
             # `SWEEP_EVERY` alone instead of the stream nudge — see the startup warning in
             # `worker.rs` for why that is now a performance regression worth noticing, not a
             # silent default.
-            - name: KLOUDLITE_REDIS_URL
-              valueFrom: { secretKeyRef: { name: kloudlite-redis, key: url, optional: true } }
+            # ... as an `optional` file in the `secrets` volume below, KLOUDLITE_REDIS_URL.
             # Jobs are mostly waiting — on the fleet, on the database — so a lane
             # is cheap. Raise it before adding replicas.
             #
@@ -670,6 +725,7 @@ spec:
             capabilities: { drop: ["ALL"] }
           volumeMounts:
             - { name: cache, mountPath: /var/cache/kloudlite }
+            - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
       volumes:
         # Scratch only: packs are read from and written to object storage, and
         # anything here can be rebuilt by fetching again. Bounded so a leak here
@@ -677,6 +733,31 @@ spec:
         - name: cache
           emptyDir:
             sizeLimit: 20Gi
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: kloudlite-storage
+                  items:
+                    - { key: account, path: AZURE_STORAGE_ACCOUNT_NAME }
+                    - { key: key, path: AZURE_STORAGE_ACCOUNT_KEY }
+              - secret:
+                  name: kloudlite-peer
+                  items:
+                    - { key: secret, path: KLOUDLITE_PEER_SECRET }
+              - secret:
+                  name: kloudlite-redis
+                  optional: true
+                  items:
+                    - { key: url, path: KLOUDLITE_REDIS_URL }
 ---
 # Redis provisioning note (no manifest here — this cluster uses a managed instance): it MUST run
 # `maxmemory-policy volatile-lru`, and this is load-bearing, not tuning. Data keys all carry a
@@ -818,10 +899,7 @@ spec:
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.
               value: az://rustic-git
-            - name: AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
-            - name: AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+            # The object-store credentials are files in the `secrets` volume below.
             - name: KLOUDLITE_UPSTREAM
               value: http://kloudlite:8081
             - name: KLOUDLITE_API_ADDR
@@ -834,16 +912,10 @@ spec:
             # cluster, so this must be set on THIS Deployment's first rollout.
             - name: KLOUDLITE_WORKSPACES_ADMINS
               value: karthik@kloudlite.io
-            - name: KLOUDLITE_PEER_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-peer, key: secret } }
-            - name: KLOUDLITE_REDIS_URL
-              valueFrom: { secretKeyRef: { name: kloudlite-redis, key: url, optional: true } }
-            - name: KLOUDLITE_MONGO_URI
-              valueFrom: { secretKeyRef: { name: kloudlite-mongo, key: uri, optional: true } }
+            # The peer secret, the Redis and Mongo URLs and the signing key are all files in the
+            # `secrets` volume below.
             - name: KLOUDLITE_MONGO_DB
               value: kloudlite
-            - name: KLOUDLITE_JWT_SECRET
-              valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
             # Its own kubeconfig, bound to the kloudlite-admin ServiceAccount (Task 10) rather
             # than kloudlite-api's — the split RBAC only means something if the admin process
             # authenticates as the admin SA. Secret not created by this task; see
@@ -860,15 +932,15 @@ spec:
             # what an unset variable looks like.
             - name: KLOUDLITE_CLICKHOUSE_URL
               value: http://clickstack-clickhouse-clickhouse-headless.clickstack.svc:8123
+            # The user name is not a credential and stays here; the password is a file in the
+            # `secrets` volume below.
             - name: KLOUDLITE_CLICKHOUSE_USER
               valueFrom: { secretKeyRef: { name: kloudlite-clickhouse, key: user, optional: true } }
-            - name: KLOUDLITE_CLICKHOUSE_PASSWORD
-              valueFrom: { secretKeyRef: { name: kloudlite-clickhouse, key: password, optional: true } }
             # One JSON line per failed probe run and per SloBurn transition
             # (crates/workspaces/src/history/notify.rs). Optional: unset means the console and the
             # HyperDX alert are the only places a breach shows up, never a crash.
-            - name: KLOUDLITE_SLO_WEBHOOK
-              valueFrom: { secretKeyRef: { name: kloudlite-slo-webhook, key: url, optional: true } }
+            # ... as an `optional` file in the `secrets` volume below, KLOUDLITE_SLO_WEBHOOK: the
+            # URL carries its own token.
             # Only for the "Open in HyperDX" link — unset means no link, never a dead one.
             - name: KLOUDLITE_HYPERDX_URL
               value: https://hyperdx-dev.kloudlite.io
@@ -896,6 +968,7 @@ spec:
           volumeMounts:
             - { name: cache, mountPath: /var/cache/kloudlite }
             - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+            - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
       volumes:
         - name: cache
           emptyDir:
@@ -904,6 +977,50 @@ spec:
           secret:
             secretName: kloudlite-admin-k3s-kubeconfig
             defaultMode: 0400
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: kloudlite-storage
+                  items:
+                    - { key: account, path: AZURE_STORAGE_ACCOUNT_NAME }
+                    - { key: key, path: AZURE_STORAGE_ACCOUNT_KEY }
+              - secret:
+                  name: kloudlite-jwt
+                  items:
+                    - { key: secret, path: KLOUDLITE_JWT_SECRET }
+              - secret:
+                  name: kloudlite-peer
+                  items:
+                    - { key: secret, path: KLOUDLITE_PEER_SECRET }
+              - secret:
+                  name: kloudlite-redis
+                  optional: true
+                  items:
+                    - { key: url, path: KLOUDLITE_REDIS_URL }
+              - secret:
+                  name: kloudlite-mongo
+                  optional: true
+                  items:
+                    - { key: uri, path: KLOUDLITE_MONGO_URI }
+              - secret:
+                  name: kloudlite-clickhouse
+                  optional: true
+                  items:
+                    - { key: password, path: KLOUDLITE_CLICKHOUSE_PASSWORD }
+              - secret:
+                  name: kloudlite-slo-webhook
+                  optional: true
+                  items:
+                    - { key: url, path: KLOUDLITE_SLO_WEBHOOK }
 ---
 # kloudlite-admin has no repo-request path, so no PodDisruptionBudget: an eviction during a
 # drain is exactly the "a few minutes' outage is fine" tradeoff replicas:1 above already made.
@@ -1772,8 +1889,9 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
-                # The probe holds no password: it MINTS its own user and admin tokens with this
-                # key, which is why it needs the same Secret the server tier signs with.
+                # The probe holds no password: it MINTS its own user and admin tokens with the
+                # same key the server tier signs with — mounted as a file in the `secrets` volume
+                # below, never env (2026-09-12 review #70).
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
@@ -1785,8 +1903,6 @@ spec:
                 # land inside the pod's own deadline.
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "840"
-                - name: KLOUDLITE_JWT_SECRET
-                  valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
                 # mounted kubeconfig is what stages 5-7 and the drills talk to — the projected
                 # ServiceAccount token above reaches only THIS cluster's pods.
@@ -1806,6 +1922,7 @@ spec:
                 - { name: tmp, mountPath: /tmp }
                 - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
                 - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+                - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
           volumes:
             # The git clones, the crane blobs and the run's own steps.json. 2Gi because the weekly
             # suite pushes a large pack and a large layer through here.
@@ -1830,6 +1947,21 @@ spec:
               secret:
                 secretName: kloudlite-slo-k3s-kubeconfig
                 defaultMode: 0400
+            # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+            # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+            # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+            # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+            # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+            # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+            # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+            - name: secrets
+              projected:
+                defaultMode: 0440
+                sources:
+                  - secret:
+                      name: kloudlite-jwt
+                      items:
+                        - { key: secret, path: KLOUDLITE_JWT_SECRET }
 ---
 # The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
 # person can perform (packages, teams, invitations, branch protection, a two-service environment,
@@ -1891,8 +2023,9 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
-                # The probe holds no password: it MINTS its own user and admin tokens with this
-                # key, which is why it needs the same Secret the server tier signs with.
+                # The probe holds no password: it MINTS its own user and admin tokens with the
+                # same key the server tier signs with — mounted as a file in the `secrets` volume
+                # below, never env (2026-09-12 review #70).
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
@@ -1909,8 +2042,6 @@ spec:
                   value: "slo-hourly-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "3000"
-                - name: KLOUDLITE_JWT_SECRET
-                  valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 # The workspace CRDs and the pods to exec into live in the k3s cluster, so the
                 # mounted kubeconfig is what stages 5-7 and the drills talk to — the projected
                 # ServiceAccount token above reaches only THIS cluster's pods.
@@ -1930,6 +2061,7 @@ spec:
                 - { name: tmp, mountPath: /tmp }
                 - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
                 - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+                - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
           volumes:
             # The git clones, the crane blobs and the run's own steps.json. 2Gi because the weekly
             # suite pushes a large pack and a large layer through here.
@@ -1954,6 +2086,21 @@ spec:
               secret:
                 secretName: kloudlite-slo-k3s-kubeconfig
                 defaultMode: 0400
+            # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+            # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+            # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+            # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+            # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+            # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+            # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+            - name: secrets
+              projected:
+                defaultMode: 0440
+                sources:
+                  - secret:
+                      name: kloudlite-jwt
+                      items:
+                        - { key: secret, path: KLOUDLITE_JWT_SECRET }
 ---
 # The weekly suite: the fast journey plus the heavy checks (large push, cold nix profile,
 # cross-node start) and the control-plane failover drill. 02:12 Sunday UTC: after the 02:02 hourly
@@ -2021,8 +2168,6 @@ spec:
                   value: "slo-drill-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "6600"
-                - name: KLOUDLITE_JWT_SECRET
-                  valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 - name: KUBECONFIG
                   value: /etc/kloudlite/k3s/config
                 - name: HOME
@@ -2038,6 +2183,7 @@ spec:
                 - { name: tmp, mountPath: /tmp }
                 - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
                 - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+                - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
           volumes:
             - name: tmp
               emptyDir:
@@ -2052,6 +2198,21 @@ spec:
               secret:
                 secretName: kloudlite-slo-k3s-kubeconfig
                 defaultMode: 0400
+            # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+            # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+            # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+            # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+            # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+            # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+            # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+            - name: secrets
+              projected:
+                defaultMode: 0440
+                sources:
+                  - secret:
+                      name: kloudlite-jwt
+                      items:
+                        - { key: secret, path: KLOUDLITE_JWT_SECRET }
 ---
 # The monthly suite: the backup checks and the destructive drills (dead node, drain, Redis down).
 # Also a SUNDAY schedule, not a day-of-month one — cron cannot say "the first Sunday", so this
@@ -2115,8 +2276,6 @@ spec:
                   value: "slo-drill-other"
                 - name: KLOUDLITE_SLO_BUDGET_SECS
                   value: "6900"
-                - name: KLOUDLITE_JWT_SECRET
-                  valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
                 - name: KUBECONFIG
                   value: /etc/kloudlite/k3s/config
                 - name: HOME
@@ -2128,18 +2287,15 @@ spec:
                 # with: a client of everything, holding no object-store credential at all.
                 # `object_store` reads the first pair from the environment itself, under exactly
                 # these names (`crates/storage/src/config.rs`'s `MicrosoftAzureBuilder::from_env`).
-                - name: AZURE_STORAGE_ACCOUNT_NAME
-                  valueFrom: { secretKeyRef: { name: kloudlite-storage, key: account } }
-                - name: AZURE_STORAGE_ACCOUNT_KEY
-                  valueFrom: { secretKeyRef: { name: kloudlite-storage, key: key } }
+                # ... as files in the `secrets` volume below, under exactly those names.
                 # `bak.versioning` and `bak.cosmos` are ARM reads; this is the same Monitoring
                 # Reader principal the OTel collector already uses, which is read-only on both.
                 - name: AZURE_TENANT_ID
                   valueFrom: { secretKeyRef: { name: kloudlite-azuremonitor, key: tenant } }
                 - name: AZURE_CLIENT_ID
                   valueFrom: { secretKeyRef: { name: kloudlite-azuremonitor, key: client-id } }
-                - name: AZURE_CLIENT_SECRET
-                  valueFrom: { secretKeyRef: { name: kloudlite-azuremonitor, key: client-secret } }
+                # Its password is a file in the `secrets` volume below; a tenant and a client id
+                # are identifiers, not credentials, so they stay here.
                 # Which account, group and Cosmos account those two URLs name. All four or none:
                 # an ARM URL with one blank segment is a 404 the step would report as a missing
                 # backup, so a partial set skips both ids instead.
@@ -2167,6 +2323,7 @@ spec:
                 - { name: tmp, mountPath: /tmp }
                 - { name: ssh-key, mountPath: /etc/slo-ssh, readOnly: true }
                 - { name: k3s-kubeconfig, mountPath: /etc/kloudlite/k3s, readOnly: true }
+                - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
           volumes:
             - name: tmp
               emptyDir:
@@ -2181,3 +2338,27 @@ spec:
               secret:
                 secretName: kloudlite-slo-k3s-kubeconfig
                 defaultMode: 0400
+            # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+            # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+            # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+            # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+            # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+            # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+            # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+            - name: secrets
+              projected:
+                defaultMode: 0440
+                sources:
+                  - secret:
+                      name: kloudlite-jwt
+                      items:
+                        - { key: secret, path: KLOUDLITE_JWT_SECRET }
+                  - secret:
+                      name: kloudlite-storage
+                      items:
+                        - { key: account, path: AZURE_STORAGE_ACCOUNT_NAME }
+                        - { key: key, path: AZURE_STORAGE_ACCOUNT_KEY }
+                  - secret:
+                      name: kloudlite-azuremonitor
+                      items:
+                        - { key: client-secret, path: AZURE_CLIENT_SECRET }

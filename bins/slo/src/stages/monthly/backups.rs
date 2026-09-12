@@ -15,9 +15,15 @@ pub(crate) async fn backups(c: &mut Ctx) {
 /// `AZURE_STORAGE_ACCOUNT_NAME`/`_KEY`, which `object_store` reads from the environment itself —
 /// the same Secret every other tier mounts, given to the MONTHLY CronJob only.
 pub(crate) async fn slots() -> Result<Vec<(String, chrono::DateTime<Utc>)>> {
-    let store = object_store::azure::MicrosoftAzureBuilder::from_env()
-        .with_container_name(BACKUP_CONTAINER)
-        .build()
+    let mut b =
+        object_store::azure::MicrosoftAzureBuilder::from_env().with_container_name(BACKUP_CONTAINER);
+    if let Some(v) = kloudlite_core::secret::read("AZURE_STORAGE_ACCOUNT_NAME") {
+        b = b.with_account(v);
+    }
+    if let Some(v) = kloudlite_core::secret::read("AZURE_STORAGE_ACCOUNT_KEY") {
+        b = b.with_access_key(v);
+    }
+    let store = b.build()
         .context("could not reach the backup container")?;
     let objects: Vec<object_store::ObjectMeta> =
         object_store::ObjectStore::list(&store, None).try_collect().await.context("could not list it")?;
@@ -191,8 +197,10 @@ pub(crate) async fn cosmos(c: &mut Ctx) {
 /// cache for a process that makes two requests in its life is code that can only rot.
 pub(crate) async fn arm(c: &Ctx, path: &str) -> Result<Value> {
     let var = |k: &str| std::env::var(k).with_context(|| format!("{k} is not set"));
-    let (tenant, client, secret) =
-        (var("AZURE_TENANT_ID")?, var("AZURE_CLIENT_ID")?, var("AZURE_CLIENT_SECRET")?);
+    // Tenant and client id are identifiers and stay env; only the password moves to a file.
+    let (tenant, client) = (var("AZURE_TENANT_ID")?, var("AZURE_CLIENT_ID")?);
+    let secret = kloudlite_core::secret::read("AZURE_CLIENT_SECRET")
+        .context("AZURE_CLIENT_SECRET is not set")?;
     let token_url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
     let r = c
         .http

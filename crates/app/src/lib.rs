@@ -179,7 +179,7 @@ impl App {
         // key present with no value) is "unset" here, not a zero-length signing key that panics
         // in `Jwt::new` below (2026-09-12). Fleet mode never reaches the fallback — `main.rs`
         // refuses the boot first.
-        let jwt_secret = std::env::var("KLOUDLITE_JWT_SECRET").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+        let jwt_secret = kloudlite_core::secret::read("KLOUDLITE_JWT_SECRET").filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
             use rand::Rng;
             rand::thread_rng()
                 .sample_iter(rand::distributions::Alphanumeric)

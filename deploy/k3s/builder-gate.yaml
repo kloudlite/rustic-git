@@ -93,6 +93,10 @@ spec:
       tolerations:
         - key: kloudlite.io/role
           operator: Exists
+      # fsGroup only, and only so the projected `secrets` volume below lands root:1001 rather
+      # than root:root — the container's own runAsUser/runAsGroup are unchanged.
+      securityContext:
+        fsGroup: 1001
       containers:
         - name: builder-gate
           # `pin.sh` rewrites this to `:<sha>@sha256:<digest>` — the placeholder is here only so
@@ -111,14 +115,11 @@ spec:
               value: json
             - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
-            # The same secret the api's `/v1/internal/builders/*` requires. The api runs on AKS
-            # and the gate here, so this Secret exists in BOTH clusters with the SAME value —
-            # rotating it means writing both and rolling both. The pod fails closed without it.
-            - name: KLOUDLITE_BUILDER_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: kloudlite-builder-gate
-                  key: secret
+            # KLOUDLITE_BUILDER_SECRET is not here: it is a file in the `secrets` volume below
+            # (2026-09-12 review #70). It is the same secret the api's `/v1/internal/builders/*`
+            # requires; the api runs on AKS and the gate here, so this Secret exists in BOTH
+            # clusters with the SAME value — rotating it means writing both and rolling both. The
+            # pod fails closed without it.
             - name: KLOUDLITE_API_URL
               valueFrom:
                 configMapKeyRef:
@@ -156,6 +157,24 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/kloudlite, readOnly: true }
+      volumes:
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0440 with this pod's `fsGroup: 1001`: the files land root:1001.
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: kloudlite-builder-gate
+                  items:
+                    - { key: secret, path: KLOUDLITE_BUILDER_SECRET }
 ---
 # `builder-gate`, not `kloudlite-builder-gate`: this name is spliced into the address every
 # workspace's buildx is configured with (`k8s::BUILDKIT_HOST`), so it is a contract, not a label.

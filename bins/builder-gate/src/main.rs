@@ -38,8 +38,8 @@ async fn main() {
 
     // Both required, fail closed: without the secret every api call is a 401 and the gate would
     // accept connections it can do nothing with.
-    let secret = match std::env::var("KLOUDLITE_BUILDER_SECRET") {
-        Ok(s) if !s.is_empty() => s,
+    let secret = match kloudlite_core::secret::read("KLOUDLITE_BUILDER_SECRET") {
+        Some(s) if !s.is_empty() => s,
         _ => fatal("KLOUDLITE_BUILDER_SECRET is required"),
     };
     let base = match std::env::var("KLOUDLITE_API_URL") {

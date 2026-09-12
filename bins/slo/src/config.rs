@@ -101,7 +101,11 @@ impl Config {
                 .filter(|h| !h.is_empty())
                 .collect(),
             origin_ip: Some(opt("KLOUDLITE_SLO_ORIGIN_IP", "")).filter(|v| !v.is_empty()),
-            jwt_secret: req("KLOUDLITE_JWT_SECRET")?,
+            // Projected file first, env second: the probe mints its own tokens, so this is a
+            // signing key and not a setting (2026-09-12 review #70).
+            jwt_secret: kloudlite_core::secret::read("KLOUDLITE_JWT_SECRET")
+                .filter(|v| !v.is_empty())
+                .with_context(|| "KLOUDLITE_JWT_SECRET is not set".to_string())?,
             probe_user: opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER),
             other_user: opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER),
             ssh_key_path: opt("KLOUDLITE_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),

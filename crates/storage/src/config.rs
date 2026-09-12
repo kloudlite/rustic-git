@@ -76,6 +76,12 @@ pub fn object_store_views() -> Result<StoreViews> {
             .with_client_options(
                 ClientOptions::new().with_timeout(std::time::Duration::from_secs(timeout)),
             );
+        if let Some(v) = kloudlite_core::secret::read("AWS_ACCESS_KEY_ID") {
+            b = b.with_access_key_id(v);
+        }
+        if let Some(v) = kloudlite_core::secret::read("AWS_SECRET_ACCESS_KEY") {
+            b = b.with_secret_access_key(v);
+        }
         if let Ok(ep) = std::env::var("AWS_ENDPOINT") {
             b = b.with_endpoint(ep).with_virtual_hosted_style_request(false);
         }
@@ -88,11 +94,17 @@ pub fn object_store_views() -> Result<StoreViews> {
         // `MultipartStore` — and this is the production backend, so without the concrete value
         // here every registry PATCH took the O(N·K) re-stream fallback.
         use slatedb::object_store::azure::MicrosoftAzureBuilder;
-        let s = Arc::new(
-            MicrosoftAzureBuilder::from_env()
-                .with_container_name(container)
-                .build()?,
-        );
+        let mut b = MicrosoftAzureBuilder::from_env().with_container_name(container);
+        // `from_env` already read `AZURE_STORAGE_*`; these override it when the same names are
+        // projected as files instead, which is how the account key stops living in our env
+        // (2026-09-12 review #70). Same value when they are not, so nothing changes off-cluster.
+        if let Some(v) = kloudlite_core::secret::read("AZURE_STORAGE_ACCOUNT_NAME") {
+            b = b.with_account(v);
+        }
+        if let Some(v) = kloudlite_core::secret::read("AZURE_STORAGE_ACCOUNT_KEY") {
+            b = b.with_access_key(v);
+        }
+        let s = Arc::new(b.build()?);
         mp = Some(s.clone());
         s
     } else {
@@ -177,7 +189,7 @@ pub async fn open_store(background: bool) -> Result<Arc<Store>> {
     // Every process that can write refs or flip visibility needs the handle to invalidate through
     // — including the admin CLI, which is where purge-cache and set-visibility run.
     store.cache = Arc::new(
-        crate::cache::Cache::connect(std::env::var("KLOUDLITE_REDIS_URL").ok().as_deref())
+        crate::cache::Cache::connect(kloudlite_core::secret::read("KLOUDLITE_REDIS_URL").as_deref())
             .await,
     );
     Ok(Arc::new(store))

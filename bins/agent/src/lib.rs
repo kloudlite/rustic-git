@@ -303,7 +303,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     tokio::spawn(controller::keys::run(ctx.clone()));
     // Fail closed: no `WS_PEER_SECRET` means no listener at all, never one guarded by an empty
     // secret that would compare-equal to a missing header.
-    if let Ok(secret) = std::env::var("WS_PEER_SECRET") {
+    if let Some(secret) = kloudlite_core::secret::read("WS_PEER_SECRET") {
         if !secret.is_empty() {
             let peer_ctx = ctx.clone();
             tokio::spawn(async move {

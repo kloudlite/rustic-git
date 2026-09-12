@@ -91,8 +91,8 @@ async fn run() -> Result<()> {
         central.clone(),
     ));
     let upstream = env("KLOUDLITE_UPSTREAM", "http://kloudlite:8081");
-    let secret = std::env::var("KLOUDLITE_PEER_SECRET")
-        .map_err(|_| err("KLOUDLITE_PEER_SECRET required"))?;
+    let secret = kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET")
+        .ok_or_else(|| err("KLOUDLITE_PEER_SECRET required"))?;
     // A client that cannot be built is a boot failure: `unwrap_or_default` handed back one with
     // NO timeout, and a lane behind a hung claim POST is a lane the heartbeat probe then kills.
     let client = reqwest::Client::builder()

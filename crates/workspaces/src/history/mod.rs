@@ -113,7 +113,7 @@ impl History {
             .ok()
             .filter(|u| !u.is_empty())?;
         let user = std::env::var("KLOUDLITE_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into());
-        let password = std::env::var("KLOUDLITE_CLICKHOUSE_PASSWORD").unwrap_or_default();
+        let password = kloudlite_core::secret::read("KLOUDLITE_CLICKHOUSE_PASSWORD").unwrap_or_default();
         History::new(&url, &user, &password)
     }
 

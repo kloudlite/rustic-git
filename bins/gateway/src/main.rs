@@ -39,7 +39,7 @@ async fn main() {
     // nothing about startup order.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let secret = std::env::var("KLOUDLITE_JWT_SECRET").unwrap_or_default();
+    let secret = kloudlite_core::secret::read("KLOUDLITE_JWT_SECRET").unwrap_or_default();
     let jwt = match Jwt::new(&secret) {
         Ok(j) => j,
         Err(e) => fatal(format!("KLOUDLITE_JWT_SECRET: {e}")),

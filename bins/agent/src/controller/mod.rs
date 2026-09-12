@@ -326,7 +326,7 @@ impl Ctx {
             pull_wake: Arc::new(tokio::sync::Notify::new()),
             // 0, not "now": a restarted agent's first sync cut should wake immediately.
             last_sync_wake: std::sync::atomic::AtomicI64::new(0),
-            peer_secret: std::env::var("WS_PEER_SECRET").unwrap_or_default(),
+            peer_secret: kloudlite_core::secret::read("WS_PEER_SECRET").unwrap_or_default(),
             wake_volume,
             wake_workspace,
             wakes: Mutex::new(Some((vol_rx, ws_rx))),

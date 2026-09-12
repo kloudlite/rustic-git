@@ -6,6 +6,7 @@ pub mod log;
 pub mod metrics;
 pub mod peer;
 pub mod pktline;
+pub mod secret;
 pub mod settings;
 #[cfg(feature = "ssh")]
 pub mod sshkeys;

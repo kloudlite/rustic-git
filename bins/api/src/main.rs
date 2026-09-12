@@ -248,8 +248,8 @@ async fn run() -> Result<()> {
     // The browse routes live on the git nodes' PEER listener, so this must be the
     // peer Service, never the public one.
     let upstream = env("KLOUDLITE_UPSTREAM", "http://kloudlite:8081");
-    let secret = std::env::var("KLOUDLITE_PEER_SECRET")
-        .map_err(|_| err("KLOUDLITE_PEER_SECRET required"))?;
+    let secret = kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET")
+        .ok_or_else(|| err("KLOUDLITE_PEER_SECRET required"))?;
 
     // Optional on purpose: without it the browse routes still answer and only the
     // team routes report unavailable. A database outage must not stop reads that
@@ -258,8 +258,8 @@ async fn run() -> Result<()> {
     // both because the bootstrap below needs it and so the router-selection match downstream
     // reuses this binding rather than reading the env var a second time.
     let role = std::env::var("KLOUDLITE_API_ROLE").unwrap_or_else(|_| "user".into());
-    let directory = match std::env::var("KLOUDLITE_MONGO_URI") {
-        Ok(uri) if !uri.is_empty() => {
+    let directory = match kloudlite_core::secret::read("KLOUDLITE_MONGO_URI") {
+        Some(uri) if !uri.is_empty() => {
             let db = env("KLOUDLITE_MONGO_DB", "kloudlite");
             let d = kloudlite_pulls::directory::Directory::connect(&uri, &db).await?;
             tracing::info!(db = %db, "directory.connected");
@@ -310,8 +310,8 @@ async fn run() -> Result<()> {
     // Same rule as the git tier: in a fleet an unset secret is a startup error, not a
     // degraded mode, because the tokens this tier mints are verified by the other one.
     require_jwt_secret_from_env()?;
-    let jwt = match std::env::var("KLOUDLITE_JWT_SECRET") {
-        Ok(s) if !s.is_empty() => Some(Arc::new(kloudlite_core::jwt::Jwt::new(&s)?)),
+    let jwt = match kloudlite_core::secret::read("KLOUDLITE_JWT_SECRET") {
+        Some(s) if !s.is_empty() => Some(Arc::new(kloudlite_core::jwt::Jwt::new(&s)?)),
         _ => {
             tracing::warn!(reason = "jwt-secret-unset", "auth.signing.unavailable");
             None
@@ -331,15 +331,14 @@ async fn run() -> Result<()> {
             // an api that came up without it would answer 401 to every build in the region, and
             // finding that out at boot beats finding it out from a user.
             if role != "admin" {
-                let secret = std::env::var("KLOUDLITE_BUILDER_SECRET")
-                    .ok()
+                let secret = kloudlite_core::secret::read("KLOUDLITE_BUILDER_SECRET")
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| err("KLOUDLITE_BUILDER_SECRET required"))?;
                 state = state.with_builder_secret(Some(secret));
             }
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
-            state = state.with_slo_webhook(std::env::var("KLOUDLITE_SLO_WEBHOOK").ok());
+            state = state.with_slo_webhook(kloudlite_core::secret::read("KLOUDLITE_SLO_WEBHOOK"));
             // The package index: Nixhub, the mirrored index in our own object store, and that
             // same object store as the day-long resolution cache.
             state = state.with_resolver(Arc::new(

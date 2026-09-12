@@ -79,7 +79,7 @@ async fn serve() -> Result<()> {
     // this node may own repos whose changes live only in Mongo, and recording them as migrated would
     // hide them for good. So it still serves git, but pull routes fail loudly until it is restarted
     // against a reachable directory.
-    let dir = match std::env::var("KLOUDLITE_MONGO_URI").ok().filter(|s| !s.is_empty()) {
+    let dir = match kloudlite_core::secret::read("KLOUDLITE_MONGO_URI").filter(|s| !s.is_empty()) {
         Some(uri) => {
             match kloudlite_server::directory::Directory::connect(&uri, &env("KLOUDLITE_MONGO_DB", "kloudlite")).await {
                 Ok(d) => kloudlite_server::pulls::Source::Directory(Arc::new(d)),

@@ -44,7 +44,7 @@ pub(crate) use kloudlite_core::sshkeys::ssh_fingerprint;
 /// nothing configured (single node, or an offline run) does it proceed, saying out loud what
 /// it is assuming.
 pub(crate) fn fleet_guard(cmd: &str, path: &str) -> Result<()> {
-    fleet_check(cmd, path, std::env::var("KLOUDLITE_UPSTREAM").ok(), std::env::var("KLOUDLITE_PEER_SECRET").ok())
+    fleet_check(cmd, path, std::env::var("KLOUDLITE_UPSTREAM").ok(), kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET"))
 }
 
 /// The decision itself, with the environment already read — so the test can state both variables
@@ -245,7 +245,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             // exactly that window. Neither set is still a guess — this process cannot see whether a
             // node is serving the repo — so the direct path says out loud what it is assuming.
             let upstream = std::env::var("KLOUDLITE_UPSTREAM").ok();
-            let secret = std::env::var("KLOUDLITE_PEER_SECRET").ok();
+            let secret = kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET");
             if upstream.is_none() && secret.is_none() {
                 eprintln!(
                     "set-visibility: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — \
@@ -267,7 +267,7 @@ pub async fn run(a: &[&str], store: &Arc<Store>) -> Result<()> {
             // that owns the image's database rather than written here under a live writer.
             // Same either-variable test for "configured", for the same reason.
             let upstream = std::env::var("KLOUDLITE_UPSTREAM").ok();
-            let secret = std::env::var("KLOUDLITE_PEER_SECRET").ok();
+            let secret = kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET");
             if upstream.is_none() && secret.is_none() {
                 eprintln!(
                     "set-image-visibility: no KLOUDLITE_UPSTREAM or KLOUDLITE_PEER_SECRET set — \

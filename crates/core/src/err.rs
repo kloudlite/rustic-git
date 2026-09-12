@@ -42,8 +42,10 @@ pub fn require_jwt_secret(peer_svc: &str, jwt_secret: &str) -> Result<()> {
 
 /// Reads the two variables `require_jwt_secret` judges, so a caller cannot get the pair wrong.
 pub fn require_jwt_secret_from_env() -> Result<()> {
-    let var = |k: &str| std::env::var(k).unwrap_or_default();
-    require_jwt_secret(var("KLOUDLITE_PEER_SVC").trim(), var("KLOUDLITE_JWT_SECRET").trim())
+    let peer_svc = std::env::var("KLOUDLITE_PEER_SVC").unwrap_or_default();
+    // The secret may arrive as a projected file now; the Service name is plain config and stays env.
+    let jwt = crate::secret::read("KLOUDLITE_JWT_SECRET").unwrap_or_default();
+    require_jwt_secret(peer_svc.trim(), jwt.trim())
 }
 
 /// Lowercase hex, the encoding every digest, fingerprint and token id in this crate uses on the

@@ -257,23 +257,24 @@ spec:
             # puller otherwise blocks that volume's replication fleet-wide for the client's hour.
             - name: WS_PEER_SERVE_TIMEOUT_SECS
               value: "900"
-          envFrom:
-            # `WS_REGION` (which region this node belongs to, matched against the `Region` CRD)
-            # and WS_PEER_SECRET below. Absent keys leave the engine in its dev fallbacks, which is
-            # why this is a Secret and not inline.
-            #
-            # WS_PEER_SECRET lives here too, not as a plain env value: it authenticates the peer
-            # listener (btrfs send) AND gates the puller — unset, `lib.rs` never spawns the
-            # listener and `peer/pull.rs`'s beat sends nothing, so replication is fail-closed by the
-            # same key that would otherwise let any pod on the cluster (peer 8444 is reachable from
-            # every namespace absent the NetworkPolicy in agent-peer.yaml) drive a btrfs send.
+            # Which region this node belongs to, matched against the `Region` CRD. It comes from
+            # the hand-made `kloudlite-agent` Secret because that is where it has always lived, not
+            # because it is one; absent, the engine stays in its dev fallbacks.
             #
             # A snapshot is restorable only in the region it was pushed in: this node reads its own
             # region's container and nothing else. Restoring elsewhere means pushing again from a
             # node in the destination region. See README "Two things that bite".
-            - secretRef:
-                name: kloudlite-agent
-                optional: true
+            - name: WS_REGION
+              valueFrom:
+                secretKeyRef: { name: kloudlite-agent, key: WS_REGION, optional: true }
+            # WS_PEER_SECRET is NOT here. It was, via an `envFrom` of the whole Secret — and this
+            # container spawns `btrfs`, `nix` and `mount`, every one of which inherited it
+            # (2026-09-12 review #70). It is a file in the `secrets` volume below now, read by
+            # `kloudlite_core::secret::read`. It authenticates the peer listener (btrfs send) AND
+            # gates the puller — unset, `lib.rs` never spawns the listener and `peer/pull.rs`'s
+            # beat sends nothing, so replication is fail-closed by the same key that would
+            # otherwise let any pod on the cluster (peer 8444 is reachable from every namespace
+            # absent the NetworkPolicy in agent-peer.yaml) drive a btrfs send.
           ports:
             - name: peer
               containerPort: 8444
@@ -299,6 +300,9 @@ spec:
               mountPath: /nix
             - name: nix-conf
               mountPath: /etc/nix
+            - name: secrets
+              mountPath: /var/run/secrets/kloudlite
+              readOnly: true
           livenessProbe:
             # The controller touches this file on every reconcile tick. A watch that silently
             # stopped delivering looks exactly like an idle cluster from outside — this is what
@@ -376,3 +380,21 @@ spec:
         - name: nix-conf
           configMap:
             name: kloudlite-nix
+        # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
+        # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
+        # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
+        # (the worker runs `git`, the agent runs `btrfs` and `nix`). The `path` under `items` IS
+        # the env var name `kloudlite_core::secret::read` asks for, so nothing has to learn a
+        # second naming scheme, and its env fallback keeps a laptop run working unchanged.
+        # 0400, not the 0440 the AKS tiers use: this container runs as root, so no fsGroup
+        # and no group bit is needed to open it.
+        - name: secrets
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: kloudlite-agent
+                  optional: true
+                  items:
+                    - { key: WS_PEER_SECRET, path: WS_PEER_SECRET }
+
