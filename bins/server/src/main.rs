@@ -62,7 +62,11 @@ async fn serve() -> Result<()> {
         // cannot fence a stale leader, so it is refused here rather than found out in a failover.
         kloudlite_server::config::fleet_store_ok(&env("KLOUDLITE_S3_URL", ""))?;
         let me = need("KLOUDLITE_SELF")?;
-        let secret = need("KLOUDLITE_PEER_SECRET")?;
+        // The one secret in this block: file first, env second — `need` is for plain config.
+        // srv-2 crash-looped on 2026-09-12 when the manifest moved it to a file and this read
+        // stayed on the environment.
+        let secret = kloudlite_core::secret::read("KLOUDLITE_PEER_SECRET")
+            .ok_or_else(|| err("KLOUDLITE_PEER_SECRET is required with KLOUDLITE_PEER_SVC".to_string()))?;
         let store = kloudlite_server::ownership::OwnershipStore::open(store.os.clone());
         (me, secret, store)
     };
