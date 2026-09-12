@@ -17,7 +17,7 @@
 # deploy/k3s/dev-push.sh loop. Only the five kloudlite binaries make it into the context — see
 # .dockerignore — so a fat `target/` costs nothing to send.
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS server
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
 # git: the merge worker performs merges by running it (see crates/pulls/src/merge_worker.rs) —
 # bookworm ships 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all
@@ -53,7 +53,7 @@ CMD ["serve"]
 # The node controller. A separate IMAGE, not a fourth binary in the server one: this runs as root
 # with btrfs-progs and the host pool mounted, and shipping root's toolchain to the three processes
 # that must never have it is exactly what the split prevents.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS agent
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS agent
 # btrfs-progs: every storage operation shells out to it.
 # util-linux: losetup/mount for the block-layer restore path.
 # ca-certificates: the registry client and Azure blob store speak TLS.
@@ -81,7 +81,7 @@ ENTRYPOINT ["kloudlite-agent"]
 # The SSH gateway. Its own image rather than a fourth binary in the server one: this pod runs with
 # NET_BIND_SERVICE to hold hostPort 443 on a pool node, and that capability has no business on the
 # git server's pods.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS gateway
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS gateway
 # ca-certificates only: the gateway talks to the kube API server over TLS and to nothing else.
 # libcap2-bin is build-time only, for the setcap below.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
@@ -104,7 +104,7 @@ ENTRYPOINT ["kloudlite-gateway"]
 
 # The build gate. Its own image for the same reason the gateway has one: a different pod, a
 # different ServiceAccount, and no reason for the git server's pods to carry either binary.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS builder-gate
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS builder-gate
 # ca-certificates only: the gate talks TLS to the kube API server and to the api tier's public
 # URL, and plain TCP to buildkit.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
@@ -135,7 +135,7 @@ ENTRYPOINT ["kloudlite-builder-gate"]
 # Pinned by digest like every other stage (2026-09-12 review #69): a tag is a pointer Docker Hub
 # can move, and this is the image a person's whole working day runs inside. Looked up 2026-09-12
 # with the same recipe as nixos/nix in deploy/k3s/agent-daemonset.yaml; the tag stays for humans.
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS workspace
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS workspace
 ARG PROFILE=release
 RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx nodejs npm \
     && mkdir -p /var/empty \
@@ -177,7 +177,7 @@ ENV DO_NOT_TRACK=1
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a
 # compromised request handler everything it needs to talk to the cluster.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS slo
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS slo
 # git + openssh-client: stage 2 pushes and clones over both transports, with a real client, because
 # a probe that used our own library would pass on a bug only a real client trips.
 # curl is the build-time tool fetch below; the edge stage dials the origin with reqwest.
