@@ -267,6 +267,15 @@ spec:
             - name: WS_REGION
               valueFrom:
                 secretKeyRef: { name: kloudlite-agent, key: WS_REGION, optional: true }
+          # The whole hand-made Secret, as before: it also carries WS_RUNTIME_CLASS, WS_REGISTRY_URL
+          # and WS_AGENT_TOKEN, and without them the pod fence refused every workspace on
+          # 2026-09-12 ("must run under gvisor"). WS_PEER_SECRET is read from the projected file
+          # first, so the copy here is inert for the agent itself; splitting this Secret into its
+          # config keys and its secret keys is the follow-up that lets this block go.
+          envFrom:
+            - secretRef:
+                name: kloudlite-agent
+                optional: true
             # WS_PEER_SECRET is NOT here. It was, via an `envFrom` of the whole Secret — and this
             # container spawns `btrfs`, `nix` and `mount`, every one of which inherited it
             # (2026-09-12 review #70). It is a file in the `secrets` volume below now, read by
