@@ -43,6 +43,9 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 # The workspace host keypair, generated in-process (see `sshkeys.rs`).
 ssh-key = { workspace = true }
+# `kubeclient.rs`'s per-request bound is a tower `Layer` on kube's own client stack. Also a
+# dev-dependency below, where `peer.rs`'s router is driven with `oneshot`.
+tower = { workspace = true }
 
 [dev-dependencies]
 # `tokio::time::pause`/`advance`, for the fake-clock beat-interval tests — production never

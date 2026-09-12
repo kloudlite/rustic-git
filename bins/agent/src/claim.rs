@@ -16,6 +16,7 @@ use kube::api::{Api, ListParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::{Resource, ResourceExt};
 use kloudlite_workspaces::crd::{self, binding_name, OwnerBinding, OwnerBindingSpec};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What the claim needs to know about the volume behind an unplaced object, gathered once in
@@ -144,11 +145,15 @@ async fn claimed_here(ctx: &Arc<Ctx>, pods: &[Pod], skip: Option<&str>) -> Resul
 /// ponytail: cpu and memory only — the node's pod-count ceiling (110 by default) and
 /// ephemeral-storage are ignored. At the workspace slot size memory binds decades before either
 /// does; read them here too if the slots ever get small enough for pod count to bite first.
+///
+/// `#[cfg(test)]`: the one seam the capacity tests drive. Every caller goes through `Room` now, so
+/// outside the tests this is a second name for `room(..).fits(..)`.
+#[cfg(test)]
 fn fits(node: Option<&Node>, pods: &[Pod], committed: Want, want: Want) -> bool {
     room(node, pods, committed).fits(want)
 }
 
-/// The three numbers `fits` subtracts, kept so a refusal can SAY them: a node that declines a
+/// The three numbers `Room::fits` subtracts, kept so a refusal can SAY them: a node that declines a
 /// 250 m environment while the scheduler shows 3 vCPU free is a disagreement nobody can settle
 /// from "no room" alone.
 struct Room {
@@ -229,18 +234,36 @@ pub(crate) fn environment_want(services: usize) -> Want {
 /// result is a preference, not a gate, and the start gate on the target node is what refuses a
 /// stale answer; upgrade to a full walk only if handovers to a node that then refuses show up.
 pub(crate) async fn nodes_with_room(ctx: &Arc<Ctx>, candidates: &[String], want: Want) -> Result<Vec<String>, ReconcileErr> {
-    let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
-    let pods = Api::<Pod>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
-    let mut out = vec![];
-    for c in candidates {
-        let here: Vec<Pod> = pods.iter().filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(c.as_str())).cloned().collect();
-        // A candidate this node cannot even read is not evidence of room.
-        let node = nodes.iter().find(|n| n.name_any() == *c);
-        if fits(node, &here, (0, 0), want) {
-            out.push(c.clone());
+    let cap = Capacity::read(ctx).await?;
+    // A candidate this node cannot even read is not evidence of room — `room_of` answers an
+    // unknown node with an empty allocatable, which fits nothing.
+    Ok(candidates.iter().filter(|c| cap.room_of(c).fits(want)).cloned().collect())
+}
+
+/// ONE cluster-wide Node and Pod listing, bucketed by node name, shared by both capacity questions
+/// here (2026-09-12). Each used to make its own pair of listings, and each then re-scanned and
+/// CLONED the whole pod list per candidate — O(candidates x pods) copies of every pod object in
+/// the cluster on every start.
+struct Capacity {
+    nodes: HashMap<String, Node>,
+    by_node: HashMap<String, Vec<Pod>>,
+}
+
+impl Capacity {
+    async fn read(ctx: &Arc<Ctx>) -> Result<Capacity, ReconcileErr> {
+        let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+        let pods = Api::<Pod>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
+        let mut by_node: HashMap<String, Vec<Pod>> = HashMap::new();
+        for p in pods {
+            let Some(n) = p.spec.as_ref().and_then(|s| s.node_name.clone()) else { continue };
+            by_node.entry(n).or_default().push(p);
         }
+        Ok(Capacity { nodes: nodes.into_iter().map(|n| (n.name_any(), n)).collect(), by_node })
     }
-    Ok(out)
+
+    fn room_of(&self, node: &str) -> Room {
+        room(self.nodes.get(node), self.by_node.get(node).map(Vec::as_slice).unwrap_or(&[]), (0, 0))
+    }
 }
 
 /// The live pool node with the most room for `want`, by the same arithmetic `fits` applies —
@@ -248,15 +271,8 @@ pub(crate) async fn nodes_with_room(ctx: &Arc<Ctx>, candidates: &[String], want:
 /// and the same ponytail: peers' claimed-but-podless parents are not counted.
 pub(crate) async fn roomiest(ctx: &Arc<Ctx>, want: Want) -> Result<Option<String>, ReconcileErr> {
     let candidates = crate::peer::placeable_nodes(ctx).await;
-    let nodes = Api::<Node>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
-    let pods = Api::<Pod>::all(ctx.client.clone()).list(&ListParams::default()).await?.items;
-    let rooms = candidates
-        .iter()
-        .map(|c| {
-            let here: Vec<Pod> = pods.iter().filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(c.as_str())).cloned().collect();
-            (c.clone(), room(nodes.iter().find(|n| n.name_any() == *c), &here, (0, 0)))
-        })
-        .collect();
+    let cap = Capacity::read(ctx).await?;
+    let rooms = candidates.iter().map(|c| (c.clone(), cap.room_of(c))).collect();
     Ok(pick_roomiest(rooms, want))
 }
 

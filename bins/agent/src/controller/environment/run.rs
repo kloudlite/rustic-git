@@ -33,7 +33,7 @@ pub(crate) async fn run_environment(
     if let Some(action) = materialise(e, vol, &wt, &mut prev, gen, owner_ref, ctx).await? {
         return Ok(action);
     }
-    ensure_fabric(e, ns, owner_ref, ctx).await?;
+    ensure_fabric(e, ns, owner_ref, prev.observed_generation != Some(gen), ctx).await?;
     let pod_ctx = k8s::PodContext {
         pool: &ctx.pool,
         node_name: &vol.spec.node_name,
@@ -154,50 +154,64 @@ async fn materialise(
 
 /// Phase 2: everything the namespace needs before a pod: the namespace itself, the network
 /// policies, the api's pull-credential grant, the per-container ceiling and the namespace total.
-async fn ensure_fabric(e: &crd::Environment, ns: &str, owner_ref: &OwnerReference, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    ensure(
-        &Api::<Namespace>::all(ctx.client.clone()),
-        &{
-            let mut n = k8s::namespace(ns, &e.spec.owner, "environment", Some(owner_ref));
-            // The pod fence (`deploy/k3s/workspace-admission.yaml`) admits `builder_hardened()`'s
-            // wider capability list only in a namespace carrying this label. On the NAMESPACE, not
-            // the pod: only this controller writes namespaces, while anything with pod create in a
-            // tenant namespace could stamp a pod label and widen its own fence.
-            if let Some(sys) = e.spec.system.as_deref() {
-                n.metadata.labels.get_or_insert_default().insert(crd::SYSTEM_LABEL.into(), sys.into());
-            }
-            n
-        },
-        ctx,
-    )
-    .await?;
-    let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns);
-    for p in k8s::default_policies(ns, &e.spec.owner, owner_ref) {
-        ensure(&policies, &p, ctx).await?;
+/// `changed` is "this pass is not a re-look at an already-observed generation". The namespace, the
+/// policies, the grant and the LimitRange are rendered from spec alone, so on a converged
+/// environment they were re-rendered and re-hashed on every child event for nothing (2026-09-12).
+/// The ResourceQuota at the bottom is deliberately NOT gated: its input is the owner's `Quota` CR,
+/// which changes without this environment's generation moving, and nothing else writes one for an
+/// `env-` namespace (`binding.rs` covers only `ws-`).
+async fn ensure_fabric(
+    e: &crd::Environment,
+    ns: &str,
+    owner_ref: &OwnerReference,
+    changed: bool,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    if changed {
+        ensure(
+            &Api::<Namespace>::all(ctx.client.clone()),
+            &{
+                let mut n = k8s::namespace(ns, &e.spec.owner, "environment", Some(owner_ref));
+                // The pod fence (`deploy/k3s/workspace-admission.yaml`) admits `builder_hardened()`'s
+                // wider capability list only in a namespace carrying this label. On the NAMESPACE, not
+                // the pod: only this controller writes namespaces, while anything with pod create in a
+                // tenant namespace could stamp a pod label and widen its own fence.
+                if let Some(sys) = e.spec.system.as_deref() {
+                    n.metadata.labels.get_or_insert_default().insert(crd::SYSTEM_LABEL.into(), sys.into());
+                }
+                n
+            },
+            ctx,
+        )
+        .await?;
+        let policies = Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns);
+        for p in k8s::default_policies(ns, &e.spec.owner, owner_ref) {
+            ensure(&policies, &p, ctx).await?;
+        }
+        // Only the hidden per-owner builder environment gets this hole: the gate is the only thing
+        // that may reach a builder's buildkit service, and an ordinary environment has no buildkit
+        // service for it to reach.
+        if e.spec.system.as_deref() == Some(crd::BUILDER_SYSTEM) {
+            ensure(&policies, &k8s::builder_gate_ingress(ns, &e.spec.owner, owner_ref), ctx).await?;
+        }
+        // An environment's services are the likeliest place a private image appears, so this namespace
+        // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
+        // here, and nowhere it has not been vouched for.
+        ensure(
+            &Api::<RoleBinding>::namespaced(ctx.client.clone(), ns),
+            &k8s::api_secret_binding(ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
+            ctx,
+        )
+        .await?;
+        // The ceiling the services render under — the env unit, or the largest shape a service names
+        // (the builder). Owned by the Environment — this namespace holds exactly one.
+        ensure(
+            &Api::<LimitRange>::namespaced(ctx.client.clone(), ns),
+            &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_limit_resources(&e.spec.services), Some(owner_ref)),
+            ctx,
+        )
+        .await?;
     }
-    // Only the hidden per-owner builder environment gets this hole: the gate is the only thing
-    // that may reach a builder's buildkit service, and an ordinary environment has no buildkit
-    // service for it to reach.
-    if e.spec.system.as_deref() == Some(crd::BUILDER_SYSTEM) {
-        ensure(&policies, &k8s::builder_gate_ingress(ns, &e.spec.owner, owner_ref), ctx).await?;
-    }
-    // An environment's services are the likeliest place a private image appears, so this namespace
-    // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
-    // here, and nowhere it has not been vouched for.
-    ensure(
-        &Api::<RoleBinding>::namespaced(ctx.client.clone(), ns),
-        &k8s::api_secret_binding(ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),
-        ctx,
-    )
-    .await?;
-    // The ceiling the services render under — the env unit, or the largest shape a service names
-    // (the builder). Owned by the Environment — this namespace holds exactly one.
-    ensure(
-        &Api::<LimitRange>::namespaced(ctx.client.clone(), ns),
-        &k8s::limit_range(ns, &e.spec.owner, "environment", &k8s::env_limit_resources(&e.spec.services), Some(owner_ref)),
-        ctx,
-    )
-    .await?;
     // The same ceiling, in the environment's own namespace: an environment's services are its
     // owner's capacity too, and the namespace is where Kubernetes can enforce it.
     //
@@ -402,6 +416,9 @@ async fn read_services_back(
     // ready the instant its object existed — so `kubectl wait --for=condition=Ready
     // environment` returned before anything was listening, and the only thing that noticed was a
     // connectivity check failing two steps later.
+    // ONE list of this namespace's StatefulSets for the whole pass, in place of a GET per service.
+    let sets: std::collections::HashMap<String, StatefulSet> =
+        deployments.list(&kube::api::ListParams::default()).await?.items.into_iter().map(|d| (d.name_any(), d)).collect();
     let mut service_status = Vec::with_capacity(e.spec.services.len());
     for svc in &e.spec.services {
         // What is actually IN FORCE, never the wish: a stopped workspace leaves its intercept in
@@ -421,7 +438,7 @@ async fn read_services_back(
             }
             _ => None,
         };
-        service_status.push(deployment_status(deployments, &svc.name, by, unreachable_since).await?);
+        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, unreachable_since));
     }
     Ok(service_status)
 }
@@ -587,10 +604,12 @@ pub(crate) async fn restore_gate(
 /// Scale every service to zero and wait, briefly, for its pods to be GONE. Returns how many are
 /// still writing; zero means the subvolume has no open writers and may be snapshotted or swapped.
 ///
-/// Waited for HERE, in this pass: a database exits in about a second, and a restore or a stop is
-/// the one moment a person is watching the clock, so handing the wait to the requeue would price
-/// every one at a full tick. Bounded well under the pods' grace period; a service that is still
-/// shutting down after this falls back to the pod watch, which wakes the pass that finishes.
+/// ONE short wait here — a database exits in about a second, and a restore or a stop is the one
+/// moment a person is watching the clock — and then the answer goes back to the caller. Not the ten
+/// second, twenty pod LIST loop it was (2026-09-12): this is one controller task, so an environment
+/// draining slowly held every other environment on the node behind it. Anything still shutting down
+/// after the second probe falls back to the namespace's own Pod watch, which wakes the pass that
+/// finishes within milliseconds of the last pod going — the requeue is only the backstop.
 pub(crate) async fn drain_services(
     e: &crd::Environment,
     ns: &str,
@@ -612,13 +631,7 @@ pub(crate) async fn drain_services(
         }
     }
     let mut remaining = writing_pods(ns, ctx).await?;
-    // 20 × 500 ms, not 40 × 250: the same 10 s ceiling at half the pod LISTs. A service that
-    // finishes its writes 250 ms sooner is not worth a doubled API cost on every stop and every
-    // restore of every environment.
-    for _ in 0..20 {
-        if remaining == 0 {
-            break;
-        }
+    if remaining > 0 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         remaining = writing_pods(ns, ctx).await?;
     }

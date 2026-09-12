@@ -66,8 +66,20 @@ pub async fn sync_beat(ctx: &Arc<Ctx>) {
     // Keep-biased like every other beat: a half-listed cluster cuts nothing. A missed sync point
     // costs one `WS_SYNC_SECS` of freshness on a replica; acting on a partial view costs more.
     let Some(parents) = crate::listing::parents_on_node(ctx).await else { return };
+    // ONE Snapshot listing for the whole pass (2026-09-12), not one per worktree: `sync_one`
+    // listed `spec.volume={its own}` every time, so a node with N worktrees made N listings of
+    // the same collection on every beat. Keep-biased like the parent listing above — a failed
+    // list cuts nothing at all rather than reading an empty cluster as "no snapshots".
+    let snapshots = match Api::<crd::Snapshot>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Snapshot", error = %e, "listing.failed");
+            return;
+        }
+    };
     for p in parents.iter().filter(|p| p.is_live_worktree()) {
-        sync_one(ctx, p).await;
+        let mine: Vec<crd::Snapshot> = snapshots.iter().filter(|s| s.spec.volume == p.volume).cloned().collect();
+        sync_one(ctx, p, &mine).await;
     }
 }
 
@@ -106,19 +118,12 @@ pub(crate) fn newest_recorded(snapshots: &[crd::Snapshot], worktree: &str) -> Op
         .map(|s| (s.name_any(), crd::transient_generation_of(s), s.spec.state.clone()))
 }
 
-async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
+/// `snapshots` is this volume's slice of the beat's ONE listing — see `sync_beat`.
+async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent, snapshots: &[crd::Snapshot]) {
     let api: Api<crd::Snapshot> = Api::all(ctx.client.clone());
-    let list = match api.list(&ListParams::default().fields(&format!("spec.volume={}", live.volume))).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(kind = "Snapshot", volume = %live.volume, error = %e, "listing.failed");
-            return;
-        }
-    };
-
     // One cut in flight at a time — the same rule `create_snapshot` applies, and the reason this
     // beat can run on a tick without piling snapshots onto a slow btrfs.
-    if list.items.iter().any(|s| {
+    if snapshots.iter().any(|s| {
         s.spec.transient
             && s.spec.worktree == live.name
             && s.status.as_ref().map(|st| st.phase) == Some(crd::Phase::Working)
@@ -126,7 +131,7 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent) {
         tracing::debug!(name = %live.name, reason = "cut-in-flight", "sync.skipped");
         return;
     }
-    let (parent, recorded, recorded_state) = match newest_recorded(&list.items, &live.name) {
+    let (parent, recorded, recorded_state) = match newest_recorded(snapshots, &live.name) {
         Some((name, gen, state)) => (name, Some(gen), state),
         None => (String::new(), None, None),
     };

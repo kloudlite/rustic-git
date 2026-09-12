@@ -584,7 +584,19 @@ pub(crate) async fn retire_pass(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, liv
             // — UNLESS this node is `hosted` (serving a pod from it right now): the owner record
             // can lag a pod that's actually running here, and deleting a live worktree out from
             // under a running pod is the one thing this pass must never do.
-            if !hosted.contains(&id) {
+            // Gated on there being a worktree here at all: without this the sweep paid one Volume
+            // GET per volume per beat on every node, and a replica node holds no worktrees at all
+            // (2026-09-12). A failed readdir reads as "none", which skips — the keep-biased
+            // direction, same as the GET below.
+            let (engine, vol) = (ctx.engine.clone(), id.clone());
+            let any_worktree = match tokio::task::spawn_blocking(move || janitor::has_worktrees(&engine, &vol)).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(volume = %id, reason = "panicked", error = %e, "worktree.scan.failed");
+                    false
+                }
+            };
+            if any_worktree && !hosted.contains(&id) {
                 // `v.spec.node_name` is from `beat.volumes`, listed before the pull loop ran; a
                 // takeover landing in that window makes it stale, and against a stale owner this
                 // would delete the worktree this node just created for itself. One fresh GET,

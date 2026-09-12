@@ -122,6 +122,17 @@ pub(crate) struct MyNode {
 }
 
 pub(crate) async fn my_node(ctx: &Ctx) -> MyNode {
+    // From the reflector `run` already keeps on THIS node's Node object (2026-09-12): every
+    // workspace and environment reconcile called this, so a busy node made one Node GET per
+    // reconcile for an object it was already streaming. An empty store is a watch that has not
+    // synced yet (or a test with no `run`), which is the one case that still pays the GET —
+    // never "the node is missing", because this store holds exactly one object when it holds any.
+    if let Some(n) = ctx.node_store.get(&kube::runtime::reflector::ObjectRef::new(&ctx.node)) {
+        return MyNode {
+            dead: crate::peer::node_is_dead(Some(&n), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()),
+            decommissioning: crate::peer::decommissioning(Some(&n)),
+        };
+    }
     match kube::Api::<k8s_openapi::api::core::v1::Node>::all(ctx.client.clone()).get_opt(&ctx.node).await {
         // Absent is not dead either: a wrong `$NODE_NAME` would otherwise freeze every reconcile
         // on a live node with nothing but a silent requeue. The sweep sees the whole listing and is
@@ -242,6 +253,10 @@ pub struct Ctx {
     /// their own `spec.nodeName` watch on the same objects, and the snapshot reconciler GETted the
     /// Volume for every request in the cluster — this store is both answers.
     pub volumes: kube::runtime::reflector::Store<crd::Volume>,
+    /// THIS node's own `Node` object, from the reflector `run` drives — see `my_node`.
+    pub node_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Node>,
+    /// The writing half, until `run` takes it and drives the watch into it.
+    pub node_writer: Mutex<Option<kube::runtime::reflector::store::Writer<k8s_openapi::api::core::v1::Node>>>,
     /// The writing half, until `run` takes it and drives the watch into it (tests feed it directly).
     pub volume_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Volume>>>,
     /// What `ensure` last applied, by kind/namespace/name: the hash of the desired object and when.
@@ -298,9 +313,14 @@ impl Ctx {
         // stops polling stalls the reflector once it fills, and every subscriber here is a
         // controller polled by the same `join!`.
         let (volumes, volume_writer) = kube::runtime::reflector::store_shared(256);
+        // Plain `store()`, not shared: nothing reconciles ON this node object — the two parents
+        // already watch it for their own wakes — so there is no subscriber to dispatch to.
+        let (node_store, node_writer) = kube::runtime::reflector::store();
         Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
+            node_store,
+            node_writer: Mutex::new(Some(node_writer)),
             applied: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashMap::new()),
             pull_wake: Arc::new(tokio::sync::Notify::new()),

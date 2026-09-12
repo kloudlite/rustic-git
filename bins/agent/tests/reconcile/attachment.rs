@@ -125,23 +125,42 @@ async fn a_cross_region_attachment_is_refused() {
     assert_eq!(attached_condition(&rec)["reason"], "RegionMismatch");
 }
 
-/// An unattached workspace has no `Attached` condition at all, and its grant is deleted — detach is
-/// the same reconcile with the field cleared.
+/// An unattached workspace has no `Attached` condition at all — and no grant is deleted, because
+/// one was never recorded (2026-09-12). This DELETE used to run on every reconcile of every
+/// workspace that has never been attached, against a policy that has never existed.
 #[tokio::test]
-async fn an_unattached_workspace_reports_nothing_and_deletes_its_grant() {
+async fn a_workspace_that_was_never_attached_reports_nothing_and_deletes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
     let _ = kloudlite_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
 
     assert!(
-        rec.calls().iter().any(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"),
-        "the grant is deleted by name: {:?}",
+        !rec.calls().iter().any(|c| c.contains("networkpolicies/attach-ws-1")),
+        "nothing was ever attached, so there is nothing to delete: {:?}",
         rec.calls()
     );
     let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
     assert!(
         !st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Attached"),
         "not attached is not a condition: {st}"
+    );
+}
+
+/// The detach the DELETE exists for: the field is cleared but the LAST pass recorded an
+/// attachment, so the workspace-side grant goes by name.
+#[tokio::test]
+async fn a_detached_workspace_deletes_the_grant_it_was_recorded_as_holding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
+    let mut w = ready_workspace("ws-1", vec![]);
+    let st = w.status.get_or_insert_with(Default::default);
+    st.conditions = vec![crd::condition(crd::ATTACHED, true, "Converged", "env-1", 1)];
+    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    assert!(
+        rec.calls().iter().any(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"),
+        "the grant is deleted by name: {:?}",
+        rec.calls()
     );
 }
 

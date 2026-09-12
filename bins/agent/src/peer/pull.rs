@@ -454,9 +454,19 @@ pub async fn pull_one(
         return Err(format!("GET {url}: status {}", resp.status()));
     }
 
+    // The two directory reads and the mkdir happen on a blocking thread: the pool can be a busy
+    // or network-backed disk, and a readdir that stalls there stalls the whole runtime, not just
+    // this pull (2026-09-12).
     let dir = engine.pool.snap_dir(volume);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let before = subvolume_names(&dir);
+    let before = {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok::<_, String>(subvolume_names(&dir))
+        })
+        .await
+        .map_err(|e| format!("snap dir scan panicked: {e}"))??
+    };
 
     let bin_parts: Vec<&str> = btrfs_bin.split_whitespace().collect();
     let Some((prog, prefix)) = bin_parts.split_first() else { return Err("empty btrfs_bin".to_string()) };
@@ -519,7 +529,10 @@ pub async fn pull_one(
     // What the stream CREATED is checked on both paths: a peer holding the secret answers this
     // request with whatever `btrfs send` stream it likes, and a receive that lands under any name
     // but the one asked for would be advertised as that snapshot on the next beat (2026-09-12).
-    let after = subvolume_names(&dir);
+    let after = {
+        let dir = dir.clone();
+        tokio::task::spawn_blocking(move || subvolume_names(&dir)).await.map_err(|e| format!("snap dir scan panicked: {e}"))?
+    };
     let created: Vec<&String> = after.iter().filter(|n| !before.contains(n)).collect();
     let expected = ok && created.len() == 1 && created[0] == name;
     if expected {

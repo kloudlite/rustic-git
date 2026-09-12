@@ -284,6 +284,15 @@ pub fn cleanup_local(engine: &Engine, id: &str) {
 /// A worktree only exists on the owner; one on any other node is what a takeover left behind.
 /// An EMPTY owner is the window between release and takeover — keep everything then, because
 /// the returning node may be about to take the volume back (replicas: 1).
+/// Whether this node holds ANY `live/{ws}` worktree of `volume` — one readdir, no API call. The
+/// sweep's fresh-owner GET is only worth paying when there is something a stale owner could make
+/// it delete, and on a replica node that is almost never (2026-09-12).
+pub(crate) fn has_worktrees(engine: &Engine, volume: &str) -> bool {
+    std::fs::read_dir(engine.pool.live(volume))
+        .map(|mut d| d.any(|e| e.map(|e| e.path().is_dir()).unwrap_or(false)))
+        .unwrap_or(false)
+}
+
 pub(crate) fn drop_stale_worktrees(engine: &Engine, volume: &str, owner: &str, me: &str) -> usize {
     if owner.is_empty() || owner == me {
         return 0;

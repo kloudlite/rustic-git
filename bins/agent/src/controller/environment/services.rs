@@ -34,43 +34,46 @@ pub(crate) async fn drop_abandoned_endpoints(
 /// `readyReplicas >= 1`, not `replicas`: `replicas` is what was asked for, `readyReplicas` is what
 /// is actually serving. A missing StatefulSet reports not-ready rather than erroring — it is the
 /// ordinary gap between applying it and the API server materializing it.
-pub(crate) async fn deployment_status(
-    deployments: &Api<StatefulSet>,
+pub(crate) fn deployment_status(
+    // The set as the pass's ONE listing found it, not a GET of its own (2026-09-12): this ran once
+    // per service per reconcile, so a ten-service environment made ten GETs of a collection one
+    // LIST already answers.
+    set: Option<&StatefulSet>,
     name: &str,
     // Decided by `intercept_plan`, threaded in rather than recomputed: this function reconstructs
     // the whole `ServiceStatus` every pass, so anything it defaults here is stomped every pass.
     intercepted_by: Option<String>,
     unreachable_since: Option<i64>,
-) -> Result<crd::ServiceStatus, ReconcileErr> {
-    let Some(d) = deployments.get_opt(name).await? else {
-        return Ok(crd::ServiceStatus {
+) -> crd::ServiceStatus {
+    let Some(d) = set else {
+        return crd::ServiceStatus {
             name: name.into(),
             ready: false,
             message: Some("statefulset not created yet".into()),
             intercepted_by,
             unreachable_since,
-        });
+        };
     };
     let ready = d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0);
     // An intercepted service is scaled to zero BY US, so zero ready replicas is the converged
     // state, not a fault — reporting it not-ready would park the environment at `ServicesNotReady`
     // and requeue it forever for as long as somebody is debugging.
     if let Some(ws) = &intercepted_by {
-        return Ok(crd::ServiceStatus {
+        return crd::ServiceStatus {
             name: name.into(),
             ready: true,
             message: Some(format!("intercepted by {ws}")),
             intercepted_by: intercepted_by.clone(),
             unreachable_since,
-        });
+        };
     }
-    Ok(crd::ServiceStatus {
+    crd::ServiceStatus {
         name: name.into(),
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
         intercepted_by,
         unreachable_since,
-    })
+    }
 }
 
 

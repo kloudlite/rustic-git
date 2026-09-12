@@ -222,6 +222,30 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // No Node watch on this controller, deliberately: `apply_volume` reads the node only through
     // `my_node`'s dead-guard, which returns `requeue(TICK)` rather than `await_change()` — it
     // re-reads on its own within 15 s. Nothing a Volume writes depends on the decommission label.
+    // THIS node's own object, nothing else in the cluster. A converged parent ends in
+    // `await_change()`, so without this watch a decommission label landing on the Node reached
+    // nobody: the annotation said `running=1` while every workspace on it carried no
+    // `Decommissioning` condition, for as long as nothing else happened to touch them. Removing
+    // the label was just as stuck, leaving a stale notice forever. Readiness moves the same way,
+    // so `my_node`'s dead-guard sees a change at once instead of on the next 15s tick.
+    let my_node_only = crate::controller::watch_config().fields(&format!("metadata.name={}", ctx.node));
+    // The same object the two parent controllers' `my_node_only` watches also stream, kept in a
+    // store so
+    // `my_node` reads it instead of GETting it on every reconcile. A bare watch like
+    // `volume_watch`; the `select!` at the bottom is what ends it on SIGTERM.
+    let node_watch = {
+        use kube::runtime::{watcher, WatchStreamExt};
+        let writer = ctx.node_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the node writer is already taken")?;
+        watcher(Api::<Node>::all(ctx.client.clone()), my_node_only.clone())
+            .default_backoff()
+            .reflect(writer)
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(kind = "Node", reason = "watch", error = %e, "reconcile.queue.failed")
+                }
+            })
+    };
     let volumes = Controller::for_shared_stream(vol_self, ctx.volumes.clone())
         .reconcile_on(wake_stream(vol_wakes))
         .shutdown_on_signal()
@@ -238,13 +262,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // Placement is a status fact now, so the node's own Workspaces and Environments are selected
     // by `status.nodeName` — `mine` (`spec.nodeName`) stays for the kinds the API still places.
     let placed = crate::controller::watch_config().fields(&format!("status.nodeName={}", ctx.node));
-    // THIS node's own object, nothing else in the cluster. A converged parent ends in
-    // `await_change()`, so without this watch a decommission label landing on the Node reached
-    // nobody: the annotation said `running=1` while every workspace on it carried no
-    // `Decommissioning` condition, for as long as nothing else happened to touch them. Removing
-    // the label was just as stuck, leaving a stale notice forever. Readiness moves the same way,
-    // so `my_node`'s dead-guard sees a change at once instead of on the next 15s tick.
-    let my_node_only = crate::controller::watch_config().fields(&format!("metadata.name={}", ctx.node));
     // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
     // the cluster to filter for its own is the cheapest way to peg an API server.
     let our_pods = crate::controller::watch_config().labels(&format!("{}=workspace", k8s::KIND_LABEL));
@@ -507,6 +524,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let everything = async {
         tokio::join!(
             volume_watch,
+            node_watch,
             snap_watch,
             volumes,
             workspaces,

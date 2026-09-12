@@ -111,6 +111,17 @@ pub(crate) const WEB_SLICE: &str = "/apis/discovery.k8s.io/v1/namespaces/env-1/e
 pub(crate) const ENV_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1";
 pub(crate) const WS_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/intercept-ws-1";
 
+/// A `StatefulSetList` as `read_services_back`'s ONE listing reads it back (2026-09-12: it used to
+/// GET each set by name).
+pub(crate) fn sts_list(items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "apps/v1", "kind": "StatefulSetList",
+        "metadata": {"resourceVersion": "1"},
+        "items": items,
+    })
+}
+
+
 pub(crate) fn secs_ago(n: i64) -> String {
     k8s_openapi::jiff::Timestamp::from_second(k8s_openapi::jiff::Timestamp::now().as_second() - n)
         .unwrap()
@@ -169,7 +180,8 @@ pub(crate) fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
         Route { method: "DELETE", path: WEB_SLICE.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "PATCH", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
-        kloudlite_workspaces::kube_test::get(WEB_STS, ready_sts),
+        kloudlite_workspaces::kube_test::get(WEB_STS, ready_sts.clone()),
+        kloudlite_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets", sts_list(vec![ready_sts])),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
     // The slice list an in-force intercept reads to find what Kubernetes abandoned. Only added

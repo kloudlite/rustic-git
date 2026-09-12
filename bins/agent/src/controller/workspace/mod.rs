@@ -371,8 +371,15 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // clone's grant would select its source's pod instead of its own.
             ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &w.name_any(), &w.spec.owner, &env_ref), ctx).await?;
         }
-        // Detach is this same pass with the field cleared, so the workspace-side half goes by name.
-        None => delete_ignoring_404(&policies, &k8s::attach_policy_name(&w.name_any())).await?,
+        // Detach is this same pass with the field cleared, so the workspace-side half goes by name
+        // — but ONLY when an attachment was ever recorded (2026-09-12). Every workspace that has
+        // never been attached issued this DELETE on every single reconcile, and there has never
+        // been anything there to delete. The condition is the same record the re-attach cleanup
+        // below reads, and it survives a detach (it goes False, it is not removed).
+        None if prev.conditions.iter().any(|c| c.type_ == crd::ATTACHED) => {
+            delete_ignoring_404(&policies, &k8s::attach_policy_name(&w.name_any())).await?
+        }
+        None => {}
     }
     // The environment-side half lives in a namespace this spec no longer names, so a detach — or a
     // re-attach to a DIFFERENT environment — would strand it there until that environment is

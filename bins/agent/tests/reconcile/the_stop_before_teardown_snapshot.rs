@@ -428,6 +428,10 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
         Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/worker".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
         kloudlite_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/web", ready_sts("web")),
         kloudlite_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/worker", ready_sts("worker")),
+        kloudlite_workspaces::kube_test::get(
+            "/apis/apps/v1/namespaces/env-1/statefulsets",
+            crate::filter_foreign_snapshots_against_the_nod::sts_list(vec![ready_sts("web"), ready_sts("worker")]),
+        ),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
@@ -458,6 +462,19 @@ async fn a_portless_service_gets_a_statefulset_but_no_clusterip() {
 
     assert!(rec.calls().iter().any(|c| c == "PATCH /apis/apps/v1/namespaces/env-1/statefulsets/web"));
     assert!(rec.calls().iter().any(|c| c == "PATCH /apis/apps/v1/namespaces/env-1/statefulsets/worker"));
+    // ONE listing reads every service back (2026-09-12), never a GET per service — the only
+    // per-name GET left on this path is the capacity gate's single "does it already exist".
+    assert_eq!(
+        rec.calls().iter().filter(|c| c.starts_with("GET /apis/apps/v1/namespaces/env-1/statefulsets/")).count(),
+        1,
+        "one GET, the capacity gate's: {:?}",
+        rec.calls()
+    );
+    assert!(
+        rec.calls().iter().any(|c| c == "GET /apis/apps/v1/namespaces/env-1/statefulsets"),
+        "the readback is a list: {:?}",
+        rec.calls()
+    );
     assert!(
         rec.calls().iter().any(|c| c == "PATCH /api/v1/namespaces/env-1/services/web"),
         "the ported service gets a ClusterIP: {:?}", rec.calls()
@@ -522,6 +539,10 @@ async fn a_team_owned_environments_quota_reads_the_bindings_team_flag() {
         Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/web".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
         Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/web".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
         kloudlite_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets/web", ready_sts("web")),
+        kloudlite_workspaces::kube_test::get(
+            "/apis/apps/v1/namespaces/env-1/statefulsets",
+            crate::filter_foreign_snapshots_against_the_nod::sts_list(vec![ready_sts("web")]),
+        ),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
     let (ctx, rec) = ctx(tmp.path(), routes);
