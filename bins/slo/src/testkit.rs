@@ -31,7 +31,9 @@ pub async fn ctx() -> Ctx {
         probe_user: crate::ctx::PROBE_USER.into(),
         other_user: crate::ctx::OTHER_USER.into(),
     };
-    Ctx::new(cfg, Suite::Fast, None).await.expect("ctx")
+    let mut c = Ctx::new(cfg, Suite::Fast, None).await.expect("ctx");
+    c.roll_check = false;
+    c
 }
 
 /// Serve a hand-built router and answer its base url. For the stage tests, which need particular

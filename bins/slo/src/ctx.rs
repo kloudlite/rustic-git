@@ -128,6 +128,10 @@ pub struct Ctx {
     /// stage with twenty failing steps made a hundred (2026-09-12). Ten seconds is far shorter
     /// than a roll and far longer than a burst of failures.
     pub rollout_cache: Option<(std::time::Instant, bool)>,
+    /// Whether a failed step may ask the cluster if a roll is in flight. Off under the test kit:
+    /// the dev pod IS in-cluster, so a unit test that expected failures read the real fleet
+    /// mid-roll and saw skips instead (ship gate, 2026-09-12).
+    pub roll_check: bool,
     /// When this run's ONE downgrade window opened. A roll is a real event with a beginning and
     /// an end, so a run gets a single window in which a failure may be read as the roll's rather
     /// than the service's — without that, a fleet stuck mid-roll for an hour turned every failing
@@ -223,6 +227,7 @@ impl Ctx {
             run_failed: false,
             report_failed: false,
             rollout_cache: None,
+            roll_check: true,
             roll_window: None,
             cfg,
         })

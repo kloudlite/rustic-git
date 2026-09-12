@@ -270,6 +270,9 @@ fn mid_rollout(c: Counts) -> bool {
 const ROLLOUT_CACHE: Duration = Duration::from_secs(10);
 
 pub async fn rollout_in_flight(c: &mut Ctx) -> bool {
+    if !c.roll_check {
+        return false;
+    }
     if let Some((at, v)) = c.rollout_cache {
         if at.elapsed() < ROLLOUT_CACHE {
             return v;
