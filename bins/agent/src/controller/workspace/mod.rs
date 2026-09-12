@@ -76,7 +76,7 @@ pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> R
         match event {
             FinalizerEvent::Cleanup(e) => {
                 let volume = e.status.as_ref().and_then(|s| s.volume_ref.clone());
-                cleanup_parent(&e.name_any(), &e.uid().unwrap_or_default(), volume, &ctx).await
+                cleanup_parent(&*e, volume, |e: &crd::Environment| e.status.as_ref().and_then(|s| s.volume_ref.clone()), &ctx).await
             }
             FinalizerEvent::Apply(e) => super::apply_environment(&e, &ctx).await,
         }
@@ -87,6 +87,13 @@ pub async fn reconcile_environment(e: Arc<crd::Environment>, ctx: Arc<Ctx>) -> R
 
 
 pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // A deleting object has nothing to converge, and an apply that runs on one WRITES: a restore
+    // deleted 1.4 s after it was created was still applied, attached itself to a Volume, and the
+    // cleanup that followed never knew (2026-09-12). The finalizer wrapper routes the next event
+    // to Cleanup; this pass does nothing at all.
+    if w.meta().deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
     // FIRST, above every write: see `my_node`. A partitioned agent that keeps reconciling erases
     // the sweep's `NodeDead` on the very next tick, which is how `/v1` came to accept `start` on a
     // node the cluster reads as dead.

@@ -68,6 +68,9 @@ async fn snapshot_model_clone_checks_out_its_graft_snapshot_and_records_it_as_he
     std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
+        // The attaching parent, read LIVE: an owner entry is only ever added on behalf of an object
+        // that still exists and is not deleting (2026-09-12).
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
@@ -197,6 +200,8 @@ pub(crate) fn restored_env_routes(snapshot: serde_json::Value) -> Vec<Route> {
                                "spec": {"owner": "acme", "name": "src", "region": "r1", "services": [],
                                         "storage": {"quotaGb": 20}, "desiredState": "running"}}),
         ),
+        // The attaching parent, read live — see `live_parent_ws`.
+        kloudlite_workspaces::kube_test::get(ENV_1_OBJ, env_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"}))),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/env-src", ready_source_volume("env-src")),
         // The restore's own attach: it becomes an OWNER of the source's Volume (design rule 6).
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/env-src".into(), status: 200, body: ready_source_volume("env-src") },
@@ -224,6 +229,9 @@ async fn snapshot_model_clone_with_a_missing_snapshot_settles_as_no_such_snapsho
     let tmp = tempfile::tempdir().unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
+        // The attaching parent, read LIVE: an owner entry is only ever added on behalf of an object
+        // that still exists and is not deleting (2026-09-12).
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-gone"),
@@ -255,6 +263,9 @@ async fn snapshot_model_a_materialised_clone_survives_its_pruned_graft_cut() {
     std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
+        // The attaching parent, read LIVE: an owner entry is only ever added on behalf of an object
+        // that still exists and is not deleting (2026-09-12).
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-gone"),
@@ -288,6 +299,7 @@ async fn a_restore_onto_a_detached_volume_is_not_no_such_source() {
     let routes = vec![
         kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/workspaces/ws-src"),
         kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/environments/ws-src"),
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),
@@ -437,6 +449,9 @@ async fn snapshot_model_clone_with_a_head_of_its_own_does_not_rewrite_it() {
     std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
+        // The attaching parent, read LIVE: an owner entry is only ever added on behalf of an object
+        // that still exists and is not deleting (2026-09-12).
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-src", ready_source_volume("ws-src")),
         Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/volumes/ws-src".into(), status: 200, body: ready_source_volume("ws-src") },
         Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
@@ -680,4 +695,14 @@ fn a_directory_left_by_the_old_subpath_mount_is_replaced_by_the_file() {
 
     kloudlite_agent::controller::write_resolv_conf(&pool, "ws-1", "ws-alice", None).unwrap();
     assert!(std::fs::metadata(&path).unwrap().is_file());
+}
+
+
+pub(crate) const ENV_1_OBJ: &str = "/apis/kloudlite.io/v1alpha1/environments/env-1";
+
+/// `attach_volume` re-reads the parent it is about to add an owner entry for, so every fixture
+/// that reaches the attach arm has to serve it (2026-09-12: a stale apply attached a workspace
+/// that was already deleted, and GC took the Volume and its push snapshot).
+pub(crate) fn live_parent_ws() -> Route {
+    kloudlite_workspaces::kube_test::get(WS_1_OBJ, ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"})))
 }

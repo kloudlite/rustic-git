@@ -391,3 +391,84 @@ async fn an_unplaced_environment_is_claimed_as_creating() {
     assert!(rec.calls().iter().any(|c| c == &format!("POST {BINDINGS}")), "the winner binds the owner");
 
 }
+
+
+/// (2026-09-12, centralindia-k3s) A restore DELETEd 1.4 s after it was created: the apply was 60 s
+/// late, attached the parent to the Volume, and the cleanup that followed ran on the CACHED object
+/// whose status was still empty. The old code returned Ok on the spot, the finalizer wrapper
+/// removed the finalizer on that Ok, and GC took the Volume — with the Ready push on it. A missing
+/// cached `volumeRef` must send the cleanup to the API server, not to `Ok`.
+#[tokio::test]
+async fn a_cleanup_whose_cached_status_has_no_volume_reads_the_live_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        // The live object — what the apply wrote while this delete was in flight.
+        kloudlite_workspaces::kube_test::get(
+            WS_1_OBJ,
+            ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})),
+        ),
+        kloudlite_workspaces::kube_test::get(SNAPS, snap_list(vec![snapshot_record("ws-1-aaaaaaaa", "ws-1", "ws-1")])),
+        kloudlite_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
+        Route { method: "PATCH", path: VOL_WS1.into(), status: 200, body: owned_volume("ws-1", "ws-uid-1") },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    // No `volumeRef`: the stale cache the incident's cleanup was handed.
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a"})));
+
+    kloudlite_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    let detach = rec.sent("PATCH", VOL_WS1);
+    assert_eq!(detach.len(), 1, "the live volumeRef must still be detached: {:?}", rec.calls());
+    assert_eq!(detach[0][1]["value"], serde_json::json!([]));
+    let calls = rec.calls();
+    let vol_at = calls.iter().position(|c| c == &format!("PATCH {VOL_WS1}")).expect("the detach happened");
+    let fin_at = calls.iter().position(|c| c == &format!("PATCH {WS_1_OBJ}")).expect("the finalizer was removed");
+    assert!(vol_at < fin_at, "the finalizer may only go after the detach landed: {calls:?}");
+}
+
+/// The backstop for the same incident: nothing names a volume — not the cache, not the live object
+/// — but a Volume out there still carries this parent's ownerReference. Leaving it is how a Volume
+/// and its snapshots get collected; the cleanup goes looking and detaches what it finds.
+#[tokio::test]
+async fn a_cleanup_with_no_volume_ref_at_all_detaches_an_owner_entry_it_finds() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let routes = vec![
+        // The live object has no `volumeRef` either — the parent never got one written.
+        kloudlite_workspaces::kube_test::get(WS_1_OBJ, ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"}))),
+        kloudlite_workspaces::kube_test::get(
+            VOLUMES,
+            serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeList",
+                               "metadata": {"resourceVersion": "1"},
+                               "items": [owned_volume("ws-1", "ws-uid-1")]}),
+        ),
+        kloudlite_workspaces::kube_test::get(VOL_WS1, owned_volume("ws-1", "ws-uid-1")),
+        Route { method: "PATCH", path: VOL_WS1.into(), status: 200, body: owned_volume("ws-1", "ws-uid-1") },
+        Route { method: "PATCH", path: WS_1_OBJ.into(), status: 200, body: ws_json(serde_json::json!({"phase": "creating", "nodeName": "node-a"})) },
+    ];
+    let (ctx, rec) = ctx(tmp.path(), routes);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "creating", "nodeName": "node-a"})));
+
+    kloudlite_agent::controller::reconcile_workspace(Arc::new(w), ctx).await.unwrap();
+
+    let detach = rec.sent("PATCH", VOL_WS1);
+    assert_eq!(detach.len(), 1, "an owner entry nobody knew about is still ours to remove: {:?}", rec.calls());
+    assert_eq!(detach[0][0]["value"][0]["uid"], "ws-uid-1");
+    assert_eq!(detach[0][1]["value"], serde_json::json!([]));
+}
+
+/// The other end of the same race: an apply handed a deleting object must WRITE NOTHING. The
+/// incident's attach came from exactly this pass — 60 s stale, on an object that was already gone.
+#[tokio::test]
+async fn an_apply_of_a_deleting_workspace_attaches_nothing_and_starts_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
+    let (ctx, rec) = ctx(tmp.path(), vec![]);
+    let w = deleting_ws(workspace(serde_json::json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"})));
+
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+
+    assert!(rec.calls().is_empty(), "a deleting object is the finalizer\'s business, not the apply\'s: {:?}", rec.calls());
+}

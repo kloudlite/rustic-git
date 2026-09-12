@@ -69,6 +69,11 @@ async fn prune_attach_grants(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<(),
     Ok(())
 }
 pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // A deleting object is the finalizer's business, not this pass's — see `apply_workspace`
+    // (2026-09-12).
+    if e.meta().deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
     // Above every write, exactly as `apply_workspace` does — see `my_node`.
     let me = my_node(ctx).await;
     if me.dead {

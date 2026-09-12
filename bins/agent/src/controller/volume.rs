@@ -585,8 +585,19 @@ pub(crate) async fn detach_volume(ctx: &Arc<Ctx>, name: &str, parent_uid: &str) 
 /// admission policy (spec-only) needs nothing and the existing `patch` on volumes is enough.
 pub(crate) async fn attach_volume<K>(ctx: &Arc<Ctx>, name: &str, parent: &K) -> Result<bool, ReconcileErr>
 where
-    K: Resource<DynamicType = ()>,
+    K: Resource<DynamicType = ()> + ResourceExt + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
 {
+    // Read the parent LIVE, never the cached copy this pass was handed: an apply that sat 60 s
+    // behind a blocked reconcile attached a workspace that had been deleted 1.4 s after it was
+    // created, and the owner entry it added outlived the object — GC then took the Volume and the
+    // push snapshot on it (2026-09-12, centralindia-k3s). An owner entry may only be added on
+    // behalf of an object that still exists and is not going away.
+    let parents: Api<K> = Api::all(ctx.client.clone());
+    let live = parents.get_opt(&parent.name_any()).await?;
+    if live.as_ref().is_none_or(|p| p.meta().deletion_timestamp.is_some()) {
+        tracing::warn!(volume = %name, parent = %parent.name_any(), "attach.refused reason=deleting");
+        return Ok(false);
+    }
     let mut mine = owner_ref_of_kind(parent)?;
     mine.controller = Some(false);
     mine.block_owner_deletion = Some(false);

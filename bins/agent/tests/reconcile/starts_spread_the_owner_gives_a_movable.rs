@@ -444,6 +444,7 @@ async fn a_restored_workspace_attaches_itself_to_the_source_volume() {
     std::fs::create_dir_all(tmp.path().join("vol/ws-src/live/ws-1")).unwrap();
     let routes = vec![
         source_workspace_exists("ws-src"),
+        live_parent_ws(),
         kloudlite_workspaces::kube_test::get(VOL_WS_SRC, ready_source_volume("ws-src")),
         Route { method: "PATCH", path: VOL_WS_SRC.into(), status: 200, body: ready_source_volume("ws-src") },
         kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/snapshots/ws-src-aaaaaaaa", ready_snapshot("ws-src-aaaaaaaa", "ws-src")),

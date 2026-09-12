@@ -93,7 +93,7 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
     // SOURCE volume for a shared clone (see `resolve_volume`'s `shared` arm). Either way the
     // worktree under it is named by this workspace's own id, same as every checkout call.
     let volume = w.status.as_ref().and_then(|s| s.volume_ref.clone());
-    cleanup_parent(&w.name_any(), &w.uid().unwrap_or_default(), volume, ctx).await
+    cleanup_parent(w, volume, |w: &crd::Workspace| w.status.as_ref().and_then(|s| s.volume_ref.clone()), ctx).await
 }
 
 
@@ -108,9 +108,33 @@ pub async fn cleanup_workspace_worktree(w: &crd::Workspace, ctx: &Arc<Ctx>) -> R
 ///   3. if a snapshot remains on the Volume — this worktree's or another's — detach it so that
 ///      snapshot outlives its parent; otherwise leave the ownerReference and let GC delete the
 ///      Volume as it always did.
-pub(crate) async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    let Some(volume) = volume else { return Ok(Action::await_change()) };
-    let id = id.to_string();
+///
+/// `volume` is the CACHED status — which may be stale by a whole reconcile. A restore deleted 1.4 s
+/// after it was created was applied from a cache whose status was still empty (2026-09-12,
+/// centralindia-k3s): the stalled apply attached this parent to a Volume, this cleanup saw
+/// `volumeRef: null`, returned Ok on the spot, and the finalizer wrapper REMOVED the finalizer on
+/// that Ok — leaving an owner entry on a Volume nothing would ever detach, so GC took the Volume
+/// and the Ready push snapshot on it. So a missing `volumeRef` is a question, never an answer:
+/// re-read the parent live, and failing that go looking for our uid on the Volumes themselves.
+pub(crate) async fn cleanup_parent<K, F>(parent: &K, volume: Option<String>, volume_of: F, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr>
+where
+    K: Resource<DynamicType = ()> + ResourceExt + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+    F: Fn(&K) -> Option<String>,
+{
+    let id = parent.name_any();
+    let uid = parent.uid().unwrap_or_default();
+    let volume = match volume {
+        Some(v) => v,
+        None => {
+            let api: Api<K> = Api::all(ctx.client.clone());
+            let live = api.get_opt(&id).await.map_err(|e| ReconcileErr(e.to_string()))?.as_ref().and_then(&volume_of);
+            match live {
+                Some(v) => v,
+                None => return detach_unknown_owners(&id, &uid, ctx).await,
+            }
+        }
+    };
+    let uid = uid.as_str();
     let (engine, wt) = (ctx.engine.clone(), id.clone());
     let vol = volume.clone();
     tokio::task::spawn_blocking(move || engine.drop_worktree(&vol, &wt))
@@ -163,6 +187,37 @@ pub(crate) async fn cleanup_parent(id: &str, uid: &str, volume: Option<String>, 
             // finalizer combinator REMOVES the finalizer on any Ok from Cleanup, which would let
             // GC take the Volume — and the snapshots — while we were still trying to detach it.
             return Err(ReconcileErr(format!("volume {volume}: owner references changed under the detach")));
+        }
+    }
+    Ok(Action::await_change())
+}
+
+
+/// The backstop for a cleanup that knows of no volume at all: sweep the Volumes for our own
+/// ownerReference and detach every one we find. A parent that left an entry behind is a Volume
+/// Kubernetes GC will collect — with its snapshots — the moment we are the last owner, and an Ok
+/// from Cleanup is what removes the finalizer, so this has to run BEFORE the Ok, not on a later
+/// beat that no longer has an object to run on.
+///
+/// A cluster-wide list is affordable here: a region holds hundreds of Volumes, not millions, and
+/// this path only runs on a delete that already lost its `volumeRef`.
+async fn detach_unknown_owners(id: &str, uid: &str, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let vols: Api<crd::Volume> = Api::all(ctx.client.clone());
+    let items = vols.list(&kube::api::ListParams::default()).await.map_err(|e| ReconcileErr(e.to_string()))?.items;
+    for v in items.iter().filter(|v| v.owner_references().iter().any(|o| o.uid == uid)) {
+        let name = v.name_any();
+        tracing::warn!(parent = %id, volume = %name, "cleanup.owner.unknown");
+        // Same three tries as the ordinary detach: siblings deleted together lose this CAS to
+        // each other, and a lost detach must be an Err so the finalizer stays on.
+        let mut detached = false;
+        for _ in 0..3 {
+            if super::super::volume::detach_volume(ctx, &name, uid).await.map_err(|e| ReconcileErr(e.to_string()))? {
+                detached = true;
+                break;
+            }
+        }
+        if !detached {
+            return Err(ReconcileErr(format!("volume {name}: owner references changed under the detach")));
         }
     }
     Ok(Action::await_change())
