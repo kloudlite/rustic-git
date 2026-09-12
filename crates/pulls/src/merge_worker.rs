@@ -300,6 +300,9 @@ fn out(cmd: &mut Command) -> Result<std::process::Output> {
 fn stderr_tail(o: &std::process::Output) -> String {
     String::from_utf8_lossy(&o.stderr)
         .lines()
+        // A networked git's diagnostics can echo the URL and its `-c http.extraHeader`; this
+        // line is stored on a job row a person reads, so those never qualify as the last word.
+        .filter(|l| !l.contains("extraHeader") && !l.contains("Authorization") && !l.contains("://"))
         .rfind(|l| !l.trim().is_empty())
         .unwrap_or("git refused it and said nothing")
         .trim()

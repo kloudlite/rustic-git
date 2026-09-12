@@ -63,9 +63,16 @@ pub(super) async fn api_compare(
 /// as it applies to a push — a protected base is not a back door.
 pub(super) async fn api_merge(
     State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
+    // Gated like `branchdelete`: a write of refs and objects with the peer secret alone was the
+    // one undocumented exception among the browse routes (2026-09-12).
+    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+        return r;
+    }
     let (Some(base), Some(head)) = (q.get("base"), q.get("head")) else {
         return (StatusCode::BAD_REQUEST, "base and head are required").into_response();
     };
@@ -256,12 +263,17 @@ pub(super) struct Committed {
 /// rather than being overwritten.
 pub(super) async fn api_patch(
     State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
     Json(patch): Json<Patch>,
 ) -> Response {
     let Some((owner, name)) = crate::protocol::parse_repo_pair(&owner, &name) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
+    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+        return r;
+    }
     let repo = match app.store.open_repo(&owner, &name).await {
         Ok(Some(r)) => r,
         Ok(None) => return hidden(),

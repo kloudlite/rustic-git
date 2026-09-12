@@ -351,12 +351,18 @@ pub(super) async fn api_pull_close(
 /// No event: this is an answer, not a change anyone asked to be told about.
 pub(super) async fn api_pull_check(
     State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
     Path((owner, name, number)): Path<(String, String, i64)>,
 ) -> Response {
     let (owner, name) = match writable(&app, &owner, &name).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    // `number == 0` fans out over every open change — the most expensive route on this
+    // listener, and the one its siblings gate with `as_owner` and this did not (2026-09-12).
+    if let Err(r) = as_owner(&trusted, &owner) {
+        return r;
+    }
     if let Err(r) = ready(&app, &owner, &name).await {
         return r;
     }

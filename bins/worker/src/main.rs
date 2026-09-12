@@ -93,10 +93,12 @@ async fn run() -> Result<()> {
     let upstream = env("KLOUDLITE_UPSTREAM", "http://kloudlite:8081");
     let secret = std::env::var("KLOUDLITE_PEER_SECRET")
         .map_err(|_| err("KLOUDLITE_PEER_SECRET required"))?;
+    // A client that cannot be built is a boot failure: `unwrap_or_default` handed back one with
+    // NO timeout, and a lane behind a hung claim POST is a lane the heartbeat probe then kills.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| err(format!("http client: {e}")))?;
 
     // Nudging is mostly waiting on the fleet, so one lane leaves the worker idle whenever a
     // node is slow to answer. Independent tasks, each reading the stream for itself — the
@@ -280,14 +282,24 @@ fn targets_whole_repo(e: &kloudlite_storage::events::Event) -> bool {
 
 /// Turn one delivered stream entry into work.
 ///
+/// The same shape check the claim path gets through `parse_repo_path`: both halves reach
+/// `cache_of`'s path join, and the stream is a nudge, never a trusted request.
+fn event_repo(repo: &str) -> Option<(String, String)> {
+    let (owner, name) = repo.split_once('/')?;
+    (kloudlite_storage::store::valid_segment(owner) && kloudlite_storage::store::valid_segment(name))
+        .then(|| (owner.to_string(), name.to_string()))
+}
+
 /// Ack happens before this runs (see the caller). Nothing that fails here is lost work:
 /// a merge stays claimed until its lease lapses and the owner re-announces it, and a check the
 /// owner never heard about is redone by its own periodic sweep. That floor, not this path, is
 /// what makes it safe for all of this to depend on Redis and on the fleet being reachable.
 async fn handle_event(w: &Worker, fields: &[(String, String)]) {
     let Some(e) = kloudlite_storage::events::from_fields(fields) else { return };
-    let Some((owner, name)) = e.repo.split_once('/') else { return };
-    let (owner, name) = (owner.to_string(), name.to_string());
+    let Some((owner, name)) = event_repo(&e.repo) else {
+        tracing::warn!(repo = %e.repo, "event.repo.invalid");
+        return;
+    };
     // One merge cache per repo, and one lane in it at a time: two lanes fetching and merging in
     // the same directory would race on refs and on the single result ref. Held across the whole
     // of the work, not just the git part, because the claim is what the lock is really about.
@@ -701,5 +713,19 @@ mod image_owners_tests {
         }
         let owners: Vec<String> = image_owners(&store).await.into_iter().collect();
         assert_eq!(owners, vec!["alpha", "beta", "gamma"]);
+    }
+}
+
+
+#[cfg(test)]
+mod event_repo_tests {
+    use super::event_repo;
+
+    #[test]
+    fn a_traversing_repo_name_is_refused() {
+        assert_eq!(event_repo("alice/web"), Some(("alice".into(), "web".into())));
+        for bad in ["a/../x", "../x/y", "a/b/c", "a/", "/x", "alice", "a/x y"] {
+            assert_eq!(event_repo(bad), None, "{bad}");
+        }
     }
 }

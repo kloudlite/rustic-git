@@ -237,7 +237,13 @@ pub(super) async fn api_delete(
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
-    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
+    let exists = match app.store.repo_exists(&owner, &name).await {
+        Ok(b) => b,
+        // Not "already gone": read as gone, the marker went and the database stayed — an
+        // invisible, still-owned repo (2026-09-12).
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("could not read the repository: {e}")).into_response(),
+    };
+    if !exists {
         // No database, but the listing may still name it: a ghost marker (a reconcile that ran
         // between a delete's two halves) is exactly what a person deleting the entry expects to
         // clear. Under the same lock the live path takes, so it cannot undo a concurrent create.
@@ -334,14 +340,18 @@ pub(super) async fn api_branch_delete(
 /// database — the same database the push path reads them from.
 pub(super) async fn api_protect(
     State(app): State<Arc<App>>,
+    axum::Extension(trusted): axum::Extension<Trusted>,
+    headers: HeaderMap,
     Path((owner, name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let Some((owner, name)) = crate::protocol::parse_repo_path(&format!("{owner}/{name}")) else {
         return (StatusCode::BAD_REQUEST, "invalid repository path").into_response();
     };
-    if !app.store.repo_exists(&owner, &name).await.unwrap_or(false) {
-        return hidden();
+    // The gate its GET sibling `api_protections` takes: setting a rule is at least as private as
+    // reading one, and until 2026-09-12 only the read was gated.
+    if let Err(r) = open_ro(&app, &trusted, &headers, &owner, &name).await {
+        return r;
     }
     let Some(pattern) = q.get("pattern").map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "a branch pattern is required").into_response();
