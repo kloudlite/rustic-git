@@ -23,7 +23,9 @@ pub fn confine(root: &Path, home: &Path, given: &str) -> Result<PathBuf, ToolErr
     if !resolved.starts_with(&home) {
         return Err(ToolError::Denied(format!("EACCES {}: outside {}", given, home.display())));
     }
-    Ok(lexical)
+    // The RESOLVED path, not the lexical one: the caller opens what was checked, so a symlink
+    // swapped between the check and the open cannot point the write somewhere else (2026-09-12).
+    Ok(resolved)
 }
 
 /// Canonicalise the longest existing prefix and re-append the rest, so a path that does not exist
@@ -62,6 +64,10 @@ mod tests {
         let e = confine(&root, &home, "../../../../etc/passwd").unwrap_err();
         assert!(matches!(e, ToolError::Denied(ref m) if m.contains("etc/passwd")), "{e:?}");
         assert!(confine(&root, &home, "/etc/passwd").is_err());
+        // A symlink INSIDE the home resolves to its target: what was checked is what is opened.
+        std::fs::create_dir_all(home.join("real")).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), root.join("link")).unwrap();
+        assert_eq!(confine(&root, &home, "link/f.txt").unwrap(), home.join("real/f.txt"));
         // A symlink that leaves the home is followed and refused.
         let outside = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), root.join("out")).unwrap();

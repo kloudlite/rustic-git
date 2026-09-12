@@ -188,10 +188,12 @@ pub async fn status(root: &Path, with_ignored: bool) -> Result<Status, String> {
 
 /// Added and removed lines per changed path, worktree against HEAD; `None` is a binary file. An
 /// untracked file counts every line, a deleted one every line it had.
-pub async fn numstat(root: &Path) -> Result<Vec<(String, Option<(u32, u32)>)>, String> {
+/// The caller's `changes` (from its own `status` call): `/fs/changes` walked status TWICE for one
+/// answer, and a large tree pays that walk twice (2026-09-12).
+pub async fn numstat(root: &Path, changes: &[Change]) -> Result<Vec<(String, Option<(u32, u32)>)>, String> {
+    let changes = changes.to_vec();
     blocking(root, move |root| {
         let Some(repo) = open(&root) else { return Ok(Vec::new()) };
-        let (changes, _) = walk_status(&repo, false)?;
         Ok(changes
             .iter()
             .map(|c| {
@@ -373,7 +375,7 @@ mod tests {
         assert_eq!(patch, "", "nothing staged for a.txt");
         let (patch, _) = diff(&root, None, Against::Head, false).await.unwrap();
         assert!(patch.contains("b/a.txt") && patch.contains("b/b.txt"), "{patch}");
-        assert_eq!(numstat(&root).await.unwrap(), vec![("a.txt".to_string(), Some((1, 0))), ("b.txt".to_string(), Some((1, 0))), ("renamed.txt".to_string(), Some((0, 0)))]);
+        assert_eq!(numstat(&root, &status(&root, false).await.unwrap().changes).await.unwrap(), vec![("a.txt".to_string(), Some((1, 0))), ("b.txt".to_string(), Some((1, 0))), ("renamed.txt".to_string(), Some((0, 0)))]);
         assert_eq!(stash_count(&root).await, 0);
     }
 

@@ -72,7 +72,9 @@ pub struct Proc {
     pub exited_at: Option<std::time::Instant>,
     pub out: Ring,
     pub err: Ring,
-    pub stdin: Option<ChildStdin>,
+    /// Behind its own async lock: taking it out for the duration of a write made a CONCURRENT
+    /// second write read "takes no more input" instead of waiting its turn (2026-09-12).
+    pub stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
     pub tx: broadcast::Sender<Frame>,
     child: Option<Child>,
 }
@@ -105,7 +107,7 @@ impl Procs {
         let (tx, _) = broadcast::channel(1024);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdin = child.stdin.take();
+        let stdin = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
         let proc_ = Arc::new(Mutex::new(Proc { id: id.clone(), cmd: cmdline, started_at: now_rfc3339(), state: State::Running, exit_code: None, exited_at: None, out: Ring::new(RING_BYTES), err: Ring::new(RING_BYTES), stdin, tx: tx.clone(), child: None }));
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), proc_.clone());
         let pump = |reader: Option<tokio::process::ChildStdout>, err_reader: Option<tokio::process::ChildStderr>, p: Arc<Mutex<Proc>>| {
@@ -167,7 +169,11 @@ impl Procs {
                         g.exit_code = Some(code);
                         g.exited_at = Some(std::time::Instant::now());
                         g.child = None;
-                        g.stdin = None;
+                        // Not waited on: a write in flight owns the lock and its own error says
+                        // the pipe is gone; the handle drops with the Proc either way.
+                        if let Ok(mut s) = g.stdin.try_lock() {
+                            *s = None;
+                        }
                         let _ = g.tx.send(Frame::Exit(code));
                         tracing::info!(process = %g.id, code, "ide.process.exited");
                         break;
@@ -228,11 +234,11 @@ impl Procs {
 
     pub async fn write_stdin(&self, id: &str, data: &[u8]) -> Result<usize, String> {
         let p = self.get(id).ok_or_else(|| format!("no process {id}"))?;
-        let stdin = p.lock().unwrap_or_else(|q| q.into_inner()).stdin.take();
-        let Some(mut s) = stdin else { return Err(format!("process {id} takes no more input")) };
+        let slot = p.lock().unwrap_or_else(|q| q.into_inner()).stdin.clone();
+        let mut g = slot.lock().await;
+        let Some(s) = g.as_mut() else { return Err(format!("process {id} takes no more input")) };
         let r = s.write_all(data).await.map(|_| data.len()).map_err(|e| format!("stdin: {e}"));
         let _ = s.flush().await;
-        p.lock().unwrap_or_else(|q| q.into_inner()).stdin = Some(s);
         r
     }
 
@@ -244,11 +250,7 @@ impl Procs {
     }
 }
 
-pub(crate) fn rand_id() -> u64 {
-    rand_u64()
-}
-
-fn rand_u64() -> u64 {
+pub(crate) fn rand_u64() -> u64 {
     // No rand dependency for an id: the clock and the pid are unique enough for one table.
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;
     t ^ ((std::process::id() as u64) << 32) ^ (t >> 17)
@@ -287,6 +289,25 @@ mod tests {
         assert_eq!(g.exit_code, Some(0));
         assert_eq!(g.out.read_since(0).0, b"one\nthree\n");
         assert_eq!(g.err.read_since(0).0, b"two\n");
+    }
+
+    #[tokio::test]
+    async fn two_writes_to_one_stdin_both_land() {
+        let procs = Procs::default();
+        let mut c = Command::new("sh");
+        c.arg("-c").arg("cat");
+        let id = procs.spawn(c, "cat".into()).unwrap();
+        let (a, b) = tokio::join!(procs.write_stdin(&id, b"one\n"), procs.write_stdin(&id, b"two\n"));
+        assert_eq!((a.unwrap(), b.unwrap()), (4, 4));
+        let p = procs.get(&id).unwrap();
+        for _ in 0..100 {
+            if p.lock().unwrap().out.end() >= 8 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(p.lock().unwrap().out.end(), 8);
+        procs.kill(&id, "KILL").await.unwrap();
     }
 
     #[tokio::test]

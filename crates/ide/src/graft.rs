@@ -156,10 +156,7 @@ impl Graft {
         let root = self.root.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
-            let relevant = ev.paths.iter().any(|p| {
-                let rel = p.strip_prefix(&root).unwrap_or(p);
-                !rel.components().next().is_some_and(|c| IGNORED_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
-            });
+            let relevant = ev.paths.iter().any(|p| !is_ignored_dir(p.strip_prefix(&root).unwrap_or(p)));
             if relevant {
                 me.refresh_soon();
             }
@@ -203,7 +200,36 @@ impl Graft {
         c.stdin.write_all(format!("{init}\n").as_bytes()).await.map_err(|e| format!("graft mcp: {e}"))?;
         let notified = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
         c.stdin.write_all(format!("{notified}\n").as_bytes()).await.map_err(|e| format!("graft mcp: {e}"))?;
+        // The table in `tools::graft` is graft's schemas COPIED, so `GET /tools` can answer while
+        // the child starts; a graft upgrade that changes one would otherwise be advertised wrong
+        // forever. Checked once per child, and only warned about (2026-09-12).
+        if let Err(e) = self.check_schemas(&mut c).await {
+            tracing::warn!(error = %e, "ide.graft.tools.uncheckable");
+        }
         *slot = Some(c);
+        Ok(())
+    }
+
+    async fn check_schemas(&self, c: &mut Child_) -> Result<(), String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
+        let req = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/list" });
+        c.stdin.write_all(format!("{req}\n").as_bytes()).await.map_err(|e| format!("graft mcp: {e}"))?;
+        let resp = match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(v)) => v,
+            _ => {
+                self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                return Err("no tools/list answer in 10 s".into());
+            }
+        };
+        let theirs = resp["result"]["tools"].as_array().cloned().unwrap_or_default();
+        for t in crate::tools::graft::table() {
+            let Some(o) = theirs.iter().find(|o| o["name"] == t.name) else { continue };
+            if o["inputSchema"] != t.schema {
+                tracing::warn!(tool = t.name, "ide.graft.schema.drift");
+            }
+        }
         Ok(())
     }
 
@@ -222,7 +248,15 @@ impl Graft {
                 return Err(format!("graft mcp: {e}"));
             }
         }
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(120), rx).await.map_err(|_| "graft mcp: no answer in 120 s".to_string())?.map_err(|_| "graft mcp exited".to_string())?;
+        let resp = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+            Ok(r) => r.map_err(|_| "graft mcp exited".to_string())?,
+            // The entry has to go, or a child that answers late resolves a channel nobody holds
+            // and the map grows for the life of the server (2026-09-12).
+            Err(_) => {
+                self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                return Err("graft mcp: no answer in 120 s".to_string());
+            }
+        };
         if let Some(e) = resp.get("error") {
             return Err(e["message"].as_str().unwrap_or("graft error").to_string());
         }
@@ -254,7 +288,14 @@ impl Graft {
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(bin)).find(|c| c.is_file()))
+    which_in(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()), bin)
+}
+
+/// A PATH entry that is a plain file is not a command: without the executable bit the spawn fails
+/// and the graph was reported Drifted rather than Unavailable (2026-09-12).
+fn which_in(dirs: impl Iterator<Item = PathBuf>, bin: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    dirs.map(|d| d.join(bin)).find(|c| c.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
 pub fn is_ignored_dir(rel: &Path) -> bool {
@@ -271,6 +312,17 @@ mod tests {
             assert!(is_ignored_dir(Path::new(d)), "{d}");
         }
         assert!(!is_ignored_dir(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn which_takes_only_an_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("graft");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        assert!(which_in([tmp.path().to_path_buf()].into_iter(), "graft").is_none(), "not executable yet");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(which_in([tmp.path().to_path_buf()].into_iter(), "graft"), Some(bin));
     }
 
     /// Needs `graft` on PATH and a graph at the repo root: runs in the dev pod with

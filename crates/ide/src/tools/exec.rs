@@ -1,8 +1,8 @@
 //! `exec` and the `process_*` tools. A job is `exec` without `detach`: it runs to completion under
 //! a timeout and answers what it printed. `detach: true` hands the same command to `Procs`.
-use super::{opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
+use super::{argv, opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
 use crate::paths::confine;
-use crate::procs::{Procs, State};
+use crate::procs::{Procs, Ring, State};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
@@ -36,10 +36,10 @@ fn command(root: &std::path::Path, home: &std::path::Path, args: &Value) -> Resu
             (c, s.clone())
         }
         Some(Value::Array(a)) if !a.is_empty() => {
-            let argv: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
-            let mut c = Command::new(argv[0]);
-            c.args(&argv[1..]);
-            (c, argv.join(" "))
+            let words = argv(a)?;
+            let mut c = Command::new(words[0]);
+            c.args(&words[1..]);
+            (c, words.join(" "))
         }
         _ => return Err(ToolError::Invalid("`cmd` (string, or argv array) is required".into())),
     };
@@ -57,12 +57,22 @@ fn command(root: &std::path::Path, home: &std::path::Path, args: &Value) -> Resu
     Ok((cmd, line))
 }
 
-fn cap(mut bytes: Vec<u8>) -> (String, bool) {
-    let truncated = bytes.len() > JOB_CAP;
-    if truncated {
-        bytes.drain(..bytes.len() - JOB_CAP);
+/// A stream read into the bounded ring: a command that prints gigabytes costs `JOB_CAP` of memory,
+/// not all of it. `read_to_end` here was the whole pod's memory in one `yes` (2026-09-12).
+async fn drain<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> (String, bool) {
+    let mut ring = Ring::new(JOB_CAP);
+    if let Some(mut r) = r {
+        let mut buf = [0u8; 64 << 10];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut r, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => ring.push(&buf[..n]),
+            }
+        }
     }
-    (String::from_utf8_lossy(&bytes).into_owned(), truncated)
+    // The ring keeps the tail; what it dropped is exactly what `truncated` reports.
+    let (bytes, _, dropped) = ring.read_since(0);
+    (String::from_utf8_lossy(&bytes).into_owned(), dropped > 0)
 }
 
 async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
@@ -73,18 +83,14 @@ async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
     let err = child.stderr.take();
     let read = async {
         let child = &mut child;
-        let (o, e) = tokio::join!(
-            async { match out { Some(mut r) => { let mut b = Vec::new(); let _ = tokio::io::AsyncReadExt::read_to_end(&mut r, &mut b).await; b } None => Vec::new() } },
-            async { match err { Some(mut r) => { let mut b = Vec::new(); let _ = tokio::io::AsyncReadExt::read_to_end(&mut r, &mut b).await; b } None => Vec::new() } }
-        );
+        let (o, e) = tokio::join!(drain(out), drain(err));
         let status = child.wait().await;
         (o, e, status)
     };
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), read).await {
         Ok((o, e, status)) => {
             let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-            let (stdout, t1) = cap(o);
-            let (stderr, t2) = cap(e);
+            let ((stdout, t1), (stderr, t2)) = (o, e);
             Ok(json!({ "exit_code": code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": false, "ms": started.elapsed().as_millis() as u64 }))
         }
         Err(_) => {
@@ -240,6 +246,23 @@ mod tests {
         assert_eq!(v["stderr"].as_str().unwrap().trim(), "err");
         let v = x.call("exec", json!({ "cmd": ["sh", "-c", "echo $FOO"], "env": { "FOO": "bar" } })).await.unwrap();
         assert_eq!(v["stdout"].as_str().unwrap().trim(), "bar");
+    }
+
+    #[tokio::test]
+    async fn a_job_that_prints_more_than_the_ring_holds_keeps_the_tail_and_says_truncated() {
+        let (_t, x) = exec_set();
+        let v = x.call("exec", json!({ "cmd": "yes 0123456789abcdef | head -c 5000000; echo END" })).await.unwrap();
+        assert_eq!(v["truncated"], true);
+        let out = v["stdout"].as_str().unwrap();
+        assert!(out.len() <= JOB_CAP, "{}", out.len());
+        assert!(out.ends_with("END\n"), "the tail is what is kept");
+    }
+
+    #[tokio::test]
+    async fn an_argv_entry_that_is_not_a_string_is_refused_rather_than_dropped() {
+        let (_t, x) = exec_set();
+        let e = x.call("exec", json!({ "cmd": ["echo", 1, "b"] })).await.unwrap_err();
+        assert!(matches!(e, ToolError::Invalid(_)), "{e:?}");
     }
 
     #[tokio::test]

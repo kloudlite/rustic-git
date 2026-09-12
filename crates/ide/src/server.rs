@@ -4,7 +4,7 @@ use crate::procs::Procs;
 use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
 use crate::watches::Watches;
 use crate::Config;
-use axum::{extract::State, routing::{get, post}, Json, Router};
+use axum::{extract::{DefaultBodyLimit, State}, routing::{get, post}, Json, Router};
 use std::sync::Arc;
 
 pub struct App {
@@ -48,6 +48,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/diff", get(crate::fs::diff))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
+        // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
+        // themselves accept up to `MAX_BYTES` (2026-09-12).
+        .layer(DefaultBodyLimit::max(crate::tools::files::MAX_BYTES as usize + (1 << 20)))
         .with_state(app)
 }
 
@@ -113,6 +116,9 @@ mod tests {
         assert_eq!(s, 400);
         let (s, _) = post(&app, "nope", serde_json::json!({})).await;
         assert_eq!(s, 404);
+        // Bigger than axum's 2 MiB default: the limit is the file tools' own.
+        let (s, v) = post(&app, "write", serde_json::json!({"path": "big.txt", "content": "x".repeat(3 << 20)})).await;
+        assert_eq!((s, v["bytes"].as_u64()), (200, Some(3 << 20)), "{v}");
     }
 
     async fn get(app: &Arc<App>, uri: &str, inm: Option<&str>) -> (u16, Option<String>, Vec<u8>) {

@@ -21,7 +21,7 @@ A tool's own answer is the body. Anything that stopped it from running is an HTT
 
 ## Tools
 
-Paths are relative to the workspace directory, or absolute under `/home/kl`. Anything outside is refused naming the path.
+Paths are relative to the workspace directory, or absolute under `/home/kl`. Anything outside is refused naming the path. Symlinks are followed before the check and the RESOLVED path is what the tool opens, so an answer names where the bytes actually are. A request body may be up to 11 MiB, which is the file tools' own 10 MiB limit plus room for the rest of the JSON; `write`, `edit` and `patch` write through a temp file beside the target whose name carries the process id, so two writers never share one.
 
 | Tool | Does |
 |---|---|

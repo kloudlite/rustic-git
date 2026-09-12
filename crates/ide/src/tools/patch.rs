@@ -160,7 +160,9 @@ pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
     let cwd = confine(root, home, super::opt_str(args, "cwd").unwrap_or("."))?;
     let files = parse(diff)?;
     // Everything in memory first; a hunk that misses anywhere means nothing is written.
-    let mut staged: Vec<(PathBuf, Option<String>)> = Vec::new();
+    // `before` per file, as `edit` keeps: a delete or a write that fails halfway puts back what
+    // the earlier entries of the same diff already overwrote (2026-09-12).
+    let mut staged: Vec<(PathBuf, Option<String>, Option<String>)> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     for fp in &files {
         let target = fp.new.clone().or_else(|| fp.old.clone()).ok_or_else(|| ToolError::Invalid("patch: a file header with /dev/null on both sides".into()))?;
@@ -173,32 +175,53 @@ pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
                 split(&text)
             }
         };
+        let before = std::fs::read_to_string(&path).ok();
         if fp.new.is_none() {
             // A deletion: the hunk must still match what is there.
             apply_file(doc, nl, fp, &name)?;
-            staged.push((path, None));
+            staged.push((path, None, before));
         } else {
             let (out, nl) = apply_file(doc, nl, fp, &name)?;
             let mut text = out.join("\n");
             if nl && !out.is_empty() {
                 text.push('\n');
             }
-            staged.push((path, Some(text)));
+            staged.push((path, Some(text), before));
         }
         touched.push(name);
     }
-    for (path, content) in &staged {
-        match content {
-            Some(c) => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(format!("{}: {e}", parent.display())))?;
-                }
-                atomic_write(path, c.as_bytes())?;
-            }
-            None => std::fs::remove_file(path).map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?,
+    let mut written: Vec<(&PathBuf, &Option<String>)> = Vec::new();
+    for (path, content, before) in &staged {
+        let one = match content {
+            Some(c) => path
+                .parent()
+                .map(|parent| std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(format!("{}: {e}", parent.display()))))
+                .unwrap_or(Ok(()))
+                .and_then(|_| atomic_write(path, c.as_bytes())),
+            None => std::fs::remove_file(path).map_err(|e| ToolError::Failed(format!("{}: {e}", path.display()))),
+        };
+        if let Err(e) = one {
+            restore(&written);
+            return Err(e);
         }
+        written.push((path, before));
     }
     Ok(json!({ "cwd": cwd, "files": touched }))
+}
+
+/// Put back what the earlier entries wrote: the recorded text, or no file at all when the entry
+/// created one.
+fn restore(written: &[(&PathBuf, &Option<String>)]) {
+    for (p, before) in written {
+        match before {
+            Some(t) => {
+                let _ = atomic_write(p, t.as_bytes());
+            }
+            None => {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +263,18 @@ mod tests {
         assert_eq!(v["files"], json!(["a.txt", "b.txt"]));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "zero\none\nTWO\nthree\nfour\n");
         assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "y\n");
+    }
+
+    #[test]
+    fn a_failed_write_puts_back_what_the_earlier_entries_of_the_diff_wrote() {
+        let (_t, root, _home) = ws();
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        let made = root.join("made.txt");
+        std::fs::write(&made, "x\n").unwrap();
+        let a = root.join("a.txt");
+        restore(&[(&a, &Some("one\ntwo\n".to_string())), (&made, &None)]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "one\ntwo\n");
+        assert!(!made.exists(), "a file the diff created is removed again");
     }
 
     #[test]

@@ -67,7 +67,7 @@ impl Watches {
         if map.len() >= MAX_WATCHES {
             return Err(format!("{MAX_WATCHES} watches already; stop one first"));
         }
-        let id = format!("w-{:x}", crate::procs::rand_id());
+        let id = format!("w-{:x}", crate::procs::rand_u64());
         let (tx, _) = broadcast::channel(1024);
         let w = Arc::new(Mutex::new(Watch { id: id.clone(), what, state: State::Running, start: 0, events: VecDeque::new(), tx, once, stop }));
         map.insert(id.clone(), w.clone());

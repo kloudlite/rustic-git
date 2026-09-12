@@ -51,11 +51,20 @@ pub trait ToolSet: Send + Sync {
 
 pub struct Registry {
     sets: Vec<Box<dyn ToolSet>>,
+    /// Built once: `call` used to ask every set for its whole `tools()` vec on every request,
+    /// which rebuilt every schema to find one name (2026-09-12).
+    index: std::collections::HashMap<String, usize>,
 }
 
 impl Registry {
     pub fn new(sets: Vec<Box<dyn ToolSet>>) -> Self {
-        Registry { sets }
+        let mut index = std::collections::HashMap::new();
+        for (i, s) in sets.iter().enumerate() {
+            for t in s.tools() {
+                index.insert(t.name.to_string(), i);
+            }
+        }
+        Registry { sets, index }
     }
 
     pub fn tools(&self) -> Vec<Tool> {
@@ -64,7 +73,7 @@ impl Registry {
 
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, ToolError> {
         let start = Instant::now();
-        let set = self.sets.iter().find(|s| s.tools().iter().any(|t| t.name == name));
+        let set = self.index.get(name).map(|i| &self.sets[*i]);
         let r = match set {
             Some(s) => s.call(name, args).await,
             None => Err(ToolError::Unknown(name.to_string())),
@@ -87,4 +96,22 @@ pub(crate) fn opt_u64(args: &Value, key: &str) -> Option<u64> {
 }
 pub(crate) fn opt_bool(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// An argv array's entries. A non-string used to be dropped silently, which shifted every
+/// argument after it and ran a different command than the caller wrote (2026-09-12).
+pub(crate) fn argv(a: &[Value]) -> Result<Vec<&str>, ToolError> {
+    a.iter().map(|v| v.as_str().ok_or_else(|| ToolError::Invalid(format!("cmd[]: `{v}` is not a string")))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_argv_entry_that_is_not_a_string_is_refused_by_value() {
+        assert_eq!(argv(&[serde_json::json!("echo"), serde_json::json!("hi")]).unwrap(), vec!["echo", "hi"]);
+        let e = argv(&[serde_json::json!("echo"), serde_json::json!(1)]).unwrap_err();
+        assert!(matches!(e, ToolError::Invalid(ref m) if m.contains('1')), "{e:?}");
+    }
 }

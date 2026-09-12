@@ -120,7 +120,14 @@ pub async fn stat(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
             let mut v = serde_json::to_value(&e).unwrap_or_default();
             if e.kind == "file" {
                 let p = confine(&app.cfg.root, &app.cfg.home, &q.path).unwrap_or_default();
-                let head = std::fs::read(&p).map(|b| b.into_iter().take(8192).collect::<Vec<u8>>()).unwrap_or_default();
+                // 8 KiB, never the whole file: a stat of a 2 GiB artefact read all of it to
+                // decide one mime string (2026-09-12).
+                let mut head = vec![0u8; 8192];
+                let n = match tokio::fs::File::open(&p).await {
+                    Ok(mut f) => tokio::io::AsyncReadExt::read(&mut f, &mut head).await.unwrap_or(0),
+                    Err(_) => 0,
+                };
+                head.truncate(n);
                 v["mime"] = json!(sniff(&e.name, &head));
             }
             conditional_json(&headers, &v)
@@ -205,7 +212,7 @@ pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap) -> Respons
     if !st.repo {
         return conditional_json(&headers, &json!({ "repo": false, "changes": [] }));
     }
-    let counts = match git::numstat(&app.cfg.root).await {
+    let counts = match git::numstat(&app.cfg.root, &st.changes).await {
         Ok(c) => c,
         Err(e) => return failed(e),
     };

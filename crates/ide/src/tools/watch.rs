@@ -1,5 +1,5 @@
 //! `watch`, `watch_poll`, `watch_stop`.
-use super::{opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
+use super::{argv, opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
 use crate::paths::confine;
 use crate::procs::Procs;
 use crate::watches::Watches;
@@ -55,10 +55,10 @@ impl ToolSet for WatchTools {
                             (c, s.clone())
                         }
                         Value::Array(a) if !a.is_empty() => {
-                            let argv: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
-                            let mut c = tokio::process::Command::new(argv[0]);
-                            c.args(&argv[1..]);
-                            (c, argv.join(" "))
+                            let words = argv(a)?;
+                            let mut c = tokio::process::Command::new(words[0]);
+                            c.args(&words[1..]);
+                            (c, words.join(" "))
                         }
                         _ => return Err(ToolError::Invalid("cmd must be a string or an argv array".into())),
                     };
@@ -84,5 +84,24 @@ impl ToolSet for WatchTools {
             }
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::watches::Watches;
+
+    #[tokio::test]
+    async fn a_watch_refuses_a_non_string_argv_entry_and_a_non_string_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let root = home.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let w = WatchTools { root, home, procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
+        let e = w.call("watch", json!({ "cmd": ["echo", 7] })).await.unwrap_err();
+        assert!(matches!(e, ToolError::Invalid(_)), "{e:?}");
+        let e = w.call("watch", json!({ "paths": [7] })).await.unwrap_err();
+        assert!(matches!(e, ToolError::Invalid(_)), "{e:?}");
     }
 }

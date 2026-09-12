@@ -91,12 +91,21 @@ pub fn write(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
 /// Temp file beside the target, then rename: a reader never sees a half-written file, and a
 /// crash leaves the old content.
 pub(crate) fn atomic_write(p: &Path, bytes: &[u8]) -> Result<(), ToolError> {
-    let tmp = p.with_extension(format!("{}.kl-ide-tmp", p.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    let tmp = tmp_path(p);
     std::fs::write(&tmp, bytes).map_err(|e| io(e, &tmp))?;
     std::fs::rename(&tmp, p).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         io(e, p)
     })
+}
+
+/// The temp name carries the pid and a per-process counter: two writers of the same file (two
+/// calls, or the server and a `kl` in the workspace) shared one temp name and one clobbered the
+/// other's rename (2026-09-12).
+pub(crate) fn tmp_path(p: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = crate::procs::rand_u64() ^ SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    p.with_extension(format!("{}.kl-ide-tmp-{:x}", p.extension().and_then(|e| e.to_str()).unwrap_or(""), n))
 }
 
 /// `{path, edits}` for one file or `{files: [{path, edits}]}` for several — ALL or nothing across
@@ -186,6 +195,10 @@ pub fn grep(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError> 
         }
         let rel = entry.path().strip_prefix(&cwd).unwrap_or(entry.path()).to_path_buf();
         if only.as_ref().is_some_and(|m| !m.is_match(&rel)) {
+            continue;
+        }
+        // Skipped before the read: a 2 GiB log under the tree must not become a 2 GiB allocation.
+        if entry.metadata().is_ok_and(|m| m.len() > MAX_BYTES) {
             continue;
         }
         let Ok(bytes) = std::fs::read(entry.path()) else { continue };
@@ -350,6 +363,17 @@ mod tests {
         let v = edit(&root, &home, &json!({ "path": "README.md", "edits": [{ "old": "l", "new": "L", "replace_all": true }] })).unwrap();
         assert_eq!(v["applied"], 1);
         assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "# api\n\nheLLo worLd\n");
+    }
+
+    #[test]
+    fn two_temp_names_never_collide_and_grep_skips_a_file_over_the_limit() {
+        let (_t, root, home) = tree();
+        let (a, b) = (tmp_path(&root.join("x.rs")), tmp_path(&root.join("x.rs")));
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().contains("kl-ide-tmp-"));
+        std::fs::write(root.join("huge.txt"), vec![b'q'; MAX_BYTES as usize + 1]).unwrap();
+        let v = grep(&root, &home, &json!({ "pattern": "qqq", "mode": "files" })).unwrap();
+        assert_eq!(v["files"].as_array().unwrap().len(), 0, "{v}");
     }
 
     #[test]

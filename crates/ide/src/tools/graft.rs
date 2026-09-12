@@ -1,7 +1,7 @@
 //! The graft tools: five proxied to `graft mcp`, `graft_build` as a detached process, `graft_blast`
 //! as a job. Schemas are a fixed table (graft 0.18's own, copied) so `GET /tools` answers while
 //! the child is still starting.
-use super::{opt_bool, opt_str, opt_u64, Tool, ToolError, ToolSet};
+use super::{opt_bool, opt_str, Tool, ToolError, ToolSet};
 use crate::graft::{Graft, GraphState};
 use crate::procs::Procs;
 use futures::future::BoxFuture;
@@ -74,7 +74,6 @@ impl ToolSet for GraftTools {
                 }
                 "graft_blast" => {
                     let depth = args.get("depth").map(|d| match d { Value::Number(n) => n.to_string(), Value::String(s) => s.clone(), _ => "1".into() });
-                    let _ = opt_u64(&args, "depth");
                     self.graft.blast(opt_str(&args, "base"), depth.as_deref()).await.map_err(ToolError::Failed)
                 }
                 other => Err(ToolError::Unknown(other.to_string())),
