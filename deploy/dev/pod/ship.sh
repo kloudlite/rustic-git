@@ -74,16 +74,19 @@ cargo build --profile $PROFILE --locked -p kl --target x86_64-unknown-linux-musl
 
 # The Dockerfile COPYs target/release/* relative to its context and .dockerignore drops the rest,
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
+# From $CARGO_TARGET_DIR, never a literal path: when the gate moved to its own target dir
+# (2026-09-12) these links kept pointing at the old shared one, and two ships pushed the previous
+# build's binaries under new tags — the tag said 8caa1dfc, the api still forwarded like 4a5cf582.
 CTX=/work/ctx; rm -rf "$CTX"; mkdir -p "$CTX/target/$PROFILE"
 cp Dockerfile .dockerignore "$CTX/"
 # The workspace image COPYs two scripts from deploy/workspace-image (CI's context is `.`, so it
 # never notices); a staging context that holds only binaries fails that COPY with "not found".
 mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
 for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
-  ln -f /work/target/$PROFILE/$b "$CTX/target/$PROFILE/$b"
+  ln -f "$CARGO_TARGET_DIR/$PROFILE/$b" "$CTX/target/$PROFILE/$b"
 done
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/$PROFILE"
-ln -f /work/target/x86_64-unknown-linux-musl/$PROFILE/kl "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kl"
+ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kl"
 
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}
