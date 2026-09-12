@@ -100,6 +100,37 @@ async fn clusters_list_composes_agents_nodes_and_hosted_counts() {
     assert_eq!(row["settingsStatus"], "stale (lag 1)", "{body}");
 }
 
+/// A region this process cannot read is a ROW, not a 500 over the whole list: the Clusters page
+/// with nine healthy regions used to render nothing at all because the tenth was unreachable
+/// (2026-09-12). The row still names the region and its status — both come from the `Region` CR,
+/// which read fine — and carries `error`.
+#[tokio::test]
+async fn a_region_that_cannot_be_read_becomes_a_row_with_an_error() {
+    let s = admin_server(vec![
+        get(format!("{API}/regions"), list_of("Region", vec![region_obj()])),
+        get(format!("{API}/regions/r1"), region_obj()),
+        get(NODES, json!({"apiVersion": "v1", "kind": "NodeList", "metadata": {}, "items": [node_obj("n1", json!({}))]})),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+        get(format!("{API}/environments"), list_of("Environment", vec![])),
+        get("/apis/apps/v1/namespaces/kube-system/daemonsets/kloudlite-agent", agent_ds()),
+        Route {
+            method: "GET",
+            path: format!("{API}/clustersettings/default"),
+            status: 500,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
+        },
+    ])
+    .await;
+    let resp =
+        reqwest::Client::new().get(format!("{}/admin/clusters", s.base)).bearer_auth(token(&s.jwt)).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "a per-region failure is no longer the whole list's failure");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body[0]["region"], "r1", "{body}");
+    assert_eq!(body[0]["status"], "active", "{body}");
+    assert!(body[0]["error"].is_string(), "the row says why it is blank: {body}");
+    assert_eq!(body[0]["settingsStatus"], "unknown", "{body}");
+}
+
 fn node_routes(annotations: Value) -> Vec<Route> {
     vec![
         get(format!("{API}/regions/r1"), region_obj()),

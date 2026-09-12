@@ -38,6 +38,12 @@ pub(crate) struct ClusterRow {
     // of the CR fails closed as a 5xx rather than handing back a partial object. Add it here if
     // the read ever becomes untyped.
     pub(crate) settings_status: String,
+    /// Set only on a row this process could not read — its region client or its settings read
+    /// failed. The region still gets a row (name and status come from the `Region` CR, which was
+    /// read fine); dropping it made one unreachable region a 500 over the whole list, so a
+    /// console with nine healthy regions showed nothing at all (2026-09-12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
 }
 
 /// The per-region facts every row and the detail both need, read once. `Workspace`/`Environment`
@@ -133,12 +139,30 @@ async fn one_row(
         draining: nodes.iter().filter(|n| n.decommission).count() as i64,
         working_copies,
         settings_status,
+        error: None,
     })
 }
 
+/// The row a region gets when `one_row` could not read it: everything the `Region` CR itself
+/// already told us, zeros for what needed the region's own client, and the failure named.
+fn error_row(r: &crd::Region, why: String) -> ClusterRow {
+    ClusterRow {
+        region: r.name_any(),
+        status: r.spec.status.clone(),
+        agents_ready: 0,
+        agents_desired: 0,
+        nodes_ready: 0,
+        nodes_total: 0,
+        draining: 0,
+        working_copies: 0,
+        settings_status: "unknown".into(),
+        error: Some(why),
+    }
+}
+
 /// Every region's row, plus the node list they all share — degraded, never all-or-nothing: one
-/// region's own client/settings read failing drops only that row, named in the returned errors,
-/// while the rest of the list still renders. `all_ws`/`all_envs` are the caller's own lists
+/// region's own client/settings read failing yields that region's row with `error` set, while
+/// the rest of the list still renders; the returned `errors` carry only fleet-wide failures. `all_ws`/`all_envs` are the caller's own lists
 /// (Overview passes `owners::Fleet.ws`/`.envs`, already fetched for the fleet numbers) so this
 /// never re-lists either CRD.
 pub(crate) async fn cluster_rows_degraded(
@@ -165,19 +189,26 @@ pub(crate) async fn cluster_rows_degraded(
     for r in &regions {
         match one_row(s, r, all_ws, all_envs, &nodes).await {
             Ok(row) => rows.push(row),
-            Err(resp) => errors.push(format!("cluster {}: HTTP {}", r.name_any(), resp.status())),
+            Err(resp) => {
+                let why = format!("could not read this region: HTTP {}", resp.status());
+                tracing::warn!(region = %r.name_any(), status = resp.status().as_u16(), "clusters.row.failed");
+                rows.push(error_row(r, why));
+            }
         }
     }
     (rows, nodes, errors)
 }
 
-/// `GET /admin/clusters`'s all-or-nothing shape, built on the same degraded walk — any failure
-/// (a region's, the node list's) becomes this route's one error instead of a partial list, since
-/// the route's existing callers expect a complete list or a clear failure, not a silent gap.
+/// `GET /admin/clusters`. Fleet-wide failures (no kube client, no region list, no node list)
+/// are still one clear 500; a single region's own failure is a row with `error` set instead, so
+/// the rest of the list renders.
 pub(crate) async fn cluster_rows(s: &ApiState) -> Result<Vec<ClusterRow>, Response> {
     let all_ws = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.workspaces).await?;
     let all_envs = fleet::all(s.fleet.as_deref(), kube(s)?, |c| &c.environments).await?;
     let (rows, _, errors) = cluster_rows_degraded(s, &all_ws, &all_envs).await;
+    // Only a FLEET-WIDE failure (no kube client, no region list, no node list) is a 500 now: a
+    // per-region failure comes back as that region's own row carrying `error`, so one sick
+    // region no longer blanks the Clusters page.
     match errors.into_iter().next() {
         Some(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
         None => Ok(rows),

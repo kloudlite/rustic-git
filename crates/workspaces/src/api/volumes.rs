@@ -7,7 +7,7 @@
 //! a second time only to answer "is the parent still around?", which is a display detail, never an
 //! authorization one.
 
-use super::scope::{caller_owners, may_act_on, mine, owner_set_selector};
+use super::scope::{caller_owners, mine, owner_set_selector};
 use super::{caller, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState, Caller};
 use crate::crd::{self, VolumeSource};
 use kube::api::{Api, ListParams};
@@ -236,10 +236,15 @@ pub(crate) async fn list_volumes(
     Query(q): Query<ListVolQuery>,
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
+    // `?owner=` NARROWS the caller's own owner set and can never widen it: every other volume
+    // route — the listings, the delete rules, `volume_owner` — decides on `caller_owners`, and
+    // authorizing this one with `may_act_on` instead admitted a superadmin claim, so the listing
+    // saw volumes the same caller's delete could not (2026-09-12).
+    let owners = caller_owners(&s, &caller_id).await;
     let owners = match &q.owner {
-        Some(o) if may_act_on(&s, &caller_id, o).await => vec![o.clone()],
+        Some(o) if owners.iter().any(|mine| mine == o) => vec![o.clone()],
         Some(_) => return Err(not_found()),
-        None => caller_owners(&s, &caller_id).await,
+        None => owners,
     };
     Ok(Json(volumes_for(&s, &owners, q.kind.as_deref()).await?).into_response())
 }

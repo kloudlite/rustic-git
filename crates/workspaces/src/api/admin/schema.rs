@@ -23,6 +23,10 @@ struct Row {
     mark: &'static str,
     readers: Vec<&'static str>,
     default: serde_json::Value,
+    /// The env value as THIS process (the admin api) sees it — not the reader's. A reader in
+    /// another Deployment can have been started with a different value for the same var, so this
+    /// column is a bootstrap hint, never the value in force; the response's `envNote` says so to
+    /// whoever renders it (2026-09-12).
     env: Option<String>,
 }
 
@@ -245,7 +249,12 @@ fn cluster_rows() -> Vec<Row> {
 }
 
 pub(crate) async fn get_schema() -> Response {
-    Json(serde_json::json!({"central": central_rows(), "cluster": cluster_rows()})).into_response()
+    Json(serde_json::json!({
+        "central": central_rows(),
+        "cluster": cluster_rows(),
+        "envNote": "env values are read from this process's environment (the admin api), not from the reader that consumes the setting",
+    }))
+    .into_response()
 }
 
 #[cfg(test)]

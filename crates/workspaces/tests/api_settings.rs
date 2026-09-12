@@ -378,6 +378,60 @@ async fn put_cluster_boot_field_rolls_only_its_reader() {
     assert!(s.rec.calls().iter().all(|c| !c.contains(GATEWAY_DEPLOY)), "the gateway is not a reader of defaultImage");
 }
 
+/// A roll that FAILS after the write is not "ok". The settings write has already landed and is
+/// never rolled back, but a `Mark::Boot` reader still running the old value is the one fact an
+/// operator would act on, and the audit result used to say "ok" regardless (2026-09-12).
+#[tokio::test]
+async fn a_failed_roll_is_named_in_the_audit_result() {
+    let keys = keys_store().await;
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            get(AGENT_DS, daemonset(2, 2)),
+            patch(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            Route {
+                method: "PATCH",
+                path: AGENT_DS.to_string(),
+                status: 500,
+                body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "code": 500}),
+            },
+        ],
+        Some(keys.clone()),
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/us", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"defaultImage": "img:2", "note": "test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "the CR write stands: {:?}", resp.text().await);
+
+    let results = audit_results(&keys).await;
+    assert!(
+        results.iter().any(|r| r.contains("roll failed: defaultImage")),
+        "the audit row must name the reader that did not roll: {results:?}"
+    );
+}
+
+/// Every audit row's `result`, straight off the object store the admin process writes them to.
+async fn audit_results(keys: &kloudlite_storage::store::Store) -> Vec<String> {
+    use futures::StreamExt;
+    use slatedb::object_store::ObjectStoreExt;
+    let prefix = slatedb::object_store::path::Path::from("audit");
+    let mut out = Vec::new();
+    let mut list = keys.os.list(Some(&prefix));
+    while let Some(Ok(meta)) = list.next().await {
+        let bytes = keys.os.get(&meta.location).await.unwrap().bytes().await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        out.push(v["result"].as_str().unwrap_or_default().to_string());
+    }
+    out
+}
+
 /// A LIVE field alone (`syncSecs`) writes the CR and rolls nothing — no PATCH to any workload at
 /// all, `kloudlite-agent` included.
 #[tokio::test]

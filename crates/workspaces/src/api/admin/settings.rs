@@ -183,18 +183,42 @@ pub(crate) async fn put_central(
         return Ok((axum::http::StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY), Json(body))
             .into_response());
     }
-    // Step 4: roll for real. `.ok()`: the precheck above already refused a conflicting roll; a
-    // failure here is a transient API error on an already-committed settings write — logged, not
-    // rolled back, since the settings document (now written on the server tier) is the source of
-    // truth per the Global Constraints.
+    // Step 4: roll for real. A failure here is a transient API error on an already-committed
+    // settings write — never rolled back, since the settings document (now written on the server
+    // tier) is the source of truth per the Global Constraints — but it IS carried into the audit
+    // result rather than dropped.
     // ponytail: step-2/step-4 TOCTOU on a reader starting its own manual roll mid-save; a global
     // "settings write" mutex in the admin process closes it if it's ever hit in practice, not
     // built ahead of evidence it happens.
-    for (field, scope, reader) in roll_targets {
-        let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
-    }
-    super::audit(&s, &c.name, "put-central-settings", "central", Some(note), "ok").await;
+    let targets = roll_targets.into_iter().map(|(f, sc, r)| (f, sc, vec![r])).collect();
+    let result = roll_all(&s, "put-central-settings", &c.name, targets).await;
+    super::audit(&s, &c.name, "put-central-settings", "central", Some(note), result).await;
     Ok(Json(body).into_response())
+}
+
+/// Roll every boot reader the write changed, and fold the outcome into the audit result.
+///
+/// The roll cannot be undone — the settings write has already landed, and the precheck above
+/// already refused a reader that was mid-roll — but answering a plain "ok" hid the one fact an
+/// operator would act on: a `Mark::Boot` reader still running the old value. Both the log line
+/// and the audit row now name the fields whose roll failed (2026-09-12).
+async fn roll_all(
+    s: &ApiState,
+    action: &str,
+    by: &str,
+    targets: Vec<(&'static str, Scope, Vec<&str>)>,
+) -> String {
+    let mut failed: Vec<&'static str> = Vec::new();
+    for (field, scope, readers) in targets {
+        if let Err(resp) = workloads::roll_readers(s, &scope, &readers, RollReason::Setting(field), by).await {
+            tracing::error!(action, field, status = resp.status().as_u16(), "settings.roll.failed");
+            failed.push(field);
+        }
+    }
+    match failed.is_empty() {
+        true => "ok".to_string(),
+        false => format!("ok; roll failed: {}", failed.join(",")),
+    }
 }
 
 /// `POST /admin/settings/central/revert`, the central twin of `revert_cluster` below. Unlike the
@@ -254,10 +278,9 @@ pub(crate) async fn revert_central(
         return Ok((axum::http::StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY), Json(body))
             .into_response());
     }
-    for (field, scope, reader) in roll_targets {
-        let _ = workloads::roll_readers(&s, &scope, &[reader], RollReason::Setting(field), &c.name).await;
-    }
-    super::audit(&s, &c.name, "revert-central-settings", "central", Some(note), "ok").await;
+    let targets = roll_targets.into_iter().map(|(f, sc, r)| (f, sc, vec![r])).collect();
+    let result = roll_all(&s, "revert-central-settings", &c.name, targets).await;
+    super::audit(&s, &c.name, "revert-central-settings", "central", Some(note), result).await;
     Ok(Json(body).into_response())
 }
 
@@ -441,15 +464,15 @@ async fn apply_cluster_patch(
             .map_err(kube_err),
     )
     .await?;
-    // `.ok()`: same reasoning as the central path above — the precheck already refused a
-    // conflicting roll, the CR write already landed, and the settings document is the source of
-    // truth.
-    for (field, readers) in &changed {
-        let _ =
-            workloads::roll_readers(s, &Scope::Region(region.to_string()), readers, RollReason::Setting(field), caller_name)
-                .await;
-    }
-    super::audit(s, caller_name, action, region, Some(note), "ok").await;
+    // Same reasoning as the central path above — the precheck already refused a conflicting
+    // roll, the CR write already landed, and the CR is the source of truth — but a failed roll
+    // is named in the audit result instead of being swallowed.
+    let targets = changed
+        .into_iter()
+        .map(|(field, readers)| (field, Scope::Region(region.to_string()), readers.to_vec()))
+        .collect();
+    let result = roll_all(s, action, caller_name, targets).await;
+    super::audit(s, caller_name, action, region, Some(note), result).await;
     Ok(Json(patched).into_response())
 }
 

@@ -121,7 +121,10 @@ pub(crate) async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str,
 pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Workspace, Response> {
     let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
     let w = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
-    if w.spec.owner != c.name && !c.superadmin {
+    // Through `may_act_on`, not a hand-rolled `c.superadmin` arm: that arm reached another
+    // owner's workspace without leaving the `superadmin.acting` line the claim's whole design
+    // rests on, so support's cross-owner reads were the only unlogged ones (2026-09-12).
+    if !may_act_on(s, c, &w.spec.owner).await {
         return Err(not_found());
     }
     Ok(w)

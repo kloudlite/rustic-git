@@ -130,6 +130,28 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     assert_eq!(gone["display_name"], "ws-gone", "nothing alive to name it: the volume id");
 }
 
+/// `?owner=` narrows the caller's own owner set; it never widens it. This route used to
+/// authorize the parameter with `may_act_on`, whose superadmin arm made the LISTING wider than
+/// every delete rule on the same volumes (all of which decide on `caller_owners`) — a superadmin
+/// could enumerate another owner's volumes from the user API (2026-09-12).
+#[tokio::test]
+async fn a_superadmin_cannot_widen_the_volume_listing_with_owner() {
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![push("ws-a-a", "ws-a", "karthik", "2026-08-27T09:00:00Z")])),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let root = s.jwt.mint_admin("root@example.com", "Root", Some("root"), true).unwrap();
+
+    let (status, _) = get_json(&s, &root, "/v1/volumes?owner=karthik").await;
+    assert_eq!(status, 404, "a superadmin claim is not membership in karthik's owner set");
+
+    // Their own is still their own.
+    let (status, body) = get_json(&s, &root, "/v1/volumes?owner=root").await;
+    assert_eq!(status, 200, "{body}");
+}
+
 /// The two fields the Snapshots page counts on: how many pushes a volume holds, and when the last
 /// one landed. Sync points are neither — they are a live worktree's replication state — and a
 /// volume that holds ONLY sync points is not a row at all.
