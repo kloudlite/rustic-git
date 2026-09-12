@@ -21,7 +21,7 @@ export async function pinnedLanguages(owner: string, pins: string[]): Promise<La
         if (!all.ok) return [];
         const head = defaultBranch(all.value);
         if (!head) return [];
-        return await files(undefined, owner, repo, head.oid);
+        return await files(undefined, owner, repo, head.oid, "", undefined, true);
       } catch {
         return [];
       }

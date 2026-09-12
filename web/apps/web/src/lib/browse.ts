@@ -220,10 +220,14 @@ export async function files(
   oid: string,
   path = "",
   cap?: number,
+  sizes = false,
 ): Promise<WalkedFile[]> {
   const params = new URLSearchParams();
   if (path) params.set("path", path);
   if (cap) params.set("cap", String(cap));
+  // Sizes are opt-in on the server since 2026-09-12 (a blob header per entry): only the
+  // language breakdown weighs files, so only it pays for them.
+  if (sizes) params.set("sizes", "1");
   const q = params.size ? `?${params}` : "";
   const r = await get<Entry[]>(`/api/${seg(owner)}/${seg(repo)}/files/${seg(oid)}${q}`, token);
   // A repo whose shape cannot be read still lists and still opens; only the
