@@ -1,0 +1,263 @@
+@import "tailwindcss";
+@source "../**/*.tsx";
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Theme.
+
+   Layer 1, below: the raw colour values, one block per theme. These are the only
+   things that change when the theme changes.
+   Layer 2, the @theme block: those values mapped into Tailwind's token
+   namespaces, so `bg-panel`, `text-muted`, `border-line` exist as utilities and
+   resolve through the vars. Because the mapping is `inline`, a utility points at
+   the var rather than copying its value, so swapping `data-theme` restyles the
+   whole app without a single `dark:` variant in any component.
+
+   Colour values are Zed's One Dark and One Light (zed/assets/themes/one), keyed
+   by the roles Zed uses, so any value can be checked against the source.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #282c33;          /* the buffer ground */
+  --raised: #2f343e;      /* panels, inputs */
+  --overlay: #3b414d;     /* menus, popovers */
+  --chrome: #3b414d;      /* title bar, status bar */
+
+  --line: #4c515e;
+  --line-subtle: #363c46;
+  --focus: #74ade8;
+
+  --hover: #363c46;
+  --active: #454a56;
+  --selected: #454a56;
+
+  --fg: #c8ccd4;
+  --muted: #979ca5;
+  --subtle: #858c99;
+  --disabled: #757a84;
+
+  --accent: #74ade8;
+  --on-accent: #1b1f26;
+  --success: #a1c181;
+  --warning: #dec184;
+  --danger: #d7868a;
+
+  --accent-wash: rgb(116 173 232 / 14%);
+  --success-wash: rgb(161 193 129 / 15%);
+  --warning-wash: rgb(222 193 132 / 15%);
+  --danger-wash: rgb(208 114 119 / 15%);
+
+  --modified: #dec184;
+  --created: #a1c181;
+  --deleted: #d7868a;
+
+  --syn-keyword: #b477cf;
+  --syn-string: #a1c181;
+  --syn-function: #74ade8;
+  --syn-number: #bf956a;
+  --syn-comment: #858c99;
+  --syn-type: #e5c07b;
+  --syn-constant: #dfc184;
+  --syn-property: #d7868a;
+  --syn-punctuation: #b2b9c6;
+
+  --thumb: #4c525e;
+  --shadow-overlay: 0 6px 16px rgb(0 0 0 / 28%);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* The light theme needs real steps between surfaces: white for the document,
+     a tinted panel, a darker chrome. One Light's values sit too close together
+     to tell the three apart on a large screen. */
+  --bg: #ffffff;
+  --raised: #f3f3f5;
+  --overlay: #ffffff;
+  --chrome: #e9e9ec;
+
+  --line: #d2d2d7;
+  --line-subtle: #e4e4e8;
+  --focus: #3f5bd8;
+
+  --hover: #ebebef;
+  --active: #dcdce2;
+  --selected: #dcdce2;
+
+  --fg: #2b2d34;
+  --muted: #55575f;
+  --subtle: #74767e;
+  --disabled: #a4a5ac;
+
+  --accent: #3f5bd8;
+  --on-accent: #ffffff;
+  --success: #3d7a33;
+  --warning: #8a5f0a;
+  --danger: #b53a30;
+
+  --accent-wash: rgb(63 91 216 / 10%);
+  --success-wash: rgb(61 122 51 / 13%);
+  --warning-wash: rgb(138 95 10 / 13%);
+  --danger-wash: rgb(181 58 48 / 11%);
+
+  --modified: #8a5f0a;
+  --created: #3d7a33;
+  --deleted: #b53a30;
+
+  --syn-keyword: #9a3fa6;
+  --syn-string: #3d7a33;
+  --syn-function: #3f5bd8;
+  --syn-number: #98601f;
+  --syn-comment: #74767e;
+  --syn-type: #8a5f0a;
+  --syn-constant: #8a5f0a;
+  --syn-property: #b53a30;
+  --syn-punctuation: #55575f;
+
+  --thumb: #c2c2c8;
+  --shadow-overlay: 0 6px 16px rgb(0 0 0 / 10%);
+}
+
+/* Following the OS is the default: with no data-theme set, light applies only
+   when the OS asks for it. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #ffffff; --raised: #f3f3f5; --overlay: #ffffff; --chrome: #e9e9ec;
+    --line: #d2d2d7; --line-subtle: #e4e4e8; --focus: #3f5bd8;
+    --hover: #ebebef; --active: #dcdce2; --selected: #dcdce2;
+    --fg: #2b2d34; --muted: #55575f; --subtle: #74767e; --disabled: #a4a5ac;
+    --accent: #3f5bd8; --on-accent: #ffffff;
+    --success: #3d7a33; --warning: #8a5f0a; --danger: #b53a30;
+    --accent-wash: rgb(63 91 216 / 10%); --success-wash: rgb(61 122 51 / 13%);
+    --warning-wash: rgb(138 95 10 / 13%); --danger-wash: rgb(181 58 48 / 11%);
+    --modified: #8a5f0a; --created: #3d7a33; --deleted: #b53a30;
+    --syn-keyword: #9a3fa6; --syn-string: #3d7a33; --syn-function: #3f5bd8;
+    --syn-number: #98601f; --syn-comment: #74767e; --syn-type: #8a5f0a;
+    --syn-constant: #8a5f0a; --syn-property: #b53a30; --syn-punctuation: #55575f;
+    --thumb: #c2c2c8;
+    --shadow-overlay: 0 6px 16px rgb(0 0 0 / 10%);
+  }
+}
+
+@theme inline {
+  /* colour: every name here is a role, never a hue */
+  --color-bg: var(--bg);
+  --color-overlay: var(--overlay);
+  --color-chrome: var(--chrome);
+  --color-panel: var(--raised);
+
+  --color-line: var(--line);
+  --color-line-subtle: var(--line-subtle);
+  --color-focus: var(--focus);
+
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-selected: var(--selected);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-disabled: var(--disabled);
+
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --color-accent-wash: var(--accent-wash);
+  --color-success-wash: var(--success-wash);
+  --color-warning-wash: var(--warning-wash);
+  --color-danger-wash: var(--danger-wash);
+
+  --color-modified: var(--modified);
+  --color-created: var(--created);
+  --color-deleted: var(--deleted);
+
+  /* type: a step per role. The app is dense, so the ramp is short and tight. */
+  --font-ui: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "Lilex", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --text-2xs: 10px;
+  --text-2xs--line-height: 14px;
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-base: 13px;
+  --text-base--line-height: 20px;
+  --text-md: 14px;
+  --text-md--line-height: 22px;
+
+  /* space: 4px base, so h-6.5 is the 26px row every list in the app uses */
+  --spacing: 4px;
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 7px;
+
+  --shadow-overlay: var(--shadow-overlay);
+  --ease-out-quick: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 400 var(--text-base) / 1.45 var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+  /* Buttons here are chrome, not web controls. */
+  button { all: unset; cursor: default; -webkit-user-select: none; }
+  svg { display: block; flex: none; }
+  textarea { font: inherit; color: inherit; }
+
+  /* Focus shows for the keyboard only, and inside the element's own bounds so a
+     ring never crowds its neighbours. A pointer click leaves no ring. */
+  :focus { outline: none; }
+  :focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-radius: 3px; }
+  :focus:not(:focus-visible) { outline: none; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--thumb);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--subtle); background-clip: padding-box; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+  }
+}
+
+@layer components {
+  /* highlight.js emits these class names; the colours are the theme's own, so
+     code follows the app between light and dark like everything else. */
+  .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section, .hljs-doctag { color: var(--syn-keyword); }
+  .hljs-string, .hljs-regexp, .hljs-addition, .hljs-meta-string { color: var(--syn-string); }
+  .hljs-title, .hljs-title.function_, .hljs-name { color: var(--syn-function); }
+  .hljs-number, .hljs-symbol, .hljs-bullet { color: var(--syn-number); }
+  .hljs-comment, .hljs-quote { color: var(--syn-comment); font-style: italic; }
+  .hljs-type, .hljs-class, .hljs-title.class_, .hljs-built_in { color: var(--syn-type); }
+  .hljs-variable.constant_, .hljs-variable.language_ { color: var(--syn-constant); }
+  .hljs-attr, .hljs-attribute, .hljs-property, .hljs-selector-attr { color: var(--syn-property); }
+  .hljs-punctuation, .hljs-operator { color: var(--syn-punctuation); }
+  .hljs-meta { color: var(--syn-comment); }
+  .hljs-deletion { color: var(--syn-property); }
+
+  /* Two text rules, used everywhere: a row clips to one line, a paragraph wraps
+     at word boundaries and never inside a word. */
+  .truncate-start { direction: rtl; text-align: left; }
+  .wrap-words { overflow-wrap: normal; word-break: normal; }
+
+}

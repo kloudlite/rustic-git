@@ -1,0 +1,10 @@
+/* The exact files Zed ships (zed/assets/fonts on main): IBM Plex Sans for the UI, Lilex for
+   the buffer. Both SIL OFL 1.1; the licence files sit beside them and must ship with the app. */
+@font-face { font-family: "IBM Plex Sans"; font-weight: 400; font-style: normal; src: url("./fonts/IBMPlexSans-Regular.ttf") format("truetype"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 400; font-style: italic; src: url("./fonts/IBMPlexSans-Italic.ttf") format("truetype"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 600; font-style: normal; src: url("./fonts/IBMPlexSans-SemiBold.ttf") format("truetype"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 600; font-style: italic; src: url("./fonts/IBMPlexSans-SemiBoldItalic.ttf") format("truetype"); }
+@font-face { font-family: "Lilex"; font-weight: 400; font-style: normal; src: url("./fonts/Lilex-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Lilex"; font-weight: 400; font-style: italic; src: url("./fonts/Lilex-Italic.ttf") format("truetype"); }
+@font-face { font-family: "Lilex"; font-weight: 700; font-style: normal; src: url("./fonts/Lilex-Bold.ttf") format("truetype"); }
+@font-face { font-family: "Lilex"; font-weight: 700; font-style: italic; src: url("./fonts/Lilex-BoldItalic.ttf") format("truetype"); }
