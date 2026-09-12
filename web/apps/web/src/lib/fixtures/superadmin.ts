@@ -230,6 +230,9 @@ const CLUSTERS: AdminClusterRow[] = [
   { region: "centralindia-k3s", status: "active", agentsReady: 3, agentsDesired: 3, nodesReady: 3, nodesTotal: 3, draining: 1, workingCopies: 41, settingsStatus: "present" },
   // The EU region is mid-roll, so its agents lag the settings document — the "stale" tone.
   { region: "westeurope-k3s", status: "active", agentsReady: 1, agentsDesired: 2, nodesReady: 1, nodesTotal: 2, draining: 0, workingCopies: 12, settingsStatus: "stale (lag 1)" },
+  // A region the admin process could not reach: still a row, with the reason, so the screen
+  // renders the error state offline too.
+  { region: "eastus-k3s", status: "active", agentsReady: 0, agentsDesired: 0, nodesReady: 0, nodesTotal: 0, draining: 0, workingCopies: 0, settingsStatus: "unknown", error: "region client: connect timeout" },
 ];
 
 const CLUSTER_SETTINGS: Record<string, Record<string, unknown>> = {

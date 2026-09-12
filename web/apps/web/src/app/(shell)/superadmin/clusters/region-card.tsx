@@ -39,6 +39,13 @@ export async function RegionCard({
       }
     >
       <div className="flex flex-col gap-3">
+        {/* A region this process could not read is a row with an error, not a missing row: the
+            operator sees WHICH region is dark and why, beside the ones that answered. */}
+        {region.error && (
+          <p className="text-caption text-destructive" role="alert">
+            Could not read this region: {region.error}
+          </p>
+        )}
         <div className="flex items-center gap-1" aria-label={`${region.nodesReady} of ${region.nodesTotal} nodes ready`}>
           {/* One dot per node: a count says "3 of 4", the dots say WHICH shape the region is in
               at a glance across a row of regions. */}

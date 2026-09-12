@@ -135,6 +135,9 @@ export type AdminClusterRow = {
   draining: number;
   workingCopies: number;
   settingsStatus: string;
+  /** Set only when the admin process could not read this region (client or settings read
+   *  failed); the row still carries the Region CR's name and status. */
+  error?: string;
 };
 
 export function adminClusters(token: string) {
