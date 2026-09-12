@@ -214,8 +214,10 @@
     user-select: none;
     cursor: default;
   }
-  /* Buttons here are chrome, not web controls. */
-  button { all: unset; cursor: default; -webkit-user-select: none; }
+  /* Buttons here are chrome, not web controls. `all: unset` also resets box-sizing
+     to content-box, which made a padded full-width button 24px wider than its
+     column and clipped its last cell; put border-box back. */
+  button { all: unset; box-sizing: border-box; cursor: default; -webkit-user-select: none; }
   svg { display: block; flex: none; }
   textarea { font: inherit; color: inherit; }
 

@@ -33,6 +33,7 @@ function group(ms: Message[]): Block[] {
  */
 export function Chat(props: {
   machine: Machine;
+  team: string;
   env?: Environment;        // open as a tab of its own, when the dock asks for it
   snapshots: Snapshot[];
   onCloseEnv: () => void;
@@ -134,7 +135,7 @@ export function Chat(props: {
             </>
           }
         >
-        <span>machine</span>
+        <span>{props.team}</span>
         <span class="text-subtle">›</span>
         <span>{props.machine.owner.split("@")[0]}</span>
         <span class="text-subtle">›</span>
@@ -170,7 +171,17 @@ export function Chat(props: {
           {(f) => <FileView path={f.path} status={f.status} onClose={props.onCloseFile} />}
         </Show>
         <div class="flex flex-col justify-end overflow-y-auto px-6 pt-5 pb-4 select-text" classList={{ hidden: onFile() }}>
-          <div class="flex flex-col gap-4">
+          <div class="flex max-w-[880px] flex-col gap-4">
+            {/* Where the thread begins, so the space above the first message reads
+                as the top of something rather than as nothing. */}
+            <div class="flex items-center gap-3 pb-1 font-ui text-xs text-subtle">
+              <span class="h-px flex-1 bg-line-subtle" />
+              <span>
+                {thread()?.readonly ? "read-only thread" : "main thread"}
+                <Show when={thread()?.messages[0]}>{(m) => <> · started {m().at}</>}</Show>
+              </span>
+              <span class="h-px flex-1 bg-line-subtle" />
+            </div>
             <For each={blocks()}>
               {(b) => (
                 <Show when={b.role !== "actions"} fallback={<Steps items={(b as { items: Action[] }).items} />}>
@@ -262,7 +273,7 @@ function Steps(props: { items: Action[] }) {
             <span class={`w-4 shrink-0 ${a.ok === true ? "text-success" : a.ok === false ? "text-danger" : "text-subtle"}`}>
               {KIND_GLYPH[a.kind]}
             </span>
-            <span class="shrink-0 pr-2 whitespace-nowrap text-accent">{a.target}</span>
+            <span class="shrink-0 pr-2 whitespace-nowrap text-fg">{a.target}</span>
             <span class="min-w-0 flex-1 whitespace-pre-wrap group-hover:text-fg">{a.text}</span>
             <Time at={a.at} />
           </div>

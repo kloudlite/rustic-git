@@ -32,6 +32,7 @@ Two env vars help when looking at the UI from a terminal:
 
     HARNESS_SHOT=out.png    capture the window once after first paint, then exit
     HARNESS_THEME=light     open in a given theme (also `?theme=` on the URL)
+    HARNESS_SIZE=1920x1080  window size for the capture (default 1360x860)
     HARNESS_HASH=eph-a1/changes   open with a node selected and a view showing
 
 ## Keys

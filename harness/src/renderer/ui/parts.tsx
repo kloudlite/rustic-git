@@ -1,13 +1,18 @@
 import { Show, type JSX } from "solid-js";
 import { cx } from "./cx";
 
-/** A section title in a panel. `meta` sits at the right, quiet. */
-export function Heading(props: { children: JSX.Element; meta?: JSX.Element; class?: string }) {
+/** A section title in a panel. `meta` sits at the right, quiet; `actions` are the
+    section's own controls, so a button never floats alone between sections. */
+export function Heading(props: { children: JSX.Element; meta?: JSX.Element; actions?: JSX.Element; class?: string }) {
   return (
     <div class={cx("flex h-7 items-center gap-2 px-3 pt-2 text-xs font-semibold tracking-[0.06em] uppercase text-muted", props.class)}>
       {props.children}
+      <span class="flex-1" />
       <Show when={props.meta}>
-        <span class="ml-auto text-xs font-normal tracking-normal normal-case text-subtle">{props.meta}</span>
+        <span class="text-xs font-normal tracking-normal normal-case text-subtle">{props.meta}</span>
+      </Show>
+      <Show when={props.actions}>
+        <span class="-mr-1.5 -my-1 flex items-center gap-0.5 normal-case tracking-normal">{props.actions}</span>
       </Show>
     </div>
   );

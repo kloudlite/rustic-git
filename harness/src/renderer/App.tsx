@@ -56,7 +56,9 @@ export function App() {
 
   // A file opens as a tab too: reading one is a subject of its own, not a
   // property of the workspace it came from.
-  const [file, setFile] = createSignal<{ path: string; status?: string } | undefined>();
+  const [file, setFile] = createSignal<{ path: string; status?: string } | undefined>(
+    undefined,
+  );
   const inspector = () => rightOpen() && !envTab();
 
   const switchTeam = (id: string) => {
@@ -196,6 +198,7 @@ export function App() {
         <div class="grid min-h-0 min-w-0">
             <Chat
               machine={machine()}
+              team={TEAMS.find((t) => t.id === teamId())?.name ?? ""}
               env={envTab() ? environment() : undefined}
               file={file()}
               onCloseFile={() => setFile(undefined)}

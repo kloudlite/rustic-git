@@ -18,16 +18,14 @@ export function MachineView(props: { machine: Machine; onOpenShell: (scope: stri
 
   return (
     <>
-      <Heading>Goal</Heading>
+      <Heading actions={<Button variant="ghost" size="sm" icon="terminal" title="Open a shell on this machine (⌘J)" onClick={() => props.onOpenShell("machine")}>Shell</Button>}>
+        Goal
+      </Heading>
       <p class="mx-3 mt-1 mb-3 rounded-r-md border-l-2 border-accent bg-bg px-2.5 py-2 text-sm leading-relaxed wrap-words">
         <Show when={props.machine.goal} fallback={<span class="text-subtle">No goal yet. The first message sets it.</span>}>
           {props.machine.goal}
         </Show>
       </p>
-
-      <div class="flex flex-wrap gap-1.5 px-3 pt-1 pb-3">
-        <Button icon="terminal" onClick={() => props.onOpenShell("machine")}>Shell</Button>
-      </div>
 
       {/* Progress is the plan's own headline, not a section of its own. */}
       <Heading meta={`${done()}/${total()} done`}>Plan</Heading>

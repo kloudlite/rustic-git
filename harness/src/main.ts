@@ -3,9 +3,11 @@ import path from "node:path";
 import fs from "node:fs/promises";
 
 function createWindow(): void {
+  // HARNESS_SIZE=WxH sizes the window for a screenshot; no effect otherwise.
+  const [w, h] = (process.env.HARNESS_SIZE ?? "1360x860").split("x").map(Number);
   const win = new BrowserWindow({
-    width: 1360,
-    height: 860,
+    width: w || 1360,
+    height: h || 860,
     minWidth: 900,
     minHeight: 560,
     titleBarStyle: "hiddenInset",

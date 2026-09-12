@@ -48,7 +48,16 @@ function WorkspaceView(props: { ws: Workspace; onOpenShell: (scope: string) => v
       onOpenFile={props.onOpenFile}
       overview={
         <>
-          <Heading>Workspace</Heading>
+          <Heading
+            actions={
+              <>
+                <Button variant="ghost" size="sm" icon="terminal" title="Open a shell in this workspace" onClick={() => props.onOpenShell(props.ws.id)}>Shell</Button>
+                <Button variant="ghost" size="sm" title={props.ws.state === "running" ? "Stop this workspace" : "Start this workspace"}>{props.ws.state === "running" ? "Stop" : "Start"}</Button>
+              </>
+            }
+          >
+            Workspace
+          </Heading>
           <Field label="repo" mono>{props.ws.repo}</Field>
           <Field label="branch" mono>{props.ws.branch}</Field>
           <Field label="state">
@@ -56,12 +65,8 @@ function WorkspaceView(props: { ws: Workspace; onOpenShell: (scope: string) => v
           </Field>
           <Field label="changes" mono>
             <span class="text-created">+{t().add}</span> <span class="text-deleted">−{t().del}</span>
-            <span class="text-muted"> in {props.ws.changes.length}</span>
+            <span class="text-muted"> · {props.ws.changes.length} {props.ws.changes.length === 1 ? "file" : "files"}</span>
           </Field>
-          <div class="flex flex-wrap gap-1.5 px-3 pt-2 pb-1">
-            <Button icon="terminal" onClick={() => props.onOpenShell(props.ws.id)}>Shell</Button>
-            <Button variant="ghost">{props.ws.state === "running" ? "Stop" : "Start"}</Button>
-          </div>
         </>
       }
       changeActions={
@@ -117,7 +122,7 @@ function EphemeralView(props: { eph: Ephemeral; ws: Workspace; onOpenFile: (path
           <Field label="started">{props.eph.started}</Field>
           <Field label="changes" mono>
             <span class="text-created">+{t().add}</span> <span class="text-deleted">−{t().del}</span>
-            <span class="text-muted"> in {props.eph.changes.length}</span>
+            <span class="text-muted"> · {props.eph.changes.length} {props.eph.changes.length === 1 ? "file" : "files"}</span>
           </Field>
           <Show when={props.eph.state === "failed"}>
             <Empty tone="danger">typecheck failed: Property 'build' does not exist on type 'Overview'</Empty>
