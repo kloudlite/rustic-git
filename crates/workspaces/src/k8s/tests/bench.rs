@@ -64,7 +64,7 @@ fn a_folder_segment_that_escapes_is_refused_before_it_becomes_a_hostpath() {
 fn only_the_gateway_may_reach_the_bench_port() {
     let np = bench_ingress_policy("ws-alice", "bench-1");
     let spec = np.spec.unwrap();
-    assert_eq!(spec.pod_selector.match_labels.unwrap()[WORKSPACE_LABEL], "bench-1");
+    assert_eq!(spec.pod_selector.unwrap().match_labels.unwrap()[WORKSPACE_LABEL], "bench-1");
     let rule = &spec.ingress.unwrap()[0];
     assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(BENCH_PORT as i32)));
     assert_eq!(rule.from.as_ref().unwrap().len(), 1);
