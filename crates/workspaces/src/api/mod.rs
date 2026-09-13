@@ -89,7 +89,7 @@ use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
     attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
-    ssh_session, start_ws, stop_ws, update_ws_packages,
+    ssh_session, start_ws, stop_ws, update_ws_packages, ws_tools,
 };
 
 
@@ -183,6 +183,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces", post(create_ws).get(list_ws))
         .route("/v1/workspaces/restore", post(restore_ws))
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
+        .route("/v1/workspaces/{id}/tools", get(ws_tools))
         .route("/v1/workspaces/{id}/packages/update", post(update_ws_packages))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
