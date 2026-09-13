@@ -1175,6 +1175,9 @@ rules:
   - apiGroups: ["extensions"]
     resources: ["daemonsets", "deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
+  # Held equal to deploy/k3s/otel-agent.yaml's role; only the k3s collector scrapes it today.
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -74,16 +74,90 @@ where
                 return fut.await;
             }
             let start = Instant::now();
+            let flight = Flight::start();
             let out = match tokio::time::timeout(KUBE_CALL_TIMEOUT, fut).await {
                 Ok(r) => r,
                 Err(_) => {
-                    tracing::warn!(%method, %path, secs = KUBE_CALL_TIMEOUT.as_secs(), "kube.timeout");
+                    let (inflight, dials, dials_ok) = flight.finish();
+                    tracing::warn!(%method, %path, secs = KUBE_CALL_TIMEOUT.as_secs(), inflight, dials, dials_ok, "kube.timeout");
                     return Err(format!("kubernetes {method} {path} did not answer in {:?}", KUBE_CALL_TIMEOUT).into());
                 }
             };
+            let (inflight, dials, dials_ok) = flight.finish();
             let ms = start.elapsed().as_millis();
             if ms >= KUBE_SLOW_MS {
-                tracing::warn!(%method, %path, ms, "kube.slow");
+                tracing::warn!(%method, %path, ms, inflight, dials, dials_ok, "kube.slow");
+            }
+            out
+        })
+    }
+}
+
+// Client-wide, not per client: a timeout is only readable against everything else the process
+// had in flight. hyper's legacy pool never says whether a request got a pooled or a fresh
+// connection, so the dial counters are the nearest honest proxy: a call that timed out with
+// `dials == 0` rode a connection that was already open (the dead-pooled-socket case), and one with
+// `dials > dials_ok` was waiting on a connect that never finished.
+static INFLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DIALS_OK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct Flight {
+    dials: u64,
+    dials_ok: u64,
+    done: bool,
+}
+
+impl Flight {
+    fn start() -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        INFLIGHT.fetch_add(1, Relaxed);
+        Flight { dials: DIALS.load(Relaxed), dials_ok: DIALS_OK.load(Relaxed), done: false }
+    }
+
+    /// `(inflight including this call, dials started during it, dials that connected during it)`.
+    fn finish(mut self) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.done = true;
+        let inflight = INFLIGHT.fetch_sub(1, Relaxed);
+        (inflight, DIALS.load(Relaxed) - self.dials, DIALS_OK.load(Relaxed) - self.dials_ok)
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        // A caller that dropped the future mid-call must not leave the gauge counting it forever.
+        if !self.done {
+            INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Counts dials under the TLS connector; the connection itself passes through untouched.
+#[derive(Clone)]
+pub struct Counted<C>(C);
+
+impl<C> tower::Service<http::Uri> for Counted<C>
+where
+    C: tower::Service<http::Uri>,
+    C::Future: Send + 'static,
+{
+    type Response = C::Response;
+    type Error = C::Error;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<C::Response, C::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        use std::sync::atomic::Ordering::Relaxed;
+        DIALS.fetch_add(1, Relaxed);
+        let fut = self.0.call(uri);
+        Box::pin(async move {
+            let out = fut.await;
+            if out.is_ok() {
+                DIALS_OK.fetch_add(1, Relaxed);
             }
             out
         })
@@ -130,7 +204,7 @@ pub fn bounded_client(config: kube::Config) -> kube::Result<kube::Client> {
     http.set_tcp_user_timeout(Some(kloudlite_core::peer::USER_TIMEOUT));
 
     let https = config.rustls_https_connector_with_connector(http)?;
-    let mut connector = hyper_timeout::TimeoutConnector::new(https);
+    let mut connector = hyper_timeout::TimeoutConnector::new(Counted(https));
     connector.set_connect_timeout(Some(KUBE_CONNECT_TIMEOUT));
     connector.set_read_timeout(config.read_timeout);
     connector.set_write_timeout(config.write_timeout);
