@@ -31,8 +31,9 @@ RUN chmod 0755 /usr/local/bin/kl
 COPY --from=harness-bin /out/harness-bench /usr/local/bin/harness-bench
 RUN chmod 0755 /usr/local/bin/harness-bench
 
-RUN useradd --uid 1000 --user-group --create-home --shell /bin/bash kl \
-    && mkdir -p /bench && chown 1000:1000 /bench
+# node:22-bookworm-slim already ships uid/gid 1000 as `node` with /home/node — reuse it rather
+# than useradd a second uid 1000, which apt's base image install (nss-wrapper aside) refuses.
+RUN mkdir -p /bench /home/kl && chown 1000:1000 /bench /home/kl
 
 USER 1000:1000
 WORKDIR /home/kl
