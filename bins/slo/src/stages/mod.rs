@@ -934,16 +934,20 @@ mod tests {
     /// A request cancelled mid-flight must say so: the step ceiling that cancels it cannot.
     #[tokio::test]
     async fn an_abandoned_request_is_logged_from_drop() {
-        use std::sync::{Arc, Mutex};
-        struct Sink(Arc<Mutex<Vec<u8>>>);
+        // A GLOBAL subscriber writing to a thread-local buffer, not `set_default`: tracing caches
+        // each callsite's interest and the max level process-wide, recomputed from a snapshot of
+        // the live dispatchers (tracing-core callsite.rs `rebuild_interest`), so a parallel test
+        // that first hits a callsite with no subscriber can store "never"/OFF over this thread's
+        // scoped one and the log vanishes. A global subscriber that never changes leaves every
+        // rebuild agreeing; other tests' lines land in their own threads' buffers.
+        thread_local!(static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) });
+        struct Sink;
         impl std::io::Write for Sink {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(b); Ok(b.len()) }
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { BUF.with(|v| v.borrow_mut().extend_from_slice(b)); Ok(b.len()) }
             fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
         }
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let b2 = buf.clone();
-        let sub = tracing_subscriber::fmt().with_writer(move || Sink(b2.clone())).with_ansi(false).finish();
-        let _g = tracing::subscriber::set_default(sub);
+        let sub = tracing_subscriber::fmt().with_writer(|| Sink).with_ansi(false).finish();
+        tracing::subscriber::set_global_default(sub).expect("the only global subscriber in this binary");
         // A listener that accepts and never answers: the request is in flight until cancelled.
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
@@ -952,7 +956,9 @@ mod tests {
         let url = format!("http://{addr}/admin/requests/x/deny");
         let fut = raw(&c, reqwest::Method::POST, &url, "", None, &[]);
         let _ = tokio::time::timeout(Duration::from_millis(300), fut).await;
-        let out = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        // `#[tokio::test]` is a current-thread runtime: the future is dropped, and InFlight logs,
+        // on this thread.
+        let out = BUF.with(|v| String::from_utf8_lossy(&v.borrow()).to_string());
         assert!(out.contains("slo.http.abandoned"), "{out}");
         assert!(out.contains("/admin/requests/x/deny"), "{out}");
     }
