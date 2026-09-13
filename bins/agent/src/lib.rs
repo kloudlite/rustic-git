@@ -151,30 +151,56 @@ pub(crate) fn may_mount() -> bool {
 /// the reconciler stopped doing anything else (2026-09-12).
 const HOME_REPAIR_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a pass that finds a repair in flight waits for it before giving up. Bounded because a
+/// mount against a dead export is up to ~65 s, and the backoff window already fails fast after it.
+const HOME_REPAIR_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The instant of the last repair attempt, held only while one runs — never across a health check.
+static REPAIR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Mounted and answering. The stale-mount repair MUST come before `create_dir_all`: on a node
+/// carrying a wedged mount every syscall against this path is already answered by a dead NFS
+/// client, and `create_dir_all` fails EEXIST — which once hid the repair that would have fixed it.
+fn home_healthy(target: &str) -> bool {
+    std::fs::read_to_string("/proc/mounts").is_ok_and(|m| already_mounted(&m, target)) && mount_answers(target)
+}
+
 pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
-    // The instant of the last attempt, not a plain lock: a second caller finding the repair in
-    // flight is told so and returns, rather than waiting out a mount it would then redo.
-    static REPAIR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    let mut last = match REPAIR.try_lock() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            return Err(format!("the shared home at {pool} is being repaired by another pass"));
-        }
-    };
+    mount_homes_with(pool, export, &home_healthy)
+}
+
+fn mount_homes_with(pool: &str, export: &str, healthy: &dyn Fn(&str) -> bool) -> Result<(), String> {
     let target = homes_root(pool);
     let Some(target_str) = target.to_str() else {
         return Err(format!("{} is not valid UTF-8", target.display()));
     };
-    // The stale-mount repair MUST come before `create_dir_all`: on a node carrying a wedged mount
-    // every syscall against this path is already answered by a dead NFS client, and `create_dir_all`
-    // fails EEXIST (mkdir says it exists, the stat that would confirm it is a directory cannot get
-    // an answer). Creating the directory first is what made the agent die with a bare
-    // "File exists (os error 17)" and never reach the repair that would have fixed it.
-    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
-    if already_mounted(&mounts, target_str) && mount_answers(target_str) {
+    // Lock-free: the check is the common case on every reconcile, and holding the repair lock
+    // across it refused every overlapping pass (~325 refusals on 2026-09-13, no repair ever ran).
+    if healthy(target_str) {
         return Ok(());
     }
+    // A pass that finds a repair in flight waits for it, bounded, then re-checks what it left —
+    // std's Mutex has no timed lock, hence the poll.
+    let started = std::time::Instant::now();
+    let mut last = loop {
+        match REPAIR.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) if started.elapsed() < HOME_REPAIR_WAIT => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(format!("the shared home at {pool} is still being repaired by another pass after {}s", HOME_REPAIR_WAIT.as_secs()));
+            }
+        }
+    };
+    if started.elapsed().as_millis() >= 100 {
+        tracing::info!(export = %target_str, waited_ms = started.elapsed().as_millis() as u64, "home.repair.waited");
+        if healthy(target_str) {
+            return Ok(());
+        }
+    }
+    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
     // Everything past here mounts or unmounts, and each of those is seconds against a server that
     // is not answering. One attempt per window, whatever the shape — the caller is told why rather
     // than being handed a success it did not get.
@@ -184,6 +210,7 @@ pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
         }
     }
     *last = Some(std::time::Instant::now());
+    tracing::warn!(export = %target_str, listed = already_mounted(&mounts, target_str), "home.repair");
     if already_mounted(&mounts, target_str) {
         // Listed but dead — the previous agent pod's namespace took the transport with it. Lazy
         // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
@@ -453,5 +480,41 @@ mod tests {
         let mounts = "zerofs:/ /wspool-prod/homes nfs rw 0 0\nother /wspool-prod/homes2 nfs rw 0 0\n";
         assert!(already_mounted(mounts, "/wspool-prod/homes"));
         assert!(!already_mounted(mounts, "/wspool-prod/home"));
+    }
+
+    /// A healthy mount is answered without the repair lock: a pass overlapping another pass (here,
+    /// the lock held outright) is not refused. Refusing it cost a 60 s requeue per clone (2026-09-13).
+    #[test]
+    fn a_healthy_home_is_not_refused_while_another_pass_holds_the_lock() {
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let holder = std::thread::spawn(move || {
+            let _g = super::REPAIR.lock().unwrap_or_else(|e| e.into_inner());
+            held.0.send(()).unwrap();
+            release.1.recv().ok();
+        });
+        held.1.recv().unwrap();
+        let r = super::mount_homes_with("/nonexistent-pool", "unused", &|_| true);
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(r, Ok(()));
+    }
+
+    /// An unhealthy home with a repair in flight waits for that repair (bounded) and succeeds on
+    /// what it left, rather than erroring into the requeue.
+    #[test]
+    fn a_pass_behind_a_repair_waits_for_it_instead_of_failing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static FIXED: AtomicBool = AtomicBool::new(false);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _g = super::REPAIR.lock().unwrap_or_else(|e| e.into_inner());
+            held_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            FIXED.store(true, Ordering::SeqCst);
+        });
+        held_rx.recv().unwrap();
+        let r = super::mount_homes_with("/nonexistent-pool", "unused", &|_| FIXED.load(Ordering::SeqCst));
+        holder.join().unwrap();
+        assert_eq!(r, Ok(()));
     }
 }
