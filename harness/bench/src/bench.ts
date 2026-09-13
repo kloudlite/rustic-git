@@ -16,6 +16,10 @@ const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
+// A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
+const WS_ID = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+/** Only bench sessions count as "an open session"; a workspace thread never stands in for one. */
+const isBench = (s: SessionRow) => (s.kind ?? "bench") === "bench";
 
 /**
  * One person's bench in one team: the list, a pi per open session, and the
@@ -68,7 +72,7 @@ export class Bench {
     // A new process holds none of the old one's children.
     for (const row of this.write(() => this.tasks.markLost()) ?? []) this.emit({ type: "task", row });
     if (this.write(() => this.procs.markLost())?.length) this.emit({ type: "procs", rows: this.procs.all() });
-    if (!this.sessions.all().some((s) => !s.archived)) this.write(() => this.sessions.create(this.opts.model));
+    if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
 
@@ -81,8 +85,11 @@ export class Bench {
   private open(s: SessionRow): RpcChild {
     let c = this.children.get(s.id);
     if (c?.running()) return c;
-    const file = s.file && fs.existsSync(s.file) ? s.file : undefined;
-    const child: RpcChild = new RpcChild(s.id, { dir: path.join(this.opts.dir, "sessions"), file, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, child, ev));
+    const thread = !isBench(s);
+    // pi creates a thread's file at the path it is given, so a thread's file need not exist yet.
+    const file = thread ? s.file : s.file && fs.existsSync(s.file) ? s.file : undefined;
+    const dir = thread ? path.dirname(s.file!) : path.join(this.opts.dir, "sessions");
+    const child: RpcChild = new RpcChild(s.id, { dir, file, tools: thread ? s.target : undefined, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, child, ev));
     this.children.set(s.id, child);
     child.start();
     // The file name is pi's to choose; ask once so the list can reopen it.
@@ -206,7 +213,7 @@ export class Bench {
 
   async archive(id: string): Promise<SessionRow> {
     this.refuse(true);
-    if (this.sessions.all().filter((s) => !s.archived).length < 2) throw new Error("this is the only open session; start another before archiving it");
+    if (isBench(this.sessions.get(id) ?? ({} as SessionRow)) && this.sessions.all().filter((s) => !s.archived && isBench(s)).length < 2) throw new Error("this is the only open session; start another before archiving it");
     this.children.get(id)?.stop();
     this.children.delete(id);
     const s = this.writable.run(() => this.sessions.update(id, { archived: true }));
@@ -217,6 +224,31 @@ export class Bench {
   async restore(id: string): Promise<SessionRow> {
     this.refuse(true);
     const s = this.writable.run(() => this.sessions.update(id, { archived: false, lastActive: Date.now() }));
+    this.open(s);
+    this.emit({ type: "sessions" });
+    return s;
+  }
+
+  async openWorkspace(ws: string): Promise<SessionRow> {
+    return this.openThread("workspace", ws);
+  }
+
+  async openEphemeral(ws: string, eph: string): Promise<SessionRow> {
+    return this.openThread("ephemeral", ws, eph);
+  }
+
+  private openThread(kind: "workspace" | "ephemeral", ws: string, eph?: string): SessionRow {
+    // Checked before either id becomes a path.
+    for (const x of kind === "workspace" ? [ws] : [ws, eph]) if (typeof x !== "string" || !WS_ID.test(x)) throw new Error(`not a workspace id: ${x}`);
+    this.refuse(true);
+    const base = path.join(this.opts.dir, "workspaces", ws);
+    const file = eph === undefined ? path.join(base, "thread.jsonl") : path.join(base, "eph", `${eph}.jsonl`);
+    const s = this.writable.run(() => {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      // An ephemeral is a workspace cut for one agent: its tools run on its own tool server.
+      return this.sessions.thread({ kind, workspace: ws, eph, target: eph ?? ws, file, model: this.opts.model });
+    });
+    if (s.archived) throw new Error(`session ${s.id} is archived; restore it to send`);
     this.open(s);
     this.emit({ type: "sessions" });
     return s;
@@ -255,10 +287,11 @@ export class Bench {
       if (s.file && fs.existsSync(s.file)) {
         const trash = path.join(this.opts.dir, "sessions", ".trash");
         fs.mkdirSync(trash, { recursive: true });
-        fs.renameSync(s.file, path.join(trash, path.basename(s.file)));
+        // Every workspace thread's file is thread.jsonl: prefix the id so two never collide in the trash.
+        fs.renameSync(s.file, path.join(trash, !isBench(s) ? `${id}-${path.basename(s.file)}` : path.basename(s.file)));
       }
-      // Never zero sessions: the replacement takes a fresh id (nextSeq), never the removed one.
-      if (!this.sessions.all().some((x) => !x.archived && x.id !== id)) this.open(this.sessions.create(this.opts.model));
+      // Never zero bench sessions: the replacement takes a fresh id (nextSeq), never the removed one.
+      if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.open(this.sessions.create(this.opts.model));
       this.sessions.remove(id);
     });
     this.emit({ type: "sessions" });

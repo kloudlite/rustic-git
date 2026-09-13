@@ -13,7 +13,11 @@ export type PiEvent = Record<string, unknown> & { type: string; id?: string };
 export const BTW_TOOLS = "read,grep,find,ls";
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string };
+/** A workspace or ephemeral session's tools, all run on that workspace's tool server. */
+export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls";
+
+/** `tools`: the workspace whose tool server runs this session's tools. */
+export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string };
 
 export class RpcChild {
   readonly id: string;
@@ -39,9 +43,11 @@ export class RpcChild {
     const o = this.opts;
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     const extDir = o.extDir ?? path.join(HARNESS, "pi");
-    const exts = o.fork ? [] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
-    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : [])];
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env: process.env, cwd: o.cwd ?? process.env.HOME });
+    // A workspace session loads only the workspace's tools: background.ts would take bash back into the bench pod.
+    const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
+    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : [])];
+    // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env: o.tools ? { ...process.env, KL_TOOLS_WORKSPACE: o.tools } : process.env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));
     let errTail = "";

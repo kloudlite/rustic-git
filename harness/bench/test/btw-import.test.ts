@@ -8,12 +8,15 @@ import { BTW_TOOLS } from "../src/rpc-child.ts";
 import { FAKE } from "./fake-pi.ts";
 
 const mk = () => new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-bi-")), readOnly: false, model: "fake/m", bin: FAKE });
-const settle = () => new Promise((r) => setTimeout(r, 150));
+// Waits for pi's get_state to land rather than a fixed delay: under a loaded suite 150 ms was not enough.
+const settle = async (b: Bench) => {
+  for (let i = 0; i < 100 && !b.sessions.get("s-1")?.file; i++) await new Promise((r) => setTimeout(r, 50));
+};
 
 test("btw answers from a fork, is kept under btw/, and its child is gone", async () => {
   const b = mk();
   await b.start();
-  await settle();
+  await settle(b);
   const argvFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bench-argv-")), "argv.json");
   process.env.FAKE_PI_ARGV_FILE = argvFile;
   let a: { id: string; question: string; entries: unknown[]; at: number };
@@ -37,7 +40,7 @@ test("btw answers from a fork, is kept under btw/, and its child is gone", async
 test("btw stops a hung fork and rejects once its bounded wait expires", async () => {
   const b = mk();
   await b.start();
-  await settle();
+  await settle(b);
   await assert.rejects(b.btw("s-1", "hang", 50), /timed out/);
   b.stop();
 });

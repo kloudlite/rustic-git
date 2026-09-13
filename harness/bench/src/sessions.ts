@@ -1,7 +1,9 @@
 import path from "node:path";
 import { readJson, replaceJson } from "./log.ts";
 
-export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string };
+export type SessionKind = "bench" | "workspace" | "ephemeral";
+/** `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools. */
+export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; kind?: SessionKind; workspace?: string; target?: string };
 
 type Stored = SessionRow[] | { nextSeq: number; rows: SessionRow[] };
 
@@ -62,5 +64,16 @@ export class SessionList {
     this.nextSeq = Math.max(this.nextSeq, ...added.map((r) => r.seq + 1));
     this.save();
     return added.map((r) => r.id);
+  }
+  /** `w-{ws}` or `e-{eph}`; an id already listed comes back unchanged. seq 0 keeps a thread out of create()'s numbering. */
+  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string }): SessionRow {
+    const id = t.kind === "workspace" ? `w-${t.workspace}` : `e-${t.eph}`;
+    const have = this.get(id);
+    if (have) return { ...have };
+    const now = Date.now();
+    const row: SessionRow = { id, name: t.kind === "workspace" ? t.workspace : `${t.workspace} · ${t.eph}`, seq: 0, file: t.file, created: now, lastActive: now, archived: false, model: t.model, kind: t.kind, workspace: t.workspace, target: t.target };
+    this.rows.push(row);
+    this.save();
+    return { ...row };
   }
 }

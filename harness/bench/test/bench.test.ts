@@ -12,7 +12,8 @@ const settle = () => new Promise((r) => setTimeout(r, 150));
 test("start on an empty folder opens one session and records its file", async () => {
   const b = mk();
   await b.start();
-  await settle();
+  // Wait for pi's get_state rather than a fixed delay: a loaded suite outran 150 ms, and a failed assertion skipped stop() and hung the file.
+  for (let i = 0; i < 100 && !b.sessions.get("s-1")?.file; i++) await settle();
   const [s] = b.sessions.all();
   assert.equal(s.id, "s-1");
   assert.match(s.file ?? "", /\.jsonl$/);

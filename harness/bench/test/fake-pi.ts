@@ -30,7 +30,7 @@ process.stdin.on("data", (d) => {
     const cmd = JSON.parse(buf.slice(0, at));
     buf = buf.slice(at + 1);
     const ok = (data?: unknown) => out({ type: "response", id: cmd.id, command: cmd.type, success: true, data });
-    if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false });
+    if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
     else if (cmd.type === "prompt") {
