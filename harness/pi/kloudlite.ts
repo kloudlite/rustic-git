@@ -36,7 +36,7 @@ function save(c: Config) {
   fs.renameSync(tmp, file());
 }
 
-async function call(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
+export async function call(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
   const c = load();
   if (!c) throw new Error("not logged in — run /kl-login in the bench");
   const r = await fetch(`${c.api}${p}`, {
