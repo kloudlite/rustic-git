@@ -10,7 +10,9 @@ impl Cache {
     /// the stream is a nudge (see `crate::events`), never the record, so a lost publish is not a
     /// lost event — it just costs the consumer a poll cycle. A disabled cache (`conn: None,
     /// mem: None`) is a silent no-op, same as every other cache miss path.
-    pub async fn xadd(&self, stream: &str, maxlen: usize, fields: &[(&'static str, String)]) {
+    /// `Err` names why nothing was appended; it is already logged, and returned only so a
+    /// publisher can say WHICH event was lost.
+    pub async fn xadd(&self, stream: &str, maxlen: usize, fields: &[(&'static str, String)]) -> Result<(), String> {
         if let Some(m) = &self.mem_stream {
             // `~` (approximate trim) has no meaning in-process; trim exactly, which is a superset
             // of what the real MAXLEN ~ guarantees and therefore never masks a bug the real one
@@ -25,20 +27,20 @@ impl Cache {
             if len > maxlen {
                 g.drain(0..len - maxlen);
             }
-            return;
+            return Ok(());
         }
-        if let Some(mut c) = self.conn.clone() {
-            let mut cmd = redis::cmd("XADD");
-            cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
-            for (k, v) in fields {
-                cmd.arg(k).arg(v);
-            }
-            // Same fire-and-forget discipline as `drop_refs`; a lost nudge self-heals via each
-            // consumer's fallback scan (see `crate::events` module doc).
-            if let Err(e) = run::<()>(&mut cmd, &mut c).await {
-                tracing::warn!(stream = %stream, op = "xadd", error = %e, "cache.stream.failed");
-            }
+        let Some(mut c) = self.conn.clone() else { return Err("no cache configured".to_string()) };
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
+        for (k, v) in fields {
+            cmd.arg(k).arg(v);
         }
+        // Same fire-and-forget discipline as `drop_refs`; a lost nudge self-heals via each
+        // consumer's fallback scan (see `crate::events` module doc).
+        run::<()>(&mut cmd, &mut c).await.map_err(|e| {
+            tracing::warn!(stream = %stream, op = "xadd", error = %e, "cache.stream.failed");
+            e.to_string()
+        })
     }
 
     /// `XGROUP CREATE {stream} {group} $ MKSTREAM`. Idempotent by design (see the worker's

@@ -390,7 +390,13 @@ pub(crate) async fn delete_snapshot(
     let caller_id = caller(&s, &headers).await?;
     check_path_segment(&snapshot)?;
     let items = snapshots_for_caller(&s, &caller_id, &name).await?;
-    let target = items.iter().find(|sn| sn.name_any() == snapshot).ok_or_else(not_found)?;
+    let Some(target) = items.iter().find(|sn| sn.name_any() == snapshot) else {
+        // A probe naming a sync point retain has just pruned gets a 404 where it expected a 409;
+        // the sync points still on the volume say whether a newer one replaced it.
+        let sync_points: Vec<String> = items.iter().filter(|sn| !sn.is_snapshot()).map(|sn| sn.name_any()).collect();
+        tracing::info!(volume = %name, %snapshot, stage = "list", visible = items.len(), ?sync_points, "snapshot.delete.notfound");
+        return Err(not_found());
+    };
     // `is_snapshot`, not `spec.transient`: a legacy migration baseline is a sync point by shape
     // rather than by flag, and deleting one by hand still removes a replica's send parent.
     if !target.is_snapshot() {
@@ -408,7 +414,9 @@ pub(crate) async fn delete_snapshot(
     match api.delete(&snapshot, &Default::default()).await {
         Ok(_) => {}
         // Already gone: someone got there first, which is the outcome the caller asked for.
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            tracing::info!(volume = %name, %snapshot, stage = "delete", "snapshot.delete.notfound");
+        }
         Err(e) => return Err(kube_err(e)),
     }
     // The same rule `cleanup_parent` detached the Volume under, read from the other end:

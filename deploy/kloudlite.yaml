@@ -1178,6 +1178,9 @@ rules:
   - apiGroups: ["extensions"]
     resources: ["daemonsets", "deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
+  # Held equal to deploy/k3s/otel-agent.yaml's role; only the k3s collector scrapes it today.
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -1271,7 +1274,8 @@ data:
             field: attributes["service.name"]
             value: node-syslog
       filelog:
-        include: [/var/log/pods/kloudlite_*/*/*.log]
+        # Plus ingress-nginx: its access log is JSON in our line shape (deploy/ingress-nginx-config.yaml).
+        include: [/var/log/pods/kloudlite_*/*/*.log, /var/log/pods/ingress-nginx_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
         exclude: [/var/log/pods/*_kloudlite-otel-*/*/*.log]
         include_file_path: true

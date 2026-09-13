@@ -210,10 +210,9 @@ pub(crate) async fn activity(
     // on the basename let `bob/web`'s events through alice's `alice/web` feed).
     let scope: std::collections::HashSet<String> =
         repos.iter().map(|r| format!("{}/{}", r.owner, r.name)).collect();
-    let stream_events: Vec<Event> = api
-        .cache
-        .xrevrange("events", want.max(FEED_EVENTS_MAX))
-        .await
+    let rows = api.cache.xrevrange("events", want.max(FEED_EVENTS_MAX)).await;
+    let mut in_scope = 0usize;
+    let stream_events: Vec<Event> = rows
         .iter()
         .filter_map(|(_, fields)| {
             let e = events::from_fields(fields)?;
@@ -223,11 +222,16 @@ pub(crate) async fn activity(
             if !scope.contains(&e.repo) {
                 return None;
             }
+            in_scope += 1;
             let name = e.repo.split('/').next_back().unwrap_or(&e.repo).to_string();
             pull_event(e, name)
         })
         .take(want)
         .collect();
+    // Separates the three ways a PR event is missing from a feed: never on the stream
+    // (`stream_rows` without it, and no `event.published`), read but out of scope, or cut by
+    // `want` (`stream_returned == want`).
+    tracing::info!(owner = %owner, stream_rows = rows.len(), in_scope, stream_returned = stream_events.len(), want, repos = repos.len(), "feed.read");
 
     events.extend(stream_events);
     // No fallback here on purpose. The PR half of the feed is stream-only now: a Redis flush

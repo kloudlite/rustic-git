@@ -75,6 +75,9 @@ rules:
   - apiGroups: ["extensions"]
     resources: ["daemonsets", "deployments", "replicasets"]
     verbs: ["get", "list", "watch"]
+  # The API server's own `/metrics`, for `prometheus/apiserver` on the cluster collector.
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -174,7 +177,7 @@ data:
         # Plus the PROBE owners workspace pods (the ws-slo-* namespaces): the entrypoint and sshd
         # of a synthetic tenant, so "when did sshd listen" is answerable. Real tenants pods are
         # deliberately not here; that is a privacy decision, not a glob.
-        include: [/var/log/pods/kube-system_kloudlite-*/*/*.log, /var/log/pods/kloudlite-system_*/*/*.log, /var/log/pods/ws-slo-*_*/*/*.log]
+        include: [/var/log/pods/kube-system_kloudlite-*/*/*.log, /var/log/pods/kloudlite-system_*/*/*.log, /var/log/pods/ws-slo-*_*/*/*.log, /var/log/pods/ingress-nginx_*/*/*.log]
         # Not the collectors themselves: "Started watching file" is nobody's signal.
         exclude: [/var/log/pods/*_kloudlite-otel-*/*/*.log]
         include_file_path: true
@@ -308,6 +311,26 @@ data:
       # evictions, FailedScheduling — what a pod's own log never carries.
       k8s_events:
         auth_type: serviceAccount
+      # The API server's side of a kube call that stalls: per-verb/resource latency, in-flight
+      # load and the storage backend's latency. Nothing server-side was collected before, so a
+      # 30 s `kube.timeout` could not be told from a slow server. Cluster-wide, so here and not on
+      # the DaemonSet (N collectors would scrape the one server N times). Kept to the series that
+      # answer that question: the rest of `/metrics` is thousands of series nobody reads.
+      prometheus/apiserver:
+        config:
+          scrape_configs:
+            - job_name: apiserver
+              scrape_interval: 30s
+              scheme: https
+              authorization:
+                credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+              tls_config:
+                ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+              static_configs: [{ targets: ["kubernetes.default.svc:443"] }]
+              metric_relabel_configs:
+                - source_labels: [__name__]
+                  action: keep
+                  regex: apiserver_request_duration_seconds_(bucket|sum|count)|apiserver_request_total|apiserver_current_inflight_requests|etcd_request_duration_seconds_(bucket|sum|count)
 
     processors:
       # Events are rows about pods, not from them: named as their own service so the picker
@@ -338,7 +361,7 @@ data:
     service:
       pipelines:
         metrics:
-          receivers: [k8s_cluster]
+          receivers: [k8s_cluster, prometheus/apiserver]
           processors: [resource, batch]
           exporters: [otlphttp]
         logs:

@@ -655,7 +655,9 @@ async fn shutdown_signal() -> &'static str {
 fn error_policy<K: Resource<DynamicType = ()>>(obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
     // Named, because three controllers share this policy: an unattributed "reconcile failed" line
     // says nothing about which object is stuck or even which kind it was.
-    tracing::warn!(kind = %K::kind(&()), name = %obj.name_any(), error = %err, "reconcile.failed");
+    // `requeue_ms`: how long a refused object now sits before its next pass, which a stuck-object
+    // timeline cannot otherwise tell from a controller that stopped looking.
+    tracing::warn!(kind = %K::kind(&()), name = %obj.name_any(), error = %err, requeue_ms = RETRY.as_millis() as u64, "reconcile.failed");
     Action::requeue(RETRY)
 }
 

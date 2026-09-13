@@ -260,9 +260,11 @@ pub(super) async fn imagedelete(
     // the same image racing this one changes nothing about the end state.
     let doomed = app.store.os.list(Some(&prefix)).map_ok(|m| m.location).boxed();
     let mut results = app.store.os.delete_stream(doomed);
+    let (mut manifests_deleted, mut manifests_absent) = (0u64, 0u64);
     while let Some(r) = results.next().await {
         match r {
-            Ok(_) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
+            Ok(_) => manifests_deleted += 1,
+            Err(slatedb::object_store::Error::NotFound { .. }) => manifests_absent += 1,
             Err(e) => return internal(e.into()),
         }
     }
@@ -272,6 +274,13 @@ pub(super) async fn imagedelete(
         true => app.store.purge_image_storage(&owner, &name).await,
         false => app.store.delete_image(&owner, &name).await,
     };
+    // What a delete actually removed, so a row still listed afterwards can be told from a delete
+    // that half-failed. `marker_removed` is the whole delete's outcome: the marker itself was
+    // cleared above (its failure returned there), and a database half that then failed leaves
+    // storage a reconcile can re-mark. `prefix_left` is one re-list at this instant; a manifest
+    // that reappears LATER (a racing push) surfaces as an unmarked name in `image.listing.done`.
+    let prefix_left = app.store.os.list(Some(&prefix)).try_collect::<Vec<_>>().await.map(|v| v.len() as i64).unwrap_or(-1);
+    tracing::info!(owner = %owner, image = %name, ghost, marker_removed = done.is_ok(), manifests_deleted, manifests_absent, prefix_left, ok = done.is_ok(), "image.deleted");
     match done {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),

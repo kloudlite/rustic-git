@@ -302,10 +302,15 @@ async fn web_pages(c: &mut Ctx) {
 /// dropped the route would land on the app's 404 with a 200 from plenty of frameworks, and a
 /// redirect anywhere but `/login` is the app sending people somewhere nobody asked for.
 pub(crate) async fn renders(c: &Ctx, url: &str, path: &str) -> Result<()> {
-    let r = c.http.get(url).send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
+    // Not through `raw`: the landed URL after redirects is the assertion. Timed the same way so a
+    // slow page joins the web tier's `page.slow` on the request id.
+    let (req_id, started) = (super::request_id(c), std::time::Instant::now());
+    let r = c.http.get(url).header(super::REQUEST_ID, &req_id).send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
+    let headers_ms = started.elapsed().as_millis() as u64;
     let landed = r.url().path().to_string();
     let body = r.text().await.unwrap_or_default();
+    super::done("GET", path, &req_id, status.as_u16(), headers_ms, started.elapsed().as_millis() as u64);
     if !status.is_success() {
         return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
     }

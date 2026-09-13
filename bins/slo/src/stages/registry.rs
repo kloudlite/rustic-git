@@ -359,21 +359,28 @@ async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
 
 /// One `imagetagdelete`, whose body is the bare tag rather than JSON.
 async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
+    // Not through `raw`, which only sends JSON; carries the same id and timing line by hand so the
+    // first call of `reg.image.delete` joins the server's lines too.
+    let (req_id, started) = (super::request_id(c), std::time::Instant::now());
     let r = c
         .http
         .post(url)
         .header("authorization", c.bearer(jwt))
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .header(super::REQUEST_ID, &req_id)
         .body(tag.to_string())
         .send()
         .await
         // `without_url`: the module's rule, not the caller's — see `bearer`.
         .map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
+    let headers_ms = started.elapsed().as_millis() as u64;
+    let body = r.text().await.unwrap_or_default();
+    super::done("POST", &super::path_of(url), &req_id, status.as_u16(), headers_ms, started.elapsed().as_millis() as u64);
     if status.is_success() {
         return Ok(());
     }
-    Err(anyhow!("{status}: {}", r.text().await.unwrap_or_default().chars().take(200).collect::<String>()))
+    Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()))
 }
 
 /// `reg.canary`: the long-lived image `bootstrap` pushed still pulls, and is still the same image.
@@ -513,15 +520,14 @@ pub(crate) async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result
     let probe = c.probe_user.clone();
     use base64::Engine;
     let url = format!("{}/v2/token?service={}&scope={}", base(c), host(c), urlencoding(scope));
-    let mut req = c.http.get(&url);
+    let mut headers = vec![];
     if let Some(s) = secret {
         let basic = base64::engine::general_purpose::STANDARD.encode(format!("{probe}:{s}"));
-        req = req.header("authorization", format!("Basic {basic}"));
+        headers.push(("authorization", format!("Basic {basic}")));
     }
-    // `without_url`: the URL is not a secret here, but the rule is the module's, not the caller's.
-    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
-    let status = r.status();
-    let body = r.text().await.unwrap_or_default();
+    // Through `raw`, so the token sample carries the request id and per-seam timing every other
+    // probe request does — `reg.token.p95` was the one id whose slow samples left no line at all.
+    let (status, body) = super::raw(c, reqwest::Method::GET, &url, "", None, &headers).await?;
     if !status.is_success() {
         return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
     }

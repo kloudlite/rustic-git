@@ -24,4 +24,13 @@ metadata:
 data:
   use-forwarded-headers: "true"
   forwarded-for-header: "CF-Connecting-IP"
+  # Access log as one JSON object per request, keyed like our own tiers' lines (`timestamp`,
+  # `level`, `message`) so the collector's existing json_parser takes it unchanged. `req_id` is
+  # the incoming `X-Request-ID` when one was sent (the probe, the web tier) and a generated one
+  # otherwise — the template's `map $http_x_request_id $req_id` — and the same value is sent
+  # upstream as `X-Request-ID`, so an edge line joins the pod lines. The upstream times split
+  # connect, wait-for-headers and whole response: the part of a slow sample no pod can see.
+  generate-request-id: "true"
+  log-format-escape-json: "true"
+  log-format-upstream: '{"timestamp":"$time_iso8601","level":"INFO","message":"ingress.access","req_id":"$req_id","host":"$host","method":"$request_method","uri":"$uri","status":$status,"request_time":$request_time,"upstream_connect_time":"$upstream_connect_time","upstream_header_time":"$upstream_header_time","upstream_response_time":"$upstream_response_time","upstream":"$upstream_addr","bytes":$bytes_sent}'
   proxy-real-ip-cidr: "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22"

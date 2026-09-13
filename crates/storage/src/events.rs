@@ -100,7 +100,12 @@ pub fn from_fields(f: &[(String, String)]) -> Option<Event> {
 /// Fire-and-forget: see the module doc. Never propagates an error, so a caller on a hot path
 /// (opening a PR, posting a comment) cannot be slowed or failed by a Redis blip.
 pub async fn publish(cache: &Cache, e: &Event) {
-    cache.xadd(STREAM, MAXLEN, &fields(e)).await;
+    // One line per event either way: the feed is stream-only for PRs, so "was it ever published"
+    // is the first question a missing feed row asks, and only the publisher can answer it.
+    match cache.xadd(STREAM, MAXLEN, &fields(e)).await {
+        Ok(()) => tracing::info!(kind = e.kind.as_str(), repo = %e.repo, pr = e.number, "event.published"),
+        Err(error) => tracing::warn!(kind = e.kind.as_str(), repo = %e.repo, pr = e.number, %error, "event.publish.failed"),
+    }
 }
 
 #[cfg(test)]

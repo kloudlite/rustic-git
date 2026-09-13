@@ -162,12 +162,20 @@ pub async fn http_metrics(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let start = Instant::now();
+    // The id the caller sent (the probe, the ingress) or a minted one, echoed back and put on a
+    // span so every event inside this request carries it: the probe's `slo.http.*` line and this
+    // tier's lines join on one value instead of on a timestamp guess.
+    let req_id = request_id(req.headers().get(REQUEST_ID).and_then(|v| v.to_str().ok()));
     // A request whose client goes away is DROPPED here mid-flight and would log nothing — which
     // is how a 15 s `GET /admin/workloads` the probe abandoned left no trace on this side
     // (2026-09-11). The guard says it happened and how far it got; it is disarmed on completion.
-    let mut abandoned = Abandoned { listener, class, method: method.clone(), path: path.clone(), start, armed: true };
-    let res = next.run(req).await;
+    let mut abandoned = Abandoned { listener, class, method: method.clone(), path: path.clone(), start, armed: true, req_id: req_id.clone() };
+    let span = tracing::info_span!("http", req_id = %req_id);
+    let mut res = tracing::Instrument::instrument(next.run(req), span).await;
     abandoned.armed = false;
+    if let Ok(v) = axum::http::HeaderValue::from_str(&req_id) {
+        res.headers_mut().insert(REQUEST_ID, v);
+    }
     let status = res.status().as_u16();
     let labels = [("listener", listener), ("class", class), ("status", status_class(status))];
     metrics::counter!("http_requests_total", &labels).increment(1);
@@ -179,11 +187,11 @@ pub async fn http_metrics(
     // agent's `event.seen` measures from it). The path carries ids, never bodies or tokens.
     let write = listener == "api" && !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
     if status >= 500 {
-        tracing::warn!(listener, class, method = %method, %path, status, ms, "http.failed");
-    } else if ms > SLOW_REQUEST_MS {
-        tracing::warn!(listener, class, method = %method, %path, status, ms, "http.slow");
+        tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.failed");
+    } else if ms > slow_ms(&path) {
+        tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.slow");
     } else if write {
-        tracing::info!(listener, class, method = %method, %path, status, ms, "http.write");
+        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, "http.write");
     }
     res
 }
@@ -192,6 +200,35 @@ pub async fn http_metrics(
 /// this says which request.
 const SLOW_REQUEST_MS: u64 = 1_000;
 
+/// `/v2/token`'s own floor. Its catalogue target is a 300 ms p95, so every failing sample (300 to
+/// 1300 ms on 2026-09-13) sat under the general one-second floor and left no line. A threshold
+/// just under the target logs exactly the samples that fail it — a per-request line at every
+/// rate would be one per docker pull for nothing.
+const SLOW_TOKEN_MS: u64 = 250;
+
+fn slow_ms(path: &str) -> u64 {
+    match path {
+        "/v2/token" => SLOW_TOKEN_MS,
+        _ => SLOW_REQUEST_MS,
+    }
+}
+
+pub const REQUEST_ID: &str = "x-request-id";
+
+/// The caller's id when it is one we can log verbatim, else a fresh one. Bounded and charset-
+/// limited because it lands in every log line of the request: a header is somebody else's bytes.
+fn request_id(incoming: Option<&str>) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    if let Some(v) = incoming.filter(|v| !v.is_empty() && v.len() <= 128 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))) {
+        return v.to_string();
+    }
+    static BOOT: OnceLock<u64> = OnceLock::new();
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    // Boot instant plus a counter: unique per process without a random source per request.
+    let boot = *BOOT.get_or_init(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0));
+    format!("{boot:x}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
 struct Abandoned {
     listener: &'static str,
     class: &'static str,
@@ -199,6 +236,7 @@ struct Abandoned {
     path: String,
     start: Instant,
     armed: bool,
+    req_id: String,
 }
 
 impl Drop for Abandoned {
@@ -206,7 +244,7 @@ impl Drop for Abandoned {
         if self.armed {
             let ms = self.start.elapsed().as_millis() as u64;
             metrics::counter!("http_requests_total", "listener" => self.listener, "class" => self.class, "status" => "abandoned").increment(1);
-            tracing::warn!(listener = self.listener, class = self.class, method = %self.method, path = %self.path, ms, "http.abandoned");
+            tracing::warn!(listener = self.listener, class = self.class, method = %self.method, path = %self.path, ms, req_id = %self.req_id, "http.abandoned");
         }
     }
 }
@@ -247,6 +285,22 @@ fn status_class(code: u16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_request_id_is_the_callers_only_when_it_is_safe_to_log() {
+        assert_eq!(super::request_id(Some("run-fast-1757-42")), "run-fast-1757-42");
+        for bad in [None, Some(""), Some("a b"), Some("x\ny"), Some(&*"a".repeat(129))] {
+            let id = super::request_id(bad);
+            assert!(id.contains('-') && !id.contains(' ') && !id.contains('\n'), "{id}");
+        }
+        assert_ne!(super::request_id(None), super::request_id(None));
+    }
+
+    #[test]
+    fn only_the_token_route_has_the_lower_slow_floor() {
+        assert_eq!(super::slow_ms("/v2/token"), 250);
+        assert_eq!(super::slow_ms("/v2/alice/app/manifests/1"), 1_000);
+    }
+
     /// Every classifier in the fleet ends here, so the HTTP one has to agree with `ERROR_KINDS`.
     #[test]
     fn http_error_classes_are_named_and_bounded() {

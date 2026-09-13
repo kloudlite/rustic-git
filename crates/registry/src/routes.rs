@@ -23,6 +23,13 @@ pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
 /// `q` is the caller's `n`/`last` query: only that page's marker bodies are read (`index::list_page`).
 /// Callers still run `paginate` over the result — the unmarked fallback below is unpaged, and the
 /// second pass is what keeps the two halves on one contract.
+/// A slow listing (which of the three halves the time went to, which `http.slow` cannot say), or
+/// any listing carrying unmarked names: a row with no marker is how a deleted image stayed listed
+/// on a FAST page (reg.image.delete, 2026-09-13), and a timing floor alone never logged it.
+fn listing_worth_logging(total_ms: u64, unmarked: usize) -> bool {
+    total_ms >= 1_000 || unmarked > 0
+}
+
 pub async fn image_listing(
     app: &App,
     owner: &str,
@@ -30,9 +37,11 @@ pub async fn image_listing(
     q: &std::collections::HashMap<String, String>,
 ) -> crate::Result<Vec<crate::index::Marker>> {
     let n = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(usize::MAX);
+    let t = std::time::Instant::now();
     let mut markers =
         crate::index::list_page(&app.store, crate::index::Kind::Img, owner, include_private, q.get("last").map(String::as_str), n)
             .await?;
+    let marker_ms = t.elapsed().as_millis() as u64;
     let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     // An unmarked (pre-backfill) image has no visibility record, so it defaults private just like
     // a freshly-pushed one — an unauthenticated caller must never see it, exactly as `index::list`
@@ -43,6 +52,7 @@ pub async fn image_listing(
     } else {
         Vec::new()
     };
+    let fallback_ms = t.elapsed().as_millis() as u64 - marker_ms;
     // WINDOWED to the caller's page before a single stat is issued. The marker half has always
     // honoured `last`/`n`; this half stat-ed every unmarked image the owner had, so a `?n=2`
     // catalog page cost one LIST per image in the account (2026-09-12). Same `after`/`take` rule
@@ -57,6 +67,11 @@ pub async fn image_listing(
     // round trips, and an unbounded fan-out put it behind N simultaneous ones.
     let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
     let stats = crate::gc::stats_of(&app.store, owner, &names).await;
+    let total_ms = t.elapsed().as_millis() as u64;
+    if listing_worth_logging(total_ms, names.len()) {
+        let stat_ms = total_ms - marker_ms - fallback_ms;
+        tracing::info!(owner = %owner, markers = markers.len(), unmarked = names.len(), marker_ms, fallback_ms, stat_ms, total_ms, "image.listing.done");
+    }
     for (name, stat) in unmarked.into_iter().zip(stats) {
         // A failed stat is NOT "zero manifests, never updated": that fabricates a listing row a
         // person reads as an empty image, which is how an object-store blip showed a tenant's
@@ -322,6 +337,13 @@ mod tests {
 
     fn jwt() -> crate::jwt::Jwt {
         crate::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()
+    }
+
+    #[test]
+    fn a_fast_listing_is_logged_only_when_it_carries_unmarked_names() {
+        assert!(listing_worth_logging(40, 1));
+        assert!(!listing_worth_logging(40, 0));
+        assert!(listing_worth_logging(1_000, 0));
     }
 
     /// The defect this fixes: an anonymous-issued token must NOT collapse into the same outcome

@@ -455,3 +455,19 @@ fn the_two_otel_stacks_grant_the_same_cluster_role() {
     let aks = role(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/kloudlite.yaml"));
     assert_eq!(k3s, aks, "the AKS collectors' ClusterRole has drifted from deploy/k3s/otel-agent.yaml");
 }
+
+/// The ingress access log is only an edge record if both clusters' collectors read it; the role
+/// test above says nothing about `filelog` includes, which are allowed to differ otherwise.
+#[test]
+fn both_otel_stacks_collect_the_ingress_access_log() {
+    for path in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/otel-agent.yaml"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/kloudlite.yaml"),
+    ] {
+        let s = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(
+            s.lines().any(|l| l.trim_start().starts_with("include:") && l.contains("/var/log/pods/ingress-nginx_*/*/*.log")),
+            "{path}: filelog does not include the ingress-nginx pods"
+        );
+    }
+}
