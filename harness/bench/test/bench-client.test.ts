@@ -76,3 +76,29 @@ test("rpc streams as pi:event, offline refuses and reads the cache, a restarted 
     fs.rmSync(cacheFile, { force: true });
   }
 });
+
+test("a second device that never sent anything streams another device's live turn", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-cl2-"));
+  const b = await run(path.join(dir, "bench"), 0);
+  const base = `http://127.0.0.1:${b.port}`;
+  const seenA: Record<string, unknown>[] = [];
+  const seenB: Record<string, unknown>[] = [];
+  const a = new BenchClient(base, (e) => seenA.push(e), path.join(dir, "a.json"));
+  const bb = new BenchClient(base, (e) => seenB.push(e), path.join(dir, "b.json"));
+  try {
+    a.start();
+    bb.start();
+    await until(() => a.connected() && bb.connected(), 5_000, "both clients to connect");
+    const sid = (await a.rest<{ id: string }[]>("GET", "/sessions"))[0].id;
+    await a.rpc(sid, { type: "prompt", message: "hi" });
+    await until(() => seenB.some((e) => e.pi === sid && e.type === "agent_end"), 5_000, "B to see A's agent_end");
+    assert.deepEqual(seenB.filter((e) => e.pi === sid && e.type !== "response").map((e) => e.type).filter((t) => t !== "sessions"), ["agent_start", "message_update", "agent_end"]);
+    await until(() => seenA.some((e) => e.pi === sid && e.type === "agent_end"), 5_000, "A's agent_end");
+    assert.deepEqual(seenA.filter((e) => e.pi === sid && e.type !== "response").map((e) => e.type), ["agent_start", "message_update", "agent_end"], "A, holding the session socket, sees each event once");
+  } finally {
+    a.close();
+    bb.close();
+    await stop(b.c);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

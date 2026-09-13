@@ -89,7 +89,10 @@ export class BenchClient {
       } catch {
         return;
       }
-      if (ev.pi) return; // session events arrive on the session's own socket
+      // A session this device holds a socket for streams there; any other session's
+      // live turn streams here, so a second device sees it before it ever sends.
+      // Responses answer another device's command: never this one's.
+      if (ev.pi && (this.sockets.has(ev.pi) || ev.type === "response")) return;
       if (ev.type === "sessions" && Array.isArray(ev.sessions)) {
         this.cache.sessions = ev.sessions;
         this.save();
