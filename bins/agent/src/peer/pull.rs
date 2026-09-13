@@ -146,6 +146,9 @@ pub(crate) async fn pull_beat_with(ctx: &Arc<Ctx>, btrfs_bin: &str, secret: &str
     // DEAD nodes only, never merely decommissioning ones: a decommissioning node is alive, its
     // running work keeps running, and it releases its volumes at its own pace from its own beat.
     sweep_dead_nodes(ctx, &beat, &nodes, floor, now).await;
+    // Benches are released on dead AND decommissioning nodes: a bench has no bytes on the node to
+    // drain, and a second pod starting elsewhere cannot corrupt the folder — the NFS folder lock
+    // fences it (exit 75) until the old pod lets go.
     super::sweeps::release_benches(ctx, &nodes, floor, now).await;
 
     let candidates = match pool_nodes(&ctx.client).await {

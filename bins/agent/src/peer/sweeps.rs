@@ -326,6 +326,8 @@ pub(crate) async fn sweep_dead_nodes(
 /// A bench keeps nothing on its node, so one on an unplaceable node is always releasable: clear
 /// `nodeName` and any up node claims it. A zombie pod on a partitioned node is fenced by the folder
 /// lock (`FolderLocked`), not by this sweep. A failed listing releases nothing.
+// ponytail: one cluster-wide Bench LIST per pull beat; a Bench reflector on `Ctx` (like
+// `Ctx::workspaces()`) replaces it once bench counts make the LIST cost anything.
 pub async fn release_benches(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
     let benches = match Api::<crd::Bench>::all(ctx.client.clone()).list(&ListParams::default()).await {
         Ok(l) => l.items,
