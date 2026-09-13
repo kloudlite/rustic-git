@@ -7,6 +7,13 @@ export type SessionRow = { id: string; name: string; seq: number; lastActive?: n
 /** The sidebar's sessions: a workspace or ephemeral thread is the bench's too, but never listed here. */
 export const benchSessions = <T extends SessionRow>(rows: T[]): T[] => rows.filter((r) => (r.kind ?? "bench") === "bench");
 
+/** The bench route that opens a workspace's thread, or an ephemeral's inside it (idempotent). */
+export const threadRoute = (ws: string, eph?: string): string => (eph === undefined ? `/workspaces/${ws}/session` : `/workspaces/${ws}/eph/${eph}/session`);
+
+/** What a tab says when the bench refuses to open its thread; a 409 `belongs to` is an id clash, not a crash. */
+export const openNote = (message: string): string =>
+  /belongs to/.test(message) ? `this tab cannot open as a session: ${message}; its history is not shown` : message;
+
 /** A process row as the task page reads it: a lost row found gone at start is lost, never running. */
 export function procState(p: { ended?: number; code?: number | null; lost?: true }): "running" | "done" | "failed" | "lost" {
   if (p.lost) return "lost";

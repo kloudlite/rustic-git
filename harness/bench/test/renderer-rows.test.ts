@@ -12,6 +12,14 @@ test("benchSessions lists bench sessions only", () => {
   assert.deepEqual(benchSessions(rows).map((r) => r.id), ["s-1", "s-2"]);
 });
 
+test("threadRoute and openNote: a workspace or ephemeral tab's route, and a clash as a note", async () => {
+  const { threadRoute, openNote } = await import("../../src/renderer/rows.ts");
+  assert.equal(threadRoute("ws-1"), "/workspaces/ws-1/session");
+  assert.equal(threadRoute("ws-1", "eph-a1"), "/workspaces/ws-1/eph/eph-a1/session");
+  assert.match(openNote("ephemeral x belongs to ws-2"), /^this tab cannot open as a session: ephemeral x belongs to ws-2/);
+  assert.equal(openNote("not connected"), "not connected");
+});
+
 test("a lost process is lost, not running or exited", () => {
   assert.equal(procState({ lost: true, ended: 5 }), "lost");
   assert.equal(procLabel({ lost: true, ended: 5 }), "lost");

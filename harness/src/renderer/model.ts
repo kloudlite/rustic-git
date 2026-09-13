@@ -565,9 +565,10 @@ export function threadOf(m: Machine, id: string): Thread | undefined {
   const messages = THREADS[id] ?? [];
   if (id === m.id) return { id, name: "Bench Thread", kind: "machine", readonly: false, messages, pi: "bench" };
   for (const w of m.workspaces) {
-    if (w.id === id) return { id, name: w.name, kind: "workspace", readonly: false, messages };
+    // A workspace's thread and an ephemeral's log are sessions on the bench; their messages are live, not fixtures.
+    if (w.id === id) return { id, name: w.name, kind: "workspace", readonly: false, messages: [], pi: `w-${w.id}` };
     const e = w.ephemerals.find((x) => x.id === id);
-    if (e) return { id, name: e.task, kind: "ephemeral", readonly: true, messages };
+    if (e) return { id, name: e.task, kind: "ephemeral", readonly: true, messages: [], pi: `e-${e.id}` };
   }
   return undefined;
 }
