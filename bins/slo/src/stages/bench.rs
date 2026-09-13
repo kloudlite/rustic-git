@@ -111,7 +111,13 @@ fn split_response(r: &str) -> Result<(u16, String)> {
 }
 
 fn is_stub(healthz: &str) -> bool {
-    healthz.contains("ok stub")
+    healthz.trim_start().starts_with("ok stub")
+}
+
+/// The real harness-bench answers JSON `{"ok":true,...}`; the stub answered text `ok stub ...`.
+fn health_ok(healthz: &str) -> bool {
+    is_stub(healthz)
+        || serde_json::from_str::<serde_json::Value>(healthz).is_ok_and(|v| v["ok"] == serde_json::Value::Bool(true))
 }
 
 /// `"total":N` from a messages answer, read as text so a chunked body still compares.
@@ -170,7 +176,7 @@ pub async fn fast(c: &mut Ctx) {
         async move {
             let (_child, port) = forward(c).await?;
             let (status, body) = through(port, "/healthz").await?;
-            if status != 200 || !body.trim_start().starts_with("ok") {
+            if status != 200 || !health_ok(&body) {
                 bail!("/healthz through the tunnel answered {status}: {}", super::clip(&body));
             }
             Ok(())
@@ -282,6 +288,10 @@ mod tests {
     fn stub_health_and_totals_read() {
         assert!(is_stub("ok stub running"));
         assert!(!is_stub("{\"clients\":0}"));
+        let real = "{\"ok\":true,\"readOnly\":false,\"writable\":true,\"reason\":null,\"clients\":0,\"busy\":false}";
+        assert!(!is_stub(real) && health_ok(real));
+        assert!(health_ok("ok stub running"));
+        assert!(!health_ok("{\"ok\":false}") && !health_ok("oops") && !health_ok("{\"ok\":\"true\"}"));
         assert_eq!(split_response("HTTP/1.1 200 OK\r\na: b\r\n\r\nok stub read-only").unwrap(), (200, "ok stub read-only".into()));
         assert_eq!(total_of("{\"messages\":[],\"total\": 12}"), Some(12));
     }
