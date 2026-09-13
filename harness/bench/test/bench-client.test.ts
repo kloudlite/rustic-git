@@ -9,7 +9,7 @@ import { FAKE } from "./fake-pi.ts";
 import { BenchClient } from "../../src/bench-client.ts";
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main.ts");
-const settle = (ms = 250) => new Promise((r) => setTimeout(r, ms));
+import { until } from "./wait.ts";
 
 /** The real harness-bench bin with a fake pi, resolved once it says where it listens. */
 function run(dir: string, port: number): Promise<{ c: ChildProcess; port: number }> {
@@ -37,12 +37,10 @@ test("rpc streams as pi:event, offline refuses and reads the cache, a restarted 
   const c = new BenchClient(`http://127.0.0.1:${port}`, (e) => seen.push(e), cacheFile);
   try {
     c.start();
-    await settle(500);
-    assert.equal(c.connected(), true);
-    assert.ok(seen.some((e) => e.type === "bench" && e.connected === true));
+    await until(() => c.connected() && seen.some((e) => e.type === "bench" && e.connected === true), 5_000, "the client to connect");
     const sid = (await c.rest<{ id: string }[]>("GET", "/sessions"))[0].id;
     await c.rpc(sid, { type: "prompt", message: "hi" });
-    await settle();
+    await until(() => seen.some((e) => e.pi === sid && e.type === "agent_end"), 5_000, "agent_end");
     assert.deepEqual(seen.filter((e) => e.pi === sid && e.type !== "response").map((e) => e.type), ["agent_start", "message_update", "agent_end"]);
     assert.equal((await c.messages(sid)).length, 2);
 
@@ -58,9 +56,7 @@ test("rpc streams as pi:event, offline refuses and reads the cache, a restarted 
     assert.equal((await c.rpc(sid, { type: "get_state" })).success, true, "a fresh socket opens on the next rpc");
 
     await stop(b.c);
-    await settle();
-    assert.equal(c.connected(), false);
-    assert.ok(seen.some((e) => e.type === "bench" && e.connected === false));
+    await until(() => !c.connected() && seen.some((e) => e.type === "bench" && e.connected === false), 5_000, "the client to see the bench go");
     await assert.rejects(c.rpc(sid, { type: "prompt", message: "lost?" }), /not connected to the bench; nothing was sent/);
     assert.equal((await c.messages(sid)).length, 2, "offline reads come from the cache");
     assert.ok(c.cached().sessions.length >= 1, "offline list comes from the cache");
@@ -69,11 +65,9 @@ test("rpc streams as pi:event, offline refuses and reads the cache, a restarted 
 
     const before = seen.length;
     b = await run(path.join(dir, "bench"), port);
-    await settle(2500);
-    assert.equal(c.connected(), true, "reconnected");
-    assert.ok(seen.slice(before).some((e) => e.type === "bench:resync"), "resynced");
+    await until(() => c.connected() && seen.slice(before).some((e) => e.type === "bench:resync"), 15_000, "reconnect and resync");
     await c.rpc(sid, { type: "prompt", message: "again" });
-    await settle();
+    await until(() => seen.slice(before).some((e) => e.pi === sid && e.type === "agent_end"), 5_000, "agent_end after reconnect");
     assert.deepEqual(seen.slice(before).filter((e) => e.pi === sid && e.type !== "response").map((e) => e.type), ["agent_start", "message_update", "agent_end"], "new events arrive after reconnect");
   } finally {
     c.close();

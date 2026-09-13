@@ -241,6 +241,8 @@ export class Bench {
     // Checked before either id becomes a path.
     for (const x of kind === "workspace" ? [ws] : [ws, eph]) if (typeof x !== "string" || !WS_ID.test(x)) throw new Error(`not a workspace id: ${x}`);
     this.refuse(true);
+    // Outside writable.run: a refusal there would read as a folder that cannot be written.
+    this.sessions.threadId({ kind, workspace: ws, eph });
     const base = path.join(this.opts.dir, "workspaces", ws);
     const file = eph === undefined ? path.join(base, "thread.jsonl") : path.join(base, "eph", `${eph}.jsonl`);
     const s = this.writable.run(() => {
@@ -289,6 +291,11 @@ export class Bench {
         fs.mkdirSync(trash, { recursive: true });
         // Every workspace thread's file is thread.jsonl: prefix the id so two never collide in the trash.
         fs.renameSync(s.file, path.join(trash, !isBench(s) ? `${id}-${path.basename(s.file)}` : path.basename(s.file)));
+      }
+      if (s.workspace) {
+        const ws = path.join(this.opts.dir, "workspaces", s.workspace);
+        // rmdir refuses a directory that still holds another thread, which is exactly when it must stay.
+        for (const d of [path.join(ws, "eph"), ws]) try { fs.rmdirSync(d); } catch { /* not empty or already gone */ }
       }
       // Never zero bench sessions: the replacement takes a fresh id (nextSeq), never the removed one.
       if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.open(this.sessions.create(this.opts.model));

@@ -65,9 +65,20 @@ export class SessionList {
     this.save();
     return added.map((r) => r.id);
   }
-  /** `w-{ws}` or `e-{eph}`; an id already listed comes back unchanged. seq 0 keeps a thread out of create()'s numbering. */
-  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string }): SessionRow {
+  /** The thread's id, refused when a row of another kind or workspace already holds it. Writes nothing, so a caller can check before its write guard. */
+  threadId(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string }): string {
     const id = t.kind === "workspace" ? `w-${t.workspace}` : `e-${t.eph}`;
+    const have = this.get(id);
+    if (have && (have.kind !== t.kind || have.workspace !== t.workspace)) throw new Error(`${have.kind ?? "bench"} ${t.eph ?? t.workspace} belongs to ${have.workspace ?? "the bench"}`);
+    return id;
+  }
+  /**
+   * `w-{ws}` or `e-{eph}`; an id already listed comes back unchanged, but only for the same kind and workspace:
+   * an ephemeral id is not scoped by its workspace, so a reuse under another would hand back the first one's file.
+   * seq 0 keeps a thread out of create()'s numbering.
+   */
+  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string }): SessionRow {
+    const id = this.threadId(t);
     const have = this.get(id);
     if (have) return { ...have };
     const now = Date.now();
