@@ -22,3 +22,8 @@
 !deploy/workspace-image/docker-credential-kl
 !deploy/workspace-image/kl-build.sh
 !deploy/workspace-image/gitignore-global
+# Directory whitelists, not named files: a name whitelist here is what broke the workspace-caches
+# merge (a new file landed and nobody added its name). deploy/bench/ holds this Dockerfile and its
+# stub; harness/bench/dist/ is the real harness-bench's future output.
+!deploy/bench/
+!harness/bench/dist/
