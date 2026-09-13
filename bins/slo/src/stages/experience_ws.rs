@@ -320,17 +320,28 @@ pub async fn cache_in_tree(c: &mut Ctx) {
     c.step("ws.cache.travels", CACHE_CEILING, move |c| {
         async move {
             let src = create(c, &name, json!({ "packages": [] })).await?;
+            // Before the push: once pushed the volume outlives both workspaces, and it is named by
+            // the workspace id, so no prefix sweep ever sees it — teardown deletes it by name.
+            c.state.extra_volumes.push(src.clone());
             let write = format!("set -e\nmkdir -p \"$CARGO_TARGET_DIR\"\nprintf %s {want} > \"$CARGO_TARGET_DIR/marker\"\nsync \"$CARGO_TARGET_DIR/marker\"");
             let (code, _, err) = ws_exec(c, &src, &write, EXEC).await?;
             if code != 0 {
                 drop_ws(c, &src).await;
+                drop_vol(c, &src).await;
                 return Err(anyhow!("writing under the cache exited {code}: {}", err.trim()));
             }
-            let out = push_then_restore(c, &src, &format!("{name}-r")).await;
+            let out = push_then_restore(c, &src, &format!("{name}-r"), &name).await;
             drop_ws(c, &src).await;
-            let restored = out?;
+            let restored = match out {
+                Ok(r) => r,
+                Err(e) => {
+                    drop_vol(c, &src).await;
+                    return Err(e);
+                }
+            };
             let (code, out, err) = ws_exec(c, &restored, "cat \"$CARGO_TARGET_DIR/marker\"", EXEC).await?;
             drop_ws(c, &restored).await;
+            drop_vol(c, &src).await;
             if code != 0 {
                 return Err(anyhow!("the restored copy has no marker under its cache: exit {code}: {}", err.trim()));
             }
@@ -407,9 +418,9 @@ pub async fn ide_server(c: &mut Ctx) {
 
 /// Push `src`, wait for the snapshot to turn ready, restore it under `name`, wait for `ready`;
 /// answers the restored workspace's id. The volume is named after the workspace.
-async fn push_then_restore(c: &mut Ctx, src: &str, name: &str) -> Result<String> {
+async fn push_then_restore(c: &mut Ctx, src: &str, name: &str, message: &str) -> Result<String> {
     let jwt = c.probe_jwt.clone();
-    let doc = post(c, &api(c, &format!("/v1/workspaces/{src}/push")), &jwt, json!({})).await.context("could not push")?;
+    let doc = post(c, &api(c, &format!("/v1/workspaces/{src}/push")), &jwt, json!({ "message": message })).await.context("could not push")?;
     let snap = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("the push answered no snapshot id"))?.to_string();
     let history = api(c, &format!("/v1/volumes/{src}/history"));
     poll_json(c, &history, &jwt, CACHE_CEILING / 2, |v| super::workspace::row_ready(v, &snap)).await.context("the snapshot never turned ready")?;
@@ -837,6 +848,15 @@ async fn drop_ws(c: &Ctx, id: &str) {
     }
 }
 
+/// Delete a volume this stage registered, best effort. A 409 is expected while the restored
+/// workspace's finalizer still runs; `drop_extra_volumes` in teardown is the guarantee.
+async fn drop_vol(c: &Ctx, name: &str) {
+    let url = api(c, &format!("/v1/volumes/{name}"));
+    if let Err(e) = call(c, reqwest::Method::DELETE, &url, &c.probe_jwt, None).await {
+        tracing::warn!(kind = "volume", op = "delete", name = %name, error = %format!("{e:#}"), "slo.experience.failed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,6 +936,51 @@ mod tests {
         for s in &c.steps {
             assert!(!s.detail.contains(&c.probe_jwt), "a jwt reached a detail: {s:?}");
         }
+    }
+
+    /// The volume outlives both workspaces once pushed and is named by id, so it has to be
+    /// registered the moment the create answers — before any exec or push can fail the step.
+    #[tokio::test]
+    async fn cache_travels_registers_its_volume_before_the_push() {
+        let app = axum::Router::new()
+            .route("/v1/workspaces", apost(|| async { axum::Json(json!({"id": "ws-1"})) }))
+            .route("/v1/workspaces/{id}", get(|| async { axum::Json(json!({"state": "ready"})) }))
+            .route("/v1/workspaces/{id}/push", apost(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }));
+        let mut c = testkit::ctx_against(app).await;
+        c.kube = Some(kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).expect("client"));
+        cache_in_tree(&mut c).await;
+        assert!(c.state.extra_volumes.contains(&"ws-1".to_string()), "{:?}", c.state.extra_volumes);
+        let s = once(&c, "ws.cache.travels");
+        assert!(!s.ok && !s.skipped, "{s:?}");
+    }
+
+    /// The push carries the run prefix: the message is the only caller-chosen string a detached
+    /// volume keeps, and the teardown backstop keys on it.
+    #[tokio::test]
+    async fn cache_travels_pushes_under_the_run_prefix() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Option<Value>>> = Arc::default();
+        let s2 = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/workspaces/{id}/push",
+                apost(move |axum::Json(b): axum::Json<Value>| {
+                    let s2 = s2.clone();
+                    async move {
+                        *s2.lock().unwrap() = Some(b);
+                        axum::Json(json!({"id": "snap-1"}))
+                    }
+                }),
+            )
+            .route("/v1/volumes/{v}/history", get(|| async { axum::Json(json!([{"id": "snap-1", "phase": "ready"}])) }))
+            .route("/v1/workspaces/restore", apost(|| async { axum::Json(json!({"id": "ws-2"})) }))
+            .route("/v1/workspaces/{id}", get(|| async { axum::Json(json!({"state": "ready"})) }));
+        let mut c = testkit::ctx_against(app).await;
+        let name = format!("{}-cache", c.prefix());
+        assert_eq!(push_then_restore(&mut c, "ws-1", "r", &name).await.expect("restored"), "ws-2");
+        let body = seen.lock().unwrap().clone().expect("pushed");
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or_default();
+        assert!(msg.starts_with(&c.prefix()), "{body}");
     }
 
     /// The state half of `home.persists`. It used to compare `readlink -f` of the state dir to
