@@ -91,6 +91,11 @@ pub const IDS: &[&str] = &[
     "id.session.reads",
     "kl.commands",
     "admin.reads",
+    "bench.idle.wake",
+    "bench.session.roundtrip",
+    "bench.exchange.both_views",
+    "bench.two_clients",
+    "bench.workspace.tool_roundtrip",
     "feed.experience",
     "home.persists",
 ];
@@ -177,6 +182,9 @@ pub async fn run(c: &mut Ctx) {
             "id.session.reads" => super::experience_gaps2::session_reads(c).await,
             "kl.commands" => super::experience_gaps2::kl_commands(c).await,
             "admin.reads" => super::experience_gaps2::reads(c).await,
+            // One call: the wake runs first, with every client gone, then the four session ids.
+            "bench.idle.wake" => super::bench::hourly(c).await,
+            "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             _ => c.skip(id, "not implemented yet"),
         }
     }

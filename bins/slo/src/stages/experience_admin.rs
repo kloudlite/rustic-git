@@ -66,8 +66,8 @@ pub(crate) fn probe_quota() -> Value {
         // runs, charged to the owner like everything else. Too small and every create after the
         // builder's back-fill answers 409 on diskGb.
         "diskGb": 90,
-        "cpu": 52,
-        "memoryGb": 104,
+        "cpu": 56,
+        "memoryGb": 112,
     })
 }
 

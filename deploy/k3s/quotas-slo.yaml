@@ -54,8 +54,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 52
-  memoryGb: 104
+  cpu: 56
+  memoryGb: 112
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
@@ -124,8 +124,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 52
-  memoryGb: 104
+  cpu: 56
+  memoryGb: 112
 
 ---
 # The hourly suite's second tenant, all zero for the same reason as `slo-other`.
@@ -190,8 +190,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 52
-  memoryGb: 104
+  cpu: 56
+  memoryGb: 112
 
 ---
 # The drills' second tenant, all zero for the same reason as `slo-other`.

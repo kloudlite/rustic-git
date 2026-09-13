@@ -264,6 +264,11 @@ pub const CATALOGUE: &[Slo] = &[
     // Create is only one of the four verbs behind `guard_alloc`; restore, clone and push route
     // through the same gate and none was probed.
     Slo { id: "env.quota.refused", feature: "Workspaces", sli: "An over-quota restore, clone and push are each refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // The owner's bench. Its object name is a hash of (owner, team), so it is long-lived rather
+    // than a `run-{id}` object: left Running with no client, it sleeps between runs.
+    Slo { id: "bench.create", feature: "Benches", sli: "`POST /v1/bench` answers, and a second POST names the same id", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "bench.start.p95", feature: "Benches", sli: "A started bench reaches phase `ready`", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "bench.tunnel", feature: "Benches", sli: "A bench token opens the tunnel and `/healthz` answers through it", target: bound(20_000), suite: Suite::Fast, stage: "5 · Workspace" },
     // Hourly, like the intercept journey: the build itself waits on the gate starting a pod,
     // which is too much to pay every five minutes, and the builder must be Stopped going in or
     // the sample is timing someone else's cold start.
@@ -461,6 +466,15 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "id.session.reads", feature: "Identity", sli: "The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "kl.commands", feature: "Identity", sli: "`kl-connect ws`, `kl-connect ws list --team` and `kl-connect logout` answer", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.reads", feature: "Admin", sli: "`/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404", target: bound(10_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // Benches. 480 s is the region's default `benchIdleSecs` (300) plus a 90 s start plus 90 s of
+    // reads; a region that raises the knob raises the probe's ceiling with it.
+    Slo { id: "bench.idle.wake", feature: "Benches", sli: "With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged", target: bound(480_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.session.roundtrip", feature: "Benches", sli: "A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages`", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.exchange.both_views", feature: "Benches", sli: "An exchange reads back by `?session=` and by `?workspace=`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.two_clients", feature: "Benches", sli: "Two WebSockets on one session see the same events in the same order", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
+    // thread file.
+    Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -497,6 +511,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
@@ -556,6 +571,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_bench_id_is_catalogued() {
+        for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.idle.wake",
+                   "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
+                   "bench.survives.reschedule", "bench.workspace.tool_roundtrip"] {
+            assert!(find(id).is_some(), "{id} missing from CATALOGUE");
+        }
+    }
+
     /// The journey is the console's spine and the probe's own stage list: every stage present in
     /// order even when it probes nothing, each suite a superset of the one before, and the ids a
     /// partition of the catalogue rather than a second hand-kept list that can drift from it.
@@ -603,7 +627,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for s in CATALOGUE {
             assert!(seen.insert(s.id), "{} twice", s.id);
-            assert!(s.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.'), "{}", s.id);
+            assert!(s.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_'), "{}", s.id);
             assert!(s.target.good_pct > 0.0 && s.target.good_pct <= 100.0);
         }
     }
