@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # CI, in the pod: the gate CI runs, a release build, and every image (the web's too) pushed under CI's tag
 # shape. Runs under pm2 as `ship` (`pm2 logs ship`). Refuses a dirty or unpushed tree: the tag is
-# the commit SHA, and a tag must mean exactly the code GitHub has under that SHA.
+# the commit SHA, and a tag must name a commit some remote actually holds — `platform` during the
+# owner's platform-first loop (2026-09-13: push platform → ship from the pod → verify on the fleet
+# → push origin only once it's good), `origin` (GitHub) once it has landed there.
 #   pod/ship.sh            # test + clippy + build + push
 #   pod/ship.sh --no-gate  # skip test + clippy (they already passed this cycle)
 set -euo pipefail
@@ -16,11 +18,16 @@ export CARGO_TARGET_DIR=/work/target-ship
 export CARGO_INCREMENTAL=0
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
-# Any origin branch, not only master: a feature branch is verified on the fleet BEFORE it merges
-# (fixed means verified on the carrying build), and the invariant is only that GitHub holds
-# exactly this code under this SHA.
-git fetch -q origin
-git branch -r --contains "$SHA" | grep -q '^ *origin/' || { echo "HEAD is on no origin branch; push first" >&2; exit 2; }
+# Any origin OR platform branch, not only master: a feature branch is verified on the fleet BEFORE
+# it merges (fixed means verified on the carrying build), and during the platform-first loop the
+# code only lives on `platform` until verification passes. Tolerate one remote being unreachable —
+# the pod may only have a route to one of them — but not both.
+fetch_ok=0
+git fetch -q origin && fetch_ok=1 || echo "warning: fetch origin failed" >&2
+git fetch -q platform && fetch_ok=1 || echo "warning: fetch platform failed" >&2
+[ "$fetch_ok" = 1 ] || { echo "could not fetch origin or platform" >&2; exit 2; }
+git branch -r --contains "$SHA" | grep -qE '^ *(origin|platform)/' \
+  || { echo "HEAD is on no origin or platform branch; push first" >&2; exit 2; }
 
 if [ "${1:-}" != "--no-gate" ]; then
   echo "==> gate: clippy + tests (CI's exact commands)"
