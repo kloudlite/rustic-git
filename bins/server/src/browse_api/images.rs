@@ -275,11 +275,12 @@ pub(super) async fn imagedelete(
         false => app.store.delete_image(&owner, &name).await,
     };
     // What a delete actually removed, so a row still listed afterwards can be told from a delete
-    // that never cleared its marker (`marker_removed` is true here: its failure returned above).
-    // `prefix_left` is one re-list: a racing push that re-created a manifest is the other way a
-    // deleted image comes back in the catalogue.
+    // that half-failed. `marker_removed` is the whole delete's outcome: the marker itself was
+    // cleared above (its failure returned there), and a database half that then failed leaves
+    // storage a reconcile can re-mark. `prefix_left` is one re-list at this instant; a manifest
+    // that reappears LATER (a racing push) surfaces as an unmarked name in `image.listing.done`.
     let prefix_left = app.store.os.list(Some(&prefix)).try_collect::<Vec<_>>().await.map(|v| v.len() as i64).unwrap_or(-1);
-    tracing::info!(owner = %owner, image = %name, ghost, marker_removed = true, manifests_deleted, manifests_absent, prefix_left, ok = done.is_ok(), "image.deleted");
+    tracing::info!(owner = %owner, image = %name, ghost, marker_removed = done.is_ok(), manifests_deleted, manifests_absent, prefix_left, ok = done.is_ok(), "image.deleted");
     match done {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => internal(e),

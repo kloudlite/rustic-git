@@ -23,6 +23,13 @@ pub async fn image_names(app: &App, owner: &str) -> crate::Result<Vec<String>> {
 /// `q` is the caller's `n`/`last` query: only that page's marker bodies are read (`index::list_page`).
 /// Callers still run `paginate` over the result — the unmarked fallback below is unpaged, and the
 /// second pass is what keeps the two halves on one contract.
+/// A slow listing (which of the three halves the time went to, which `http.slow` cannot say), or
+/// any listing carrying unmarked names: a row with no marker is how a deleted image stayed listed
+/// on a FAST page (reg.image.delete, 2026-09-13), and a timing floor alone never logged it.
+fn listing_worth_logging(total_ms: u64, unmarked: usize) -> bool {
+    total_ms >= 1_000 || unmarked > 0
+}
+
 pub async fn image_listing(
     app: &App,
     owner: &str,
@@ -61,9 +68,7 @@ pub async fn image_listing(
     let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
     let stats = crate::gc::stats_of(&app.store, owner, &names).await;
     let total_ms = t.elapsed().as_millis() as u64;
-    // Only a listing somebody would wait on: which of the three halves a slow catalogue page
-    // spent its time in, which the request's own `http.slow` cannot say.
-    if total_ms >= 1_000 {
+    if listing_worth_logging(total_ms, names.len()) {
         let stat_ms = total_ms - marker_ms - fallback_ms;
         tracing::info!(owner = %owner, markers = markers.len(), unmarked = names.len(), marker_ms, fallback_ms, stat_ms, total_ms, "image.listing.done");
     }
@@ -332,6 +337,13 @@ mod tests {
 
     fn jwt() -> crate::jwt::Jwt {
         crate::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()
+    }
+
+    #[test]
+    fn a_fast_listing_is_logged_only_when_it_carries_unmarked_names() {
+        assert!(listing_worth_logging(40, 1));
+        assert!(!listing_worth_logging(40, 0));
+        assert!(listing_worth_logging(1_000, 0));
     }
 
     /// The defect this fixes: an anonymous-issued token must NOT collapse into the same outcome
