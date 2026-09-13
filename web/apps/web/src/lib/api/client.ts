@@ -86,6 +86,19 @@ export async function callAgainst<T>(
     headers.set("x-kloudlite-owner", init.asUser);
   }
 
+  // The page request's timing store, when there is one (see `instrumentation-node.ts`): the id
+  // goes upstream so the api's lines join the page's, and the wait is added to the page's total.
+  const timing = (
+    globalThis as { __webRequestTiming?: { getStore(): { reqId: string; upstreamMs: number; upstreamCalls: number } | undefined } }
+  ).__webRequestTiming?.getStore();
+  if (timing?.reqId) headers.set("x-request-id", timing.reqId);
+  const upstreamStarted = performance.now();
+  const settle = () => {
+    if (!timing) return;
+    timing.upstreamMs += performance.now() - upstreamStarted;
+    timing.upstreamCalls += 1;
+  };
+
   let res: Response;
   try {
     // Bounded: a hung api pod must not pin a render, or every refresh stacks another one until
@@ -98,6 +111,7 @@ export async function callAgainst<T>(
       cache: "no-store",
     });
   } catch (e) {
+    settle();
     // The api server being unreachable is not the user's problem to read about — but it is
     // exactly what an operator is looking for, so it goes to the log and the counter here
     // rather than dying inside the sentence the page renders.
@@ -105,6 +119,7 @@ export async function callAgainst<T>(
     logger.error("api.upstream.failed", { upstream, path, method: init.method ?? "GET", error: reason(e) });
     return { ok: false, kind: "unavailable", message: "The service is unavailable. Try again." };
   }
+  settle();
   count("upstream_requests_total", { upstream, status: String(res.status) });
   // 4xx are ordinary answers (a taken handle, a role that is not enough); only the upstream
   // failing at its own end is an event.
