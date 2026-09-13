@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 pub const NAMESPACE_READY: &str = "NamespaceReady";
 
-/// Every team this owner has a workspace in ON THIS NODE, plus the personal namespace.
+/// Every team this owner has a workspace or a bench in ON THIS NODE, plus the personal namespace.
 ///
 /// The personal one is unconditional: a first workspace's reconcile waits on `NamespaceReady`, and
 /// gating the namespace on a workspace that is itself waiting for the namespace is a deadlock.
@@ -57,6 +57,21 @@ async fn teams_in_use(ctx: &Arc<Ctx>, owner: &str) -> Result<BTreeSet<String>, R
         if w.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
             teams.insert(w.spec.team.clone());
         }
+    }
+    // A bench needs its (owner, team) namespace exactly as a workspace does, and a person may hold
+    // a team bench with no workspace in that team at all. A 404 is a cluster without the Bench CRD.
+    let benches: Api<crd::Bench> = Api::all(ctx.client.clone());
+    match benches.list(&lp).await {
+        Ok(l) => {
+            for b in l.items {
+                if b.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
+                    // A personal bench carries its own handle as the team; `ws_namespace` is keyed on "".
+                    teams.insert(if b.spec.team.eq_ignore_ascii_case(owner) { String::new() } else { b.spec.team.clone() });
+                }
+            }
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => {}
+        Err(e) => return Err(e.into()),
     }
     Ok(teams)
 }

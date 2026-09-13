@@ -442,7 +442,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // during a probe run woke a full binding pass — two quota GETs and three applies each —
         // and the region API server saw ~50 quota GETs a minute for six bindings (2026-09-12).
         .watches_stream(
-            kube::runtime::watcher(Api::<crd::Workspace>::all(ctx.client.clone()), placed)
+            kube::runtime::watcher(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone())
                 .applied_objects()
                 .predicate_filter(kube::runtime::predicates::generation, Default::default()),
             {
@@ -453,7 +453,19 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                     &w.spec.owner,
                 )))
             }
-        });
+        })
+        // A bench placed here needs its (owner, team) namespace exactly as a workspace does.
+        .watches_stream(
+            kube::runtime::watcher(Api::<crd::Bench>::all(ctx.client.clone()), placed)
+                .applied_objects()
+                .predicate_filter(kube::runtime::predicates::generation, Default::default()),
+            {
+                let region = ctx.region.clone();
+                move |b: crd::Bench| {
+                    Some(kube::runtime::reflector::ObjectRef::<crd::OwnerBinding>::new(&crd::binding_name(&region, &b.spec.owner)))
+                }
+            },
+        );
     // A raised or lowered `Quota` must re-stamp the `ResourceQuota` promptly, not wait out the
     // next unrelated event. `Quota.metadata.name` is the owner slug but `OwnerBinding.metadata.name`
     // is `binding_name(region, owner)` — a hash of the pair — so there is no cheap ObjectRef to

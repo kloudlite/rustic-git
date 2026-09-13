@@ -146,6 +146,8 @@ pub async fn run_beat(s: Arc<ApiState>) {
 pub async fn readonly_departed_benches(s: &ApiState) {
     let (Some(c), Some(_)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::Bench> = Api::all(c.clone());
+    // ponytail: every Bench LISTed and `teams_for` asked per bench on every beat; one `teams_for`
+    // per owner, or a Bench reflector, once benches number more than a few hundred.
     let benches = match api.list(&Default::default()).await {
         Ok(l) => l.items,
         // The Bench CRD not applied yet: nothing to demote, and not worth a warning every beat.
@@ -246,6 +248,17 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             return;
         }
     };
+    // A bench holds its namespace even with no pod (idle or stopped): the `user-key` Secret and its
+    // ingress policy live there. Same keep-bias; a 404 is a cluster without the Bench CRD.
+    let mut keep = keep;
+    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => keep.extend(l.items.iter().map(|b| crd::ws_namespace(&b.spec.owner, &b.spec.team))),
+        Err(kube::Error::Api(e)) if e.code == 404 => {}
+        Err(e) => {
+            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
+            return;
+        }
+    }
     let now = chrono::Utc::now().timestamp();
     let seen: Vec<(String, i64)> = listed
         .iter()
@@ -490,6 +503,31 @@ mod tests {
         // regardless of ownership would still pass the assertion above — this counts calls
         // instead, which catches "refreshed acme twice" or "refreshed a phantom owner" either way.
         assert_eq!(rec.calls().iter().filter(|c| *c == "GET /api/v1/namespaces").count(), 1);
+    }
+
+    /// C1: a `wt-` namespace holding only an idle bench (no pod, no workspace) is never pruned.
+    #[tokio::test]
+    async fn a_namespace_a_bench_resolves_to_is_never_pruned() {
+        let ns = crd::ws_namespace("alice", "acme");
+        let list = |kind: &str, api: &str, items: serde_json::Value| serde_json::json!({"apiVersion": api, "kind": kind, "metadata": {}, "items": items});
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([
+                {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns, "creationTimestamp": "2020-01-01T00:00:00Z"}}
+            ]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([{
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "bench-1"},
+                "spec": {"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"},
+                "status": {"phase": "idle", "nodeName": "node-a"},
+            }]))),
+            crate::kube_test::get(format!("/api/v1/namespaces/{ns}/pods"), list("PodList", "v1", serde_json::json!([]))),
+        ]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.kube = Some(client);
+        prune_namespaces(&s).await;
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+        assert!(rec.calls().contains(&"GET /apis/kloudlite.io/v1alpha1/benches".to_string()), "{:?}", rec.calls());
     }
 
     /// The back-fill: `ensure_builder` used to run only from `create_ws`, so every owner whose
