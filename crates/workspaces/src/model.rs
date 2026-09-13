@@ -34,7 +34,7 @@ pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-workspace";
 pub const DEFAULT_BENCH_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-bench:latest";
 
 /// `spec.model` when a create names none; passed to the pod as `KL_MODEL`.
-pub const DEFAULT_BENCH_MODEL: &str = "anthropic/claude-sonnet-4-5";
+pub const DEFAULT_BENCH_MODEL: &str = "deepseek/deepseek-v4-flash";
 
 /// Whether a spec's image means "the platform's own": the marker, a tagged form of it, or the
 /// two images the platform used to default to — specs written back then must keep getting sshd.
