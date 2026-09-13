@@ -33,3 +33,11 @@ test("procs keep other sessions' rows, and dead pids are lost", () => {
   assert.equal(row.lost, true);
   assert.equal(typeof row.ended, "number");
 });
+
+test("markLost for one session leaves another session's running task running", () => {
+  const t = new Tasks(dir());
+  t.transition({ id: "a", session: "s-1", tool: "Bash", arg: "x", state: "running", started: 1 });
+  t.transition({ id: "b", session: "s-2", tool: "Bash", arg: "y", state: "background", started: 1 });
+  assert.deepEqual(t.markLost("s-1").map((r) => r.id), ["a"]);
+  assert.equal(t.all().find((r) => r.id === "b")!.state, "background");
+});

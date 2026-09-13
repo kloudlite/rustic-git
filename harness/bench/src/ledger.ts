@@ -24,9 +24,9 @@ export class Tasks {
     return [...this.rows.values()];
   }
   /** A new process holds none of the old one's commands: whatever was in flight is gone. */
-  markLost(): TaskRow[] {
+  markLost(session?: string): TaskRow[] {
     const now = Date.now();
-    return this.all().filter((t) => t.state === "running" || t.state === "background").map((t) => this.transition({ id: t.id, state: "lost", ended: now }));
+    return this.all().filter((t) => (t.state === "running" || t.state === "background") && (session === undefined || t.session === session)).map((t) => this.transition({ id: t.id, state: "lost", ended: now }));
   }
 }
 
