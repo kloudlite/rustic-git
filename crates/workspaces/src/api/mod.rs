@@ -314,7 +314,7 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
     // IS its expiry. Without a directory to ask, a CLI token authenticates nothing here.
     if let Some(jti) = jti {
-        if !cli_token_live(state, &jti).await {
+        if !admin::timing::step("directory.token_live", cli_token_live(state, &jti)).await {
             return Err(unauthorized());
         }
     }

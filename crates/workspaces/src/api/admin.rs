@@ -21,6 +21,7 @@ mod overview;
 mod schema;
 mod settings;
 mod slo;
+pub(crate) mod timing;
 
 /// One row per successful write, called from the handler's own success path (see the module
 /// doc on `crate::audit` for why this isn't a middleware). Fire-and-forget: audit is evidence,
@@ -64,7 +65,7 @@ pub(crate) async fn audit(
     // Timed: 2026-09-12's silent twenty-second admin write had no line naming which await it
     // spent them in. `SLOW_AWAIT_MS` is the same outlier threshold `kube_bound` uses.
     let start = std::time::Instant::now();
-    let wrote = crate::audit::record(&store.os, &entry).await;
+    let wrote = timing::step("objectstore.put.audit", crate::audit::record(&store.os, &entry)).await;
     warn_if_slow("object-store", action, target, start);
     if let Err(e) = wrote {
         tracing::error!(actor, action, target, error = %e, "audit.write.failed");
@@ -82,7 +83,7 @@ pub(crate) async fn audit(
             &entry.result,
         );
         let start = std::time::Instant::now();
-        let wrote = crate::history::events::write_events(h, &[row]).await;
+        let wrote = timing::step("clickhouse.insert.audit", crate::history::events::write_events(h, &[row])).await;
         warn_if_slow("clickhouse", action, target, start);
         if let Err(e) = wrote {
             tracing::warn!(table = "audit", action, target, error = %e, "history.write.failed");
@@ -416,14 +417,14 @@ async fn deny_quota_request(
 }
 
 async fn deny_legacy(s: &ApiState, actor: &str, id: &str, note: &Decision) -> Result<Response, Response> {
-    let r = audited(s, actor, "deny", id, note.note.clone(), pending_request(s, id).await).await?;
+    let r = audited(s, actor, "deny", id, note.note.clone(), timing::step("kube.get.quotarequest", pending_request(s, id)).await).await?;
     let out = audited(
         s,
         actor,
         "deny",
         &r.spec.owner,
         note.note.clone(),
-        decide(s, id, crd::RequestState::Denied, actor, note.note.clone()).await,
+        timing::step("kube.patch.quotarequest", decide(s, id, crd::RequestState::Denied, actor, note.note.clone())).await,
     )
     .await?;
     audit(s, actor, "deny", &r.spec.owner, note.note.clone(), "ok").await;
@@ -658,24 +659,25 @@ async fn deny_request(
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
-    let d = decision_body(&body)?;
-    let note = require_note(d.note.as_deref().unwrap_or(""))?;
-    let pending = audited(&s, &c.name, "request.denied", &id, Some(note.clone()), pending_generic(&s, &id).await).await?;
-    if pending.is_none() {
-        return deny_legacy(&s, &c.name, &id, &d.legacy()).await;
-    }
-    let out = audited(
-        &s,
-        &c.name,
-        "request.denied",
-        &id,
-        Some(note.clone()),
-        decide_generic(&s, &id, crd::RequestState::Denied, &c.name, Some(note.clone()), None).await,
-    )
-    .await?;
-    audit(&s, &c.name, "request.denied", &id, Some(note), "ok").await;
-    Ok(out)
+    timing::request("request.deny", id.clone(), async move {
+        let c = caller(&s, &headers).await?;
+        let d = decision_body(&body)?;
+        let note = require_note(d.note.as_deref().unwrap_or(""))?;
+        let pending = timing::step("kube.get.request", pending_generic(&s, &id)).await;
+        let pending = audited(&s, &c.name, "request.denied", &id, Some(note.clone()), pending).await?;
+        if pending.is_none() {
+            return deny_legacy(&s, &c.name, &id, &d.legacy()).await;
+        }
+        let decided = timing::step(
+            "kube.patch.request",
+            decide_generic(&s, &id, crd::RequestState::Denied, &c.name, Some(note.clone()), None),
+        )
+        .await;
+        let out = audited(&s, &c.name, "request.denied", &id, Some(note.clone()), decided).await?;
+        audit(&s, &c.name, "request.denied", &id, Some(note), "ok").await;
+        Ok(out)
+    })
+    .await
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -912,12 +914,16 @@ async fn admin_stop_ws(
     Path(id): Path<String>,
     Json(body): Json<NoteBody>,
 ) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
-    let note = require_note(&body.note)?;
-    let out = audited(&s, &c.name, "stop-workspace", &id, Some(note.clone()), super::workspaces::stop_as(&s, &headers, &id).await)
-        .await?;
-    audit(&s, &c.name, "stop-workspace", &id, Some(note), "ok").await;
-    Ok(out)
+    timing::request("workspace.stop", id.clone(), async move {
+        let c = caller(&s, &headers).await?;
+        let note = require_note(&body.note)?;
+        let out =
+            audited(&s, &c.name, "stop-workspace", &id, Some(note.clone()), super::workspaces::stop_as(&s, &headers, &id).await)
+                .await?;
+        audit(&s, &c.name, "stop-workspace", &id, Some(note), "ok").await;
+        Ok(out)
+    })
+    .await
 }
 
 async fn admin_delete_ws(
