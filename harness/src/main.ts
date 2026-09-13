@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTh
 import path from "node:path";
 import fs from "node:fs/promises";
 import { BenchClient } from "./bench-client";
+import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from "./import-payload";
 
 let mainWin: BrowserWindow | undefined;
 // The bench is remote: HARNESS_BENCH is the local end of the tunnel to this
@@ -274,6 +275,43 @@ ipcMain.handle("bench:messages", (_e, id: unknown) => {
   return needBench().messages(id);
 });
 ipcMain.handle("bench:state", () => ({ configured: !!bench, connected: bench?.connected() ?? false, ...(bench?.cached() ?? { sessions: [], exchanges: [] }) }));
+// `bench import`: the laptop's sessions onto the bench, once. The list is the
+// renderer's localStorage (only it can read it); the files are what the old
+// memos point at plus every other session file beside them. The bench merges
+// by id and skips file names it has, so running it again changes nothing.
+ipcMain.handle("bench:import", async (_e, rows: unknown) => {
+  if (!Array.isArray(rows)) throw new Error("import takes the session list");
+  const ud = app.getPath("userData");
+  const memoFile = (id: string) => (id === "bench" ? path.join(ud, "last-session") : path.join(ud, "sessions", id));
+  const readMemo = async (id: string) => (await fs.readFile(memoFile(id), "utf8").catch(() => "")).trim();
+  const items = [];
+  const dirs = new Set<string>();
+  for (const r of rows as ImportRow[]) {
+    if (!r || typeof r.id !== "string" || !isLaptopRow(r.id)) continue;
+    const file = await readMemo(r.id);
+    const base = file && safeJsonlName(path.basename(file));
+    const content = base ? await fs.readFile(file, "utf8").catch(() => undefined) : undefined;
+    if (file) dirs.add(path.dirname(file));
+    items.push(toItem(r, base || `${r.id}.jsonl`, content));
+  }
+  const named = new Set(items.map((i) => i.name));
+  const loose = [];
+  for (const d of dirs) {
+    for (const f of await fs.readdir(d).catch(() => [] as string[])) {
+      const base = safeJsonlName(f);
+      if (!base || named.has(base)) continue;
+      loose.push({ name: base, content: await fs.readFile(path.join(d, f), "utf8") });
+    }
+  }
+  let added: string[] = [];
+  let files = 0;
+  for (const batch of batchImport(items, loose)) {
+    const r = await needBench().rest<{ added: string[]; files: number }>("POST", "/import", batch);
+    added = added.concat(r.added);
+    files += r.files;
+  }
+  return { added, files };
+});
 app.on("before-quit", () => bench?.close());
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {

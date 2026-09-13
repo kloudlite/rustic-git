@@ -335,6 +335,16 @@ export function App() {
     { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
     { id: "abort", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", label: "New session", run: newSession },
+    { id: "benchImport", label: "Import this laptop's sessions into the bench", run: () => {
+      if (!live.connected() || !live.writable().ok) return void live.thread(cur()).note("not connected to the bench; nothing was sent");
+      const raw = localStorage.getItem("harness.sessions");
+      if (!raw) return void live.thread(cur()).note("nothing to import: this laptop has no local session list");
+      void window.harness.benchImport(JSON.parse(raw) as { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]).then((r) => {
+        localStorage.setItem("harness.sessions.imported", String(Date.now()));
+        live.thread(cur()).note(r.added.length ? `imported ${r.added.length} sessions and ${r.files} files` : "already imported: the bench has every session");
+        return refreshSessions();
+      }, (e: Error) => live.thread(cur()).note(e.message));
+    } },
     { id: "deleteSession", label: "Delete this session", run: () => deleteSession(cur()) },
     { id: "archiveSession", label: "Archive this session", run: () => archiveSession(cur()) },
     { id: "archiveIdle", label: "Archive idle sessions (untouched for a day)", run: () => idleSessions().forEach((x) => archiveSession(x.id)) },

@@ -24,6 +24,9 @@ const harness = {
   benchMessages: (id: string): Promise<unknown[]> => ipcRenderer.invoke("bench:messages", id),
   /** Configured, connected, and the last list and exchanges seen, for a cold offline start. */
   benchState: (): Promise<{ configured: boolean; connected: boolean; sessions: unknown[]; exchanges: unknown[] }> => ipcRenderer.invoke("bench:state"),
+  /** Copies this laptop's sessions onto the bench; safe to run again. */
+  benchImport: (sessions: { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]): Promise<{ added: string[]; files: number }> =>
+    ipcRenderer.invoke("bench:import", sessions),
 
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
