@@ -22,8 +22,8 @@ pub async fn ssh(target: &str, args: &[String]) -> Result<(), String> {
 }
 
 /// `kl-connect ws ide <target>`: the same ssh, carrying only a port forward to the workspace's
-/// tool server (`kl ide serve`, loopback 7788 in the pod) and no shell. ssh itself is the
-/// authentication; the printed lines are what a session layer needs to reach it.
+/// tool server (`kl ide serve`, 7788 on the pod IP; the owner's bench dials it inside the
+/// namespace, this tunnel reaches it on loopback) and no shell. ssh itself is the authentication; the printed lines are what a session layer needs to reach it.
 pub async fn ide(target: &str, port: u16) -> Result<(), String> {
     let banner = format!(
         "kl-connect: {target}'s tool API is at http://localhost:{port}/tools while this runs.\n  curl http://localhost:{port}/healthz\n  curl -X POST http://localhost:{port}/tools/exec -d '{{\"cmd\":\"ls\"}}'"

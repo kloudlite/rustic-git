@@ -237,6 +237,23 @@ pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::E
 }
 
 
+/// The workspace-side ports of every service `ws_id` is serving in force this pass — the same
+/// `workspace_port` over the service's ports that `intercept_slice` writes, deduplicated.
+pub(crate) fn intercepted_ports(e: &crd::Environment, plan: &std::collections::HashMap<&str, Intercepting>, ws_id: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = e
+        .spec
+        .services
+        .iter()
+        .filter(|s| matches!(plan.get(s.name.as_str()), Some(Intercepting::Force { ws, .. }) if ws.name_any() == ws_id))
+        .filter_map(|s| e.spec.intercepts.iter().find(|ic| ic.service == s.name).map(|ic| (s, ic)))
+        .flat_map(|(s, ic)| s.ports.iter().map(|p| ic.workspace_port(*p)))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+
 /// The environment → workspace direction, which `allow_internet_egress` denies by default: without
 /// this pair an in-force intercept renders perfectly and delivers nothing.
 ///
@@ -271,7 +288,10 @@ pub(crate) async fn intercept_policies(
         // cross namespaces. Owned by the Workspace instead, exactly as the attach pair splits.
         let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
         let ws_ref = owner_ref_of_kind(&**ws)?;
-        ensure(&in_ws, &k8s::intercept_ingress(&ws_ns, ns, &ws.name_any(), &e.spec.owner, &ws_ref), ctx).await?;
+        // Only the ports this workspace's slices land on: the tool server listens on the pod IP too.
+        // One policy per workspace, so a workspace serving two services admits both port sets.
+        let ports = intercepted_ports(e, plan, &ws.name_any());
+        ensure(&in_ws, &k8s::intercept_ingress(&ws_ns, ns, &ws.name_any(), &ports, &e.spec.owner, &ws_ref), ctx).await?;
     }
     // Every workspace this environment could still be holding a grant open for: one it wishes for
     // and is not serving, and one the LAST pass recorded as in force — which is the ordinary

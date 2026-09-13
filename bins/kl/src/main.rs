@@ -54,7 +54,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum IdeCmd {
-    /// Serve on 127.0.0.1:7788; reach it through `kl-connect ws ide <workspace>`
+    /// Serve on 0.0.0.0:7788: a person's bench reaches it inside the namespace, `kl-connect ws ide` over the tunnel
     Serve {
         #[arg(long, default_value = "127.0.0.1:7788")]
         bind: std::net::SocketAddr,

@@ -153,7 +153,7 @@ pub(super) fn prelude(name: &str) -> String {
          SEED\n\
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          echo prelude.chown.done\n\
-         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} exec kl ide serve >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
+         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
          echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )

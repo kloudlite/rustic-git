@@ -457,6 +457,8 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     // never started. Everything the inner shell needs is rendered, not referenced.
     assert!(!line.contains("$H"), "no prelude variable survives into su -c: {line}");
     assert!(line.contains(">> /home/kl/.local/state/kl-ide.log"), "{line}");
+    // The bench dials the tool server on the pod IP (the bench spec's What runs where); the ssh tunnel still reaches it on loopback.
+    assert!(line.contains("exec kl ide serve --bind 0.0.0.0:7788 "), "{line}");
 }
 
 /// `/etc/profile` sources every `/etc/profile.d/*.sh`: an `exit` in one ends the login shell itself,

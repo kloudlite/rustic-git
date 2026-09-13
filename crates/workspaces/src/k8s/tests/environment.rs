@@ -299,13 +299,42 @@ pub(crate) fn the_intercept_policies_name_one_peer_each() {
     assert_eq!(to[0]["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
     assert_eq!(spec["policyTypes"], serde_json::json!(["Egress"]));
 
-    let ing = intercept_ingress("ws-acme", "env-abc", "ws-1", "acme", &r);
+    let ing = intercept_ingress("ws-acme", "env-abc", "ws-1", &[3000], "acme", &r);
     assert_eq!(ing.metadata.namespace.as_deref(), Some("ws-acme"));
     let spec = serde_json::to_value(ing.spec.unwrap()).unwrap();
     // Its peer is a whole namespace, so the scoping to this one pod is the top-level selector.
     assert_eq!(spec["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
     assert_eq!(spec["ingress"][0]["from"].as_array().unwrap().len(), 1);
     assert_eq!(spec["policyTypes"], serde_json::json!(["Ingress"]));
+}
+
+
+#[test]
+pub(crate) fn an_intercepting_environment_reaches_only_the_intercepted_ports() {
+    let r = owner_ref();
+    let np = intercept_ingress("ws-acme", "env-abc", "ws-1", &[3000, 9229], "acme", &r);
+    let rule = &np.spec.unwrap().ingress.unwrap()[0];
+    let ports: Vec<_> = rule.ports.as_ref().unwrap().iter().map(|p| p.port.clone()).collect();
+    assert_eq!(ports, vec![Some(IntOrString::Int(3000)), Some(IntOrString::Int(9229))]);
+    let none = intercept_ingress("ws-acme", "env-abc", "ws-1", &[], "acme", &r);
+    assert!(none.spec.unwrap().ingress.unwrap_or_default().is_empty(), "no ports admits nothing, never every port");
+}
+
+
+#[test]
+pub(crate) fn only_bench_pods_in_the_namespace_reach_the_tool_port() {
+    let np = allow_bench_tools("wt-alice-acme", "alice", &owner_ref());
+    let spec = np.spec.unwrap();
+    let sel = spec.pod_selector.clone().unwrap().match_expressions.unwrap();
+    assert_eq!((sel[0].key.as_str(), sel[0].operator.as_str()), (WORKSPACE_LABEL, "Exists"));
+    // A bench pod carries WORKSPACE_LABEL too; it must not become a target.
+    assert_eq!((sel[1].key.as_str(), sel[1].operator.as_str(), sel[1].values.clone()), (KIND_LABEL, "NotIn", Some(vec!["bench".to_string()])));
+    let rule = &spec.ingress.unwrap()[0];
+    let from = rule.from.as_ref().unwrap();
+    assert_eq!(from.len(), 1);
+    assert!(from[0].namespace_selector.is_none(), "this namespace only");
+    assert_eq!(from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()[KIND_LABEL], "bench");
+    assert_eq!(rule.ports.as_ref().unwrap(), &vec![k8s_openapi::api::networking::v1::NetworkPolicyPort { protocol: Some("TCP".into()), port: Some(IntOrString::Int(IDE_PORT as i32)), end_port: None }]);
 }
 
 

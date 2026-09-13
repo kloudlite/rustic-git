@@ -342,9 +342,7 @@ owner never made it and cannot see it — which is why `default_quota`'s derived
 folded in rather than being spent by a create nobody asked for.
 
 **Every workspace runs a tool server**: `kl ide serve` (`crates/ide`, the third verb of `kl`),
-started by the pod prelude as `kl` before sshd, on `127.0.0.1:7788` and nowhere else — the ssh
-tunnel a person already holds (`kl-connect ws ide <ws>`) is the boundary, so there is no second
-credential and no auth code in the crate. A plain HTTP tool API (`GET /tools` with schemas,
+started by the pod prelude as `kl` before sshd, on port 7788 of the pod IP, fenced by the namespace: only the person's own bench (`allow-bench-tools`) and the ssh tunnel (`kl-connect ws ide <ws>`) reach it, an intercepting environment only on its intercepted ports, and `/v1/workspaces/{id}/tools` hands the address to the owner alone — so there is no second credential and no auth code in the crate. A plain HTTP tool API (`GET /tools` with schemas,
 `POST /tools/{name}` with the body as arguments; 404/400/403/500 + `{"error"}` when a tool did not
 run) carries `read write edit patch glob grep exec process_* watch*` and graft's own tools —
 shaped to spend few tokens: `read` takes `paths`, `edit` takes `files` atomically, `patch` takes a

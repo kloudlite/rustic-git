@@ -94,6 +94,10 @@ pub(super) const EPHEMERAL_LIMIT: &str = "4Gi";
 /// user owns.
 pub const WORKSPACE_LABEL: &str = "kloudlite.io/workspace";
 
+/// Where `kl ide serve` listens in every workspace pod, on the pod IP: the owner's bench dials it
+/// there (`allow_bench_tools`), and `kl-connect ws ide` reaches it over the ssh tunnel.
+pub const IDE_PORT: u16 = 7788;
+
 
 pub struct PodContext<'a> {
     /// The btrfs pool root on the node, e.g. `/wspool-prod`. Every volume builder needs it: a
