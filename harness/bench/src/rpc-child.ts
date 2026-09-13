@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
  * here remembers anything — reopening a session is `--session <file>`.
  */
 export type PiEvent = Record<string, unknown> & { type: string; id?: string };
-export const READ_ONLY_TOOLS = "read,grep,find,ls,kl_workspaces,kl_workspace,kl_environments,kl_environment,kl_regions,kl_quota,kl_volumes,kl_builder,kl_whoami";
+/** The btw fork's tools: no kl_* — it answers one question, it never touches a workspace. */
+export const BTW_TOOLS = "read,grep,find,ls";
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string };
@@ -39,7 +40,7 @@ export class RpcChild {
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     const extDir = o.extDir ?? path.join(HARNESS, "pi");
     const exts = o.fork ? [] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
-    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", READ_ONLY_TOOLS] : [])];
+    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : [])];
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env: process.env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

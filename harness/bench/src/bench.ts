@@ -14,6 +14,8 @@ export type BenchOpts = { dir: string; readOnly: boolean; model: string; bin?: s
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
 const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
+/** How long a btw fork may run before it is stopped and the call rejects. */
+const BTW_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * One person's bench in one team: the list, a pi per open session, and the
@@ -40,6 +42,10 @@ export class Bench {
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
+  }
+
+  get readOnly(): boolean {
+    return this.opts.readOnly;
   }
 
   onEvent(fn: (ev: BenchEvent & { pi?: string }) => void): () => void {
@@ -259,7 +265,7 @@ export class Bench {
   }
 
   /** A one-question, read-only fork: no kl_* tools, no streaming — the answer replays on completion. */
-  async btw(session: string, question: string): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
+  async btw(session: string, question: string, timeoutMs = BTW_TIMEOUT_MS): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
     this.refuse(true);
     const s = this.sessions.get(session);
     if (!s?.file || !fs.existsSync(s.file)) throw new Error("this session has no file yet; say something first");
@@ -268,26 +274,35 @@ export class Bench {
     const forkDir = path.join(this.opts.dir, "btw", ".forks");
     fs.mkdirSync(forkDir, { recursive: true });
     let done!: () => void;
+    let timedOut = false;
     const ended = new Promise<void>((r) => (done = r));
     const child = new RpcChild(id, { dir: forkDir, fork: s.file, model: s.model ?? this.opts.model, bin: this.opts.bin }, (ev) => {
       this.emit({ ...ev, pi: id });
       if (ev.type === "agent_end" || ev.type === "exit") done();
     });
     child.start();
+    const timer = setTimeout(() => {
+      timedOut = true;
+      done();
+    }, timeoutMs);
+    timer.unref?.();
     try {
       const before = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages?.length ?? 0;
       await child.send({ type: "prompt", message: question });
       await ended;
+      if (timedOut) throw new Error(`btw timed out after ${timeoutMs}ms`);
       const all = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages ?? [];
       const answer = { id, question, entries: all.slice(before), at: Date.now() };
       this.writable.run(() => replaceJson(path.join(dir, `${id}.json`), answer));
       return answer;
     } finally {
+      clearTimeout(timer);
       child.stop();
     }
   }
 
   listBtw(session: string): { id: string; question: string; entries: unknown[]; at: number }[] {
+    if (!this.sessions.get(session)) throw new Error(`no session ${session}`);
     const dir = path.join(this.opts.dir, "btw", session);
     if (!fs.existsSync(dir)) return [];
     return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(dir, f), null)).filter((x) => x !== null)
