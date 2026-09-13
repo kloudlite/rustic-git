@@ -64,6 +64,23 @@ test("a pi that exits loses only its own session's tasks", async () => {
   await settle();
   assert.equal(b.tasks.all().find((t) => t.id === "t1")!.state, "lost");
   assert.equal(b.tasks.all().find((t) => t.id === "t2")!.state, "background");
+  assert.equal(b.busy(), true, "s-2's background task still holds the bench up");
+  b.tasks.transition({ id: "t2", state: "done", ended: 2 });
+  assert.equal(b.busy(), false);
+  b.stop();
+});
+
+test("a replaced child's late exit folds nothing into its successor", async () => {
+  const b = mk();
+  await b.start();
+  await b.create();
+  await settle();
+  b.tasks.transition({ id: "t1", session: "s-1", tool: "Bash", arg: "make", state: "running", started: 1 });
+  await b.archive("s-1");
+  await b.restore("s-1");
+  await settle();
+  assert.equal(b.tasks.all().find((t) => t.id === "t1")!.state, "running");
+  assert.equal(b.busy(), true);
   b.stop();
 });
 

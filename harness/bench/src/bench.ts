@@ -74,16 +74,18 @@ export class Bench {
     let c = this.children.get(s.id);
     if (c?.running()) return c;
     const file = s.file && fs.existsSync(s.file) ? s.file : undefined;
-    c = new RpcChild(s.id, { dir: path.join(this.opts.dir, "sessions"), file, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, ev));
-    this.children.set(s.id, c);
-    c.start();
+    const child: RpcChild = new RpcChild(s.id, { dir: path.join(this.opts.dir, "sessions"), file, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, child, ev));
+    this.children.set(s.id, child);
+    child.start();
     // The file name is pi's to choose; ask once so the list can reopen it.
-    void c.send({ type: "get_state" }).catch(() => undefined);
-    return c;
+    void child.send({ type: "get_state" }).catch(() => undefined);
+    return child;
   }
 
-  private fold(id: string, ev: PiEvent) {
-    // A removed session's child still reports its exit; there is no row left to fold it into.
+  private fold(id: string, child: RpcChild, ev: PiEvent) {
+    // A stopped child (archived, removed, replaced, or the bench stopping) still
+    // reports its exit late; folded, it would mark its successor's tasks lost.
+    if (this.children.get(id) !== child) return;
     if (this.sessions.get(id)) this.foldRow(id, ev);
     this.emit({ ...ev, pi: id });
   }
@@ -229,13 +231,15 @@ export class Bench {
     if (c?.running()) {
       // Commands and processes run in their own process groups: stop them
       // through pi before pi goes, or they outlive the session.
-      for (const t of this.tasks.all().filter((t) => t.session === id && t.state === "background")) await c.send({ type: "prompt", message: `/cancel #${t.n}` }).catch(() => undefined);
+      for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background")))
+        await c.send({ type: "prompt", message: t.state === "background" && t.n !== undefined ? `/cancel #${t.n}` : `/cancel ${t.id}` }).catch(() => undefined);
       for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await c.send({ type: "prompt", message: `/proc-stop ${p.id}` }).catch(() => undefined);
       await c.send({ type: "abort" }).catch(() => undefined);
       c.stop();
     }
     this.children.delete(id);
     this.turning.delete(id);
+    // A write failing midway leaves the child stopped but the row kept: it reopens on the next start and delete can be retried.
     this.writable.run(() => {
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background"))) this.tasks.transition({ id: t.id, state: "cancelled", ended: Date.now() });
       this.exchanges.discard(id);
