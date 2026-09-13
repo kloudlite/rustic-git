@@ -18,6 +18,7 @@
 //! - `attach`: the per-workspace resolv.conf and the projected authorized_keys file
 //! - `environment`: a service's StatefulSet, ClusterIP, and the intercept EndpointSlice
 //! - `policies`: every NetworkPolicy
+//! - `bench`: the bench Pod, its home-relative folder, and its gateway-only ingress policy
 //! - `tests`: one file, since the fixtures are shared
 //!
 
@@ -49,12 +50,14 @@ mod workspace;
 mod attach;
 mod environment;
 mod policies;
+mod bench;
 pub use namespace::*;
 pub use secrets::*;
 pub use workspace::*;
 pub use attach::*;
 pub use environment::*;
 pub use policies::*;
+pub use bench::*;
 
 #[cfg(test)]
 mod tests;
