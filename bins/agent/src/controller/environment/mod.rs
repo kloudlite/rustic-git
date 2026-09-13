@@ -250,6 +250,48 @@ mod tests {
         assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(9090, 3000)])).is_some(), "not a declared port");
         assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(0, 3000)])).is_some(), "0 is not a port");
         assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(8080, 0)])).is_some(), "0 is not a port");
+        let ide = kloudlite_workspaces::k8s::IDE_PORT;
+        assert!(invalid_port_map(&ported(&[8080]), &intercept(&[(8080, ide)])).unwrap().contains("7788"), "never the tool server");
+        assert!(invalid_port_map(&ported(&[ide]), &intercept(&[])).is_some(), "not even 1:1");
+    }
+
+    fn ws_named(name: &str) -> crd::Workspace {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": name, "uid": format!("{name}-uid")},
+            "spec": {"owner": "alice", "team": "", "name": name, "region": "r1",
+                     "image": "nginx:alpine", "desiredState": "running", "packages": []},
+        }))
+        .unwrap()
+    }
+
+    /// The intercept ingress admits exactly what this workspace's slices land on: a union over the
+    /// services it serves in force, remapped, and nothing from a service that is not in force.
+    #[test]
+    fn intercepted_ports_are_the_workspace_side_of_services_in_force() {
+        let service = |name: &str, ports: &[u16]| {
+            let mut s = ported(ports);
+            s.name = name.into();
+            s
+        };
+        let wish = |svc: &str, ports: &[(u16, u16)]| crd::Intercept { service: svc.into(), ..intercept(ports) };
+        let mut e: crd::Environment = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment", "metadata": {"name": "env-1"},
+            "spec": {"owner": "alice", "team": "", "name": "e", "region": "r1", "services": [], "desiredState": "running"},
+        }))
+        .unwrap();
+        e.spec.services = vec![service("api", &[8080, 9229]), service("web", &[80]), service("db", &[5432])];
+        e.spec.intercepts = vec![wish("api", &[(8080, 3000)]), wish("web", &[]), wish("db", &[])];
+        let force = || Intercepting::Force { ws: Box::new(ws_named("ws-1")), pod_ip: "10.42.0.9".into() };
+        let plan: std::collections::HashMap<&str, Intercepting> = [
+            ("api", force()),
+            ("web", force()),
+            ("db", Intercepting::Off { reason: "WorkspaceStopped", message: String::new(), ws: None }),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(intercepted_ports(&e, &plan, "ws-1"), vec![80, 3000, 9229]);
+        assert!(intercepted_ports(&e, &plan, "ws-2").is_empty(), "another workspace's grant is not this one's");
     }
 
     /// The clock the grace measures against. The last case is the one that matters: a workspace

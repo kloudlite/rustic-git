@@ -615,6 +615,13 @@ async fn validate_intercept(
                 .into_response());
         }
     }
+    if let Some(p) = want.ide_port_collision(&svc.ports) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("port {p} would land on workspace port {}, the tool server's; map it to another port", crate::k8s::IDE_PORT),
+        )
+            .into_response());
+    }
     Ok(())
 }
 

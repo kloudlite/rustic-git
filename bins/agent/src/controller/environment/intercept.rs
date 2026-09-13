@@ -146,7 +146,8 @@ pub(crate) fn invalid_port_map(svc: &model::Service, ic: &crd::Intercept) -> Opt
             return Some(format!("{} does not listen on {}", svc.name, p.service));
         }
     }
-    None
+    ic.ide_port_collision(&svc.ports)
+        .map(|p| format!("port {p} would land on workspace port {}, the tool server's; map it elsewhere", k8s::IDE_PORT))
 }
 
 

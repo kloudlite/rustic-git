@@ -672,6 +672,17 @@ mod request_tests {
         assert_eq!(i.workspace_port(9090), 9090, "an unmapped port keeps its number");
     }
 
+    #[test]
+    fn an_intercept_never_lands_on_the_ide_port() {
+        let port = crate::k8s::IDE_PORT;
+        let remap = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![PortMap { service: 8080, workspace: port }] };
+        assert_eq!(remap.ide_port_collision(&[8080]), Some(8080), "a rewrite onto it");
+        let plain = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![] };
+        assert_eq!(plain.ide_port_collision(&[port]), Some(port), "an unmapped port that is it");
+        let away = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![PortMap { service: port, workspace: 3000 }] };
+        assert_eq!(away.ide_port_collision(&[port]), None, "a service port 7788 rewritten elsewhere is fine");
+    }
+
     /// Every stored Environment predates this field and must still parse.
     #[test]
     fn an_environment_without_intercepts_still_parses() {
