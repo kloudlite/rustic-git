@@ -20,6 +20,11 @@
 #                                                                       (the delete path decides
 #                                                                       whether the Volume detaches
 #                                                                       or is collected)
+#   benches (kloudlite.io)                 get,list,watch               Controller watches; claim
+#                                                                       re-read
+#                                          patch                        heal_labels (metadata.labels
+#                                                                       ONLY — see the admission
+#                                                                       policy)
 #   volumes (kloudlite.io)                get,list,watch               Controller + heartbeat list
 #                                          create                       ensure_child_volume (a
 #                                                                       parent's child)
@@ -186,6 +191,11 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch"]
+  # A Bench is desired state from /v1 like a Workspace; the agent reconciles it and writes only
+  # its status and metadata (heal_labels), same split as workspaces/environments above.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["benches"]
+    verbs: ["get", "list", "watch", "patch"]
   # `create` on the children: a controller that creates a child owns it, and the API lost the same
   # verbs. `delete` is `collect_unreferenced_volumes` (peer/sweeps.rs): an ownerless Volume with no
   # worktree and no snapshot has no ownerReference left to garbage-collect it, so the sweep is the
@@ -254,7 +264,8 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources:
       ["volumes/status", "workspaces/status", "environments/status",
-       "ownerbindings/status", "volumereplicas/status", "snapshots/status"]
+       "ownerbindings/status", "volumereplicas/status", "snapshots/status",
+       "benches/status"]
     verbs: ["patch", "update"]
   # Finalizers are edited on the main resource, but Kubernetes gates them behind their own verb.
   # Snapshot has none (see its module doc: content-addressed btrfs, reclaimed by retention or a
