@@ -29,6 +29,16 @@ test("merge adds only unknown ids, so a re-run is a no-op", () => {
   assert.equal(a.create().id, "s-2");
 });
 
+test("an id is never reused, even after the row is removed and the list reopened", () => {
+  const d = dir();
+  const a = new SessionList(d);
+  a.create();
+  a.create();
+  a.remove("s-2");
+  const b = new SessionList(d);
+  assert.equal(b.create().id, "s-3");
+});
+
 test("remove drops the row", () => {
   const a = new SessionList(dir());
   a.create();
