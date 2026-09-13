@@ -98,7 +98,8 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Shared with config.rs's tests: KL_CONFIG_DIR etc. are process-global.
+    use crate::config::ENV_LOCK;
 
     fn cfg(api: String) -> Config {
         Config {
@@ -130,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn each_local_connection_gets_its_own_tunnel_and_token() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env = ENV.lock().await;
+        let _env = ENV_LOCK.lock().await;
         let counter = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/v1/bench/session", post(session_handler_ok))
@@ -163,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn a_sleeping_bench_is_waited_for_and_the_early_bytes_arrive() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env = ENV.lock().await;
+        let _env = ENV_LOCK.lock().await;
         let counter = Arc::new(AtomicUsize::new(0));
         let upgrades = Arc::new(AtomicUsize::new(0));
 

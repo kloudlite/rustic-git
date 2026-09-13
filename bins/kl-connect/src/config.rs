@@ -38,6 +38,14 @@ pub fn known_hosts() -> PathBuf {
     dir().join("known_hosts")
 }
 
+/// `KL_CONFIG_DIR`/`HOME`/`XDG_CONFIG_HOME`/`KL_ACCEPT_NEW_HOST_KEY` are process-global, so every
+/// test in the crate that touches one — here and in `bench.rs` — takes this first or they race.
+/// `tokio::sync::Mutex` rather than `std::sync::Mutex`: the bench tests are async and hold the
+/// guard across `.await` (spawned servers, real sockets), which a std guard can't do; a sync test
+/// takes it with `blocking_lock`, which is fine outside a tokio runtime.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub fn load() -> Result<Config, String> {
     let p = path();
     let s =
@@ -130,11 +138,7 @@ pub fn pin_host_key(id: &str, host_key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    /// `KL_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` are process-global, and cargo runs tests in
-    /// parallel threads: every test that sets one holds this first, or they interleave and read
-    /// each other's directory. Poisoning is irrelevant — a panicking test leaves stale env, not a
-    /// corrupt lock — so the guard is taken back from a poisoned mutex rather than unwrapped.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::ENV_LOCK;
 
     /// The finding: `pin_host_key` filtered out any existing line for the id and appended whatever
     /// the api just returned, so a changed key was adopted silently on every connect. Chained with
@@ -142,7 +146,7 @@ mod tests {
     /// known_hosts would have shouted.
     #[test]
     fn a_changed_host_key_is_refused_not_adopted() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV_LOCK.blocking_lock();
         let d = tempfile::tempdir().unwrap();
         std::env::set_var("KL_CONFIG_DIR", d.path());
         super::pin_host_key("ws-1", "ssh-ed25519 AAAAfirst").unwrap();
@@ -171,7 +175,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn config_is_written_private() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV_LOCK.blocking_lock();
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("kl-connect");
@@ -220,7 +224,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_config_dir_is_dot_config_kl_connect_everywhere() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV_LOCK.blocking_lock();
         std::env::remove_var("KL_CONFIG_DIR");
         std::env::set_var("XDG_CONFIG_HOME", "/xdg");
         assert_eq!(super::dir(), std::path::Path::new("/xdg/kl-connect"));
