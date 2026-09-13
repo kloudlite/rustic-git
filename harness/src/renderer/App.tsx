@@ -15,7 +15,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
-import { benchSessions, inFlightItems, procState, type SessionRow } from "./rows";
+import { benchSessions, inFlightItems, procState, refusal, type SessionRow } from "./rows";
 import { cycleTheme } from "./theme";
 
 export function App() {
@@ -111,7 +111,7 @@ export function App() {
     p.open
       .map((id) => threadOf(machine(), id) ?? sessionThread(id) ?? sides.find((t) => t.id === id))
       .filter((t) => t !== undefined)
-      .map((t) => (t.kind === "machine" ? { ...t, pi: live_()[0]?.id ?? "bench", readonly: !live.connected() } : t))
+      .map((t) => (t.kind === "machine" ? { ...t, pi: live_()[0]?.id ?? "", readonly: !live.connected() } : t))
       .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages } : t));
   const threads = createMemo(() => threadsOf(pane()));
   const setSelectedRaw = (id: string) => setPanes(activePane(), "sel", id);
@@ -190,7 +190,7 @@ export function App() {
   // A task's log opens in place like a file does; a process is shown through
   // the same page, its ring of output as the "output" and its uptime as the clock.
   const asTask = (p?: live.Proc): live.Task | undefined =>
-    p && { id: p.id, session: p.session ?? "bench", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
+    p && { id: p.id, session: p.session ?? "", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
   const [taskId, setTaskId] = createSignal<string | undefined>();
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
@@ -293,8 +293,17 @@ export function App() {
   };
   const goTo = showThread;
   // The selected session's pi and live state: what every command acts on.
-  const cur = () => threads().find((t) => t.id === selected())?.pi ?? live_()[0]?.id ?? "bench";
+  const cur = () => threads().find((t) => t.id === selected())?.pi ?? live_()[0]?.id ?? "";
   const L = () => live.thread(cur());
+  /** Every pi call the harness makes goes through here: a refusal or a failure is a note, never silence. */
+  const pi = (cmd: Record<string, unknown> & { type: string }, id = cur()) => {
+    const why = refusal(cmd, { session: id, connected: live.connected(), writable: live.writable() });
+    if (why) return void live.thread(id).note(why);
+    return window.harness.pi(cmd, id).then(
+      (r) => (r.success === false ? (live.thread(id).note(String(r.error)), undefined) : r),
+      (e: Error) => void live.thread(id).note(e.message),
+    );
+  };
   const placeItems = createMemo<PaletteItem[]>(() => {
     const m = machine();
     const out: PaletteItem[] = [{ id: m.id, label: "Bench Thread", detail: m.goal, kind: "machine", icon: "machine", run: () => goTo(m.id) }];
@@ -323,8 +332,8 @@ export function App() {
     { id: "workspaces", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
     { id: "go", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
     { id: "settings", label: "Settings", keys: KEYS.settings.keys, run: openSettings },
-    { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void window.harness.pi({ type: "prompt", message: "/bg" }, cur()) },
-    { id: "abort", label: "Stop this session", run: () => void window.harness.pi({ type: "abort" }, cur()) },
+    { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
+    { id: "abort", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", label: "New session", run: newSession },
     { id: "deleteSession", label: "Delete this session", run: () => deleteSession(cur()) },
     { id: "archiveSession", label: "Archive this session", run: () => archiveSession(cur()) },
@@ -353,7 +362,7 @@ export function App() {
 
     if (hit(KEYS.steer)) return (stop(), send("steer"));
     if (hit(KEYS.send)) return (stop(), send());
-    if (hit(KEYS.background)) return (stop(), void window.harness.pi({ type: "prompt", message: "/bg" }, cur()));
+    if (hit(KEYS.background)) return (stop(), void pi({ type: "prompt", message: "/bg" }));
     if (hit(KEYS.split)) return (stop(), splitRight());
     if (hit(KEYS.focusPane)) return (stop(), void setActivePane((p) => (p + 1) % panes.length));
     if (hit(KEYS.commands)) return (stop(), void setPalette("commands"));
@@ -410,14 +419,15 @@ export function App() {
   });
   // Slash commands the harness answers itself, before anything reaches pi;
   // what is not listed here (/bg, /kl-login, /cancel, /skill:…) goes through.
-  const SLASH: Record<string, { help: string; run: (arg: string) => void }> = {
-    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void window.harness.pi({ type: "new_session" }, cur()).then(() => L().replay([])) },
+  // `local` entries never reach the bench, so they run offline; the rest are refused first, not echoed.
+  const SLASH: Record<string, { help: string; local?: true; run: (arg: string) => void }> = {
+    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void pi({ type: "new_session" })?.then((r) => r && L().replay([])) },
     "/new": { help: "open another session beside this one", run: newSession },
-    "/compact": { help: "summarise the older part of this session", run: () => void window.harness.pi({ type: "compact" }, cur()) },
-    "/abort": { help: "stop what this session is doing", run: () => void window.harness.pi({ type: "abort" }, cur()) },
-    "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void window.harness.pi({ type: "set_model", provider, modelId }, cur()); else L().note("usage: /model provider/id"); } },
-    "/login": { help: "log in to Kloudlite in your browser", run: () => void window.harness.pi({ type: "prompt", message: "/kl-login" }, cur()) },
-    "/settings": { help: "open settings", run: openSettings },
+    "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
+    "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },
+    "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void pi({ type: "set_model", provider, modelId }); else L().note("usage: /model provider/id"); } },
+    "/login": { help: "log in to Kloudlite in your browser", run: () => void pi({ type: "prompt", message: "/kl-login" }) },
+    "/settings": { help: "open settings", local: true, run: openSettings },
     "/btw": {
       help: "ask one question of a read-only fork of this session: /btw <question>",
       run: (arg) => {
@@ -446,7 +456,7 @@ export function App() {
         );
       },
     },
-    "/help": { help: "this list", run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)\n/kl-login  log in to Kloudlite") },
+    "/help": { help: "this list", local: true, run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)\n/kl-login  log in to Kloudlite") },
   };
 
   /** Everything a `/` can start: the harness's own, pi's, and each enabled skill. */
@@ -467,6 +477,10 @@ export function App() {
     const text = c?.value.trim() ?? "";
     const pi = threads().find((t) => t.id === selected())?.pi;
     const slash = /^(\/[a-z-]+)\s*(.*)$/i.exec(text);
+    const entry = slash && SLASH[slash[1].toLowerCase()];
+    // /btw posts through the bench REST and needs it up too, but writes nothing pi-side.
+    const why = entry?.local ? undefined : refusal({ type: entry && slash![1].toLowerCase() === "/btw" ? "get_state" : "prompt" }, { session: pi, connected: live.connected(), writable: live.writable() });
+    if (why && c) return void live.thread(pi ?? "").note(why);
     // The harness's own commands act on the selected session; typed in a
     // read-only fork they go to that fork's pi like any other line.
     if (slash && SLASH[slash[1].toLowerCase()] && c && pi && !pi.startsWith("btw-")) {
@@ -479,8 +493,6 @@ export function App() {
     }
     if (!c || !pi) return;
     const L = live.thread(pi);
-    if (!live.connected()) return void L.note("not connected to the bench; nothing was sent");
-    if (!live.writable().ok) return void L.note(`the bench cannot save right now (${live.writable().reason}); nothing was sent`);
     const atts = L.takeAttachments();
     const images = atts.map((i) => ({ type: "image", data: i.data, mimeType: i.mimeType }));
     if (!text && !images.length) return;

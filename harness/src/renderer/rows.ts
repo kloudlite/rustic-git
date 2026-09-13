@@ -25,3 +25,17 @@ export function inFlightItems(message: string): string[] | undefined {
   const at = message.indexOf("in flight: ");
   return at < 0 ? undefined : message.slice(at + 11).split(", ").filter(Boolean);
 }
+
+/** pi commands that change what the bench saves; the rest only read or steer a running turn. */
+const WRITES = new Set(["prompt", "steer", "follow_up", "new_session", "compact", "set_model"]);
+
+/**
+ * Why a pi command must not be sent now, or undefined to send it. One answer
+ * for every path (composer, slash, palette, keys), so none fails silently.
+ */
+export function refusal(cmd: { type: string }, st: { session?: string; connected: boolean; writable: { ok: boolean; reason?: string } }): string | undefined {
+  if (!st.session) return "no session yet; start one with /new or the + beside Sessions";
+  if (!st.connected) return "not connected to the bench; nothing was sent";
+  if (WRITES.has(cmd.type) && !st.writable.ok) return `the bench cannot save right now (${st.writable.reason}); nothing was sent`;
+  return undefined;
+}
