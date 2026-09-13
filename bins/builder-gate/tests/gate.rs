@@ -352,6 +352,10 @@ async fn the_builder_stops_once_after_the_last_connection_closes() {
     tokio::time::sleep(Duration::from_secs(IDLE - 30)).await;
     assert_eq!(api.count("stop"), 0, "not yet: builder_idle_secs has not elapsed");
     tokio::time::sleep(Duration::from_secs(60)).await;
+    // `until`, not an assert: the beat has decided, but its POST is real IO the paused clock does
+    // not wait for, so an assert here raced the request to the mock api.
+    let a = api.clone();
+    until("the idle builder was stopped", move || a.count("stop") > 0).await;
     assert_eq!(api.count("stop"), 1, "stopped exactly once: {:?}", api.calls());
 
     // And exactly once: the beat keeps ticking over an idle builder forever.
@@ -376,6 +380,9 @@ async fn a_builder_left_running_across_a_restart_is_stopped() {
     tokio::time::sleep(Duration::from_secs(IDLE - 30)).await;
     assert_eq!(api.count("stop"), 0, "seeded idle-from-now, not idle-forever");
     tokio::time::sleep(Duration::from_secs(60)).await;
+    // Same race as above: the stop POST is real IO the paused clock does not wait for.
+    let a = api.clone();
+    until("the seeded builder was stopped", move || a.count("stop") > 0).await;
     assert_eq!(api.count("stop"), 1, "stopped one idle period after boot: {:?}", api.calls());
 }
 
