@@ -2,16 +2,18 @@
 //!
 //! Everything the gateway decides happens BEFORE the upgrade, so a refusal is a plain HTTP status
 //! the CLI can print. After `101` the gateway is a pipe: it holds no credential, reads no ssh
-//! frame, and cannot open a session of its own — sshd still wants the user's key.
+//! frame, and cannot open a session of its own — sshd still wants the user's key. A bench is a
+//! second target of the same pipe: same claims-then-resolve-then-dial shape, a different token
+//! type and a different port.
 
-use crate::resolve::resolve;
+use crate::resolve::{resolve, resolve_bench};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use kloudlite_core::jwt::Jwt;
+use kloudlite_core::jwt::{BenchSessionClaims, Jwt, SshSessionClaims};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,6 +37,8 @@ pub struct Gateway {
     pub kube: kube::Client,
     /// 22 everywhere real; a test points it at a local echo listener.
     pub ssh_port: u16,
+    /// `BENCH_PORT` everywhere real; a test points it at a local echo listener.
+    pub bench_port: u16,
     /// Spent session ids → their expiry. A token is a CONNECT token: replaying one is either a
     /// bug or an attack, and both are refused the same way.
     // ponytail: per-replica, so a replayed token could still connect to a different replica within
@@ -54,12 +58,13 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(jwt: Jwt, region: String, kube: kube::Client, ssh_port: u16) -> Gateway {
+    pub fn new(jwt: Jwt, region: String, kube: kube::Client, ssh_port: u16, bench_port: u16) -> Gateway {
         Gateway {
             jwt,
             region,
             kube,
             ssh_port,
+            bench_port,
             used: Mutex::new(HashMap::new()),
             per_ws: Mutex::new(HashMap::new()),
             per_owner: Mutex::new(HashMap::new()),
@@ -146,6 +151,41 @@ fn take(map: &Mutex<HashMap<String, usize>>, key: &str, limit: usize) -> bool {
     true
 }
 
+/// Either kind of session token the tunnel accepts. A workspace token never opens a bench and a
+/// bench token never opens a workspace — that separation is the two match arms in `resolve_by`,
+/// never a shared `id` field with the kind inferred.
+enum Ticket {
+    Workspace(SshSessionClaims),
+    Bench(BenchSessionClaims),
+}
+
+impl Ticket {
+    fn id(&self) -> &str {
+        match self {
+            Ticket::Workspace(c) => &c.ws,
+            Ticket::Bench(c) => &c.bench,
+        }
+    }
+    fn region(&self) -> &str {
+        match self {
+            Ticket::Workspace(c) => &c.region,
+            Ticket::Bench(c) => &c.region,
+        }
+    }
+    fn jti(&self) -> &str {
+        match self {
+            Ticket::Workspace(c) => &c.jti,
+            Ticket::Bench(c) => &c.jti,
+        }
+    }
+    fn exp(&self) -> u64 {
+        match self {
+            Ticket::Workspace(c) => c.exp,
+            Ticket::Bench(c) => c.exp,
+        }
+    }
+}
+
 pub fn app(gw: Arc<Gateway>) -> Router {
     Router::new()
         .route(
@@ -169,19 +209,26 @@ async fn tunnel(
     // business only insofar as "get a new token", and saying more distinguishes a real workspace
     // from an invented one for someone holding a token for neither.
     let token = kloudlite_core::httpx::bearer_token(&headers).unwrap_or_default();
-    let claims = match gw.jwt.verify_ssh_session(token) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    let ticket = match gw.jwt.verify_ssh_session(token) {
+        Ok(c) => Ticket::Workspace(c),
+        Err(_) => match gw.jwt.verify_bench_session(token) {
+            Ok(c) => Ticket::Bench(c),
+            Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+        },
     };
-    // A token names ONE workspace in ONE region. The region check is what stops a token minted
-    // for another region's gateway being replayed here against a workspace that shares an id.
-    if claims.ws != ws || claims.region != gw.region {
+    // A token names ONE object in ONE region. The region check is what stops a token minted
+    // for another region's gateway being replayed here against an object that shares an id.
+    if ticket.id() != ws || ticket.region() != gw.region {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Some(mut slot) = gw.reserve(&ws) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let target = match resolve(&gw.kube, &ws, gw.ssh_port).await {
+    let target = match &ticket {
+        Ticket::Workspace(_) => resolve(&gw.kube, &ws, gw.ssh_port).await,
+        Ticket::Bench(_) => resolve_bench(&gw.kube, &ws, gw.bench_port).await,
+    };
+    let target = match target {
         Ok(t) => t,
         Err((status, why)) => {
             tracing::debug!(workspace = %ws, reason = why, "tunnel.refused");
@@ -210,7 +257,7 @@ async fn tunnel(
     // connection limit) and a 502 (pod not listening yet) are the refusals worth retrying, and
     // burning the token on any of them would turn a retryable refusal into "log in again".
     // Everything after this point either upgrades or fails for a reason a new token cannot fix.
-    if !gw.spend(&claims.jti, claims.exp) {
+    if !gw.spend(ticket.jti(), ticket.exp()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     upgrade
@@ -313,7 +360,7 @@ mod tests {
 
     fn gw() -> Arc<Gateway> {
         let (client, _) = kloudlite_workspaces::kube_test::mock_client(vec![]);
-        Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22))
+        Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22, 7789))
     }
 
     fn count(map: &Mutex<HashMap<String, usize>>, key: &str) -> usize {

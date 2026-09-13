@@ -15,6 +15,8 @@ const SECRET: &str = "0123456789abcdef0123456789abcdef";
 const REGION: &str = "centralindia-k3s";
 const WS: &str = "/apis/kloudlite.io/v1alpha1/workspaces/ws-1";
 const POD: &str = "/api/v1/namespaces/ws-alice/pods/ws-1-abc";
+const BENCH: &str = "/apis/kloudlite.io/v1alpha1/benches/bench-1";
+const BENCH_POD: &str = "/api/v1/namespaces/ws-alice/pods/bench";
 
 fn workspace(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
     let mut status = serde_json::json!({ "phase": phase, "nodeName": "node-1" });
@@ -29,6 +31,20 @@ fn workspace(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
             "owner": "alice", "name": "gh", "region": REGION, "image": "img",
             "desiredState": "running"
         },
+        "status": status,
+    })
+}
+
+fn bench(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
+    let mut status = serde_json::json!({ "phase": phase, "nodeName": "node-1" });
+    if let Some(r) = pod_ref {
+        status["podRef"] = serde_json::json!(r);
+    }
+    serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1",
+        "kind": "Bench",
+        "metadata": { "name": "bench-1" },
+        "spec": { "owner": "alice", "team": "acme", "image": "img", "desiredState": "running" },
         "status": status,
     })
 }
@@ -66,8 +82,12 @@ async fn echo_on(port: u16) -> u16 {
 
 /// The gateway serving on a free port; returns its base ws:// URL.
 async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
+    serve_with(routes, ssh_port, 0).await
+}
+
+async fn serve_with(routes: Vec<Route>, ssh_port: u16, bench_port: u16) -> String {
     let (client, _) = mock_client(routes);
-    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port));
+    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port, bench_port));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });
@@ -76,6 +96,10 @@ async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
 
 fn token(ws: &str, region: &str) -> String {
     Jwt::new(SECRET).unwrap().mint_ssh_session("alice", ws, region).unwrap().0
+}
+
+fn bench_token(bench: &str, region: &str) -> String {
+    Jwt::new(SECRET).unwrap().mint_bench_session("alice", bench, region).unwrap().0
 }
 
 /// Connect to `/tunnel/{ws}`; `Ok` is the upgraded socket, `Err` the pre-upgrade status.
@@ -242,4 +266,42 @@ async fn failed_dials_do_not_use_up_the_limit() {
     }
     echo_on(port).await;
     let _live = connect(&base, "ws-1", &token("ws-1", REGION)).await.expect("nothing leaked");
+}
+
+#[tokio::test]
+async fn a_bench_token_opens_a_tunnel_to_the_bench_port() {
+    use futures::{SinkExt, StreamExt};
+    let port = echo().await;
+    let base = serve_with(
+        vec![get(BENCH, bench("ready", Some("ws-alice/bench"))), get(BENCH_POD, pod(Some("127.0.0.1")))],
+        22,
+        port,
+    )
+    .await;
+
+    let tok = bench_token("bench-1", REGION);
+    let mut sock = connect(&base, "bench-1", &tok).await.expect("upgrade");
+    sock.send(tungstenite::Message::binary(b"ping".to_vec())).await.unwrap();
+    let back = sock.next().await.unwrap().unwrap();
+    assert_eq!(back.into_data(), b"ping".as_slice());
+}
+
+#[tokio::test]
+async fn a_workspace_token_cannot_open_a_bench_with_the_same_id() {
+    // Only a Bench named "bench-1" exists — no Workspace of that name — so an ssh-session token
+    // naming it must fail at resolve, and the echo listener behind it must never see a connection.
+    let port = echo().await;
+    let base = serve_with(
+        vec![kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/workspaces/bench-1")],
+        port,
+        22,
+    )
+    .await;
+    assert_eq!(connect(&base, "bench-1", &token("bench-1", REGION)).await.err(), Some(404));
+}
+
+#[tokio::test]
+async fn a_bench_token_for_another_region_is_refused() {
+    let base = serve_with(vec![], 22, 22).await;
+    assert_eq!(connect(&base, "bench-1", &bench_token("bench-1", "westeurope-k3s")).await.err(), Some(401));
 }
