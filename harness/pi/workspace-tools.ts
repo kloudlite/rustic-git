@@ -14,6 +14,11 @@ import { call } from "./kloudlite.ts";
 export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls";
 const MAX_EXEC_MS = 600_000;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const ADDR_RE = /^([A-Za-z0-9.-]+:\d{1,5}|\[[0-9a-fA-F:]+\]:\d{1,5})$/;
+function validAddress(addr: string, source: string): string {
+  if (!ADDR_RE.test(addr)) throw new Error(`${source} is not a host:port address: ${addr}`);
+  return addr;
+}
 
 export type IdeCall = { tool: string; args: Record<string, unknown> };
 type Result = { content: { type: "text"; text: string }[]; isError: boolean };
@@ -34,7 +39,7 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
     case "find":
       return { tool: "glob", args: { pattern: p.pattern, cwd: p.path } };
     case "ls":
-      return { tool: "exec", args: { cmd: ["ls", "-1Ap", p.path ?? "."], head: p.limit ?? 500 } };
+      return { tool: "exec", args: { cmd: ["ls", "-1Ap", "--", p.path ?? "."], head: p.limit ?? 500 } };
     default:
       throw new Error(`no workspace tool ${name}`);
   }
@@ -57,7 +62,11 @@ export function fromIde(name: string, status: number, body: any, limit?: number)
       return body.exit_code === 0 ? text(out) : text(`${out}\n[exit ${body.exit_code}]`.trim(), true);
     }
     case "grep":
-      return text((body.matches ?? []).map((m: { path: string; line: number; text: string }) => `${m.path}:${m.line}: ${m.text}`).join("\n") + (body.truncated ? "\n[truncated]" : ""));
+      return text(
+        (body.matches ?? [])
+          .map((m: { path: string; line: number; text: string; context?: string }) => `${m.path}:${m.line}: ${m.text}` + (m.context ? `\n${m.context}` : ""))
+          .join("\n") + (body.truncated ? "\n[truncated]" : ""),
+      );
     case "find":
       return text((body.paths ?? []).slice(0, limit ?? 1000).join("\n"));
     default:
@@ -74,12 +83,28 @@ export class ToolServer {
     this.resolve = resolve;
   }
   async call(c: IdeCall, signal?: AbortSignal): Promise<{ status: number; body: any }> {
+    // A stale address (a restarted pod, or a workspace not yet ready) surfaces as either a
+    // connection failure here or a 409 from the tool server itself; both clear the cached
+    // address and ask /v1 once more before giving up, same as a 409 from /v1's own answer
+    // (thrown by resolve()) does.
     for (let attempt = 0; ; attempt++) {
-      this.address ??= await this.resolve(this.workspace);
+      try {
+        this.address ??= await this.resolve(this.workspace);
+      } catch (e) {
+        this.address = undefined;
+        if (attempt > 0) throw e;
+        continue;
+      }
       const at = this.address;
       try {
         const r = await fetch(`http://${at}/tools/${c.tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c.args), signal });
-        return { status: r.status, body: await r.json().catch(() => ({ error: `the tool server answered ${r.status} without JSON` })) };
+        const body = await r.json().catch(() => ({ error: `the tool server answered ${r.status} without JSON` }));
+        if (r.status === 409) {
+          this.address = undefined;
+          if (attempt > 0) return { status: r.status, body };
+          continue;
+        }
+        return { status: r.status, body };
       } catch (e) {
         if (signal?.aborted) throw e;
         this.address = undefined;
@@ -91,11 +116,11 @@ export class ToolServer {
 
 export async function resolveFromApi(ws: string): Promise<string> {
   // A laptop points every workspace session at one tool server, such as the local end of `kl-connect ws ide`.
-  if (process.env.KL_TOOLS_ADDRESS) return process.env.KL_TOOLS_ADDRESS;
-  const team = process.env.KL_TEAM ? `?team=${encodeURIComponent(process.env.KL_TEAM)}` : "";
-  const r = await call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools${team}`);
+  if (process.env.KL_TOOLS_ADDRESS) return validAddress(process.env.KL_TOOLS_ADDRESS, "KL_TOOLS_ADDRESS");
+  if (!process.env.KL_TEAM) throw new Error("KL_TEAM is not set");
+  const r = await call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools?team=${encodeURIComponent(process.env.KL_TEAM)}`);
   const d = r.data as { address?: string; error?: string } | string | null;
-  if (r.status === 200 && d && typeof d === "object" && d.address) return d.address;
+  if (r.status === 200 && d && typeof d === "object" && d.address) return validAddress(d.address, "workspace address");
   throw new Error(d && typeof d === "object" && d.error ? d.error : `workspace ${ws}: ${typeof d === "string" ? d : r.status}`);
 }
 
