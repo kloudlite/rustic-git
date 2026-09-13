@@ -596,9 +596,44 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: String, match
             }
         }
     }
+    gone += sweep_detached_volumes(c, owner, &jwt, matches).await;
     gone += deny_requests(c, owner, &jwt, matches).await;
     gone += sweep_images(c, owner, &jwt, matches).await;
     gone += sweep_teams(c, &jwt, matches).await;
+    gone
+}
+
+/// Detached volumes whose EVERY push message `matches` — the backstop for a volume the run never
+/// registered. A detached volume's `display_name` is its id, so the `KINDS` sweep cannot see it;
+/// the push message is the only caller-chosen string that survives the detach. Keep-biased: an
+/// unreadable listing or history, an empty history or one foreign message keeps the volume.
+async fn sweep_detached_volumes<M: Fn(&str) -> bool>(c: &Ctx, owner: &str, jwt: &str, matches: &M) -> usize {
+    let rows = match get(c, &api(c, &format!("/v1/volumes?owner={owner}")), jwt).await {
+        Ok(v) => v.as_array().cloned().unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(kind = "volume", op = "list", error = %format!("{e:#}"), "slo.teardown.failed");
+            return 0;
+        }
+    };
+    let mut gone = 0;
+    for row in rows {
+        let Some(name) = row.get("name").and_then(Value::as_str) else { continue };
+        if row.get("deleted").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let history = match get(c, &api(c, &format!("/v1/volumes/{name}/history")), jwt).await {
+            Ok(v) => v.as_array().cloned().unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(kind = "volume", op = "history", name = %name, error = %format!("{e:#}"), "slo.teardown.failed");
+                continue;
+            }
+        };
+        let ours = !history.is_empty()
+            && history.iter().all(|h| h.get("message").and_then(Value::as_str).is_some_and(|m| !m.is_empty() && matches(m)));
+        if ours {
+            gone += del(c, "volume", name, &api(c, &format!("/v1/volumes/{name}")), jwt).await as usize;
+        }
+    }
     gone
 }
 
@@ -923,6 +958,76 @@ mod tests {
     }
 
     use super::*;
+
+    /// A router listing `vols`, answering each volume's history from `hist` (None = 500), and
+    /// counting DELETEs by name.
+    async fn volumes_ctx(vols: Value, hist: Value) -> (Ctx, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::extract::Path;
+        use axum::routing::get as aget;
+        let dels: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let d2 = dels.clone();
+        let app = axum::Router::new()
+            .route("/v1/volumes", aget(move || { let v = vols.clone(); async move { axum::Json(v) } }))
+            .route(
+                "/v1/volumes/{n}/history",
+                aget(move |Path(n): Path<String>| {
+                    let h = hist.get(&n).cloned();
+                    async move {
+                        match h {
+                            Some(h) => Ok(axum::Json(h)),
+                            None => Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/volumes/{n}",
+                axum::routing::delete(move |Path(n): Path<String>| {
+                    d2.lock().unwrap().push(n);
+                    async { axum::http::StatusCode::NO_CONTENT }
+                }),
+            );
+        (crate::testkit::ctx_against(app).await, dels)
+    }
+
+    #[tokio::test]
+    async fn a_detached_volume_whose_pushes_all_name_this_run_is_swept() {
+        use serde_json::json;
+        let (c, dels) = volumes_ctx(
+            json!([{"name": "ws-a", "display_name": "ws-a", "deleted": true}]),
+            json!({"ws-a": [{"message": "run-hourly-1-cache"}]}),
+        )
+        .await;
+        let gone = sweep_detached_volumes(&c, "slo-hourly", "", &|m: &str| m.starts_with("run-hourly-1")).await;
+        assert_eq!(gone, 1);
+        assert_eq!(*dels.lock().unwrap(), vec!["ws-a".to_string()]);
+    }
+
+    /// Keep-biased: a foreign push, an unnamed one, an unreadable history or a working copy each
+    /// keeps the volume.
+    #[tokio::test]
+    async fn a_detached_volume_is_kept_on_any_doubt() {
+        use serde_json::json;
+        let (c, dels) = volumes_ctx(
+            json!([
+                {"name": "ws-b", "deleted": true},
+                {"name": "ws-c", "deleted": true},
+                {"name": "ws-d", "deleted": true},
+                {"name": "ws-e", "deleted": false},
+                {"name": "ws-f", "deleted": true},
+            ]),
+            json!({
+                "ws-b": [{"message": "run-hourly-1-cache"}, {"message": "one"}],
+                "ws-c": [{"message": ""}],
+                "ws-e": [{"message": "run-hourly-1-cache"}],
+                "ws-f": [],
+            }),
+        )
+        .await;
+        let gone = sweep_detached_volumes(&c, "slo-hourly", "", &|m: &str| m.starts_with("run-hourly-1")).await;
+        assert_eq!(gone, 0);
+        assert!(dels.lock().unwrap().is_empty(), "{:?}", dels.lock().unwrap());
+    }
 
     #[test]
     fn only_a_probe_object_past_the_deadline_is_stale() {
