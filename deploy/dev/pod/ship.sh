@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CI, in the pod: the gate CI runs, a release build, and every image (the web's too) pushed under CI's tag
+# CI, in the pod: the gate CI runs, a release build, and every image (the web's and bench's too) pushed under CI's tag
 # shape. Runs under pm2 as `ship` (`pm2 logs ship`). Refuses a dirty or unpushed tree: the tag is
 # the commit SHA, and a tag must name a commit some remote actually holds — `platform` during the
 # owner's platform-first loop (2026-09-13: push platform → ship from the pod → verify on the fleet
@@ -94,6 +94,16 @@ for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gate
 done
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/$PROFILE"
 ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kl"
+# deploy/bench/Dockerfile COPYs the musl kl from the release path literally (CI builds release);
+# the pod only ever builds dev-image, so link it under the name the Dockerfile expects too.
+mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
+ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/release/kl"
+# Same CTX: the bench image needs the harness sources CI's context carries, none of which
+# .dockerignore admits from anywhere but these exact paths (deploy/bench/, harness/{package*,bench,pi}).
+cp -r deploy/bench "$CTX/deploy/"
+mkdir -p "$CTX/harness"
+cp harness/package.json harness/package-lock.json "$CTX/harness/"
+cp -r harness/bench harness/pi "$CTX/harness/"
 
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
   target=${t%%:*}; image=${t#*:}
@@ -103,6 +113,10 @@ for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builde
     --output "type=image,\"name=ghcr.io/kloudlite/$image:$SHA,ghcr.io/kloudlite/$image:latest\",push=true" \
     --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
 done
+echo "==> kloudlite-bench:$SHA"
+buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX/deploy/bench" \
+  --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-bench:$SHA,ghcr.io/kloudlite/kloudlite-bench:latest\",push=true" \
+  --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
 # The web image too, from `web/` as its own context (its Dockerfile runs bun install + next build
 # inside the build, so nothing from the pod's node_modules leaks in). CI's web.yml still builds it
 # on master; this is the same image under the same SHA tag, so either may land first.

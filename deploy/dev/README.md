@@ -68,7 +68,8 @@ Cost: one Standard_D16s_v5 (about $0.8/hour). Delete the pool when the campaign 
 ## Images from the pod (`ship.sh`)
 
 `deploy/dev/ship.sh` is CI in the pod: clippy + tests (CI's commands), `cargo build --release`,
-then the four images built by the `buildkitd` sidecar from the real Dockerfile and pushed as
+then the server/agent/gateway/builder-gate/slo/workspace images, the web image, and the bench
+image, all built by the `buildkitd` sidecar from their real Dockerfiles and pushed as
 `ghcr.io/kloudlite/<image>:<full sha>` (+ `latest`) — the same tags CI writes, so `deploy/pin.sh
 <sha>` and `deploy/roll.sh` follow unchanged. It refuses a dirty tree or a HEAD that is on no
 `origin/*` or `platform/*` branch: the tag must name a commit some remote actually holds. The
