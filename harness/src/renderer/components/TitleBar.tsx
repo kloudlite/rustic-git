@@ -7,7 +7,7 @@ import type { Machine, Team } from "../model";
 
 /**
  * The TEAM, which is what the window is scoped by: a developer has exactly one
- * work machine per team, so picking a team is what picks the machine, and there
+ * bench per team, so picking a team is what picks the bench, and there
  * is nothing to choose within one. The environment the machine is connected to
  * is picked where it is shown, in the dock.
  */
@@ -16,17 +16,18 @@ export function TitleBar(props: {
   teams: Team[];
   teamId: string;
   onSwitchTeam: (id: string) => void;
+  onSearch: () => void;
 }) {
   const [teamOpen, setTeamOpen] = createSignal(false);
   const team = () => props.teams.find((t) => t.id === props.teamId);
 
   return (
-    <header class="relative flex items-center gap-1 border-b border-line bg-chrome pr-2.5 pl-[78px] [-webkit-app-region:drag] [&>*]:[-webkit-app-region:no-drag]">
+    <header class="relative z-40 flex items-center gap-1 border-b border-line bg-chrome pr-2.5 pl-[78px] [-webkit-app-region:drag] [&>*]:[-webkit-app-region:no-drag]">
       {/* Centred on the window, not after the traffic lights: the team is what
           the whole window is scoped by. */}
       <div class="absolute left-1/2 -translate-x-1/2" data-menu-root>
         <button
-          class="flex h-5.5 max-w-56 items-center gap-1.5 rounded-md px-2 hover:bg-hover data-[open=true]:bg-hover"
+          class="flex h-5.5 max-w-56 items-center gap-1.5 rounded-[2px] px-2 hover:bg-toolbar-hover data-[open=true]:bg-toolbar-hover"
           data-open={teamOpen()}
           aria-expanded={teamOpen()}
           onPointerDown={(e) => {
@@ -58,7 +59,7 @@ export function TitleBar(props: {
 
       <span class="flex-1" />
 
-      <Button variant="icon" icon="search" title="Search (⌘P)" />
+      <Button variant="icon" icon="search" title="Go to… (⌘P)" onClick={props.onSearch} />
       <Button variant="icon" icon={THEME_ICON[mode()]} title={`Theme: ${mode()}`} onClick={cycleTheme} />
       <Button variant="icon" icon="bell" title="Notifications" />
     </header>

@@ -1,4 +1,5 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, type JSX } from "solid-js";
+import { Row, Gutter } from "../../ui/parts";
 import { Icon } from "../../ui/Icon";
 import { TODO } from "../status";
 import type { Todo, TodoState } from "../../model";
@@ -18,16 +19,15 @@ export function stateOf(t: Todo): TodoState {
 }
 
 /**
- * The plan, as a list of groups rather than a drawn graph. A group is a heading
- * with its own progress; its steps hang off one guide line, the same shape the
- * workspace tree uses on the left. An earlier version drew commit-graph rails,
- * which cost a lot of CSS to say what an indent already says.
- *
- * Nesting stops mattering below the second level, so deeper groups indent but
- * keep the same shape.
+ * The plan as the workbench draws a tree: 22px rows, a chevron in the first
+ * gutter for a group, a state mark for a step, indent guides down each level,
+ * the count at the row's end. Nothing here is a card; it is the same tree the
+ * side bar uses, so the eye reads it without learning a second shape.
  */
 export function PlanTree(props: { todos: Todo[]; depth?: number }) {
   const depth = () => props.depth ?? 0;
+  const indent = () => 12 + depth() * 16;
+  const guide = (): JSX.CSSProperties => ({ "padding-left": `${indent()}px` });
 
   return (
     <For each={props.todos}>
@@ -37,37 +37,20 @@ export function PlanTree(props: { todos: Todo[]; depth?: number }) {
         const [open, setOpen] = createSignal(st() !== "done");
         const done = () => leaves(t.children ?? []).filter((l) => l.state === "done").length;
         const total = () => leaves(t.children ?? []).length;
+        const dim = () => st() === "done" || st() === "pending";
 
         return (
-          <Show when={branch()} fallback={<Step todo={t} state={st()} />}>
-            <section class="mt-3 first:mt-0">
-              <button
-                class="group flex w-full items-center gap-2 py-0.5 text-left"
-                onClick={() => setOpen(!open())}
-                aria-expanded={open()}
-              >
-                <Icon
-                  name={open() ? "chevronDown" : "chevronRight"}
-                  size={11}
-                  class="shrink-0 text-subtle group-hover:text-fg"
-                />
-                <span
-                  class="min-w-0 flex-1 truncate text-sm font-medium"
-                  classList={{ "text-muted": st() === "done" || st() === "pending" }}
-                >
-                  {t.text}
-                </span>
-                <span class="shrink-0 font-mono text-xs tabular-nums text-subtle">
-                  {done()}/{total()}
-                </span>
-              </button>
-
-              <Show when={open()}>
-                <div class="mt-1 ml-[5px] border-l border-line pl-3">
-                  <PlanTree todos={t.children!} depth={depth() + 1} />
-                </div>
-              </Show>
-            </section>
+          <Show when={branch()} fallback={<Step todo={t} state={st()} depth={depth()} />}>
+            <Row class="min-h-5.5 py-0.5 pr-3" style={guide()} onClick={() => setOpen(!open())}>
+              <Gutter><Icon name={open() ? "chevronDown" : "chevronRight"} size={16} class="text-muted" /></Gutter>
+              <span class="min-w-0 flex-1 px-1 leading-[18px] whitespace-normal wrap-words" classList={{ "text-muted": dim() }}>{t.text}</span>
+              <span class="shrink-0 font-mono text-xs tabular-nums text-subtle">{done()}/{total()}</span>
+            </Row>
+            <Show when={open()}>
+              <Guides depth={depth() + 1}>
+                <PlanTree todos={t.children!} depth={depth() + 1} />
+              </Guides>
+            </Show>
           </Show>
         );
       }}
@@ -75,37 +58,31 @@ export function PlanTree(props: { todos: Todo[]; depth?: number }) {
   );
 }
 
-/** One step: a state mark, the text, and what is carrying it underneath. */
-function Step(props: { todo: Todo; state: TodoState }) {
-  const t = () => props.todo;
+/** One guide per level, at the chevron's centre, drawn behind the rows. */
+function Guides(props: { depth: number; children: JSX.Element }) {
   return (
-    <div class="flex gap-2 py-[3px]">
-      <span class="flex h-5 w-3.5 shrink-0 items-center justify-center" title={TODO[props.state].label}>
-        <Show
-          when={props.state === "done"}
-          fallback={<span class={`size-1.5 rounded-full ${TODO[props.state].dot}`} />}
-        >
-          <Icon name="check" size={12} class="text-subtle" />
-        </Show>
-      </span>
-      <div class="min-w-0 flex-1">
-        <div
-          class="text-sm leading-5 wrap-words"
-          classList={{
-            "text-muted": props.state === "done" || props.state === "pending",
-            "font-medium": props.state === "active",
-          }}
-        >
-          {t().text}
-        </div>
-        <Show when={t().eph || t().note}>
-          <div class="flex min-w-0 items-baseline gap-1.5 truncate text-xs leading-4 text-subtle">
-            <Show when={t().eph}>{(id) => <span class="font-mono text-accent">{id()}</span>}</Show>
-            <Show when={t().eph && t().note}><span class="text-line">·</span></Show>
-            <Show when={t().note}>{(n) => <span class="truncate">{n()}</span>}</Show>
-          </div>
-        </Show>
-      </div>
+    <div class="relative">
+      <For each={Array.from({ length: props.depth })}>
+        {(_, i) => <span class="pointer-events-none absolute top-0 bottom-0 w-px bg-guide" style={{ left: `${12 + i() * 16 + 8}px` }} />}
+      </For>
+      {props.children}
     </div>
+  );
+}
+
+/** One step: a state mark in the gutter, the text, the agent and note after it. */
+function Step(props: { todo: Todo; state: TodoState; depth: number }) {
+  const t = () => props.todo;
+  const dim = () => props.state === "done" || props.state === "pending";
+  return (
+    <Row class="min-h-5.5 items-start py-0.5 pr-3" style={{ "padding-left": `${12 + props.depth * 16}px` }} title={`${TODO[props.state].label}${t().note ? ` · ${t().note}` : ""}`}>
+      <Gutter>
+        <Show when={props.state === "done"} fallback={<span class={`size-1.5 rounded-full ${TODO[props.state].dot}`} />}>
+          <Icon name="check" size={16} class="text-subtle" />
+        </Show>
+      </Gutter>
+      <span class="min-w-0 flex-1 px-1 leading-[18px] whitespace-normal wrap-words" classList={{ "text-muted": dim() }}>{t().text}</span>
+      <Show when={t().eph}>{(id) => <span class="shrink-0 pt-px font-mono text-xs leading-[18px] text-accent">{id()}</span>}</Show>
+    </Row>
   );
 }

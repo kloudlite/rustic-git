@@ -1,6 +1,13 @@
-import { app, BrowserWindow, ipcMain, nativeTheme } from "electron";
+import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTheme, type WebContents } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { Pi, type Fork } from "./pi";
+
+let mainWin: BrowserWindow | undefined;
+// The bench, and any side session forked from it (`/btw`), by id.
+const pis = new Map<string, Pi>();
+const pi = new Pi("bench", () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), path.join(app.getPath("userData"), "last-session"));
+pis.set(pi.id, pi);
 
 function createWindow(): void {
   // HARNESS_SIZE=WxH sizes the window for a screenshot; no effect otherwise.
@@ -12,7 +19,7 @@ function createWindow(): void {
     minHeight: 560,
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 12, y: 11 },
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#282c33" : "#fafafa",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#1f1f1f" : "#ffffff",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -20,6 +27,7 @@ function createWindow(): void {
     },
   });
 
+  mainWin = win;
   void win.loadFile(path.join(__dirname, "renderer", "index.html"), {
     hash: process.env.HARNESS_HASH ?? "",
     search: process.env.HARNESS_THEME ? `theme=${process.env.HARNESS_THEME}` : "",
@@ -45,6 +53,78 @@ function createWindow(): void {
 // sandboxed and carries no preload, so the page gets nothing of the harness.
 const previews = new Map<string, BrowserWindow>();
 
+/** Runs inside a preview page. Plain script, no bundler: it must survive any page. */
+const ANNOTATE = String.raw`(() => {
+  if (window.__hzSet) return;
+  const CUR = "url(\"data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="22" viewBox="0 0 20 22"><path d="M3 2l13 9.5-5.6 1.1 3.4 6.3-2.4 1.3-3.4-6.3L3 18.5z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></svg>') + "\") 3 2, crosshair";
+  const S = document.createElement("style");
+  S.textContent = "#__hzo{position:fixed;pointer-events:none;z-index:2147483646;border:1.5px solid #74ade8;background:#74ade814}.__hzm{outline:1.5px solid #74ade8!important;outline-offset:1px}html.__hzp,html.__hzp *{cursor:" + CUR + "!important}";
+  document.documentElement.appendChild(S);
+  const ol = document.createElement("div"); ol.id = "__hzo"; ol.style.display = "none"; document.documentElement.appendChild(ol);
+  let on = false, cur = null;
+  window.__hzSet = (v) => { on = v; document.documentElement.classList.toggle("__hzp", v); if (!v) ol.style.display = "none"; };
+  window.__hzClear = () => document.querySelectorAll(".__hzm").forEach((e) => e.classList.remove("__hzm"));
+  const sel = (el) => {
+    const parts = [];
+    for (let e = el; e && e !== document.body && parts.length < 3; e = e.parentElement) {
+      if (e.id && !e.id.startsWith("__hz")) { parts.unshift("#" + e.id); break; }
+      let p = e.tagName.toLowerCase();
+      const cls = [...e.classList].filter((c) => !c.startsWith("__hz")).slice(0, 1);
+      if (cls.length) p += "." + cls[0];
+      const sib = e.parentElement ? [...e.parentElement.children].filter((x) => x.tagName === e.tagName) : [];
+      if (sib.length > 1) p += ":nth-of-type(" + (sib.indexOf(e) + 1) + ")";
+      parts.unshift(p);
+    }
+    return parts.join(">");
+  };
+  const block = (t) => { let e = t; while (e && e !== document.body && getComputedStyle(e).display.startsWith("inline")) e = e.parentElement; return e; };
+  document.addEventListener("mousemove", (ev) => {
+    if (!on) return; const el = block(ev.target); if (!el) return; cur = el;
+    const r = el.getBoundingClientRect(); Object.assign(ol.style, { display: "block", left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+  }, true);
+  document.addEventListener("click", (ev) => {
+    if (!on || !cur) return; ev.preventDefault(); ev.stopPropagation();
+    cur.classList.add("__hzm");
+    console.log("harness:ref " + location.pathname + " " + sel(cur));
+  }, true);
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") window.__hzSet(false); }, true);
+})();`;
+
+function samplePage(service: string, url: string): string {
+  const dark = nativeTheme.shouldUseDarkColors;
+  const c = dark
+    ? { bg: "#282c33", panel: "#2f343c", line: "#3b414b", fg: "#dce0e5", muted: "#9aa2ad", accent: "#74ade8", ok: "#a1c181" }
+    : { bg: "#fafafa", panel: "#ffffff", line: "#e4e4e8", fg: "#383a42", muted: "#74767e", accent: "#3f5bd8", ok: "#50a14f" };
+  const [name, port] = service.split(":");
+  const rows = [
+    ["GET", "/healthz", "200", "1 ms"], ["GET", "/v1/workspaces", "200", "14 ms"], ["POST", "/v1/workspaces/ws-51480ba5/push", "202", "38 ms"],
+    ["GET", "/v1/environments/env-2f9a11", "200", "9 ms"], ["GET", "/metrics", "200", "2 ms"],
+  ].map(([m, p, s, t]) => `<tr><td class="m">${m}</td><td>${p}</td><td class="s">${s}</td><td class="t">${t}</td></tr>`).join("");
+  const html = `<!doctype html><meta charset="utf-8"><title>${service}</title><style>
+    body{margin:0;background:${c.bg};color:${c.fg};font:14px/1.5 -apple-system,"IBM Plex Sans",system-ui,sans-serif}
+    header{display:flex;align-items:center;gap:12px;padding:14px 24px;border-bottom:1px solid ${c.line};background:${c.panel}}
+    .dot{width:8px;height:8px;border-radius:50%;background:${c.ok}} h1{font-size:15px;font-weight:500;margin:0}
+    .url{margin-left:auto;font:12px ui-monospace,Menlo,monospace;color:${c.muted}}
+    main{padding:24px;max-width:860px} h2{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:${c.muted};margin:24px 0 8px}
+    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:${c.line};border:1px solid ${c.line};border-radius:6px;overflow:hidden}
+    .grid div{background:${c.panel};padding:12px 14px} .grid b{display:block;font-size:20px;font-weight:500} .grid span{font-size:12px;color:${c.muted}}
+    table{width:100%;border-collapse:collapse;font:13px ui-monospace,Menlo,monospace} td{padding:7px 10px;border-top:1px solid ${c.line}}
+    td.m{color:${c.accent};width:60px} td.s{color:${c.ok};width:50px;text-align:right} td.t{color:${c.muted};width:70px;text-align:right}
+    p{color:${c.muted};font-size:13px}
+  </style>
+  <header><span class="dot"></span><h1>${name}</h1><span style="color:${c.muted}">listening on :${port}</span><span class="url">${url}</span></header>
+  <main><p>Sample page — the harness is not connected to an environment yet. This is what opens when a port is clicked.</p>
+  <h2>Now</h2><div class="grid"><div><b>up</b><span>2h 14m</span></div><div><b>412</b><span>requests / min</span></div><div><b>11 ms</b><span>p50</span></div><div><b>0</b><span>5xx</span></div></div>
+  <h2>Recent requests</h2><table>${rows}</table></main>`;
+  return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+}
+
+const BAR = 38;
+
+/** Which preview window a toolbar or a page belongs to, for the IPC below. */
+type PreviewWin = { win: BrowserWindow; bar: WebContentsView; page: WebContentsView; asSeen: (u: string) => string; picking: boolean; marks: number };
+const byContents = new Map<number, PreviewWin>();
+
 ipcMain.handle("open-preview", (_e, url: unknown, label: unknown) => {
   if (typeof url !== "string" || !/^https?:\/\//.test(url)) throw new Error("only http(s) urls open");
   const existing = previews.get(url);
@@ -57,27 +137,146 @@ ipcMain.handle("open-preview", (_e, url: unknown, label: unknown) => {
   const service = typeof label === "string" ? label : new URL(url).host;
   const asSeen = (u: string) => (u.startsWith(origin) ? service + u.slice(origin.length) : u).replace(/\/$/, "");
 
+  // Two views in one window: the harness's own toolbar in the title bar, and
+  // the page under it. The page is sandboxed with no preload — nothing of the
+  // harness reaches it — so the annotate tool is injected as a plain script
+  // and reports back over the one channel every page has, a console line.
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
     title: asSeen(url),
-    backgroundColor: nativeTheme.shouldUseDarkColors ? "#282c33" : "#fafafa",
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 12, y: 12 },
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#1f1f1f" : "#ffffff",
+    webPreferences: { sandbox: true },
   });
   win.setMenuBarVisibility(false);
-  win.webContents.setWindowOpenHandler(({ url: u }) => {
-    void win.loadURL(u);
+  const bar = new WebContentsView({ webPreferences: { preload: path.join(__dirname, "preview-preload.js"), contextIsolation: true, nodeIntegration: false } });
+  const page = new WebContentsView({ webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
+  win.contentView.addChildView(bar);
+  win.contentView.addChildView(page);
+  const layout = () => {
+    const [w, h] = win.getContentSize();
+    bar.setBounds({ x: 0, y: 0, width: w, height: BAR });
+    page.setBounds({ x: 0, y: BAR, width: w, height: h - BAR });
+  };
+  layout();
+  win.on("resize", layout);
+
+  const pw: PreviewWin = { win, bar, page, asSeen, picking: false, marks: 0 };
+  byContents.set(bar.webContents.id, pw);
+  byContents.set(page.webContents.id, pw);
+
+  page.webContents.setWindowOpenHandler(({ url: u }) => {
+    void page.webContents.loadURL(u);
     return { action: "deny" };
   });
-  win.on("page-title-updated", (e) => e.preventDefault());
-  const retitle = () => win.setTitle(asSeen(win.webContents.getURL()));
-  win.webContents.on("did-navigate", retitle);
-  win.webContents.on("did-navigate-in-page", retitle);
-  void win.loadURL(url);
+  const retitle = () => {
+    win.setTitle(asSeen(page.webContents.getURL()));
+    tell(pw);
+  };
+  page.webContents.on("did-navigate", retitle);
+  page.webContents.on("did-navigate-in-page", retitle);
+  page.webContents.on("did-finish-load", () => {
+    pw.picking = false;
+    pw.marks = 0;
+    void page.webContents.executeJavaScript(ANNOTATE, true);
+    tell(pw);
+  });
+  page.webContents.on("console-message", (_e, _level, line) => {
+    if (!line.startsWith("harness:ref ")) return;
+    const ref = `@${asSeen(page.webContents.getURL())} ${line.slice("harness:ref ".length)}`;
+    clipboard.writeText(ref);
+    pw.marks++;
+    tell(pw, ref);
+  });
+
+  void bar.webContents.loadFile(path.join(__dirname, "renderer", "preview.html"));
+  // Until the harness is wired to a real environment, a fixture host answers
+  // with a sample page of its own, so opening a port shows something rather
+  // than a resolver error: the service, the port, and a request log.
+  const sample = /\.khost\.dev$/.test(new URL(url).host);
+  void page.webContents.loadURL(sample ? samplePage(service, url) : url);
 
   previews.set(url, win);
-  win.on("closed", () => previews.delete(url));
+  win.on("closed", () => {
+    previews.delete(url);
+    byContents.delete(bar.webContents.id);
+    byContents.delete(page.webContents.id);
+  });
 });
+
+/** The toolbar is told everything it shows; it keeps no state of its own. */
+function tell(pw: PreviewWin, copied?: string) {
+  const h = pw.page.webContents.navigationHistory;
+  pw.bar.webContents.send("state", {
+    title: pw.asSeen(pw.page.webContents.getURL()),
+    picking: pw.picking,
+    marks: pw.marks,
+    copied,
+    canBack: h.canGoBack(),
+    canForward: h.canGoForward(),
+  });
+}
+
+const owner = (wc: WebContents) => byContents.get(wc.id);
+ipcMain.handle("preview:pick", (e, on: unknown) => {
+  const pw = owner(e.sender);
+  if (!pw) return;
+  pw.picking = on === true;
+  void pw.page.webContents.executeJavaScript(`window.__hzSet && window.__hzSet(${pw.picking})`, true);
+  tell(pw);
+});
+ipcMain.handle("preview:clear", (e) => {
+  const pw = owner(e.sender);
+  if (!pw) return;
+  pw.marks = 0;
+  void pw.page.webContents.executeJavaScript("window.__hzClear && window.__hzClear()", true);
+  tell(pw);
+});
+ipcMain.handle("preview:nav", (e, verb: unknown) => {
+  const pw = owner(e.sender);
+  if (!pw) return;
+  const h = pw.page.webContents.navigationHistory;
+  if (verb === "back" && h.canGoBack()) h.goBack();
+  else if (verb === "forward" && h.canGoForward()) h.goForward();
+  else if (verb === "reload") pw.page.webContents.reload();
+});
+
+// The bench: every command is forwarded to pi as is, and the answer is the
+// RPC response; events arrive on their own over `pi:event`.
+ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
+  if (!cmd || typeof cmd !== "object" || typeof (cmd as { type?: unknown }).type !== "string") throw new Error("a pi command has a type");
+  const p = pis.get(typeof id === "string" ? id : "bench");
+  if (!p) throw new Error(`no pi ${String(id)}`);
+  const r = await p.send(cmd as Record<string, unknown>);
+  // Whatever pi is on now is what a relaunch reopens (a fork remembers nothing).
+  const file = (r.data as { sessionFile?: string } | undefined)?.sessionFile;
+  if (typeof file === "string" && file) p.remember(file);
+  return r;
+});
+// A session (`s-N`) is a bench in its own right: a full pi with a memo of its
+// session file, so a relaunch resumes each one. A fork (`btw-N`) copies a
+// session file and remembers nothing.
+ipcMain.handle("pi:spawn", (_e, id: unknown, opts: unknown) => {
+  if (typeof id !== "string" || !/^(btw|s)-\d+$/.test(id)) throw new Error("a pi id is s-N or btw-N");
+  const fork = (opts as Fork | undefined)?.fork;
+  if (id.startsWith("btw-") && (typeof fork !== "string" || !fork)) throw new Error("a side session forks a session file");
+  if (!pis.has(id)) {
+    pis.set(id, id.startsWith("btw-")
+      ? new Pi(id, () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), undefined, { fork: fork as string })
+      : new Pi(id, () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), path.join(app.getPath("userData"), "sessions", id)));
+  }
+  pis.get(id)!.start();
+});
+ipcMain.handle("pi:stop", (_e, id: unknown, forget: unknown) => {
+  if (typeof id !== "string" || id === "bench") return;
+  pis.get(id)?.stop();
+  pis.delete(id);
+  // Deleted: the harness forgets which file it was; pi's record stays on disk.
+  if (forget === true && /^s-\d+$/.test(id)) fs.rm(path.join(app.getPath("userData"), "sessions", id), { force: true }).catch(() => undefined);
+});
+app.on("before-quit", () => pis.forEach((p) => p.stop()));
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {
   if (mode !== "system" && mode !== "light" && mode !== "dark") throw new Error("unknown theme");
@@ -85,6 +284,9 @@ ipcMain.handle("set-theme", (_e, mode: unknown) => {
 });
 
 void app.whenReady().then(() => {
+  // The standard menus, explicitly: on macOS ⌘C/⌘V/⌘X/⌘A reach a web page
+  // only through Edit-menu roles, and a pasted image is a paste event first.
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }]));
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

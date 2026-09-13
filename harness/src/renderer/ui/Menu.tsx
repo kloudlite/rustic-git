@@ -38,8 +38,8 @@ export function Menu(props: {
       <div
         role="menu"
         class={cx(
-          "absolute z-30 grid w-max min-w-44 grid-cols-[16px_auto_1fr] gap-x-2 px-2 py-1.5",
-          "rounded-md border border-line bg-overlay shadow-overlay",
+          "absolute z-50 grid w-max min-w-44 grid-cols-[16px_auto_1fr] gap-x-2 px-2 py-1.5",
+          "rounded-md border border-widget-line bg-overlay shadow-overlay",
           props.placement === "above" ? "bottom-[calc(100%+4px)]" : "top-[calc(100%+4px)]",
           props.align === "right" ? "right-0" : "left-0",
           props.class,
@@ -58,7 +58,7 @@ const ROW = "col-span-full grid grid-cols-subgrid items-center px-2";
 
 export function MenuLabel(props: { children: JSX.Element }) {
   return (
-    <div class={cx(ROW, "h-5 text-2xs font-semibold tracking-[0.08em] uppercase text-subtle")}>
+    <div class={cx(ROW, "h-5 text-2xs font-semibold uppercase text-subtle")}>
       <span />
       <span>{props.children}</span>
     </div>

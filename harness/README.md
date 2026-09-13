@@ -7,7 +7,7 @@ A desktop client for working with AI agents, not for editing files yourself.
     team
      ├─ environment ×N       the services a team runs; a developer clones one to
      │                       get a copy they can break
-     └─ work machine         exactly one per developer per team, connected to one
+     └─ bench                exactly one per developer per team, connected to one
          │                   environment at a time
          ├─ thread ×N        the first may change things, the rest are read-only
          └─ workspace ×N     a working copy the developer can enter

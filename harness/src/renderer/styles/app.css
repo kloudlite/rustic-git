@@ -20,104 +20,162 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: #282c33;          /* the buffer ground */
-  --raised: #2f343e;      /* panels, inputs */
-  --overlay: #3b414d;     /* menus, popovers */
-  --chrome: #3b414d;      /* title bar, status bar */
+  /* VS Code Dark Modern: near-neutral greys, one blue, semantic colours only
+     where they mean something. Every name is a role; the hues are theirs. */
+  --bg: #1f1f1f;          /* editor */
+  --raised: #181818;      /* side bar, panels */
+  --input: #313131;       /* input, dropdown, checkbox */
+  --input-line: #3c3c3c;
+  --tab-inactive: #2b2b2b;
+  --activity-fg: #d7d7d7;
+  --activity-inactive: #868686;
+  --badge: #616161;
+  --badge-fg: #f8f8f8;
+  --overlay: #222222;     /* quick input, menus (#1f1f1f), editor widgets (#202020) */
+  --chrome: #181818;      /* title bar, activity bar, status bar */
 
-  --line: #4c515e;
-  --line-subtle: #363c46;
-  --focus: #74ade8;
+  --line: #2b2b2b;
+  --line-subtle: #2b2b2b;
+  --widget-line: #3c3c3c;     /* pickerGroup.border / dropdown.border: the line an overlay is cut by */
+  --focus: #0078d4;
 
-  --hover: #363c46;
-  --active: #454a56;
-  --selected: #454a56;
+  --hover: #2a2d2e;
+  --active: #37373d;
+  --selected: #04395e;
+  --selected-fg: #ffffff;
+  --focus-outline: #0078d4;
 
-  --fg: #c8ccd4;
-  --muted: #979ca5;
-  --subtle: #858c99;
-  --disabled: #757a84;
+  --fg: #cccccc;
+  --fg-strong: #ffffff;   /* settings.headerForeground: what is emphasised */
+  --muted: #9d9d9d;
+  --subtle: #8c8c8c;
+  --disabled: #6f6f6f;
+  --request: rgb(255 255 255 / 4%);        /* chat.requestBackground */
+  --request-line: rgb(255 255 255 / 10%);  /* chat.requestBorder */
+  --preformat: #3c3c3c;   /* textPreformat.background */
+  --preformat-fg: #d0d0d0;
+  --codeblock: #2b2b2b;   /* textCodeBlock.background */
+  --quote-line: #616161;  /* textBlockQuote.border */
+  --btn2: transparent;    /* button.secondaryBackground (Dark Modern) */
+  --btn2-line: rgb(255 255 255 / 10%);
+  --btn2-hover: #2b2b2b;
+  --btn-hover: #026ec1;
+  --toolbar-hover: rgb(90 93 94 / 31%);    /* toolbar.hoverBackground */
+  --kbd: rgb(128 128 128 / 17%);           /* keybindingLabel.background */
+  --kbd-line: rgb(51 51 51 / 60%);
+  --kbd-bottom: rgb(68 68 68 / 60%);
+  --line-number: #6e7681;
+  --line-number-active: #cccccc;
+  --guide: #585858;       /* tree.indentGuidesStroke */
+  --tile: #2b2b2b;        /* welcomePage.tileBackground */
 
-  --accent: #74ade8;
-  --on-accent: #1b1f26;
-  --success: #a1c181;
-  --warning: #dec184;
-  --danger: #d7868a;
+  --accent: #4daafc;
+  --on-accent: #ffffff;
+  --success: #89d185;
+  --warning: #cca700;
+  --danger: #f14c4c;
 
-  --accent-wash: rgb(116 173 232 / 14%);
-  --success-wash: rgb(161 193 129 / 15%);
-  --warning-wash: rgb(222 193 132 / 15%);
-  --danger-wash: rgb(208 114 119 / 15%);
+  --accent-wash: rgb(0 120 212 / 18%);
+  --success-wash: rgb(155 185 85 / 20%);   /* diffEditor.insertedLineBackground */
+  --warning-wash: rgb(204 167 0 / 14%);
+  --danger-wash: rgb(255 0 0 / 20%);       /* diffEditor.removedLineBackground */
 
-  --modified: #dec184;
-  --created: #a1c181;
-  --deleted: #d7868a;
+  --modified: #e2c08d;
+  --created: #73c991;
+  --deleted: #f14c4c;
 
-  --syn-keyword: #b477cf;
-  --syn-string: #a1c181;
-  --syn-function: #74ade8;
-  --syn-number: #bf956a;
-  --syn-comment: #858c99;
-  --syn-type: #e5c07b;
-  --syn-constant: #dfc184;
-  --syn-property: #d7868a;
-  --syn-punctuation: #b2b9c6;
+  --syn-keyword: #569cd6;
+  --syn-string: #ce9178;
+  --syn-function: #dcdcaa;
+  --syn-number: #b5cea8;
+  --syn-comment: #6a9955;
+  --syn-type: #4ec9b0;
+  --syn-constant: #4fc1ff;
+  --syn-property: #9cdcfe;
+  --syn-punctuation: #d4d4d4;
 
-  --thumb: #4c525e;
-  --shadow-overlay: 0 6px 16px rgb(0 0 0 / 28%);
+  --thumb: rgb(121 121 121 / 40%);
+  --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 36%);   /* widget.shadow */
 }
 
 [data-theme="light"] {
   color-scheme: light;
 
-  /* The light theme needs real steps between surfaces: white for the document,
-     a tinted panel, a darker chrome. One Light's values sit too close together
-     to tell the three apart on a large screen. */
+  /* VS Code Light Modern. */
   --bg: #ffffff;
-  --raised: #f3f3f5;
-  --overlay: #ffffff;
-  --chrome: #e9e9ec;
+  --raised: #f8f8f8;
+  --input: #ffffff;
+  --input-line: #cecece;
+  --tab-inactive: #e5e5e5;
+  --activity-fg: #1f1f1f;
+  --activity-inactive: #616161;
+  --badge: #cccccc;
+  --badge-fg: #3b3b3b;
+  --overlay: #f8f8f8;
+  --chrome: #f8f8f8;
 
-  --line: #d2d2d7;
-  --line-subtle: #e4e4e8;
-  --focus: #3f5bd8;
+  --line: #e5e5e5;
+  --line-subtle: #e5e5e5;
+  --widget-line: #cecece;
+  --focus: #005fb8;
 
-  --hover: #ebebef;
-  --active: #dcdce2;
-  --selected: #dcdce2;
+  --hover: #f2f2f2;
+  --active: #e8e8e8;
+  --selected: #e8e8e8;
+  --selected-fg: #000000;
+  --focus-outline: #005fb8;
 
-  --fg: #2b2d34;
-  --muted: #55575f;
-  --subtle: #74767e;
-  --disabled: #a4a5ac;
+  --fg: #3b3b3b;
+  --fg-strong: #1f1f1f;
+  --muted: #616161;
+  --subtle: #767676;
+  --disabled: #a0a0a0;
+  --request: rgb(0 0 0 / 3%);
+  --request-line: rgb(0 0 0 / 10%);
+  --preformat: rgb(0 0 0 / 12%);
+  --preformat-fg: #3b3b3b;
+  --codeblock: #f8f8f8;
+  --quote-line: #e5e5e5;
+  --btn2: #e5e5e5;
+  --btn2-line: rgb(0 0 0 / 10%);
+  --btn2-hover: #cccccc;
+  --btn-hover: #0258a8;
+  --toolbar-hover: rgb(184 184 184 / 31%);
+  --kbd: rgb(221 221 221 / 40%);
+  --kbd-line: rgb(204 204 204 / 40%);
+  --kbd-bottom: rgb(187 187 187 / 40%);
+  --line-number: #6e7681;
+  --line-number-active: #171184;
+  --guide: #a9a9a9;
+  --tile: #f3f3f3;
 
-  --accent: #3f5bd8;
+  --accent: #005fb8;
   --on-accent: #ffffff;
-  --success: #3d7a33;
-  --warning: #8a5f0a;
-  --danger: #b53a30;
+  --success: #388a34;
+  --warning: #bf8803;
+  --danger: #cd3131;
 
-  --accent-wash: rgb(63 91 216 / 10%);
-  --success-wash: rgb(61 122 51 / 13%);
-  --warning-wash: rgb(138 95 10 / 13%);
-  --danger-wash: rgb(181 58 48 / 11%);
+  --accent-wash: rgb(0 95 184 / 10%);
+  --success-wash: rgb(156 204 44 / 25%);
+  --warning-wash: rgb(191 136 3 / 12%);
+  --danger-wash: rgb(255 0 0 / 12%);
 
-  --modified: #8a5f0a;
-  --created: #3d7a33;
-  --deleted: #b53a30;
+  --modified: #895503;
+  --created: #587c0c;
+  --deleted: #ad0707;
 
-  --syn-keyword: #9a3fa6;
-  --syn-string: #3d7a33;
-  --syn-function: #3f5bd8;
-  --syn-number: #98601f;
-  --syn-comment: #74767e;
-  --syn-type: #8a5f0a;
-  --syn-constant: #8a5f0a;
-  --syn-property: #b53a30;
-  --syn-punctuation: #55575f;
+  --syn-keyword: #0000ff;
+  --syn-string: #a31515;
+  --syn-function: #795e26;
+  --syn-number: #098658;
+  --syn-comment: #008000;
+  --syn-type: #267f99;
+  --syn-constant: #0070c1;
+  --syn-property: #001080;
+  --syn-punctuation: #3b3b3b;
 
-  --thumb: #c2c2c8;
-  --shadow-overlay: 0 6px 16px rgb(0 0 0 / 10%);
+  --thumb: rgb(100 100 100 / 40%);
+  --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 16%);
 }
 
 /* Following the OS is the default: with no data-theme set, light applies only
@@ -125,20 +183,72 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
-    --bg: #ffffff; --raised: #f3f3f5; --overlay: #ffffff; --chrome: #e9e9ec;
-    --line: #d2d2d7; --line-subtle: #e4e4e8; --focus: #3f5bd8;
-    --hover: #ebebef; --active: #dcdce2; --selected: #dcdce2;
-    --fg: #2b2d34; --muted: #55575f; --subtle: #74767e; --disabled: #a4a5ac;
-    --accent: #3f5bd8; --on-accent: #ffffff;
-    --success: #3d7a33; --warning: #8a5f0a; --danger: #b53a30;
-    --accent-wash: rgb(63 91 216 / 10%); --success-wash: rgb(61 122 51 / 13%);
-    --warning-wash: rgb(138 95 10 / 13%); --danger-wash: rgb(181 58 48 / 11%);
-    --modified: #8a5f0a; --created: #3d7a33; --deleted: #b53a30;
-    --syn-keyword: #9a3fa6; --syn-string: #3d7a33; --syn-function: #3f5bd8;
-    --syn-number: #98601f; --syn-comment: #74767e; --syn-type: #8a5f0a;
-    --syn-constant: #8a5f0a; --syn-property: #b53a30; --syn-punctuation: #55575f;
-    --thumb: #c2c2c8;
-    --shadow-overlay: 0 6px 16px rgb(0 0 0 / 10%);
+    --bg: #ffffff;
+    --raised: #f8f8f8;
+    --input: #ffffff;
+    --input-line: #cecece;
+    --tab-inactive: #e5e5e5;
+    --activity-fg: #1f1f1f;
+    --activity-inactive: #616161;
+    --badge: #cccccc;
+    --badge-fg: #3b3b3b;
+    --overlay: #f8f8f8;
+    --chrome: #f8f8f8;
+    --line: #e5e5e5;
+    --line-subtle: #e5e5e5;
+    --widget-line: #cecece;
+    --focus: #005fb8;
+    --hover: #f2f2f2;
+    --active: #e8e8e8;
+    --selected: #e8e8e8;
+    --selected-fg: #000000;
+    --focus-outline: #005fb8;
+    --fg: #3b3b3b;
+    --fg-strong: #1f1f1f;
+    --muted: #616161;
+    --subtle: #767676;
+    --disabled: #a0a0a0;
+    --request: rgb(0 0 0 / 3%);
+    --request-line: rgb(0 0 0 / 10%);
+    --preformat: rgb(0 0 0 / 12%);
+    --preformat-fg: #3b3b3b;
+    --codeblock: #f8f8f8;
+    --quote-line: #e5e5e5;
+    --btn2: #e5e5e5;
+    --btn2-line: rgb(0 0 0 / 10%);
+    --btn2-hover: #cccccc;
+    --btn-hover: #0258a8;
+    --toolbar-hover: rgb(184 184 184 / 31%);
+    --kbd: rgb(221 221 221 / 40%);
+    --kbd-line: rgb(204 204 204 / 40%);
+    --kbd-bottom: rgb(187 187 187 / 40%);
+    --line-number: #6e7681;
+    --line-number-active: #171184;
+    --guide: #a9a9a9;
+    --tile: #f3f3f3;
+    --accent: #005fb8;
+    --on-accent: #ffffff;
+    --success: #388a34;
+    --warning: #bf8803;
+    --danger: #cd3131;
+    --accent-wash: rgb(0 95 184 / 10%);
+    --success-wash: rgb(156 204 44 / 25%);
+    --warning-wash: rgb(191 136 3 / 12%);
+    --danger-wash: rgb(255 0 0 / 12%);
+    --modified: #895503;
+    --created: #587c0c;
+    --deleted: #ad0707;
+    --syn-keyword: #0000ff;
+    --syn-string: #a31515;
+    --syn-function: #795e26;
+    --syn-number: #098658;
+    --syn-comment: #008000;
+    --syn-type: #267f99;
+    --syn-constant: #0070c1;
+    --syn-property: #001080;
+    --syn-punctuation: #3b3b3b;
+    --thumb: rgb(100 100 100 / 40%);
+    --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 16%);
   }
 }
 
@@ -148,6 +258,34 @@
   --color-overlay: var(--overlay);
   --color-chrome: var(--chrome);
   --color-panel: var(--raised);
+  --color-input: var(--input);
+  --color-input-line: var(--input-line);
+  --color-tab-inactive: var(--tab-inactive);
+  --color-activity-fg: var(--activity-fg);
+  --color-activity-inactive: var(--activity-inactive);
+  --color-badge: var(--badge);
+  --color-badge-fg: var(--badge-fg);
+  --color-widget-line: var(--widget-line);
+  --color-selected-fg: var(--selected-fg);
+  --color-focus-outline: var(--focus-outline);
+  --color-request: var(--request);
+  --color-request-line: var(--request-line);
+  --color-preformat: var(--preformat);
+  --color-preformat-fg: var(--preformat-fg);
+  --color-codeblock: var(--codeblock);
+  --color-quote-line: var(--quote-line);
+  --color-btn2: var(--btn2);
+  --color-btn2-line: var(--btn2-line);
+  --color-btn2-hover: var(--btn2-hover);
+  --color-btn-hover: var(--btn-hover);
+  --color-toolbar-hover: var(--toolbar-hover);
+  --color-kbd: var(--kbd);
+  --color-kbd-line: var(--kbd-line);
+  --color-kbd-bottom: var(--kbd-bottom);
+  --color-line-number: var(--line-number);
+  --color-line-number-active: var(--line-number-active);
+  --color-guide: var(--guide);
+  --color-tile: var(--tile);
 
   --color-line: var(--line);
   --color-line-subtle: var(--line-subtle);
@@ -158,6 +296,7 @@
   --color-selected: var(--selected);
 
   --color-fg: var(--fg);
+  --color-fg-strong: var(--fg-strong);
   --color-muted: var(--muted);
   --color-subtle: var(--subtle);
   --color-disabled: var(--disabled);
@@ -178,16 +317,20 @@
   --color-deleted: var(--deleted);
 
   /* type: a step per role. The app is dense, so the ramp is short and tight. */
-  --font-ui: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
-  --font-mono: "Lilex", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --text-2xs: 10px;
-  --text-2xs--line-height: 14px;
+  /* VS Code's own stacks: the workbench is the system face at 13px, the
+     editor is Menlo at 12px with the golden 1.5 line height on the Mac. The
+     vendored faces stay behind them for a machine that has neither. */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
+  --font-mono: Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", "Courier New", "Lilex", monospace;
+  /* No 10px anywhere: VS Code's smallest UI text is 11px (badges, status bar). */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 16px;
   --text-xs: 11px;
   --text-xs--line-height: 16px;
   --text-sm: 12px;
   --text-sm--line-height: 18px;
   --text-base: 13px;
-  --text-base--line-height: 20px;
+  --text-base--line-height: 22px;
   --text-md: 14px;
   --text-md--line-height: 22px;
 
@@ -208,7 +351,7 @@
     margin: 0;
     background: var(--bg);
     color: var(--fg);
-    font: 400 var(--text-base) / 1.45 var(--font-ui);
+    font: 400 var(--text-base) / 22px var(--font-ui);
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
     user-select: none;
@@ -227,15 +370,11 @@
   :focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; border-radius: 3px; }
   :focus:not(:focus-visible) { outline: none; }
 
-  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb {
-    background: var(--thumb);
-    border: 2px solid transparent;
-    background-clip: padding-box;
-    border-radius: 999px;
-  }
-  ::-webkit-scrollbar-thumb:hover { background-color: var(--subtle); background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 0; }
+  ::-webkit-scrollbar-thumb:hover { background: rgb(121 121 121 / 70%); }
+  ::-webkit-scrollbar-thumb:active { background: rgb(191 191 191 / 40%); }
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
@@ -263,3 +402,39 @@
   .wrap-words { overflow-wrap: normal; word-break: normal; }
 
 }
+
+/* Prose in an answer: the editor's mono at 12/20 — the terminal's own face,
+   which is what a person watching an agent expects — with real air between
+   blocks, real cells in tables, and a real step for headings. */
+.prose { font-family: var(--font-mono); font-size: 12px; line-height: 20px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
+.prose > * + * { margin-top: 10px; }
+.prose p, .prose li { line-height: 20px; }
+.prose ul, .prose ol { padding-left: 22px; }
+.prose li + li { margin-top: 3px; }
+.prose li::marker { color: var(--subtle); }
+.prose ul { list-style: disc; }
+.prose ol { list-style: decimal; }
+.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 700; line-height: 22px; color: var(--fg-strong); }
+.prose h1 { font-size: 14px; margin-top: 18px; }
+.prose h2 { font-size: 13px; margin-top: 16px; }
+.prose h3, .prose h4 { font-size: 12px; margin-top: 14px; }
+.prose > h1:first-child, .prose > h2:first-child, .prose > h3:first-child { margin-top: 0; }
+.prose hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.prose strong { font-weight: 700; color: var(--fg-strong); }
+.prose em { font-style: italic; color: var(--muted); }
+.prose code { font-family: var(--font-mono); font-size: 12px; padding: 1px 4px; border-radius: 2px; background: var(--preformat); color: var(--preformat-fg); }
+.prose pre { max-width: 100%; margin: 10px 0; padding: 10px 12px; border-radius: 2px; background: var(--codeblock); overflow-x: auto; }
+.prose pre code { padding: 0; background: none; color: inherit; font-size: 12px; line-height: 18px; white-space: pre; }
+.prose a { color: var(--accent); text-decoration: none; }
+.prose a:hover { text-decoration: underline; }
+.prose blockquote { margin: 10px 0; padding: 6px 12px; border-left: 3px solid var(--quote-line); background: var(--codeblock); color: var(--muted); }
+.prose table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 18px; margin: 10px 0; }
+.prose thead th { background: var(--codeblock); font-weight: 700; color: var(--fg-strong); text-align: left; }
+.prose th, .prose td { padding: 6px 10px; border: 1px solid var(--line); vertical-align: top; }
+.prose td code, .prose th code { font-size: 11px; }
+.prose tr:nth-child(even) td { background: rgb(128 128 128 / 4%); }
+
+/* Layout guard: a grid or flex item defaults to a min-content width, and one
+   long token anywhere would push its column under the next. Nothing in the
+   centre is allowed to be wider than the room it was given. */
+main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }

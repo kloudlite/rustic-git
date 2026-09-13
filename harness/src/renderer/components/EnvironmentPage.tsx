@@ -18,7 +18,7 @@ export function EnvironmentPage(props: { env: Environment; snapshots: Snapshot[]
 
   return (
     <div class="overflow-y-auto px-6 py-6 select-text">
-      <div class="mx-auto flex w-full max-w-[1100px] flex-col gap-8">
+      <div class="flex w-full flex-col gap-8">
         <header class="flex flex-col gap-4">
           <div class="flex items-center gap-3">
             <h1 class="truncate font-mono text-md font-medium">{props.env.name}</h1>
@@ -27,7 +27,7 @@ export function EnvironmentPage(props: { env: Environment; snapshots: Snapshot[]
             <Button icon="camera" size="sm" title="Freeze this environment so you can come back to it">Snapshot</Button>
             <Button icon="copy" size="sm" variant="ghost" title="Make a copy of your own">Clone</Button>
           </div>
-          <dl class="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line-subtle bg-line-subtle sm:grid-cols-4">
+          <dl class="grid grid-cols-2 gap-px overflow-hidden border border-line bg-line sm:grid-cols-4">
             <Stat label="Services">
               <span class="text-fg">{up()}</span>
               <span class="text-subtle"> / {props.env.services.length} up</span>
@@ -72,7 +72,7 @@ export function EnvironmentPage(props: { env: Environment; snapshots: Snapshot[]
           <Show
             when={props.snapshots.length}
             fallback={
-              <p class="rounded-md border border-dashed border-line px-4 py-6 text-center text-sm text-subtle">
+              <p class="border border-dashed border-line px-4 py-6 text-center text-subtle">
                 No snapshots yet. A snapshot freezes what every service runs, so you can clone it back later.
               </p>
             }
@@ -105,7 +105,7 @@ export function EnvironmentPage(props: { env: Environment; snapshots: Snapshot[]
 function Stat(props: { label: string; children: JSX.Element }) {
   return (
     <div class="bg-bg px-4 py-3">
-      <dt class="text-2xs font-semibold tracking-[0.08em] uppercase text-subtle">{props.label}</dt>
+      <dt class="text-2xs font-semibold uppercase text-subtle">{props.label}</dt>
       <dd class="mt-1 truncate font-mono text-sm">{props.children}</dd>
     </div>
   );
@@ -114,7 +114,7 @@ function Stat(props: { label: string; children: JSX.Element }) {
 function Section(props: { title: string; count: number; children: JSX.Element }) {
   return (
     <section class="flex flex-col gap-2.5">
-      <h2 class="flex items-center gap-2 text-xs font-semibold tracking-[0.06em] uppercase text-muted">
+      <h2 class="flex items-center gap-2 text-xs font-semibold uppercase text-muted">
         {props.title}
         <span class="rounded-full bg-active px-1.5 font-mono text-2xs font-normal tracking-normal text-subtle">{props.count}</span>
       </h2>
@@ -125,8 +125,8 @@ function Section(props: { title: string; count: number; children: JSX.Element })
 
 function Table(props: { cols: string; head: string[]; children: JSX.Element }) {
   return (
-    <div class="overflow-hidden rounded-md border border-line-subtle">
-      <div class={`grid ${props.cols} gap-4 border-b border-line-subtle bg-panel px-4 py-2 text-2xs font-semibold tracking-[0.06em] uppercase text-subtle`}>
+    <div class="overflow-hidden border border-line">
+      <div class={`grid ${props.cols} gap-4 border-b border-line bg-codeblock px-4 py-2 text-xs font-semibold uppercase text-subtle`}>
         <For each={props.head}>{(h, i) => <span classList={{ "text-right": i() === props.head.length - 1 }}>{h}</span>}</For>
       </div>
       <div class="divide-y divide-line-subtle">{props.children}</div>

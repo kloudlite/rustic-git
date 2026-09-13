@@ -1,35 +1,28 @@
-import { For, Show, createMemo, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack, type JSX } from "solid-js";
+import { marked } from "marked";
+import "../syntax";
 import { Icon } from "../ui/Icon";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { Kbd } from "../ui/parts";
 import { EnvironmentPage } from "./EnvironmentPage";
+import { SettingsPage } from "./SettingsPage";
 import { FileView } from "./FileView";
+import { TaskView } from "./TaskView";
+import { ToolCall } from "./ToolCall";
 import { HINTS } from "../keys";
-import type { Environment, Machine, Message, Snapshot, Thread } from "../model";
+import * as live from "../live";
+import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
 
 type Action = Extract<Message, { role: "action" }>;
-type Block = Exclude<Message, Action> | { role: "actions"; items: Action[] };
 
 const KIND_GLYPH = { spawn: "+", run: "$", fold: "⇡", note: "…" } as const;
 
-/** Everything the AI did between two things it said folds into one run. */
-function group(ms: Message[]): Block[] {
-  const out: Block[] = [];
-  for (const m of ms) {
-    const last = out[out.length - 1];
-    if (m.role === "action") {
-      if (last?.role === "actions") last.items.push(m);
-      else out.push({ role: "actions", items: [m] });
-    } else out.push(m);
-  }
-  return out;
-}
-
 /**
- * A machine holds several AI threads. The FIRST may change things — it spawns
- * agents, folds work back, ships. Every other thread is read-only: discussion
- * and planning. The tab bar is where that distinction is made visible.
+ * Every tab is a thread, and every thread belongs to a node of the machine's
+ * tree: the machine's own thread is the one that changes things, a workspace's
+ * is where that copy is worked, an ephemeral's is watched. With nothing open
+ * the pane is the home screen — the places a person can go.
  */
 export function Chat(props: {
   machine: Machine;
@@ -37,46 +30,138 @@ export function Chat(props: {
   env?: Environment;        // open as a tab of its own, when the dock asks for it
   snapshots: Snapshot[];
   onCloseEnv: () => void;
+  settings: boolean;        // the machine's settings page, a tab like the environment
+  onCloseSettings: () => void;
   threads: Thread[];
   threadId: string;
   onThread: (id: string) => void;
-  onNewThread: () => void;
+  onSwitch: () => void;
+  commands: { name: string; help: string }[];   // what `/` can complete to
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
+  dimmed?: boolean;                                   // the other pane: quieter, so the active one reads
+  onDropTab: (id: string, index: number) => void;     // a tab dragged onto this pane's tab row
+  onSplit?: () => void;                               // move the current tab to a new pane on the right
   onCloseThread: (id: string) => void;
   file?: { path: string; status?: string };
   onCloseFile: () => void;
-  /** The inspector rides with the thread: what it describes belongs to this
-      machine's tree, so it lives inside the tab rather than beside it. */
-  inspector?: JSX.Element;
+  task?: live.Task;          // a task's log, open in place like a file
+  onCloseTask: () => void;
   /** The shell, likewise: it runs in this machine, so it opens under the
       conversation inside the same container rather than across the window. */
   shell?: JSX.Element;
 }) {
   const thread = createMemo<Thread | undefined>(
-    () => props.threads.find((t) => t.id === props.threadId) ?? props.threads[0],
+    () => props.threads.find((t) => t.id === props.threadId),
   );
-  const blocks = createMemo(() => group(thread()?.messages ?? []));
+  const blocks = () => thread()?.messages ?? [];
+  // The live state behind this thread: the bench's, a side session's, or an
+  // idle one for a recorded thread (nothing arrives on it, so it stays quiet).
+  const L = () => live.thread(thread()?.pi ?? "");
+  // A long session reads in sittings: a gap of more than half an hour between
+  // two messages starts a new one, and every sitting but the latest folds to
+  // one line — what it covered and when — until it is opened. The transcript
+  // stays a page, not a scroll through the week.
+  const GAP = 30 * 60 * 1000;
+  const sittings = createMemo(() => {
+    const out: Message[][] = [];
+    let last: number | undefined;
+    for (const m of blocks()) {
+      if (!out.length || (m.ts && last && m.ts - last > GAP)) out.push([]);
+      out[out.length - 1].push(m);
+      if (m.ts) last = m.ts;
+    }
+    return out;
+  });
+  const [opened, setOpened] = createSignal(new Set<number>());
+  const isOpen = (i: number) => i === sittings().length - 1 || opened().has(i);
+  let hist = -1;     // how far back ↑ has walked; -1 is the draft
+  let draft = "";
+  // `/` completion: the commands whose name starts with what is typed, shown
+  // above the composer while the caret is still in the first word.
+  const [typed, setTyped] = createSignal("");
+  const [pick, setPick] = createSignal(0);
+  const matches = createMemo(() => {
+    const m = /^(\/[a-z-]*)$/i.exec(typed());
+    return m ? props.commands.filter((c) => c.name.startsWith(m[1].toLowerCase())) : [];
+  });
+  const accept = (t: HTMLTextAreaElement, i = pick()) => {
+    const c = matches()[i];
+    if (!c) return false;
+    t.value = c.name + " ";
+    setTyped(t.value);
+    fit(t);
+    t.setSelectionRange(t.value.length, t.value.length);
+    return true;
+  };
+  let scroller: HTMLDivElement | undefined;
+  // Reading back up is not fought: new content only pulls the view down when
+  // it was already at the bottom; otherwise a "jump to latest" pill appears.
+  const [behind, setBehind] = createSignal(false);
+  // The scroller is a reversed column: the browser itself keeps the view
+  // pinned to the end while scrollTop is 0, exactly as a terminal does, and
+  // never moves it once a person has scrolled up (scrollTop goes negative).
+  const atBottom = () => !!scroller && scroller.scrollTop > -2;
+  const toBottom = () => {
+    if (scroller) scroller.scrollTop = 0;
+    setBehind(false);
+  };
+  // Follow growth, not renders: whatever makes the column taller — a new row,
+  // a streamed word, an opened result — scrolls the view if it was at the
+  // bottom, and raises the pill if it was not.
+  let column: HTMLDivElement | undefined;
+  onMount(() => {
+    const ro = new ResizeObserver(() => { if (!atBottom()) setBehind(true); });
+    if (column) ro.observe(column);
+    onCleanup(() => ro.disconnect());
+  });
   const readonly = () => thread()?.readonly ?? false;
   // The environment takes the pane while it is open: it is a different subject,
   // not a property of the thread underneath it.
   const onEnv = () => !!props.env;
-  const onFile = () => !!props.file && !onEnv();
-  const away = () => onEnv();
+  const onFile = () => (!!props.file || !!props.task) && !onEnv();
+  const away = () => onEnv() || props.settings;
+  const empty = () => props.threads.length === 0 && !away();
   const running = () => props.machine.workspaces.flatMap((w) => w.ephemerals).filter((e) => e.state === "running").length;
 
   return (
-    <main class="grid h-full min-h-0 min-w-0 grid-rows-[34px_26px_minmax(0,1fr)] overflow-hidden">
-      <div class="flex items-stretch border-b border-line bg-chrome pr-2" role="tablist">
+    <main class="grid h-full min-h-0 min-w-0 overflow-clip transition-opacity" classList={{ "grid-rows-[35px_22px_minmax(0,1fr)]": !empty(), "grid-rows-[minmax(0,1fr)]": empty(), "opacity-70": props.dimmed }}>
+      {/* Nothing open, nothing to tab between: the home screen takes the whole pane. */}
+      <Show when={!empty()}>
+      <div
+        class="flex items-stretch border-b border-line bg-tab-inactive pr-2"
+        role="tablist"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          // Dropped on the row itself (past the last tab): goes to the end.
+          const id = e.dataTransfer?.getData("text/tab");
+          if (id) (e.preventDefault(), props.onDropTab(id, props.threads.length));
+        }}
+      >
         <For each={props.threads}>
-          {(t) => (
+          {(t, i) => (
             // A tab is a row, not a button: a close control cannot live inside a
             // button, and nesting one is invalid markup that browsers treat
             // inconsistently — which is why the close never fired.
             <div
               role="tab"
+              draggable={true}
+              onDragStart={(e) => e.dataTransfer?.setData("text/tab", t.id)}
+              onDragOver={(e) => (e.preventDefault(), e.stopPropagation())}
+              onDrop={(e) => {
+                const id = e.dataTransfer?.getData("text/tab");
+                if (!id || id === t.id) return;
+                e.preventDefault();
+                e.stopPropagation();
+                // Left half: before this tab; right half: after it.
+                const r = e.currentTarget.getBoundingClientRect();
+                props.onDropTab(id, i() + (e.clientX > r.left + r.width / 2 ? 1 : 0));
+              }}
               aria-selected={!away() && t.id === thread()?.id}
-              title={t.readonly ? "Read-only thread: discussion and planning, never a change" : "Main thread: the one that changes things"}
-              class="flex max-w-60 min-w-32 items-center gap-1.5 border-r border-line pr-2 pl-3 text-sm whitespace-nowrap text-muted
-                     hover:text-fg aria-selected:-mb-px aria-selected:border-b aria-selected:border-b-bg aria-selected:bg-bg aria-selected:text-fg"
+              title={TAB_TITLE[t.kind]}
+              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line pr-2 pl-3 text-base whitespace-nowrap text-muted
+                     hover:bg-bg aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
+                     aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
             >
               <button
                 class="flex min-w-0 flex-1 items-center gap-1.5 self-stretch"
@@ -86,18 +171,16 @@ export function Chat(props: {
                   props.onThread(t.id);
                 }}
               >
-                <Icon name={t.readonly ? "lock" : "sparkle"} class={t.readonly ? "text-subtle" : "text-accent"} />
+                <Icon name={TAB_ICON[t.kind]} class={t.kind === "ephemeral" || t.kind === "session" ? "text-muted" : "text-accent"} />
                 <span class="min-w-0 truncate">{t.name}</span>
               </button>
-              <Show when={t.readonly} fallback={<Badge tone="accent">main</Badge>}>
-                <button
-                  class="shrink-0 rounded-sm p-0.5 text-subtle hover:bg-line hover:text-fg"
-                  title="Close this thread"
-                  onClick={() => props.onCloseThread(t.id)}
-                >
-                  <Icon name="x" size={11} />
-                </button>
-              </Show>
+              <button
+                class="shrink-0 rounded-sm p-0.5 text-subtle hover:bg-line hover:text-fg"
+                title="Close (⌘W)"
+                onClick={() => props.onCloseThread(t.id)}
+              >
+                <Icon name="x" size={11} />
+              </button>
             </div>
           )}
         </For>
@@ -106,8 +189,9 @@ export function Chat(props: {
             <div
               role="tab"
               aria-selected={true}
-              class="flex max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 text-sm whitespace-nowrap text-muted
-                     aria-selected:-mb-px aria-selected:border-b aria-selected:border-b-bg aria-selected:bg-bg aria-selected:text-fg"
+              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 text-base whitespace-nowrap text-muted
+                     aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
+                     aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
             >
               <Icon name="server" class="text-accent" />
               <span class="min-w-0 flex-1 truncate font-mono">{env().name}</span>
@@ -117,81 +201,165 @@ export function Chat(props: {
             </div>
           )}
         </Show>
+        <Show when={props.settings}>
+          <div
+            role="tab"
+            aria-selected={true}
+            class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 text-base whitespace-nowrap text-muted
+                   aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
+                   aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
+          >
+            <Icon name="settings" class="text-accent" />
+            <span class="min-w-0 flex-1 truncate">settings</span>
+            <button class="shrink-0 rounded-sm p-0.5 text-subtle hover:bg-line hover:text-fg" title="Close" onClick={props.onCloseSettings}>
+              <Icon name="x" size={11} />
+            </button>
+          </div>
+        </Show>
         <span class="flex-1" />
-        <Button class="self-center" variant="icon" icon="plus" title="New read-only thread" onClick={props.onNewThread} />
-        <Button class="self-center" variant="icon" icon="split" title="Split" />
+        <Button class="self-center" variant="icon" icon="plus" title="Open a workspace (⌘T)" onClick={props.onSwitch} />
+        <Show when={props.onSplit}>
+          <Button class="self-center" variant="icon" icon="split" title="Split right (⌘\\)" onClick={props.onSplit} />
+        </Show>
+        <Show when={!away()}>
+          <Button
+            class="self-center aria-pressed:text-fg"
+            variant="icon"
+            icon="panelRight"
+            title="Inspector (⌘⌥B)"
+            aria-pressed={props.inspectorOpen}
+            onClick={props.onToggleInspector}
+          />
+        </Show>
       </div>
 
-      <div class="flex items-center gap-1.5 border-b border-line-subtle px-6 text-sm whitespace-nowrap text-muted">
+      <div class="flex h-5.5 items-center gap-1 px-4 text-base whitespace-nowrap text-fg/80">
         <Show
           when={!away()}
           fallback={
-            <>
+            <Show when={props.env} fallback={<><span>{props.team}</span><Icon name="chevronRight" size={16} class="text-fg/60" /><span>{props.machine.owner.split("@")[0]}</span><Icon name="chevronRight" size={16} class="text-fg/60" /><span>settings</span></>}>
               <span>team</span>
-              <span class="text-subtle">›</span>
+              <Icon name="chevronRight" size={16} class="text-fg/60" />
               <span>environment</span>
-              <span class="text-subtle">›</span>
+              <Icon name="chevronRight" size={16} class="text-fg/60" />
               <span>{props.env!.name}</span>
-            </>
+            </Show>
           }
         >
         <span>{props.team}</span>
-        <span class="text-subtle">›</span>
+        <Icon name="chevronRight" size={16} class="text-fg/60" />
         <span>{props.machine.owner.split("@")[0]}</span>
-        <span class="text-subtle">›</span>
+        <Icon name="chevronRight" size={16} class="text-fg/60" />
         <span>{thread()?.name}</span>
         <span class="flex-1" />
         <Show when={readonly()}>
-          <span class="inline-flex items-center gap-1 rounded-full bg-active px-2 text-xs text-muted">
-            <Icon name="lock" size={10} /> read-only
+          <span class="inline-flex items-center gap-1 text-xs text-muted">
+            <Icon name="lock" size={12} /> read-only
           </span>
         </Show>
         </Show>
       </div>
 
+      </Show>
+
       <Show when={props.env} keyed>
         {(env) => <EnvironmentPage env={env} snapshots={props.snapshots} />}
+      </Show>
+      <Show when={props.settings && !props.env}>
+        <SettingsPage machine={props.machine} />
       </Show>
 
 
       {/* The conversation and what it is about are one thing: they sit in a
           centred container together, rather than the transcript floating in the
           middle of the pane with the inspector pinned to the window's edge. */}
-      <div class="min-h-0 min-w-0 overflow-hidden" classList={{ hidden: away() }}>
-      <div class="mx-auto grid h-full min-h-0 w-full max-w-[1240px] grid-rows-[minmax(0,1fr)_auto]">
-      <div
-        class="grid min-h-0"
-        style={{ "grid-template-columns": props.inspector ? "minmax(0,1fr) 300px" : "minmax(0,1fr)" }}
-      >
-      <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono text-base [font-feature-settings:'calt']">
+      <Show when={!away() && !thread()}>
+        <Home machine={props.machine} team={props.team} onGo={props.onThread} onSwitch={props.onSwitch} />
+      </Show>
+
+      <div class="min-h-0 min-w-0 overflow-clip" classList={{ hidden: away() || !thread() }}>
+      {/* Every level here is `min-w-0`: a grid item defaults to a min-content
+          width, and one wide table or unbroken token in the transcript would
+          otherwise widen the column and run the text under the inspector. */}
+      <div class="grid h-full min-h-0 w-full min-w-0 grid-rows-[minmax(0,1fr)_auto]">
+      <div class="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)]">
+      <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono text-sm leading-[18px]">
         {/* A file opens in place: the thread stays selected and the sidebar
             stays put, because reading a file is part of following the work
             rather than a separate place to be. */}
         <Show when={props.file} keyed>
           {(f) => <FileView path={f.path} status={f.status} onClose={props.onCloseFile} />}
         </Show>
-        <div class="flex flex-col justify-end overflow-y-auto px-6 pt-5 pb-4 select-text" classList={{ hidden: onFile() }}>
-          <div class="flex max-w-[880px] flex-col gap-4">
+        <Show when={!props.file && props.task}>
+          {(t) => <TaskView task={t()} onClose={props.onCloseTask} />}
+        </Show>
+        {/* A reversed flex column: the end is the scroll origin, so the browser
+            keeps the view pinned there as content grows and leaves it alone
+            once a person scrolls up — the terminal's behaviour, no script. */}
+        <div
+          ref={scroller}
+          class="relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 pb-4 select-text"
+          classList={{ hidden: onFile() }}
+          onScroll={() => { if (atBottom()) setBehind(false); }}
+        >
+          <div ref={column} class="flex min-w-0 flex-col gap-4">
+            {/* A thread with nothing in it yet is a first run: say what the bench
+                is for and offer a few first asks, which fill the prompt rather
+                than send — the person's words go first. */}
+            <Show when={(thread()?.kind === "machine" || thread()?.kind === "session") && L().ready() && blocks().length === 0}>
+              <FirstRun team={props.team} onPick={(t) => {
+                const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+                if (c) (c.value = t, fit(c), c.focus());
+              }} />
+            </Show>
             {/* Where the thread begins, so the space above the first message reads
                 as the top of something rather than as nothing. */}
-            <div class="flex items-center gap-3 pb-1 font-ui text-xs text-subtle">
+            <div class="flex items-center gap-3 pb-1 font-ui text-xs text-subtle" classList={{ hidden: blocks().length === 0 }}>
               <span class="h-px flex-1 bg-line-subtle" />
               <span>
-                {thread()?.readonly ? "read-only thread" : "main thread"}
+                {thread()?.kind === "machine" ? "Bench Thread" : thread()?.kind === "ephemeral" ? "watching" : thread()?.kind === "btw" ? "forked from the bench · read-only" : thread()?.name}
                 <Show when={thread()?.messages[0]}>{(m) => <> · started {m().at}</>}</Show>
               </span>
               <span class="h-px flex-1 bg-line-subtle" />
             </div>
-            <For each={blocks()}>
+            <For each={sittings()}>
+              {(sit, si) => (
+                <Show when={isOpen(si())} fallback={<Folded messages={sit} onOpen={() => setOpened((o) => new Set(o).add(si()))} />}>
+                  <Show when={si() > 0}><SittingRule messages={sit} /></Show>
+            <For each={sit}>
               {(b) => (
-                <Show when={b.role !== "actions"} fallback={<Steps items={(b as { items: Action[] }).items} />}>
-                  <div class="flex items-start leading-6">
-                    <span class={`w-5 shrink-0 ${b.role === "user" ? "text-accent" : "text-muted"}`}>
-                      {b.role === "user" ? "❯" : "⏺"}
-                    </span>
-                    <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap">{(b as { text: string }).text}</span>
-                    <Time at={(b as { at: string }).at} />
-                  </div>
+                <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
+                  {/* A prompt is a command and reads like one; an answer is prose
+                      and reads in the UI face, so the two turns are told apart by
+                      their type rather than by a glyph alone. */}
+                  <Show
+                    when={b.role === "user"}
+                    fallback={
+                      <div class="flex items-start">
+                        <span class="w-5 shrink-0 leading-[20px] text-fg-strong">⏺</span>
+                        <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
+                      </div>
+                    }
+                  >
+                    <div class="flex flex-col leading-[18px]">
+                      <div class="-mx-3 flex items-start rounded-[2px] border border-request-line bg-request px-3 py-2">
+                        <span class="w-5 shrink-0 font-bold text-accent">&gt;</span>
+                        <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">{(b as { text: string }).text}</span>
+                        <Time at={(b as { at: string }).at} />
+                      </div>
+                      <For each={(b as { images?: number[] }).images ?? []}>
+                        {(n) => (
+                          <div class="flex items-start text-accent">
+                            <span class="w-5 shrink-0 pl-2 text-subtle">⎿</span>
+                            <span class="pl-1">[Image #{n}]</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </Show>
+              )}
+            </For>
                 </Show>
               )}
             </For>
@@ -202,28 +370,146 @@ export function Chat(props: {
             with the keys that drive it underneath rather than crowding it. */}
         {/* One box: the caret and the keys that drive it belong together, and a
             hint row floating underneath read as a second, unrelated thing. */}
-        <div class="bg-bg px-6 pt-1 pb-3.5" classList={{ hidden: onFile() }}>
-          <div class="flex flex-col rounded-md border border-line bg-panel transition-colors duration-100 focus-within:border-focus">
+        <div class="relative min-w-0 bg-bg px-6 pt-1 pb-3.5" classList={{ hidden: onFile() || thread()?.kind === "btw" }}>
+          <Show when={matches().length}>
+            <div class="absolute right-6 bottom-full left-6 z-20 mb-1 max-h-64 overflow-y-auto rounded-md border border-widget-line bg-overlay py-1 shadow-overlay">
+              <For each={matches()}>
+                {(c, i) => (
+                  <button
+                    class="flex h-5.5 w-full items-center gap-3 px-3 text-left font-mono text-sm"
+                    classList={{ "bg-selected text-selected-fg": i() === pick(), "text-fg": i() !== pick() }}
+                    onMouseMove={() => setPick(i())}
+                    onMouseDown={(e) => { e.preventDefault(); accept(e.currentTarget.closest("main")!.querySelector<HTMLTextAreaElement>("textarea[data-composer]")!, i()); }}
+                  >
+                    <span class="w-28 shrink-0">{c.name}</span>
+                    <span class="min-w-0 truncate font-ui text-xs" classList={{ "text-muted": i() !== pick() }}>{c.help}</span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={behind()}>
+            <button
+              class="absolute -top-9 left-1/2 z-10 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-[2px] border border-widget-line bg-overlay px-3 text-xs text-fg shadow-overlay hover:bg-hover"
+              onClick={toBottom}
+            >
+              <Icon name="chevronDown" size={12} /> Jump to latest
+            </button>
+          </Show>
+          <Show when={L().queue.length}>
+            <div class="mb-2 flex flex-col gap-1 px-3 font-mono text-sm">
+              <For each={L().queue}>
+                {(q) => (
+                  <div class="flex items-start gap-2 text-muted">
+                    <span class="w-12 shrink-0 text-xs text-subtle">{q.how === "steer" ? "steer" : "queued"}</span>
+                    <span class="min-w-0 flex-1 truncate">{q.text}</span>
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={L().busy() && thread()?.pi}>
+            <div class="flex items-center gap-2 px-3 pb-2 font-mono text-sm text-muted">
+              <span class="animate-pulse text-accent">✻</span>
+              <span>Working…</span>
+              <span class="text-subtle">(esc to interrupt · ^B to background a command)</span>
+            </div>
+          </Show>
+          <div class="flex flex-col rounded-[2px] border border-input-line bg-input transition-colors duration-100 focus-within:border-focus">
             <div class="flex items-start px-3 pt-2 pb-1.5">
               <span class="w-5 shrink-0 leading-5 text-accent">❯</span>
+              {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
+                  ⇧↩ is a newline, so a long prompt is still written in place. */}
               <textarea
-                id="composer"
+                data-composer
                 rows="1"
-                class="max-h-44 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 leading-5 outline-none placeholder:text-subtle"
-                placeholder={readonly() ? "ask or discuss · this thread cannot change anything" : "tell the machine what to do"}
+                class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 leading-5 outline-none placeholder:text-subtle"
+                placeholder={thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
+                onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), (hist = -1))}
+                onKeyDown={(e) => {
+                  // Completion first: while suggestions show, ↑/↓ move, ⇥ and ↩
+                  // take one (↩ sends only when the word is already complete).
+                  if (matches().length) {
+                    const t = e.currentTarget;
+                    if (e.key === "ArrowDown") return (e.preventDefault(), setPick((p) => (p + 1) % matches().length));
+                    if (e.key === "ArrowUp") return (e.preventDefault(), setPick((p) => (p - 1 + matches().length) % matches().length));
+                    if (e.key === "Tab") return (e.preventDefault(), void accept(t));
+                    if (e.key === "Escape") return (e.preventDefault(), setTyped(""));
+                    if (e.key === "Enter" && !e.shiftKey && matches()[pick()]?.name !== t.value.trim()) return (e.preventDefault(), e.stopPropagation(), void accept(t));
+                  }
+                  // ↑/↓ walk the prompts already sent, shell-style, but only
+                  // when the caret is on the first/last line so a multi-line
+                  // prompt is still navigable; a draft in progress is kept.
+                  const t = e.currentTarget;
+                  const sent = blocks().filter((m) => m.role === "user").map((m) => (m as { text: string }).text);
+                  if (!sent.length) return;
+                  const onFirst = !t.value.slice(0, t.selectionStart).includes("\n");
+                  const onLast = !t.value.slice(t.selectionEnd).includes("\n");
+                  if (e.key === "ArrowUp" && onFirst) {
+                    if (hist === -1) draft = t.value;
+                    if (hist < sent.length - 1) hist++;
+                    else return;
+                  } else if (e.key === "ArrowDown" && onLast && hist >= 0) {
+                    hist--;
+                  } else return;
+                  e.preventDefault();
+                  t.value = hist === -1 ? draft : sent[sent.length - 1 - hist];
+                  fit(t);
+                  t.setSelectionRange(t.value.length, t.value.length);
+                }}
+                onPaste={(e) => {
+                  // An image on the clipboard attaches; text pastes as text.
+                  const files = Array.from(e.clipboardData?.items ?? []).filter((i) => i.type.startsWith("image/")).map((i) => i.getAsFile()).filter((f): f is File => !!f);
+                  if (!files.length) return;
+                  e.preventDefault();
+                  const t = e.currentTarget;
+                  void Promise.all(files.map(L().attach)).then((ns) => {
+                    const token = ns.map((n) => `[Image #${n}]`).join(" ");
+                    const at = t.selectionStart ?? t.value.length;
+                    const before = t.value.slice(0, at);
+                    const after = t.value.slice(t.selectionEnd ?? at);
+                    t.value = `${before}${before && !/\s$/.test(before) ? " " : ""}${token}${after && !/^\s/.test(after) ? " " : ""}${after}`;
+                    const caret = t.value.length - after.length;
+                    t.setSelectionRange(caret, caret);
+                    fit(t);
+                    t.focus();
+                  });
+                }}
               />
             </div>
-            <div class="flex items-center gap-4 border-t border-line-subtle px-3 py-1.5 text-xs text-subtle">
-              <For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>
-              <Show when={readonly()}><Hint keys="/promote">to main</Hint></Show>
+            {/* What is attached, as thumbnails the way an editor shows a pasted
+                image: small, removable, sent with the next message. */}
+            <Show when={L().attachments().length}>
+              <div class="flex flex-wrap gap-2 px-3 pb-2">
+                <For each={L().attachments()}>
+                  {(img) => (
+                    <div class="group relative h-14 w-14 overflow-hidden rounded-[2px] border border-input-line bg-input">
+                      <img src={img.url} alt="" class="h-full w-full object-cover" />
+                      <button
+                        class="absolute top-0.5 right-0.5 hidden size-4 items-center justify-center rounded-sm bg-overlay text-fg group-hover:inline-flex"
+                        title="Remove"
+                        onClick={() => L().detach(img.id)}
+                      >
+                        <Icon name="x" size={10} />
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <div class="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line-subtle px-3 py-1.5 font-ui text-xs text-subtle">
+              <Show when={L().busy()} fallback={<For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>}>
+                <Hint keys="↩">queue after this</Hint>
+                <Hint keys="⌘↩">steer now</Hint>
+                <Hint keys="⇧↩">newline</Hint>
+              </Show>
               <span class="flex-1" />
-              <span class="truncate">{props.machine.model}</span>
+              <span class="min-w-0 truncate" title={L().status()}>{L().busy() ? "working…" : L().status()}</span>
             </div>
           </div>
         </div>
         {props.shell}
       </div>
-      {props.inspector}
       </div>
       </div>
       </div>
@@ -232,9 +518,162 @@ export function Chat(props: {
 }
 
 /** Times sit in a column of their own, right aligned, so they read as a margin. */
-function Time(props: { at: string; wide?: boolean }) {
+const TAB_ICON = { machine: "machine", session: "thread", workspace: "workspace", ephemeral: "ephemeral", btw: "lock" } as const;
+const TAB_TITLE = {
+  machine: "The bench thread: the one that changes things",
+  session: "A session of the bench: one thing being worked on",
+  workspace: "This workspace's thread",
+  ephemeral: "An agent's log: watch, it cannot be steered",
+  btw: "A read-only side session forked from the bench: ask, it changes nothing",
+} as const;
+
+/**
+ * Nothing open. The pane reads as a start page: who and where at the top,
+ * then the places a person can go on the left and the keys that take them
+ * there on the right — one screen, no scrolling, nothing to learn twice.
+ */
+function Home(props: { machine: Machine; team: string; onGo: (id: string) => void; onSwitch: () => void }) {
+  const running = (w: Workspace) => w.ephemerals.filter((e) => e.state === "running").length;
+  const KEYS_SHOWN: [string, string][] = [
+    ["⌘T", "switch workspace"],
+    ["⌘P", "go to anything"],
+    ["⌘⇧P", "every command"],
+    ["⌘J", "shell"],
+    ["⌘E", "environment"],
+    ["⌘,", "settings"],
+  ];
   return (
-    <span class={`shrink-0 pl-6 text-right text-xs whitespace-nowrap tabular-nums text-subtle ${props.wide ? "w-28" : "w-11"}`}>
+    <div class="flex min-h-0 items-center justify-center overflow-y-auto p-10">
+      <div class="w-full max-w-[820px]">
+        <header class="mb-8 flex items-end gap-4 border-b border-line-subtle pb-5">
+          <div class="min-w-0 flex-1">
+            <div class="text-2xs font-semibold uppercase text-subtle">{props.team} · {props.machine.owner.split("@")[0]}</div>
+            <h1 class="mt-1 text-md font-medium">Bench</h1>
+            <p class="mt-1 truncate text-sm text-muted">{props.machine.goal || "No goal yet. The first message sets it."}</p>
+          </div>
+          <Button icon="workspace" onClick={props.onSwitch} title="⌘T">Open a workspace</Button>
+        </header>
+
+        <div class="grid grid-cols-[minmax(0,1fr)_240px] gap-12">
+          <section>
+            <div class="mb-1.5 text-2xs font-semibold uppercase text-subtle">Open</div>
+            <div class="flex flex-col">
+              <button class={HOME_ROW} onClick={() => props.onGo(props.machine.id)}>
+                <Icon name="machine" size={14} class="shrink-0 text-accent" />
+                <span class="text-sm text-fg">Bench Thread</span>
+                <span class="min-w-0 flex-1 truncate text-xs text-subtle">the thread that changes things</span>
+              </button>
+              <For each={props.machine.workspaces}>
+                {(w) => (
+                  <button class={HOME_ROW} onClick={() => props.onGo(w.id)}>
+                    <Icon name="workspace" size={14} class={`shrink-0 ${w.state === "running" ? "text-accent" : "text-subtle"}`} />
+                    <span class="font-mono text-sm text-fg">{w.name}</span>
+                    <span class="min-w-0 flex-1 truncate font-mono text-xs text-subtle">{w.repo} · {w.branch}</span>
+                    <Show when={running(w)}>
+                      {(n) => <span class="inline-flex items-center gap-1.5 text-xs text-muted"><span class="size-1.5 rounded-full bg-success" />{n()} running</span>}
+                    </Show>
+                  </button>
+                )}
+              </For>
+            </div>
+          </section>
+
+          <section>
+            <div class="mb-1.5 text-2xs font-semibold uppercase text-subtle">Keys</div>
+            <div class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
+              <For each={KEYS_SHOWN}>
+                {([k, label]) => (
+                  <>
+                    <Kbd>{k}</Kbd>
+                    <span class="text-xs text-muted">{label}</span>
+                  </>
+                )}
+              </For>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const HOME_ROW = "flex h-5.5 w-full items-center gap-2 px-3 text-left hover:bg-hover";
+
+const FIRST_ASKS = [
+  "Set up a workspace on kloudlite/rustic-git and run the test suite",
+  "Read the open issues and propose a plan for the next release",
+  "Fix the failing SLO probe and verify it on the fleet",
+];
+
+function FirstRun(props: { team: string; onPick: (text: string) => void }) {
+  return (
+    <div class="mb-6 flex flex-col gap-5 font-ui">
+      <div>
+        <h2 class="text-md font-medium">Your bench for {props.team}</h2>
+        <p class="mt-1 max-w-[60ch] text-sm leading-relaxed text-muted">
+          Say what you want done. The bench sets that as its goal, makes a plan, and opens the workspaces
+          and agents it needs — you watch them appear on the left and read their work here.
+        </p>
+      </div>
+      <div class="flex flex-col gap-1">
+        <div class="text-2xs font-semibold uppercase text-subtle">Try</div>
+        <For each={FIRST_ASKS}>
+          {(t) => (
+            <button class="flex h-6.5 w-fit max-w-full items-center gap-2 rounded-[2px] border border-btn2-line bg-btn2 px-3 text-left text-fg hover:bg-btn2-hover" onClick={() => props.onPick(t)}>
+              <span class="text-accent">❯</span>
+              <span class="truncate">{t}</span>
+            </button>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+}
+
+const when = (ms: Message[]) => {
+  const first = ms.find((m) => m.ts)?.ts;
+  const last = [...ms].reverse().find((m) => m.ts)?.ts;
+  if (!first || !last) return "";
+  const d = new Date(first);
+  const day = d.toDateString() === new Date().toDateString() ? "today" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return `${day} ${new Date(first).toTimeString().slice(0, 5)}–${new Date(last).toTimeString().slice(0, 5)}`;
+};
+
+/** A sitting that is folded: one line saying what it held, opened by a click. */
+function Folded(props: { messages: Message[]; onOpen: () => void }) {
+  const prompts = () => props.messages.filter((m) => m.role === "user").length;
+  const first = () => (props.messages.find((m) => m.role === "user") as { text?: string } | undefined)?.text ?? "";
+  return (
+    <button class="group -mx-3 flex items-center gap-3 rounded-sm px-3 py-1 text-left font-ui text-xs text-subtle hover:bg-hover hover:text-fg" onClick={props.onOpen} title="Open this sitting">
+      <span class="h-px w-6 shrink-0 bg-line-subtle" />
+      <span class="shrink-0 tabular-nums">{when(props.messages)}</span>
+      <span class="shrink-0">· {prompts()} {prompts() === 1 ? "prompt" : "prompts"}</span>
+      <span class="min-w-0 flex-1 truncate font-mono text-muted">{first()}</span>
+      <span class="h-px flex-1 bg-line-subtle" />
+    </button>
+  );
+}
+
+/** Where an opened sitting begins, so the gap before it still reads. */
+function SittingRule(props: { messages: Message[] }) {
+  return (
+    <div class="flex items-center gap-3 pt-2 font-ui text-xs text-subtle">
+      <span class="h-px flex-1 bg-line-subtle" />
+      <span class="tabular-nums">{when(props.messages)}</span>
+      <span class="h-px flex-1 bg-line-subtle" />
+    </div>
+  );
+}
+
+/** Size the composer to its text: collapse first, so it shrinks as well as grows. */
+export function fit(t: HTMLTextAreaElement) {
+  t.style.height = "0";
+  t.style.height = t.value ? `${t.scrollHeight}px` : "";
+}
+
+function Time(props: { at: string }) {
+  return (
+    <span class="shrink-0 pl-6 text-right text-xs leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
       {props.at}
     </span>
   );
@@ -242,43 +681,98 @@ function Time(props: { at: string; wide?: boolean }) {
 
 function Hint(props: { keys: string; children: string }) {
   return (
-    <span class="inline-flex items-baseline gap-1.5 whitespace-nowrap">
+    <span class="inline-flex items-center gap-1.5 whitespace-nowrap">
       <Kbd>{props.keys}</Kbd>
       {props.children}
     </span>
   );
 }
 
-/** A run of steps: a headline, then each step hanging off a box-drawing rail. */
-function Steps(props: { items: Action[] }) {
-  const first = () => props.items[0];
-  const last = () => props.items[props.items.length - 1];
-  const bad = () => props.items.some((a) => a.ok === false);
-  const targets = () => Array.from(new Set(props.items.map((a) => a.target?.split(" ")[0]).filter(Boolean)));
-
+/**
+ * A tool call, the way the terminal prints it: `⏺ Bash(cmd)` on one line, the
+ * result hanging under it on a `⎿` rail — the first lines, then `… +N lines`
+ * that opens on click. A call still running shows a dim dot; a failed one red.
+ */
+function Step(props: { a: Action }) {
+  const [openOut, setOpenOut] = createSignal(false);
+  const [showOut, setShowOut] = createSignal(true); // the call line folds its result away
+  const HEAD = 5;
+  const lines = () => (props.a.output ?? "").replace(/\s+$/, "").split("\n");
+  const more = () => Math.max(0, lines().length - HEAD);
+  const shown = () => (openOut() ? lines() : lines().slice(0, HEAD));
+  const tool = () => (props.a.target && !/\s/.test(props.a.target) ? props.a.target : undefined);
+  const tone = () => (props.a.pending ? "text-subtle" : props.a.ok === false ? "text-danger" : "text-success");
   return (
-    <div class="flex flex-col">
-      <div class="flex items-start leading-6">
-        <span class={`w-5 shrink-0 ${bad() ? "text-danger" : "text-success"}`}>{bad() ? "✗" : "✓"}</span>
-        <span class="min-w-0 flex-1 text-muted">
-          {props.items.length} {props.items.length === 1 ? "step" : "steps"}
-          <span class="text-subtle"> · {targets().join(" ")}</span>
+    <div class="flex flex-col leading-[18px]">
+      {/* `⏺ Bash(cmd)` then `⎿  output` — the terminal's own shape, in the
+          terminal's own face, nothing drawn that the terminal would not. */}
+      <div class="flex cursor-pointer items-start" onClick={() => setShowOut((v) => !v)} title={showOut() ? "Fold the result" : "Show the result"}>
+        <span class={`w-5 shrink-0 ${tone()}`} classList={{ "animate-pulse": props.a.pending }}>⏺</span>
+        <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
+          <Show when={tool()} fallback={<><Show when={props.a.target}><span class="font-bold text-fg-strong">{props.a.target} </span></Show>{props.a.text}</>}>
+            <span class="font-bold text-fg-strong">{tool()}</span><span class="text-subtle">(</span>{props.a.text}<span class="text-subtle">)</span>
+          </Show>
         </span>
-        <Time at={first().at === last().at ? first().at : `${first().at}–${last().at}`} wide />
       </div>
-      <For each={props.items}>
-        {(a, i) => (
-          <div class="group flex items-start leading-5 text-muted">
-            <span class="w-5 shrink-0 text-line">{i() === props.items.length - 1 ? "└" : "├"}</span>
-            <span class={`w-4 shrink-0 ${a.ok === true ? "text-success" : a.ok === false ? "text-danger" : "text-subtle"}`}>
-              {KIND_GLYPH[a.kind]}
-            </span>
-            <span class="shrink-0 pr-2 whitespace-nowrap text-fg">{a.target}</span>
-            <span class="min-w-0 flex-1 whitespace-pre-wrap group-hover:text-fg">{a.text}</span>
-            <Time at={a.at} />
+      <Show when={(props.a.output !== undefined || props.a.pending) && showOut()}>
+        <div class="flex items-start" classList={{ "text-muted": props.a.ok !== false, "text-danger": props.a.ok === false }}>
+          <span class="w-5 shrink-0 pl-2 text-subtle">⎿</span>
+          <div class="min-w-0 flex-1 pl-1">
+            <Show when={!props.a.pending} fallback={<span class="text-accent">Running…</span>}>
+              <Show when={props.a.output} fallback={<span class="text-subtle">(No output)</span>}>
+                <pre class="m-0 whitespace-pre-wrap wrap-words font-[inherit]">{shown().join("\n")}</pre>
+                <Show when={more()}>
+                  <button class="text-subtle hover:text-fg" onClick={(e) => (e.stopPropagation(), setOpenOut((v) => !v))}>
+                    {openOut() ? "… collapse" : `… +${more()} ${more() === 1 ? "line" : "lines"}`}
+                  </button>
+                </Show>
+              </Show>
+            </Show>
           </div>
-        )}
-      </For>
+        </div>
+      </Show>
     </div>
   );
 }
+
+/**
+ * Assistant prose is markdown, as Claude Code renders it. While a message
+ * streams, the parse runs on a short trailing timer rather than on every
+ * token: re-rendering the whole block per token is what flickered, and a
+ * reader cannot tell 80 ms from 0.
+ */
+function Prose(props: { text: string; latest?: boolean }) {
+  // A long answer that is not the one being read folds to its head, with the
+  // rest a click away; the latest answer is always whole.
+  const LONG = 40;
+  const lines = () => props.text.split("\n").length;
+  const [openAll, setOpenAll] = createSignal(false);
+  const folded = () => !props.latest && !openAll() && lines() > LONG;
+  const shown = () => (folded() ? props.text.split("\n").slice(0, 16).join("\n") : props.text);
+  const [html, setHtml] = createSignal(render(shown()));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const text = shown();
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      setHtml(render(untrack(shown)));
+    }, 80);
+    void text;
+  });
+  onCleanup(() => clearTimeout(timer));
+  return (
+    <div class="min-w-0 flex-1">
+      <div class="prose" innerHTML={html()} />
+      <Show when={folded()}>
+        <button class="mt-1 font-mono text-sm text-subtle hover:text-fg" onClick={() => setOpenAll(true)}>… +{lines() - 16} lines</button>
+      </Show>
+      <Show when={openAll() && lines() > LONG}>
+        <button class="mt-1 font-mono text-sm text-subtle hover:text-fg" onClick={() => setOpenAll(false)}>… collapse</button>
+      </Show>
+    </div>
+  );
+}
+
+const render = (text: string) => marked.parse(text, { async: false, gfm: true, breaks: false }) as string;
+

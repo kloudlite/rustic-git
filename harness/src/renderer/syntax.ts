@@ -73,3 +73,16 @@ export function highlight(line: string, language?: string): string {
     return escape(line);
   }
 }
+
+import { marked } from "marked";
+
+// Fenced code in prose goes through the same highlighter as a file view, so a
+// snippet in an answer and the file it came from look the same.
+marked.use({
+  renderer: {
+    code({ text, lang }) {
+      const body = text.split("\n").map((l) => highlight(l, lang || undefined)).join("\n");
+      return `<pre><code>${body}</code></pre>`;
+    },
+  },
+});

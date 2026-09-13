@@ -1,4 +1,4 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { DIFFS, FILES } from "../model";
@@ -91,73 +91,78 @@ function parse(text: string): Row[] {
   return out;
 }
 
-const GUTTER = "w-11 shrink-0 px-2 text-right tabular-nums select-none";
+const GUTTER = "w-11 shrink-0 px-2 text-right tabular-nums text-line-number select-none";
 
 /**
- * Consecutive changed lines are one block, not a stack of separately tinted
- * rows: a replacement reads as one edit, so its removed and added halves share a
- * single rule down the edge.
+ * The file as it is now, with what left it folded away: added lines carry a
+ * green number, a run of deleted lines is one marker — `— 3 deleted —` — that
+ * opens on click to show them. Reading a diff is reading the new file; the
+ * old text is there when it is wanted, not in the way when it is not.
  */
-function runs(rows: Row[]): Row[][] {
-  const out: Row[][] = [];
-  for (const r of rows) {
-    const last = out[out.length - 1];
-    const changed = r.kind === "add" || r.kind === "del";
-    const lastChanged = last && (last[0].kind === "add" || last[0].kind === "del");
-    if (changed && lastChanged) last.push(r);
-    else out.push([r]);
-  }
-  return out;
-}
-
 function Diff(props: { rows: Row[]; lang?: string }) {
+  const groups = createMemo(() => {
+    const out: (Row | { kind: "gone"; rows: Row[] })[] = [];
+    for (const r of props.rows) {
+      const last = out[out.length - 1];
+      if (r.kind === "del") {
+        if (last && last.kind === "gone") last.rows.push(r);
+        else out.push({ kind: "gone", rows: [r] });
+      } else out.push(r);
+    }
+    return out;
+  });
+
   return (
-    <For each={runs(props.rows)}>
-      {(run) => (
-        <Show
-          when={run[0].kind !== "hunk"}
-          fallback={
-            <div class="flex items-center gap-3 border-y border-line-subtle bg-panel px-3 py-1 text-subtle">
-              <span class="font-ui text-2xs tracking-[0.06em] uppercase">hunk</span>
-              <span class="truncate">{run[0].text}</span>
+    <For each={groups()}>
+      {(g) => (
+        <Switch>
+          <Match when={g.kind === "hunk"}>
+            <div class="flex items-center gap-3 border-y border-line bg-codeblock px-3 py-1 text-subtle">
+              <span class="font-ui text-2xs uppercase">hunk</span>
+              <span class="truncate">{(g as Row).text}</span>
             </div>
-          }
-        >
-          <div
-            class="border-l-2"
-            classList={{
-              "border-transparent": run[0].kind === "ctx",
-              "border-created": run.every((r) => r.kind === "add"),
-              "border-deleted": run.every((r) => r.kind === "del"),
-              "border-warning": run.some((r) => r.kind === "add") && run.some((r) => r.kind === "del"),
-            }}
-          >
-            <For each={run}>
-              {(r) => (
-                <div
-                  class="flex"
-                  classList={{ "bg-success-wash": r.kind === "add", "bg-danger-wash": r.kind === "del" }}
-                >
-                  <span class={`${GUTTER} ${r.kind === "add" ? "text-transparent" : "text-subtle"}`}>{r.old ?? ""}</span>
-                  <span class={`${GUTTER} ${r.kind === "del" ? "text-transparent" : "text-subtle"}`}>{r.neu ?? ""}</span>
-                  <span
-                    class="w-4 shrink-0 text-center select-none"
-                    classList={{
-                      "text-created": r.kind === "add",
-                      "text-deleted": r.kind === "del",
-                      "text-transparent": r.kind === "ctx",
-                    }}
-                  >
-                    {r.kind === "add" ? "+" : r.kind === "del" ? "−" : " "}
-                  </span>
-                  <span class="flex-1 pr-4 pl-2 whitespace-pre" innerHTML={highlight(r.text, props.lang)} />
-                </div>
-              )}
-            </For>
-          </div>
-        </Show>
+          </Match>
+          <Match when={g.kind === "gone"}>
+            <Gone rows={(g as { rows: Row[] }).rows} lang={props.lang} />
+          </Match>
+          <Match when={g.kind === "add" || g.kind === "ctx"}>
+            <div class="flex" classList={{ "bg-success-wash/40": g.kind === "add" }}>
+              <span class={`${GUTTER} ${g.kind === "add" ? "text-created" : ""}`}>{(g as Row).neu}</span>
+              <span class="flex-1 pr-4 pl-3 whitespace-pre" innerHTML={highlight((g as Row).text, props.lang)} />
+            </div>
+          </Match>
+        </Switch>
       )}
     </For>
+  );
+}
+
+/** A run of deleted lines, folded to one marker until it is opened. */
+function Gone(props: { rows: Row[]; lang?: string }) {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <>
+      <button
+        class="flex w-full items-center gap-2 py-0.5 text-left text-deleted select-none hover:bg-danger-wash/40"
+        onClick={() => setOpen((v) => !v)}
+        title={open() ? "Hide the deleted lines" : "Show the deleted lines"}
+      >
+        <span class={`${GUTTER} text-transparent`}>0</span>
+        <span class="h-px w-6 bg-deleted/60" />
+        <span class="text-sm">{props.rows.length} deleted</span>
+        <span class="h-px w-6 bg-deleted/60" />
+      </button>
+      <Show when={open()}>
+        <For each={props.rows}>
+          {(r) => (
+            <div class="flex bg-danger-wash/40">
+              <span class={`${GUTTER} text-deleted`}>{r.old}</span>
+              <span class="flex-1 pr-4 pl-3 whitespace-pre opacity-70" innerHTML={highlight(r.text, props.lang)} />
+            </div>
+          )}
+        </For>
+      </Show>
+    </>
   );
 }
 
@@ -167,7 +172,7 @@ function Plain(props: { text: string; lang?: string }) {
     <For each={props.text.split("\n")}>
       {(l, i) => (
         <div class="group flex hover:bg-hover">
-          <span class={`${GUTTER} text-subtle group-hover:text-muted`}>{i() + 1}</span>
+          <span class={`${GUTTER} group-hover:text-line-number-active`}>{i() + 1}</span>
           <span class="w-px shrink-0 bg-line-subtle" />
           <span class="flex-1 pr-4 pl-3 whitespace-pre" innerHTML={highlight(l, props.lang)} />
         </div>

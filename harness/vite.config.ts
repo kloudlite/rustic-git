@@ -6,5 +6,9 @@ export default defineConfig({
   root: "src/renderer",
   base: "./",
   plugins: [solid(), tailwindcss()],
-  build: { outDir: "../../dist/renderer", emptyOutDir: true },
+  build: {
+    outDir: "../../dist/renderer",
+    emptyOutDir: true,
+    rollupOptions: { input: { index: "src/renderer/index.html", preview: "src/renderer/preview.html" } },
+  },
 });

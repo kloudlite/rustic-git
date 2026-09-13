@@ -5,15 +5,15 @@ import { cx } from "./cx";
 type Variant = "default" | "primary" | "ghost" | "danger" | "icon";
 
 const BASE =
-  "inline-flex items-center justify-center gap-1.5 rounded-md whitespace-nowrap " +
+  "inline-flex items-center justify-center gap-1.5 rounded-[2px] whitespace-nowrap " +
   "transition-colors duration-100 ease-out-quick disabled:text-disabled";
 
 const VARIANT: Record<Variant, string> = {
-  default: "bg-active text-fg hover:bg-line disabled:bg-hover",
-  primary: "bg-accent text-on-accent font-medium hover:brightness-110 disabled:bg-active disabled:brightness-100",
-  ghost: "bg-transparent text-muted hover:bg-line hover:text-fg",
+  default: "border border-btn2-line bg-btn2 text-fg hover:bg-btn2-hover disabled:opacity-50",
+  primary: "border border-btn2-line bg-focus text-on-accent hover:bg-btn-hover disabled:opacity-50",
+  ghost: "bg-transparent text-fg hover:bg-toolbar-hover",
   danger: "bg-transparent text-danger border border-line hover:bg-danger-wash",
-  icon: "bg-transparent text-muted hover:bg-line hover:text-fg",
+  icon: "bg-transparent text-fg hover:bg-toolbar-hover",
 };
 
 export function Button(props: {
@@ -25,6 +25,7 @@ export function Button(props: {
   title?: string;
   "aria-pressed"?: boolean;
   onClick?: (e: MouseEvent) => void;
+  onPointerDown?: (e: PointerEvent) => void;
   class?: string;
   children?: JSX.Element;
 }) {
@@ -44,10 +45,11 @@ export function Button(props: {
       title={props.title}
       aria-pressed={props["aria-pressed"]}
       onClick={(e) => props.onClick?.(e)}
+      onPointerDown={(e) => props.onPointerDown?.(e)}
     >
-      <Show when={props.icon}>{(n) => <Icon name={n()} size={sm() ? 12 : 13} />}</Show>
+      <Show when={props.icon}>{(n) => <Icon name={n()} size={16} />}</Show>
       {props.children}
-      <Show when={props.iconRight}>{(n) => <Icon name={n()} size={sm() ? 11 : 12} />}</Show>
+      <Show when={props.iconRight}>{(n) => <Icon name={n()} size={16} />}</Show>
     </button>
   );
 }

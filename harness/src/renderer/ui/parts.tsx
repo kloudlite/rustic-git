@@ -5,7 +5,7 @@ import { cx } from "./cx";
     section's own controls, so a button never floats alone between sections. */
 export function Heading(props: { children: JSX.Element; meta?: JSX.Element; actions?: JSX.Element; class?: string }) {
   return (
-    <div class={cx("flex h-7 items-center gap-2 px-3 pt-2 text-xs font-semibold tracking-[0.06em] uppercase text-muted", props.class)}>
+    <div class={cx("mt-3 mb-1 flex h-5.5 items-center gap-2 border-t border-line px-3 text-xs font-bold uppercase text-fg first:mt-0 first:border-t-0", props.class)}>
       {props.children}
       <span class="flex-1" />
       <Show when={props.meta}>
@@ -21,17 +21,22 @@ export function Heading(props: { children: JSX.Element; meta?: JSX.Element; acti
 /** A label and its value on one line. The value truncates; the label never does. */
 export function Field(props: { label: string; mono?: boolean; children: JSX.Element }) {
   return (
-    <div class="flex items-baseline gap-3 px-3 py-[3px] text-sm">
+    <div class="flex h-5.5 items-center gap-3 px-5">
       <span class="shrink-0 text-muted">{props.label}</span>
-      <span class={cx("ml-auto min-w-0 truncate text-right", props.mono && "font-mono text-xs")}>{props.children}</span>
+      <span class={cx("ml-auto min-w-0 truncate text-right", props.mono && "font-mono text-sm")}>{props.children}</span>
     </div>
   );
 }
 
 /** A key in a hint line. A terminal has no key caps: the key is simply the
     brighter half of the pair, and the verb after it is the quieter half. */
-export function Kbd(props: { children: JSX.Element }) {
-  return <kbd class="font-mono text-xs font-medium text-fg">{props.children}</kbd>;
+/** A key, drawn as a keycap: the one shape a person reads as "press this". */
+export function Kbd(props: { children: JSX.Element; class?: string }) {
+  return (
+    <kbd class={cx("inline-flex h-4.5 min-w-4.5 items-center justify-center rounded-[3px] border border-kbd-line border-b-kbd-bottom bg-kbd px-1 font-mono text-xs leading-none text-fg", props.class)}>
+      {props.children}
+    </kbd>
+  );
 }
 
 /** Nothing to show, said in a sentence rather than a blank. */
@@ -64,8 +69,8 @@ export function Row(props: {
       title={props.title}
       style={props.style}
       class={cx(
-        "flex h-6.5 items-center gap-0.5 px-3 whitespace-nowrap transition-colors duration-100 ease-out-quick",
-        "hover:bg-hover aria-selected:bg-selected",
+        "flex min-h-5.5 items-center gap-0.5 px-3 whitespace-nowrap",
+        "hover:bg-hover aria-selected:bg-selected aria-selected:text-selected-fg aria-selected:outline aria-selected:outline-1 aria-selected:-outline-offset-1 aria-selected:outline-focus-outline",
         props.class,
       )}
     >

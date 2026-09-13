@@ -1,8 +1,8 @@
 import { Dynamic } from "solid-js/web";
 import {
-  ArrowUpRight, Bell, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, Circle, Clock, Columns2, Copy,
+  Archive, ArrowDownLeft, ArrowUpRight, Bell, Bot, Box, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, Circle, Clock, Columns2, Container, Copy, Ellipsis, FolderGit2, Globe, LoaderCircle,
   File, FileDiff, Folder, FolderOpen, GitBranch, GitCommitHorizontal, History, Lock, Monitor,
-  Maximize2, Minimize2, Moon, PanelLeft, PanelRight, Plus, Search, Server, Sparkles, Sun, Terminal, Users, X,
+  Maximize2, MessageSquare, Minimize2, Moon, PanelLeft, PanelRight, Plus, Search, Server, Settings, Sparkles, SquareDashedMousePointer, Sun, Target, Terminal, User, Users, X,
 } from "lucide-solid";
 import { cx } from "./cx";
 
@@ -44,12 +44,27 @@ const ICONS = {
   maximise: Maximize2,
   minimise: Minimize2,
   server: Server,
+  more: Ellipsis,
+  archive: Archive,
+  thread: MessageSquare,
+  spinner: LoaderCircle,
+  container: Container,
+  repo: FolderGit2,
+  user: User,
+  pick: SquareDashedMousePointer,
+  machine: Target,
+  workspace: Box,
+  ephemeral: Bot,
+  settings: Settings,
+  globe: Globe,
+  chevronsUpDown: ChevronsUpDown,
   users: Users,
   copy: Copy,
   history: History,
   camera: Camera,
   lock: Lock,
   arrowUpRight: ArrowUpRight,
+  arrowDownLeft: ArrowDownLeft,
   bell: Bell,
   sun: Sun,
   moon: Moon,
@@ -66,8 +81,8 @@ export function Icon(props: { name: IconName | string; size?: number; class?: st
   return (
     <Dynamic
       component={ICONS[known()]}
-      size={props.size ?? 14}
-      stroke-width={FILLED.has(known()) ? 0 : 1.75}
+      size={props.size ?? 16}
+      stroke-width={FILLED.has(known()) ? 0 : 1.5}
       fill={FILLED.has(known()) ? "currentColor" : "none"}
       class={cx("shrink-0", props.class)}
       aria-hidden="true"

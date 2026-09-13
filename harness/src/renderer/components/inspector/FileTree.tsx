@@ -16,16 +16,16 @@ export function FileTree(props: { nodes: FileNode[]; depth?: number; path?: stri
         return (
           <>
             <Row
-              class="h-6"
+              class="h-5.5"
               style={{ "padding-left": `${12 + depth() * 14}px` }}
               onClick={() => (n.dir ? setOpen(!open()) : props.onOpen(at(n.name), n.status))}
               title={n.name}
             >
               <Gutter>
-                <Show when={n.dir}><Icon name={open() ? "chevronDown" : "chevronRight"} size={11} class="text-subtle" /></Show>
+                <Show when={n.dir}><Icon name={open() ? "chevronDown" : "chevronRight"} size={16} class="text-muted" /></Show>
               </Gutter>
-              <Gutter><Icon name={n.dir ? "folder" : "file"} size={13} class="text-muted" /></Gutter>
-              <span class={`min-w-0 flex-1 truncate px-1 text-sm ${n.status ? STATUS_TONE[n.status] : ""}`}>{n.name}</span>
+              <Gutter><Icon name={n.dir ? "folder" : "file"} size={16} class="text-muted" /></Gutter>
+              <span class={`min-w-0 flex-1 truncate px-1 ${n.status ? STATUS_TONE[n.status] : ""}`}>{n.name}</span>
               <Show when={n.status}>{(s) => <span class="shrink-0 pr-1 font-mono text-2xs text-subtle">{s()}</span>}</Show>
             </Row>
             <Show when={n.dir && open() && n.children}>

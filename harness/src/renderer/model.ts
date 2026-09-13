@@ -3,7 +3,7 @@
 //   team
 //    ├─ environment ×N        the services a team runs; a developer clones one
 //    │                        to get a copy they can break
-//    └─ work machine          exactly one per developer per team: where they
+//    └─ bench                 exactly one per developer per team: where they
 //        │                    work, connected to one environment at a time
 //        ├─ thread ×N         the AI conversation; the first may change things,
 //        │                    the rest are read-only
@@ -181,12 +181,25 @@ export type Ephemeral = {
   changes: Change[];
 };
 
+/** A package as the platform pins it: `attr@version`, or bare for the region's nixpkgs pin. */
+export type Package = { name: string; version: string; pinned?: boolean };
+
+/**
+ * One message between the machine and a workspace: the machine hands a
+ * workspace something to do (`in`), the workspace reports back (`out`). A
+ * workspace's overview shows this queue, so what the machine asked of it and
+ * what it answered can be read without opening either thread.
+ */
+export type Exchange = { dir: "in" | "out"; at: string; text: string; state: "pending" | "working" | "done"; session: string };
+
 export type Workspace = {
   id: string;
+  queue: Exchange[];
   name: string;
   repo: string;
   branch: string;
   state: "running" | "stopped";
+  packages: Package[];
   ephemerals: Ephemeral[];
   files: FileNode[];
   changes: Change[];
@@ -237,7 +250,10 @@ export type Snapshot = {
   note?: string;
 };
 
-export type Thread = { id: string; name: string; readonly: boolean; messages: Message[] };
+/** A thread belongs to a node of the machine's tree: the machine's own is the
+    one that changes things, a workspace's is where that copy is worked, an
+    ephemeral's is a log to watch — nobody drives one. */
+export type Thread = { id: string; name: string; kind: "machine" | "session" | "workspace" | "ephemeral" | "btw"; readonly: boolean; messages: Message[]; pi?: string; session?: string };
 
 export type TodoState = "done" | "active" | "blocked" | "pending";
 // A plan is a tree: a step may hold sub-steps. A parent's state is derived from
@@ -245,6 +261,60 @@ export type TodoState = "done" | "active" | "blocked" | "pending";
 export type Todo = { id: string; text: string; state?: TodoState; eph?: string; note?: string; children?: Todo[] };
 
 export type Team = { id: string; name: string };
+
+/** A repository the team has on the platform; a workspace is cut from one. */
+export type Repo = { id: string; teamId: string; name: string; branch: string; updated: string; private?: boolean };
+export const REPOS: Repo[] = [
+  { id: "r-rustic-git", teamId: "t-kloudlite", name: "kloudlite/rustic-git", branch: "master", updated: "1h ago", private: true },
+  { id: "r-harness", teamId: "t-kloudlite", name: "kloudlite/harness", branch: "main", updated: "3h ago", private: true },
+  { id: "r-infra", teamId: "t-kloudlite", name: "kloudlite/infra", branch: "main", updated: "2d ago", private: true },
+  { id: "r-docs", teamId: "t-kloudlite", name: "kloudlite/docs", branch: "main", updated: "1w ago" },
+  { id: "r-labs", teamId: "t-labs", name: "labs/playground", branch: "main", updated: "4d ago" },
+];
+
+/** An image in the team's registry, with the tags it carries. */
+export type Image = { id: string; teamId: string; name: string; tags: string[]; pushed: string; size: string; pulls: number };
+export const IMAGES: Image[] = [
+  { id: "i-api", teamId: "t-kloudlite", name: "kloudlite/api", tags: ["bc5a5062", "925536aa", "latest"], pushed: "2h ago", size: "84 MB", pulls: 1412 },
+  { id: "i-server", teamId: "t-kloudlite", name: "kloudlite/server", tags: ["bc5a5062", "latest"], pushed: "2h ago", size: "91 MB", pulls: 1398 },
+  { id: "i-agent", teamId: "t-kloudlite", name: "kloudlite/agent", tags: ["bc5a5062", "latest"], pushed: "2h ago", size: "77 MB", pulls: 620 },
+  { id: "i-web", teamId: "t-kloudlite", name: "kloudlite/web", tags: ["925536aa", "latest"], pushed: "1d ago", size: "212 MB", pulls: 388 },
+  { id: "i-slo", teamId: "t-kloudlite", name: "kloudlite/slo", tags: ["bc5a5062"], pushed: "2h ago", size: "63 MB", pulls: 96 },
+  { id: "i-labs", teamId: "t-labs", name: "labs/hello", tags: ["1", "latest"], pushed: "4d ago", size: "12 MB", pulls: 3 },
+];
+
+/**
+ * Where a model comes from. A provider is connected by a key the person adds
+ * once per machine; the machine's `model` is one of a connected provider's.
+ * A local provider needs no key — it is connected when the process answers.
+ */
+export type Provider = {
+  id: string;
+  name: string;
+  state: "connected" | "no-key" | "unreachable";
+  models: string[];
+  note?: string;
+};
+
+export const PROVIDERS: Provider[] = [
+  { id: "anthropic", name: "Anthropic", state: "connected", models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] },
+  { id: "openai", name: "OpenAI", state: "connected", models: ["gpt-5.2", "gpt-5.2-mini", "o4"] },
+  { id: "deepseek", name: "DeepSeek", state: "connected", models: ["deepseek-v4", "deepseek-r2"] },
+  { id: "google", name: "Google", state: "no-key", models: ["gemini-3-pro", "gemini-3-flash"] },
+  { id: "ollama", name: "Ollama", state: "unreachable", models: ["qwen3-coder:32b", "llama4:70b"], note: "nothing listening on localhost:11434" },
+  { id: "openrouter", name: "OpenRouter", state: "no-key", models: [] },
+];
+
+/**
+ * What extends the machine. A SKILL is a prompt the machine can be told to
+ * follow (`/name` in the composer); an MCP SERVER is a process that lends it
+ * tools; a HOOK runs at a moment of the machine's own loop. All three are the
+ * machine's, not a workspace's: an agent cut from it inherits them.
+ */
+export type Plugin =
+  | { kind: "skill"; name: string; from: string; enabled: boolean; summary: string }
+  | { kind: "mcp"; name: string; from: string; enabled: boolean; state: "connected" | "starting" | "failed" | "off"; tools: number; note?: string }
+  | { kind: "hook"; name: string; from: string; enabled: boolean; on: string };
 
 // Exactly one per developer per team. Switching teams therefore switches the
 // machine; there is no machine to choose within a team.
@@ -255,15 +325,15 @@ export type Machine = {
   goal: string;
   model: string;
   environmentId: string;
-  threads: Thread[];
   todos: Todo[];
   workspaces: Workspace[];
+  plugins: Plugin[];
 };
 
 export type Message =
-  | { role: "user"; text: string; at: string }
-  | { role: "assistant"; text: string; at: string }
-  | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ok?: boolean };
+  | { role: "user"; text: string; at: string; ts?: number; images?: number[] }
+  | { role: "assistant"; text: string; at: string; ts?: number }
+  | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ts?: number; ok?: boolean; output?: string; pending?: boolean; tool?: string; args?: Record<string, unknown>; ms?: number };
 
 /** The team's environments. A machine connects to one; a developer clones one. */
 export const ENVIRONMENTS: Environment[] = [
@@ -320,7 +390,17 @@ export const MACHINE: Machine = {
   goal: "Stop the region API churn: a workspace status write must not wake its owner's binding; verify on the fleet.",
   model: "claude-fable-5-1",
   environmentId: "env-1dfa74",
-  threads: [], // filled below, once TRANSCRIPT exists
+  plugins: [
+    { kind: "skill", name: "ship", from: "kloudlite/deploy", enabled: true, summary: "pin, roll and verify a build on the fleet" },
+    { kind: "skill", name: "review", from: "kloudlite/deploy", enabled: true, summary: "review a diff against the plan it came from" },
+    { kind: "skill", name: "brainstorm", from: "superpowers", enabled: false, summary: "turn an idea into a design before any code" },
+    { kind: "mcp", name: "graft", from: "graft", enabled: true, state: "connected", tools: 5 },
+    { kind: "mcp", name: "clickstack", from: "clickstack", enabled: true, state: "connected", tools: 29 },
+    { kind: "mcp", name: "chrome", from: "claude-in-chrome", enabled: true, state: "failed", tools: 0, note: "extension not running" },
+    { kind: "mcp", name: "figma", from: "figma", enabled: false, state: "off", tools: 0 },
+    { kind: "hook", name: "pod-only", from: "kloudlite/deploy", enabled: true, on: "before a shell command" },
+    { kind: "hook", name: "no-attribution", from: "kloudlite/deploy", enabled: true, on: "before a commit" },
+  ],
   todos: [
     { id: "t1", text: "Diagnose the churn", children: [
       { id: "t1a", text: "Rule out the datastore", state: "done", note: "kine healthy: 138 MB WAL, 150 ms compactions" },
@@ -348,6 +428,13 @@ export const MACHINE: Machine = {
   workspaces: [
     {
       id: "ws-51480ba5",
+      queue: [
+        { session: "bench", dir: "in", at: "12:04", text: "Filter the OwnerBinding watch by generation; keep the status-only path out of the binding pass.", state: "done" },
+        { session: "bench", dir: "out", at: "12:09", text: "Folded 2 files into master as bc5a5062. 5 tests pass, clippy clean.", state: "done" },
+        { session: "bench", dir: "in", at: "12:41", text: "Add a reconcile test that proves a status-only write no longer wakes the binding.", state: "working" },
+        { session: "bench", dir: "in", at: "12:44", text: "Review bc5a5062 against the plan once the test lands.", state: "pending" },
+      ],
+      packages: [{ name: "rustc", version: "1.89.0", pinned: true }, { name: "cargo", version: "1.89.0", pinned: true }, { name: "clippy", version: "1.89.0" }, { name: "kubectl", version: "1.33.2" }, { name: "jq", version: "1.7.1" }, { name: "ripgrep", version: "14.1.1" }],
       name: "rustic-git",
       repo: "kloudlite/rustic-git",
       branch: "master",
@@ -390,6 +477,11 @@ export const MACHINE: Machine = {
     },
     {
       id: "ws-ea918209",
+      queue: [
+        { session: "bench", dir: "in", at: "11:52", text: "Wire the fleet build KPI to /admin/overview from the history series.", state: "working" },
+        { session: "bench", dir: "out", at: "12:31", text: "Typecheck failed on adminSeries typing; retrying with the narrowed union.", state: "working" },
+      ],
+      packages: [{ name: "bun", version: "1.2.19", pinned: true }, { name: "nodejs", version: "22.17.0", pinned: true }, { name: "ripgrep", version: "14.1.1" }],
       name: "web",
       repo: "kloudlite/rustic-git",
       branch: "web/superadmin-kpis",
@@ -422,6 +514,8 @@ export const MACHINE: Machine = {
     },
     {
       id: "ws-0c77d1e2",
+      queue: [],
+      packages: [{ name: "nodejs", version: "22.17.0", pinned: true }],
       name: "harness",
       repo: "kloudlite/harness",
       branch: "main",
@@ -447,41 +541,36 @@ export const TRANSCRIPT: Message[] = [
   { role: "action", kind: "note", at: "12:45", target: "eph-a3", text: "Waiting on eph-a2 to finish before reviewing" },
 ];
 
-MACHINE.threads = [
-  { id: "th-main", name: "reconciler churn", readonly: false, messages: TRANSCRIPT },
-  {
-    id: "th-plan", name: "plan: verify on fleet", readonly: true, messages: [
-      { role: "user", at: "12:20", text: "how do we prove the fix on the fleet without a quiet window? the fast probe fires every 5 min." },
-      { role: "assistant", at: "12:21", text: "Two readings. One: count OwnerBinding reconcile.pass lines per five minutes before and after the roll; the probe does not touch bindings, so that number isolates the fix. Two: the apiserver quota GET counter, which will fall but not to zero because the probe's own creates read quota. Report both; call the second one the floor." },
-      { role: "user", at: "12:22", text: "ok. and the hourly?" },
-      { role: "assistant", at: "12:22", text: "Run it after the roll settles; refuse to read anything from a run that overlaps the roll. The main thread has that as step 7." },
-    ],
-  },
-  {
-    id: "th-q", name: "why watches_stream", readonly: true, messages: [
-      { role: "user", at: "12:05", text: "why not just .watches with a predicate?" },
-      { role: "assistant", at: "12:06", text: "Controller::watches takes a Config, not a stream, so there is nowhere to hang predicate_filter. watches_stream takes the stream you build, and that is where the generation predicate goes. It needs the unstable-runtime-stream-control feature on kube-runtime 4.2." },
-    ],
-  },
-];
+/** Transcripts by node id; anything not here is a thread that has not started. */
+const THREADS: Record<string, Message[]> = {
+  "wm-karthik-kloudlite": TRANSCRIPT,
+  "ws-51480ba5": [
+    { role: "user", at: "12:20", text: "how do we prove the fix on the fleet without a quiet window? the fast probe fires every 5 min." },
+    { role: "assistant", at: "12:21", text: "Two readings. One: count OwnerBinding reconcile.pass lines per five minutes before and after the roll; the probe does not touch bindings, so that number isolates the fix. Two: the apiserver quota GET counter, which will fall but not to zero because the probe's own creates read quota. Report both; call the second one the floor." },
+    { role: "user", at: "12:22", text: "ok. and the hourly?" },
+    { role: "assistant", at: "12:22", text: "Run it after the roll settles; refuse to read anything from a run that overlaps the roll. The machine has that as step 7." },
+  ],
+  "ws-ea918209": [
+    { role: "user", at: "12:05", text: "why not just .watches with a predicate?" },
+    { role: "assistant", at: "12:06", text: "Controller::watches takes a Config, not a stream, so there is nowhere to hang predicate_filter. watches_stream takes the stream you build, and that is where the generation predicate goes. It needs the unstable-runtime-stream-control feature on kube-runtime 4.2." },
+  ],
+  "eph-a2": [
+    { role: "action", kind: "spawn", at: "12:41", target: "rustic-git › eph-a2", text: "Started an implementer: add a reconcile test for a status-only write" },
+    { role: "action", kind: "run", at: "12:43", target: "eph-a2", text: "cargo test -p kloudlite-agent-bin status_only · running", },
+  ],
+};
 
-MACHINE.threads = [
-  { id: "th-main", name: "reconciler churn", readonly: false, messages: TRANSCRIPT },
-  {
-    id: "th-plan", name: "plan: verify on fleet", readonly: true, messages: [
-      { role: "user", at: "12:20", text: "how do we prove the fix on the fleet without a quiet window? the fast probe fires every 5 min." },
-      { role: "assistant", at: "12:21", text: "Two readings. One: count OwnerBinding reconcile.pass lines per five minutes before and after the roll; the probe does not touch bindings, so that number isolates the fix. Two: the apiserver quota GET counter, which will fall but not to zero because the probe's own creates read quota. Report both; call the second one the floor." },
-      { role: "user", at: "12:22", text: "ok. and the hourly?" },
-      { role: "assistant", at: "12:22", text: "Run it after the roll settles; refuse to read anything from a run that overlaps the roll. The main thread has that as step 7." },
-    ],
-  },
-  {
-    id: "th-q", name: "why watches_stream", readonly: true, messages: [
-      { role: "user", at: "12:05", text: "why not just .watches with a predicate?" },
-      { role: "assistant", at: "12:06", text: "Controller::watches takes a Config, not a stream, so there is nowhere to hang predicate_filter. watches_stream takes the stream you build, and that is where the generation predicate goes. It needs the unstable-runtime-stream-control feature on kube-runtime 4.2." },
-    ],
-  },
-];
+/** The thread for a node of the machine, or nothing if the id names none. */
+export function threadOf(m: Machine, id: string): Thread | undefined {
+  const messages = THREADS[id] ?? [];
+  if (id === m.id) return { id, name: "Bench Thread", kind: "machine", readonly: false, messages, pi: "bench" };
+  for (const w of m.workspaces) {
+    if (w.id === id) return { id, name: w.name, kind: "workspace", readonly: false, messages };
+    const e = w.ephemerals.find((x) => x.id === id);
+    if (e) return { id, name: e.task, kind: "ephemeral", readonly: true, messages };
+  }
+  return undefined;
+}
 
 /** One machine per developer per team, so this list is keyed by team. */
 export const MACHINES: Machine[] = [
@@ -493,8 +582,8 @@ export const MACHINES: Machine[] = [
     goal: "",
     model: "claude-fable-5-1",
     environmentId: "env-7c21a9",
-    threads: [],
     todos: [],
     workspaces: [],
+    plugins: [],
   },
 ];

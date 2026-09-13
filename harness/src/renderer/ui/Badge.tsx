@@ -17,7 +17,7 @@ export function Badge(props: { tone?: Tone; class?: string; children?: JSX.Eleme
   return (
     <span
       class={cx(
-        "inline-flex h-4 items-center gap-1 rounded-full px-1.5 text-2xs font-medium whitespace-nowrap",
+        "inline-flex h-4.5 items-center gap-1 rounded-[2px] px-1.5 text-xs font-normal whitespace-nowrap",
         TONE[props.tone ?? "neutral"],
         props.class,
       )}
