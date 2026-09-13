@@ -18,9 +18,15 @@ const harness = {
   pi: (cmd: Record<string, unknown>, id = "bench"): Promise<Record<string, unknown>> => ipcRenderer.invoke("pi", cmd, id),
   onPi: (fn: (ev: Record<string, unknown> & { type: string; pi?: string }) => void): void =>
     void ipcRenderer.on("pi:event", (_e, ev: Record<string, unknown> & { type: string; pi?: string }) => fn(ev)),
-  /** Start (or resume) a pi: a session `s-N` on its own, a `btw-N` forked from a session file; `stopPi` ends one. */
-  spawnPi: (id: string, sessionFile?: string): Promise<void> => ipcRenderer.invoke("pi:spawn", id, sessionFile ? { fork: sessionFile } : {}),
-  stopPi: (id: string, forget = false): Promise<void> => ipcRenderer.invoke("pi:stop", id, forget),
+  /** The remote bench's own routes (sessions list, archive, delete, btw, exchanges, import). */
+  bench: <T = unknown>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> => ipcRenderer.invoke("bench", method, path, body),
+  /** A session's history: the cache first, then whatever the bench has beyond it. */
+  benchMessages: (id: string): Promise<unknown[]> => ipcRenderer.invoke("bench:messages", id),
+  /** Configured, connected, and the last list and exchanges seen, for a cold offline start. */
+  benchState: (): Promise<{ configured: boolean; connected: boolean; sessions: unknown[]; exchanges: unknown[] }> => ipcRenderer.invoke("bench:state"),
+  /** Copies this laptop's sessions onto the bench; safe to run again. */
+  benchImport: (sessions: { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]): Promise<{ added: string[]; files: number }> =>
+    ipcRenderer.invoke("bench:import", sessions),
 
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),

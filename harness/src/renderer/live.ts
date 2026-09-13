@@ -16,15 +16,16 @@ type Ev = Record<string, unknown> & { type: string };
  * every tool call while it runs, and a backgrounded command until its output
  * comes back. The inspector lists these; the transcript only tells the story.
  */
-export type Task = { id: string; session: string; n?: number; tool: string; arg: string; state: "running" | "background" | "done" | "failed" | "cancelled"; started: number; ended?: number; output: string };
+export type Task = { id: string; session: string; n?: number; tool: string; arg: string; state: "running" | "background" | "done" | "failed" | "cancelled" | "lost"; started: number; ended?: number; output: string };
 const [tasks, setTasks] = createStore<Task[]>([]);
 export { tasks };
 const taskIndex = (id: string) => tasks.findIndex((t) => t.id === id);
 /**
- * Long-lived processes the bench started, as the extension publishes them:
- * a JSON snapshot on the `harness:procs` widget every second while any runs.
+ * Long-lived processes the bench started: the bench folds every session's
+ * `harness:procs` widget into one table and sends it whole as `procs`. A row
+ * found gone when the bench restarted is `lost`, with `ended` set.
  */
-export type Proc = { id: string; session?: string; name: string; command: string; started: number; ended?: number; code?: number | null; tail: string };
+export type Proc = { id: string; session?: string; name: string; command: string; started: number; ended?: number; code?: number | null; tail: string; pid?: number; lost?: true };
 const [procs, setProcs] = createStore<Proc[]>([]);
 export { procs };
 const [sessionCount, setSessionCount] = createSignal(1);
@@ -36,14 +37,19 @@ export function discard(id: string) {
   setDiscarded((d) => new Set(d).add(id));
 }
 
+/** Whether /events is up; false until main says otherwise. Offline, every thread reads and nothing sends. */
+const [connected, setConnected] = createSignal(false);
+const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({ ok: true });
+export { connected, setConnected, writable };
+
 export function stopProc(p: Proc) {
-  void window.harness.pi({ type: "prompt", message: `/proc-stop ${p.id}` }, p.session ?? "bench");
+  if (p.session) void window.harness.pi({ type: "prompt", message: `/proc-stop ${p.id}` }, p.session).catch((e: Error) => thread(p.session!).note(e.message));
 }
 
 export function cancel(t: Task) {
   const i = taskIndex(t.id);
   if (i >= 0) setTasks(i, { state: "cancelled" });
-  void window.harness.pi({ type: "prompt", message: `/cancel ${t.n ? `#${t.n}` : t.id}` }, t.session);
+  void window.harness.pi({ type: "prompt", message: `/cancel ${t.n ? `#${t.n}` : t.id}` }, t.session).catch((e: Error) => thread(t.session).note(e.message));
 }
 
 const now = () => new Date().toTimeString().slice(0, 5);
@@ -171,18 +177,6 @@ function makeThread(id: string) {
         // Only a failure to start is worth surfacing; pi is chatty on stderr.
         if (/error|missing|api key|not found/i.test(ev.text as string)) setStatus((ev.text as string).trim().slice(0, 120));
         return;
-      case "extension_ui_request": {
-        if (!bench || ev.method !== "setWidget" || ev.widgetKey !== "harness:procs") return;
-        const lines = ev.widgetLines as string[] | undefined;
-        try {
-          const next = (lines?.[0] ? (JSON.parse(lines[0]) as Proc[]) : []).map((p) => ({ ...p, session: id }));
-          // Each session publishes only its own; the others' rows stay.
-          setProcs(produce((ps) => void ps.splice(0, ps.length, ...ps.filter((p) => p.session !== id), ...next)));
-        } catch {
-          /* a widget line that is not ours */
-        }
-        return;
-      }
       case "queue_update": {
         // pi is the truth: what it still holds stays; what it delivered is
         // echoed into the transcript as the prompt it became.
@@ -202,7 +196,7 @@ function makeThread(id: string) {
         // ones that ended in the last few seconds (the list lets them settle).
         if (bench) setTasks(produce((ts) => {
           const now = Date.now();
-          const keep = ts.filter((t) => t.state === "running" || t.state === "background" || (t.ended && now - t.ended < 4000));
+          const keep = ts.filter((t) => t.state === "running" || t.state === "background" || t.state === "lost" || (t.ended && now - t.ended < 4000));
           ts.splice(0, ts.length, ...keep);
         }));
         return;
@@ -281,9 +275,26 @@ export function thread(id: string) {
   if (!t) threads.set(id, (t = makeThread(id)));
   return t;
 }
-/** Every event says which process it came from; the bench is the default. */
+/** Session events carry the session they came from; the bench's own changes carry none. */
 export function onEvent(ev: Ev & { pi?: string }) {
-  thread(typeof ev.pi === "string" && ev.pi ? ev.pi : "bench").onEvent(ev);
+  switch (ev.type) {
+    case "bench":
+      return void setConnected(ev.connected === true);
+    case "writable":
+      return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
+    case "procs":
+      // The bench folds every session's widget into one table; it is the whole list.
+      return void setProcs(produce((ps) => void ps.splice(0, ps.length, ...((ev.rows as Proc[]) ?? []))));
+    case "task": {
+      // The bench's ledger is the record; the live fold only adds output.
+      const row = ev.row as Task;
+      const i = taskIndex(row.id);
+      if (i >= 0) setTasks(i, { ...row, output: tasks[i].output });
+      else if (row.state === "running" || row.state === "background" || row.state === "lost") setTasks(produce((ts) => void ts.push({ ...row, output: row.output ?? "" })));
+      return;
+    }
+  }
+  if (typeof ev.pi === "string" && ev.pi) thread(ev.pi).onEvent(ev);
 }
 
 // The bench, under the names everything already reads.

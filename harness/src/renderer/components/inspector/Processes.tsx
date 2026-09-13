@@ -1,5 +1,6 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as live from "../../live";
+import { procLabel, procState } from "../../rows";
 import { Icon } from "../../ui/Icon";
 import { Heading } from "../../ui/parts";
 
@@ -30,7 +31,7 @@ export function Processes(props: { onOpen: (id: string) => void }) {
             title="Open the log"
           >
             <span class="flex w-4 shrink-0 items-center justify-center">
-              <span class={`size-1.5 rounded-full ${p.ended ? (p.code === 0 ? "bg-subtle" : "bg-danger") : "bg-success"}`} />
+              <span class={`size-1.5 rounded-full ${{ running: "bg-success", done: "bg-subtle", failed: "bg-danger", lost: "bg-warning" }[procState(p)]}`} />
             </span>
             <div class="flex min-w-0 flex-1 flex-col">
               <span class="truncate font-mono text-sm leading-[18px]">
@@ -40,7 +41,7 @@ export function Processes(props: { onOpen: (id: string) => void }) {
                 <span class="font-mono">{p.id}</span>
                 <span>·</span>
                 <Show when={live.sessionCount() > 1 && p.session}><span class="font-mono">{p.session}</span><span>·</span></Show>
-                <span>{p.ended ? `exited ${p.code}` : "running"}</span>
+                <span>{procLabel(p)}</span>
                 <span>·</span>
                 <span class="font-mono tabular-nums">{up(p)}</span>
               </span>

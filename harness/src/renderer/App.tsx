@@ -1,5 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import { TitleBar } from "./components/TitleBar";
 import { MachinePanel } from "./components/MachinePanel";
 import { ActivityBar, type Activity } from "./components/ActivityBar";
@@ -15,6 +15,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
+import { benchSessions, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { cycleTheme } from "./theme";
 
 export function App() {
@@ -46,108 +47,78 @@ export function App() {
   const open = () => pane().open;
   const selected = () => pane().sel;
   const paneOf = (id: string) => panes.findIndex((p) => p.open.includes(id));
-  // A bench is several sessions at once — one per thing being worked on —
-  // each a full pi of its own that is resumed on relaunch. Session 1 is the
-  // "bench" pi; the rest are `s-N`. The list is the harness's to remember.
-  // ponytail: no routing yet — a session's code change does not reach a
-  // workspace's queue; the platform decides that next, the fixture stands in.
-  type Session = { id: string; name: string; seq: number; lastActive?: number; archived?: boolean };
-  // A session untouched this long is archived on start: its pi is not spawned
-  // and it folds away, one click from coming back. Never the one being used.
+  // Sessions are the bench's: the list lives in /bench/sessions.json on the
+  // person's bench and every device is a view of it. Nothing here persists the
+  // list; the cache for a cold, disconnected start is main's. The first live
+  // session is the machine's own row and tab.
+  type Session = SessionRow;
   const ARCHIVE_AFTER = 24 * 60 * 60 * 1000;
-  const stored = (): Session[] => {
-    try {
-      const v = JSON.parse(localStorage.getItem("harness.sessions") ?? "") as Session[];
-      if (Array.isArray(v) && v.length && v[0].id === "bench") return v;
-    } catch {
-      /* first run, or unreadable: one session */
-    }
-    return [{ id: "bench", name: "session 1", seq: 1 }];
-  };
-  const [sessions, setSessions] = createStore<Session[]>(stored());
-  const touch = (id: string) => {
-    const i = sessions.findIndex((x) => x.id === id);
-    if (i >= 0) setSessions(i, "lastActive", Date.now());
-  };
-  const live_ = () => sessions.filter((x) => !x.archived);
-  const archived = () => sessions.filter((x) => x.archived);
-  // Smart archive: at start, anything idle past the window goes to sleep.
-  setSessions(produce((xs) => {
-    const now = Date.now();
-    for (const x of xs) if (!x.archived && x.lastActive && now - x.lastActive > ARCHIVE_AFTER && xs.filter((y) => !y.archived).length > 1) x.archived = true;
-  }));
-  createEffect(() => localStorage.setItem("harness.sessions", JSON.stringify(sessions.map((x) => ({ ...x })))));
-  createEffect(() => live.setSessionCount(sessions.length));
-  const isDefaultName = (x: Session) => x.name === `session ${x.seq}`;
-  /** A session is named by its first prompt until it has one. */
-  const nameSession = (id: string, text: string) => {
-    const i = sessions.findIndex((x) => x.id === id);
-    if (i >= 0 && isDefaultName(sessions[i]) && text.trim()) setSessions(i, "name", text.trim().replace(/\s+/g, " ").slice(0, 40));
-  };
+  const [sessions, setSessions] = createStore<Session[]>([]);
+  const bench = window.harness.bench;
+  const refreshSessions = async () => void setSessions(reconcile(await bench<Session[]>("GET", "/sessions")));
+  const live_ = () => benchSessions(sessions).filter((x) => !x.archived);
+  const archived = () => benchSessions(sessions).filter((x) => x.archived);
+  createEffect(() => live.setSessionCount(live_().length));
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
-    return x && { id, name: x.name, kind: "session", readonly: false, messages: [], pi: id };
+    return x && { id, name: x.name, kind: "session", readonly: !live.connected(), messages: [], pi: id };
   };
-  const newSession = () => {
-    const seq = Math.max(...sessions.map((x) => x.seq)) + 1;
-    const id = `s-${seq}`;
-    void window.harness.spawnPi(id).then(() => {
-      setSessions((xs) => [...xs, { id, name: `session ${seq}`, seq, lastActive: Date.now() }]);
+  const fail = (e: Error) => live.thread(cur()).note(e.message);
+  const loadThread = async (id: string) => live.thread(id).replay(await window.harness.benchMessages(id));
+  // A workspace tab is its thread on the bench: open it there (idempotent),
+  // then read its history. An ephemeral is watched, never driven: it only
+  // reads. Offline or unwritable skips the open through refusal() and reads
+  // what main cached, read-only.
+  const openLive = (id: string) => {
+    const t = threadOf(machine(), id);
+    if (!t?.pi || (t.kind !== "workspace" && t.kind !== "ephemeral")) return;
+    const w = machine().workspaces.find((x) => x.id === id || x.ephemerals.some((e) => e.id === id))!;
+    const L = live.thread(t.pi);
+    const route = openRoute(t.kind, w.id);
+    const skip = !route || refusal({ type: "new_session" }, { session: t.pi, connected: live.connected(), writable: live.writable() });
+    void (async () => {
+      const sid = skip ? t.pi! : (await bench<Session>("POST", route)).id;
+      if (sid !== t.pi) return L.note(`the bench opened ${sid}, not ${t.pi}`);
+      await loadThread(sid);
+    })().catch((e: Error) => L.note(openNote(e.message)));
+  };
+  const newSession = () =>
+    void bench<Session>("POST", "/sessions").then(async (s) => {
+      await refreshSessions();
+      await loadThread(s.id);
+      showThread(s.id);
+    }, fail);
+  /** Archive: the bench stops its pi, the tab closes, the row folds away; nothing is lost. */
+  const archiveSession = (id: string) =>
+    void bench("POST", `/sessions/${id}/archive`).then(() => {
+      sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
+      if (paneOf(id) >= 0) closeThread(id);
+      return refreshSessions();
+    }, fail);
+  const restoreSession = (id: string) =>
+    void bench("POST", `/sessions/${id}/restore`).then(async () => {
+      await refreshSessions();
+      await loadThread(id);
       showThread(id);
-    });
-  };
-  /** Archive: the pi stops, the tab closes, the row folds away; nothing is lost. */
-  const archiveSession = (id: string) => {
-    if (live_().length < 2) return void live.thread(cur()).note("this is the only open session; start another before archiving it");
-    void window.harness.stopPi(id);
-    sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
-    setSessions(sessions.findIndex((x) => x.id === id), "archived", true);
-    if (paneOf(id) >= 0) closeThread(id);
-  };
-  /** Back from the archive: the pi resumes its own session file. */
-  const restoreSession = (id: string) => {
-    void (id === "bench" ? Promise.resolve() : window.harness.spawnPi(id)).then(async () => {
-      setSessions(sessions.findIndex((x) => x.id === id), { archived: false, lastActive: Date.now() });
-      const r = await window.harness.pi({ type: "get_messages" }, id);
-      live.thread(id).replay((r.data as { messages?: unknown[] } | undefined)?.messages ?? []);
-      showThread(id);
-    });
-  };
-  /** Delete: gone from the harness for good; pi's own session file stays on
-      disk. What the session had in flight is stopped first, and what it sent
-      to the workspaces is discarded with it — after the person says so. */
+    }, fail);
   const [confirm, setConfirm] = createSignal<{ id: string; items: string[] } | undefined>();
-  const inFlight = (id: string) => [
-    ...(live.thread(id).busy() ? ["the reply being written"] : []),
-    ...live.tasks.filter((t) => t.session === id && (t.state === "running" || t.state === "background")).map((t) => `${t.tool} ${t.arg}`),
-    ...live.procs.filter((p) => p.session === id && !p.ended).map((p) => `process ${p.name}`),
-    ...live.thread(id).queue.map((q) => `queued: ${q.text}`),
-  ];
   const idleSessions = () => live_().filter((x) => x.lastActive && Date.now() - x.lastActive > ARCHIVE_AFTER && x.id !== cur());
-  const deleteSession = (id: string) => {
-    const items = inFlight(id);
-    if (items.length) return void setConfirm({ id, items });
-    reallyDelete(id);
-  };
+  /** Delete asks the bench; what it says is in flight comes back as the confirm list. */
+  const deleteSession = (id: string) =>
+    void bench("DELETE", `/sessions/${id}`, { stop: false }).then(() => afterDelete(id), (e: Error) => {
+      const items = inFlightItems(e.message);
+      if (items) setConfirm({ id, items });
+      else fail(e);
+    });
   const reallyDelete = (id: string) => {
     setConfirm(undefined);
-    // Stop what runs under it — commands and processes live in their own
-    // process groups, so ending pi alone would leave them running.
-    live.tasks.filter((t) => t.session === id && (t.state === "running" || t.state === "background")).forEach(live.cancel);
-    live.procs.filter((p) => p.session === id && !p.ended).forEach(live.stopProc);
+    void bench("DELETE", `/sessions/${id}`, { stop: true }).then(() => afterDelete(id), fail);
+  };
+  const afterDelete = (id: string) => {
     sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
     live.discard(id);
-    if (id === "bench" || live_().length < 2) {
-      // The first session's process is the bench's own and never ends: it
-      // is emptied in place instead, and what was there is left on disk.
-      void window.harness.pi({ type: "abort" }, id).then(() => window.harness.pi({ type: "new_session" }, id)).then(() => live.thread(id).replay([]));
-      const i = sessions.findIndex((x) => x.id === id);
-      if (i >= 0) setSessions(i, { name: `session ${sessions[i].seq}`, lastActive: Date.now(), archived: false });
-      return;
-    }
-    void window.harness.pi({ type: "abort" }, id).finally(() => void window.harness.stopPi(id, true));
-    setSessions((xs) => xs.filter((x) => x.id !== id));
     if (paneOf(id) >= 0) closeThread(id);
+    void refreshSessions();
   };
   // Side sessions (`/btw`): read-only forks of a session, each on its own pi.
   // Their messages come from their own live state.
@@ -157,6 +128,7 @@ export function App() {
     p.open
       .map((id) => threadOf(machine(), id) ?? sessionThread(id) ?? sides.find((t) => t.id === id))
       .filter((t) => t !== undefined)
+      .map((t) => (t.kind === "machine" ? { ...t, pi: live_()[0]?.id ?? "", readonly: !live.connected() } : t))
       .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages } : t));
   const threads = createMemo(() => threadsOf(pane()));
   const setSelectedRaw = (id: string) => setPanes(activePane(), "sel", id);
@@ -180,9 +152,8 @@ export function App() {
     setPanes(pi, { open: rest, sel: panes[pi].sel === id ? (list[i + 1] ?? list[i - 1] ?? "") : panes[pi].sel });
   };
   /** A btw is removed from the side bar, not by closing its tab: its answer
-      is kept until then. Removing ends its process if it is still answering. */
+      is kept until then; the bench's answer file stays. */
   const removeSide = (id: string) => {
-    void window.harness.stopPi(id);
     setSides((ts) => ts.filter((t) => t.id !== id));
     if (paneOf(id) >= 0) closeThread(id);
   };
@@ -236,7 +207,7 @@ export function App() {
   // A task's log opens in place like a file does; a process is shown through
   // the same page, its ring of output as the "output" and its uptime as the clock.
   const asTask = (p?: live.Proc): live.Task | undefined =>
-    p && { id: p.id, session: p.session ?? "bench", tool: "Process", arg: `${p.name} · ${p.command}`, state: p.ended ? (p.code === 0 ? "done" : "failed") : "running", started: p.started, ended: p.ended, output: p.tail };
+    p && { id: p.id, session: p.session ?? "", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
   const [taskId, setTaskId] = createSignal<string | undefined>();
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
@@ -331,6 +302,7 @@ export function App() {
   // A thread is for typing into: opening one puts the caret in its prompt,
   // after the tab has rendered so the element exists to focus.
   const showThread = (id: string) => {
+    openLive(id);
     setEnvTab(false);
     setSettingsTab(false);
     setFile(undefined);
@@ -339,12 +311,21 @@ export function App() {
   };
   const goTo = showThread;
   // The selected session's pi and live state: what every command acts on.
-  const cur = () => threads().find((t) => t.id === selected())?.pi ?? "bench";
+  const cur = () => threads().find((t) => t.id === selected())?.pi ?? live_()[0]?.id ?? "";
   const L = () => live.thread(cur());
+  /** Every pi call the harness makes goes through here: a refusal or a failure is a note, never silence. */
+  const pi = (cmd: Record<string, unknown> & { type: string }, id = cur()) => {
+    const why = refusal(cmd, { session: id, connected: live.connected(), writable: live.writable() });
+    if (why) return void live.thread(id).note(why);
+    return window.harness.pi(cmd, id).then(
+      (r) => (r.success === false ? (live.thread(id).note(String(r.error)), undefined) : r),
+      (e: Error) => void live.thread(id).note(e.message),
+    );
+  };
   const placeItems = createMemo<PaletteItem[]>(() => {
     const m = machine();
     const out: PaletteItem[] = [{ id: m.id, label: "Bench Thread", detail: m.goal, kind: "machine", icon: "machine", run: () => goTo(m.id) }];
-    for (const x of sessions.slice(1)) out.push({ id: x.id, label: x.name, detail: x.id, kind: "session", icon: "thread", run: () => goTo(x.id) });
+    for (const x of live_().slice(1)) out.push({ id: x.id, label: x.name, detail: x.id, kind: "session", icon: "thread", run: () => goTo(x.id) });
     for (const w of m.workspaces) {
       out.push({ id: w.id, label: w.name, detail: `${w.repo} · ${w.branch}`, kind: "workspace", icon: "workspace", run: () => goTo(w.id) });
       for (const e of w.ephemerals) out.push({ id: e.id, label: e.task, detail: `${w.name} · ${e.agent}`, kind: "ephemeral", icon: "ephemeral", run: () => goTo(e.id) });
@@ -369,9 +350,19 @@ export function App() {
     { id: "workspaces", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
     { id: "go", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
     { id: "settings", label: "Settings", keys: KEYS.settings.keys, run: openSettings },
-    { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void window.harness.pi({ type: "prompt", message: "/bg" }, cur()) },
-    { id: "abort", label: "Stop this session", run: () => void window.harness.pi({ type: "abort" }, cur()) },
+    { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
+    { id: "abort", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", label: "New session", run: newSession },
+    { id: "benchImport", label: "Import this laptop's sessions into the bench", run: () => {
+      if (!live.connected() || !live.writable().ok) return void live.thread(cur()).note("not connected to the bench; nothing was sent");
+      const raw = localStorage.getItem("harness.sessions");
+      if (!raw) return void live.thread(cur()).note("nothing to import: this laptop has no local session list");
+      void window.harness.benchImport(JSON.parse(raw) as { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]).then((r) => {
+        localStorage.setItem("harness.sessions.imported", String(Date.now()));
+        live.thread(cur()).note(r.added.length ? `imported ${r.added.length} sessions and ${r.files} files` : "already imported: the bench has every session");
+        return refreshSessions();
+      }, (e: Error) => live.thread(cur()).note(e.message));
+    } },
     { id: "deleteSession", label: "Delete this session", run: () => deleteSession(cur()) },
     { id: "archiveSession", label: "Archive this session", run: () => archiveSession(cur()) },
     { id: "archiveIdle", label: "Archive idle sessions (untouched for a day)", run: () => idleSessions().forEach((x) => archiveSession(x.id)) },
@@ -399,7 +390,7 @@ export function App() {
 
     if (hit(KEYS.steer)) return (stop(), send("steer"));
     if (hit(KEYS.send)) return (stop(), send());
-    if (hit(KEYS.background)) return (stop(), void window.harness.pi({ type: "prompt", message: "/bg" }, cur()));
+    if (hit(KEYS.background)) return (stop(), void pi({ type: "prompt", message: "/bg" }));
     if (hit(KEYS.split)) return (stop(), splitRight());
     if (hit(KEYS.focusPane)) return (stop(), void setActivePane((p) => (p + 1) % panes.length));
     if (hit(KEYS.commands)) return (stop(), void setPalette("commands"));
@@ -436,66 +427,66 @@ export function App() {
   onCleanup(() => document.removeEventListener("keydown", onKey));
   onMount(() => composer()?.focus());
 
-  // The bench thread is live: pi's events land here and the prompt goes to
-  // pi. A workspace's thread stays a recorded fixture for now.
-  window.harness.onPi(live.onEvent);
-  // Every remembered session comes back: its pi resumed, its history replayed
-  // before anything new lands, its name taken from its first prompt.
-  for (const x of sessions.filter((y) => !y.archived)) {
-    void (x.id === "bench" ? Promise.resolve() : window.harness.spawnPi(x.id)).then(async () => {
-      const r = await window.harness.pi({ type: "get_messages" }, x.id);
-      const ms = (r.data as { messages?: unknown[] } | undefined)?.messages ?? [];
-      live.thread(x.id).replay(ms);
-      const first = ms.find((m) => (m as { role?: string }).role === "user") as { content?: unknown } | undefined;
-      const text = typeof first?.content === "string" ? first.content : ((first?.content as { text?: string }[] | undefined) ?? []).map((c) => c.text ?? "").join("");
-      if (text) nameSession(x.id, text);
-      void window.harness.pi({ type: "get_state" }, x.id);
-    });
-  }
+  // The bench is live: session events and the bench's own changes land here.
+  window.harness.onPi((ev) => {
+    live.onEvent(ev);
+    if (ev.type === "sessions") void refreshSessions().catch(() => undefined);
+    // After a reconnect, every open session pages in what it missed.
+    if (ev.type === "bench:resync") void refreshSessions().then(() => Promise.all(live_().map((x) => loadThread(x.id))), () => undefined);
+  });
+  void window.harness.benchState().then(async (st) => {
+    live.setConnected(st.connected);
+    if (!st.configured) return void live.thread("bench").note("no bench: start the harness with HARNESS_BENCH=http://127.0.0.1:<port>");
+    // Cold and offline: the cached list and messages, read-only until connected.
+    setSessions(reconcile(st.sessions as Session[]));
+    for (const x of live_()) void loadThread(x.id);
+    if (!st.connected) return;
+    await refreshSessions().catch(fail);
+    void bench<Record<string, unknown>[]>("GET", "/procs").then((rows) => live.onEvent({ type: "procs", rows }), fail);
+    void bench<Record<string, unknown>[]>("GET", "/tasks").then((rows) => rows.forEach((row) => live.onEvent({ type: "task", row })), fail);
+  });
   // Slash commands the harness answers itself, before anything reaches pi;
   // what is not listed here (/bg, /kl-login, /cancel, /skill:…) goes through.
-  const SLASH: Record<string, { help: string; run: (arg: string) => void }> = {
-    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void window.harness.pi({ type: "new_session" }, cur()).then(() => L().replay([])) },
+  // `local` entries never reach the bench, so they run offline; the rest are refused first, not echoed.
+  const SLASH: Record<string, { help: string; local?: true; run: (arg: string) => void }> = {
+    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void pi({ type: "new_session" })?.then((r) => r && L().replay([])) },
     "/new": { help: "open another session beside this one", run: newSession },
-    "/compact": { help: "summarise the older part of this session", run: () => void window.harness.pi({ type: "compact" }, cur()) },
-    "/abort": { help: "stop what this session is doing", run: () => void window.harness.pi({ type: "abort" }, cur()) },
-    "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void window.harness.pi({ type: "set_model", provider, modelId }, cur()); else L().note("usage: /model provider/id"); } },
-    "/login": { help: "log in to Kloudlite in your browser", run: () => void window.harness.pi({ type: "prompt", message: "/kl-login" }, cur()) },
-    "/settings": { help: "open settings", run: openSettings },
+    "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
+    "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },
+    "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void pi({ type: "set_model", provider, modelId }); else L().note("usage: /model provider/id"); } },
+    "/login": { help: "log in to Kloudlite in your browser", run: () => void pi({ type: "prompt", message: "/kl-login" }) },
+    "/settings": { help: "open settings", local: true, run: openSettings },
     "/btw": {
       help: "ask one question of a read-only fork of this session: /btw <question>",
-      run: (arg) => void window.harness.pi({ type: "get_state" }, cur()).then(async (r) => {
+      run: (arg) => {
         const from = cur();
         if (!arg.trim()) return L().note("usage: /btw <question> — one question, one answer, nothing changed");
-        const file = (r.data as { sessionFile?: string } | undefined)?.sessionFile;
-        if (!file) return L().note("this session has no file yet; say something first");
+        // The fork's read tools run on the bench pod: on a workspace thread they would read the wrong machine.
+        if (/^[we]-/.test(from ?? "")) return L().note("btw is only for bench sessions");
         const id = `btw-${++sideSeq}`;
-        await window.harness.spawnPi(id, file);
-        setSides((ts) => [...ts, { id, name: arg ? `btw · ${arg.slice(0, 40)}` : `btw #${sideSeq}`, kind: "btw", readonly: true, messages: [], pi: id, session: from }]);
-        // Beside the bench when there is room for a second pane, else a tab.
+        setSides((ts) => [...ts, { id, name: `btw · ${arg.slice(0, 40)}`, kind: "btw", readonly: true, messages: [], pi: id, session: from }]);
+        // Beside the session when there is room for a second pane, else a tab.
         if (panes.length < 2) {
           setPanes(produce((ps) => void ps.push({ open: [id], sel: id })));
           setActivePane(panes.length - 1);
-          queueMicrotask(() => composer()?.focus());
         } else showThread(id);
-        // The fork holds the bench's whole history for the model; the tab
-        // does not repeat it — one line says where this came from.
         const side = live.thread(id);
-        const ms = await window.harness.pi({ type: "get_messages" }, id);
-        const n = ((ms.data as { messages?: unknown[] } | undefined)?.messages ?? []).filter((m) => (m as { role?: string }).role === "user").length;
         side.replay([]);
-        side.note(`forked from the bench · ${n} ${n === 1 ? "prompt" : "prompts"} of context · read-only · one answer`);
+        side.note("a read-only fork of this session on the bench · one answer");
         side.sent(arg);
-        void window.harness.pi({ type: "prompt", message: arg }, id);
-        // One answer is the whole session: once it lands, the process goes.
-        let ran = false;
-        createEffect(() => {
-          if (side.busy()) ran = true;
-          else if (ran) (void window.harness.stopPi(id), side.setStatus("answered"));
-        });
-      }),
+        side.setStatus("answering…");
+        // No streaming: the bench answers when the fork is done, under its own
+        // btw id, so the local id only names the tab.
+        void bench<{ id: string; entries: unknown[] }>("POST", `/sessions/${from}/btw`, { question: arg }).then(
+          (a) => {
+            side.replay(a.entries);
+            side.setStatus("answered");
+          },
+          (e: Error) => (side.note(e.message), side.setStatus("no answer")),
+        );
+      },
     },
-    "/help": { help: "this list", run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)\n/kl-login  log in to Kloudlite") },
+    "/help": { help: "this list", local: true, run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)\n/kl-login  log in to Kloudlite") },
   };
 
   /** Everything a `/` can start: the harness's own, pi's, and each enabled skill. */
@@ -516,6 +507,10 @@ export function App() {
     const text = c?.value.trim() ?? "";
     const pi = threads().find((t) => t.id === selected())?.pi;
     const slash = /^(\/[a-z-]+)\s*(.*)$/i.exec(text);
+    const entry = slash && SLASH[slash[1].toLowerCase()];
+    // /btw posts through the bench REST and needs it up too, but writes nothing pi-side.
+    const why = entry?.local ? undefined : refusal({ type: entry && slash![1].toLowerCase() === "/btw" ? "get_state" : "prompt" }, { session: pi, connected: live.connected(), writable: live.writable() });
+    if (why && c) return void live.thread(pi ?? "").note(why);
     // The harness's own commands act on the selected session; typed in a
     // read-only fork they go to that fork's pi like any other line.
     if (slash && SLASH[slash[1].toLowerCase()] && c && pi && !pi.startsWith("btw-")) {
@@ -535,7 +530,6 @@ export function App() {
     fit(c);
     c.dispatchEvent(new Event("input", { bubbles: true }));
     L.sent(text, atts.map((i) => i.n));
-    if (!pi.startsWith("btw-")) nameSession(pi, text);
     const cmd: Record<string, unknown> = { type: "prompt", message: text || "(see image)" };
     if (images.length) cmd.images = images;
     // Sent while it runs: a follow-up waits for the turn to end; a steer is
@@ -544,7 +538,7 @@ export function App() {
       cmd.streamingBehavior = how === "steer" ? "steer" : "followUp";
       L.queued(text, how);
     } else L.sent(text, atts.map((i) => i.n));
-    void window.harness.pi(cmd, pi);
+    void window.harness.pi(cmd, pi).then((r) => void (r.success === false && L.note(String(r.error))), (e: Error) => L.note(e.message));
   };
 
   /** A shell opened by shortcut lands where the selection is, else the machine. */
