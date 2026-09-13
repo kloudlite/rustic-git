@@ -8,13 +8,16 @@ import { Writable } from "../src/guard.ts";
 test("a failed write flips the guard and a good probe restores it", () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), "bench-guard-"));
   const changes: boolean[] = [];
-  const w = new Writable(d, (ok) => changes.push(ok));
+  let probeShouldFail = false;
+  const w = new Writable(d, (ok) => changes.push(ok), () => {
+    if (probeShouldFail) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+  });
   assert.throws(() => w.run(() => { throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" }); }), /EIO/);
   assert.equal(w.ok(), false);
   assert.match(w.reason()!, /EIO/);
-  fs.chmodSync(d, 0o500);
+  probeShouldFail = true;
   assert.equal(w.probe(), false);
-  fs.chmodSync(d, 0o700);
+  probeShouldFail = false;
   assert.equal(w.probe(), true);
   assert.deepEqual(changes, [false, true]);
 });

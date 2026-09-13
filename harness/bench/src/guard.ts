@@ -9,10 +9,16 @@ import { appendLine } from "./log.ts";
 export class Writable {
   private file: string;
   private onChange: (ok: boolean, reason?: string) => void;
+  private writeProbe: (file: string) => void;
   private why?: string;
-  constructor(dir: string, onChange: (ok: boolean, reason?: string) => void) {
+  constructor(
+    dir: string,
+    onChange: (ok: boolean, reason?: string) => void,
+    writeProbe: (file: string) => void = (file) => appendLine(file, { ts: Date.now() }),
+  ) {
     this.file = path.join(dir, ".health");
     this.onChange = onChange;
+    this.writeProbe = writeProbe;
   }
   ok(): boolean {
     return this.why === undefined;
@@ -35,7 +41,7 @@ export class Writable {
   }
   probe(): boolean {
     try {
-      appendLine(this.file, { ts: Date.now() });
+      this.writeProbe(this.file);
       this.set(undefined);
       return true;
     } catch (e) {
