@@ -46,6 +46,7 @@ mod owner;
 mod quota;
 mod region;
 mod settings;
+mod bench;
 pub use volume::*;
 pub use snapshot::*;
 pub use workspace::*;
@@ -54,6 +55,7 @@ pub use owner::*;
 pub use quota::*;
 pub use region::*;
 pub use settings::*;
+pub use bench::*;
 
 
 pub(super) mod names;
@@ -214,6 +216,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         QuotaRequest::crd(),
         Request::crd(),
         ClusterSettings::crd(),
+        Bench::crd(),
     ]
 }
 
