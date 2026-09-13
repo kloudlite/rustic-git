@@ -43,6 +43,7 @@ impl Directory {
                                 email: email.clone(),
                                 name: name.to_string(),
                                 username: None,
+                                region: String::new(),
                                 created_at: now,
                                 last_seen_at: now,
                             },

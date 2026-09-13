@@ -14,7 +14,11 @@ const API: &str = "/apis/kloudlite.io/v1alpha1";
 
 /// `karthik` is a member of team `acme`, exercised by the approve-a-team-request case moved here
 /// from `api_quota.rs`.
-struct StubMembership;
+#[derive(Default)]
+struct StubMembership {
+    /// Owner slug → bound region ("" = unbound); what `region_of`/`bind_region` read and CAS.
+    regions: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
 
 #[async_trait::async_trait]
 impl Directory for StubMembership {
@@ -56,6 +60,19 @@ impl Directory for StubMembership {
     async fn owners_of(&self, _email: &str) -> Vec<String> {
         Vec::new()
     }
+
+    async fn region_of(&self, slug: &str) -> Option<String> {
+        self.regions.lock().unwrap().get(slug).filter(|r| !r.is_empty()).cloned()
+    }
+
+    async fn bind_region(&self, slug: &str, region: &str) -> Result<Option<String>, String> {
+        let mut m = self.regions.lock().unwrap();
+        let Some(slot) = m.get_mut(slug) else { return Ok(None) };
+        if slot.is_empty() {
+            *slot = region.to_string();
+        }
+        Ok(Some(slot.clone()))
+    }
 }
 
 struct Server {
@@ -67,7 +84,7 @@ struct Server {
 async fn admin_server(routes: Vec<Route>) -> Server {
     let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
     let mut state = ApiState::new(jwt.clone());
-    state = state.with_directory(Arc::new(StubMembership));
+    state = state.with_directory(Arc::new(StubMembership::default()));
     let (client, rec) = mock_client(routes);
     state = state.with_kube(client);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -382,4 +399,52 @@ async fn approve_with_no_body_still_grants_exactly_what_was_asked() {
 
     let written = s.rec.sent("POST", &format!("{API}/quotas")).remove(0);
     assert_eq!(written["spec"]["workspaces"], 10, "{written}");
+}
+
+#[tokio::test]
+async fn only_a_superadmin_binds_a_region_and_only_once() {
+    let region = |id: &str| {
+        get(
+            format!("{API}/regions/{id}"),
+            json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region",
+                   "metadata": {"name": id}, "spec": {"name": id, "status": "active"}}),
+        )
+    };
+    let routes = vec![region("r1"), region("r2"), not_found(format!("{API}/regions/nope"))];
+    let jwt = Arc::new(Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+    let dir = StubMembership::default();
+    dir.regions.lock().unwrap().insert("acme".into(), String::new());
+    let tmp = tempfile::tempdir().unwrap();
+    let keys = Arc::new(
+        kloudlite_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
+            .await
+            .unwrap(),
+    );
+    let (client, _rec) = mock_client(routes);
+    let state = ApiState::new(jwt.clone()).with_directory(Arc::new(dir)).with_kube(client).with_keys(keys.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, router(Arc::new(state))).await.unwrap() });
+    let put = |tok: String, region: &str| {
+        reqwest::Client::new()
+            .put(format!("{base}/admin/owners/acme/region"))
+            .bearer_auth(tok)
+            .json(&json!({"region": region}))
+            .send()
+    };
+
+    let r = put(admin_token(&jwt), "r1").await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"slug": "acme", "region": "r1"}));
+    let rows = kloudlite_workspaces::audit::list(&keys.os, Default::default(), None, 100).await.unwrap().rows;
+    let binds: Vec<_> = rows.iter().filter(|e| e.action == "owner.region.bind" && e.result == "ok").collect();
+    assert_eq!(binds.len(), 1, "one audit row owner.region.bind: {rows:?}");
+    assert_eq!(binds[0].target, "acme");
+
+    let r = put(admin_token(&jwt), "r2").await.unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"], "acme is bound to r1; a region is set once");
+
+    assert_eq!(put(admin_token(&jwt), "nope").await.unwrap().status(), 422);
+    assert_eq!(put(token(&jwt, "karthik"), "r1").await.unwrap().status(), 403);
 }
