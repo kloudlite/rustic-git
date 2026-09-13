@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // A pi stand-in speaking just enough of `pi --mode rpc` for harness-bench's tests.
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +40,13 @@ process.stdin.on("data", (d) => {
       messages.push({ role: "user", content: cmd.message, timestamp: Date.now() });
       out({ type: "agent_start" });
       if (cmd.message === "hang") return; // never answers: for a bounded-wait timeout test
+      if (cmd.message === "task") { out({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 600" } }); return; } // a task left "running": no tool_execution_end
       if (cmd.message === "exchange") out({ type: "extension_ui_request", id: "w1", method: "setWidget", widgetKey: "harness:exchange", widgetLines: [JSON.stringify({ id: "e1", workspace: "api", dir: "out", text: "kl_workspace_start api", state: "sent" })] });
+      if (cmd.message === "proc") {
+        // A real child, so a reschedule drill can actually kill it and see the pid check catch it dead.
+        const child = spawn("sleep", ["600"]);
+        out({ type: "extension_ui_request", id: "w2", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "sleeper", command: "sleep 600", pid: child.pid, started: Date.now() }])] });
+      }
       out({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo ${cmd.message}` } });
       messages.push({ role: "assistant", content: [{ type: "text", text: `echo ${cmd.message}` }], timestamp: Date.now() });
       out({ type: "agent_end" });
