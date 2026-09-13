@@ -181,7 +181,6 @@ pub(crate) async fn create_bench(
         let b = api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
         return Ok(Json(bench_doc(&b, &region)).into_response());
     }
-    check_region(&s, &region).await?;
     guard_alloc(&s, &caller.name, false, &bench_cost(&crd::PodResources::default())).await?;
     let id = crd::bench_id(&caller.name, &team);
     let image = std::env::var("KLOUDLITE_BENCH_IMAGE")

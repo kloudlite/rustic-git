@@ -148,6 +148,8 @@ pub async fn readonly_departed_benches(s: &ApiState) {
     let api: Api<crd::Bench> = Api::all(c.clone());
     let benches = match api.list(&Default::default()).await {
         Ok(l) => l.items,
+        // The Bench CRD not applied yet: nothing to demote, and not worth a warning every beat.
+        Err(kube::Error::Api(e)) if e.code == 404 => return,
         Err(e) => {
             tracing::warn!(kind = "Bench", error = %e, "listing.failed");
             return;
