@@ -7,8 +7,8 @@ export type SessionRow = { id: string; name: string; seq: number; lastActive?: n
 /** The sidebar's sessions: a workspace or ephemeral thread is the bench's too, but never listed here. */
 export const benchSessions = <T extends SessionRow>(rows: T[]): T[] => rows.filter((r) => (r.kind ?? "bench") === "bench");
 
-/** The bench route that opens a workspace's thread, or an ephemeral's inside it (idempotent). */
-export const threadRoute = (ws: string, eph?: string): string => (eph === undefined ? `/workspaces/${ws}/session` : `/workspaces/${ws}/eph/${eph}/session`);
+/** The bench route that opens a tab's thread (idempotent), or undefined: an ephemeral is watched, never driven, so it only reads. */
+export const openRoute = (kind: string, ws: string): string | undefined => (kind === "workspace" ? `/workspaces/${ws}/session` : undefined);
 
 /** What a tab says when the bench refuses to open its thread; a 409 `belongs to` is an id clash, not a crash. */
 export const openNote = (message: string): string =>

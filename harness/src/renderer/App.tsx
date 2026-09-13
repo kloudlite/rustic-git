@@ -15,7 +15,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
-import { benchSessions, inFlightItems, openNote, procState, refusal, threadRoute, type SessionRow } from "./rows";
+import { benchSessions, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { cycleTheme } from "./theme";
 
 export function App() {
@@ -65,20 +65,22 @@ export function App() {
   };
   const fail = (e: Error) => live.thread(cur()).note(e.message);
   const loadThread = async (id: string) => live.thread(id).replay(await window.harness.benchMessages(id));
-  // A workspace or ephemeral tab is its thread on the bench: open it there
-  // (idempotent), then read its history. Offline or unwritable skips the open
-  // through refusal() and reads what main cached, read-only.
+  // A workspace tab is its thread on the bench: open it there (idempotent),
+  // then read its history. An ephemeral is watched, never driven: it only
+  // reads. Offline or unwritable skips the open through refusal() and reads
+  // what main cached, read-only.
   const openLive = (id: string) => {
     const t = threadOf(machine(), id);
     if (!t?.pi || (t.kind !== "workspace" && t.kind !== "ephemeral")) return;
     const w = machine().workspaces.find((x) => x.id === id || x.ephemerals.some((e) => e.id === id))!;
     const L = live.thread(t.pi);
-    const skip = refusal({ type: "new_session" }, { session: t.pi, connected: live.connected(), writable: live.writable() });
-    const opened = skip ? Promise.resolve(t.pi) : bench<Session>("POST", threadRoute(w.id, t.kind === "ephemeral" ? id : undefined)).then((s) => s.id);
-    void opened.then(
-      (sid) => (sid === t.pi ? loadThread(sid) : L.note(`the bench opened ${sid}, not ${t.pi}`)),
-      (e: Error) => L.note(openNote(e.message)),
-    );
+    const route = openRoute(t.kind, w.id);
+    const skip = !route || refusal({ type: "new_session" }, { session: t.pi, connected: live.connected(), writable: live.writable() });
+    void (async () => {
+      const sid = skip ? t.pi! : (await bench<Session>("POST", route)).id;
+      if (sid !== t.pi) return L.note(`the bench opened ${sid}, not ${t.pi}`);
+      await loadThread(sid);
+    })().catch((e: Error) => L.note(openNote(e.message)));
   };
   const newSession = () =>
     void bench<Session>("POST", "/sessions").then(async (s) => {
