@@ -71,7 +71,14 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
         if (!s === !w) return send(res, 400, { error: "exactly one of session= or workspace=" });
         return send(res, 200, s ? bench.exchanges.bySession(s, n("after")) : bench.exchanges.byWorkspace(w!, n("after")));
       }
-      if (m === "GET" && p[0] === "workspaces" && p.length === 3 && p[2] === "messages") return send(res, 200, bench.exchanges.byWorkspace(p[1], n("after")));
+      if (p[0] === "workspaces") {
+        // A thread never opened has no history yet, which is an empty one, not a missing route.
+        const thread = (id: string) => (bench.sessions.get(id) ? bench.messages(id, n("after"), n("limit")) : Promise.resolve({ messages: [], total: 0 }));
+        if (p.length === 3 && p[2] === "session" && m === "POST") return send(res, 200, await bench.openWorkspace(p[1]));
+        if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await thread(`w-${p[1]}`));
+        if (p.length === 5 && p[2] === "eph" && p[4] === "session" && m === "POST") return send(res, 200, await bench.openEphemeral(p[1], p[3]));
+        if (p.length === 5 && p[2] === "eph" && p[4] === "messages" && m === "GET") return send(res, 200, await thread(`e-${p[3]}`));
+      }
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       if (m === "POST" && u.pathname === "/import") {
