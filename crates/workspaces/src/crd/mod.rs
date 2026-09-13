@@ -163,12 +163,18 @@ pub enum Phase {
     #[default]
     Pending,
     Creating,
+    /// A bench whose pod is being created after a wake — distinct from `Creating` (first
+    /// materialization) so the UI can tell "waking up" from "first ever start".
+    Starting,
     /// A workspace whose pod is Ready, or a Volume whose subvolume is materialized.
     Ready,
     /// An environment whose services are up. (`WsState` has no `Running`; `EnvState` has no
     /// `Ready` — the two projections disagree, and this enum is the union.)
     Running,
     Stopped,
+    /// A bench with no pod because nobody has used it recently — distinct from `Stopped` (an
+    /// explicit `desiredState: Stopped`) so a wake can tell "asleep, wake it" from "off on purpose".
+    Idle,
     /// A btrfs operation is in flight.
     Working,
     /// The owning node is dead and the pin has been cleared: no node may write this subvolume
@@ -189,9 +195,11 @@ impl Phase {
         match self {
             Phase::Pending => "pending",
             Phase::Creating => "creating",
+            Phase::Starting => "starting",
             Phase::Ready => "ready",
             Phase::Running => "running",
             Phase::Stopped => "stopped",
+            Phase::Idle => "idle",
             Phase::Working => "working",
             Phase::Unavailable => "unavailable",
             Phase::Done => "done",
