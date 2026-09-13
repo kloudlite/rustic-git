@@ -24,10 +24,6 @@ const harness = {
   benchMessages: (id: string): Promise<unknown[]> => ipcRenderer.invoke("bench:messages", id),
   /** Configured, connected, and the last list and exchanges seen, for a cold offline start. */
   benchState: (): Promise<{ configured: boolean; connected: boolean; sessions: unknown[]; exchanges: unknown[] }> => ipcRenderer.invoke("bench:state"),
-  // ponytail: no-ops until Task 15 moves App.tsx off them — the bench starts a
-  // session's pi on its first rpc, so nothing is left for these to do.
-  spawnPi: (_id: string, _sessionFile?: string): Promise<void> => Promise.resolve(),
-  stopPi: (_id: string, _forget = false): Promise<void> => Promise.resolve(),
 
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),

@@ -3,7 +3,7 @@ import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import * as live from "../live";
 
-const TONE: Record<live.Task["state"], "success" | "accent" | "neutral" | "danger" | "warning"> = { running: "success", background: "accent", done: "neutral", failed: "danger", cancelled: "warning" };
+const TONE: Record<live.Task["state"], "success" | "accent" | "neutral" | "danger" | "warning"> = { running: "success", background: "accent", done: "neutral", failed: "danger", cancelled: "warning", lost: "warning" };
 
 /** One task in full: the command, its state and time, and its output as it grows. */
 export function TaskView(props: { task: live.Task; onClose: () => void }) {
