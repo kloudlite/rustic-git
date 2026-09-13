@@ -42,7 +42,8 @@ export class RpcChild {
     if (this.child) return;
     const o = this.opts;
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
-    const extDir = o.extDir ?? path.join(HARNESS, "pi");
+    // The image installs the whole harness tree at /opt/harness, so the relative defaults resolve there; the env names another layout.
+    const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
     // A workspace session loads only the workspace's tools: background.ts would take bash back into the bench pod.
     const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
     const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : [])];

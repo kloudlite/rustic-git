@@ -36,3 +36,23 @@ test("a dead child rejects waiting and later sends", async () => {
     await c.stop();
   }
 });
+
+test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions are found", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-rpc-"));
+  const ext = path.join(dir, "ext");
+  const argvFile = path.join(dir, "argv.json");
+  const saved = { bin: process.env.HARNESS_PI_BIN, ext: process.env.HARNESS_PI_EXT_DIR, argv: process.env.FAKE_PI_ARGV_FILE };
+  Object.assign(process.env, { HARNESS_PI_BIN: FAKE, HARNESS_PI_EXT_DIR: ext, FAKE_PI_ARGV_FILE: argvFile });
+  const c = new RpcChild("s-1", { dir, model: "m" }, () => undefined);
+  try {
+    c.start();
+    await c.send({ type: "get_state" });
+    const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
+    const exts = argv.filter((_, i) => argv[i - 1] === "-e");
+    assert.deepEqual(exts, ["background.ts", "process.ts", "kloudlite.ts"].map((f) => path.join(ext, f)));
+  } finally {
+    await c.stop();
+    for (const [k, v] of [["HARNESS_PI_BIN", saved.bin], ["HARNESS_PI_EXT_DIR", saved.ext], ["FAKE_PI_ARGV_FILE", saved.argv]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
