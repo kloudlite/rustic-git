@@ -115,6 +115,18 @@ impl kloudlite_workspaces::api::Directory for Dir {
         self.0.get(slug).await.ok().flatten().is_some()
     }
 
+    async fn region_of(&self, slug: &str) -> Option<String> {
+        let region = match self.0.get(slug).await.ok()? {
+            Some(t) => t.region,
+            None => self.0.user_by_handle(slug).await.ok()??.region,
+        };
+        (!region.is_empty()).then_some(region)
+    }
+
+    async fn bind_region(&self, slug: &str, region: &str) -> std::result::Result<Option<String>, String> {
+        self.0.bind_region(slug, region).await.map_err(|e| e.to_string())
+    }
+
     async fn add_superadmin(&self, email: &str, by: &str) -> std::result::Result<(), String> {
         self.0.add_superadmin(email, by).await.map_err(|e| e.to_string())
     }

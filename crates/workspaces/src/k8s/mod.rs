@@ -18,6 +18,7 @@
 //! - `attach`: the per-workspace resolv.conf and the projected authorized_keys file
 //! - `environment`: a service's StatefulSet, ClusterIP, and the intercept EndpointSlice
 //! - `policies`: every NetworkPolicy
+//! - `bench`: the bench Pod, its home-relative folder, and its gateway-only ingress policy
 //! - `tests`: one file, since the fixtures are shared
 //!
 
@@ -49,12 +50,14 @@ mod workspace;
 mod attach;
 mod environment;
 mod policies;
+mod bench;
 pub use namespace::*;
 pub use secrets::*;
 pub use workspace::*;
 pub use attach::*;
 pub use environment::*;
 pub use policies::*;
+pub use bench::*;
 
 #[cfg(test)]
 mod tests;
@@ -90,6 +93,10 @@ pub(super) const EPHEMERAL_LIMIT: &str = "4Gi";
 /// namespace: an attachment selects on it, so without it a grant would reach every workspace the
 /// user owns.
 pub const WORKSPACE_LABEL: &str = "kloudlite.io/workspace";
+
+/// Where `kl ide serve` listens in every workspace pod, on the pod IP: the owner's bench dials it
+/// there (`allow_bench_tools`), and `kl-connect ws ide` reaches it over the ssh tunnel.
+pub const IDE_PORT: u16 = 7788;
 
 
 pub struct PodContext<'a> {

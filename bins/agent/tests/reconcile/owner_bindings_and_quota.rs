@@ -50,7 +50,7 @@ pub(crate) fn ns_routes(ns: &str) -> Vec<Route> {
             "RoleBinding",
         ),
     ];
-    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh", "allow-builder-gate"] {
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh", "allow-bench-tools", "allow-builder-gate"] {
         r.push(ok(
             format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
             "networking.k8s.io/v1",
@@ -256,4 +256,43 @@ pub(crate) fn home_vol_json(quota: u64) -> serde_json::Value {
         "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": quota},
         "status": {"phase": "ready", "subvolumePresent": true},
     })
+}
+
+/// C1: a team bench with no workspace in that team still gets its namespace — the real
+/// `teams_in_use` decision, not a faked Namespace GET. A bench on another node does not.
+#[tokio::test]
+async fn a_team_bench_with_no_workspace_in_that_team_gets_its_namespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws_list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []});
+    let bench = |team: &str, node: &str| serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
+        "metadata": {"name": format!("bench-{team}")},
+        "spec": {"owner": "alice", "team": team, "image": "i", "desiredState": "running"},
+        "status": {"phase": "idle", "nodeName": node},
+    });
+    let benches = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "BenchList", "metadata": {},
+        "items": [bench("acme", "node-a"), bench("elsewhere", "node-b"), bench("alice", "node-a")]});
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
+            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", benches),
+            Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
+        ]
+        .into_iter()
+        .chain(quota_fallback_routes("alice", false))
+        .chain(quota_fallback_routes("acme", true))
+        .chain(ns_routes("ws-alice"))
+        .chain(ns_routes(&crd::ws_namespace("alice", "acme")))
+        .collect(),
+    );
+    let b: crd::OwnerBinding = serde_json::from_value(binding_json()).unwrap();
+    kloudlite_agent::binding::apply_binding(&b, &ctx).await.unwrap();
+    let calls = rec.calls();
+    let ns_patch = |ns: String| format!("PATCH /api/v1/namespaces/{ns}");
+    assert!(calls.contains(&ns_patch(crd::ws_namespace("alice", "acme"))), "{calls:?}");
+    assert!(!calls.contains(&ns_patch(crd::ws_namespace("alice", "elsewhere"))), "{calls:?}");
+    // A personal bench (team == owner) is the personal namespace, not a team quota pass.
+    assert!(!calls.iter().any(|c| c.contains("/quotas/default-team") && c.contains("alice")), "{calls:?}");
+    assert_eq!(calls.iter().filter(|c| **c == ns_patch("ws-alice".into())).count(), 1, "{calls:?}");
 }

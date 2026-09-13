@@ -43,7 +43,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -67,6 +67,9 @@ pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/buil
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
+# The bench image is the api's to write into a Bench spec (KLOUDLITE_BENCH_IMAGE on the api
+# Deployment).
+pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" kloudlite.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 

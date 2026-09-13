@@ -234,3 +234,15 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-workspace:latest
             ghcr.io/kloudlite/kloudlite-workspace:${{ github.sha }}
+      # pi, kl and harness-bench (the real binary once harness/bench/dist/ exists, else the stub —
+      # see deploy/bench/Dockerfile). A separate Dockerfile, same context, so it also reaches the
+      # kl-musl artifact downloaded above.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/bench/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-bench:latest
+            ghcr.io/kloudlite/kloudlite-bench:${{ github.sha }}

@@ -8,7 +8,7 @@
 use axum::http::StatusCode;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use kloudlite_workspaces::crd::{Phase, Workspace};
+use kloudlite_workspaces::crd::{Bench, Phase, Workspace};
 use std::net::SocketAddr;
 
 /// The pod's sshd address, and the owner the tunnel is charged to.
@@ -50,6 +50,34 @@ pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Resul
         .ok_or((StatusCode::CONFLICT, "pod has no IP"))?;
     let ip = ip.parse().map_err(|_| (StatusCode::CONFLICT, "pod IP is not an address"))?;
     Ok(Target { addr: SocketAddr::new(ip, ssh_port), owner: ws.spec.owner })
+}
+
+/// The bench's harness address, same two-GET shape as `resolve`: a Bench's `status.podRef` is
+/// the only place a bench's pod IP lives, and it is just as stale-prone as a workspace's.
+pub async fn resolve_bench(client: &kube::Client, id: &str, port: u16) -> Result<Target, Refusal> {
+    if !is_dns_label(id) {
+        return Err((StatusCode::NOT_FOUND, "no such object"));
+    }
+    let bench = Api::<Bench>::all(client.clone()).get(id).await.map_err(api_err)?;
+    let status = bench.status.ok_or((StatusCode::CONFLICT, "no status yet"))?;
+    if status.phase != Phase::Ready {
+        return Err((StatusCode::CONFLICT, "bench not ready"));
+    }
+    let pod_ref = status.pod_ref.ok_or((StatusCode::CONFLICT, "no podRef"))?;
+    let (ns, name) = pod_ref.split_once('/').ok_or((StatusCode::CONFLICT, "malformed podRef"))?;
+    let pod = Api::<Pod>::namespaced(client.clone(), ns)
+        .get(name)
+        .await
+        .map_err(|e| match api_err(e) {
+            (StatusCode::NOT_FOUND, _) => (StatusCode::CONFLICT, "pod gone"),
+            other => other,
+        })?;
+    let ip = pod
+        .status
+        .and_then(|s| s.pod_ip)
+        .ok_or((StatusCode::CONFLICT, "pod has no IP"))?;
+    let ip = ip.parse().map_err(|_| (StatusCode::CONFLICT, "pod IP is not an address"))?;
+    Ok(Target { addr: SocketAddr::new(ip, port), owner: bench.spec.owner })
 }
 
 /// RFC 1123: at most 63 characters of lowercase alphanumerics and dashes, starting and ending

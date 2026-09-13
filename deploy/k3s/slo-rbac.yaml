@@ -44,7 +44,7 @@ rules:
   # naming the cut — rather than trusting the owner's `Replicated` condition, because that field is
   # what `may_claim` reads before it lets a stopped worktree start elsewhere.
   - apiGroups: ["kloudlite.io"]
-    resources: ["workspaces", "environments", "volumes", "snapshots", "volumereplicas"]
+    resources: ["workspaces", "environments", "volumes", "snapshots", "volumereplicas", "benches"]
     verbs: ["get", "list"]
   # Its own rule rather than a sixth resource above: the keys journey WAITS for the agent's ack,
   # so it needs `watch`, and nothing else the probe reads does.

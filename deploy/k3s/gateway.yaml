@@ -46,7 +46,7 @@ metadata:
   name: kloudlite-gateway
 rules:
   - apiGroups: ["kloudlite.io"]
-    resources: ["workspaces"]
+    resources: ["workspaces", "benches"]
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods"]

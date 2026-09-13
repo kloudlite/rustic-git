@@ -28,6 +28,22 @@ is the conversation that drives it, the right is whatever is selected, in full.
     npm run build      # tsc for main/preload, vite for the renderer
     npm run typecheck  # both tsconfigs, no emit
 
+## Running the bench
+
+The harness no longer runs pi. It is a view of a bench: `harness-bench`, one per person per team, serving the sessions in a bench folder on port 7789.
+
+    node bench/src/main.ts --dir /path/to/bench [--host 127.0.0.1] [--port 7789] [--read-only] [--wait] [--idle-secs N]
+    node bench/src/main.ts --ping [--port 7789]
+    HARNESS_BENCH=http://127.0.0.1:7789 npm start
+
+On the platform the folder is `/bench` and the address is the local end of `kl-connect bench`. There the listener binds `0.0.0.0` behind a gateway-only NetworkPolicy, a held folder lock exits 75 (the agent shows `FolderLocked` and the pod restarts), and `--ping` is the readiness probe. With no client connected and nothing running for the region's `benchIdleSecs`, the bench exits 0 and has no pod; the next connection through `kl-connect bench` starts it, and the first request waits out a cold start of seconds. On a laptop pass `--host 127.0.0.1` and `--wait` to wait for a held lock; leave `--idle-secs` unset (0), and it never sleeps. `--read-only` is a bench whose owner has left the team: it serves history with no pi at all. `npm run bench:test` runs the bench's tests; they need `flock(1)` (`brew install flock` on a Mac).
+
+Env: `KL_MODEL` (default model, overrides `--model`'s default), `KL_BENCH_IDLE_SECS` (default for `--idle-secs`), `KL_TEAM` (passed through to pi's extensions unchanged), `TERMINATION_LOG` (where a lock or idle exit writes its reason instead of `/dev/termination-log`), `NODE_NAME` (the lock holder's name; falls back to the hostname), `HARNESS_PI_BIN` (the pi binary; default `node_modules/.bin/pi` in the harness tree) and `HARNESS_PI_EXT_DIR` (pi's extensions; default `pi/` in the harness tree). The bench image installs the whole harness tree at `/opt/harness` (`package.json`, `package-lock.json`, `node_modules`, `bench/`, `pi/`), so both defaults resolve there with neither set. Exit codes: `0` a clean stop or an idle exit, `75` the folder is locked by someone else, `2` a bad `--idle-secs`.
+
+To bring this laptop's old sessions onto the bench, run "Import this laptop's sessions into the bench" from the palette. Running it twice changes nothing.
+
+A workspace tab is a session on the bench too: its pi runs there and its tools run on the workspace's tool server, found through `/v1`. Locally, `KL_TOOLS_ADDRESS=127.0.0.1:<port>` points every workspace session at one tool server, such as the local end of `kl-connect ws ide <workspace>`.
+
 Two env vars help when looking at the UI from a terminal:
 
     HARNESS_SHOT=out.png    capture the window once after first paint, then exit

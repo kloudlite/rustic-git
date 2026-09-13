@@ -122,6 +122,13 @@ impl Intercept {
             .find(|p| p.service == service_port)
             .map_or(service_port, |p| p.workspace)
     }
+
+    /// The service port that would land on the workspace's tool server, if any: `kl ide serve`
+    /// listens on the pod IP with no auth of its own, so an intercept delivering there hands the
+    /// environment an `exec`. Covers a rewrite onto it and an unmapped port that IS it.
+    pub fn ide_port_collision(&self, service_ports: &[u16]) -> Option<u16> {
+        service_ports.iter().copied().find(|p| self.workspace_port(*p) == crate::k8s::IDE_PORT)
+    }
 }
 
 

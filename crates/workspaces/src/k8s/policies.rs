@@ -1,6 +1,7 @@
 //! Every NetworkPolicy: the default deny with DNS, internet egress that excludes the cluster and
 //! the metadata service, the gateway's hole for port 22, the builder gate's two policies, and the
-//! pairs that open an attachment or an intercept between a workspace and an environment.
+//! pairs that open an attachment or an intercept between a workspace and an environment, and the
+//! bench's hole to its workspaces' tool port.
 
 use super::*;
 
@@ -46,7 +47,19 @@ pub fn intercept_egress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, own
 /// Lets that one workspace pod accept the environment's namespace. Scoped to the pod by the
 /// policy's own `podSelector`: an owner's workspaces share a namespace, so a namespace-wide rule
 /// would open every workspace they have to this environment.
-pub fn intercept_ingress(ws_ns: &str, env_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+///
+/// Scoped to `ports`, the workspace-side ports of the intercept: the tool server listens on the pod
+/// IP with no auth of its own, so every port would hand the environment an `exec`. Empty admits
+/// nothing, never everything — an ingress rule without `ports` means all of them.
+pub fn intercept_ingress(ws_ns: &str, env_ns: &str, ws_id: &str, ports: &[u16], owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    let ingress: Vec<serde_json::Value> = if ports.is_empty() {
+        vec![]
+    } else {
+        vec![json!({
+            "from": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": env_ns } } }],
+            "ports": ports.iter().map(|p| json!({ "protocol": "TCP", "port": p })).collect::<Vec<_>>(),
+        })]
+    };
     policy(
         &intercept_policy_name(ws_id),
         ws_ns,
@@ -55,9 +68,7 @@ pub fn intercept_ingress(ws_ns: &str, env_ns: &str, ws_id: &str, owner: &str, ow
         json!({
             "podSelector": { "matchLabels": { WORKSPACE_LABEL: ws_id } },
             "policyTypes": ["Ingress"],
-            "ingress": [{
-                "from": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": env_ns } } }],
-            }],
+            "ingress": ingress,
         }),
     )
 }
@@ -197,6 +208,35 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
                     "podSelector": { "matchLabels": { "app": "kloudlite-gateway" } },
                 }],
                 "ports": [{ "protocol": "TCP", "port": 22 }],
+            }],
+        }),
+    )
+}
+
+
+/// Workspace pods accept IDE_PORT from bench pods in their own namespace: a person's bench runs
+/// their workspace sessions. `allow-same-namespace` admits this today; the grant is named so the
+/// bench keeps its path if that is ever narrowed.
+///
+/// A bench pod carries `WORKSPACE_LABEL` too (its id), so the target excludes `kind=bench`: a
+/// bench serves no tools. No `namespaceSelector` in the peer — this namespace only, which is the
+/// owner (or the owner in one team), never another person's bench.
+// ponytail: AKS runs no network policy engine; the fence holds on the k3s regions where benches run
+pub fn allow_bench_tools(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-bench-tools",
+        ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": { "matchExpressions": [
+                { "key": WORKSPACE_LABEL, "operator": "Exists" },
+                { "key": KIND_LABEL, "operator": "NotIn", "values": ["bench"] },
+            ] },
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{ "podSelector": { "matchLabels": { KIND_LABEL: "bench" } } }],
+                "ports": [{ "protocol": "TCP", "port": IDE_PORT }],
             }],
         }),
     )

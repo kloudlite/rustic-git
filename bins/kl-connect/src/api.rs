@@ -124,6 +124,83 @@ pub struct BuilderStatus {
     pub conditions: Vec<Condition>,
 }
 
+/// `POST /v1/bench/session`'s 201 body.
+#[derive(serde::Deserialize)]
+pub struct BenchSession {
+    #[allow(dead_code)]
+    pub id: String,
+    pub token: String,
+    pub gateway: String,
+    #[allow(dead_code)]
+    pub expires_at: String,
+}
+
+/// `bench_session`'s answer: `Ready` on 201, `Waking(state)` on 202 (the api's `{"state": phase}`
+/// while it wakes or starts).
+pub enum SessionAnswer {
+    Ready(BenchSession),
+    Waking(String),
+}
+
+#[derive(serde::Deserialize)]
+struct BenchState {
+    state: String,
+}
+
+async fn bench_request(
+    req: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, Error> {
+    req.send().await.map_err(|e| Error::Other(e.to_string()))
+}
+
+/// `region` is sent only for a personal bench (its first use binds the person's region); a
+/// team's is the team's.
+pub async fn create_bench(
+    cfg: &crate::config::Config,
+    team: Option<&str>,
+    region: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let body = serde_json::json!({"team": team, "region": region});
+    let r = bench_request(
+        client()
+            .post(format!("{}/v1/bench", cfg.api))
+            .bearer_auth(&cfg.token)
+            .json(&body),
+    )
+    .await?;
+    json(r).await
+}
+
+#[allow(dead_code)] // part of the api surface the brief specifies; no `kl-connect bench status` yet
+pub async fn get_bench(
+    cfg: &crate::config::Config,
+    team: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let mut req = client().get(format!("{}/v1/bench", cfg.api)).bearer_auth(&cfg.token);
+    if let Some(t) = team {
+        req = req.query(&[("team", t)]);
+    }
+    json(bench_request(req).await?).await
+}
+
+/// 201 -> `Ready(session)`; 202 -> `Waking(state)`; anything else an `Error` carrying the body's
+/// `error`.
+pub async fn bench_session(cfg: &crate::config::Config, team: Option<&str>) -> Result<SessionAnswer, Error> {
+    let mut req = client()
+        .post(format!("{}/v1/bench/session", cfg.api))
+        .bearer_auth(&cfg.token);
+    if let Some(t) = team {
+        req = req.query(&[("team", t)]);
+    }
+    let r = bench_request(req).await?;
+    if r.status() == reqwest::StatusCode::ACCEPTED {
+        let body = r.text().await.map_err(|e| Error::Other(e.to_string()))?;
+        let st: BenchState = serde_json::from_str(&body).map_err(|e| Error::Other(e.to_string()))?;
+        return Ok(SessionAnswer::Waking(st.state));
+    }
+    Ok(SessionAnswer::Ready(json(r).await?))
+}
+
 /// `GET /v1/builders/me` -- the caller's own hidden builder, or their team's with `team`.
 pub async fn builder_status(
     cfg: &crate::config::Config,

@@ -122,6 +122,18 @@ pub trait Directory: Send + Sync {
     async fn grant_access(&self, _team: &str, _user: &str, _role: TeamRole) -> GrantAccess {
         GrantAccess::Unsupported
     }
+
+    /// The region a team or person is bound to. `None` = unbound or unreadable. Defaulted like
+    /// `grant_access`: only the directory-backed adapter and the stubs that exercise it answer.
+    async fn region_of(&self, _slug: &str) -> Option<String> {
+        None
+    }
+
+    /// `Directory::bind_region` — set once; `Ok(None)` = no such owner, `Ok(Some(r))` = what the
+    /// slug is bound to afterwards, which differs from the ask when it was already bound.
+    async fn bind_region(&self, _slug: &str, _region: &str) -> Result<Option<String>, String> {
+        Err("no directory".into())
+    }
 }
 
 

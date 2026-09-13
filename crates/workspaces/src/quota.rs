@@ -138,6 +138,7 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let vols: Api<crd::Volume> = Api::all(c.clone());
     let snaps: Api<crd::Snapshot> = Api::all(c.clone());
+    let benches: Api<crd::Bench> = Api::all(c.clone());
     let lp = owned_by(owner);
     let team_lp = ListParams::default().labels(&format!("{TEAM_LABEL}={owner}"));
     let charged = |o: &str, team: &str| if team.is_empty() { o == owner } else { team == owner };
@@ -145,13 +146,21 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // The six listings are independent reads; serially awaited they were six round trips on a
     // path every create and every quota page runs (2026-09-12). Concurrency only — the counts are
     // still recomputed from the CRDs on every request, never cached.
-    let (ws_own, ws_team, env_own, vol_own, vol_team, snap_own) = futures::try_join!(
+    let (ws_own, ws_team, env_own, vol_own, vol_team, snap_own, bench_own) = futures::try_join!(
         ws.list(&lp),
         ws.list(&team_lp),
         envs.list(&lp),
         vols.list(&lp),
         vols.list(&team_lp),
         snaps.list(&lp),
+        async {
+            // A 404 is a region whose Bench CRD is not applied yet: no benches, not a failed
+            // create for every workspace while the api rolls ahead of the CRD.
+            match benches.list(&lp).await {
+                Err(kube::Error::Api(e)) if e.code == 404 => Ok(Vec::new()),
+                r => r.map(|l| l.items),
+            }
+        },
     )?;
 
     let (mut millis, mut mib) = (0u64, 0u64);
@@ -190,6 +199,15 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
                 millis += millicores(&unit.cpu_limit);
                 mib += mebibytes(&unit.memory_limit);
             }
+        }
+    }
+    // Decision 3: a bench is charged to its person, and only while it wants a pod — asleep or
+    // stopped costs nothing. Never to a team: the owner check is on `spec.owner`, not the label.
+    for b in bench_own {
+        let idle = b.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
+        if b.spec.owner == owner && live(b.spec.desired_state) && !idle {
+            millis += millicores(&b.spec.resources.cpu_limit);
+            mib += mebibytes(&b.spec.resources.memory_limit);
         }
     }
     // Detached volumes included: disk kept by snapshots after a working copy is deleted is still

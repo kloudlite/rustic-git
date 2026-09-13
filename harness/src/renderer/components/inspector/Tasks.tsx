@@ -22,19 +22,22 @@ export function Tasks(props: { onOpen: (id: string) => void }) {
   };
   const background = () => live.tasks.filter((t) => t.state === "background");
   // Just ended after being backgrounded: shown dim for a few seconds, then gone.
-  const settling = () => live.tasks.filter((t) => t.n && t.ended && tick() - t.ended < 4000 && t.state !== "background");
+  const settling = () => live.tasks.filter((t) => t.n && t.ended && tick() - t.ended < 4000 && t.state !== "background" && t.state !== "lost");
+  // Found gone when the bench restarted: listed dim, never as running.
+  const lost = () => live.tasks.filter((t) => t.state === "lost");
 
   return (
-    <Show when={background().length || settling().length}>
+    <Show when={background().length || settling().length || lost().length}>
       <Heading meta={background().length ? `${background().length} running` : undefined}>Background tasks</Heading>
       <Group items={background()} tone="bg-accent animate-pulse" onOpen={props.onOpen} clock={clock} />
+      <Group items={lost()} onOpen={props.onOpen} clock={clock} dim />
       <Group items={settling()} onOpen={props.onOpen} clock={clock} dim />
       <div class="h-3" />
     </Show>
   );
 }
 
-const DOT: Record<live.Task["state"], string> = { running: "bg-success", background: "bg-accent", done: "bg-subtle", failed: "bg-danger", cancelled: "bg-warning" };
+const DOT: Record<live.Task["state"], string> = { running: "bg-success", background: "bg-accent", done: "bg-subtle", failed: "bg-danger", cancelled: "bg-warning", lost: "bg-warning" };
 
 function Group(props: { label?: string; items: live.Task[]; tone?: string; dim?: boolean; onOpen: (id: string) => void; clock: (t: live.Task) => string }) {
   return (

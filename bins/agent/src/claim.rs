@@ -540,7 +540,7 @@ async fn claim<K>(
     ctx: &Arc<Ctx>,
     kind: &'static str,
     phase: crd::Phase,
-    parts: fn(&K) -> Parts<'_>,
+    parts: for<'a> fn(&'a K, &'a Ctx) -> Parts<'a>,
 ) -> Result<Action, ReconcileErr>
 where
     K: Resource<DynamicType = ()> + Clone + serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
@@ -548,7 +548,7 @@ where
     let api: Api<K> = Api::all(ctx.client.clone());
     let mut obj = obj.clone();
     for attempt in 0..ATTEMPTS {
-        let p = parts(&obj);
+        let p = parts(&obj, ctx);
         let patch = match decide(ctx, &obj.name_any(), &p, phase, obj.meta().generation.unwrap_or(0), unplaced_for(&obj)).await? {
             Verdict::Claim(patch) => patch,
             Verdict::Decline => return Ok(Action::await_change()),
@@ -612,7 +612,7 @@ where
 }
 
 pub async fn claim_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    claim(w, ctx, "Workspace", crd::Phase::Pending, |o| {
+    claim(w, ctx, "Workspace", crd::Phase::Pending, |o, _| {
         let st = o.status.clone().unwrap_or_default();
         Parts {
             node_name: st.node_name,
@@ -643,7 +643,7 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     // Environments have no clone-of-a-running-source path through placement: `clone_env` copies a
     // volume by id and the copy is materialized by the Volume controller, which needs the same disk
     // — the same rule, expressed through the same helper.
-    claim(e, ctx, "Environment", crd::Phase::Creating, |o| {
+    claim(e, ctx, "Environment", crd::Phase::Creating, |o, _| {
         let st = o.status.clone().unwrap_or_default();
         Parts {
             node_name: st.node_name,
@@ -653,6 +653,21 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
             owner: &o.spec.owner,
             want: env_want(o.spec.services.len()),
         }
+    })
+    .await
+}
+
+/// A bench holds no volume, so `decide` reaches only the capacity and placeability arms. It has no
+/// region field: /v1 writes it to its team's region's cluster, so this agent's region is the team's.
+/// A sleeping bench asks for no capacity.
+pub async fn claim_bench(b: &crd::Bench, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    claim(b, ctx, "Bench", crd::Phase::Pending, |o, c| Parts {
+        node_name: o.status.as_ref().map(|s| s.node_name.clone()).unwrap_or_default(),
+        storage: None,
+        volume: None,
+        region: &c.region,
+        owner: &o.spec.owner,
+        want: if crd::bench_wants_pod(o) { want_of(&o.spec.resources) } else { Want::default() },
     })
     .await
 }

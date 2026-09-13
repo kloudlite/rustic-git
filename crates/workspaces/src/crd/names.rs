@@ -62,6 +62,15 @@ fn dns_label(raw: &str) -> String {
     format!("{head}-{tail}")
 }
 
+/// `"bench-" + 12 hex of sha256("{owner}\0{team}")` over lowercased inputs — one bench per
+/// (owner, team) pair. `\0` rather than `binding_name`'s `/` separator only because both are
+/// already in use elsewhere in this file; either byte works since no handle or team slug can
+/// contain it, which is what keeps `("ab","c")` and `("a","bc")` apart.
+pub fn bench_id(owner: &str, team: &str) -> String {
+    let (owner, team) = (owner.to_lowercase(), team.to_lowercase());
+    format!("bench-{}", hex_prefix(&format!("{owner}\0{team}"), 6))
+}
+
 /// The namespace an environment's deployments and services live in. One namespace per environment
 /// is what makes a default-deny NetworkPolicy the isolation boundary.
 ///

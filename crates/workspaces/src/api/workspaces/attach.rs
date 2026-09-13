@@ -6,7 +6,25 @@ use super::*;
 
 #[derive(serde::Deserialize)]
 pub(crate) struct AttachBody {
-    environment: String,
+    pub(crate) environment: String,
+}
+
+
+/// Whether `caller` may attach something in `region` to `environment`: shared by a workspace and a
+/// bench, so neither can skip the label check or the one-cluster rule.
+pub(crate) async fn check_attach(s: &ApiState, caller: &super::super::Caller, environment: &str, region: &str) -> Result<(), Response> {
+    if !valid_segment_label(environment) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "invalid environment id").into_response());
+    }
+    // `find_env` answers 404 for an environment the caller has no part in, which is what keeps this
+    // route from being a way to enumerate other people's environments.
+    let e = find_env(s, caller, environment).await?;
+    if e.spec.region != region {
+        // Another region is another cluster: no pod route, no DNS. Refused here rather than left to
+        // fail inside a reconcile that has no way to report it back to this caller.
+        return Err((StatusCode::CONFLICT, "the environment is in another region, which is another cluster").into_response());
+    }
+    Ok(())
 }
 
 
@@ -26,17 +44,7 @@ pub(crate) async fn attach_ws(
     // Same predicate `validate_ws_spec` applies to this field at the agent — checked here too so a
     // bad id is a 422 at the door rather than a kube 422 (a patch on an illegal label value)
     // laundered into a 500 further down.
-    if !valid_segment_label(&body.environment) {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "invalid environment id").into_response());
-    }
-    // `find_env` answers 404 for an environment the caller has no part in, which is what keeps this
-    // route from being a way to enumerate other people's environments.
-    let e = find_env(&s, &owner, &body.environment).await?;
-    if e.spec.region != w.spec.region {
-        // Another region is another cluster: no pod route, no DNS. Refused here rather than left to
-        // fail inside a reconcile that has no way to report it back to this caller.
-        return Err((StatusCode::CONFLICT, "the environment is in another region, which is another cluster").into_response());
-    }
+    check_attach(&s, &owner, &body.environment, &w.spec.region).await?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
     // The label is stamped here, not left for the next reconcile: `delete_env`'s sweep selects on
     // it, and a window where the spec says attached but the label does not would let a delete

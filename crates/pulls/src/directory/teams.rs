@@ -34,6 +34,9 @@ pub struct Team {
     /// a pin whose repo was since deleted is dropped at read time by the profile route.
     #[serde(default)]
     pub pins: Vec<String>,
+    /// The region this team's benches live in; empty = unbound. Set once, by `bind_region`.
+    #[serde(default)]
+    pub region: String,
     pub created_by: String,
     pub created_at: DateTime,
     pub members: Vec<Member>,
@@ -54,6 +57,7 @@ impl Default for Team {
             website: String::new(),
             email: String::new(),
             pins: vec![],
+            region: String::new(),
             created_by: String::new(),
             created_at: DateTime::from_millis(0),
             members: vec![],
@@ -281,6 +285,45 @@ impl Directory {
                 }
                 None => Ok(false),
             },
+        }
+    }
+
+    /// Compare-and-set on the empty value: a team slug, else a person by handle. Returns the region
+    /// the slug is bound to after the call — `region` itself, or what it already held — and `None`
+    /// for no such owner. The filter carries the emptiness check, so two concurrent binds cannot
+    /// both land.
+    // ponytail: set once; moving a team to another region is a migration of its benches' folders, designed when needed.
+    pub async fn bind_region(&self, slug: &str, region: &str) -> Result<Option<String>> {
+        let handle = slug.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let unbound = doc! { "$or": [{ "region": { "$exists": false } }, { "region": "" }] };
+                let set = doc! { "$set": { "region": region } };
+                let mut filter = doc! { "_id": slug };
+                filter.extend(unbound.clone());
+                m.teams.update_one(filter, set.clone()).await.map_err(|e| err(format!("mongo: {e}")))?;
+                if let Some(t) = self.get(slug).await? {
+                    return Ok(Some(t.region));
+                }
+                let mut filter = doc! { "username": &handle };
+                filter.extend(unbound);
+                m.users.update_one(filter, set).await.map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(self.user_by_handle(&handle).await?.map(|u| u.region))
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                let slot = match s.teams.get_mut(slug) {
+                    Some(t) => &mut t.region,
+                    None => match s.users.values_mut().find(|u| u.username.as_deref() == Some(&handle)) {
+                        Some(u) => &mut u.region,
+                        None => return Ok(None),
+                    },
+                };
+                if slot.is_empty() {
+                    *slot = region.to_string();
+                }
+                Ok(Some(slot.clone()))
+            }
         }
     }
 
@@ -672,6 +715,20 @@ mod tests {
         assert!(check_pins(&["ghost".into()], &repos).is_err(), "a pin must name a repo of the team");
         let seven: Vec<String> = (0..7).map(|i| format!("r{i}")).collect();
         assert!(check_pins(&seven, &seven).is_err(), "at most six pins");
+    }
+
+    #[tokio::test]
+    async fn a_region_binds_once_to_a_team_or_a_person_and_never_moves() {
+        let d = Directory::in_memory();
+        d.upsert_user("alice@x.io", "Alice").await.unwrap();
+        d.claim_username("alice@x.io", "alice").await.unwrap().unwrap();
+        d.create("acme", "Acme", "alice@x.io").await.unwrap().unwrap();
+        assert_eq!(d.get("acme").await.unwrap().unwrap().region, "", "an existing team is unbound");
+        assert_eq!(d.bind_region("acme", "r1").await.unwrap().as_deref(), Some("r1"));
+        assert_eq!(d.bind_region("acme", "r2").await.unwrap().as_deref(), Some("r1"), "set once");
+        assert_eq!(d.bind_region("alice", "r2").await.unwrap().as_deref(), Some("r2"), "a person's handle binds their own record");
+        assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "r2");
+        assert_eq!(d.bind_region("nobody", "r1").await.unwrap(), None);
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "name": "harness-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'",
+    "start": "node src/main.ts"
+  },
+  "bin": {
+    "harness-bench": "src/main.ts"
+  }
+}

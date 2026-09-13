@@ -250,7 +250,6 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         mount_homes(&cfg.pool, export)?;
     }
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
-    janitor::spawn_janitor(cfg.pool.clone(), nix_client.clone());
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
     }
@@ -295,6 +294,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // The gauges the collector cannot get from the kubelet: the btrfs pool is this process's
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
+    janitor::spawn_janitor(cfg.pool.clone(), nix_client.clone(), client.clone());
     stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
     let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.homes_export, cfg.registry_host, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);

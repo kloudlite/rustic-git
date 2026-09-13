@@ -345,7 +345,10 @@ pub const RESERVED_OWNERS: [&str; 5] = ["api", "v2", "img", "vol", "superadmin"]
 /// that predates the reservation keeps working over SSH and can be moved with `admin fork`; only
 /// its HTTP routes are gone.
 pub fn valid_owner(s: &str) -> bool {
-    valid_segment(s) && !RESERVED_OWNERS.contains(&s)
+    // A leading dot is refused here, not in `valid_segment` (git blobs and other callers of that
+    // still need one): `.benches` under the shared home is the bench platform's own dotted
+    // directory, and a real owner of that name would collide with it.
+    valid_segment(s) && !s.starts_with('.') && !RESERVED_OWNERS.contains(&s)
 }
 
 #[cfg(test)]
@@ -390,6 +393,13 @@ mod reserved_owner_tests {
         assert!(!valid_owner("vol"));
         assert!(!valid_owner("superadmin"));
         assert!(valid_owner("volley")); // a prefix match must not over-reserve
+    }
+
+    /// `.benches` is the bench platform's own directory under the shared home
+    /// (`{pool}/homes/.benches/{team}/{owner}`); a real owner of that name would collide with it.
+    #[test]
+    fn a_leading_dot_is_refused() {
+        assert!(!valid_owner(".benches"));
     }
 }
 

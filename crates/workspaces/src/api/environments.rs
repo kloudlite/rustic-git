@@ -423,6 +423,23 @@ pub(crate) async fn delete_env(
             warning = Some("could not list workspaces to clear; some may still name this deleted environment".to_string());
         }
     }
+    // Benches name an environment the same way and carry the same label.
+    let benches: Api<crd::Bench> = Api::all(c.clone());
+    match benches.list(&attached_to).await {
+        Ok(list) => {
+            for b in list.items.iter().filter(|b| b.spec.attached_environment.as_deref() == Some(id.as_str())) {
+                let patch = serde_json::json!({
+                    "spec": {"attachedEnvironment": serde_json::Value::Null},
+                    "metadata": {"labels": {ATTACHED_ENV_LABEL: serde_json::Value::Null}},
+                });
+                if let Err(e) = benches.patch(&b.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
+                    tracing::warn!(bench = %b.name_any(), error = %e, "attach.clear.failed");
+                }
+            }
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(err) => tracing::warn!(kind = "Bench", environment = %id, error = %err, "listing.failed"),
+    }
     let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
     let mut doc = env_doc(&e, &pushed);
     doc.state = EnvState::Deleted;
@@ -614,6 +631,13 @@ async fn validate_intercept(
             )
                 .into_response());
         }
+    }
+    if let Some(p) = want.ide_port_collision(&svc.ports) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("port {p} would land on workspace port {}, the tool server's; map it to another port", crate::k8s::IDE_PORT),
+        )
+            .into_response());
     }
     Ok(())
 }

@@ -36,8 +36,10 @@ export default function (pi: ExtensionAPI) {
       /* already gone */
     }
   };
+  // The pid lets harness-bench tell, after its own restart, a process that
+  // still runs from one that went with the old pod.
   const snapshot = () =>
-    [...procs.values()].map((p) => ({ id: p.id, name: p.name, command: p.command, started: p.started, ended: p.ended, code: p.code, tail: tail(p, 40) }));
+    [...procs.values()].map((p) => ({ id: p.id, name: p.name, command: p.command, pid: p.proc.pid, started: p.started, ended: p.ended, code: p.code, tail: tail(p, 40) }));
   const publish = () => {
     for (const [id, p] of procs) if (p.ended && Date.now() - p.ended > HOLD) procs.delete(id);
     ui?.setWidget("harness:procs", [JSON.stringify(snapshot())]);

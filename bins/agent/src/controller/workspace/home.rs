@@ -41,6 +41,28 @@ pub(crate) fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32
 }
 
 
+/// `{pool}/homes/.benches/{team}/{owner}`: re-verifies the share, then mkdir; the team directory
+/// root-owned 0755, the person's directory uid 1000 mode 0700 so another person's bench pod cannot
+/// read it. Segments go through `k8s::bench_folder` (Task 3) so the agent and the pod builder can
+/// never disagree on the path.
+pub(crate) fn ensure_bench_folder(pool: &str, export: &str, team: &str, owner: &str, uid: u32) -> Result<(), String> {
+    if crate::may_mount() {
+        crate::mount_homes(pool, export)?;
+    }
+    let folder = kloudlite_workspaces::k8s::bench_folder(pool, team, owner)?;
+    let dir = std::path::PathBuf::from(&folder);
+    let team_dir = crate::homes_root(pool).join(".benches").join(team);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if unsafe { libc::geteuid() } == 0 {
+        std::os::unix::fs::chown(&dir, Some(uid), Some(uid)).map_err(|e| e.to_string())?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&team_dir, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+
 #[cfg(test)]
 pub(crate) mod home_tests {
     use super::super::ensure_shared_home;
@@ -59,5 +81,21 @@ pub(crate) mod home_tests {
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
         ensure_shared_home(&pool, "unused", "alice", 1000).unwrap();
         assert_eq!(std::fs::metadata(&ssh).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn a_bench_folder_is_made_on_the_share_private_and_refuses_an_escaping_segment() {
+        use super::super::ensure_bench_folder;
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = tmp.path().display().to_string();
+        std::fs::create_dir_all(crate::homes_root(&pool)).unwrap();
+        ensure_bench_folder(&pool, "unused", "acme", "alice", 1000).unwrap();
+        let dir = crate::homes_root(&pool).join(".benches/acme/alice");
+        assert!(dir.is_dir());
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        ensure_bench_folder(&pool, "unused", "acme", "alice", 1000).unwrap();
+        assert!(ensure_bench_folder(&pool, "unused", "..", "alice", 1000).is_err());
+        assert!(ensure_bench_folder(&pool, "unused", "acme", "../bob", 1000).is_err());
+        assert!(!crate::homes_root(&pool).join("bob").exists());
     }
 }

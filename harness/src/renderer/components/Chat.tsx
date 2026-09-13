@@ -252,6 +252,11 @@ export function Chat(props: {
         <Icon name="chevronRight" size={16} class="text-fg/60" />
         <span>{thread()?.name}</span>
         <span class="flex-1" />
+        <Show when={thread()?.pi && !live.connected()}>
+          <span class="mr-2 inline-flex items-center gap-1 text-xs text-warning" title="Showing what was last seen; nothing can be sent until the bench is back">
+            <span class="size-1.5 rounded-full bg-warning" /> bench offline
+          </span>
+        </Show>
         <Show when={readonly()}>
           <span class="inline-flex items-center gap-1 text-xs text-muted">
             <Icon name="lock" size={12} /> read-only
@@ -422,9 +427,10 @@ export function Chat(props: {
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
               <textarea
                 data-composer
+                disabled={thread()?.kind === "machine" && !thread()?.pi}
                 rows="1"
                 class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 leading-5 outline-none placeholder:text-subtle"
-                placeholder={thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
+                placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
                 onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), (hist = -1))}
                 onKeyDown={(e) => {
                   // Completion first: while suggestions show, ↑/↓ move, ⇥ and ↩

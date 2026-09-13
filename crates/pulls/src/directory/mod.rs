@@ -62,6 +62,9 @@ pub struct User {
     /// sign in, but they do not have a namespace until they choose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// The region this person's personal benches live in; empty = unbound. Set once.
+    #[serde(default)]
+    pub region: String,
     pub created_at: DateTime,
     pub last_seen_at: DateTime,
 }

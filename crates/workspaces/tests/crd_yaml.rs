@@ -66,6 +66,7 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
             // The single `default` object per cluster: every agent watches it by name, not by
             // node, so there is no per-node axis to select on.
             "ClusterSettings" => &[],
+            "Bench" => &[".status.nodeName"],
             other => panic!("unknown kind {other}"),
         };
         if want.is_empty() {
@@ -264,8 +265,21 @@ fn no_two_owner_team_pairs_share_a_namespace() {
 #[test]
 fn phase_as_str_matches_the_wire_form() {
     use kloudlite_workspaces::crd::Phase::*;
-    for p in [Pending, Creating, Ready, Running, Stopped, Working, Done, Error] {
+    for p in [Pending, Creating, Starting, Ready, Running, Stopped, Idle, Working, Done, Error] {
         assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(p.as_str()), "{p:?}");
+    }
+}
+
+/// `Starting` and `Idle` are Bench's own phases (waking up / asleep with no pod), added beside the
+/// existing variants — a round trip each, same as every other `Phase` variant already gets via
+/// `phase_as_str_matches_the_wire_form`.
+#[test]
+fn bench_phases_round_trip() {
+    use kloudlite_workspaces::crd::Phase;
+    for (p, word) in [(Phase::Starting, "starting"), (Phase::Idle, "idle")] {
+        let v = serde_json::to_value(p).unwrap();
+        assert_eq!(v, serde_json::json!(word));
+        assert_eq!(serde_json::from_value::<Phase>(v).unwrap(), p);
     }
 }
 
@@ -391,6 +405,15 @@ fn quota_kinds_are_published() {
     let states = status["state"].enum_.as_ref().expect("state must be an enum");
     let words: Vec<String> = states.iter().map(|v| v.0.as_str().unwrap().to_string()).collect();
     assert_eq!(words, vec!["pending", "approved", "denied"], "{words:?}");
+}
+
+/// The Bench CRD is generated and published in the manifest.
+#[test]
+fn bench_crd_is_generated() {
+    let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
+    assert!(kinds.iter().any(|k| k == "Bench"), "{kinds:?}");
+    let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
+    assert!(yaml.contains("\"name\": \"benches.kloudlite.io\""), "regenerate deploy/k3s/crds.yaml");
 }
 
 /// The bootstrap numbers are the spec's table, and they are what an owner with no `Quota` object

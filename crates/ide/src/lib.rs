@@ -3,10 +3,11 @@
 //! A session running OUTSIDE the workspace — Claude Code on a laptop, a CI agent, the console —
 //! needs the same handful of tools it uses locally, executed inside the pod against the tree and
 //! the toolchain that live there. This crate is those tools, typed and bounded, behind a plain
-//! HTTP tool API on `127.0.0.1:7788` (`GET /tools`, `POST /tools/{name}`): `read`, `write`, `edit`, `glob`, `grep`, `exec` (a job, or a
-//! detached process with an id), `process_*`, `watch*`, and graft's own tools proxied from a
-//! `graft mcp` child. Loopback only: the ssh tunnel a person already holds is the boundary, so
-//! there is no second credential and no auth code here. MCP is deliberately NOT spoken here: the
+//! HTTP tool API on port 7788 of the pod IP (`GET /tools`, `POST /tools/{name}`): `read`, `write`,
+//! `edit`, `glob`, `grep`, `exec` (a job, or a detached process with an id), `process_*`, `watch*`,
+//! and graft's own tools proxied from a `graft mcp` child. The namespace is the fence: the owner's
+//! bench reaches it there (`allow-bench-tools`), `kl-connect ws ide` over the ssh tunnel, so there
+//! is no second credential and no auth code here. MCP is deliberately NOT spoken here: the
 //! session layer above speaks it once for every workspace a person holds and forwards to this API.
 //!
 //! Design: `docs/superpowers/specs/2026-09-11-kl-ide-serve-design.md`. Module map: `guard`

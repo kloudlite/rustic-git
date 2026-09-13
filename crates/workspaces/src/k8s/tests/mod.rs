@@ -9,6 +9,7 @@ mod attach;
 mod pod;
 mod environment;
 mod policies;
+mod bench;
 
 
 pub(super) const AGENT_RESOLV: &str = "search kube-system.svc.cluster.local svc.cluster.local cluster.local node.example.net\nnameserver 10.43.0.10\noptions ndots:5\n";

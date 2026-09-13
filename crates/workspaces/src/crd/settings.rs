@@ -12,6 +12,9 @@ pub mod defaults {
     pub fn sync_secs() -> u64 {
         60
     }
+    pub fn bench_idle_secs() -> u64 {
+        300
+    }
     pub fn replica_secs() -> u64 {
         300
     }
@@ -75,6 +78,10 @@ pub struct ClusterSettingsSpec {
     /// falls back to env, then the built-in default (`AgentSettings::merged_with`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_secs: Option<u64>,
+    /// How long a bench with no client and nothing running keeps its pod. 60..=86400 seconds;
+    /// stamped into the pod at create, so a change reaches the next pod only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_idle_secs: Option<u64>,
     /// Replication pull beat interval. 30..=3600 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_secs: Option<u64>,
@@ -141,6 +148,7 @@ pub struct ClusterSettingsStatus {
 /// entry here fails loudly instead of shipping unreadable.
 pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str])] = &[
     ("syncSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("benchIdleSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("replicaSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("decommissionSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("nodeDeadSecs", kloudlite_core::settings::Mark::Live, &[]),

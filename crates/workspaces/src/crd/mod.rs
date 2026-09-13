@@ -46,6 +46,7 @@ mod owner;
 mod quota;
 mod region;
 mod settings;
+mod bench;
 pub use volume::*;
 pub use snapshot::*;
 pub use workspace::*;
@@ -54,6 +55,7 @@ pub use owner::*;
 pub use quota::*;
 pub use region::*;
 pub use settings::*;
+pub use bench::*;
 
 
 pub(super) mod names;
@@ -161,12 +163,18 @@ pub enum Phase {
     #[default]
     Pending,
     Creating,
+    /// A bench whose pod is being created after a wake — distinct from `Creating` (first
+    /// materialization) so the UI can tell "waking up" from "first ever start".
+    Starting,
     /// A workspace whose pod is Ready, or a Volume whose subvolume is materialized.
     Ready,
     /// An environment whose services are up. (`WsState` has no `Running`; `EnvState` has no
     /// `Ready` — the two projections disagree, and this enum is the union.)
     Running,
     Stopped,
+    /// A bench with no pod because nobody has used it recently — distinct from `Stopped` (an
+    /// explicit `desiredState: Stopped`) so a wake can tell "asleep, wake it" from "off on purpose".
+    Idle,
     /// A btrfs operation is in flight.
     Working,
     /// The owning node is dead and the pin has been cleared: no node may write this subvolume
@@ -187,9 +195,11 @@ impl Phase {
         match self {
             Phase::Pending => "pending",
             Phase::Creating => "creating",
+            Phase::Starting => "starting",
             Phase::Ready => "ready",
             Phase::Running => "running",
             Phase::Stopped => "stopped",
+            Phase::Idle => "idle",
             Phase::Working => "working",
             Phase::Unavailable => "unavailable",
             Phase::Done => "done",
@@ -214,6 +224,7 @@ pub fn all_crds() -> Vec<CustomResourceDefinition> {
         QuotaRequest::crd(),
         Request::crd(),
         ClusterSettings::crd(),
+        Bench::crd(),
     ]
 }
 
@@ -659,6 +670,17 @@ mod request_tests {
         };
         assert_eq!(i.workspace_port(8080), 3000, "the mapped one");
         assert_eq!(i.workspace_port(9090), 9090, "an unmapped port keeps its number");
+    }
+
+    #[test]
+    fn an_intercept_never_lands_on_the_ide_port() {
+        let port = crate::k8s::IDE_PORT;
+        let remap = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![PortMap { service: 8080, workspace: port }] };
+        assert_eq!(remap.ide_port_collision(&[8080]), Some(8080), "a rewrite onto it");
+        let plain = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![] };
+        assert_eq!(plain.ide_port_collision(&[port]), Some(port), "an unmapped port that is it");
+        let away = Intercept { service: "api".into(), workspace: "ws-1".into(), ports: vec![PortMap { service: port, workspace: 3000 }] };
+        assert_eq!(away.ide_port_collision(&[port]), None, "a service port 7788 rewritten elsewhere is fine");
     }
 
     /// Every stored Environment predates this field and must still parse.

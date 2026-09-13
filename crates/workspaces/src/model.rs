@@ -29,6 +29,13 @@ pub fn default_ws_image() -> String {
 /// tag would pin every workspace to whatever the image was the day it was created.
 pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-workspace";
 
+/// The bench image when `KLOUDLITE_BENCH_IMAGE` is unset. Tagged, unlike `DEFAULT_WS_IMAGE`: the
+/// api writes it into the spec, and pin.sh pins the env on the api Deployment.
+pub const DEFAULT_BENCH_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-bench:latest";
+
+/// `spec.model` when a create names none; passed to the pod as `KL_MODEL`.
+pub const DEFAULT_BENCH_MODEL: &str = "deepseek/deepseek-v4-flash";
+
 /// Whether a spec's image means "the platform's own": the marker, a tagged form of it, or the
 /// two images the platform used to default to — specs written back then must keep getting sshd.
 pub fn is_default_image(image: &str) -> bool {

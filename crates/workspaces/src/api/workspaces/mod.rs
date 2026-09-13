@@ -430,6 +430,64 @@ pub(crate) async fn get_ws(
 }
 
 
+#[derive(serde::Deserialize)]
+pub(crate) struct ToolsQuery {
+    team: Option<String>,
+}
+
+
+fn ws_tools_err(msg: impl Into<String>) -> Response {
+    (StatusCode::CONFLICT, Json(serde_json::json!({"error": msg.into()}))).into_response()
+}
+
+
+/// The owner's tool server address (`kl ide serve`, port `k8s::IDE_PORT`) — a session's own
+/// workspace, never a team member's or a superadmin's: `my_ws` admits both, so ownership is
+/// re-checked HERE rather than by changing `my_ws` for every other caller. Address resolution
+/// (podRef → pod → podIP) mirrors the gateway's `resolve` (`bins/gateway/src/resolve.rs`) minus
+/// the port; copied rather than shared because that lives in another binary.
+pub(crate) async fn ws_tools(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ToolsQuery>,
+) -> Result<Response, Response> {
+    let owner = caller(&s, &headers).await?;
+    let w = my_ws(&s, &owner, &id).await?;
+    if w.spec.owner != owner.name {
+        return Err(not_found());
+    }
+    let phase = w.status.as_ref().map(|st| st.phase).unwrap_or_default();
+    if phase != crd::Phase::Ready {
+        let phase = serde_json::to_value(phase).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        return Err(ws_tools_err(format!("workspace {} is {phase}; start it to run tools", w.spec.name)));
+    }
+    if let Some(team) = q.team {
+        let team = { let t = team.trim().to_lowercase(); if t.is_empty() { owner.name.clone() } else { t } };
+        let spec_team = if w.spec.team.is_empty() { owner.name.clone() } else { w.spec.team.clone() };
+        if team != spec_team {
+            return Err(ws_tools_err(format!(
+                "workspace {} is in team {spec_team}; open it from that team's bench",
+                w.spec.name
+            )));
+        }
+    }
+    let between_pods = || ws_tools_err(format!("workspace {} is between pods; try again", w.spec.name));
+    let pod_ref = w.status.as_ref().and_then(|st| st.pod_ref.clone()).ok_or_else(between_pods)?;
+    let (ns, name) = pod_ref.split_once('/').ok_or_else(between_pods)?;
+    let c = kube(&s)?;
+    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(c.clone(), ns);
+    let ip = pods
+        .get_opt(name)
+        .await
+        .map_err(kube_err)?
+        .and_then(|p| p.status)
+        .and_then(|st| st.pod_ip)
+        .ok_or_else(between_pods)?;
+    Ok(Json(serde_json::json!({"address": format!("{ip}:{}", crate::k8s::IDE_PORT)})).into_response())
+}
+
+
 /// One apex for every region's ssh gateway; the per-region name (`ws-{region}.`) is a proxied
 /// Cloudflare record pointing at that region's nodes, created when the region is stood up. A const
 /// rather than config because a second domain would mean a second origin certificate, not a new
@@ -437,7 +495,7 @@ pub(crate) async fn get_ws(
 pub(super) const GATEWAY_DOMAIN: &str = "khost.dev";
 
 
-pub(super) fn gateway_url(region: &str, id: &str) -> String {
+pub(crate) fn gateway_url(region: &str, id: &str) -> String {
     format!("wss://ws-{region}.{GATEWAY_DOMAIN}/tunnel/{id}")
 }
 

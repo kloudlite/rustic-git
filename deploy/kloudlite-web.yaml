@@ -242,8 +242,9 @@ spec:
           # KLOUDLITE_BUILDER_SECRET the same way `/v1/keys` is by the session JWT — published,
           # not unauthenticated. `builders` is the one person-facing read of the hidden builder
           # (`GET /v1/builders/me`, session JWT again) — `kl-connect builder status` on a laptop has no
-          # other way in.
-          - path: /v1/(cli|workspaces|keys|internal|builders)(/.*)?$
+          # other way in. `bench` is the CLI's and the harness's route to their own bench
+          # (`/v1/bench*`, session JWT, answered only to the bench's owner).
+          - path: /v1/(cli|workspaces|keys|internal|builders|bench)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:

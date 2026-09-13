@@ -283,3 +283,40 @@ pub(crate) async fn owner_detail(
 
     Ok(Json(OwnerDetail { owner, is_team, limit, used, source, workspaces, environments, volumes, requests, audit }).into_response())
 }
+
+#[derive(serde::Deserialize)]
+pub(crate) struct RegionBody {
+    region: String,
+}
+
+/// PUT /admin/owners/{slug}/region — 200 {slug, region}; 409 when already bound elsewhere; 404 no
+/// such owner; 422 unknown region. Set once: a rebind would strand the benches' folders on the old
+/// region's share (`Directory::bind_region`'s ponytail).
+pub(crate) async fn bind_owner_region(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(slug): Path<String>,
+    Json(b): Json<RegionBody>,
+) -> Result<Response, Response> {
+    let c = caller(&s, &headers).await?;
+    check_path_segment(&slug)?;
+    check_region(&s, &b.region).await?;
+    let dir = s.directory.as_ref().ok_or_else(|| {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "directory unavailable"}))).into_response()
+    })?;
+    let bound = match dir.bind_region(&slug, &b.region).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err(not_found()),
+        Err(e) => {
+            tracing::error!(slug, error = %e, "owner.region.bind.failed");
+            return Err((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "directory unavailable"}))).into_response());
+        }
+    };
+    if bound != b.region {
+        audit(&s, &c.name, "owner.region.bind", &slug, Some(b.region.clone()), "error:409").await;
+        let error = format!("{slug} is bound to {bound}; a region is set once");
+        return Err((StatusCode::CONFLICT, Json(serde_json::json!({ "error": error }))).into_response());
+    }
+    audit(&s, &c.name, "owner.region.bind", &slug, Some(bound.clone()), "ok").await;
+    Ok(Json(serde_json::json!({"slug": slug, "region": bound})).into_response())
+}

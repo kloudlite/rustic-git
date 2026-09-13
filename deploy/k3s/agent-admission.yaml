@@ -48,8 +48,11 @@ spec:
       - apiGroups: ["kloudlite.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
+        # A Bench is desired state from /v1 like a Workspace; the agent writes its status. The
+        # CEL's non-Volume arm (`object.spec == oldObject.spec`) covers it unchanged — the agent
+        # has no `create` verb on benches.
         resources: ["workspaces", "environments", "volumes", "ownerbindings", "ownerkeys", "snapshots",
-                    "volumereplicas"]
+                    "volumereplicas", "benches"]
   matchConditions:
     # The SLO probe is fenced by the same policy, not by a second one: its role holds
     # `workspaces: patch` (for the dry-run in `sec.agent.spec`), which RBAC reads as "may rewrite
