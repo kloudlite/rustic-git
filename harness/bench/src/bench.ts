@@ -6,6 +6,7 @@ import { Procs, Tasks, type ProcRow } from "./ledger.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
+import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 export type BenchOpts = { dir: string; readOnly: boolean; model: string; bin?: string; extDir?: string };
@@ -255,5 +256,63 @@ export class Bench {
     });
     this.emit({ type: "sessions" });
     this.emit({ type: "procs", rows: this.procs.all() });
+  }
+
+  /** A one-question, read-only fork: no kl_* tools, no streaming — the answer replays on completion. */
+  async btw(session: string, question: string): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
+    this.refuse(true);
+    const s = this.sessions.get(session);
+    if (!s?.file || !fs.existsSync(s.file)) throw new Error("this session has no file yet; say something first");
+    const dir = path.join(this.opts.dir, "btw", session);
+    const id = `btw-${(fs.existsSync(dir) ? fs.readdirSync(dir).length : 0) + 1}`;
+    const forkDir = path.join(this.opts.dir, "btw", ".forks");
+    fs.mkdirSync(forkDir, { recursive: true });
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const child = new RpcChild(id, { dir: forkDir, fork: s.file, model: s.model ?? this.opts.model, bin: this.opts.bin }, (ev) => {
+      this.emit({ ...ev, pi: id });
+      if (ev.type === "agent_end" || ev.type === "exit") done();
+    });
+    child.start();
+    try {
+      const before = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages?.length ?? 0;
+      await child.send({ type: "prompt", message: question });
+      await ended;
+      const all = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages ?? [];
+      const answer = { id, question, entries: all.slice(before), at: Date.now() };
+      this.writable.run(() => replaceJson(path.join(dir, `${id}.json`), answer));
+      return answer;
+    } finally {
+      child.stop();
+    }
+  }
+
+  listBtw(session: string): { id: string; question: string; entries: unknown[]; at: number }[] {
+    const dir = path.join(this.opts.dir, "btw", session);
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(dir, f), null)).filter((x) => x !== null)
+      .sort((a, b) => (a as { at: number }).at - (b as { at: number }).at) as { id: string; question: string; entries: unknown[]; at: number }[];
+  }
+
+  /** Session files copy in once by name; rows merge idempotently; loose files copy in and get no row. */
+  import(items: { row: SessionRow; name: string; content?: string }[], loose: { name: string; content: string }[]): { added: string[]; files: number } {
+    this.refuse(true);
+    const dir = path.join(this.opts.dir, "sessions");
+    let files = 0;
+    const put = (name: string, content: string) => {
+      const safe = path.basename(name);
+      const to = path.join(dir, safe);
+      if (!safe.endsWith(".jsonl") || fs.existsSync(to)) return to;
+      fs.writeFileSync(to, content, { flag: "wx" });
+      files++;
+      return to;
+    };
+    return this.writable.run(() => {
+      const rows = items.map(({ row, name, content }) => ({ ...row, archived: !!row.archived, file: content !== undefined ? put(name, content) : undefined }));
+      for (const f of loose) put(f.name, f.content);
+      const added = this.sessions.merge(rows);
+      if (added.length) this.emit({ type: "sessions" });
+      return { added, files };
+    });
   }
 }

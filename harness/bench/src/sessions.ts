@@ -59,6 +59,7 @@ export class SessionList {
     const added = rows.filter((r) => !this.get(r.id));
     if (!added.length) return [];
     this.rows.push(...added.map((r) => ({ ...r })));
+    this.nextSeq = Math.max(this.nextSeq, ...added.map((r) => r.seq + 1));
     this.save();
     return added.map((r) => r.id);
   }

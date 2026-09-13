@@ -39,6 +39,14 @@ test("an id is never reused, even after the row is removed and the list reopened
   assert.equal(b.create().id, "s-3");
 });
 
+test("merge advances nextSeq past every merged row's seq, so a deleted import is never reused", () => {
+  const d = dir();
+  const a = new SessionList(d);
+  a.merge([{ id: "s-5", name: "session 5", seq: 5, created: 1, lastActive: 1, archived: false }]);
+  a.remove("s-5");
+  assert.equal(a.create().id, "s-6");
+});
+
 test("remove drops the row", () => {
   const a = new SessionList(dir());
   a.create();
