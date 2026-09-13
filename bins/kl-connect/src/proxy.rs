@@ -34,13 +34,14 @@ pub async fn proxy(id: &str) -> Result<(), String> {
             s
         }
     };
-    pump(&gateway_url(&s.gateway), &s.token).await
+    let ws = connect(&gateway_url(&s.gateway), &s.token).await?;
+    pump_io(ws, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 /// `KL_GATEWAY_OVERRIDE` (hidden, tests and e2e only) swaps the origin of the api-supplied gateway
 /// URL, keeping its path — so the pump can be exercised against a local server without the api
 /// having to know about it.
-fn gateway_url(gateway: &str) -> String {
+pub(crate) fn gateway_url(gateway: &str) -> String {
     let Ok(origin) = std::env::var("KL_GATEWAY_OVERRIDE") else {
         return gateway.to_string();
     };
@@ -51,7 +52,16 @@ fn gateway_url(gateway: &str) -> String {
     format!("{}{path}", origin.trim_end_matches('/'))
 }
 
-async fn pump(url: &str, token: &str) -> Result<(), String> {
+/// Opens the tunnel and authenticates it. Split from `pump_io` so `bench.rs` can dial a fresh
+/// tunnel per local connection without pumping stdio — a bench's callers are TCP sockets, not
+/// this process's own stdin/stdout.
+pub(crate) async fn connect(
+    url: &str,
+    token: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    String,
+> {
     let mut req = url
         .into_client_request()
         .map_err(|e| format!("{url}: {e}"))?;
@@ -65,16 +75,29 @@ async fn pump(url: &str, token: &str) -> Result<(), String> {
         .await
         // The token travels in this request, so it must not survive into the error text.
         .map_err(|e| format!("gateway unreachable: {}", e.to_string().replace(token, "…")))?;
+    Ok(ws)
+}
 
+/// Pumps binary frames between an open tunnel and any reader/writer pair — stdio for `ws proxy`,
+/// a local TCP socket's halves for `bench`. Behaviour unchanged from the old `pump`: writes are
+/// flushed per frame (a request/response handshake on the other end), and a `Close` frame ends
+/// the pump cleanly while any other error is reported.
+pub(crate) async fn pump_io<
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+>(
+    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    mut r: R,
+    mut w: W,
+) -> Result<(), String> {
     let (mut tx, mut rx) = ws.split();
 
-    // stdin lives in its own task: ssh reads and writes independently, and a read that blocks the
-    // write half deadlocks the handshake.
+    // The reader lives in its own task: writer and reader progress independently, and a read
+    // that blocks would deadlock the write half.
     let up = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
         let mut buf = vec![0u8; 32 * 1024];
         loop {
-            match stdin.read(&mut buf).await {
+            match r.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     if tx
@@ -90,17 +113,15 @@ async fn pump(url: &str, token: &str) -> Result<(), String> {
         let _ = tx.close().await;
     });
 
-    let mut stdout = tokio::io::stdout();
     while let Some(msg) = rx.next().await {
         match msg {
             Ok(Message::Binary(b)) => {
-                stdout.write_all(&b).await.map_err(|e| e.to_string())?;
-                // ssh is a request/response handshake: an unflushed reply is a hang.
-                stdout.flush().await.map_err(|e| e.to_string())?;
+                w.write_all(&b).await.map_err(|e| e.to_string())?;
+                w.flush().await.map_err(|e| e.to_string())?;
             }
             Ok(Message::Close(_)) => break,
-            // A dropped tunnel is not a clean end of session: ssh must see a failure, and the
-            // error kind (never the token, which appears in no frame) is the one line printed.
+            // A dropped tunnel is not a clean end of session: the caller must see a failure, and
+            // the error kind (never the token, which appears in no frame) is the one line printed.
             Err(e) => {
                 up.abort();
                 return Err(format!("tunnel error: {e}"));

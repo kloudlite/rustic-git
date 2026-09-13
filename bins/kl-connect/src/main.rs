@@ -5,6 +5,7 @@
 //!   KL_GATEWAY_OVERRIDE replaces the origin of the api-supplied gateway URL
 
 mod api;
+mod bench;
 mod builder;
 mod config;
 mod login;
@@ -46,6 +47,19 @@ enum Cmd {
     Builder {
         #[command(subcommand)]
         cmd: BuilderCmd,
+    },
+    /// Open a bench on a local port, waking it on connect
+    Bench {
+        #[arg(long)]
+        team: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        start: bool,
+        /// Only used for an unbound personal bench's first `--start` (a team's region is the
+        /// team's).
+        #[arg(long)]
+        region: Option<String>,
     },
 }
 
@@ -103,6 +117,9 @@ async fn main() {
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
+        Cmd::Bench { team, port, start, region } => {
+            bench::bench(team.as_deref(), *port, *start, region.as_deref()).await
+        }
     };
     if let Err(e) = r {
         eprintln!("kl-connect: {e}");

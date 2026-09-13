@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 pub const DEFAULT_API: &str = "https://dev.kloudlite.io";
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub api: String,
     pub token: String,
