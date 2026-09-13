@@ -359,21 +359,28 @@ async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
 
 /// One `imagetagdelete`, whose body is the bare tag rather than JSON.
 async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
+    // Not through `raw`, which only sends JSON; carries the same id and timing line by hand so the
+    // first call of `reg.image.delete` joins the server's lines too.
+    let (req_id, started) = (super::request_id(c), std::time::Instant::now());
     let r = c
         .http
         .post(url)
         .header("authorization", c.bearer(jwt))
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .header(super::REQUEST_ID, &req_id)
         .body(tag.to_string())
         .send()
         .await
         // `without_url`: the module's rule, not the caller's — see `bearer`.
         .map_err(|e| anyhow!("{}", e.without_url()))?;
     let status = r.status();
+    let headers_ms = started.elapsed().as_millis() as u64;
+    let body = r.text().await.unwrap_or_default();
+    super::done("POST", &super::path_of(url), &req_id, status.as_u16(), headers_ms, started.elapsed().as_millis() as u64);
     if status.is_success() {
         return Ok(());
     }
-    Err(anyhow!("{status}: {}", r.text().await.unwrap_or_default().chars().take(200).collect::<String>()))
+    Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()))
 }
 
 /// `reg.canary`: the long-lived image `bootstrap` pushed still pulls, and is still the same image.
