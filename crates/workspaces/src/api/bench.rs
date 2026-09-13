@@ -176,6 +176,10 @@ pub(crate) async fn create_bench(
     let api = bench_api(&s)?;
     if let Some(mut b) = existing {
         ensure_access(&api, &mut b, standing).await?;
+        // Re-POSTing a stopped or idle bench starts a pod: an allocation, exactly as `start_bench`.
+        if !crd::bench_wants_pod(&b) {
+            guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
+        }
         let name = b.metadata.name.clone().unwrap_or_default();
         let patch = json!({"spec": {"desiredState": DesiredState::Running, "wakeAt": now()}});
         let b = api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
@@ -273,6 +277,14 @@ pub(crate) async fn bench_session(
     }
     if phase != Phase::Ready {
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": phase.as_str()}))).into_response());
+    }
+    // `ensure_access` may just have demoted a departed member to ReadOnly while the phase still
+    // describes the old Full pod. Only a Ready reason written for THIS access proves the pod being
+    // dialled is the right one; the reconciler writes exactly `ReadOnly` or `Running`.
+    let want = if b.spec.access == BenchAccess::ReadOnly { "ReadOnly" } else { "Running" };
+    let serving = b.status.as_ref().is_some_and(|st| st.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True" && c.reason == want));
+    if !serving {
+        return Ok((StatusCode::ACCEPTED, Json(json!({"state": Phase::Starting.as_str()}))).into_response());
     }
     let (token, claims) = s.jwt.mint_bench_session(&caller.name, &id, &region).map_err(|e| {
         tracing::error!(error = %e, "bench.session.mint.failed");

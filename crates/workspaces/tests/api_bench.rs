@@ -128,6 +128,11 @@ fn bench_obj(owner: &str, team: &str, desired: &str, phase: Option<&str>, access
     });
     if let Some(p) = phase {
         b["status"] = json!({"phase": p, "nodeName": "node-a", "idleSince": "2026-09-13T10:00:00Z"});
+        if p == "ready" {
+            let reason = if access == "readOnly" { "ReadOnly" } else { "Running" };
+            b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": reason, "message": "",
+                                               "lastTransitionTime": "2026-09-13T10:00:00Z"}]);
+        }
     }
     b
 }
@@ -184,6 +189,8 @@ async fn creating_a_bench_twice_is_one_object_and_starts_it() {
     let patches = t.rec.sent("PATCH", &path);
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0]["spec"]["desiredState"], "running");
+    let quota_reads = t.rec.calls().iter().filter(|c| *c == &format!("GET {API}/quotas/alice")).count();
+    assert_eq!(quota_reads, 2, "the re-POST start is an allocation too: {:?}", t.rec.calls());
 }
 
 #[tokio::test]
@@ -379,4 +386,33 @@ fn the_admin_router_has_no_bench_route() {
     for src in srcs {
         assert!(!src.contains("/bench"), "no platform surface reads a person's bench");
     }
+}
+
+/// I2: a departed member's Ready bench still serving the old Full pod gets no token until the
+/// reconciler has written a Ready reason for ReadOnly.
+#[tokio::test]
+async fn a_departed_member_gets_no_token_while_the_full_pod_still_serves() {
+    let path = bench_path("alice", "acme");
+    let full = bench_obj("alice", "acme", "running", Some("ready"), "full");
+    let t = setup(vec![get(path.clone(), full.clone()), patch(path.clone(), full), region("r1")], Stub::new(&[], &[("acme", "r1")]));
+    let (st, body) = t.call("POST", "/v1/bench/session?team=acme", &t.tok("alice"), None).await;
+    assert_eq!((st, body), (StatusCode::ACCEPTED, json!({"state": "starting"})));
+    assert_eq!(t.rec.sent("PATCH", &path)[0]["spec"]["access"], "readOnly");
+}
+
+/// I3: re-POSTing a stopped bench is a start, and a start at the cpu ceiling is refused.
+#[tokio::test]
+async fn re_posting_a_stopped_bench_at_the_cpu_limit_is_refused() {
+    let path = bench_path("alice", "acme");
+    let stopped = bench_obj("alice", "acme", "stopped", None, "full");
+    let mut full = alloc("alice", vec![]);
+    full[0] = get(
+        format!("{API}/quotas/alice"),
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Quota", "metadata": {"name": "alice"},
+               "spec": {"workspaces": 5, "environments": 2, "snapshots": 20, "diskGb": 100, "cpu": 0, "memoryGb": 100}}),
+    );
+    let t = setup(with(vec![get(path.clone(), stopped.clone()), patch(path.clone(), stopped), region("r1")], full), Stub::new(&[("alice", "acme")], &[("acme", "r1")]));
+    let (st, body) = t.call("POST", "/v1/bench", &t.tok("alice"), Some(json!({"team": "acme"}))).await;
+    assert_eq!(st, 409, "{body}");
+    assert!(t.rec.sent("PATCH", &path).is_empty());
 }
