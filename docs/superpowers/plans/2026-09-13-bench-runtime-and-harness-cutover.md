@@ -49,6 +49,11 @@
     - **Listen:** `--host` defaults to `0.0.0.0`: the gateway dials the pod IP, and the platform's `bench-ingress` NetworkPolicy admits only the gateway. A laptop passes `--host 127.0.0.1`.
     - **Probe:** `--ping` fetches `http://127.0.0.1:<port>/healthz` and exits 0 or 1. It is the pod's readiness probe.
     - **Lock:** a held lock exits 75 by default and writes the holder to `/dev/termination-log` (`TERMINATION_LOG` overrides the path). The agent reads exit 75 as `FolderLocked` and the pod restarts until the lease frees. `--wait` waits instead, for a laptop.
+    - **Read-only:** `--read-only` is a departed member's bench (platform plan decision 10), never a stopped one: history through pi's SDK, no pi child, no tool, no lock. A bench that should cost nothing has no pod at all.
+12. **Idle is `harness-bench`'s to observe, and exiting is how it says so** (platform plan decision 6).
+    - **What counts:** idle means no connected client and no running work. A client is an open WebSocket (`/events` or a session's `/rpc`); a plain HTTP request is too short to hold a bench up. Running work is a pi turn between `agent_start` and `agent_end` (or the child's exit), a task `running` or `background`, or a process without `ended`.
+    - **The clock:** `Idle` (`src/idle.ts`) keeps `idleSince`, set the moment both counts reach zero and cleared by any client or work. `GET /healthz` reports `{clients, busy, idleSince}`.
+    - **The exit:** `--idle-secs N` (default `KL_BENCH_IDLE_SECS`, else 0 = never; a laptop never sets it) checks every 5 s. Once `idleSince` is N seconds old, `main.ts` writes `idle` to the termination log, stops the children, releases the lock and exits 0. The agent reads a `Succeeded` pod as asleep and starts a new one when a client next connects through `/v1`.
 
 ---
 
@@ -65,8 +70,9 @@ harness/bench/src/rpc-child.ts      RpcChild: pi --mode rpc over stdio (src/pi.t
 harness/bench/src/reader.ts         transcript(file) / listFiles(dir) via the pi SDK, no agent
 harness/bench/src/guard.ts          Writable: a failed write flips it; a probe beat restores it
 harness/bench/src/bench.ts          Bench: sessions ⇄ children, event folding, delete/archive/restore/btw/import
-harness/bench/src/server.ts         HTTP routes + WS /sessions/{id}/rpc + WS /events
-harness/bench/src/main.ts           CLI: --dir --host --port --read-only --wait --ping; lock (exit 75), reopen, listen
+harness/bench/src/idle.ts           Idle: connected clients + busy() → idleSince
+harness/bench/src/server.ts         HTTP routes + WS /sessions/{id}/rpc + WS /events; counts clients into Idle
+harness/bench/src/main.ts           CLI: --dir --host --port --read-only --wait --ping --idle-secs; lock (exit 75), reopen, listen, idle exit (0)
 harness/bench/test/*.test.ts        node --test
 harness/bench/test/fake-pi.ts       a pi stand-in speaking RPC, for tests
 harness/pi/process.ts               + pid in the snapshot
@@ -1289,6 +1295,7 @@ export class Bench {
   archive(id: string): Promise<SessionRow>;
   restore(id: string): Promise<SessionRow>;
   remove(id: string, stop: boolean): Promise<void>;   // Error "in flight: …" when !stop and something runs
+  busy(): boolean;                            // a turn in flight, a running/background task, or a live process
 }
 ```
 
@@ -1377,6 +1384,26 @@ test("read-only serves history and refuses work", async () => {
   b.stop();
 });
 
+test("busy covers a turn in flight, a background task and a live process, and nothing else", async () => {
+  const b = mk();
+  await b.start();
+  await settle();
+  assert.equal(b.busy(), false, "an open session with nothing running is not busy");
+  const turn = new Promise((r) => b.onEvent((e) => e.type === "agent_start" && r(b.busy())));
+  await b.rpc("s-1", { type: "prompt", message: "hi" });
+  assert.equal(await turn, true, "a turn is busy from agent_start");
+  await settle();
+  assert.equal(b.busy(), false, "and idle again after agent_end");
+  b.tasks.transition({ id: "t1", session: "s-1", tool: "Bash", arg: "make", state: "background", started: 1 });
+  assert.equal(b.busy(), true);
+  b.tasks.transition({ id: "t1", state: "done", ended: 2 });
+  b.procs.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: process.pid, started: 1 }]);
+  assert.equal(b.busy(), true);
+  b.procs.snapshot("s-1", []);
+  assert.equal(b.busy(), false);
+  b.stop();
+});
+
 test("delete refuses while something runs unless stop, then discards exchanges", async () => {
   const b = mk();
   await b.start();
@@ -1439,6 +1466,8 @@ export class Bench {
   private opts: BenchOpts;
   private children = new Map<string, RpcChild>();
   private listeners = new Set<(ev: BenchEvent & { pi?: string }) => void>();
+  /** Sessions between agent_start and agent_end: a turn nobody watches still holds the bench up. */
+  private turning = new Set<string>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -1500,7 +1529,11 @@ export class Bench {
       this.write(() => this.sessions.update(id, { file: data.sessionFile }));
       this.emit({ type: "sessions" });
     }
-    if (ev.type === "agent_start") this.write(() => this.sessions.update(id, { lastActive: now }));
+    if (ev.type === "agent_start") {
+      this.turning.add(id);
+      this.write(() => this.sessions.update(id, { lastActive: now }));
+    }
+    if (ev.type === "agent_end" || ev.type === "exit") this.turning.delete(id);
     if (ev.type === "tool_execution_start") {
       const name = ev.toolName as string;
       const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, ev.args as Record<string, unknown>), state: "running", started: now }));
@@ -1540,8 +1573,17 @@ export class Bench {
     this.emit({ ...ev, pi: id });
   }
 
+  /** What the idle clock (idle.ts) asks: is anything running that a client leaving must not stop? */
+  busy(): boolean {
+    return (
+      this.turning.size > 0 ||
+      this.tasks.all().some((t) => t.state === "running" || t.state === "background") ||
+      this.procs.all().some((p) => p.ended === undefined)
+    );
+  }
+
   private refuse(write: boolean) {
-    if (this.opts.readOnly) throw new Error("this bench is stopped (read-only); start it to send");
+    if (this.opts.readOnly) throw new Error("this bench is read-only: you are no longer in this team, so it reads history and runs nothing");
     if (write && !this.writable.ok()) throw new Error(`the bench folder is not writable: ${this.writable.reason()}; prompts are refused until it is`);
   }
 
@@ -1644,7 +1686,7 @@ for (const row of lostTasks) this.emit({ type: "task", row });
 - [ ] **Step 4: Run it and watch it pass**
 
 Run: `cd harness && node --test bench/test/bench.test.ts`
-Expected: `# pass 6`, `# fail 0`.
+Expected: `# pass 7`, `# fail 0`.
 
 - [ ] **Step 5: Commit**
 
@@ -1808,12 +1850,14 @@ git commit -m "Answer btw from a read-only fork and import laptop sessions idemp
 
 **Interfaces:**
 ```ts
-export function serve(bench: Bench, port: number, host?: string): Promise<{ port: number; close(): Promise<void> }>;
+export function serve(bench: Bench, port: number, host?: string, idle?: Idle): Promise<{ port: number; close(): Promise<void> }>;
 ```
+
+Every WebSocket, `/events` or a session's `/rpc`, calls `idle.opened()` on upgrade and `idle.closed()` on close; `serve` makes its own `Idle` over `bench.busy` when none is passed, so the tests need none.
 
 | Route | Answer |
 |---|---|
-| `GET /healthz` | `{ok, readOnly, writable, reason?}` |
+| `GET /healthz` | `{ok, readOnly, writable, reason?, clients, busy, idleSince}` (`idleSince` a ms timestamp or `null`) |
 | `GET /sessions` | `SessionRow[]` |
 | `POST /sessions` | `SessionRow` (201) |
 | `DELETE /sessions/{id}` body `{stop?:boolean}` | 204; 409 `{error:"in flight: …", items}` |
@@ -1876,8 +1920,14 @@ test("two clients on one session see the same events in the same order; response
 
 test("REST: list, create, messages, archive, exchanges by both views, delete", async () => {
   const t = await up();
+  const quiet = await (await fetch(t.base + "/healthz")).json();
+  assert.equal(quiet.clients, 0);
+  assert.equal(typeof quiet.idleSince, "number", "no client and nothing running is idle");
   const ev = t.ws("/events");
   await opened(ev);
+  const held = await (await fetch(t.base + "/healthz")).json();
+  assert.equal(held.clients, 1);
+  assert.equal(held.idleSince, null, "a connected client holds the bench up");
   const seen: Record<string, unknown>[] = [];
   frames(ev, seen);
   const j = async (method: string, p: string, body?: unknown) => {
@@ -1914,6 +1964,7 @@ Expected: FAIL with `Cannot find module '.../bench/src/server.ts'`.
 import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
+import { Idle } from "./idle.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -1930,7 +1981,7 @@ async function body(req: http.IncomingMessage): Promise<Record<string, unknown>>
   return s ? (JSON.parse(s) as Record<string, unknown>) : {};
 }
 
-export function serve(bench: Bench, port: number, host = "127.0.0.1"): Promise<{ port: number; close(): Promise<void> }> {
+export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new Idle(() => bench.busy())): Promise<{ port: number; close(): Promise<void> }> {
   const send = (res: http.ServerResponse, code: number, v?: unknown) => {
     res.writeHead(code, v === undefined ? {} : { "content-type": "application/json" });
     res.end(v === undefined ? undefined : JSON.stringify(v));
@@ -1941,7 +1992,7 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1"): Promise<{
     const n = (k: string) => (u.searchParams.has(k) ? Number(u.searchParams.get(k)) : undefined);
     try {
       const m = req.method ?? "GET";
-      if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, readOnly: (bench as unknown as { opts: { readOnly: boolean } }).opts.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason() });
+      if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, readOnly: (bench as unknown as { opts: { readOnly: boolean } }).opts.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
         if (p.length === 1 && m === "POST") return send(res, 201, await bench.create());
@@ -1997,6 +2048,9 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1"): Promise<{
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
     if (!rpc && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
+      // A connected device holds the bench up whichever socket it holds.
+      idle.opened();
+      w.on("close", () => idle.closed());
       if (!rpc) {
         events.add(w);
         w.on("close", () => events.delete(w));
@@ -2058,21 +2112,92 @@ git commit -m "Serve bench sessions, exchanges and RPC fan-out"
 ### Task 12: The `harness-bench` entry point
 
 **Files:**
-- Create: `harness/bench/src/main.ts`, `harness/bench/test/main.test.ts`
+- Create: `harness/bench/src/idle.ts`, `harness/bench/test/idle.test.ts`, `harness/bench/src/main.ts`, `harness/bench/test/main.test.ts`
 
 **Interfaces:**
 ```
-node bench/src/main.ts --dir /bench [--host 0.0.0.0] [--port 7789] [--read-only] [--wait] [--model deepseek/deepseek-v4-flash]
+node bench/src/main.ts --dir /bench [--host 0.0.0.0] [--port 7789] [--read-only] [--wait] [--idle-secs N] [--model deepseek/deepseek-v4-flash]
 node bench/src/main.ts --ping [--port 7789]
 stdout: one line `harness-bench listening on <host>:<port> (running|read-only) dir=<dir>`
 exit 75 when the lock is held, the holder written to $TERMINATION_LOG (default /dev/termination-log) when that file can be written
+exit 0 with "idle" written to $TERMINATION_LOG once no client has been connected and nothing has run for N seconds
 --wait: wait for the lock instead, logging "waiting on <holder>"
+--idle-secs: default $KL_BENCH_IDLE_SECS, else 0; 0 never exits idle
 --ping: exit 0 when GET http://127.0.0.1:<port>/healthz answers ok, else 1
 ```
 
-Start order is lock, then `Bench.start()`, then truncating `.health`, then `serve`, then the writable probe beat every 10 s. SIGTERM stops the children, closes the server, releases the lock and exits 0. `--read-only` takes no lock: it writes nothing, and a reader beside a writer is fine.
+Start order is lock, then `Bench.start()`, then truncating `.health`, then `serve` with one `Idle`, then the writable probe beat every 10 s and the idle beat every 5 s. SIGTERM, and an idle exit, stop the children, close the server, release the lock and exit 0. `--read-only` takes no lock: it writes nothing, and a reader beside a writer is fine. A read-only bench idles out like any other.
 
-These defaults are the platform's (decision 11). The pod runs `harness-bench` with no flags; its readiness probe is `harness-bench --ping`; the agent reads exit 75 as `FolderLocked`.
+These defaults are the platform's (decisions 11 and 12). The pod runs `harness-bench` with no flags but `KL_BENCH_IDLE_SECS` in its env; its readiness probe is `harness-bench --ping`; the agent reads exit 75 as `FolderLocked` and a `Succeeded` pod as asleep.
+
+The idle clock is its own small file, tested before the entry point that uses it.
+
+`harness/bench/test/idle.test.ts`:
+```ts
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Idle } from "../src/idle.ts";
+
+test("idle starts at zero clients and no work, and any client or work clears it", () => {
+  let t = 1000;
+  let busy = false;
+  const i = new Idle(() => busy, () => t);
+  assert.equal(i.state().idleSince, 1000, "a fresh bench with nobody on it is idle from the start");
+  t = 2000;
+  i.opened();
+  assert.equal(i.state().idleSince, null);
+  t = 3000;
+  i.closed();
+  assert.equal(i.state().idleSince, 3000, "idle from the moment the last client left");
+  t = 3500;
+  busy = true;
+  assert.equal(i.idleFor(), 0, "a turn with nobody watching holds it up");
+  t = 4000;
+  busy = false;
+  assert.equal(i.state().idleSince, 4000, "the clock restarts when the work ends, it does not resume");
+  t = 9000;
+  assert.equal(i.idleFor(), 5000);
+  i.closed();
+  assert.equal(i.state().clients, 0, "a stray close never goes negative");
+});
+```
+
+`harness/bench/src/idle.ts`:
+```ts
+/**
+ * When a bench may sleep: nobody connected and nothing running. The platform
+ * scales an idle bench to zero (the pod exits 0 and is not replaced until a
+ * client connects), so a tool that runs with the laptop shut must hold it up,
+ * which is why busy() is asked rather than only counting sockets.
+ */
+export class Idle {
+  private clients = 0;
+  private since: number | undefined;
+  constructor(private busy: () => boolean, private now: () => number = Date.now) {
+    this.since = this.now();
+  }
+  opened(): void {
+    this.clients++;
+    this.since = undefined;
+  }
+  closed(): void {
+    this.clients = Math.max(0, this.clients - 1);
+    this.tick();
+  }
+  private tick(): number | undefined {
+    if (this.clients > 0 || this.busy()) this.since = undefined;
+    else this.since ??= this.now();
+    return this.since;
+  }
+  idleFor(): number {
+    const s = this.tick();
+    return s === undefined ? 0 : this.now() - s;
+  }
+  state(): { clients: number; busy: boolean; idleSince: number | null } {
+    return { clients: this.clients, busy: this.busy(), idleSince: this.tick() ?? null };
+  }
+}
+```
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2121,12 +2246,27 @@ test("a second writer exits 75 naming the holder; a reader beside it is served a
   a.c.kill("SIGTERM");
   assert.equal(await exited(a.c), 0);
 });
+
+test("with nobody connected and nothing running it exits 0 naming idle, and releases the lock", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-main-"));
+  const term = path.join(dir, "termination-log");
+  fs.writeFileSync(term, "");
+  const a = run(["--dir", dir, "--port", "0"], { KL_BENCH_IDLE_SECS: "1", TERMINATION_LOG: term });
+  const started = Date.now();
+  assert.equal(await exited(a.c), 0);
+  assert.ok(Date.now() - started < 15_000, "within the idle period plus two beats");
+  assert.equal(fs.readFileSync(term, "utf8"), "idle");
+  const b = run(["--dir", dir, "--port", "0"]);
+  await b.line(/\(running\)/);
+  b.c.kill("SIGTERM");
+  assert.equal(await exited(b.c), 0, "the next start takes the lock at once");
+});
 ```
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cd harness && node --test bench/test/main.test.ts`
-Expected: FAIL because the test times out, since `main.ts` does not exist. `node:test` reports `Cannot find module` on the child's stderr.
+Run: `cd harness && node --test bench/test/idle.test.ts bench/test/main.test.ts`
+Expected: FAIL with `Cannot find module '.../bench/src/idle.ts'`, and the main test times out because `main.ts` does not exist. `node:test` reports `Cannot find module` on the child's stderr.
 
 - [ ] **Step 3: Implement**
 
@@ -2136,6 +2276,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { Bench } from "./bench.ts";
+import { Idle } from "./idle.ts";
 import { FolderLocked, takeLock, type Lock } from "./lock.ts";
 import { serve } from "./server.ts";
 
@@ -2149,6 +2290,8 @@ const { values: a } = parseArgs({
     "read-only": { type: "boolean", default: false },
     wait: { type: "boolean", default: false },
     ping: { type: "boolean", default: false },
+    // The platform's benchIdleSecs, stamped into the pod; 0 (a laptop) never sleeps.
+    "idle-secs": { type: "string", default: process.env.KL_BENCH_IDLE_SECS ?? "0" },
   },
 });
 
@@ -2181,34 +2324,54 @@ if (!readOnly) {
 const bench = new Bench({ dir, readOnly, model: a.model! });
 await bench.start();
 if (!readOnly) fs.writeFileSync(path.join(dir, ".health"), "");
-const srv = await serve(bench, Number(a.port), a.host);
+const idle = new Idle(() => bench.busy());
+const srv = await serve(bench, Number(a.port), a.host, idle);
 console.log(`harness-bench listening on ${a.host}:${srv.port} (${readOnly ? "read-only" : "running"}) dir=${dir}`);
 const beat = readOnly ? undefined : setInterval(() => bench.writable.probe(), 10_000);
 
-process.on("SIGTERM", async () => {
+let leaving = false;
+const shutdown = async (why?: string) => {
+  if (leaving) return;
+  leaving = true;
   clearInterval(beat);
+  clearInterval(sleep);
+  if (why) {
+    // The agent reads a Succeeded pod as asleep; the message says why for kubectl describe.
+    try {
+      fs.writeFileSync(process.env.TERMINATION_LOG ?? "/dev/termination-log", why);
+    } catch {
+      /* not in a pod */
+    }
+    console.error(`harness-bench: ${why}: no client and nothing running for ${a["idle-secs"]} s`);
+  }
   bench.stop();
   await srv.close();
   lock?.release();
   process.exit(0);
-});
+};
+const idleMs = Number(a["idle-secs"]) * 1000;
+const sleep = setInterval(() => {
+  if (idleMs > 0 && idle.idleFor() >= idleMs) void shutdown("idle");
+}, 5_000);
+
+process.on("SIGTERM", () => void shutdown());
 ```
 
 - [ ] **Step 4: Run it and watch it pass**
 
-Run: `cd harness && node --test bench/test/main.test.ts`
-Expected: `# pass 1`, `# fail 0`.
+Run: `cd harness && node --test bench/test/idle.test.ts bench/test/main.test.ts`
+Expected: `# pass 3`, `# fail 0`.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `cd harness && npm run bench:test`
-Expected: `# fail 0`, with every file from Tasks 1–12 passing (`# pass 29`).
+Expected: `# fail 0`, with every file from Tasks 1–12 passing (`# pass 32`).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add harness/bench/src/main.ts harness/bench/test/main.test.ts
-git commit -m "Start harness-bench with the folder lock, a readiness ping and a read-only mode"
+git add harness/bench/src/idle.ts harness/bench/test/idle.test.ts harness/bench/src/main.ts harness/bench/test/main.test.ts
+git commit -m "Start harness-bench with the folder lock, a readiness ping, a read-only mode and an idle exit"
 ```
 
 ---
@@ -2980,11 +3143,11 @@ Replace the README's section on running pi locally with:
 
 The harness no longer runs pi. It is a view of a bench: `harness-bench`, one per person per team, serving the sessions in a bench folder on port 7789.
 
-    node bench/src/main.ts --dir /path/to/bench [--host 127.0.0.1] [--port 7789] [--read-only] [--wait]
+    node bench/src/main.ts --dir /path/to/bench [--host 127.0.0.1] [--port 7789] [--read-only] [--wait] [--idle-secs N]
     node bench/src/main.ts --ping [--port 7789]
     HARNESS_BENCH=http://127.0.0.1:7789 npm start
 
-On the platform the folder is `/bench` and the address is the tunnel's local end. There the listener binds `0.0.0.0` behind a gateway-only NetworkPolicy, a held folder lock exits 75 (the agent shows `FolderLocked` and the pod restarts), and `--ping` is the readiness probe. On a laptop pass `--host 127.0.0.1`, and `--wait` to wait for a held lock. `--read-only` serves history with no pi at all. `npm run bench:test` runs the bench's tests; they need `flock(1)` (`brew install flock` on a Mac).
+On the platform the folder is `/bench` and the address is the local end of `kl-connect bench`. There the listener binds `0.0.0.0` behind a gateway-only NetworkPolicy, a held folder lock exits 75 (the agent shows `FolderLocked` and the pod restarts), and `--ping` is the readiness probe. With no client connected and nothing running for the region's `benchIdleSecs`, the bench exits 0 and has no pod; the next connection through `kl-connect bench` starts it, and the first request waits out a cold start of seconds. On a laptop pass `--host 127.0.0.1` and `--wait` to wait for a held lock; leave `--idle-secs` unset (0), and it never sleeps. `--read-only` is a bench whose owner has left the team: it serves history with no pi at all. `npm run bench:test` runs the bench's tests; they need `flock(1)` (`brew install flock` on a Mac).
 
 To bring this laptop's old sessions onto the bench, run "Import this laptop's sessions into the bench" from the palette. Running it twice changes nothing.
 ```
@@ -3651,11 +3814,13 @@ git commit -m "Open workspace and ephemeral tabs as live sessions on the bench"
 ## Self-review
 
 - **Spec coverage:**
-  - **What runs where:** bench sessions (Tasks 6, 9), workspace and ephemeral sessions in the bench pod with tools on the tool server (Tasks 18–20), `/btw` (Task 10). The address from `/v1` and the fence are the platform plan's Tasks 11 and 12; Task 18 is their client.
+  - **What runs where:** bench sessions (Tasks 6, 9), workspace and ephemeral sessions in the bench pod with tools on the tool server (Tasks 18–20), `/btw` (Task 10). The address from `/v1` and the fence are the platform plan's Tasks 12 and 13; Task 18 is their client.
   - **Folder layout** (sessions, sessions.json, exchanges.jsonl, btw, tasks.jsonl, procs.json, .lock): Tasks 1–5, 9 and 10. `workspaces/{ws}/thread.jsonl` and `eph/{id}.jsonl`: Task 19.
   - **Surface:** every route in the spec is in Task 11, and the thread routes in Task 20.
   - **Restart-safe:** reopen, lost tasks and procs, and rebuilt exchange views are in Tasks 9 and 12; threads reopen (Task 19). The reschedule drill is Task 17.
   - **Single writer, and the platform's contract:** Tasks 2 and 12 (`0.0.0.0` by default, `--ping`, exit 75 with the holder in the termination message).
+  - **Scale to zero:** `Bench.busy` (T9), clients counted and `idleSince` on `/healthz` (T11), `Idle` and the exit 0 naming `idle` (T12). The platform's side — the agent removing a `Succeeded` pod, `/v1` waking it, `kl-connect` waiting — is the platform plan's decision 6.
+  - **Departed member:** `--read-only` (T9, T12) is the reader the platform starts for `access: ReadOnly`.
   - **Share unavailable, refuse prompts:** Tasks 8, 9 and 15.
   - **Workspace stopped or unreachable during a tool call:** Task 18 (one fresh lookup, then an error naming the address; `/v1`'s 409 text passed through).
   - **Sync:** fan-out, `/events`, per-device state and the offline cache are in Tasks 11, 14 and 15.
@@ -3670,7 +3835,7 @@ git commit -m "Open workspace and ephemeral tabs as live sessions on the bench"
   - `PiEvent` (T6) is used by T9; `ChildOpts.tools` (T19) carries `SessionRow.target`.
   - `WORKSPACE_TOOLS` is defined once (T18) and imported by `rpc-child.ts` (T19).
   - Thread ids `w-{ws}` and `e-{id}` are minted in `SessionList.thread` (T19) and accepted by `SESSION_ID` (T21).
-  - Across plans: port 7789 for the bench, 7788 for the tool server; `GET /v1/workspaces/{id}/tools?team=` answering `{address}` or `{error}` is the platform plan's Task 12; `KL_TEAM` is set on the bench pod by the platform plan's Task 3 and inherited by every child.
+  - Across plans: port 7789 for the bench, 7788 for the tool server; `GET /v1/workspaces/{id}/tools?team=` answering `{address}` or `{error}` is the platform plan's Task 13; `KL_TEAM` is set on the bench pod by the platform plan's Task 3 and inherited by every child.
   - `BenchClient.rpc` returns the same response shape as the old `Pi.send`, so `live.ts` is unchanged.
 
 ## Remaining gaps for the owner

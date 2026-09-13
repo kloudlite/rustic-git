@@ -6,20 +6,34 @@
 
 **Architecture:** one new cluster-scoped CRD beside `Workspace`, reusing every mechanism a workspace already has — the claim (`claim::claim`), the shared-share mount (`mount_homes`), the `ensure_shared_home` shape, the owner namespace (`ws_namespace`), the `user-key` Secret, the attach `resolv.conf`, the ssh-session JWT pattern and the gateway pump. The bench differs only in having no btrfs volume, no sshd, and a different port.
 
-**Out of scope:** the `harness-bench` program and the harness UI (the other plan). This plan relies only on its interface: a listener on `0.0.0.0:7789`, a `--read-only` flag, a `--ping` flag, exit code 75 when the folder lock is held with the holder in `/dev/termination-log`, `KL_TEAM` passed on to the `workspace-tools` extension, all shipped in `ghcr.io/kloudlite/kloudlite-bench`. Until that image carries the real program, Task 10 ships a stub honouring the same interface so every platform step is verifiable on its own.
+**Out of scope:** the `harness-bench` program and the harness UI (the other plan). This plan relies only on its interface: a listener on `0.0.0.0:7789`, a `--read-only` flag (a departed member's bench: history, no pi, no tools), a `--ping` flag, exit code 0 with `idle` in `/dev/termination-log` once no client has been connected and no tool has run for `KL_BENCH_IDLE_SECS`, exit code 75 when the folder lock is held with the holder in `/dev/termination-log`, `KL_TEAM` passed on to the `workspace-tools` extension, all shipped in `ghcr.io/kloudlite/kloudlite-bench`. Until that image carries the real program, Task 11 ships a stub honouring the same interface so every platform step is verifiable on its own.
 
 ## Decisions this plan makes (the spec left them open or the code contradicts it)
 
-1. **Region is stored on the Bench (deviation from the spec, flagged).** The spec says "no region field — read from the team". No team→region binding exists in the code (`RegionSpec` is `{name, status}`; the directory has no region; `create_ws` takes `region` from the body). The claim, the gateway's region check and `ensure_binding` all need a region on the object. So `POST /v1/bench` takes `region` (checked by `check_region`), writes it once into `spec.region`, and later calls for that `(owner, team)` ignore a different one. A `// ponytail:` on the field names the upgrade: when teams get a region binding, `/v1` fills it from the team and refuses a mismatch.
-2. **Folder path is `{pool}/homes/.benches/{team}/{person}` (deviation, flagged).** The export is mounted AT `{pool}/homes` (`mount_homes`), so the spec's sibling `{pool}/benches` would be node-local rootfs, not the share. A dot-prefixed directory at the share's root is still "beside the homes", keeps one mount and one repair path, and cannot collide with a person's home because `valid_owner` refuses a leading dot.
-3. **Quota: the person** (open question 2, default taken). `quota::usage` sums bench cpu/memory under `spec.owner`: `spec.resources` when Running, the reader's 50m/128Mi when Stopped, because the reader is a real pod. No `benches` dimension. A team's usage never includes a bench.
+1. **A region belongs to the team, and the bench stores none.** No team→region binding exists in the code today (`RegionSpec` is `{name, status}`, `crates/workspaces/src/crd/region.rs:23`; `directory::Team` has no region, `crates/pulls/src/directory/teams.rs:12`; `create_ws` takes `region` from the body). Task 7 adds it, as the smallest binding that can hold:
+   - **Where it lives:** a `region` field on the directory's `Team` record and on its `User` record (`crates/pulls/src/directory/mod.rs:54`), `#[serde(default)]` so every existing document still parses as unbound. A personal "team" is the person's handle, so the person's own record carries it; no second store.
+   - **Set once.** `Directory::bind_region(slug, region)` is a compare-and-set on the empty value and answers the region the slug is bound to afterwards. A team is bound by a superadmin through `PUT /admin/owners/{slug}/region` (the admin process holds the directory, checks the id with `check_region`, writes an audit row). A person binds their own at their first `POST /v1/bench`, from the body's `region`, because nobody else governs a personal namespace — the spec's "personal bench region" question, now decided there. A rebind is refused with 409 in this cut: the folders already on the old region's share would silently stop being reachable (`// ponytail:` on `bind_region`: moving a team between regions is a migration of its benches' folders, designed when it is needed).
+   - **Where the region is derived, at each point, never stored on the bench:** `/v1` reads it from the directory on every bench call (`team_region`, Task 8) and uses it for `check_region`, `gateway_url` and the tunnel token's `region` claim; the gateway compares that claim to its own region exactly as it does for a workspace token; the claim and `ensure_binding` use the agent's own `ctx.region` (`bins/agent/src/controller/mod.rs:231`), because a Bench is written to its team's region's cluster and only that cluster's agents ever see it. No status copy is stamped: nothing downstream of `/v1` needs one.
+   - An unbound team is a 409 on every `/v1/bench` route, "team {team} has no region; a platform admin binds one"; an unbound person without `region` in the body is a 422, "choose a region for your personal bench".
+2. **The folder is `{pool}/homes/.benches/{team}/{person}`.** The export is mounted AT `{pool}/homes` (`mount_homes`), so the folder lives on the same share, under the one mount and the one repair path the homes have. It cannot collide with a person's home because `valid_owner` refuses a leading dot.
+3. **Quota: the person** (open question 2, default taken). `quota::usage` sums bench cpu/memory under `spec.owner`, `spec.resources`, only while a pod is wanted: `desiredState: Running` and `status.phase` not `Idle`. A bench scaled to zero or Stopped costs cpu and memory nothing. No `benches` dimension. A team's usage never includes a bench.
 4. **Personal bench is `team == owner`** (the spec's "a person's own handle"), which `ws_namespace` already maps to `ws-{owner}`. The API normalizes an absent team to the caller's handle, never to empty.
 5. **Object name is `bench-{hash(owner, team)}`** (`crd::bench_id`, deterministic like `builder_id`), so "one per (owner, team)" is the API server's name uniqueness, not a read-then-write race.
-6. **Stopped keeps a pod** (spec): `desiredState: Stopped` replaces the pod with `harness-bench --read-only`. Deleting the Bench removes the pod by ownerReference GC; no finalizer, and the platform never touches the folder.
+6. **A bench scales to zero when idle, the builder's shape with the pieces where they can see.** The builder gate counts connections, stops the builder after `builder_idle_secs` through `/v1`, and starts it on the next connection, holding that connection while it polls for ready (`bins/builder-gate/src/idle.rs`, `bins/builder-gate/src/lib.rs:143`). A bench's idleness includes tools running with nobody connected, which only `harness-bench` sees, so:
+   - **Who observes:** `harness-bench` counts connected clients (open WebSockets) and running work (a pi turn between `agent_start` and `agent_end`, a task `running` or `background`, a process without `ended`). Once both have been zero for `KL_BENCH_IDLE_SECS` it writes `idle` to its termination message and exits 0.
+   - **Who sets the pod absent:** the agent. The pod's `restartPolicy` is `OnFailure`, so exit 0 leaves it `Succeeded` (exit 75 still restarts). The reconciler deletes a succeeded pod and writes `phase: Idle`, `Ready=False/Idle`, `status.idleSince` = the container's `finishedAt` (derived from the object, so a replayed pass writes the same value). It creates no pod while `spec.wakeAt` is not later than `status.idleSince`. The agent still writes status only.
+   - **The grace knob:** `benchIdleSecs` on `ClusterSettings` (per region, where the agent reads it), default 300, range 60..=86400, `Mark::Live`. The agent stamps it into the pod's `KL_BENCH_IDLE_SECS` at create; a running pod keeps the value it started with, as an in-flight `btrfs send` keeps its timeout.
+   - **Who starts it on connect:** `POST /v1/bench/session`, which every tunnel connection already calls. On an `Idle` bench it runs `guard_alloc` (waking re-charges cpu and memory) and patches `spec.wakeAt` to now, `/v1` being the only writer of spec; on any bench not yet Ready it answers 202 `{"state": phase}` with no token. `kl-connect bench` is the gate: it holds the local connection and re-asks every second, for up to `BENCH_START_WAIT` (90 s), until a 201 carries a token, then dials. The harness and the probe reach a bench only through that local end, so neither learns a bench was asleep.
+   - **Explicit `Stopped`** is the same zero with the auto-start refused: no pod, and `POST /v1/bench/session` answers 409 "bench is stopped; start it". `POST /v1/bench/start` sets `Running` and writes `wakeAt`; the pod then idles away again if nobody connects.
+   - Deleting the Bench removes any pod by ownerReference GC; no finalizer, and the platform never touches the folder.
 7. **Tunnel token is a new `typ: "bench-session"`**, not a reused `ssh-session`: the gateway must know which kind to resolve and which port to dial, and a workspace token must never open a bench, nor the reverse.
 8. **The bench listens on the pod IP, fenced by a NetworkPolicy (deviation from the spec's first draft; the other plan's Task 12 now binds `0.0.0.0` by default).** The gateway dials the pod IP and a bench pod has no sshd to port-forward through. `harness-bench` binds `0.0.0.0:7789`; the agent writes a `bench-ingress` NetworkPolicy admitting 7789 only from the gateway pods. The k3s regions enforce policies; AKS does not (`// ponytail:` on the policy).
 9. **`kl-connect bench` opens one tunnel per local TCP connection**, each with its own 60 s single-use token, because the harness opens several HTTP and WebSocket connections and the gateway spends a token on connect.
-10. **No delete route and no read-after-leaving in this cut.** The spec lists no `/v1` delete; deleting is `kubectl delete bench` until the folder's fate is designed (open questions 1 and 4). A person no longer in the team gets 404 from every `/v1/bench` route, including the tunnel token, so a departed member's read-only access (open question 1) is not granted yet.
+10. **A person who left a team still reads their own sessions there; nothing else.** The spec lists no `/v1` delete; deleting is `kubectl delete bench` until the folder's fate is designed (the spec's open question 2, retention). Membership decides `spec.access`, `Full` or `ReadOnly`, written only by `/v1`:
+    - **Member (and always for the personal bench):** `Full` — pi, tools, workspace sessions.
+    - **Not a member, but `spec.owner` is the caller and the Bench exists:** `GET /v1/bench`, `POST /v1/bench/start`, `/stop` and `/session` are admitted, and each first patches `access: ReadOnly`. `POST /v1/bench` (create) and `/attach` stay 404 "no such team". The pod runs `harness-bench --read-only`: the list, every transcript, the exchanges and the workspace threads, read through pi's SDK, with no pi process, no tool, no model and no lock. It reaches no workspace: nothing in it dials one, and `GET /v1/workspaces/{id}/tools` refuses a non-member through `my_ws` regardless.
+    - **A running `Full` pod of someone who just left:** the api's keys beat (`run_beat`, `crates/workspaces/src/api/keys.rs:131`, every `KEYS_RESYNC_SECS`, `user` role only) patches `access: ReadOnly` on every Bench whose owner is no longer a member of `spec.team`, and the reconciler replaces the pod (a container command is immutable). So tools stop within one beat of the removal, and a workspace call fails at once. Rejoining flips it back at the next `/v1/bench` call.
+    - A read-only bench scales to zero exactly like any other (decision 6), and its cpu and memory count against the person while it runs.
 11. **The tool server listens on the pod IP; the namespace is the fence.** Every session runs in the bench pod and only tool calls reach a workspace, so the bench must dial `kl ide serve`, today bound to `127.0.0.1:7788` and reached only through the ssh tunnel. The prelude passes `--bind 0.0.0.0:7788`; the flag already exists (`bins/kl/src/main.rs:59`). A person's bench and their workspaces in one team share `ws_namespace(owner, team)`, whose `default-deny` plus `allow-same-namespace` (`bins/agent/src/binding.rs:142`) admit exactly those pods to each other and nobody else's. `allow-bench-tools` (bench pods to workspace pods, TCP 7788) names the grant; it widens nothing today, and it keeps the bench's path if `allow-same-namespace` is ever narrowed. `intercept_ingress` admits the intercepting environment on every port. With the tool server on the pod IP, that would hand the environment an unauthenticated `exec`, so it is narrowed to the intercepted ports in the same commit. `allow-gateway-ssh` stays port 22 only. The ssh tunnel (`kl-connect ws ide`) still reaches loopback. AKS enforces no policy (the `// ponytail:` of decision 8); workspaces and benches run on the k3s regions.
 12. **Ownership is checked by `/v1`, never by the pod.** The tool server keeps no auth code. `GET /v1/workspaces/{id}/tools?team=` answers `{"address": "{podIP}:7788"}` only to the caller who is `spec.owner`, only while Ready, and only for a workspace of the bench's own team when `team` is given. A workspace that is not Ready, or is in another team, is a 409 naming why. Everyone but the owner gets a 404, a team admin and a superadmin included. The bench's `workspace-tools` extension dials only an address it got there.
 
@@ -28,9 +42,9 @@
 - Edit, build, test and commit only in `/work/src` in the dev pod. Never `cargo` on the laptop; in piped pod scripts spell it `c=$(printf 'car%s' go)`. Never a plain `cargo update`, never `cargo fmt`.
 - `spec.owner` is the truth; labels are a view stamped by `/v1` and healed by the agent. Never authorize on a label.
 - The agent writes status only; `deploy/k3s/agent-admission.yaml` covers `benches` in the same commit that gives the agent `patch` on them.
-- No admin router, admin page, history reflector or audit view touches a Bench. Task 7 has a test that proves the admin router has no bench route; Task 2 proves the admin ServiceAccount cannot read one.
+- No admin router, admin page, history reflector or audit view touches a Bench. Task 8 has a test that proves the admin router has no bench route; Task 2 proves the admin ServiceAccount cannot read one.
 - Files stay under ~800 lines; module `//!` docs carry the design context; comments say why; keep and add `// ponytail:` markers.
-- Commit subjects are imperative sentence case with no tool attribution. Commit after each task from `/work/src`. Push `origin` and `platform` once, at the end of the verified batch (end of Task 13), never mid-batch.
+- Commit subjects are imperative sentence case with no tool attribution. Commit after each task from `/work/src`. Push `origin` and `platform` once, at the end of the verified batch (end of Task 14), never mid-batch.
 - Before every commit: `cargo clippy --workspace --all-targets -- -D warnings` clean. Confirm package names once with `grep -h '^name' crates/*/Cargo.toml bins/*/Cargo.toml` and substitute them in the commands below if they differ.
 
 ## Task list
@@ -41,14 +55,15 @@
 4. `ensure_bench_folder` on the agent
 5. The bench reconciler, its claim, its dead-node release, its controller wiring
 6. The `bench-session` tunnel token
-7. `/v1/bench` routes, quota, ingress allow-list
-8. Gateway: `/tunnel/{id}` resolves a bench to port 7789
-9. `kl-connect bench`
-10. The bench image (stub until harness-bench lands) and its CI job
-11. The tool server on the pod IP: prelude, `allow-bench-tools`, intercept ingress narrowed to its ports
-12. `GET /v1/workspaces/{id}/tools`: the owner's tool server address
-13. SLO ids, catalogue, `deploy/slo.md`, probe stage; push the batch
-14. Ship, pin, roll, apply, verify on the fleet
+7. A region on every team and person: the directory field, `bind_region`, the admin route
+8. `/v1/bench` routes, access, wake, quota, ingress allow-list
+9. Gateway: `/tunnel/{id}` resolves a bench to port 7789
+10. `kl-connect bench`: the local gate that wakes a bench and waits for it
+11. The bench image (stub until harness-bench lands) and its CI job
+12. The tool server on the pod IP: prelude, `allow-bench-tools`, intercept ingress narrowed to its ports
+13. `GET /v1/workspaces/{id}/tools`: the owner's tool server address
+14. SLO ids, catalogue, `deploy/slo.md`, probe stage; push the batch
+15. Ship, pin, roll, apply, verify on the fleet
 
 ---
 
@@ -74,17 +89,26 @@
 pub struct BenchSpec {
     pub owner: String,
     pub team: String,
-    // ponytail: stored because no team->region binding exists yet; /v1 fills it from the team once one does.
-    pub region: String,
+    // No region: a team is bound to one (the directory's record), and /v1 reads it there.
     pub image: String,
     #[serde(default)]
     pub model: String,
     pub desired_state: DesiredState,
+    /// `Full` for a member; `ReadOnly` once the owner has left `team`. Written only by /v1.
+    #[serde(default)]
+    pub access: BenchAccess,
+    /// RFC 3339, written by /v1 when a client asks for a tunnel to an idle bench. A pod is wanted
+    /// again only while this is later than `status.idleSince`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<String>,
     #[serde(default)]
     pub resources: PodResources,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_environment: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum BenchAccess { #[default] Full, ReadOnly }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +118,9 @@ pub struct BenchStatus {
     pub node_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_ref: Option<String>,
+    /// The `finishedAt` of the pod that exited idle; cleared when a pod is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
@@ -101,8 +128,9 @@ pub struct BenchStatus {
 pub const FOLDER_READY: &str = "FolderReady";
 pub const FOLDER_NOT_READY: &str = "FolderNotReady";
 pub const FOLDER_LOCKED: &str = "FolderLocked";
-/// The reader a Stopped bench keeps: enough to parse JSONL, nothing to run a model.
-pub fn reader_resources() -> PodResources; // cpu request/limit 50m, memory request/limit 128Mi
+pub const BENCH_IDLE: &str = "Idle";
+/// Whether a pod should exist now: Running, and not asleep unless a wake came after it slept.
+pub fn bench_wants_pod(b: &Bench) -> bool;
 
 // crd/names.rs
 /// "bench-" + 12 hex of sha256("{owner}\0{team}") over lowercased inputs.
@@ -121,16 +149,31 @@ mod tests {
         assert_ne!(bench_id("alice", "acme"), bench_id("alice", "alice"));
         assert_ne!(bench_id("ab", "c"), bench_id("a", "bc"), "the separator keeps pairs apart");
         assert!(bench_id("alice", "acme").len() <= 63);
-        let v = serde_json::json!({"owner":"alice","team":"acme","region":"r1","image":"i","desiredState":"running"});
+        let v = serde_json::json!({"owner":"alice","team":"acme","image":"i","desiredState":"running"});
         let s: BenchSpec = serde_json::from_value(v).unwrap();
         assert_eq!(s.resources, PodResources::default());
-        assert!(s.model.is_empty() && s.attached_environment.is_none());
-        assert_eq!(reader_resources().memory_limit, "128Mi");
+        assert_eq!(s.access, BenchAccess::Full, "an absent access is a member's bench");
+        assert!(s.model.is_empty() && s.attached_environment.is_none() && s.wake_at.is_none());
+    }
+
+    #[test]
+    fn a_pod_is_wanted_while_running_and_awake_or_woken_after_it_slept() {
+        let mut b = Bench::new("bench-1", serde_json::from_value(serde_json::json!(
+            {"owner":"alice","team":"acme","image":"i","desiredState":"running"})).unwrap());
+        assert!(bench_wants_pod(&b), "never slept");
+        b.status = Some(BenchStatus { idle_since: Some("2026-09-13T10:00:00Z".into()), ..Default::default() });
+        assert!(!bench_wants_pod(&b), "asleep and nobody asked");
+        b.spec.wake_at = Some("2026-09-13T09:59:59Z".into());
+        assert!(!bench_wants_pod(&b), "a wake from before it slept is spent");
+        b.spec.wake_at = Some("2026-09-13T10:00:01Z".into());
+        assert!(bench_wants_pod(&b));
+        b.spec.desired_state = DesiredState::Stopped;
+        assert!(!bench_wants_pod(&b), "stopped refuses a wake");
     }
 }
 ```
 - [ ] Run: `cargo test -p kloudlite-workspaces a_bench_is_one_name` → expected FAIL: `cannot find function bench_id` / `cannot find type BenchSpec`.
-- [ ] Implement `bench.rs` as in Interfaces with a `//!` doc ("a person's bench in one team; no volume, no sshd; the folder is on the region share; see the spec"), and `bench_id` in `names.rs` using the hashing helper `builder_id`'s neighbours use (`hex_prefix`).
+- [ ] Implement `bench.rs` as in Interfaces with a `//!` doc ("a person's bench in one team; no volume, no sshd, no region of its own; the folder is on the region share; it sleeps when idle; see the spec"). `bench_wants_pod` compares the two RFC 3339 strings by parsing them with `chrono::DateTime::parse_from_rfc3339` (an unparsable `wakeAt` is no wake), and `bench_id` in `names.rs` using the hashing helper `builder_id`'s neighbours use (`hex_prefix`).
 - [ ] Run again → expected `test ... ok`.
 - [ ] Add `Bench::crd()` to `crates/workspaces/tests/crd_yaml.rs` in the same shape as the entries at `:165`/`:193`; regenerate `deploy/k3s/crds.yaml` as that test's failure message instructs; add `assert!(yaml.contains("name: benches.kloudlite.io"))`.
 - [ ] Run: `cargo test -p kloudlite-workspaces --test crd_yaml` → all ok.
@@ -179,7 +222,8 @@ pub const BENCH_CONTAINER: &str = "bench";
 pub const BENCH_POD: &str = "bench";
 /// `{pool}/homes/.benches/{team}/{owner}`, each segment checked by `model::validate_mount`.
 pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, String>;
-pub fn bench_pod(b: &crd::Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str) -> Result<Pod, String>;
+/// `idle_secs` is the region's `benchIdleSecs`, stamped into KL_BENCH_IDLE_SECS at create.
+pub fn bench_pod(b: &crd::Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64) -> Result<Pod, String>;
 /// Admits BENCH_PORT only from the gateway's pods.
 pub fn bench_ingress_policy(namespace: &str, id: &str) -> NetworkPolicy;
 ```
@@ -188,8 +232,9 @@ Pod shape — start from `workspace_pod` (`k8s/workspace.rs:490`) and delete, ne
 - `nodeName` from `status.nodeName`, `runtimeClassName`, and the same hardened security context (uid/gid `SSH_UID`, no privilege escalation, read-only root, `drop: ALL`).
 - Volumes: `home_volume(pool, owner)` at `HOME_DIR`; a hostPath `bench_folder(..)` with `type: Directory` at `BENCH_DIR` (never `DirectoryOrCreate`: a missing folder must fail, never become an empty local directory); the `user-key` Secret projected as the workspace does; the attach `resolv.conf` (`attach_file(pool, id)`, `type: File`) at `/etc/resolv.conf`; an `emptyDir` at `/tmp`.
 - Not carried: the btrfs worktree, homecache, sshd config and host-key Secret, `authorized_keys`, the git seed init container, the `.cache` subPath mounts.
-- Command: `["harness-bench"]` when Running, `["harness-bench", "--read-only"]` when Stopped. Env: `KL_OWNER`, `KL_TEAM`, `KL_BENCH=id`, `KL_MODEL=spec.model`, `KL_REGISTRY_HOST`, `NODE_NAME` from the downward API (the lock holder's name), `HOME=/home/kl`, `LANG=C.UTF-8`.
-- Resources: `quantities(&spec.resources)` when Running, `quantities(&crd::reader_resources())` when Stopped.
+- Command: `["harness-bench"]` for `access: Full`, `["harness-bench", "--read-only"]` for `access: ReadOnly`. Env: `KL_OWNER`, `KL_TEAM`, `KL_BENCH=id`, `KL_MODEL=spec.model`, `KL_REGISTRY_HOST`, `KL_BENCH_IDLE_SECS=idle_secs`, `NODE_NAME` from the downward API (the lock holder's name), `HOME=/home/kl`, `LANG=C.UTF-8`.
+- `restartPolicy: OnFailure`: an idle exit (0) leaves the pod `Succeeded` for the agent to remove; a held lock (75) or a crash restarts it.
+- Resources: `quantities(&spec.resources)`. A bench that should cost nothing has no pod at all.
 - Readiness: `exec: ["harness-bench", "--ping"]`, period 5 s.
 - `terminationMessagePolicy: File` (the default path `/dev/termination-log` carries the lock holder, Task 5).
 
@@ -198,7 +243,7 @@ Pod shape — start from `workspace_pod` (`k8s/workspace.rs:490`) and delete, ne
 #[test]
 fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
     let b = fixture_bench("alice", "acme", DesiredState::Running);
-    let p = bench_pod(&b, "bench-1", "/wspool", None, "cr.example").unwrap();
+    let p = bench_pod(&b, "bench-1", "/wspool", None, "cr.example", 300).unwrap();
     assert_eq!(p.metadata.namespace.as_deref(), Some(crate::crd::ws_namespace("alice", "acme").as_str()));
     let spec = p.spec.unwrap();
     let paths: Vec<String> = spec.volumes.as_ref().unwrap().iter()
@@ -212,11 +257,15 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
 }
 
 #[test]
-fn a_stopped_bench_is_a_small_read_only_reader() {
-    let p = bench_pod(&fixture_bench("alice", "acme", DesiredState::Stopped), "bench-1", "/wspool", None, "cr").unwrap();
-    let c = &p.spec.unwrap().containers[0];
+fn a_departed_members_bench_runs_the_reader_and_every_bench_may_exit_idle() {
+    let mut b = fixture_bench("alice", "acme", DesiredState::Running);
+    b.spec.access = crate::crd::BenchAccess::ReadOnly;
+    let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", 420).unwrap().spec.unwrap();
+    let c = &spec.containers[0];
     assert_eq!(c.command.as_ref().unwrap().last().map(String::as_str), Some("--read-only"));
-    assert_eq!(c.resources.as_ref().unwrap().limits.as_ref().unwrap()["memory"].0, "128Mi");
+    assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"), "exit 0 is idle and must not restart");
+    let idle = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_BENCH_IDLE_SECS").unwrap();
+    assert_eq!(idle.value.as_deref(), Some("420"));
 }
 
 #[test]
@@ -224,7 +273,7 @@ fn a_folder_segment_that_escapes_is_refused_before_it_becomes_a_hostpath() {
     assert!(bench_folder("/wspool", "..", "alice").is_err());
     assert!(bench_folder("/wspool", "acme", "a/b").is_err());
     assert!(bench_folder("/wspool", "acme", ".").is_err());
-    assert!(bench_pod(&fixture_bench("alice", "../x", DesiredState::Running), "b", "/wspool", None, "cr").is_err());
+    assert!(bench_pod(&fixture_bench("alice", "../x", DesiredState::Running), "b", "/wspool", None, "cr", 300).is_err());
 }
 
 #[test]
@@ -275,13 +324,13 @@ fn a_bench_folder_is_made_on_the_share_private_and_refuses_an_escaping_segment()
 - [ ] Run: `cargo test -p kloudlite-agent-bin a_bench_folder_is_made` → expected FAIL: `cannot find function ensure_bench_folder`.
 - [ ] Implement with the same `crate::may_mount()` / `crate::mount_homes` gate as `ensure_shared_home`; segments through `k8s::bench_folder` (Task 3) so the agent and the pod builder cannot disagree on the path; `create_dir_all`; `set_permissions` 0700 on the person's directory; `chown` only under `geteuid() == 0` as the neighbour does.
 - [ ] Run → ok; `cargo test -p kloudlite-storage` for the reserved-owner test → ok; clippy.
-- [ ] Commit: `Make a private bench folder on the region share beside the homes`.
+- [ ] Commit: `Make a private bench folder on the region share under the homes`.
 
 ### Task 5: The bench reconciler, its claim, its dead-node release, its controller wiring
 
 **Files:**
 - Create: `bins/agent/src/controller/bench.rs` (under 400 lines), `bins/agent/tests/reconcile/bench.rs`
-- Modify: `bins/agent/src/controller/mod.rs` (`mod bench; pub use bench::reconcile_bench;`), `bins/agent/src/claim.rs` (`claim_bench` after `claim_environment` near `:642`), `bins/agent/src/controller/run.rs` (a placed `Controller<Bench>` beside `workspaces` at `:269`; an unplaced claim controller beside `claim_ws` at `:399`), `bins/agent/src/peer/sweeps.rs` (bench release on an unplaceable node), `bins/agent/tests/reconcile/main.rs` (`mod bench;`), `deploy/k3s/agent-rbac.yaml` (a `networkpolicies` row naming `reconcile_bench` if the attach row does not already grant create/patch)
+- Modify: `crates/workspaces/src/crd/settings.rs` (`bench_idle_secs: Option<u64>` on `ClusterSettingsSpec` beside `sync_secs` at `:77`, its row `("benchIdleSecs", Mark::Live, &[])` in `CLUSTER_SETTING_META` at `:142`, and its range 60..=86400), `crates/workspaces/src/settings.rs` (`AgentSettings::bench_idle_secs`, env `WS_BENCH_IDLE_SECS`, default 300, merged like `sync_secs`), `bins/agent/src/controller/mod.rs` (`mod bench; pub use bench::reconcile_bench;`), `bins/agent/src/claim.rs` (`claim_bench` after `claim_environment` near `:642`), `bins/agent/src/controller/run.rs` (a placed `Controller<Bench>` beside `workspaces` at `:269`; an unplaced claim controller beside `claim_ws` at `:399`), `bins/agent/src/peer/sweeps.rs` (bench release on an unplaceable node), `bins/agent/tests/reconcile/main.rs` (`mod bench;`), `deploy/k3s/agent-rbac.yaml` (a `networkpolicies` row naming `reconcile_bench` if the attach row does not already grant create/patch)
 
 **Interfaces:**
 ```rust
@@ -289,19 +338,25 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
 pub async fn claim_bench(b: &crd::Bench, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr>;
 /// Pure: what the pod says about the bench. Split out so the arms are unit-testable.
 pub(crate) fn bench_state(b: &crd::Bench, pod: Option<&Pod>) -> PodVerdict;
-pub(crate) enum PodVerdict { Create, Replace, Starting, Ready, Locked(String) }
+pub(crate) enum PodVerdict { Create, Replace, Starting, Ready, Locked(String), Idle(String), Absent, Remove }
 ```
 The reconcile, in order. Every status write goes through `bench_conditions(prev, c)`, which replaces by type and keeps `Placed` and `FolderReady` (the `replaced` helper in `controller/workspace/conditions.rs` already does this; reuse it).
 1. `heal_labels` (the existing generic helper): owner, team, kind.
 2. Namespace readiness: the same `NAMESPACE_READY` wait `apply_workspace` does (`controller/workspace/mod.rs:190-202`).
 3. `ctx.homes_export` is `None` → phase `Creating`, `Ready=False/FolderNotReady` "this node has no shared-home mount (WS_HOMES_EXPORT)", requeue `TICK`.
 4. `spawn_blocking(ensure_bench_folder)` under `super::timed("bench_folder", ..)`. `Err` → `Creating`, `FolderReady=False/FolderNotReady` with the error, requeue `TICK`. `Ok` → `FolderReady=True/Ready`.
-5. Attach `resolv.conf` for `id` with the render the workspace path uses (the function writing `attach_file(pool, id)`), so `spec.attachedEnvironment` works. `/v1` writes the NetworkPolicy half (Task 7).
+5. Attach `resolv.conf` for `id` with the render the workspace path uses (the function writing `attach_file(pool, id)`), so `spec.attachedEnvironment` works. `/v1` writes the NetworkPolicy half (Task 8).
 6. Apply `k8s::bench_ingress_policy` (server-side apply, field manager `kloudlite-agent`).
-7. The `user-key` Secret must exist in the namespace (a GET). Missing → `Ready=False/KeysNotReady`, requeue `TICK`. `/v1` installs it (Task 7).
-8. GET the pod, then `bench_state`: `Create` → create `k8s::bench_pod`; `Replace` (the pod's `--read-only` does not match `desiredState`; a container command is immutable) → delete, requeue 2 s; `Starting` → phase `Starting`; `Ready` → phase `Ready`, `Ready=True/Running` or `Ready=True/ReadOnly`; `Locked(holder)` (container last terminated with exit code 75) → `Ready=False/FolderLocked`, message "folder held by {holder}". Always record `status.podRef = "{ns}/bench"` once the pod exists.
+7. The `user-key` Secret must exist in the namespace (a GET). Missing → `Ready=False/KeysNotReady`, requeue `TICK`. `/v1` installs it (Task 8).
+8. GET the pod, then `bench_state`, which reads `crd::bench_wants_pod` first:
+   - pod `Succeeded` → `Idle(finishedAt)`: delete the pod, write phase `Idle`, `Ready=False/Idle` "no client and nothing running for benchIdleSecs; the next connection starts it", `status.idleSince = finishedAt`, clear `podRef`. The next pass decides from the new status (a `wakeAt` that raced the exit is later than `finishedAt` and creates a pod at once).
+   - no pod and `bench_wants_pod` → `Create`: create `k8s::bench_pod` with `ctx.settings.load().bench_idle_secs`; the status write that records `podRef` clears `idleSince`.
+   - no pod and not wanted → `Absent`: phase `Stopped` with `Ready=False/Stopped` when `desiredState` is Stopped, else phase `Idle` unchanged; requeue on change only.
+   - a pod and not wanted (`desiredState: Stopped`) → `Remove`: delete it, requeue 2 s.
+   - a pod whose `--read-only` does not match `spec.access` → `Replace` (a container command is immutable): delete, requeue 2 s.
+   - `Starting` → phase `Starting`; `Ready` → phase `Ready`, `Ready=True/Running` or `Ready=True/ReadOnly`; `Locked(holder)` (container last terminated with exit code 75) → `Ready=False/FolderLocked`, message "folder held by {holder}". Record `status.podRef = "{ns}/bench"` once the pod exists.
 
-`claim_bench` is `claim(b, ctx, "Bench", crd::Phase::Pending, |o| Parts { node_name: status node, storage: None, volume: None, region: &o.spec.region, owner: &o.spec.owner, want: want_of(&o.spec.resources) })`. With no storage and no volume, `decide` (`claim.rs:415`) reaches the capacity and placeability arms and nothing volume-bound.
+`claim` takes `parts: fn(&K) -> Parts<'_>` today (`bins/agent/src/claim.rs:543`), a function pointer that cannot capture `ctx`. Widen it to `parts: for<'a> fn(&'a K, &'a Ctx) -> Parts<'a>`; the Workspace and Environment callers ignore the second argument and keep `region: &o.spec.region`. `claim_bench` is `claim(b, ctx, "Bench", crd::Phase::Pending, |o, c| Parts { node_name: status node, storage: None, volume: None, region: &c.region, owner: &o.spec.owner, want: if crd::bench_wants_pod(o) { want_of(&o.spec.resources) } else { Want::default() } })`: a Bench is written to its team's region's cluster, so the agent's own region is the team's. With no storage and no volume, `decide` (`claim.rs:415`) reaches the capacity and placeability arms and nothing volume-bound; a sleeping bench asks for no capacity.
 
 Dead node: a bench holds no state on its node, so it is always releasable. In `peer/sweeps.rs`, next to the pass that calls `unplaceable(`, add a bench pass: for each Bench whose `status.nodeName` names an unplaceable node, clear `nodeName` and write `Placed=False/NodeDead` through `mark_parent_of::<crd::Bench>` (read its signature; it is generic over the kind). Any up node then claims it; the folder lock (`FolderLocked`) is what keeps a zombie writer on a partitioned node from double-writing.
 
@@ -312,22 +367,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_pod_decides_create_replace_ready_and_locked() {
+    fn the_pod_decides_create_replace_ready_locked_idle_and_absent() {
         let running = fixture_bench(DesiredState::Running);
         assert!(matches!(bench_state(&running, None), PodVerdict::Create));
-        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench", "--read-only"], None, true))), PodVerdict::Replace));
+        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench", "--read-only"], None, true))), PodVerdict::Replace), "a member's bench running the reader");
         assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Ready));
         assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, false))), PodVerdict::Starting));
         match bench_state(&running, Some(&pod_with(&["harness-bench"], Some((75, "node-b")), false))) {
             PodVerdict::Locked(h) => assert_eq!(h, "node-b"),
             _ => panic!("exit 75 is a held lock"),
         }
+        let mut exited = pod_with(&["harness-bench"], Some((0, "idle")), false);
+        exited.status.as_mut().unwrap().phase = Some("Succeeded".into());
+        match bench_state(&running, Some(&exited)) {
+            PodVerdict::Idle(at) => assert_eq!(at, FINISHED_AT),
+            _ => panic!("exit 0 is asleep"),
+        }
+        let mut asleep = fixture_bench(DesiredState::Running);
+        asleep.status.as_mut().unwrap().idle_since = Some(FINISHED_AT.into());
+        assert!(matches!(bench_state(&asleep, None), PodVerdict::Absent), "nobody asked");
+        asleep.spec.wake_at = Some("2099-01-01T00:00:00Z".into());
+        assert!(matches!(bench_state(&asleep, None), PodVerdict::Create), "a client asked after it slept");
         let stopped = fixture_bench(DesiredState::Stopped);
-        assert!(matches!(bench_state(&stopped, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Replace));
+        assert!(matches!(bench_state(&stopped, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Remove));
+        assert!(matches!(bench_state(&stopped, None), PodVerdict::Absent));
+        let mut departed = fixture_bench(DesiredState::Running);
+        departed.spec.access = crd::BenchAccess::ReadOnly;
+        assert!(matches!(bench_state(&departed, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Replace), "tools stop when the owner leaves");
     }
 }
 ```
-(`fixture_bench` and `pod_with(command, last_terminated: Option<(exit, message)>, ready)` are ten-line helpers in the same test module.)
+(`fixture_bench`, `FINISHED_AT` (`"2026-09-13T10:00:00Z"`, the terminated state's `finishedAt` in `pod_with`) and `pod_with(command, last_terminated: Option<(exit, message)>, ready)` are ten-line helpers in the same test module.)
 
 Then the loop tests in `tests/reconcile/bench.rs`, built on `kube_test::{mock_client, Recorder, Route}` with route tables copied from `the_workspace_reconciler_and_its_volume.rs`:
 ```rust
@@ -346,9 +416,17 @@ async fn a_running_bench_makes_its_folder_and_one_pod() {
 }
 
 #[tokio::test]
-async fn stopping_a_bench_replaces_its_pod_with_the_reader() {
-    // desiredState Stopped; GET pod -> command ["harness-bench"].
-    // assert: one DELETE pods/bench and no POST in this pass; second pass with GET pod -> 404 POSTs a pod ending "--read-only"
+async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
+    // desiredState Running; GET pod -> phase Succeeded, container terminated exit 0 finishedAt FINISHED_AT.
+    // assert: one DELETE pods/bench; the status write carries phase Idle, Ready=False/Idle, idleSince == FINISHED_AT, no podRef
+    // second pass, Bench re-seeded with that status and no wakeAt, GET pod -> 404: no POST pods, no DELETE
+    // third pass, wakeAt one second after FINISHED_AT: exactly one POST pods whose env KL_BENCH_IDLE_SECS == ctx's benchIdleSecs
+}
+
+#[tokio::test]
+async fn stopping_a_bench_leaves_no_pod_at_all() {
+    // desiredState Stopped; GET pod -> command ["harness-bench"], Ready.
+    // assert: one DELETE pods/bench and no POST in this pass; second pass with GET pod -> 404: no POST, status phase Stopped, Ready=False/Stopped
 }
 
 #[tokio::test]
@@ -365,10 +443,11 @@ async fn a_bench_on_a_dead_node_is_released_for_another_node() {
 }
 ```
 Each comment is the assertion list the body implements in full with `Recorder` checks; no body is left as a comment.
+- [ ] Add `benchIdleSecs` to `ClusterSettingsSpec`, `CLUSTER_SETTING_META` and `AgentSettings`; the existing test that holds the meta table equal to the spec's fields (`crates/workspaces/src/crd/mod.rs:578`) is the check. Run `cargo test -p kloudlite-workspaces cluster_setting` → ok.
 - [ ] Run: `cargo test -p kloudlite-agent-bin the_pod_decides` → FAIL: `cannot find function bench_state`. Run: `cargo test -p kloudlite-agent-bin --test reconcile bench` → FAIL: unresolved import `kloudlite_agent::controller::reconcile_bench`.
 - [ ] Implement `controller/bench.rs`, `claim_bench`, the sweep pass, and the `run.rs` wiring: bench pods watched with `KIND_LABEL=bench`, mapped through `held(&bench_store, owned_by::<crd::Bench, _>(&p))`; the claim controller gated on `ctx.has_pool` like `claim_ws`; both runs wrapped in `observed("bench", ..)` and `observed("claim", ..)`.
 - [ ] Run both commands → ok. `cargo test -p kloudlite-agent-bin` → no regressions; the one-kind-of-node merge noted two wall-clock flakes, so re-run a single failure once before calling it a regression.
-- [ ] Clippy; commit: `Reconcile benches on the node: claim, folder, pod, and the reader when stopped`.
+- [ ] Clippy; commit: `Reconcile benches on the node: claim, folder, pod, and no pod while it sleeps`.
 
 ### Task 6: The `bench-session` tunnel token
 
@@ -402,41 +481,110 @@ fn a_bench_session_is_sixty_seconds_and_never_opens_a_workspace() {
 - [ ] Implement by copying `mint_ssh_session`'s body with the new claims.
 - [ ] Run → ok; clippy; commit: `Mint a single-use bench tunnel token`.
 
-### Task 7: `/v1/bench` routes, quota, ingress allow-list
+### Task 7: A region on every team and person
+
+**Files:**
+- Modify: `crates/pulls/src/directory/teams.rs:12` (`region` on `Team`, and in its `Default` at `:47`), `crates/pulls/src/directory/mod.rs:54` (`region` on `User`), `crates/pulls/src/directory/teams.rs` (`bind_region` beside `update_team`, and its test beside the team tests), `crates/workspaces/src/api/state.rs:72-105` (two trait methods), `bins/api/src/main.rs:55` (their implementation on `Dir`), every `impl Directory for` stub under `crates/workspaces/tests/` and the one in `crates/workspaces/src/api/mod.rs:535` (default bodies make this a no-op for them), `crates/workspaces/src/api/admin/owners.rs` (the route), `crates/workspaces/src/api/admin.rs:177` (mount it), the admin tests where `owner_detail` is tested (grep `owner_detail` under `crates/workspaces/tests`)
+
+**Interfaces:**
+```rust
+// crates/pulls/src/directory
+#[serde(default)] pub region: String,          // on Team and on User; empty = unbound
+/// Compare-and-set on the empty value: a team slug, else a person by handle. Returns the region the
+/// slug is bound to after the call — `region` itself, or what it already held — and `None` for no such owner.
+// ponytail: set once; moving a team to another region is a migration of its benches' folders, designed when needed.
+pub async fn bind_region(&self, slug: &str, region: &str) -> Result<Option<String>>;
+
+// crates/workspaces/src/api/state.rs, on trait Directory
+async fn region_of(&self, slug: &str) -> Option<String> { None }            // team or person; None = unbound or unreadable
+async fn bind_region(&self, slug: &str, region: &str) -> Result<Option<String>, String> { Err("no directory".into()) }
+
+// crates/workspaces/src/api/admin/owners.rs
+#[derive(Deserialize)] pub(crate) struct RegionBody { region: String }
+/// PUT /admin/owners/{slug}/region — 200 {slug, region}; 409 when already bound elsewhere; 404 no such owner; 422 unknown region.
+pub(crate) async fn bind_owner_region(State(s): State<Arc<ApiState>>, headers: HeaderMap, Path(slug): Path<String>, Json(b): Json<RegionBody>) -> Result<Response, Response>;
+```
+Mongo: `update_one({_id: slug, $or: [{region: {$exists: false}}, {region: ""}]}, {$set: {region}})` on `teams`, then the same on `users` keyed by `username: slug` when no team matched; afterwards read the document back and return its `region`. The memory backend does the same under its lock. The admin handler runs `check_region`, then `bind_region`, answers 409 `{"error": "{slug} is bound to {r}; a region is set once"}` when the returned region differs, and writes `crate::audit::record` with action `owner.region.bind` on success.
+
+- [ ] **Failing test** in `teams.rs`'s test module (memory backend):
+```rust
+#[tokio::test]
+async fn a_region_binds_once_to_a_team_or_a_person_and_never_moves() {
+    let d = Directory::in_memory();
+    d.upsert_user("alice@x.io", "Alice").await.unwrap();
+    d.claim_username("alice@x.io", "alice").await.unwrap().unwrap();
+    d.create("acme", "Acme", "alice@x.io").await.unwrap().unwrap();
+    assert_eq!(d.get("acme").await.unwrap().unwrap().region, "", "an existing team is unbound");
+    assert_eq!(d.bind_region("acme", "r1").await.unwrap().as_deref(), Some("r1"));
+    assert_eq!(d.bind_region("acme", "r2").await.unwrap().as_deref(), Some("r1"), "set once");
+    assert_eq!(d.bind_region("alice", "r2").await.unwrap().as_deref(), Some("r2"), "a person's handle binds their own record");
+    assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "r2");
+    assert_eq!(d.bind_region("nobody", "r1").await.unwrap(), None);
+}
+```
+`Directory::in_memory` is what the directory's own tests construct (`crates/pulls/src/directory/mod.rs:737`); `upsert_user`, `claim_username` and `user_by_handle` are `users.rs:10`, `:107` and `:160`.
+- [ ] Run: `cargo test -p kloudlite-pulls a_region_binds_once` → FAIL: `no field region` / `no method bind_region`.
+- [ ] Implement the field, `bind_region` and its `// ponytail:`; run → ok.
+- [ ] **Failing test** in the admin tests:
+```rust
+#[tokio::test]
+async fn only_a_superadmin_binds_a_region_and_only_once() {
+    // StubMembership gains region_of/bind_region over a Mutex<HashMap<String, String>> seeded {"acme": ""}; Region r1 and r2 exist.
+    // PUT /admin/owners/acme/region {"region":"r1"} with a superadmin token          -> 200 {"slug":"acme","region":"r1"}; one audit row owner.region.bind
+    // the same with {"region":"r2"}                                                    -> 409, error == "acme is bound to r1; a region is set once"
+    // {"region":"nope"}                                                                -> 422
+    // a token without the superadmin claim                                             -> 403 (refuse_without_claim)
+}
+```
+The comments are the exact assertions; write them out in full.
+- [ ] Run: `cargo test -p kloudlite-workspaces --test api_admin only_a_superadmin_binds` → FAIL; implement the trait methods, `Dir`'s bodies (`self.0.get(slug)` then `self.0.user_by_handle(slug)` for `region_of`; `self.0.bind_region` for the bind), the handler and `.route("/admin/owners/{slug}/region", put(owners::bind_owner_region))`; run → ok.
+- [ ] `cargo test -p kloudlite-pulls`, `cargo test -p kloudlite-workspaces` → no regressions; clippy.
+- [ ] Commit: `Bind a region to each team and person, once`.
+
+### Task 8: `/v1/bench` routes, access, wake, quota, ingress allow-list
 
 **Files:**
 - Create: `crates/workspaces/src/api/bench.rs` (under 500 lines); tests where the `ssh_session` handler's tests live (grep `ssh_session` under `crates/workspaces/tests` and `crates/workspaces/src/api`; add `api_bench.rs` beside them with the same mock-kube harness)
-- Modify: `crates/workspaces/src/api/mod.rs:198-231` (routes), `crates/workspaces/src/api/workspaces/mod.rs:440` (`gateway_url` to `pub(crate)`), `crates/workspaces/src/api/workspaces/attach.rs` (extract the NetworkPolicy and environment checks into a function taking `(id, namespace, region)`, called by both `attach_ws` and `attach_bench`), `crates/workspaces/src/quota.rs:135-175`, `crates/workspaces/src/model.rs` (`DEFAULT_BENCH_IMAGE`, `DEFAULT_BENCH_MODEL`), `deploy/pin.sh` (rewrite the bench image pin beside the workspace image), `deploy/kloudlite-web.yaml:246` (allow-list and its comment)
+- Modify: `crates/workspaces/src/api/mod.rs:198-231` (routes), `crates/workspaces/src/api/workspaces/mod.rs:440` (`gateway_url` to `pub(crate)`), `crates/workspaces/src/api/workspaces/attach.rs` (extract the NetworkPolicy and environment checks into a function taking `(id, namespace, region)`, called by both `attach_ws` and `attach_bench`), `crates/workspaces/src/quota.rs:135-175`, `crates/workspaces/src/api/keys.rs:131` (the departed-member pass in `run_beat`, beside `prune_builders` at `:275`), `crates/workspaces/src/model.rs` (`DEFAULT_BENCH_IMAGE`, `DEFAULT_BENCH_MODEL`), `deploy/pin.sh` (rewrite the bench image pin beside the workspace image), `deploy/kloudlite-web.yaml:246` (allow-list and its comment)
 
 **Interfaces:**
 ```rust
 #[derive(Deserialize)] pub(crate) struct TeamQuery { team: Option<String> }
-#[derive(Deserialize)] pub(crate) struct NewBench { team: Option<String>, region: String, #[serde(default)] model: Option<String> }
+#[derive(Deserialize)] pub(crate) struct NewBench { team: Option<String>, #[serde(default)] region: Option<String>, #[serde(default)] model: Option<String> }
 #[derive(Deserialize)] pub(crate) struct AttachBody { environment: String }
 
 pub(crate) async fn get_bench(..)     // GET  /v1/bench?team=           200 doc | 404
 pub(crate) async fn create_bench(..)  // POST /v1/bench                 201 created | 200 existing, now Running
 pub(crate) async fn start_bench(..)   // POST /v1/bench/start?team=     202
 pub(crate) async fn stop_bench(..)    // POST /v1/bench/stop?team=      202
-pub(crate) async fn bench_session(..) // POST /v1/bench/session?team=   201 {id, token, gateway, expires_at}
+pub(crate) async fn bench_session(..) // POST /v1/bench/session?team=   201 {id, token, gateway, expires_at} | 202 {state} | 409 stopped
 pub(crate) async fn attach_bench(..)  // POST /v1/bench/attach?team=    202
 pub(crate) async fn detach_bench(..)  // POST /v1/bench/detach?team=    202
-fn bench_doc(b: &crd::Bench) -> serde_json::Value; // {id, owner, team, region, model, desiredState, phase, nodeName, conditions}
-/// caller, normalized team, and the caller's own bench — or the 404 every other case gets.
-async fn my_bench(s: &ApiState, headers: &HeaderMap, team: Option<&str>) -> Result<(Caller, String, Option<crd::Bench>), Response>;
+fn bench_doc(b: &crd::Bench, region: &str) -> serde_json::Value; // {id, owner, team, region, model, desiredState, access, phase, nodeName, conditions}
+/// The region `team` is bound to, from the directory; the 409 (team) or 422 (person, no `region` given) otherwise.
+/// A person's first call with `region` binds it (`check_region`, then `Directory::bind_region`).
+async fn team_region(s: &ApiState, caller: &Caller, team: &str, first: Option<&str>) -> Result<String, Response>;
+/// What the caller may do with this bench.
+enum Standing { Member, Departed }
+/// caller, normalized team, region, standing, and the caller's own bench — or the 404 every other case gets.
+async fn my_bench(s: &ApiState, headers: &HeaderMap, team: Option<&str>) -> Result<(Caller, String, String, Standing, Option<crd::Bench>), Response>;
 ```
 Rules, all in `my_bench` so no handler can forget one:
 - `caller()`; team trimmed and lowercased; absent or empty → `caller.name` (decision 4).
-- `may_allocate_for(s, &caller, &team)` (membership, never the superadmin claim), else 404 "no such team". This is the spec's `may_act(person, team)`.
 - GET `crd::bench_id(&caller.name, &team)`; a found object with `spec.owner != caller.name` → 404. No superadmin arm anywhere in this file.
+- `may_allocate_for(s, &caller, &team)` (membership, never the superadmin claim) → `Member`. Not a member and a Bench exists → `Departed` (decision 10). Not a member and no Bench → 404 "no such team". This is the spec's `may_act(person, team)`.
+- `team_region(s, &caller, &team, None)`; it is never cached, so an admin's bind takes effect on the next call.
+- Every handler's access write goes through one helper, `ensure_access(&api, &b, standing)`: a JSON merge patch of `spec.access` only when it differs from `Full` for `Member` or `ReadOnly` for `Departed`.
 
 Handlers:
-- `create_bench`: `check_region`. Existing → `set_desired::<crd::Bench>(Running)` and 200 with the doc; a different `region` in the body is ignored with `tracing::info!(.., "bench.region.ignored")`. New → `guard_alloc(&s, &caller.name, false, &bench_cost(&PodResources::default()))`; create with `labels(&caller.name, "bench")` plus `TEAM_LABEL`, `image: DEFAULT_BENCH_IMAGE`, `model` defaulting to `DEFAULT_BENCH_MODEL`; spawn the user-key install the way `create_ws` spawns `install_user_key_after_placed` (read its signature; if it is Workspace-bound, generalize its lookup to take the namespace rather than copying it).
-- `start_bench`: `guard_alloc` for `spec.resources` minus the reader, then `set_desired(Running)`. `stop_bench`: `set_desired(Stopped)`.
-- `bench_session`: phase must be `ready`, else 409 `{"error": "bench is {phase}"}`; `s.jwt.mint_bench_session(&caller.name, &id, &spec.region)`; `gateway = gateway_url(&spec.region, &id)`; response shape identical to `ssh_session` minus `host_key`.
-- `attach_bench` / `detach_bench`: the extracted attach function with the bench's namespace and `WORKSPACE_LABEL=id`; patch `spec.attachedEnvironment`.
+- `create_bench`: `Departed` → 404 "no such team". `team_region(.., body.region.as_deref())`; for a team, a body `region` that differs from the binding → 409 "team {team} is in region {r}". Existing → `ensure_access`, `set_desired::<crd::Bench>(Running)` plus `wakeAt = now` in the same patch, and 200 with the doc. New → `guard_alloc(&s, &caller.name, false, &bench_cost(&PodResources::default()))`; create with `labels(&caller.name, "bench")` plus `TEAM_LABEL`, `image: DEFAULT_BENCH_IMAGE`, `model` defaulting to `DEFAULT_BENCH_MODEL`, `access: Full`; spawn the user-key install the way `create_ws` spawns `install_user_key_after_placed` (read its signature; if it is Workspace-bound, generalize its lookup to take the namespace rather than copying it).
+- `start_bench`: `ensure_access`; `guard_alloc` for `spec.resources` unless the bench already wants a pod (`crd::bench_wants_pod`); then one merge patch `{desiredState: Running, wakeAt: now}`. `stop_bench`: `set_desired(Stopped)`.
+- `bench_session`: `ensure_access`; `desiredState` Stopped → 409 `{"error": "bench is stopped; start it"}`. Phase `Idle` → `guard_alloc` for `spec.resources`, patch `wakeAt = now`, answer 202 `{"state": "waking"}`. Any other phase but `ready` → 202 `{"state": "{phase}"}` and no write. Ready → `s.jwt.mint_bench_session(&caller.name, &id, &region)`; `gateway = gateway_url(&region, &id)`; 201 with the response shape of `ssh_session` minus `host_key`.
+- `attach_bench` / `detach_bench`: `Departed` → 404. The extracted attach function with the bench's namespace, `region` and `WORKSPACE_LABEL=id`; patch `spec.attachedEnvironment`.
 
-Quota: add `benches.list(&lp)` to the `try_join!` in `usage`; for each Bench with `spec.owner == owner`, add cpu and memory of `spec.resources` when Running and of `reader_resources()` when Stopped. `bench_cost` lives beside `workspace_cost`.
+Quota: add `benches.list(&lp)` to the `try_join!` in `usage`; for each Bench with `spec.owner == owner` and `desiredState == Running` and `status.phase != Idle`, add cpu and memory of `spec.resources`. `bench_cost` lives beside `workspace_cost`.
+
+Departed-member pass, in `keys::run_beat` after `prune_builders`: list Benches; for each with `spec.team != spec.owner` whose owner is not a member (`teams_for(owner)` does not contain `spec.team`) and `access == Full`, merge-patch `access: ReadOnly` and log `bench.access.readonly` with owner and team. It never sets `Full`: rejoining is restored by the person's own next `/v1/bench` call, so an unreadable directory (`teams_for` fails closed to empty) can only ever take tools away, never hand them back.
 
 - [ ] **Failing tests** (`api_bench.rs`), each built with the neighbouring `ssh_session` test's router and route recorder and called with `tower::ServiceExt::oneshot`:
 ```rust
@@ -447,8 +595,27 @@ async fn creating_a_bench_twice_is_one_object_and_starts_it() {
 }
 
 #[tokio::test]
-async fn a_non_member_cannot_see_create_or_tunnel_to_a_teams_bench() {
-    // directory: caller not in "acme"; GET, POST, POST /start, POST /session with team=acme -> 404 each; recorder has no benches write
+async fn a_non_member_without_a_bench_cannot_see_create_or_tunnel_to_a_teams_bench() {
+    // directory: caller not in "acme", acme bound to r1, no Bench seeded; GET, POST, POST /start, POST /session with team=acme -> 404 each; recorder has no benches write
+}
+
+#[tokio::test]
+async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
+    // seed Bench{owner alice, team acme, access Full, phase Idle}; directory: alice no longer in acme, acme bound to r1.
+    // GET /v1/bench?team=acme            -> 200, and the recorded PATCH carries spec.access "ReadOnly"
+    // POST /v1/bench/session?team=acme   -> 202 {"state":"waking"}, a PATCH with wakeAt
+    // POST /v1/bench {"team":"acme"}     -> 404; POST /v1/bench/attach?team=acme -> 404
+    // re-seed phase Ready                -> POST /session 201
+    // run the departed pass of keys::run_beat over Bench{owner carol, team acme, access Full}, carol not in acme -> one PATCH access ReadOnly;
+    // the same pass over a personal Bench{owner dave, team dave} -> no PATCH
+}
+
+#[tokio::test]
+async fn the_region_comes_from_the_team_and_a_person_binds_their_own_once() {
+    // acme unbound: POST /v1/bench {"team":"acme"} by a member -> 409, error == "team acme has no region; a platform admin binds one"
+    // acme bound r1: POST {"team":"acme","region":"r2"} -> 409 "team acme is in region r1"; POST {"team":"acme"} -> 201, and the created Bench has no region anywhere in its spec
+    // alice personal, unbound: POST {} -> 422 "choose a region for your personal bench"; POST {"region":"r2"} -> 201 and the stub records bind_region("alice","r2")
+    // POST /v1/bench/session for the acme bench once Ready -> the token's region claim == "r1" and gateway == gateway_url("r1", id)
 }
 
 #[tokio::test]
@@ -457,14 +624,18 @@ async fn a_superadmin_claim_does_not_open_someone_elses_bench() {
 }
 
 #[tokio::test]
-async fn a_bench_session_is_refused_until_the_bench_is_ready() {
-    // phase Starting -> 409; phase Ready -> 201; token verifies with verify_bench_session and names the bench id and region
+async fn a_session_wakes_an_idle_bench_waits_on_a_starting_one_and_refuses_a_stopped_one() {
+    // phase Idle -> 202 {"state":"waking"}, one PATCH whose spec.wakeAt parses as RFC 3339 within 5 s of now
+    // phase Starting -> 202 {"state":"starting"}, no PATCH
+    // phase Ready -> 201; token verifies with verify_bench_session and names the bench id and the team's region
+    // desiredState Stopped -> 409, error == "bench is stopped; start it", no PATCH
+    // phase Idle with the owner's quota already at its cpu limit -> 409 with quota::refuse's sentence, no PATCH
 }
 
 #[tokio::test]
-async fn a_running_bench_counts_against_the_person_and_never_the_team() {
-    // seed Bench{owner alice, team acme, Running, cpu_limit "1"}; quota::usage(alice).millicores += 1000; usage(acme) unchanged;
-    // flip to Stopped: usage(alice) += 50
+async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
+    // seed Bench{owner alice, team acme, Running, phase Ready, cpu_limit "1"}; quota::usage(alice).millicores += 1000; usage(acme) unchanged;
+    // phase Idle: usage(alice) += 0; desiredState Stopped: usage(alice) += 0
 }
 
 #[test]
@@ -488,9 +659,9 @@ The comments are the exact assertions; write them out in full.
 ```
 - [ ] Ingress: `path: /v1/(cli|workspaces|keys|internal|builders|bench)(/.*)?$`, with a comment sentence saying `bench` is the CLI's and the harness's route to their own bench.
 - [ ] Run → ok; `cargo test -p kloudlite-workspaces` → no regressions; clippy.
-- [ ] Commit: `Serve /v1/bench to the person only: create, start, stop, attach and a tunnel token`.
+- [ ] Commit: `Serve /v1/bench to the person only: create, start, stop, wake, attach and a tunnel token`.
 
-### Task 8: Gateway resolves a bench to port 7789
+### Task 9: Gateway resolves a bench to port 7789
 
 **Files:**
 - Modify: `bins/gateway/src/resolve.rs` (add `resolve_bench` after `resolve`), `bins/gateway/src/tunnel.rs:33-64` (`bench_port` on `Gateway`) and `:162-230` (accept either token), `bins/gateway/src/main.rs` (pass `k8s::BENCH_PORT`), the gateway's tunnel tests (grep `ssh_port` under `bins/gateway` for where `Gateway::new` is exercised), `deploy/k3s/gateway.yaml` (its ClusterRole gains `benches: get`)
@@ -529,7 +700,7 @@ async fn a_bench_token_for_another_region_is_refused() {
 - [ ] Run → ok; `cargo test -p kloudlite-gateway`; clippy.
 - [ ] Commit: `Tunnel to a bench's port with a bench token`.
 
-### Task 9: `kl-connect bench`
+### Task 10: `kl-connect bench`
 
 **Files:**
 - Create: `bins/kl-connect/src/bench.rs`
@@ -541,14 +712,19 @@ async fn a_bench_token_for_another_region_is_refused() {
 pub async fn bench(team: Option<&str>, port: u16, start: bool) -> Result<(), String>;
 // api.rs
 #[derive(Deserialize)] pub struct BenchSession { pub id: String, pub token: String, pub gateway: String, pub expires_at: String }
-pub async fn create_bench(cfg: &Config, team: Option<&str>, region: &str) -> Result<serde_json::Value, Error>;
+/// `region` is sent only for a personal bench (its first use binds the person's region); a team's is the team's.
+pub async fn create_bench(cfg: &Config, team: Option<&str>, region: Option<&str>) -> Result<serde_json::Value, Error>;
 pub async fn get_bench(cfg: &Config, team: Option<&str>) -> Result<serde_json::Value, Error>;
-pub async fn bench_session(cfg: &Config, team: Option<&str>) -> Result<BenchSession, Error>;
+/// 201 → `Ready(session)`; 202 → `Waking(state)`; anything else an Error carrying the body's `error`.
+pub enum SessionAnswer { Ready(BenchSession), Waking(String) }
+pub async fn bench_session(cfg: &Config, team: Option<&str>) -> Result<SessionAnswer, Error>;
+// bench.rs
+pub const BENCH_START_WAIT: Duration = Duration::from_secs(90);
 // proxy.rs
 pub(crate) async fn connect(url: &str, token: &str) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, String>;
 pub(crate) async fn pump_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(ws: WebSocketStream<MaybeTlsStream<TcpStream>>, r: R, w: W) -> Result<(), String>;
 ```
-Behaviour: with `--start`, `create_bench` (region = the config's default region, the one `ws` commands use) and poll `get_bench` until phase `ready` for up to 90 s, printing progress to stderr. Bind `127.0.0.1:{port}`. Print exactly one stdout line, `127.0.0.1:<port>`, and flush. For each accepted connection spawn a task: `bench_session`, `connect(gateway_url(&s.gateway), &s.token)`, `pump_io(ws, read_half, write_half)`. A 401 prints "your login has expired — run `kl-connect login`" and exits non-zero; any other per-connection error is logged to stderr and the listener keeps serving. The `//!` doc says the token never appears in output, as `proxy.rs`'s does.
+Behaviour: this is the bench's builder gate, on the laptop. With `--start`, `create_bench` (region = the config's default region, sent only when `team` is absent or equals the caller's handle) first. Bind `127.0.0.1:{port}`. Print exactly one stdout line, `127.0.0.1:<port>`, and flush. For each accepted connection spawn a task that holds the connection open and loops: `bench_session`; on `Waking(state)` print `bench is {state}; waiting` to stderr once per state change, sleep 1 s and ask again, giving up after `BENCH_START_WAIT` (the connection is closed and stderr says "bench did not start within 90 s"); on `Ready(s)`, `connect(gateway_url(&s.gateway), &s.token)`, `pump_io(ws, read_half, write_half)`. A connection's bytes are never read before the pump starts, so a client that sent a request while the bench slept has it delivered once it is up. A 409 ("bench is stopped; start it") prints that sentence and closes that connection; the listener keeps serving. A 401 prints "your login has expired — run `kl-connect login`" and exits non-zero; any other per-connection error is logged to stderr and the listener keeps serving. The `//!` doc says the token never appears in output, as `proxy.rs`'s does.
 
 - [ ] **Failing test** in `bench.rs`:
 ```rust
@@ -556,12 +732,19 @@ Behaviour: with `--start`, `create_bench` (region = the config's default region,
 mod tests {
     #[tokio::test]
     async fn each_local_connection_gets_its_own_tunnel_and_token() {
-        // One local axum app serves POST /v1/bench/session (an AtomicUsize counter; returns gateway "wss://x/tunnel/bench-1")
+        // One local axum app serves POST /v1/bench/session (an AtomicUsize counter; returns 201 with gateway "wss://x/tunnel/bench-1")
         // and GET /tunnel/bench-1 (WebSocket echo of binary frames).
         // KL_CONFIG_DIR = tempdir with config.json pointing api at the app; KL_GATEWAY_OVERRIDE = "ws://127.0.0.1:{app port}".
         // Run bench_on(listener) — the testable core `bench` wraps — on a pre-bound 127.0.0.1:0 listener.
         // Open two TcpStreams; write b"a" / b"b"; read back b"a" / b"b".
         // assert counter == 2
+    }
+
+    #[tokio::test]
+    async fn a_sleeping_bench_is_waited_for_and_the_early_bytes_arrive() {
+        // The same app, but POST /v1/bench/session answers 202 {"state":"waking"} for its first two calls and 201 after.
+        // Open one TcpStream and write b"early" at once; read back b"early" within 5 s.
+        // assert counter == 3 and the tunnel route saw exactly one upgrade
     }
 }
 ```
@@ -569,9 +752,9 @@ Extract `async fn bench_on(listener: TcpListener, cfg: Config, team: Option<Stri
 - [ ] Run: `cargo test -p kl-connect each_local_connection` → FAIL.
 - [ ] Implement. No new dependencies (musl build).
 - [ ] Run → ok; `cargo test -p kl-connect` (the existing proxy tests prove the split kept behaviour); clippy.
-- [ ] Commit: `Open a bench on a local port with kl-connect bench`.
+- [ ] Commit: `Open a bench on a local port with kl-connect bench, waking it on connect`.
 
-### Task 10: The bench image and its CI job
+### Task 11: The bench image and its CI job
 
 **Files:**
 - Create: `deploy/bench/Dockerfile`, `deploy/bench/harness-bench-stub.sh`
@@ -580,15 +763,15 @@ Extract `async fn bench_on(listener: TcpListener, cfg: Config, team: Option<Stri
 **Interfaces:**
 - Image: `node:22-bookworm-slim`; `npm i -g @mariozechner/pi-coding-agent@<the version in harness/package-lock.json>`; `kl` copied from the `kl-musl` artifact the workflow already downloads; `harness-bench` = `harness/bench/dist/harness-bench` when the other plan has produced it, else the stub (a build stage does `test -f` and copies one or the other); `util-linux` for `flock`, `socat`; user `1000:1000`; `WORKDIR /home/kl`; `ENTRYPOINT []` (the pod sets `command`).
 - Stub contract (the same interface the real program honours):
-  - `harness-bench [--read-only]`: `exec 9>/bench/.lock; flock -n 9 || { cat /bench/.lock.holder > /dev/termination-log; exit 75; }`; write `$NODE_NAME` to `/bench/.lock.holder`; serve `socat TCP-LISTEN:7789,fork,reuseaddr SYSTEM:'printf "HTTP/1.1 200 OK\r\ncontent-length: N\r\n\r\nok stub MODE"'` where MODE is `read-only` or `running`.
+  - `harness-bench [--read-only]`: `exec 9>/bench/.lock; flock -n 9 || { cat /bench/.lock.holder > /dev/termination-log; exit 75; }`; write `$NODE_NAME` to `/bench/.lock.holder`; serve one connection at a time, each under the idle clock: `while timeout "${KL_BENCH_IDLE_SECS:-300}" socat TCP-LISTEN:7789,reuseaddr SYSTEM:'printf "HTTP/1.1 200 OK\r\ncontent-length: N\r\n\r\nok stub MODE"'; do :; done; echo idle > /dev/termination-log; exit 0` where MODE is `read-only` or `running`. `timeout` exits 124 only when no connection arrived for the whole period, which is the stub's "no client and nothing running"; the stub runs no tools.
   - `harness-bench --ping`: `socat -u TCP:127.0.0.1:7789 - </dev/null | grep -q ok`.
 
 - [ ] **Failing check** in the dev pod's build path (`deploy/dev-push.sh` or the builder gate): `docker buildx build -f deploy/bench/Dockerfile .` → fails, file not found.
-- [ ] Write both files. Build. Then, with a scratch folder mounted at `/bench`: start one container detached with `harness-bench`; `docker exec` it with `harness-bench --ping` → exit 0; start a second container on the same folder → exits 75 and its termination file names the first one's `NODE_NAME`.
-- [ ] Add the CI step (tags `ghcr.io/kloudlite/kloudlite-bench:latest` and `:${{ github.sha }}`); add the bench image to `deploy/pin.sh`'s package check (Task 7 added the rewrite).
+- [ ] Write both files. Build. Then, with a scratch folder mounted at `/bench`: start one container detached with `harness-bench`; `docker exec` it with `harness-bench --ping` → exit 0; start a second container on the same folder → exits 75 and its termination file names the first one's `NODE_NAME`; stop both, start one with `KL_BENCH_IDLE_SECS=5` and connect nothing → it exits 0 within 10 s with `idle` in its termination file.
+- [ ] Add the CI step (tags `ghcr.io/kloudlite/kloudlite-bench:latest` and `:${{ github.sha }}`); add the bench image to `deploy/pin.sh`'s package check (Task 8 added the rewrite).
 - [ ] Commit: `Package the bench image with pi, kl and a stub harness-bench`.
 
-### Task 11: The tool server on the pod IP, fenced by its namespace
+### Task 12: The tool server on the pod IP, fenced by its namespace
 
 **Files:**
 - Modify: `crates/workspaces/src/k8s/mod.rs` (`IDE_PORT` beside `WORKSPACE_LABEL`), `crates/workspaces/src/k8s/workspace.rs:156` (the prelude's `kl ide serve` line), `crates/workspaces/src/k8s/tests/pod.rs:446-460`, `crates/workspaces/src/k8s/policies.rs` (`allow_bench_tools` beside `allow_gateway_ingress`; `intercept_ingress` takes the ports; the `//!` list), `crates/workspaces/src/k8s/tests/environment.rs:302`, `bins/agent/src/controller/environment/intercept.rs:274`, `bins/agent/src/binding.rs:148`, `bins/kl/src/main.rs:57` (help text), `bins/kl-connect/src/ws.rs:25` (comment), `crates/ide/src/lib.rs:6` (module doc), `CLAUDE.md` (the tool-server paragraph)
@@ -648,7 +831,7 @@ fn only_bench_pods_in_the_namespace_reach_the_tool_port() {
 - [ ] Run the three tests → ok. `cargo test -p kloudlite-workspaces` and `cargo test -p kloudlite-agent-bin` → no regressions (re-run a single wall-clock flake once).
 - [ ] Clippy; commit: `Serve the workspace tool server on the pod IP for the owner's bench`.
 
-### Task 12: `GET /v1/workspaces/{id}/tools`: the owner's tool server address
+### Task 13: `GET /v1/workspaces/{id}/tools`: the owner's tool server address
 
 **Files:**
 - Modify: `crates/workspaces/src/api/workspaces/mod.rs` (handler beside `get_ws` at `:421`), `crates/workspaces/src/api/mod.rs:183` (route); tests where `get_ws` is tested (grep `get_ws` under `crates/workspaces/tests` and `crates/workspaces/src/api`)
@@ -688,7 +871,7 @@ The comments are the exact assertions; write each out in full.
 - [ ] Run → ok; `cargo test -p kloudlite-workspaces` → no regressions; clippy.
 - [ ] Commit: `Tell a workspace's owner where its tool server listens`.
 
-### Task 13: SLO ids, catalogue, `deploy/slo.md`, probe stage
+### Task 14: SLO ids, catalogue, `deploy/slo.md`, probe stage
 
 **Files:**
 - Create: `bins/slo/src/stages/bench.rs`
@@ -701,20 +884,20 @@ The comments are the exact assertions; write each out in full.
 | `bench.create` | Fast | 5 · Workspace | avail 99.9 | `POST /v1/bench` answers, and a second POST names the same id |
 | `bench.start.p95` | Fast | 5 · Workspace | p95 90 000 ms | A started bench reaches phase `ready` |
 | `bench.tunnel` | Fast | 5 · Workspace | bound 20 000 ms | A bench token opens the tunnel and `/healthz` answers through it |
-| `bench.stop.readable` | Fast | 5 · Workspace | bound 60 000 ms | A stopped bench answers `/healthz` as `read-only` through the tunnel |
+| `bench.idle.wake` | Hourly | 14 · Experience | bound 480 000 ms | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged |
 | `bench.session.roundtrip` | Hourly | 14 · Experience | bound 60 000 ms | A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages` |
 | `bench.exchange.both_views` | Hourly | 14 · Experience | avail 99.9 | An exchange reads back by `?session=` and by `?workspace=` |
 | `bench.two_clients` | Hourly | 14 · Experience | avail 99.9 | Two WebSockets on one session see the same events in the same order |
 | `bench.survives.reschedule` | Weekly | 12 · Weekly | bound 180 000 ms | After the pod is deleted every session reopens and processes read `lost` |
 | `bench.workspace.tool_roundtrip` | Hourly | 14 · Experience | bound 180 000 ms | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` |
 
-`bench.stop.readable` goes beyond the spec's list: "stopped stops the work, not the history" is otherwise unprobed. `bench.workspace.tool_roundtrip` holds the whole chain the spec's "What runs where" draws: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the thread file. The hourly and weekly ids need the real `harness-bench`; while `/healthz` answers `ok stub …` the stage SKIPS them with the reason "bench image is the stub". A skipped id must reach the run row as skipped, never as passed (the service-intercept merge found skipped ids reading as passed).
+`bench.idle.wake` goes beyond the spec's list: "an idle bench costs nothing and a connection brings its history back" is otherwise unprobed. Its bound is the region's default `benchIdleSecs` (300 s) plus a 90 s start plus 90 s of reads; a region that raises the knob raises the ceiling constant with it. `bench.workspace.tool_roundtrip` holds the whole chain the spec's "What runs where" draws: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the thread file. The hourly and weekly ids need the real `harness-bench`; while `/healthz` answers `ok stub …` the stage SKIPS them with the reason "bench image is the stub". A skipped id must reach the run row as skipped, never as passed (the service-intercept merge found skipped ids reading as passed).
 
 - [ ] **Failing test** in `catalogue.rs` (beside `the_catalogue_matches_deploy_slo_md`):
 ```rust
 #[test]
 fn every_bench_id_is_catalogued() {
-    for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.stop.readable",
+    for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.idle.wake",
                "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
                "bench.survives.reschedule", "bench.workspace.tool_roundtrip"] {
         assert!(find(id).is_some(), "{id} missing from CATALOGUE");
@@ -724,27 +907,34 @@ fn every_bench_id_is_catalogued() {
 - [ ] Run: `cargo test -p kloudlite-workspaces every_bench_id` → FAIL.
 - [ ] Add the catalogue rows and the matching `deploy/slo.md` rows; run both tests → ok.
 - [ ] Implement `stages/bench.rs` with ceilings as constants at the top, each at least its target (the rule in `stages/workspace.rs`'s doc):
-  - `fast(ctx)`: create twice (same id) → poll ready → `POST /v1/bench/session` → open the tunnel with the WebSocket client `stages/workspace.rs` uses for `gw.tunnel.p95` and write a raw `GET /healthz HTTP/1.1\r\nhost: bench\r\n\r\n`, expecting `ok` → stop → poll until a fresh tunnel answers `read-only` → start again. The object name is a hash, so the `run-{id}` teardown prefix does not apply: the probe owner's bench is long-lived, and the stage ends with a stop so only the reader stays up.
-  - `hourly(ctx)`: skip-or-run the four session ids through a local forward built on `kl-connect`'s `bench_on` (or the `kl-connect` binary the probe image ships for `id.cli.flow`). `bench.workspace.tool_roundtrip`: create a workspace the way `ide_server` does (`bins/slo/src/stages/experience_ws.rs:350`) and wait for `ide.serve.up`'s healthz; `POST /workspaces/{ws}/session` through the forward; on `WS /sessions/w-{ws}/rpc` prompt "Run `echo bench-$(id -un)` with the bash tool."; pass on a `tool_execution_end` whose `toolName` is `bash` and whose result text contains `bench-kl` (the event, never the model's prose); then `GET /workspaces/{ws}/messages` has `total > 0`, and `kubectl exec` in the bench pod finds `/bench/workspaces/{ws}/thread.jsonl` non-empty. Drop the workspace at the end as `ide_server` does.
+  - `fast(ctx)`: create twice (same id) → poll ready → `POST /v1/bench/session` → open the tunnel with the WebSocket client `stages/workspace.rs` uses for `gw.tunnel.p95` and write a raw `GET /healthz HTTP/1.1\r\nhost: bench\r\n\r\n`, expecting `ok` → stop → `POST /v1/bench/session` answers 409 "bench is stopped; start it" and `GET /v1/bench` shows phase `stopped` → start again. The probe owner's region is bound once by hand (Task 15). The object name is a hash, so the `run-{id}` teardown prefix does not apply: the probe owner's bench is long-lived and is left Running with no client, so it sleeps between runs and costs nothing.
+  - `hourly(ctx)`: `bench.idle.wake` runs first, before the session ids, because it needs every client gone: close the forward; poll `GET /v1/bench` until phase `idle` and `kubectl get pod bench` in its namespace answers NotFound, within `benchIdleSecs` read from the region's `ClusterSettings` plus 60 s; record the phase change and the pod's absence as two checks in the stage's log. Open a new forward and a new connection: `GET /v1/bench` goes `starting` then `ready`, and through the forward `GET /sessions` equals the list read before the forward closed and `GET /sessions/{first}/messages` has the same `total`. With the stub image the history half cannot be read, so the id is SKIPPED with "bench image is the stub" after the no-pod check passes, never recorded as passed. Then skip-or-run the four session ids through a local forward built on `kl-connect`'s `bench_on` (or the `kl-connect` binary the probe image ships for `id.cli.flow`). `bench.workspace.tool_roundtrip`: create a workspace the way `ide_server` does (`bins/slo/src/stages/experience_ws.rs:350`) and wait for `ide.serve.up`'s healthz; `POST /workspaces/{ws}/session` through the forward; on `WS /sessions/w-{ws}/rpc` prompt "Run `echo bench-$(id -un)` with the bash tool."; pass on a `tool_execution_end` whose `toolName` is `bash` and whose result text contains `bench-kl` (the event, never the model's prose); then `GET /workspaces/{ws}/messages` has `total > 0`, and `kubectl exec` in the bench pod finds `/bench/workspaces/{ws}/thread.jsonl` non-empty. Drop the workspace at the end as `ide_server` does.
   - `weekly(ctx)`: delete the bench pod with the probe's kube client (reuse the drill's existing pod-delete grant in `slo-rbac.yaml`; add `benches` to its resource list if the grant is resource-scoped), then the reschedule checks, or skip with the stub reason.
 - [ ] Run `cargo test -p kloudlite-slo` and `cargo test -p kloudlite-workspaces`; clippy.
-- [ ] Commit: `Probe benches: create, start, tunnel, the stopped reader, the session journey and a workspace's tools`.
+- [ ] Commit: `Probe benches: create, start, tunnel, sleep and wake, the session journey and a workspace's tools`.
 - [ ] **End of batch:** `cargo test` for the whole workspace and clippy green in the pod; then `git push origin master` and `git push platform master` as two separate steps.
 
-### Task 14: Ship, pin, roll, apply, verify on the fleet
+### Task 15: Ship, pin, roll, apply, verify on the fleet
 
 - [ ] Wait for `image.yml` on the pushed SHA: the test job green and `kloudlite-bench:<sha>` published.
 - [ ] `deploy/pin.sh <sha>` (refuses a SHA with no package, the bench image included); commit `Pin every tier to <sha>`; push both remotes.
 - [ ] `deploy/roll.sh` for AKS (api, gateway). On the k3s region, by hand per `deploy/k3s/README.md`, in this order: `crds.yaml`, `agent-rbac.yaml`, `agent-admission.yaml`, `api-rbac.yaml`, `gateway.yaml`, `slo-rbac.yaml`, `quotas-slo.yaml`; the agent DaemonSet then rolls on its repin. Do not edit `/work/src` while a ship runs.
+- [ ] Bind the regions once, with a superadmin token against the admin process: `PUT $ADMIN_API/admin/owners/kloudlite/region {"region":"centralindia-k3s"}` and the same for each SLO probe owner (a personal probe owner binds on its own first `POST /v1/bench`; a probe team does not). Expect 200, and 409 on a second call with another region.
 - [ ] Direct checks with a minted token, not a wait for the hourly:
 ```sh
-curl -sX POST "$API/v1/bench" -H "authorization: Bearer $T" -d '{"team":"kloudlite","region":"centralindia-k3s"}'
+curl -sX POST "$API/v1/bench" -H "authorization: Bearer $T" -d '{"team":"kloudlite"}'
+kubectl get benches -o jsonpath='{.items[*].spec}' | grep -c region  # 0: the bench stores no region
 kubectl get benches -o wide                                          # Node set, Phase Ready
 kubectl -n "$NS" get pod bench -o jsonpath='{.spec.volumes[*].hostPath.path}'   # includes /homes/.benches/kloudlite/<owner>
 kl-connect bench --team kloudlite &                                  # prints 127.0.0.1:PORT
 curl -s "127.0.0.1:$PORT/healthz"                                    # ok stub running
+kill %1; sleep 360                                                   # past the default benchIdleSecs with no client
+kubectl -n "$NS" get pod bench                                       # NotFound
+kubectl get bench "$ID" -o jsonpath='{.status.phase} {.status.idleSince}'   # Idle <rfc3339>
+kl-connect bench --team kloudlite & sleep 1; time curl -s "127.0.0.1:$PORT/healthz"   # ok stub running, after a cold start of seconds
 curl -sX POST "$API/v1/bench/stop?team=kloudlite" -H "authorization: Bearer $T"
-sleep 30; curl -s "127.0.0.1:$PORT/healthz"                          # ok stub read-only
+curl -s "127.0.0.1:$PORT/healthz"; kubectl -n "$NS" get pod bench     # the connection closes naming "bench is stopped; start it"; NotFound
+curl -sX POST "$API/v1/bench/start?team=kloudlite" -H "authorization: Bearer $T"
 kubectl auth can-i list benches.kloudlite.io --as=system:serviceaccount:kloudlite:kloudlite-admin   # no
 WS_IP=$(kubectl -n "$NS" get pod "$WS_POD" -o jsonpath='{.status.podIP}')                      # one of your workspaces in this team
 curl -s "$API/v1/workspaces/$WS/tools?team=kloudlite" -H "authorization: Bearer $T"          # {"address":"$WS_IP:7788"}
@@ -752,5 +942,6 @@ curl -s "$API/v1/workspaces/$WS/tools" -H "authorization: Bearer $OTHER_MEMBER_T
 kubectl -n "$NS" exec bench -- node -e "fetch('http://$WS_IP:7788/healthz').then(r=>r.text()).then(console.log)"   # "ok":true
 kubectl -n "$ENV_NS" exec "$INTERCEPTING_POD" -- sh -c "timeout 5 nc -z $WS_IP 7788; echo \$?"   # non-zero: an intercepting environment cannot reach the tool port
 ```
-- [ ] Run the fast suite by hand (`deploy/dev/run-job.sh fast`): `bench.create`, `bench.start.p95`, `bench.tunnel`, `bench.stop.readable` pass. The hourly and weekly bench ids, `bench.workspace.tool_roundtrip` among them, show as skipped with "bench image is the stub" until harness-bench ships. `ide.serve.up` and `ide.exec` still pass: the tunnel's loopback path is unchanged.
+- [ ] Departed member, with a scratch team `bench-leave` bound to the region and a second person `$U2` in it: `$U2` creates a bench there and connects; the owner removes `$U2` from the team; within `KEYS_RESYNC_SECS` (300 s) `kubectl get bench "$ID2" -o jsonpath='{.spec.access}'` reads `ReadOnly` and the pod's command ends in `--read-only`; `$U2`'s `GET /v1/bench?team=bench-leave` answers 200 and `POST /v1/bench/attach?team=bench-leave` answers 404; `$U2`'s `GET /v1/workspaces/$WS2/tools` answers 404. Delete the scratch team afterwards.
+- [ ] Run the fast suite by hand (`deploy/dev/run-job.sh fast`): `bench.create`, `bench.start.p95`, `bench.tunnel` pass. Run the hourly suite by hand once: `bench.idle.wake` records its no-pod check and then shows as skipped with "bench image is the stub", as do the other hourly and weekly bench ids, `bench.workspace.tool_roundtrip` among them, until harness-bench ships. `ide.serve.up` and `ide.exec` still pass: the tunnel's loopback path is unchanged.
 - [ ] Call it shipped only after the fast run passed on the carrying SHA; record the SHA and the skipped ids on the status board.
