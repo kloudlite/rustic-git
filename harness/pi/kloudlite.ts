@@ -77,8 +77,19 @@ export default function (pi: ExtensionAPI) {
       label: name,
       description: `${s.summary} [${s.effect}]`,
       parameters: Type.Object(params),
-      async execute(_id, a) {
-        return run(a as Record<string, any>);
+      async execute(toolCallId, a, _signal, _update, ctx) {
+        const args = a as Record<string, any>;
+        // A call that hands work to a workspace or environment is an exchange:
+        // harness-bench records it in the bench's one log, where the session's
+        // queue and the workspace's queue both read it.
+        const target = /^kl_(workspace|environment)_/.test(name) ? String(args.id ?? args.name ?? "") : "";
+        const publish = (v: unknown) => target && ctx?.ui?.setWidget("harness:exchange", [JSON.stringify(v)]);
+        const id = `x-${toolCallId}`;
+        publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
+        const r = await run(args);
+        publish({ id: `${id}-in`, workspace: target, dir: "in", text: r.content.map((c) => c.text).join("").slice(0, 2000), state: r.isError ? "failed" : "done", ref: id });
+        publish({ id, state: r.isError ? "failed" : "done" });
+        return r;
       },
     });
   };
