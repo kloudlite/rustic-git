@@ -75,12 +75,13 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             ]),
             resources: Some(quantities(&b.spec.resources)),
             security_context: Some(hardened()),
-            // `--ping` checks the harness process is alive, never a client socket on
-            // `BENCH_PORT` — a probe that dialled the port would look like a session to the idle
-            // clock `harness-bench` keeps, and the bench would never sleep.
+            // `--ping` does GET /healthz on `BENCH_PORT`, but that request isn't counted as a
+            // client by the idle clock `harness-bench` keeps — only WebSockets count — so the
+            // probe never keeps the bench awake.
             readiness_probe: Some(Probe {
                 exec: Some(ExecAction { command: Some(vec!["harness-bench".to_string(), "--ping".to_string()]) }),
                 period_seconds: Some(5),
+                timeout_seconds: Some(3),
                 ..Default::default()
             }),
             termination_message_policy: Some("File".to_string()),

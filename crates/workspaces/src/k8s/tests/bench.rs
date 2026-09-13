@@ -38,6 +38,7 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
     let c = &spec.containers[0];
     assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
     assert!(c.volume_mounts.as_ref().unwrap().iter().any(|m| m.mount_path == "/bench"));
+    assert_eq!(c.readiness_probe.as_ref().unwrap().timeout_seconds, Some(3), "a slow Node start must not flap the bench unready");
 }
 
 #[test]
