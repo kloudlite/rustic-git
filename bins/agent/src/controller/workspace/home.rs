@@ -45,8 +45,6 @@ pub(crate) fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32
 /// root-owned 0755, the person's directory uid 1000 mode 0700 so another person's bench pod cannot
 /// read it. Segments go through `k8s::bench_folder` (Task 3) so the agent and the pod builder can
 /// never disagree on the path.
-// ponytail: unwired until the bench reconciler (a later task) calls this on its own apply pass.
-#[allow(dead_code)]
 pub(crate) fn ensure_bench_folder(pool: &str, export: &str, team: &str, owner: &str, uid: u32) -> Result<(), String> {
     if crate::may_mount() {
         crate::mount_homes(pool, export)?;

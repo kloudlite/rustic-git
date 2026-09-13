@@ -1,0 +1,268 @@
+//! The `Bench` reconciler: a person's bench on one team, placed by the claim like any parent but
+//! holding no volume. What it converges is small — the folder on the region share, the attach
+//! `resolv.conf`, the gateway-only ingress policy, and at most one pod — and what it decides is
+//! mostly the pod's lifecycle: `harness-bench` keeps the idle clock and exits 0 when nobody has
+//! used it for `benchIdleSecs`; this pass turns that exit into `Idle` and creates no pod again until
+//! `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the container's own `finishedAt`, never
+//! this node's clock, so a replayed pass writes the identical status.
+
+use super::{delete_ignoring_404, ensure, heal_labels, my_node, replaced, write_status, Ctx, ReconcileErr, TICK};
+use k8s_openapi::api::core::v1::{ContainerStateTerminated, Pod, Secret};
+use k8s_openapi::api::networking::v1::NetworkPolicy;
+use kube::runtime::controller::Action;
+use kube::{Api, Resource, ResourceExt};
+use kloudlite_workspaces::crd::{self, BenchAccess, Condition, DesiredState, Phase};
+use kloudlite_workspaces::k8s;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// What the pod says about the bench.
+#[derive(Debug)]
+pub(crate) enum PodVerdict {
+    Create,
+    Replace,
+    Starting,
+    Ready,
+    Locked(String),
+    Idle(String),
+    Absent,
+    Remove,
+}
+
+/// `harness-bench`'s exit when another pod holds the folder lock; its message names the holder.
+const EXIT_LOCKED: i32 = 75;
+const SHORT: Duration = Duration::from_secs(2);
+
+fn terminated(pod: &Pod) -> Option<&ContainerStateTerminated> {
+    let c = pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == k8s::BENCH_CONTAINER)?;
+    c.state.as_ref().and_then(|s| s.terminated.as_ref()).or_else(|| c.last_state.as_ref().and_then(|s| s.terminated.as_ref()))
+}
+
+pub(crate) fn bench_state(b: &crd::Bench, pod: Option<&Pod>) -> PodVerdict {
+    let wants = crd::bench_wants_pod(b);
+    let Some(pod) = pod else {
+        return if wants { PodVerdict::Create } else { PodVerdict::Absent };
+    };
+    if b.spec.desired_state == DesiredState::Stopped {
+        return PodVerdict::Remove;
+    }
+    if pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded") {
+        let at = terminated(pod)
+            .and_then(|t| t.finished_at.as_ref())
+            .and_then(|t| serde_json::to_value(t).ok())
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        return PodVerdict::Idle(at);
+    }
+    if !wants {
+        return PodVerdict::Remove;
+    }
+    // A container's command is immutable, so an access change is a new pod.
+    let read_only = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.containers.iter().find(|c| c.name == k8s::BENCH_CONTAINER))
+        .and_then(|c| c.command.as_ref())
+        .is_some_and(|cmd| cmd.iter().any(|a| a == "--read-only"));
+    if read_only != (b.spec.access == BenchAccess::ReadOnly) {
+        return PodVerdict::Replace;
+    }
+    let ready = pod.status.as_ref().and_then(|s| s.conditions.as_ref()).is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
+    if ready {
+        return PodVerdict::Ready;
+    }
+    match terminated(pod) {
+        Some(t) if t.exit_code == EXIT_LOCKED => PodVerdict::Locked(t.message.clone().unwrap_or_default()),
+        _ => PodVerdict::Starting,
+    }
+}
+
+async fn write(b: &crd::Bench, st: crd::BenchStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
+    write_status(b, "Bench", b.status.as_ref(), &st, ctx, |a, b| {
+        a.phase == b.phase
+            && a.node_name == b.node_name
+            && a.pod_ref == b.pod_ref
+            && a.idle_since == b.idle_since
+            && super::conditions_eq(&a.conditions, &b.conditions)
+    })
+    .await
+}
+
+pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    // No finalizer: the pod is ownerReference-collected and the folder outlives the bench on purpose.
+    if b.meta().deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
+    let name = b.name_any();
+    if super::timed("my_node", &name, my_node(&ctx)).await.dead {
+        return Ok(Action::requeue(TICK));
+    }
+    let (owner, team) = (b.spec.owner.clone(), b.spec.team.clone());
+    let gen = b.meta().generation.unwrap_or(0);
+    let mut prev = b.status.clone().unwrap_or_default();
+    let cond = |t: &str, ok: bool, reason: &str, msg: &str| crd::condition(t, ok, reason, msg, gen);
+    let with = |prev: &crd::BenchStatus, c: Condition| replaced(&prev.conditions, c);
+
+    heal_labels(&Api::<crd::Bench>::all(ctx.client.clone()), &*b, &owner, &team, "bench").await?;
+
+    if !super::timed("namespace_ready", &name, crate::binding::namespace_ready(&ctx, &ctx.region, &owner, &team)).await? {
+        let c = cond(crate::binding::NAMESPACE_READY, false, "NamespaceNotReady", "waiting for the owner's namespace");
+        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+
+    let Some(export) = ctx.homes_export.clone() else {
+        let c = cond("Ready", false, crd::FOLDER_NOT_READY, "this node has no shared-home mount (WS_HOMES_EXPORT)");
+        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
+        return Ok(Action::requeue(TICK));
+    };
+    let (pool, t, o) = (ctx.pool.clone(), team.clone(), owner.clone());
+    let folder = super::timed("bench_folder", &name, tokio::task::spawn_blocking(move || {
+        super::workspace::ensure_bench_folder(&pool, &export, &t, &o, k8s::SSH_UID as u32)
+    }))
+    .await
+    .map_err(|e| ReconcileErr(e.to_string()))?;
+    if let Err(why) = folder {
+        let c = cond(crd::FOLDER_READY, false, crd::FOLDER_NOT_READY, &why);
+        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+    prev.conditions = with(&prev, cond(crd::FOLDER_READY, true, "Ready", "the bench folder exists on the region share"));
+
+    let ns = crd::ws_namespace(&owner, &team);
+    let (pool, id, ns_owned, env_ns) = (ctx.pool.clone(), name.clone(), ns.clone(), b.spec.attached_environment.as_deref().map(crd::env_namespace));
+    tokio::task::spawn_blocking(move || super::write_resolv_conf(&pool, &id, &ns_owned, env_ns.as_deref()))
+        .await
+        .map_err(|e| ReconcileErr(e.to_string()))??;
+
+    ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns), &k8s::bench_ingress_policy(&ns, &name), &ctx).await?;
+
+    if Api::<Secret>::namespaced(ctx.client.clone(), &ns).get_opt(k8s::USER_KEY_SECRET).await?.is_none() {
+        let c = cond("Ready", false, "KeysNotReady", "the user-key Secret is not in the namespace yet");
+        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
+        return Ok(Action::requeue(TICK));
+    }
+
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+    let pod = pods.get_opt(k8s::BENCH_POD).await?;
+    let pod_ref = Some(format!("{ns}/{}", k8s::BENCH_POD));
+    match bench_state(&b, pod.as_ref()) {
+        PodVerdict::Create => {
+            let idle_secs = ctx.settings.load().bench_idle_secs;
+            let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, idle_secs).map_err(ReconcileErr)?;
+            super::create_if_absent(&pods, &p).await?;
+            let c = cond("Ready", false, "Starting", "the bench pod is starting");
+            write(&b, crd::BenchStatus { phase: Phase::Starting, pod_ref, idle_since: None, conditions: with(&prev, c), ..prev }, &ctx).await?;
+            Ok(Action::requeue(TICK))
+        }
+        PodVerdict::Idle(at) => {
+            delete_ignoring_404(&pods, k8s::BENCH_POD).await?;
+            let c = cond("Ready", false, crd::BENCH_IDLE, "no client and nothing running for benchIdleSecs; the next connection starts it");
+            write(&b, crd::BenchStatus { phase: Phase::Idle, pod_ref: None, idle_since: Some(at), conditions: with(&prev, c), ..prev }, &ctx).await?;
+            Ok(Action::await_change())
+        }
+        PodVerdict::Absent => {
+            let st = if b.spec.desired_state == DesiredState::Stopped {
+                let c = cond("Ready", false, "Stopped", "the bench is stopped");
+                crd::BenchStatus { phase: Phase::Stopped, pod_ref: None, conditions: with(&prev, c), ..prev }
+            } else {
+                crd::BenchStatus { phase: Phase::Idle, pod_ref: None, ..prev }
+            };
+            write(&b, st, &ctx).await?;
+            Ok(Action::await_change())
+        }
+        PodVerdict::Remove | PodVerdict::Replace => {
+            delete_ignoring_404(&pods, k8s::BENCH_POD).await?;
+            Ok(Action::requeue(SHORT))
+        }
+        PodVerdict::Starting => {
+            let c = cond("Ready", false, "Starting", "the bench pod is starting");
+            write(&b, crd::BenchStatus { phase: Phase::Starting, pod_ref, conditions: with(&prev, c), ..prev }, &ctx).await?;
+            Ok(Action::requeue(TICK))
+        }
+        PodVerdict::Ready => {
+            let reason = if b.spec.access == BenchAccess::ReadOnly { "ReadOnly" } else { "Running" };
+            let c = cond("Ready", true, reason, "the bench is serving");
+            write(&b, crd::BenchStatus { phase: Phase::Ready, pod_ref, conditions: with(&prev, c), ..prev }, &ctx).await?;
+            Ok(Action::await_change())
+        }
+        PodVerdict::Locked(holder) => {
+            let c = cond("Ready", false, crd::FOLDER_LOCKED, &format!("folder held by {holder}"));
+            write(&b, crd::BenchStatus { phase: Phase::Starting, pod_ref, conditions: with(&prev, c), ..prev }, &ctx).await?;
+            Ok(Action::requeue(TICK))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{Container, ContainerState, ContainerStatus, PodCondition, PodSpec, PodStatus};
+
+    const FINISHED_AT: &str = "2026-09-13T10:00:00Z";
+
+    fn fixture_bench(desired: DesiredState) -> crd::Bench {
+        let mut b = crd::Bench::new(
+            "bench-1",
+            serde_json::from_value(serde_json::json!({"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"})).unwrap(),
+        );
+        b.spec.desired_state = desired;
+        b.status = Some(crd::BenchStatus::default());
+        b
+    }
+
+    fn pod_with(command: &[&str], last_terminated: Option<(i32, &str)>, ready: bool) -> Pod {
+        let terminated = last_terminated.map(|(exit_code, message)| ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code,
+                message: Some(message.into()),
+                finished_at: Some(serde_json::from_value(serde_json::json!(FINISHED_AT)).unwrap()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container { name: k8s::BENCH_CONTAINER.into(), command: Some(command.iter().map(|s| s.to_string()).collect()), ..Default::default() }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                conditions: Some(vec![PodCondition { type_: "Ready".into(), status: if ready { "True" } else { "False" }.into(), ..Default::default() }]),
+                container_statuses: Some(vec![ContainerStatus { name: k8s::BENCH_CONTAINER.into(), last_state: terminated, ..Default::default() }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_pod_decides_create_replace_ready_locked_idle_and_absent() {
+        let running = fixture_bench(DesiredState::Running);
+        assert!(matches!(bench_state(&running, None), PodVerdict::Create));
+        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench", "--read-only"], None, true))), PodVerdict::Replace), "a member's bench running the reader");
+        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Ready));
+        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, false))), PodVerdict::Starting));
+        match bench_state(&running, Some(&pod_with(&["harness-bench"], Some((75, "node-b")), false))) {
+            PodVerdict::Locked(h) => assert_eq!(h, "node-b"),
+            v => panic!("exit 75 is a held lock: {v:?}"),
+        }
+        let mut exited = pod_with(&["harness-bench"], Some((0, "idle")), false);
+        exited.status.as_mut().unwrap().phase = Some("Succeeded".into());
+        match bench_state(&running, Some(&exited)) {
+            PodVerdict::Idle(at) => assert_eq!(at, FINISHED_AT),
+            v => panic!("exit 0 is asleep: {v:?}"),
+        }
+        let mut asleep = fixture_bench(DesiredState::Running);
+        asleep.status.as_mut().unwrap().idle_since = Some(FINISHED_AT.into());
+        assert!(matches!(bench_state(&asleep, None), PodVerdict::Absent), "nobody asked");
+        asleep.spec.wake_at = Some("2099-01-01T00:00:00Z".into());
+        assert!(matches!(bench_state(&asleep, None), PodVerdict::Create), "a client asked after it slept");
+        let stopped = fixture_bench(DesiredState::Stopped);
+        assert!(matches!(bench_state(&stopped, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Remove));
+        assert!(matches!(bench_state(&stopped, None), PodVerdict::Absent));
+        let mut departed = fixture_bench(DesiredState::Running);
+        departed.spec.access = crd::BenchAccess::ReadOnly;
+        assert!(matches!(bench_state(&departed, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Replace), "tools stop when the owner leaves");
+    }
+}

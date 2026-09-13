@@ -2353,6 +2353,13 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "benchIdleSecs": {
+                        "description": "How long a bench with no client and nothing running keeps its pod. 60..=86400 seconds;\nstamped into the pod at create, so a change reaches the next pod only.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
+                      },
                       "decommissionSecs": {
                         "description": "Decommission-beat interval. 5..=600 seconds.",
                         "format": "uint64",

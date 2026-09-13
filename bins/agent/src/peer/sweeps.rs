@@ -323,6 +323,27 @@ pub(crate) async fn sweep_dead_nodes(
     sweep_volumes(ctx, beat, &dead, "NodeDead", true).await;
 }
 
+/// A bench keeps nothing on its node, so one on an unplaceable node is always releasable: clear
+/// `nodeName` and any up node claims it. A zombie pod on a partitioned node is fenced by the folder
+/// lock (`FolderLocked`), not by this sweep. A failed listing releases nothing.
+pub async fn release_benches(ctx: &Arc<Ctx>, nodes: &[Node], floor: i64, now: k8s_openapi::jiff::Timestamp) {
+    let benches = match Api::<crd::Bench>::all(ctx.client.clone()).list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
+            return;
+        }
+    };
+    for b in benches {
+        let node = b.status.as_ref().map(|s| s.node_name.as_str()).unwrap_or_default();
+        if node.is_empty() || !super::unplaceable(nodes.iter().find(|n| n.name_any() == node), floor, now) {
+            continue;
+        }
+        let why = format!("node {node} is dead or leaving; another node takes this bench");
+        mark_parent_of::<crd::Bench>(ctx, &b.name_any(), "Bench", ("Placed", false), "NodeDead", &why, true).await;
+    }
+}
+
 /// A copy whose rendezvous slot moved (a node joined, or a dead one came back) is not just
 /// wasted disk: its stale Synced row still wins claims and satisfies stop's flush gate with
 /// data that is no longer being pulled. It goes only once every CURRENT target is Synced, so a

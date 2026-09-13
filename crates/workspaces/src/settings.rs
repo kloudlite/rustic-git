@@ -11,6 +11,7 @@ use crate::crd::{self, ClusterSettingsSpec};
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentSettings {
     pub sync_secs: u64,
+    pub bench_idle_secs: u64,
     pub replica_secs: u64,
     pub decommission_secs: u64,
     pub node_dead_secs: u64,
@@ -43,6 +44,7 @@ impl AgentSettings {
 
         Self {
             sync_secs: env_u64("WS_SYNC_SECS", crd::defaults::sync_secs()),
+            bench_idle_secs: env_u64("WS_BENCH_IDLE_SECS", crd::defaults::bench_idle_secs()),
             replica_secs: env_u64("WS_REPLICA_SECS", crd::defaults::replica_secs()),
             decommission_secs: env_u64("WS_DECOMMISSION_SECS", crd::defaults::decommission_secs()),
             node_dead_secs: env_u64("WS_NODE_DEAD_SECS", crd::defaults::node_dead_secs()),
@@ -73,6 +75,7 @@ impl AgentSettings {
             };
         }
         over!(sync_secs);
+        over!(bench_idle_secs);
         over!(replica_secs);
         over!(decommission_secs);
         over!(node_dead_secs);
