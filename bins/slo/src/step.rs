@@ -33,6 +33,26 @@ fn clip(mut s: String) -> String {
     s
 }
 
+/// The object a step's id is about, from what the run has created so far — the join key from a
+/// probe sample to the agent's and api's lines about that object. A guess by family: an id whose
+/// object is not in `State` gets none rather than a wrong one.
+fn object_of(id: &str, state: &crate::ctx::State) -> Option<String> {
+    let pick = if id.starts_with("ws.clone") {
+        &state.clone
+    } else if id.starts_with("ws.") {
+        &state.workspace
+    } else if id.starts_with("env.") {
+        &state.environment
+    } else if id.starts_with("vol.") {
+        &state.volume
+    } else if id.starts_with("repo.") || id.starts_with("git.") || id.starts_with("pr.") || id.starts_with("feed.") {
+        &state.repo
+    } else {
+        return None;
+    };
+    pick.clone()
+}
+
 impl Ctx {
     /// Run `f` under `timeout`, record the sample, return whether it passed.
     pub async fn step<F>(&mut self, id: &'static str, timeout: Duration, f: F) -> bool
@@ -41,7 +61,11 @@ impl Ctx {
     {
         let ts = Utc::now();
         let start = Instant::now();
-        let outcome = tokio::time::timeout(timeout, f(self)).await;
+        // The span tags every `slo.http.*` line inside the step with the id it was measuring.
+        let span = tracing::info_span!("slo.step", slo_id = id, run_id = %self.run_id);
+        let outcome = tracing::Instrument::instrument(tokio::time::timeout(timeout, f(self)), span).await;
+        // After the step, so an object the step itself created is named.
+        let object = object_of(id, &self.state).unwrap_or_default();
         // Measured around the timeout, so a step that timed out reports the ceiling it hit rather
         // than a duration nobody recorded.
         let ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
@@ -78,7 +102,7 @@ impl Ctx {
             Some(max) if ok && ms > max => (false, format!("took {ms} ms, past its {max} ms target")),
             _ => (ok, detail),
         };
-        tracing::info!(slo_id = id, ok = good, ms, detail = %detail, "slo.step.done");
+        tracing::info!(slo_id = id, ok = good, ms, %object, run_id = %self.run_id, detail = %detail, "slo.step.done");
         metrics::counter!("slo_steps_total", "ok" => if good { "true" } else { "false" }).increment(1);
         self.steps.push(StepReport {
             slo_id: id.to_string(),
@@ -152,6 +176,25 @@ mod tests {
     use super::*;
     use crate::testkit::ctx;
     use futures::FutureExt;
+
+    #[test]
+    fn a_step_names_the_object_of_its_family_and_none_it_cannot_know() {
+        let state = crate::ctx::State {
+            workspace: Some("run-ws".into()),
+            clone: Some("run-ws-clone".into()),
+            environment: Some("run-env".into()),
+            volume: Some("run-vol".into()),
+            repo: Some("run-repo".into()),
+            ..Default::default()
+        };
+        assert_eq!(object_of("ws.push.p95", &state).as_deref(), Some("run-ws"));
+        assert_eq!(object_of("ws.clone.p95", &state).as_deref(), Some("run-ws-clone"));
+        assert_eq!(object_of("env.attach", &state).as_deref(), Some("run-env"));
+        assert_eq!(object_of("vol.refusals", &state).as_deref(), Some("run-vol"));
+        assert_eq!(object_of("feed.latency", &state).as_deref(), Some("run-repo"));
+        assert_eq!(object_of("reg.token.p95", &state), None);
+        assert_eq!(object_of("ws.push.p95", &crate::ctx::State::default()), None);
+    }
 
     #[tokio::test]
     async fn a_step_records_ok_ms_and_detail() {

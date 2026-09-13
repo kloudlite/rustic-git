@@ -513,15 +513,14 @@ pub(crate) async fn bearer(c: &Ctx, secret: Option<&str>, scope: &str) -> Result
     let probe = c.probe_user.clone();
     use base64::Engine;
     let url = format!("{}/v2/token?service={}&scope={}", base(c), host(c), urlencoding(scope));
-    let mut req = c.http.get(&url);
+    let mut headers = vec![];
     if let Some(s) = secret {
         let basic = base64::engine::general_purpose::STANDARD.encode(format!("{probe}:{s}"));
-        req = req.header("authorization", format!("Basic {basic}"));
+        headers.push(("authorization", format!("Basic {basic}")));
     }
-    // `without_url`: the URL is not a secret here, but the rule is the module's, not the caller's.
-    let r = req.send().await.map_err(|e| anyhow!("{}", e.without_url()))?;
-    let status = r.status();
-    let body = r.text().await.unwrap_or_default();
+    // Through `raw`, so the token sample carries the request id and per-seam timing every other
+    // probe request does — `reg.token.p95` was the one id whose slow samples left no line at all.
+    let (status, body) = super::raw(c, reqwest::Method::GET, &url, "", None, &headers).await?;
     if !status.is_success() {
         return Err(anyhow!("{status}: {}", body.chars().take(200).collect::<String>()));
     }

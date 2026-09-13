@@ -28,6 +28,7 @@ pub(crate) async fn images_proxy(
         .get(url)
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
         .header(kloudlite_core::peer::OWNER_HEADER, &who)
+        .headers(request_id(&headers))
         .send()
         .await
     {
@@ -38,6 +39,17 @@ pub(crate) async fn images_proxy(
         }
     };
     relay(r).await
+}
+
+/// The caller's `x-request-id`, passed on so the node's `http.*` and `image.*` lines carry the
+/// same id as this tier's and the probe's. Passed through unchecked on purpose: the node's own
+/// `http_metrics` validates it on arrival, and a rejected one is replaced there.
+fn request_id(headers: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    if let Some(v) = headers.get(kloudlite_core::metrics::REQUEST_ID) {
+        out.insert(kloudlite_core::metrics::REQUEST_ID, v.clone());
+    }
+    out
 }
 
 /// `POST /api/{owner}/{image}/imagetagdelete` — proxied by hand for the same reason
@@ -116,7 +128,8 @@ pub(crate) async fn image_write_proxy(
         .client
         .post(url)
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
-        .header(kloudlite_core::peer::OWNER_HEADER, &who);
+        .header(kloudlite_core::peer::OWNER_HEADER, &who)
+        .headers(request_id(headers));
     if let Some(b) = body {
         up = up.body(b);
     }

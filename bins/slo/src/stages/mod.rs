@@ -123,7 +123,8 @@ pub(crate) async fn raw(
     headers: &[(&str, String)],
 ) -> Result<(reqwest::StatusCode, String)> {
     let method_name = method.to_string();
-    let mut req = c.http.request(method, url);
+    let req_id = request_id(c);
+    let mut req = c.http.request(method, url).header(REQUEST_ID, &req_id);
     if !token.is_empty() {
         req = req.header("authorization", c.bearer(token));
     }
@@ -146,14 +147,14 @@ pub(crate) async fn raw(
     // failures with the phase and reqwest's own classification (`slo.http.failed`), and a request
     // still in flight when its step's ceiling cancelled it (`slo.http.abandoned`, from Drop — the
     // one place a cancelled future can still speak).
-    let mut flight = InFlight { method: method_name.clone(), path: path_of(url), started: std::time::Instant::now(), done: false };
+    let mut flight = InFlight { method: method_name.clone(), path: path_of(url), started: std::time::Instant::now(), done: false, req_id: req_id.clone() };
     let r = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             flight.done = true;
             let (connect, timeout) = (e.is_connect(), e.is_timeout());
             let e = e.without_url();
-            tracing::warn!(method = %method_name, path = %flight.path, phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
+            tracing::warn!(method = %method_name, path = %flight.path, %req_id, phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
             return Err(anyhow!("{e} ({})", flight.path));
         }
     };
@@ -167,16 +168,35 @@ pub(crate) async fn raw(
         Err(e) => {
             flight.done = true;
             let e = e.without_url();
-            tracing::warn!(method = %method_name, path = %flight.path, phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
+            tracing::warn!(method = %method_name, path = %flight.path, %req_id, phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
             return Err(anyhow!("{e} while reading the body of {status} ({})", flight.path));
         }
     };
     flight.done = true;
     let total_ms = flight.started.elapsed().as_millis() as u64;
-    if total_ms > SLOW_HTTP_MS {
-        tracing::warn!(method = %method_name, path = %flight.path, %status, headers_ms, total_ms, "slo.http.slow");
-    }
+    done(&method_name, &flight.path, &req_id, status.as_u16(), headers_ms, total_ms);
     Ok((status, text))
+}
+
+pub(crate) const REQUEST_ID: &str = "x-request-id";
+
+/// `{run_id}-{n}`: unique per request, and the run id in it finds every request of one run. Sent
+/// as `x-request-id`, which every tier's `http_metrics` logs and echoes, so this side's timing and
+/// the server's join on one value.
+pub(crate) fn request_id(c: &Ctx) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", c.run_id, SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Every request, not only the slow ones: an SLO judged against 300 ms fails on samples far under
+/// any slow floor, and the probe's request count per run is bounded, so the line costs little and
+/// is the only client-side record of a sub-threshold sample. Slow ones still warn.
+pub(crate) fn done(method: &str, path: &str, req_id: &str, status: u16, headers_ms: u64, total_ms: u64) {
+    if total_ms > SLOW_HTTP_MS {
+        tracing::warn!(%method, %path, %req_id, status, headers_ms, total_ms, "slo.http.slow");
+    } else {
+        tracing::info!(%method, %path, %req_id, status, headers_ms, total_ms, "slo.http.done");
+    }
 }
 
 /// Anything over this is logged whatever its status: the step's own ceiling says a request was
@@ -190,12 +210,13 @@ struct InFlight {
     path: String,
     started: std::time::Instant,
     done: bool,
+    req_id: String,
 }
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         if !self.done {
-            tracing::warn!(method = %self.method, path = %self.path, ms = self.started.elapsed().as_millis() as u64, "slo.http.abandoned");
+            tracing::warn!(method = %self.method, path = %self.path, req_id = %self.req_id, ms = self.started.elapsed().as_millis() as u64, "slo.http.abandoned");
         }
     }
 }
