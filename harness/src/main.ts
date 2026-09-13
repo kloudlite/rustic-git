@@ -1,13 +1,16 @@
 import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTheme, type WebContents } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { Pi, type Fork } from "./pi";
+import { BenchClient } from "./bench-client";
 
 let mainWin: BrowserWindow | undefined;
-// The bench, and any side session forked from it (`/btw`), by id.
-const pis = new Map<string, Pi>();
-const pi = new Pi("bench", () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), path.join(app.getPath("userData"), "last-session"));
-pis.set(pi.id, pi);
+// The bench is remote: HARNESS_BENCH is the local end of the tunnel to this
+// person's harness-bench. Without it there is no bench, and the harness says so.
+const BENCH = process.env.HARNESS_BENCH;
+let bench: BenchClient | undefined;
+const toRenderer = (ev: Record<string, unknown>) => {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("pi:event", ev);
+};
 
 function createWindow(): void {
   // HARNESS_SIZE=WxH sizes the window for a screenshot; no effect otherwise.
@@ -243,40 +246,34 @@ ipcMain.handle("preview:nav", (e, verb: unknown) => {
   else if (verb === "reload") pw.page.webContents.reload();
 });
 
-// The bench: every command is forwarded to pi as is, and the answer is the
-// RPC response; events arrive on their own over `pi:event`.
+// Session ids as the bench checks them; only the bench's own ids are forwarded.
+const SESSION = /^(bench|[sw]-[A-Za-z0-9.-]+|e-[A-Za-z0-9.-]+)$/;
+const needBench = () => {
+  if (!bench) throw new Error("no bench: set HARNESS_BENCH to the bench's address");
+  return bench;
+};
 ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
   if (!cmd || typeof cmd !== "object" || typeof (cmd as { type?: unknown }).type !== "string") throw new Error("a pi command has a type");
-  const p = pis.get(typeof id === "string" ? id : "bench");
-  if (!p) throw new Error(`no pi ${String(id)}`);
-  const r = await p.send(cmd as Record<string, unknown>);
-  // Whatever pi is on now is what a relaunch reopens (a fork remembers nothing).
-  const file = (r.data as { sessionFile?: string } | undefined)?.sessionFile;
-  if (typeof file === "string" && file) p.remember(file);
-  return r;
+  const sid = id === undefined ? "bench" : id;
+  if (typeof sid !== "string" || !SESSION.test(sid)) throw new Error("not a session id");
+  return needBench().rpc(sid, cmd as Record<string, unknown>);
 });
-// A session (`s-N`) is a bench in its own right: a full pi with a memo of its
-// session file, so a relaunch resumes each one. A fork (`btw-N`) copies a
-// session file and remembers nothing.
-ipcMain.handle("pi:spawn", (_e, id: unknown, opts: unknown) => {
-  if (typeof id !== "string" || !/^(btw|s)-\d+$/.test(id)) throw new Error("a pi id is s-N or btw-N");
-  const fork = (opts as Fork | undefined)?.fork;
-  if (id.startsWith("btw-") && (typeof fork !== "string" || !fork)) throw new Error("a side session forks a session file");
-  if (!pis.has(id)) {
-    pis.set(id, id.startsWith("btw-")
-      ? new Pi(id, () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), undefined, { fork: fork as string })
-      : new Pi(id, () => (mainWin && !mainWin.isDestroyed() ? mainWin.webContents : undefined), path.join(app.getPath("userData"), "sessions", id)));
-  }
-  pis.get(id)!.start();
+// The bench's own surface, method + path allow-listed: the renderer never
+// reaches anything else through this.
+const SID = "(bench|[swe]-[A-Za-z0-9.-]+)";
+const BENCH_ROUTES = new RegExp(
+  `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/btw$|^GET /(tasks|procs|healthz)$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^POST /import$`,
+);
+ipcMain.handle("bench", async (_e, method: unknown, p: unknown, body: unknown) => {
+  if (typeof method !== "string" || typeof p !== "string" || !BENCH_ROUTES.test(`${method} ${p}`)) throw new Error(`not a bench route: ${String(method)} ${String(p)}`);
+  return needBench().rest(method, p, body);
 });
-ipcMain.handle("pi:stop", (_e, id: unknown, forget: unknown) => {
-  if (typeof id !== "string" || id === "bench") return;
-  pis.get(id)?.stop();
-  pis.delete(id);
-  // Deleted: the harness forgets which file it was; pi's record stays on disk.
-  if (forget === true && /^s-\d+$/.test(id)) fs.rm(path.join(app.getPath("userData"), "sessions", id), { force: true }).catch(() => undefined);
+ipcMain.handle("bench:messages", (_e, id: unknown) => {
+  if (typeof id !== "string" || !SESSION.test(id)) throw new Error("not a session id");
+  return needBench().messages(id);
 });
-app.on("before-quit", () => pis.forEach((p) => p.stop()));
+ipcMain.handle("bench:state", () => ({ configured: !!bench, connected: bench?.connected() ?? false, ...(bench?.cached() ?? { sessions: [], exchanges: [] }) }));
+app.on("before-quit", () => bench?.close());
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {
   if (mode !== "system" && mode !== "light" && mode !== "dark") throw new Error("unknown theme");
@@ -287,6 +284,10 @@ void app.whenReady().then(() => {
   // The standard menus, explicitly: on macOS ⌘C/⌘V/⌘X/⌘A reach a web page
   // only through Edit-menu roles, and a pasted image is a paste event first.
   Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }]));
+  if (BENCH) {
+    bench = new BenchClient(BENCH, toRenderer, path.join(app.getPath("userData"), "bench-cache.json"));
+    bench.start();
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

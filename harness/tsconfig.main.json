@@ -12,5 +12,5 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["src/main.ts", "src/preload.ts", "src/preview-preload.ts", "src/pi.ts"]
+  "include": ["src/main.ts", "src/preload.ts", "src/preview-preload.ts", "src/bench-client.ts"]
 }
