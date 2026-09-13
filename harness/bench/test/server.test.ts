@@ -71,3 +71,29 @@ test("REST: list, create, messages, archive, exchanges by both views, delete", a
   ev.close();
   await t.down();
 });
+
+test("hostile paths and bodies: bad escapes, traversal ids and oversized bodies are refused without killing the server", async () => {
+  const t = await up();
+  assert.equal((await fetch(t.base + "/sessions/%E0/messages")).status, 400);
+  assert.equal((await fetch(t.base + "/sessions/..%2F..%2Fx/btw")).status, 400);
+  assert.equal((await fetch(t.base + "/workspaces/..%2Fx/messages")).status, 400);
+  assert.equal((await fetch(t.base + "/sessions/nope/btw")).status, 404);
+  const bad = t.ws("/sessions/%E0/rpc");
+  await new Promise((r) => bad.once("error", r));
+  const walk = t.ws("/sessions/..%2Fx/rpc");
+  await new Promise((r) => walk.once("error", r));
+  const small = await serve(t.bench, 0, "127.0.0.1", undefined, 16);
+  const r = await fetch(`http://127.0.0.1:${small.port}/import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [], loose: [], pad: "x".repeat(1000) }) }).catch((e) => e);
+  assert.ok(r instanceof Error || r.status === 413, `413 or a closed connection, got ${r.status}`);
+  await small.close();
+  const w = t.ws("/events");
+  await opened(w);
+  assert.equal((await (await fetch(t.base + "/healthz")).json()).clients, 1);
+  w.close();
+  await new Promise((r) => w.once("close", r));
+  await settle();
+  const h = await (await fetch(t.base + "/healthz")).json();
+  assert.equal(h.clients, 0, "a closed socket stops holding the bench up");
+  assert.equal(h.ok, true);
+  await t.down();
+});

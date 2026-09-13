@@ -12,28 +12,40 @@ import { Idle } from "./idle.ts";
  */
 const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|not writable|in flight|only open session/.test(e.message) ? 409 : 400);
 
-async function body(req: http.IncomingMessage): Promise<Record<string, unknown>> {
-  let s = "";
-  for await (const c of req) s += c;
-  return s ? (JSON.parse(s) as Record<string, unknown>) : {};
+const TOO_LARGE = "request body too large";
+const MAX_BODY = 64 * 1024 * 1024;
+
+/** Split and decode a path; a bad escape or an id that could walk out of a folder (`..%2F`) is a 400, never a crash or a read elsewhere. */
+function segments(pathname: string): string[] {
+  const p = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if ((p[0] === "sessions" || p[0] === "workspaces") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
+    throw new Error(`bad id ${JSON.stringify(p[1])}`);
+  return p;
 }
 
-export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new Idle(() => bench.busy())): Promise<{ port: number; close(): Promise<void> }> {
+export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new Idle(() => bench.busy()), maxBody = MAX_BODY): Promise<{ port: number; close(): Promise<void> }> {
+  const body = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
+    let s = "";
+    let size = 0;
+    for await (const c of req) {
+      size += (c as Buffer).length;
+      if (size > maxBody) throw new Error(TOO_LARGE);
+      s += c;
+    }
+    return s ? (JSON.parse(s) as Record<string, unknown>) : {};
+  };
   const send = (res: http.ServerResponse, code: number, v?: unknown) => {
     res.writeHead(code, v === undefined ? {} : { "content-type": "application/json" });
     res.end(v === undefined ? undefined : JSON.stringify(v));
   };
   const server = http.createServer(async (req, res) => {
     const u = new URL(req.url ?? "/", "http://bench");
-    const p = u.pathname.split("/").filter(Boolean).map(decodeURIComponent);
     // after= is a message (or exchange) index, never a timestamp.
     const n = (k: string) => (u.searchParams.has(k) ? Number(u.searchParams.get(k)) : undefined);
     const m = req.method ?? "GET";
     try {
-      if (m === "GET" && u.pathname === "/healthz") {
-        const readOnly = (bench as unknown as { opts: { readOnly: boolean } }).opts.readOnly;
-        return send(res, 200, { ok: true, readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
-      }
+      const p = segments(u.pathname);
+      if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
         if (p.length === 1 && m === "POST") return send(res, 201, await bench.create());
@@ -68,7 +80,14 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
       }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
-      send(res, status(e as Error), { error: (e as Error).message });
+      const msg = (e as Error).message;
+      if (msg === TOO_LARGE) {
+        // The rest of the upload is never read; closing is the only way to stop it.
+        res.setHeader("connection", "close");
+        send(res, 413, { error: msg });
+        return void res.on("finish", () => req.destroy());
+      }
+      send(res, status(e as Error), { error: msg });
     }
   });
 
@@ -87,7 +106,12 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
   });
 
   server.on("upgrade", (req, socket, head) => {
-    const p = new URL(req.url ?? "/", "http://bench").pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    let p: string[];
+    try {
+      p = segments(new URL(req.url ?? "/", "http://bench").pathname);
+    } catch {
+      return void socket.destroy();
+    }
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
     if (!rpc && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {

@@ -16,3 +16,13 @@ test("idle only while no client is connected and nothing runs; any client or wor
   busy = false;
   assert.equal(typeof i.state().idleSince, "number");
 });
+
+test("work finishing with no client connected starts the idle clock", () => {
+  let busy = true;
+  const i = new Idle(() => busy);
+  i.check();
+  assert.equal(i.state().idleSince, null);
+  busy = false;
+  i.check();
+  assert.equal(typeof i.state().idleSince, "number");
+});
