@@ -277,7 +277,19 @@ async fn a_missing_repo_is_indistinguishable_from_a_private_one_until_you_authen
     let private = raw_get(port, "/alice/secret/info/refs?service=git-upload-pack", None);
     let missing = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", None);
     assert!(private.starts_with("HTTP/1.1 401"), "{private}");
-    assert_eq!(missing, private, "a missing name must answer byte-for-byte as a private one does");
+    // The request id is fresh per request (a counter suffix can even change length), so only its
+    // presence and shape — the same hex segments — must match; every other byte must be identical.
+    let split = |r: &str| {
+        let shape = r.split("\r\n").find_map(|l| l.strip_prefix("x-request-id: ")).map(|v| {
+            v.split('-').map(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_hexdigit())).collect::<Vec<_>>()
+        });
+        let rest: Vec<&str> = r.split("\r\n").filter(|l| !l.starts_with("x-request-id: ")).collect();
+        (shape, rest.join("\r\n"))
+    };
+    let ((missing_id, missing_rest), (private_id, private_rest)) = (split(&missing), split(&private));
+    assert!(private_id.as_ref().is_some_and(|s| s.iter().all(|&ok| ok)), "a refusal must carry a well-formed x-request-id: {private}");
+    assert_eq!(missing_id, private_id, "x-request-id must be present and shaped alike on both");
+    assert_eq!(missing_rest, private_rest, "a missing name must answer byte-for-byte as a private one does");
 
     // With credentials the answer may differ — that caller is allowed to know.
     let r = raw_get(port, "/alice/nosuch/info/refs?service=git-upload-pack", Some(&token));
