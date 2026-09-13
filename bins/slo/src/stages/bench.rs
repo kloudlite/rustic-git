@@ -13,8 +13,6 @@
 //! why `a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped` exists.
 
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -33,8 +31,8 @@ use crate::ctx::Ctx;
 // out of ceiling before its target is a timeout nobody can read as a verdict.
 /// `bench.create`: two POSTs.
 const CREATE_CEILING: Duration = Duration::from_secs(30);
-/// `bench.start.p95`: the stop round trip, then a start from stopped to `ready` (target 90 s).
-const START_CEILING: Duration = Duration::from_secs(150);
+/// `bench.start.p95`: start from stopped to `ready` only (target 90 s).
+const START_CEILING: Duration = Duration::from_secs(120);
 /// `bench.tunnel`: target 20 s; the forward waits up to its own 90 s for a waking bench.
 const TUNNEL_CEILING: Duration = Duration::from_secs(30);
 /// `bench.idle.wake`: target 480 s = default `benchIdleSecs` 300 + 90 s start + 90 s of reads.
@@ -143,15 +141,22 @@ pub async fn fast(c: &mut Ctx) {
         c.skip("bench.start.p95", "the bench was never created");
         return c.skip("bench.tunnel", "the bench was never created");
     }
+    // Untimed: the sample is start→ready only. The 409 holds the moment /stop answers, because
+    // `stop_bench` writes `desiredState: Stopped` before its 202 and `bench_session` refuses on
+    // that spec field, not on the phase (crates/workspaces/src/api/bench.rs).
+    let stopped = async {
+        call(c, reqwest::Method::POST, &bench_url(c, "/stop"), &c.probe_jwt, None).await?;
+        let (status, text) = raw(c, reqwest::Method::POST, &bench_url(c, "/session"), &c.probe_jwt, None, &[]).await?;
+        if status != reqwest::StatusCode::CONFLICT || !text.contains("bench is stopped; start it") {
+            bail!("a session on a stopped bench answered {status}: {}", super::clip(&text));
+        }
+        wait_phase(c, "stopped", START_WAIT).await
+    }
+    .await;
     let started = c
-        .step("bench.start.p95", START_CEILING, |c| {
+        .step("bench.start.p95", START_CEILING, move |c| {
             async move {
-                call(c, reqwest::Method::POST, &bench_url(c, "/stop"), &c.probe_jwt, None).await?;
-                let (status, text) = raw(c, reqwest::Method::POST, &bench_url(c, "/session"), &c.probe_jwt, None, &[]).await?;
-                if status != reqwest::StatusCode::CONFLICT || !text.contains("bench is stopped; start it") {
-                    bail!("a session on a stopped bench answered {status}: {}", super::clip(&text));
-                }
-                wait_phase(c, "stopped", START_WAIT).await?;
+                stopped.context("the stop round trip before the start")?;
                 call(c, reqwest::Method::POST, &bench_url(c, "/start"), &c.probe_jwt, None).await?;
                 wait_phase(c, "ready", START_WAIT).await
             }
@@ -180,29 +185,38 @@ pub async fn hourly(c: &mut Ctx) {
         c.skip("bench.idle.wake", "no kubeconfig");
         return SESSION_IDS.iter().for_each(|id| c.skip(id, "no kubeconfig"));
     };
-    let stub = Arc::new(AtomicBool::new(false));
-    let seen = stub.clone();
+    // Untimed: this suite's owner is not the fast suite's, so its bench is created here (idempotent,
+    // and the first call binds the personal region); then the first connection — which may itself
+    // wake last hour's idle bench — reads the history the sample compares against.
+    let region = c.cfg.region.clone();
+    let prep = async {
+        post(c, &bench_url(c, ""), &c.probe_jwt, json!({"region": region})).await.context("could not create this suite's bench")?;
+        let idle = Api::<ClusterSettings>::all(k.clone())
+            .get_opt("default")
+            .await?
+            .and_then(|s| s.spec.bench_idle_secs)
+            .unwrap_or_else(crd::defaults::bench_idle_secs);
+        let (child, port) = forward(c).await?;
+        let (_, health) = through(port, "/healthz").await?;
+        let stub = is_stub(&health);
+        let before = if stub { None } else { Some(history(port).await?) };
+        anyhow::Ok((idle, child, stub, before))
+    }
+    .await;
+    let stub = prep.as_ref().ok().map(|p| p.2);
     let woke = c
         .step("bench.idle.wake", WAKE_CEILING, move |c| {
             async move {
-                let idle = Api::<ClusterSettings>::all(k.clone())
-                    .get_opt("default")
-                    .await?
-                    .and_then(|s| s.spec.bench_idle_secs)
-                    .unwrap_or_else(crd::defaults::bench_idle_secs);
-                let (child, port) = forward(c).await?;
-                let (_, health) = through(port, "/healthz").await?;
-                seen.store(is_stub(&health), Ordering::SeqCst);
-                let before = if is_stub(&health) { None } else { Some(history(port).await?) };
+                let (idle, child, _, before) = prep.context("before the sleep")?;
                 drop(child);
                 let owner = c.cfg.probe_user.clone();
                 let pods: Api<Pod> = Api::namespaced(k.clone(), &crd::ws_namespace(&owner, &owner));
-                let cap = Duration::from_secs(idle) + IDLE_GRACE;
-                wait_phase(c, "idle", cap).await?;
+                // One budget for both waits: idle, then the pod gone.
+                let deadline = Instant::now() + Duration::from_secs(idle) + IDLE_GRACE;
+                wait_phase(c, "idle", deadline.saturating_duration_since(Instant::now())).await?;
                 tracing::info!(check = "phase.idle", "slo.bench.idle");
-                let start = Instant::now();
                 while pods.get_opt(kloudlite_workspaces::k8s::BENCH_POD).await?.is_some() {
-                    if start.elapsed() >= cap {
+                    if Instant::now() >= deadline {
                         bail!("the bench is idle and its pod still exists");
                     }
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -225,11 +239,15 @@ pub async fn hourly(c: &mut Ctx) {
             .boxed()
         })
         .await;
-    if woke && stub.load(Ordering::SeqCst) {
-        c.demote_to_skip("bench.idle.wake", STUB);
-    }
-    if stub.load(Ordering::SeqCst) {
-        return SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
+    match stub {
+        Some(true) => {
+            if woke {
+                c.demote_to_skip("bench.idle.wake", STUB);
+            }
+            return SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
+        }
+        None => return SESSION_IDS.iter().for_each(|id| c.skip(id, "the bench could not be reached before the sleep")),
+        Some(false) => {}
     }
     // ponytail: the four journeys need a harness-bench RPC WebSocket client the probe does not
     // carry yet; skipped (never passed) until the real image ships and the client lands with it.
