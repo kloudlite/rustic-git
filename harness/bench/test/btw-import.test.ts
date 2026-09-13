@@ -65,3 +65,18 @@ test("import copies files, merges rows, and a re-run is a no-op", async () => {
     await b.stop();
   }
 });
+
+test("concurrent btw calls get distinct ids, and no fork file is left behind", async () => {
+  const b = mk();
+  try {
+    await b.start();
+    await filed(b);
+    const [x, y] = await Promise.all([b.btw("s-1", "one"), b.btw("s-1", "two")]);
+    assert.notEqual(x.id, y.id);
+    assert.deepEqual(b.listBtw("s-1").map((a) => a.question).sort(), ["one", "two"]);
+    const forks = path.join((b as unknown as { opts: { dir: string } }).opts.dir, "btw", ".forks");
+    assert.deepEqual(fs.existsSync(forks) ? fs.readdirSync(forks) : [], []);
+  } finally {
+    await b.stop();
+  }
+});

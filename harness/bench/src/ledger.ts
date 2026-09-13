@@ -32,24 +32,13 @@ export class Tasks {
 
 export type ProcRow = { id: string; session: string; name: string; command: string; pid?: number; started: number; ended?: number; code?: number | null; lost?: true };
 
-const pidAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-};
-
 /** `/bench/procs.json`: the live table, replaced whole; each session publishes only its own rows. */
 export class Procs {
   private file: string;
   private rows: ProcRow[];
-  private alive: (pid: number) => boolean;
-  constructor(dir: string, alive: (pid: number) => boolean = pidAlive) {
+  constructor(dir: string) {
     this.file = path.join(dir, "procs.json");
     this.rows = readJson<ProcRow[]>(this.file, []);
-    this.alive = alive;
   }
   snapshot(session: string, rows: Omit<ProcRow, "session">[]): void {
     this.rows = [...this.rows.filter((r) => r.session !== session), ...rows.map((r) => ({ ...r, session }))];
@@ -58,9 +47,13 @@ export class Procs {
   all(): ProcRow[] {
     return this.rows.map((r) => ({ ...r }));
   }
-  markLost(): ProcRow[] {
+  /**
+   * Every open row, whatever its pid: pids restart low in a new container, so an
+   * old row's pid can name a live, unrelated process and hold the bench awake forever.
+   */
+  markLost(session?: string): ProcRow[] {
     const now = Date.now();
-    const lost = this.rows.filter((r) => r.ended === undefined && !(r.pid && this.alive(r.pid)));
+    const lost = this.rows.filter((r) => r.ended === undefined && (session === undefined || r.session === session));
     for (const r of lost) Object.assign(r, { ended: now, lost: true as const });
     if (lost.length) replaceJson(this.file, this.rows);
     return lost.map((r) => ({ ...r }));

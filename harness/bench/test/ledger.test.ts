@@ -20,18 +20,28 @@ test("tasks fold from the log and in-flight ones are lost after a restart", () =
   assert.equal(new Tasks(d).markLost().length, 0);
 });
 
-test("procs keep other sessions' rows, and dead pids are lost", () => {
+test("procs keep other sessions' rows; a restart loses every open row, even one whose old pid is alive now", () => {
   const d = dir();
-  const p = new Procs(d, (pid) => pid === 100);
-  p.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: 100, started: 1 }]);
+  const p = new Procs(d);
+  // process.pid is alive: a pid reused in a restarted container must not keep the row open.
+  p.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: process.pid, started: 1 }]);
   p.snapshot("s-2", [{ id: "p1", name: "tunnel", command: "kl tunnel", pid: 200, started: 1 }]);
-  p.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: 100, started: 1 }, { id: "p2", name: "w", command: "w", pid: 300, started: 2, ended: 5, code: 0 }]);
+  p.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: process.pid, started: 1 }, { id: "p2", name: "w", command: "w", pid: 300, started: 2, ended: 5, code: 0 }]);
   assert.equal(p.all().length, 3);
-  const lost = new Procs(d, (pid) => pid === 100).markLost();
-  assert.deepEqual(lost.map((r) => `${r.session}/${r.id}`), ["s-2/p1"]);
+  const lost = new Procs(d).markLost();
+  assert.deepEqual(lost.map((r) => `${r.session}/${r.id}`).sort(), ["s-1/p1", "s-2/p1"]);
   const row = new Procs(d).all().find((r) => r.session === "s-2")!;
   assert.equal(row.lost, true);
   assert.equal(typeof row.ended, "number");
+  assert.equal(new Procs(d).all().find((r) => r.id === "p2")!.lost, undefined, "an ended row stays as it was");
+});
+
+test("procs markLost for one session leaves another's open row open", () => {
+  const p = new Procs(dir());
+  p.snapshot("s-1", [{ id: "p1", name: "a", command: "a", pid: 1, started: 1 }]);
+  p.snapshot("s-2", [{ id: "p1", name: "b", command: "b", pid: 2, started: 1 }]);
+  assert.deepEqual(p.markLost("s-1").map((r) => r.session), ["s-1"]);
+  assert.equal(p.all().find((r) => r.session === "s-2")!.ended, undefined);
 });
 
 test("markLost for one session leaves another session's running task running", () => {

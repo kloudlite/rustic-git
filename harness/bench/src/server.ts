@@ -83,7 +83,7 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       if (m === "POST" && u.pathname === "/import") {
         const b = await body(req);
-        return send(res, 200, bench.import((b.items ?? []) as never, (b.loose ?? []) as never));
+        return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));
       }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
@@ -98,7 +98,7 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
     }
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: maxBody });
   const events = new Set<WebSocket>();
   const rpcClients = new Map<string, Set<WebSocket>>();
   const unsubscribe = bench.onEvent((ev) => {
@@ -125,6 +125,8 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
       // A connected device holds the bench up whichever socket it holds.
       idle.opened();
       w.on("close", () => idle.closed());
+      // An oversized frame (maxPayload) or a torn socket errors before it closes; unheard, it would crash the bench.
+      w.on("error", () => undefined);
       if (!rpc) {
         events.add(w);
         w.on("close", () => events.delete(w));

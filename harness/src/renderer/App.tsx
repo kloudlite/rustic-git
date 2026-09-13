@@ -461,6 +461,8 @@ export function App() {
       run: (arg) => {
         const from = cur();
         if (!arg.trim()) return L().note("usage: /btw <question> — one question, one answer, nothing changed");
+        // The fork's read tools run on the bench pod: on a workspace thread they would read the wrong machine.
+        if (/^[we]-/.test(from ?? "")) return L().note("btw is only for bench sessions");
         const id = `btw-${++sideSeq}`;
         setSides((ts) => [...ts, { id, name: `btw · ${arg.slice(0, 40)}`, kind: "btw", readonly: true, messages: [], pi: id, session: from }]);
         // Beside the session when there is room for a second pane, else a tab.

@@ -114,3 +114,61 @@ test("hostile paths and bodies: bad escapes, traversal ids and oversized bodies 
     await t.down();
   }
 });
+
+test("a bad archive or restore id and a malformed import answer 404/400 and leave the folder writable", async () => {
+  const t = await up();
+  try {
+    const post = (p: string, body?: unknown) => fetch(t.base + p, { method: "POST", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    assert.equal((await post("/sessions/s-99/archive")).status, 404);
+    assert.equal((await post("/sessions/s-99/restore")).status, 404);
+    assert.equal((await post("/import", { items: [null], loose: [] })).status, 400);
+    assert.equal((await post("/import", { items: "x" })).status, 400);
+    assert.equal((await health(t.base)).writable, true);
+  } finally {
+    await t.down();
+  }
+});
+
+test("import refuses a row with a field outside the allow-list, and writes nothing", async () => {
+  const t = await up();
+  try {
+    const row = { id: "s-7", name: "old", seq: 7, created: 1, lastActive: 1, archived: false };
+    const post = (r: unknown) => fetch(t.base + "/import", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items: [{ row: r, name: "s-7.jsonl", content: "{}\n" }], loose: [] }) });
+    for (const bad of [{ ...row, seq: "x" }, { ...row, seq: -1 }, { ...row, id: "../x" }, { ...row, kind: "root" }, { ...row, kind: "workspace", workspace: "Not_A_Label", target: "api" }, { ...row, archived: "yes" }, { ...row, lastActive: "now" }, { ...row, evil: 1 }]) {
+      const r = await post(bad);
+      assert.equal(r.status, 400, JSON.stringify(bad));
+    }
+    assert.equal(t.bench.sessions.get("s-7"), undefined);
+    assert.equal((await health(t.base)).writable, true);
+    assert.equal((await post(row)).status, 200, "the same row, well-formed, is taken");
+  } finally {
+    await t.down();
+  }
+});
+
+test("btw is refused on a workspace thread", async () => {
+  const t = await up();
+  try {
+    await t.bench.openWorkspace("api");
+    const r = await fetch(t.base + "/sessions/w-api/btw", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ question: "q" }) });
+    assert.equal(r.status, 400);
+    assert.equal(((await r.json()) as { error: string }).error, "btw is only for bench sessions");
+  } finally {
+    await t.down();
+  }
+});
+
+test("a WebSocket frame over the body cap closes the socket", async () => {
+  const t = await up();
+  const small = await serve(t.bench, 0, "127.0.0.1", undefined, 1024);
+  try {
+    const w = new WebSocket(`ws://127.0.0.1:${small.port}/sessions/s-1/rpc`);
+    await opened(w);
+    const code = new Promise((r) => w.once("close", r));
+    w.send("x".repeat(4096));
+    assert.equal(await code, 1009);
+  } finally {
+    await small.close();
+    await t.down();
+  }
+});

@@ -43,7 +43,7 @@ process.stdin.on("data", (d) => {
       if (cmd.message === "task") { out({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 600" } }); return; } // a task left "running": no tool_execution_end
       if (cmd.message === "exchange") out({ type: "extension_ui_request", id: "w1", method: "setWidget", widgetKey: "harness:exchange", widgetLines: [JSON.stringify({ id: "e1", workspace: "api", dir: "out", text: "kl_workspace_start api", state: "sent" })] });
       if (cmd.message === "proc") {
-        // A real child, so a reschedule drill can actually kill it and see the pid check catch it dead.
+        // A real child, so a reschedule drill can actually kill it and see the restart mark it lost.
         const child = spawn("sleep", ["600"]);
         out({ type: "extension_ui_request", id: "w2", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "sleeper", command: "sleep 600", pid: child.pid, started: Date.now() }])] });
       }

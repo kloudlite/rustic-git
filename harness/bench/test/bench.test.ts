@@ -177,3 +177,34 @@ test("a prompt is refused while the folder is not writable", async () => {
     await b.stop();
   }
 });
+
+test("a pi that exits loses its session's open process rows, so the bench can idle", async () => {
+  const b = mk();
+  try {
+    await b.start();
+    await filed(b);
+    b.procs.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: process.pid, started: 1 }]);
+    assert.equal(b.busy(), true);
+    await assert.rejects(b.rpc("s-1", { type: "prompt", message: "crash" }));
+    await until(() => b.procs.all().find((p) => p.id === "p1")!.lost === true, 5_000, "p1 lost");
+    assert.equal(b.busy(), false);
+  } finally {
+    await b.stop();
+  }
+});
+
+test("boot skips a thread row with no file instead of crash-looping", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-core-"));
+  fs.writeFileSync(path.join(dir, "sessions.json"), JSON.stringify({ nextSeq: 2, rows: [
+    { id: "s-1", name: "session 1", seq: 1, created: 1, lastActive: 1, archived: false },
+    { id: "w-api", name: "api", seq: 0, created: 1, lastActive: 1, archived: false, kind: "workspace", workspace: "api", target: "api" },
+  ] }));
+  const b = mk(dir);
+  try {
+    await b.start();
+    await filed({ sessions: { all: () => b.sessions.all().filter((s) => s.id === "s-1") } } as unknown as Bench);
+    assert.equal(childOf(b, "w-api"), undefined, "the fileless thread is not opened");
+  } finally {
+    await b.stop();
+  }
+});
