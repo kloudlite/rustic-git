@@ -173,6 +173,13 @@ async fn snapshot(
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     }
     let parent_path = q.parent.as_ref().map(|p| dir.join(p));
+    // Refused BEFORE spawning: a `-p` this node no longer holds used to fail mid-stream after the
+    // 200, costing the puller a wasted transfer before it could try another parent. The puller
+    // reads any non-2xx as "next candidate", so a 409 here is a fallback, not a lost snapshot.
+    if let Some(p) = parent_path.as_ref().filter(|p| !p.exists()) {
+        tracing::warn!(%volume, snapshot = %name, parent = %p.display(), reason = "parent-absent", "peer.send.parent.missing");
+        return (StatusCode::CONFLICT, Body::empty()).into_response();
+    }
 
     // The puller declares what it will accept; a source that cannot fit a full send under it says
     // so BEFORE streaming. A truncated body after a 200 costs both sides the whole transfer, and
