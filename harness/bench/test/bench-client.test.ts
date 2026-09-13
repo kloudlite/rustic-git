@@ -46,6 +46,17 @@ test("rpc streams as pi:event, offline refuses and reads the cache, a restarted 
     assert.deepEqual(seen.filter((e) => e.pi === sid && e.type !== "response").map((e) => e.type), ["agent_start", "message_update", "agent_end"]);
     assert.equal((await c.messages(sid)).length, 2);
 
+    // Only the session's socket drops, /events stays up: the pending rpc is answered.
+    const pending = c.rpc(sid, { type: "get_state" });
+    setImmediate(() => (c as unknown as { sockets: Map<string, { terminate(): void }> }).sockets.get(sid)!.terminate());
+    const t0 = Date.now();
+    const r = await pending;
+    assert.equal(r.success, false);
+    assert.match(String(r.error), /bench connection closed/);
+    assert.ok(Date.now() - t0 < 1000, "answered promptly");
+    assert.equal(c.connected(), true, "/events is still up");
+    assert.equal((await c.rpc(sid, { type: "get_state" })).success, true, "a fresh socket opens on the next rpc");
+
     await stop(b.c);
     await settle();
     assert.equal(c.connected(), false);

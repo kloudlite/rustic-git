@@ -28,7 +28,7 @@ export class BenchClient {
   private backoff = 1000;
   private timer?: NodeJS.Timeout;
   private sockets = new Map<string, WebSocket>();
-  private waiting = new Map<string, (r: Record<string, unknown>) => void>();
+  private waiting = new Map<string, { w: WebSocket; done: (r: Record<string, unknown>) => void }>();
   private seq = 0;
 
   constructor(base: string, emit: Emit, cacheFile: string) {
@@ -105,7 +105,7 @@ export class BenchClient {
       this.setUp(false);
       for (const s of this.sockets.values()) s.terminate();
       this.sockets.clear();
-      for (const [id, r] of this.waiting) r({ type: "response", id, success: false, error: "the bench connection dropped; reconnecting" });
+      for (const [id, x] of this.waiting) x.done({ type: "response", id, success: false, error: "the bench connection dropped; reconnecting" });
       this.waiting.clear();
       if (this.closed) return;
       this.timer = setTimeout(() => this.start(), this.backoff);
@@ -156,18 +156,26 @@ export class BenchClient {
       } catch {
         return;
       }
-      const done = ev.type === "response" && ev.id ? this.waiting.get(ev.id) : undefined;
-      if (done) {
+      const x = ev.type === "response" && ev.id ? this.waiting.get(ev.id) : undefined;
+      if (x) {
         this.waiting.delete(ev.id!);
-        done(ev);
+        x.done(ev);
         return; // the awaited answer, not a stream event
       }
       this.emit({ ...ev, pi: session });
     });
-    w.on("close", () => {
+    // A session socket can drop on its own (a proxy's idle timeout) while
+    // /events stays up; whatever it was carrying must be answered, not hang.
+    const drop = () => {
       if (this.sockets.get(session) === w) this.sockets.delete(session);
-    });
-    w.on("error", () => undefined);
+      for (const [id, x] of this.waiting) {
+        if (x.w !== w) continue;
+        this.waiting.delete(id);
+        x.done({ type: "response", id, success: false, error: "bench connection closed" });
+      }
+    };
+    w.on("close", drop);
+    w.on("error", drop);
     return new Promise((resolve, reject) => {
       w.once("open", () => resolve(w));
       w.once("close", () => reject(new Error(OFFLINE)));
@@ -177,9 +185,12 @@ export class BenchClient {
   async rpc(session: string, cmd: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (!this.up) throw new Error(OFFLINE);
     const w = await this.socket(session);
+    // /events may have dropped, or this socket closed, while it opened.
+    if (!this.up) throw new Error(OFFLINE);
     const id = `h${++this.seq}`;
-    return new Promise((resolve) => {
-      this.waiting.set(id, resolve);
+    if (w.readyState !== WebSocket.OPEN) return { type: "response", id, success: false, error: "bench connection closed" };
+    return new Promise((done) => {
+      this.waiting.set(id, { w, done });
       w.send(JSON.stringify({ ...cmd, id }));
     });
   }

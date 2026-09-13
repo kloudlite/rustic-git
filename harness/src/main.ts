@@ -247,7 +247,8 @@ ipcMain.handle("preview:nav", (e, verb: unknown) => {
 });
 
 // Session ids as the bench checks them; only the bench's own ids are forwarded.
-const SESSION = /^(bench|[sw]-[A-Za-z0-9.-]+|e-[A-Za-z0-9.-]+)$/;
+// A DNS label after the prefix, as workspace and ephemeral ids are.
+const SESSION = /^(bench|btw-\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)$/;
 const needBench = () => {
   if (!bench) throw new Error("no bench: set HARNESS_BENCH to the bench's address");
   return bench;
@@ -260,7 +261,7 @@ ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
 });
 // The bench's own surface, method + path allow-listed: the renderer never
 // reaches anything else through this.
-const SID = "(bench|[swe]-[A-Za-z0-9.-]+)";
+const SID = "(bench|btw-\\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)";
 const BENCH_ROUTES = new RegExp(
   `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/btw$|^GET /(tasks|procs|healthz)$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^POST /import$`,
 );
