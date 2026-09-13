@@ -347,11 +347,29 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
             return;
         }
     };
-    // A replica mid-receive of the older transient just deleted here fails that one pull and
-    // self-heals on its next: the beat re-lists and re-sends against whatever `Ready` transient
-    // is current then, so a delete racing an in-flight send is a retry, not data loss.
+    // The cut each peer holds newest for this worktree (`VolumeReplica.status.branches`) is that
+    // peer's incremental `-p` for its next pull. Pruning it forced a FULL send that overran the
+    // SLO cap (env.replicated, 2026-09-13 01:56: the stop cut's parent sync point was gone on the
+    // source mid-pull). Kept until the peer advertises a newer one; keep-biased, a failed listing
+    // deletes nothing.
+    // ponytail: holds one extra read-only subvolume per lagging peer per worktree, and a dead
+    // peer's row pins its cut until `reap_dead_replicas` removes that row.
+    let peer_held: std::collections::HashSet<String> = match Api::<crd::VolumeReplica>::all(ctx.client.clone())
+        .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
+        .await
+    {
+        Ok(l) => l.items.into_iter().filter(|r| r.spec.node != ctx.node).filter_map(|r| r.status?.branches.remove(&worktree)).collect(),
+        Err(e) => {
+            tracing::warn!(kind = "VolumeReplica", %volume, reason = "retention", error = %e, "listing.failed");
+            return;
+        }
+    };
     for (name, s) in &ready {
         if name != head && s.spec.transient && s.spec.worktree == worktree && !seeded.contains(name) {
+            if peer_held.contains(name) {
+                tracing::info!(%volume, snapshot = %name, reason = "peer-parent", "snapshot.prune.kept");
+                continue;
+            }
             if let Err(e) = snap_api.delete(name, &Default::default()).await {
                 tracing::warn!(%volume, snapshot = %name, error = %e, "snapshot.prune.failed");
             }
@@ -405,6 +423,13 @@ mod snapshot_tests {
             path: "/apis/kloudlite.io/v1alpha1/environments".into(),
             status: 200,
             body: list_of("Environment", vec![]),
+        });
+        // And the replica rows: a peer's newest held cut is its next incremental parent.
+        routes.push(Route {
+            method: "GET",
+            path: "/apis/kloudlite.io/v1alpha1/volumereplicas".into(),
+            status: 200,
+            body: list_of("VolumeReplica", vec![]),
         });
         shared_test_ctx(pool, node, routes)
     }
@@ -847,6 +872,37 @@ mod snapshot_tests {
         retain(&ctx, "vol-1", "sync-ws-1-b").await;
         let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes, vec![format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")], "{deletes:?}");
+    }
+
+    /// env.replicated 2026-09-13: the stop cut's retain pruned the sync point a peer still held as
+    /// its newest, so the peer's incremental pull hit a missing `-p` and fell to a full send.
+    #[tokio::test]
+    async fn retention_keeps_the_cut_a_peer_holds_as_its_incremental_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = snapshot("sync-ws-1-a", "vol-1", "ws-1", "", true, crd::Phase::Ready);
+        let new = snapshot("stop-ws-1-2", "vol-1", "ws-1", "sync-ws-1-a", true, crd::Phase::Ready);
+        let items: Vec<serde_json::Value> = [&old, &new].into_iter().map(|s| serde_json::to_value(s.as_ref()).unwrap()).collect();
+        let replica = |branch: &str| {
+            serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "VolumeReplica",
+                               "metadata": {"name": "vol-1-node-b"},
+                               "spec": {"volume": "vol-1", "node": "node-b"},
+                               "status": {"phase": "Synced", "branches": {"ws-1": branch}}})
+        };
+        let routes = |r: serde_json::Value| {
+            vec![
+                Route { method: "GET", path: SNAPSHOTS_LIST.into(), status: 200, body: list_of("Snapshot", items.clone()) },
+                Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/volumereplicas".into(), status: 200, body: list_of("VolumeReplica", vec![r]) },
+                Route { method: "DELETE", path: format!("{SNAPSHOTS_LIST}/sync-ws-1-a"), status: 200, body: serde_json::json!({}) },
+            ]
+        };
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes(replica("sync-ws-1-a")));
+        retain(&ctx, "vol-1", "stop-ws-1-2").await;
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "the peer's parent must survive: {:?}", rec.calls());
+
+        // Once the peer holds the newer cut, the older one goes.
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes(replica("stop-ws-1-2")));
+        retain(&ctx, "vol-1", "stop-ws-1-2").await;
+        assert!(rec.calls().iter().any(|c| c == &format!("DELETE {SNAPSHOTS_LIST}/sync-ws-1-a")), "{:?}", rec.calls());
     }
 
     /// The previous transient is the btrfs send parent of a still-`Working` new one — deleting it

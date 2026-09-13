@@ -2362,3 +2362,23 @@ fn agent_pod(node: &str, ip: &str) -> serde_json::Value {
         "status": {"podIP": ip},
     })
 }
+
+/// env.replicated 2026-09-13: the chain to the cut being pulled runs through a sync point the owner
+/// already pruned, so the ancestor walk finds nothing held. The fallback is my newest held cut of
+/// the same worktree (the one retain spares for me), never a full send and never another worktree's.
+#[test]
+fn a_broken_parent_chain_falls_back_to_my_newest_held_cut_of_the_worktree() {
+    let snap = |name: &str, worktree: &str, gen: &str| -> crd::Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "annotations": {crd::SYNCED_GENERATION: gen}},
+            "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
+            "status": {"phase": "ready"},
+        }))
+        .unwrap()
+    };
+    let ready = vec![snap("sync-a", "ws-1", "1"), snap("sync-b", "ws-1", "2"), snap("sync-x", "ws-2", "9"), snap("stop-c", "ws-1", "3")];
+    let have: HashSet<String> = ["sync-a".into(), "sync-b".into(), "sync-x".into()].into_iter().collect();
+    assert_eq!(newest_held_of_worktree("stop-c", &ready, &have).as_deref(), Some("sync-b"));
+    assert_eq!(newest_held_of_worktree("stop-c", &ready, &HashSet::new()), None, "nothing held: full send");
+}

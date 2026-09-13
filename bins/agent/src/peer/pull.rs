@@ -231,6 +231,19 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
     None
 }
 
+/// When the `spec.parent` chain is broken (an intermediate sync point already pruned), my newest
+/// held Ready transient of the same worktree. The source keeps it (retain spares every peer's
+/// advertised `branches` cut), and `btrfs send -p` needs only a shared subvolume, not lineage —
+/// so a pruned middle costs an incremental from further back rather than a full send.
+pub(crate) fn newest_held_of_worktree(name: &str, ready: &[crd::Snapshot], have: &HashSet<String>) -> Option<String> {
+    let worktree = &ready.iter().find(|s| s.name_any() == name)?.spec.worktree;
+    ready
+        .iter()
+        .filter(|s| s.spec.transient && &s.spec.worktree == worktree && s.name_any() != name && have.contains(&s.name_any()))
+        .max_by_key(|s| (crd::transient_generation_of(s), s.name_any()))
+        .map(|s| s.name_any())
+}
+
 /// Local snapshots whose CR is gone entirely — retention's disk-side convergence. Pure, so
 /// `pull_volume`'s "which locals to drop" decision is testable without real btrfs (`drop_snapshot`
 /// itself is the engine's own concern, covered by `engine_snapshot.rs`'s loopback tests).
@@ -340,7 +353,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             continue;
         }
         let parent = by_name.get(&name).map(|(p, _)| p.clone()).filter(|p| !p.is_empty());
-        let my_parent = nearest_held_ancestor(parent, &by_name, &have);
+        let my_parent = nearest_held_ancestor(parent, &by_name, &have).or_else(|| newest_held_of_worktree(&name, &ready, &have));
 
         let mut pulled = false;
         for (source, addr) in &addrs {
@@ -357,7 +370,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             let timeout = send_timeout(&ctx.settings);
             let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes, timeout).await;
             if result.is_err() && my_parent.is_some() {
-                tracing::warn!(%volume, snapshot = %name, node = source, reason = "incremental-failed", "pull.retried");
+                tracing::warn!(%volume, snapshot = %name, node = source, parent = my_parent.as_deref().unwrap_or(""), reason = "incremental-failed", "pull.retried");
                 result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes, timeout).await;
             }
             match result {
@@ -512,6 +525,8 @@ pub async fn pull_one(
             false
         }
         Ok(n) => {
+            tracing::info!(%volume, snapshot = %name, parent = parent.unwrap_or(""), mode = if parent.is_some() { "incremental" } else { "full" },
+                           bytes = n, ms = started.elapsed().as_millis() as u64, "pull.received");
             // Counted whatever `btrfs receive` then makes of them: these are wire bytes, and a
             // transfer that arrived and failed to apply still cost the link exactly this much.
             metrics::counter!("snapshot_transfer_bytes_total", "direction" => "pull").increment(n);

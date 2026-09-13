@@ -173,6 +173,10 @@ async fn snapshot(
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     }
     let parent_path = q.parent.as_ref().map(|p| dir.join(p));
+    // The puller sees a truncated body and retries full; this line is what says why.
+    if let Some(p) = parent_path.as_ref().filter(|p| !p.exists()) {
+        tracing::warn!(%volume, snapshot = %name, parent = %p.display(), reason = "parent-absent", "peer.send.parent.missing");
+    }
 
     // The puller declares what it will accept; a source that cannot fit a full send under it says
     // so BEFORE streaming. A truncated body after a 200 costs both sides the whole transfer, and
