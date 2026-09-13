@@ -66,6 +66,17 @@ pub struct SshSessionClaims {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchSessionClaims {
+    pub sub: String,
+    pub bench: String,
+    pub region: String,
+    pub jti: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub typ: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CliClaims {
     pub sub: String,
     pub name: String,
@@ -209,6 +220,28 @@ impl Jwt {
 
     pub fn verify_ssh_session(&self, token: &str) -> Result<SshSessionClaims> {
         self.verify_typed(token, "ssh-session")
+    }
+
+    /// A 60 s token bound to one bench, minted for the gateway tunnel — like
+    /// `mint_ssh_session` but for a bench, never a workspace.
+    pub fn mint_bench_session(&self, owner: &str, bench: &str, region: &str) -> Result<(String, BenchSessionClaims)> {
+        let now = now()?;
+        let claims = BenchSessionClaims {
+            sub: owner.to_string(),
+            bench: bench.to_string(),
+            region: region.to_string(),
+            jti: new_jti(),
+            iat: now,
+            exp: now + SSH_SESSION_TTL_SECS,
+            typ: "bench-session".into(),
+        };
+        let tok = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| err(format!("minting bench session token: {e}")))?;
+        Ok((tok, claims))
+    }
+
+    pub fn verify_bench_session(&self, token: &str) -> Result<BenchSessionClaims> {
+        self.verify_typed(token, "bench-session")
     }
 
     /// A revocable, month-long login for the CLI — a `jti` lets it be revoked without
@@ -357,6 +390,19 @@ mod tests {
         assert!(j.verify(&tok).is_err(), "a session token is not a login");
         let login = j.mint("a@b.c", "A", Some("a")).unwrap();
         assert!(j.verify_ssh_session(&login).is_err(), "a login is not a session token");
+    }
+
+    #[test]
+    fn a_bench_session_is_sixty_seconds_and_never_opens_a_workspace() {
+        let j = Jwt::new("0123456789abcdef0123456789abcdef").unwrap();
+        let (tok, c) = j.mint_bench_session("alice", "bench-1", "r1").unwrap();
+        assert_eq!(c.exp - c.iat, SSH_SESSION_TTL_SECS);
+        assert_eq!(j.verify_bench_session(&tok).unwrap().bench, "bench-1");
+        assert_eq!(c.jti.len(), 32);
+        assert!(j.verify_ssh_session(&tok).is_err(), "a bench token is not a workspace token");
+        let (ws, _) = j.mint_ssh_session("alice", "bench-1", "r1").unwrap();
+        assert!(j.verify_bench_session(&ws).is_err(), "a workspace token is not a bench token");
+        assert!(j.verify(&tok).is_err(), "a session token is not a login");
     }
 
     #[test]
