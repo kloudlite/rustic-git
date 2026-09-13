@@ -39,18 +39,24 @@ test("a killed bench reschedules: sessions reopen, the running task and process 
   fs.writeFileSync(term, "");
 
   const a = run(["--dir", dir, "--port", "0"], { NODE_NAME: "node-a", TERMINATION_LOG: term });
+  let b: ReturnType<typeof run> | undefined;
+  let c: ReturnType<typeof run> | undefined;
+  const sockets: WebSocket[] = [];
+  try {
   const aOut = await line(a.out, /listening on 0\.0\.0\.0:\d+ \(running\)/);
   const aPort = portOf(aOut);
   const aBase = `http://127.0.0.1:${aPort}`;
 
   // s-1 (the bench's default session) picks up a task that never finishes.
   const wsTask = new WebSocket(`ws://127.0.0.1:${aPort}/sessions/s-1/rpc`);
+  sockets.push(wsTask);
   await new Promise((r) => wsTask.once("open", r));
   wsTask.send(JSON.stringify({ id: "1", type: "prompt", message: "task" }));
 
   // A second session picks up a live background process.
   const s2 = (await j(aBase, "POST", "/sessions")).body as { id: string };
   const wsProc = new WebSocket(`ws://127.0.0.1:${aPort}/sessions/${s2.id}/rpc`);
+  sockets.push(wsProc);
   const procDone = new Promise<void>((r) => wsProc.on("message", (d) => JSON.parse(d.toString()).type === "agent_end" && r()));
   await new Promise((r) => wsProc.once("open", r));
   wsProc.send(JSON.stringify({ id: "1", type: "prompt", message: "proc" }));
@@ -78,7 +84,7 @@ test("a killed bench reschedules: sessions reopen, the running task and process 
   // A second instance, a different node, same folder: it must take the lock
   // at once (the flock child dies with the killed bench's stdin pipe) rather
   // than exit 75.
-  const b = run(["--dir", dir, "--port", "0"], { NODE_NAME: "node-b", TERMINATION_LOG: term });
+  b = run(["--dir", dir, "--port", "0"], { NODE_NAME: "node-b", TERMINATION_LOG: term });
   const bOut = await line(b.out, /listening on 0\.0\.0\.0:\d+ \(running\)/);
   const bPort = portOf(bOut);
   const bBase = `http://127.0.0.1:${bPort}`;
@@ -99,11 +105,15 @@ test("a killed bench reschedules: sessions reopen, the running task and process 
   assert.equal(typeof p1?.ended, "number", "and a numeric ended");
 
   // The new instance holds the lock: a third would exit 75 naming it.
-  const c = run(["--dir", dir, "--port", "0"], { TERMINATION_LOG: term });
+  c = run(["--dir", dir, "--port", "0"], { TERMINATION_LOG: term });
   assert.equal(await exited(c.c), 75);
   assert.match(c.out(), /locked by node-b pid \d+/);
 
   b.c.kill("SIGTERM");
   assert.equal(await exited(b.c), 0);
-  fs.rmSync(dir, { recursive: true, force: true });
+  } finally {
+    for (const w of sockets) w.terminate();
+    for (const x of [a.c, b?.c, c?.c]) if (x && x.exitCode === null && x.signalCode === null) x.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
