@@ -5,14 +5,14 @@
  * KL_BENCH_IDLE_SECS in its env; its readiness probe is `harness-bench --ping`;
  * the agent reads exit 75 as FolderLocked and a Succeeded pod as asleep.
  * Children inherit this process's env, so KL_TEAM reaches pi's extensions as is.
+ *
+ * Only node: builtins are imported statically: `--ping` is an exec readiness
+ * probe with a 1 s default timeout, and type-stripping the bench, server, ws and
+ * pi SDK under gVisor would flap the bench unready. The server path imports them.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { Bench } from "./bench.ts";
-import { Idle } from "./idle.ts";
-import { FolderLocked, takeLock, type Lock } from "./lock.ts";
-import { serve } from "./server.ts";
 
 const { values: a } = parseArgs({
   options: {
@@ -30,7 +30,7 @@ const { values: a } = parseArgs({
 });
 
 if (a.ping) {
-  const ok = await fetch(`http://127.0.0.1:${a.port}/healthz`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
+  const ok = await fetch(`http://127.0.0.1:${a.port}/healthz`, { signal: AbortSignal.timeout(900) }).then((r) => r.ok, () => false);
   process.exit(ok ? 0 : 1);
 }
 
@@ -51,7 +51,8 @@ if (!Number.isFinite(idleMs) || idleMs < 0) {
   process.exit(2);
 }
 
-let lock: Lock | undefined;
+const { FolderLocked, takeLock } = await import("./lock.ts");
+let lock: { release(): void } | undefined;
 if (!readOnly) {
   try {
     lock = await takeLock(dir, { wait: a.wait, onWaiting: (h) => console.error(`harness-bench: waiting on ${h} for ${dir}/.lock`) });
@@ -63,6 +64,7 @@ if (!readOnly) {
   }
 }
 
+const [{ Bench }, { Idle }, { serve }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts")]);
 const bench = new Bench({ dir, readOnly, model: a.model });
 await bench.start();
 if (!readOnly) {
@@ -89,10 +91,16 @@ async function shutdown(why?: string) {
     terminationLog(why);
     console.error(`harness-bench: ${why}: no client and nothing running for ${a["idle-secs"]} s`);
   }
-  bench.stop();
-  await srv.close();
-  lock?.release();
-  process.exit(0);
+  // Whatever fails while closing, the lock goes and the exit stays 0: the agent reads non-zero as a crash.
+  try {
+    await bench.stop();
+    await srv.close();
+  } catch (e) {
+    console.error(`harness-bench: while stopping: ${(e as Error).message}`);
+  } finally {
+    lock?.release();
+    process.exit(0);
+  }
 }
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());

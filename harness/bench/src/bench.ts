@@ -72,9 +72,10 @@ export class Bench {
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
 
-  stop(): void {
-    for (const c of this.children.values()) c.stop();
+  async stop(): Promise<void> {
+    const done = [...this.children.values()].map((c) => c.stop());
     this.children.clear();
+    await Promise.all(done);
   }
 
   private open(s: SessionRow): RpcChild {

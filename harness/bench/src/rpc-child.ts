@@ -60,8 +60,15 @@ export class RpcChild {
     this.onEvent({ type: "started", host: "bench", model: o.model, resumed: !!o.file, forked: !!o.fork });
   }
 
-  stop(): void {
-    this.child?.kill();
+  /** Resolves once pi has exited; one still up after timeoutMs is SIGKILLed, so no stop leaves a pi behind. */
+  stop(timeoutMs = 5_000): Promise<void> {
+    const c = this.child;
+    if (!c || c.exitCode !== null || c.signalCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const t = setTimeout(() => (c.kill("SIGKILL"), resolve()), timeoutMs).unref();
+      c.once("exit", () => (clearTimeout(t), resolve()));
+      c.kill();
+    });
   }
 
   send(cmd: Record<string, unknown>): Promise<PiEvent> {
