@@ -42,6 +42,8 @@ Env: `KL_MODEL` (default model, overrides `--model`'s default), `KL_BENCH_IDLE_S
 
 To bring this laptop's old sessions onto the bench, run "Import this laptop's sessions into the bench" from the palette. Running it twice changes nothing.
 
+A workspace tab is a session on the bench too: its pi runs there and its tools run on the workspace's tool server, found through `/v1`. Locally, `KL_TOOLS_ADDRESS=127.0.0.1:<port>` points every workspace session at one tool server, such as the local end of `kl-connect ws ide <workspace>`.
+
 Two env vars help when looking at the UI from a terminal:
 
     HARNESS_SHOT=out.png    capture the window once after first paint, then exit
