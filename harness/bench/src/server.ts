@@ -10,7 +10,7 @@ import { Idle } from "./idle.ts";
  * the client's and are rewritten only for the trip through pi (RpcChild mints
  * its own), so two devices can both send id "1".
  */
-const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|not writable|in flight|only open session/.test(e.message) ? 409 : 400);
+const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|not writable|in flight|only open session|belongs to/.test(e.message) ? 409 : 400);
 
 const TOO_LARGE = "request body too large";
 const MAX_BODY = 64 * 1024 * 1024;

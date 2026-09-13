@@ -41,3 +41,24 @@ test("a workspace thread opens over HTTP, streams on its socket and reads back a
     await srv.close();
   }
 });
+
+test("an ephemeral id already held under another workspace is refused with 409, and the bench stays writable", async () => {
+  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-srvt-")), readOnly: false, model: "fake/m", bin: FAKE });
+  await bench.start();
+  const srv = await serve(bench, 0);
+  try {
+    const base = `http://127.0.0.1:${srv.port}`;
+    const j = async (method: string, p: string) => {
+      const r = await fetch(base + p, { method });
+      return { status: r.status, body: await r.json() };
+    };
+
+    assert.equal((await j("POST", "/workspaces/a/eph/x/session")).status, 200);
+    assert.equal((await j("POST", "/workspaces/b/eph/x/session")).status, 409);
+    const health = await j("GET", "/healthz");
+    assert.equal(health.body.writable, true);
+  } finally {
+    await bench.stop();
+    await srv.close();
+  }
+});
