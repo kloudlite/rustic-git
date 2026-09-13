@@ -173,6 +173,9 @@ async fn snapshot(
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     }
     let parent_path = q.parent.as_ref().map(|p| dir.join(p));
+    // Read now, before the send: a parent retain prunes between the puller's choice and this line
+    // is exactly the case a later `snapshot.send.failed` has to be able to name.
+    let parent_present = parent_path.as_ref().map(|p| p.exists());
 
     // The puller declares what it will accept; a source that cannot fit a full send under it says
     // so BEFORE streaming. A truncated body after a 200 costs both sides the whole transfer, and
@@ -235,6 +238,8 @@ async fn snapshot(
         stderr_task,
         volume: volume_id,
         name: snapshot_name,
+        parent: q.parent.clone(),
+        parent_present,
         started: std::time::Instant::now(),
         sent: 0,
         _guard: guard,
@@ -269,6 +274,9 @@ struct KillOnDrop {
     stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
     volume: String,
     name: String,
+    parent: Option<String>,
+    /// Whether `parent` was on this disk when the send was asked for; `None` for a full send.
+    parent_present: Option<bool>,
     /// The transfer metrics ride on this wrapper because it is the only thing that sees both ends
     /// of a streamed send: every byte passes through `poll_read`, and `Drop` is the one point that
     /// runs whether the puller finished, timed out or disconnected.
@@ -302,6 +310,8 @@ impl Drop for KillOnDrop {
         let Some(mut child) = self.child.take() else { return };
         let stderr_task = self.stderr_task.take();
         let (volume, name) = (self.volume.clone(), self.name.clone());
+        let (parent, parent_present) = (self.parent.clone().unwrap_or_default(), self.parent_present);
+        let (sent_bytes, ms) = (self.sent, self.started.elapsed().as_millis() as u64);
         tokio::spawn(async move {
             let _ = child.kill().await;
             let exit = child.wait().await;
@@ -310,7 +320,7 @@ impl Drop for KillOnDrop {
                     Some(t) => t.await.unwrap_or_default(),
                     None => Vec::new(),
                 };
-                tracing::warn!(%volume, snapshot = %name, status = ?exit, stderr = %tail_str(&stderr, 300), "snapshot.send.failed");
+                tracing::warn!(%volume, snapshot = %name, %parent, ?parent_present, sent_bytes, ms, status = ?exit, stderr = %tail_str(&stderr, 300), "snapshot.send.failed");
             }
         });
     }

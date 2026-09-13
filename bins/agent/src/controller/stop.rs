@@ -183,8 +183,10 @@ pub async fn start_placement(
 
     // Intersection across every parent: a candidate must be up to date for ALL of them.
     let mut candidates: Option<HashSet<String>> = None;
+    let mut final_cuts: Vec<String> = Vec::new();
     for p in parents {
         let newest = crate::peer::newest_transient(ctx, &id, &p.name).await?;
+        final_cuts.push(format!("{}={}", p.name, newest.as_deref().unwrap_or("none")));
         let ok: HashSet<String> =
             crate::peer::up_to_date_nodes(&p.name, newest.as_deref(), &live).into_iter().collect();
         candidates = Some(match candidates {
@@ -250,7 +252,12 @@ pub async fn start_placement(
         // Nobody named: whichever peer is first up to date takes it. The string is for the log
         // and the caller's `is_some()`, never a node a claim could be routed to.
         true => {
-            tracing::info!(volume = %id, reason = "retiring", "volume.released");
+            // Enough to tell, afterwards, a release that left the only copy of the cut here: the
+            // cut each parent was waiting on, which live peers had any replica row at all (none is
+            // up to date by construction of this branch), and what the owner last said.
+            let replica_nodes: Vec<&str> = live.iter().map(|r| r.spec.node.as_str()).collect();
+            let replicated: Vec<String> = parents.iter().map(|p| format!("{}={}", p.name, p.replicated)).collect();
+            tracing::info!(volume = %id, reason = "retiring", ?final_cuts, up_to_date_peers = 0, ?replica_nodes, ?replicated, "volume.released");
             Ok(Some("the first up-to-date peer".to_string()))
         }
         false => {

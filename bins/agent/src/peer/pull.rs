@@ -356,9 +356,13 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             // deadline it started with, nothing here cancels or extends one already streaming.
             let timeout = send_timeout(&ctx.settings);
             let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes, timeout).await;
-            if result.is_err() && my_parent.is_some() {
-                tracing::warn!(%volume, snapshot = %name, node = source, reason = "incremental-failed", "pull.retried");
+            if let (Err(e), Some(parent)) = (&result, my_parent.as_deref()) {
+                // `parent_requested` + the error: the source side's `snapshot.send.failed` for the
+                // same snapshot says whether that parent was on its disk.
+                tracing::warn!(%volume, snapshot = %name, node = source, parent_requested = %parent, error = %e, reason = "incremental-failed", "pull.retried");
+                let full = std::time::Instant::now();
                 result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes, timeout).await;
+                tracing::info!(%volume, snapshot = %name, node = source, ok = result.is_ok(), full_ms = full.elapsed().as_millis() as u64, "pull.full.done");
             }
             match result {
                 Ok(()) => {
