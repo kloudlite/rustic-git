@@ -64,6 +64,7 @@ mod push;
 
 pub(crate) mod scope;
 
+mod bench;
 mod volumes;
 // `pub`: the SLO probe reads `KNOWN_CENTRAL` so its rollout yield asks about exactly the
 // workloads a roll moves — one list, not a second copy that drifts.
@@ -83,6 +84,7 @@ use environments::{
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
+use bench::{attach_bench, bench_session, create_bench, detach_bench, get_bench, start_bench, stop_bench};
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
@@ -210,6 +212,12 @@ pub fn router(state: Arc<ApiState>) -> Router {
             axum::routing::delete(delete_snapshot),
         )
         .route("/v1/volumes/{name}/refs", get(volume_refs))
+        .route("/v1/bench", get(get_bench).post(create_bench))
+        .route("/v1/bench/start", post(start_bench))
+        .route("/v1/bench/stop", post(stop_bench))
+        .route("/v1/bench/session", post(bench_session))
+        .route("/v1/bench/attach", post(attach_bench))
+        .route("/v1/bench/detach", post(detach_bench))
         .with_state(state)
 }
 
@@ -276,6 +284,17 @@ pub(crate) fn workspace_cost(quota_gb: u64, res: &crd::PodResources) -> Vec<(cra
     vec![
         (Dim::Workspaces, 1),
         (Dim::DiskGb, quota_gb),
+        (Dim::Cpu, millicores(&res.cpu_limit).div_ceil(1000)),
+        (Dim::MemoryGb, mebibytes(&res.memory_limit).div_ceil(1024)),
+    ]
+}
+
+
+/// What waking or creating a bench costs: cpu and memory only — no disk (its folder is on the
+/// region share) and no count (decision 3: a bench is not a quota dimension).
+pub(crate) fn bench_cost(res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::{mebibytes, millicores, Dim};
+    vec![
         (Dim::Cpu, millicores(&res.cpu_limit).div_ceil(1000)),
         (Dim::MemoryGb, mebibytes(&res.memory_limit).div_ceil(1024)),
     ]

@@ -17,23 +17,34 @@ use super::*;
 /// The install itself stays best effort: the pod's key mount is optional (`k8s::user_key_volume`),
 /// so a key that lands late — or never — costs the workspace its git identity, not its existence.
 pub(crate) async fn install_user_key_after_placed(s: &ApiState, c: &kube::Client, owner: &str, team: &str, id: &str) {
+    install_user_key_when::<crd::Workspace>(s, c, owner, team, id, |w| {
+        w.status.as_ref().is_some_and(|st| st.conditions.iter().any(|cd| cd.type_ == "Placed" && cd.status == "True"))
+    })
+    .await
+}
+
+
+/// The same wait for any parent that lands in `ws_namespace(owner, team)`: a bench is claimed by a
+/// node the way a workspace is, and `placed` says how each kind reports it.
+pub(crate) async fn install_user_key_when<K>(s: &ApiState, c: &kube::Client, owner: &str, team: &str, id: &str, placed: fn(&K) -> bool)
+where
+    K: kube::Resource<Scope = kube::core::ClusterResourceScope, DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
     // Nothing to install and nothing to wait for.
     if s.keys.is_none() {
         return;
     }
-    let api: Api<crd::Workspace> = Api::all(c.clone());
+    let api: Api<K> = Api::all(c.clone());
     for _ in 0..10 {
-        if let Ok(Some(w)) = api.get_opt(id).await {
-            if w.status.is_some_and(|st| {
-                st.conditions.iter().any(|cd| cd.type_ == "Placed" && cd.status == "True")
-            }) {
+        if let Ok(Some(o)) = api.get_opt(id).await {
+            if placed(&o) {
                 write_user_key(s, c, &crd::ws_namespace(owner, team), owner).await;
                 return;
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
-    tracing::info!(%owner, workspace = %id, reason = "not-placed", "workspace.keys.deferred");
+    tracing::info!(%owner, parent = %id, reason = "not-placed", "workspace.keys.deferred");
 }
 
 

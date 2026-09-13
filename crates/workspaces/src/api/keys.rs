@@ -136,6 +136,36 @@ pub async fn run_beat(s: Arc<ApiState>) {
         project_all(&s).await;
         prune_namespaces(&s).await;
         prune_builders(&s).await;
+        readonly_departed_benches(&s).await;
+    }
+}
+
+/// Decision 10's beat half: a Full bench whose owner has left its team goes ReadOnly within one
+/// beat. It never sets Full — a person's own next `/v1/bench` call does that — so a directory that
+/// cannot answer (`teams_for` fails closed to empty) only ever takes tools away.
+pub async fn readonly_departed_benches(s: &ApiState) {
+    let (Some(c), Some(_)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
+    let api: Api<crd::Bench> = Api::all(c.clone());
+    let benches = match api.list(&Default::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
+            return;
+        }
+    };
+    for b in benches {
+        let (owner, team) = (&b.spec.owner, &b.spec.team);
+        if team.eq_ignore_ascii_case(owner) || b.spec.access != crd::BenchAccess::Full {
+            continue;
+        }
+        if super::scope::teams_for(s, owner).await.iter().any(|t| t == team) {
+            continue;
+        }
+        let patch = serde_json::json!({"spec": {"access": crd::BenchAccess::ReadOnly}});
+        match api.patch(&b.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
+            Ok(_) => tracing::info!(%owner, %team, "bench.access.readonly"),
+            Err(e) => tracing::warn!(%owner, %team, error = %e, "bench.access.readonly.failed"),
+        }
     }
 }
 

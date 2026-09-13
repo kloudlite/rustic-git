@@ -437,7 +437,7 @@ pub(crate) async fn get_ws(
 pub(super) const GATEWAY_DOMAIN: &str = "khost.dev";
 
 
-pub(super) fn gateway_url(region: &str, id: &str) -> String {
+pub(crate) fn gateway_url(region: &str, id: &str) -> String {
     format!("wss://ws-{region}.{GATEWAY_DOMAIN}/tunnel/{id}")
 }
 
