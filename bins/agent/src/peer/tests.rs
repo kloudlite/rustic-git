@@ -527,6 +527,9 @@ fi
     let send_bin = send_bin.to_string_lossy().into_owned();
     let source_pool = tmp.path().join("source-pool");
     std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/vol-1-child")).unwrap();
+    // The source holds the parent too, so the send starts and the failure is the RECEIVE's; a
+    // parent the source lacks is refused with 409 before any stream (see the next test).
+    std::fs::create_dir_all(source_pool.join("vol/vol-1/snap/vol-1-parent")).unwrap();
     let (client, _rec) = mock_client(vec![]);
     let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin, test_settings());
     // `agent_pod_addr` hard-codes `:8444` (the peer listener's fixed port in production), so
@@ -2363,22 +2366,68 @@ fn agent_pod(node: &str, ip: &str) -> serde_json::Value {
     })
 }
 
-/// env.replicated 2026-09-13: the chain to the cut being pulled runs through a sync point the owner
-/// already pruned, so the ancestor walk finds nothing held. The fallback is my newest held cut of
-/// the same worktree (the one retain spares for me), never a full send and never another worktree's.
+/// Candidate order: ancestor, then my advertised cut (only if still held), then full; no repeats.
 #[test]
-fn a_broken_parent_chain_falls_back_to_my_newest_held_cut_of_the_worktree() {
-    let snap = |name: &str, worktree: &str, gen: &str| -> crd::Snapshot {
-        serde_json::from_value(serde_json::json!({
-            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
-            "metadata": {"name": name, "annotations": {crd::SYNCED_GENERATION: gen}},
-            "spec": {"volume": "vol-1", "owner": "alice", "worktree": worktree, "parent": "", "transient": true},
-            "status": {"phase": "ready"},
-        }))
-        .unwrap()
-    };
-    let ready = vec![snap("sync-a", "ws-1", "1"), snap("sync-b", "ws-1", "2"), snap("sync-x", "ws-2", "9"), snap("stop-c", "ws-1", "3")];
-    let have: HashSet<String> = ["sync-a".into(), "sync-b".into(), "sync-x".into()].into_iter().collect();
-    assert_eq!(newest_held_of_worktree("stop-c", &ready, &have).as_deref(), Some("sync-b"));
-    assert_eq!(newest_held_of_worktree("stop-c", &ready, &HashSet::new()), None, "nothing held: full send");
+fn parent_candidates_try_the_ancestor_then_my_advertised_cut_then_full() {
+    let have: HashSet<String> = ["sync-a".into(), "sync-x".into()].into_iter().collect();
+    assert_eq!(parent_candidates(Some("sync-x".into()), Some("sync-a"), &have), vec![Some("sync-x".into()), Some("sync-a".into()), None]);
+    assert_eq!(parent_candidates(None, Some("sync-a"), &have), vec![Some("sync-a".into()), None], "broken chain: the advertised cut");
+    assert_eq!(parent_candidates(Some("sync-a".into()), Some("sync-a"), &have), vec![Some("sync-a".into()), None]);
+    assert_eq!(parent_candidates(None, Some("gone"), &have), vec![None], "an advertised cut no longer on disk is no parent");
+}
+
+/// env.replicated 2026-09-13 plus review round 1, finding 4: I pulled `sync-x` but had not
+/// advertised it yet, so the owner's retain (which spares only my ADVERTISED `sync-a`) pruned it.
+/// My next pull must not go full: the source refuses `-p sync-x` with 409 before streaming, and I
+/// retry with `-p sync-a`, which it still holds. The fake `btrfs send` records its argv.
+#[tokio::test]
+async fn a_pruned_unadvertised_parent_retries_with_my_advertised_cut_not_a_full_send() {
+    let tmp = tempfile::tempdir().unwrap();
+    for held in ["sync-a", "sync-x"] {
+        std::fs::create_dir_all(tmp.path().join(format!("vol/vol-1/snap/{held}"))).unwrap();
+    }
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let bin = bin_dir.join("btrfs");
+    std::fs::write(&bin, "#!/bin/sh\nif [ \"$1\" = \"receive\" ]; then cat >/dev/null; mkdir -p \"$2/stop-c\"; exit 0; fi\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let argv = bin_dir.join("send-argv");
+    let send_bin = bin_dir.join("btrfs-send");
+    std::fs::write(&send_bin, format!("#!/bin/sh\necho \"$@\" >> \"{}\"\nprintf 'bytes'\nexit 0\n", argv.display())).unwrap();
+    std::fs::set_permissions(&send_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let source_pool = tmp.path().join("source-pool");
+    for held in ["sync-a", "stop-c"] {
+        std::fs::create_dir_all(source_pool.join(format!("vol/vol-1/snap/{held}"))).unwrap();
+    }
+    let (client, _rec) = mock_client(vec![]);
+    let peer_state = PeerState::new(client, source_pool.to_string_lossy().into(), "node-a".into(), "s3cret".into(), send_bin.to_string_lossy().into(), test_settings());
+    let peer_server = serve_on_the_peer_port(router(peer_state)).await;
+
+    let pod = serde_json::json!({
+        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "agent-a"},
+        "spec": {"serviceAccountName": "kloudlite-agent"}, "status": {"podIP": "127.0.0.1"},
+    });
+    // `sync-x`'s CR is still listed here (the prune raced this pass), so the ancestor walk picks it.
+    let routes = vec![
+        Route { method: "GET", path: SNAPSHOTS.into(), status: 200, body: list_of("Snapshot", vec![
+            ready_snapshot("sync-a", "vol-1", ""), ready_snapshot("sync-x", "vol-1", "sync-a"), ready_snapshot("stop-c", "vol-1", "sync-x"),
+        ]) },
+        Route { method: "GET", path: "/api/v1/namespaces/kube-system/pods".into(), status: 200, body: list_of("Pod", vec![pod]) },
+        not_found(format!("{VOLREPLICAS}/vol-1.node-b")),
+        Route { method: "POST", path: VOLREPLICAS.into(), status: 201, body: replica_of("vol-1", "node-b", "Syncing") },
+        Route { method: "PUT", path: format!("{VOLREPLICAS}/vol-1.node-b/status"), status: 200, body: replica_of("vol-1", "node-b", "Synced") },
+    ];
+    let (ctx, _rec) = test_ctx(tmp.path(), "node-b", routes);
+    let mut mine = replica_of("vol-1", "node-b", "Synced");
+    mine["status"]["branches"] = serde_json::json!({"ws-1": "sync-a"});
+    let beat = beat_of(vec![], vec![replica_of("vol-1", "node-a", "Synced"), mine], vec![]);
+
+    pull_volume(&ctx, &beat, &bin.to_string_lossy(), &peer_http_client().unwrap(), "s3cret", "vol-1", &[]).await;
+    peer_server.stop().await;
+
+    assert!(tmp.path().join("vol/vol-1/snap/stop-c").exists(), "the pull must land");
+    let sends = std::fs::read_to_string(&argv).unwrap();
+    let lines: Vec<&str> = sends.lines().collect();
+    assert_eq!(lines.len(), 1, "sync-x is refused before any send, and no full send runs: {sends}");
+    assert!(lines[0].contains("-p") && lines[0].contains("snap/sync-a"), "the retry is incremental on my advertised cut: {sends}");
 }

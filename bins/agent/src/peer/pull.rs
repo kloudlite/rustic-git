@@ -231,17 +231,19 @@ fn nearest_held_ancestor(mut cur: Option<String>, by_name: &HashMap<String, (Str
     None
 }
 
-/// When the `spec.parent` chain is broken (an intermediate sync point already pruned), my newest
-/// held Ready transient of the same worktree. The source keeps it (retain spares every peer's
-/// advertised `branches` cut), and `btrfs send -p` needs only a shared subvolume, not lineage —
-/// so a pruned middle costs an incremental from further back rather than a full send.
-pub(crate) fn newest_held_of_worktree(name: &str, ready: &[crd::Snapshot], have: &HashSet<String>) -> Option<String> {
-    let worktree = &ready.iter().find(|s| s.name_any() == name)?.spec.worktree;
-    ready
-        .iter()
-        .filter(|s| s.spec.transient && &s.spec.worktree == worktree && s.name_any() != name && have.contains(&s.name_any()))
-        .max_by_key(|s| (crd::transient_generation_of(s), s.name_any()))
-        .map(|s| s.name_any())
+/// The `-p` candidates for pulling `name`, in order, ending in a full send (`None`). First my
+/// nearest held ancestor; then the cut MY OWN `VolumeReplica` advertises for that worktree, because
+/// that is the one cut the source's retain is guaranteed to spare — a newer cut I hold but have not
+/// advertised yet may already be pruned there (review round 1, finding 4). `btrfs send -p` needs a
+/// subvolume both sides share, not direct lineage, so an older advertised cut is still incremental.
+pub(crate) fn parent_candidates(ancestor: Option<String>, advertised: Option<&str>, have: &HashSet<String>) -> Vec<Option<String>> {
+    let mut out: Vec<Option<String>> = ancestor.into_iter().map(Some).collect();
+    if let Some(a) = advertised.filter(|a| have.contains(*a)) {
+        out.push(Some(a.to_string()));
+    }
+    out.push(None);
+    out.dedup();
+    out
 }
 
 /// Local snapshots whose CR is gone entirely — retention's disk-side convergence. Pure, so
@@ -353,7 +355,13 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             continue;
         }
         let parent = by_name.get(&name).map(|(p, _)| p.clone()).filter(|p| !p.is_empty());
-        let my_parent = nearest_held_ancestor(parent, &by_name, &have).or_else(|| newest_held_of_worktree(&name, &ready, &have));
+        let worktree = ready.iter().find(|s| s.name_any() == name).map(|s| s.spec.worktree.as_str()).unwrap_or("");
+        let advertised = replicas
+            .iter()
+            .find(|r| r.spec.node == ctx.node)
+            .and_then(|r| r.status.as_ref()?.branches.get(worktree))
+            .map(String::as_str);
+        let candidates = parent_candidates(nearest_held_ancestor(parent, &by_name, &have), advertised, &have);
 
         let mut pulled = false;
         for (source, addr) in &addrs {
@@ -368,10 +376,13 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
             // Read fresh for each new send this pass starts — an in-flight one keeps the
             // deadline it started with, nothing here cancels or extends one already streaming.
             let timeout = send_timeout(&ctx.settings);
-            let mut result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, my_parent.as_deref(), max_bytes, timeout).await;
-            if result.is_err() && my_parent.is_some() {
-                tracing::warn!(%volume, snapshot = %name, node = source, parent = my_parent.as_deref().unwrap_or(""), reason = "incremental-failed", "pull.retried");
-                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, None, max_bytes, timeout).await;
+            let mut result = Err(String::new());
+            for p in &candidates {
+                result = pull_one(&ctx.engine, btrfs_bin, http, addr, secret, volume, &name, p.as_deref(), max_bytes, timeout).await;
+                match (&result, p) {
+                    (Err(e), Some(p)) => tracing::warn!(%volume, snapshot = %name, node = source, parent = %p, error = %e, reason = "incremental-failed", "pull.retried"),
+                    _ => break,
+                }
             }
             match result {
                 Ok(()) => {
