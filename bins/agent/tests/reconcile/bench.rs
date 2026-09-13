@@ -189,3 +189,93 @@ async fn a_bench_on_a_dead_node_is_released_for_another_node() {
     assert_eq!(sent[0]["status"]["nodeName"], "");
     assert!(has_cond(&sent[0]["status"], "Placed", "False", "NodeDead"), "{}", sent[0]);
 }
+
+/// I1: the old pod pinned to a dead node is force-deleted (grace 0) so this node can create one.
+#[tokio::test]
+async fn a_pod_left_on_a_dead_node_is_force_deleted() {
+    let tmp = homes_pool();
+    let mut stranded = pod_json(&["harness-bench"], "Running", false, None);
+    stranded["spec"]["nodeName"] = serde_json::json!("n-dead");
+    let mut routes = up_to_the_pod(get(pod_path(), stranded));
+    routes.push(get("/api/v1/nodes/n-dead", serde_json::json!({
+        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-dead"},
+        "status": {"conditions": [{"type": "Ready", "status": "False", "lastTransitionTime": rfc3339_ago(3600)}]}
+    })));
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
+    let del = rec.sent("DELETE", &pod_path());
+    assert_eq!(del.len(), 1, "{:?}", rec.calls());
+    assert_eq!(del[0]["gracePeriodSeconds"], 0, "{}", del[0]);
+}
+
+/// I1's other half: a pod on a LIVE other node is left alone (the folder lock fences it).
+#[tokio::test]
+async fn a_pod_on_a_live_other_node_is_not_forced() {
+    let tmp = homes_pool();
+    let mut elsewhere = pod_json(&["harness-bench"], "Running", false, None);
+    elsewhere["spec"]["nodeName"] = serde_json::json!("n-live");
+    let mut routes = up_to_the_pod(get(pod_path(), elsewhere));
+    routes.push(get("/api/v1/nodes/n-live", serde_json::json!({
+        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-live"},
+        "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": rfc3339_ago(3600)}]}
+    })));
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
+    assert!(rec.sent("DELETE", &pod_path()).is_empty(), "{:?}", rec.calls());
+}
+
+/// I5: an attached bench gets both halves of the grant, the environment side owned by the Environment.
+#[tokio::test]
+async fn an_attached_bench_gets_both_halves_of_the_grant() {
+    let tmp = homes_pool();
+    let np = |ns: &str| kloudlite_workspaces::kube_test::patch(
+        format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-{BENCH}"),
+        serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": format!("attach-{BENCH}")}}),
+    );
+    let mut routes = up_to_the_pod(not_found(pod_path()));
+    routes.extend([np(&ns()), np(&crd::env_namespace("env-abc")), env_route("env-abc", "r1")]);
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({"attachedEnvironment": "env-abc"}), placed())), ctx).await.unwrap();
+    let egress = rec.sent("PATCH", &format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns()));
+    assert_eq!(egress.len(), 1, "{:?}", rec.calls());
+    assert_eq!(egress[0]["metadata"]["ownerReferences"][0]["kind"], "Bench");
+    let ingress = rec.sent("PATCH", &format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", crd::env_namespace("env-abc")));
+    assert_eq!(ingress.len(), 1, "{:?}", rec.calls());
+    assert_eq!(ingress[0]["metadata"]["ownerReferences"][0]["kind"], "Environment");
+    assert!(has_cond(&last_status(&rec), "Attached", "True", "Converged"), "{}", last_status(&rec));
+
+    // Detach: the bench side goes by name, the environment side by the recorded id.
+    let st = last_status(&rec);
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st)), ctx).await.unwrap();
+    let calls = rec.calls();
+    assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns())), "{calls:?}");
+    assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", crd::env_namespace("env-abc"))), "{calls:?}");
+}
+
+/// I5: the environment's own prune keeps a grant an attached Bench names, and drops one it does not.
+#[tokio::test]
+async fn the_environment_prune_keeps_an_attached_benchs_grant() {
+    for (attached, kept) in [(Some("env-1"), true), (None, false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_ns = crd::env_namespace("env-1");
+        let mut b = bench_json(serde_json::json!({}), placed());
+        b["metadata"]["name"] = serde_json::json!("bench-1");
+        if let Some(e) = attached {
+            b["spec"]["attachedEnvironment"] = serde_json::json!(e);
+        }
+        let (ctx, rec) = ctx(
+            tmp.path(),
+            vec![
+                get(format!("/apis/networking.k8s.io/v1/namespaces/{env_ns}/networkpolicies"), serde_json::json!({
+                    "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicyList", "metadata": {},
+                    "items": [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "attach-bench-1"}}]
+                })),
+                get("/apis/kloudlite.io/v1alpha1/benches/bench-1", b),
+            ],
+        );
+        let _ = kloudlite_agent::controller::apply_environment(&environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"})), &ctx).await;
+        let deleted = rec.calls().contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{env_ns}/networkpolicies/attach-bench-1"));
+        assert_eq!(!deleted, kept, "attached={attached:?}: {:?}", rec.calls());
+    }
+}

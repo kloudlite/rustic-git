@@ -6,10 +6,11 @@
 //! `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the container's own `finishedAt`, never
 //! this node's clock, so a replayed pass writes the identical status.
 
-use super::{delete_ignoring_404, ensure, heal_labels, my_node, replaced, write_status, Ctx, ReconcileErr, TICK};
-use k8s_openapi::api::core::v1::{ContainerStateTerminated, Pod, Secret};
+use super::{delete_ignoring_404, ensure, heal_labels, my_node, owner_ref_of_kind, replaced, write_status, Ctx, ReconcileErr, TICK};
+use k8s_openapi::api::core::v1::{ContainerStateTerminated, Node, Pod, Secret};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::runtime::controller::Action;
+use kube::api::DeleteParams;
 use kube::{Api, Resource, ResourceExt};
 use kloudlite_workspaces::crd::{self, BenchAccess, Condition, DesiredState, Phase};
 use kloudlite_workspaces::k8s;
@@ -47,12 +48,24 @@ pub(crate) fn bench_state(b: &crd::Bench, pod: Option<&Pod>) -> PodVerdict {
         return PodVerdict::Remove;
     }
     if pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded") {
+        // A runtime that omits `finishedAt` falls back to the pod's own Ready transition: an empty
+        // `idleSince` would read as "never slept" and recreate the pod at once. Neither clock is
+        // this node's, so a replayed pass still writes the identical status.
+        let ready_at = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|cs| cs.iter().find(|c| c.type_ == "Ready"))
+            .and_then(|c| c.last_transition_time.as_ref());
         let at = terminated(pod)
             .and_then(|t| t.finished_at.as_ref())
+            .or(ready_at)
             .and_then(|t| serde_json::to_value(t).ok())
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default();
-        return PodVerdict::Idle(at);
+            .and_then(|v| v.as_str().map(str::to_string));
+        return match at {
+            Some(at) => PodVerdict::Idle(at),
+            None => PodVerdict::Starting,
+        };
     }
     if !wants {
         return PodVerdict::Remove;
@@ -86,6 +99,58 @@ async fn write(b: &crd::Bench, st: crd::BenchStatus, ctx: &Arc<Ctx>) -> Result<(
             && super::conditions_eq(&a.conditions, &b.conditions)
     })
     .await
+}
+
+/// Whether the pod sits on ANOTHER node that is dead or leaving — the same `unplaceable` predicate
+/// the sweep released the bench by, so the two can never disagree on which node is gone.
+async fn on_unplaceable_node(pod: &Pod, ctx: &Arc<Ctx>) -> Result<bool, ReconcileErr> {
+    let on = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()).unwrap_or_default();
+    if on.is_empty() || on == ctx.node {
+        return Ok(false);
+    }
+    // Absent reads as not-unplaceable: a deleted Node takes its pods with it, nothing to force.
+    let Some(node) = Api::<Node>::all(ctx.client.clone()).get_opt(on).await? else { return Ok(false) };
+    Ok(crate::peer::unplaceable(Some(&node), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()))
+}
+
+/// Both halves of an attachment, as `apply_workspace` writes them: egress in the bench's namespace,
+/// ingress in the environment's, owned by the Environment because an ownerReference cannot cross
+/// namespaces. The bench pod carries `WORKSPACE_LABEL` = its id, so the same selectors apply. The
+/// `Attached` condition's message is the bare environment id, which is how a detach or a re-attach
+/// finds the grant it left behind; a detach removes the condition once it has cleaned up.
+async fn attach_grants(
+    b: &crd::Bench,
+    name: &str,
+    ns: &str,
+    policies: &Api<NetworkPolicy>,
+    prev: &mut crd::BenchStatus,
+    gen: i64,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    let env = match b.spec.attached_environment.as_deref() {
+        None => None,
+        Some(id) => Api::<crd::Environment>::all(ctx.client.clone()).get_opt(id).await?.filter(|e| e.spec.region == ctx.region),
+    };
+    let was = prev.conditions.iter().find(|c| c.type_ == crd::ATTACHED && c.status == "True").map(|c| c.message.clone());
+    let now = env.as_ref().map(|e| e.name_any());
+    if let Some(was) = was.as_ref().filter(|w| now.as_ref() != Some(*w)) {
+        delete_ignoring_404(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &crd::env_namespace(was)), &k8s::attach_policy_name(name)).await?;
+    }
+    match &env {
+        Some(e) => {
+            let env_ns = crd::env_namespace(&e.name_any());
+            ensure(policies, &k8s::attach_egress(ns, name, &env_ns, &b.spec.owner, &owner_ref_of_kind(b)?), ctx).await?;
+            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &env_ns);
+            ensure(&in_env, &k8s::attach_ingress(&env_ns, ns, name, &b.spec.owner, &owner_ref_of_kind(e)?), ctx).await?;
+            prev.conditions = replaced(&prev.conditions, crd::condition(crd::ATTACHED, true, "Converged", &e.name_any(), gen));
+        }
+        None if prev.conditions.iter().any(|c| c.type_ == crd::ATTACHED) => {
+            delete_ignoring_404(policies, &k8s::attach_policy_name(name)).await?;
+            prev.conditions.retain(|c| c.type_ != crd::ATTACHED);
+        }
+        None => {}
+    }
+    Ok(())
 }
 
 pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
@@ -135,7 +200,9 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
         .await
         .map_err(|e| ReconcileErr(e.to_string()))??;
 
-    ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ns), &k8s::bench_ingress_policy(&ns, &name), &ctx).await?;
+    let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
+    ensure(&policies, &k8s::bench_ingress_policy(&ns, &name), &ctx).await?;
+    attach_grants(&b, &name, &ns, &policies, &mut prev, gen, &ctx).await?;
 
     if Api::<Secret>::namespaced(ctx.client.clone(), &ns).get_opt(k8s::USER_KEY_SECRET).await?.is_none() {
         let c = cond("Ready", false, "KeysNotReady", "the user-key Secret is not in the namespace yet");
@@ -145,6 +212,20 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
     let pod = pods.get_opt(k8s::BENCH_POD).await?;
+    if let Some(p) = &pod {
+        if on_unplaceable_node(p, &ctx).await? {
+            // A pod on an unreachable node stays Terminating until its Node object goes, and this
+            // pass would read it as Starting forever. Grace 0 removes the object; a zombie that is
+            // still running there is fenced by the folder lock (exit 75), not by this delete.
+            tracing::info!(bench = %name, "bench.pod.forced");
+            match pods.delete(k8s::BENCH_POD, &DeleteParams { grace_period_seconds: Some(0), ..Default::default() }).await {
+                Err(kube::Error::Api(e)) if e.code != 404 => return Err(kube::Error::Api(e).into()),
+                Err(e) if !matches!(e, kube::Error::Api(_)) => return Err(e.into()),
+                _ => {}
+            }
+            return Ok(Action::requeue(SHORT));
+        }
+    }
     let pod_ref = Some(format!("{ns}/{}", k8s::BENCH_POD));
     match bench_state(&b, pod.as_ref()) {
         PodVerdict::Create => {
@@ -264,5 +345,22 @@ mod tests {
         let mut departed = fixture_bench(DesiredState::Running);
         departed.spec.access = crd::BenchAccess::ReadOnly;
         assert!(matches!(bench_state(&departed, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Replace), "tools stop when the owner leaves");
+    }
+
+    #[test]
+    fn an_exit_without_finished_at_sleeps_from_the_ready_transition_or_keeps_starting() {
+        let running = fixture_bench(DesiredState::Running);
+        let mut exited = pod_with(&["harness-bench"], None, false);
+        let st = exited.status.as_mut().unwrap();
+        st.phase = Some("Succeeded".into());
+        st.container_statuses.as_mut().unwrap()[0].state =
+            Some(ContainerState { terminated: Some(ContainerStateTerminated { exit_code: 0, ..Default::default() }), ..Default::default() });
+        assert!(matches!(bench_state(&running, Some(&exited)), PodVerdict::Starting), "no clock at all is not an empty idleSince");
+        exited.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].last_transition_time =
+            Some(serde_json::from_value(serde_json::json!(FINISHED_AT)).unwrap());
+        match bench_state(&running, Some(&exited)) {
+            PodVerdict::Idle(at) => assert_eq!(at, FINISHED_AT),
+            v => panic!("the Ready transition is the clock: {v:?}"),
+        }
     }
 }
