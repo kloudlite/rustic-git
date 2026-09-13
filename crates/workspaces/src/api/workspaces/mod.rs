@@ -547,7 +547,7 @@ pub(crate) async fn stop_as(
 ) -> Result<Response, Response> {
     let owner = caller(s, headers).await?;
     let w = my_ws(s, &owner, id).await?;
-    set_desired::<crd::Workspace>(kube(s)?, id, DesiredState::Stopped).await?;
+    crate::api::admin::timing::step("kube.patch.workspace", set_desired::<crd::Workspace>(kube(s)?, id, DesiredState::Stopped)).await?;
     // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
     // a body-less 202 throws there, so this always emits an object, `warning` present only when
     // there is one to give.
@@ -558,7 +558,7 @@ pub(crate) async fn stop_as(
     // response even for a volume with fifty pushes, and a client reading that as "never pushed" got
     // a wrong answer from all seven of these handlers. The WORKSPACE's owner, not the caller — the
     // two differ on `/admin`, and the caller's own pushed set would answer the wrong question.
-    let pushed = pushed_volumes(s, kube(s)?, &w.spec.owner).await?;
+    let pushed = crate::api::admin::timing::step("kube.list.snapshots", pushed_volumes(s, kube(s)?, &w.spec.owner)).await?;
     let mut doc = ws_doc(&w, &pushed);
     doc.state = WsState::Stopped;
     #[allow(clippy::expect_used)] // serde of a derive(Serialize) value of ours cannot fail
