@@ -30,9 +30,11 @@ pub async fn image_listing(
     q: &std::collections::HashMap<String, String>,
 ) -> crate::Result<Vec<crate::index::Marker>> {
     let n = q.get("n").and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(usize::MAX);
+    let t = std::time::Instant::now();
     let mut markers =
         crate::index::list_page(&app.store, crate::index::Kind::Img, owner, include_private, q.get("last").map(String::as_str), n)
             .await?;
+    let marker_ms = t.elapsed().as_millis() as u64;
     let marked: std::collections::HashSet<String> = markers.iter().map(|m| m.name.clone()).collect();
     // An unmarked (pre-backfill) image has no visibility record, so it defaults private just like
     // a freshly-pushed one — an unauthenticated caller must never see it, exactly as `index::list`
@@ -43,6 +45,7 @@ pub async fn image_listing(
     } else {
         Vec::new()
     };
+    let fallback_ms = t.elapsed().as_millis() as u64 - marker_ms;
     // WINDOWED to the caller's page before a single stat is issued. The marker half has always
     // honoured `last`/`n`; this half stat-ed every unmarked image the owner had, so a `?n=2`
     // catalog page cost one LIST per image in the account (2026-09-12). Same `after`/`take` rule
@@ -57,6 +60,13 @@ pub async fn image_listing(
     // round trips, and an unbounded fan-out put it behind N simultaneous ones.
     let names: Vec<&str> = unmarked.iter().map(String::as_str).collect();
     let stats = crate::gc::stats_of(&app.store, owner, &names).await;
+    let total_ms = t.elapsed().as_millis() as u64;
+    // Only a listing somebody would wait on: which of the three halves a slow catalogue page
+    // spent its time in, which the request's own `http.slow` cannot say.
+    if total_ms >= 1_000 {
+        let stat_ms = total_ms - marker_ms - fallback_ms;
+        tracing::info!(owner = %owner, markers = markers.len(), unmarked = names.len(), marker_ms, fallback_ms, stat_ms, total_ms, "image.listing.done");
+    }
     for (name, stat) in unmarked.into_iter().zip(stats) {
         // A failed stat is NOT "zero manifests, never updated": that fabricates a listing row a
         // person reads as an empty image, which is how an object-store blip showed a tenant's
