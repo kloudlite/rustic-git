@@ -6,8 +6,6 @@ export function StatusBar(props: {
   machine: Machine;
   shells: number;
   env: string;
-  leftOpen: boolean;
-  onToggleLeft: () => void;
 }) {
   const eph = () => props.machine.workspaces.flatMap((w) => w.ephemerals);
   const running = () => eph().filter((e) => e.state === "running").length;
@@ -15,13 +13,10 @@ export function StatusBar(props: {
   const up = () => props.machine.workspaces.filter((w) => w.state === "running").length;
 
   const item = "inline-flex h-5.5 items-center gap-1 px-1.25 leading-none whitespace-nowrap tabular-nums";
-  const btn = `${item} hover:bg-[#f1f1f133] aria-pressed:text-fg`;
   const dot = (tone: string) => <span class={`h-1.5 w-1.5 rounded-full ${tone}`} />;
 
   return (
     <footer class="flex h-5.5 items-center border-t border-line bg-chrome px-1 text-sm text-fg">
-      <button class={btn} aria-pressed={props.leftOpen} onClick={props.onToggleLeft} title="Bench panel (⌘B)"><Icon name="panelLeft" size={16} /></button>
-      <span class="mx-1 h-3 w-px bg-line" />
       <span class={item} title={`Connected to ${props.env}`}>{dot("bg-success")} {props.env}<span class="text-subtle"> · 12 ms</span></span>
       <Show when={props.shells > 0}>
         <span class={item} title="Open shells (⌘J)"><Icon name="terminal" size={12} /> {props.shells}</span>

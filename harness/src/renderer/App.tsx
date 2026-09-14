@@ -721,8 +721,6 @@ export function App() {
         machine={machine()}
         shells={tabs().length}
         env={environment().name}
-        leftOpen={leftOpen()}
-        onToggleLeft={() => setLeftOpen((v) => !v)}
       />
     </div>
   );
