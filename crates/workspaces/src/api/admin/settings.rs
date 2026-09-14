@@ -102,13 +102,14 @@ async fn central_boot_readers(s: &ApiState, field: &str) -> Result<Vec<(Scope, &
 }
 
 /// Which changed fields (patch differs from current, and is `Some`) are `Mark::Boot`.
-fn central_boot_fields(current: &StoredCentralSettings, patch: &StoredCentralSettings) -> Vec<&'static str> {
+/// `restore`: the patch is a whole snapshot, so a `None` there is a change too (back to default).
+fn central_boot_fields(current: &StoredCentralSettings, patch: &StoredCentralSettings, restore: bool) -> Vec<&'static str> {
     let is_boot = |name: &str| CENTRAL_SETTING_META.iter().any(|(n, m)| *n == name && *m == Mark::Boot);
     let mut out = Vec::new();
-    if is_boot("sshHost") && patch.ssh_host.is_some() && patch.ssh_host != current.ssh_host {
+    if is_boot("sshHost") && (restore || patch.ssh_host.is_some()) && patch.ssh_host != current.ssh_host {
         out.push("sshHost");
     }
-    if is_boot("sshPort") && patch.ssh_port.is_some() && patch.ssh_port != current.ssh_port {
+    if is_boot("sshPort") && (restore || patch.ssh_port.is_some()) && patch.ssh_port != current.ssh_port {
         out.push("sshPort");
     }
     out
@@ -132,7 +133,7 @@ pub(crate) async fn put_central(
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response());
     }
     let current = current_central(&s).await?;
-    let changed_boot = central_boot_fields(&current, &patch);
+    let changed_boot = central_boot_fields(&current, &patch, false);
     // Step 2: precheck every affected reader, across every scope it lives in — nothing is
     // forwarded to the server tier (so `cluster/settings` stays untouched) until every one of
     // them is settled.
@@ -239,7 +240,7 @@ pub(crate) async fn revert_central(
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "no history to revert to").into_response());
     };
     let target: StoredCentralSettings = snap.into();
-    let changed_boot = central_boot_fields(&current, &target);
+    let changed_boot = central_boot_fields(&current, &target, true);
     let mut roll_targets: Vec<(&'static str, Scope, &'static str)> = Vec::new();
     for field in &changed_boot {
         for (scope, reader) in central_boot_readers(&s, field).await? {
@@ -365,14 +366,16 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
 /// Changed AND `Mark::Boot`, paired with the readers `CLUSTER_SETTING_META` already names for
 /// that field — unlike the central table, this one carries its readers inline (Task 1), so there
 /// is no separate "which readers" dispatch to hand-maintain here.
+/// `restore`: the patch is a whole snapshot, so a `None` there is a change too (back to default).
 fn changed_cluster_boot_fields(
     current: &crd::ClusterSettingsSpec,
     patch: &crd::ClusterSettingsSpec,
+    restore: bool,
 ) -> Vec<(&'static str, &'static [&'static str])> {
     let mut out = Vec::new();
     macro_rules! chk {
         ($f:ident, $wire:literal) => {
-            if patch.$f.is_some() && patch.$f != current.$f {
+            if (restore || patch.$f.is_some()) && patch.$f != current.$f {
                 if let Some((_, mark, readers)) = crd::CLUSTER_SETTING_META.iter().find(|(n, _, _)| *n == $wire) {
                     if *mark == Mark::Boot {
                         out.push(($wire, *readers));
@@ -423,6 +426,28 @@ struct ClusterWrite<'a> {
     action: &'static str,
     note: String,
     region: &'a str,
+    /// A revert: the patch REPLACES the spec (a field the snapshot left unset returns to
+    /// `env ?? default`) instead of merging onto it.
+    restore: bool,
+}
+
+/// The spec and annotations a write lands: `current` onto history, stamped, then `patch` merged
+/// (a PUT) or taken whole (a revert).
+fn cluster_write(
+    current: &crd::ClusterSettings,
+    patch: &crd::ClusterSettingsSpec,
+    restore: bool,
+    by: &str,
+    at: &str,
+) -> crd::ClusterSettings {
+    let mut ann = current.metadata.annotations.clone().unwrap_or_default();
+    push_cluster_history(&current.spec, &mut ann);
+    ann.insert(crd::SETTINGS_UPDATED_BY_ANNOTATION.to_string(), by.to_string());
+    ann.insert(crd::SETTINGS_UPDATED_AT_ANNOTATION.to_string(), at.to_string());
+    let spec = if restore { patch.clone() } else { merge_cluster_spec(current.spec.clone(), patch) };
+    let mut apply = crd::ClusterSettings::new("default", spec);
+    apply.metadata.annotations = Some(ann);
+    apply
 }
 
 async fn apply_cluster_patch(
@@ -432,9 +457,9 @@ async fn apply_cluster_patch(
     current: crd::ClusterSettings,
     patch: crd::ClusterSettingsSpec,
 ) -> Result<Response, Response> {
-    let ClusterWrite { caller_name, action, note, region } = w;
+    let ClusterWrite { caller_name, action, note, region, restore } = w;
     let api: Api<crd::ClusterSettings> = Api::all(client);
-    let changed = changed_cluster_boot_fields(&current.spec, &patch);
+    let changed = changed_cluster_boot_fields(&current.spec, &patch, restore);
     if !changed.is_empty() {
         let mut readers: Vec<&str> = changed.iter().flat_map(|(_, rs)| rs.iter().copied()).collect();
         readers.sort_unstable();
@@ -451,13 +476,7 @@ async fn apply_cluster_patch(
         )
         .await?;
     }
-    let mut ann = current.metadata.annotations.clone().unwrap_or_default();
-    push_cluster_history(&current.spec, &mut ann);
-    ann.insert(crd::SETTINGS_UPDATED_BY_ANNOTATION.to_string(), caller_name.to_string());
-    ann.insert(crd::SETTINGS_UPDATED_AT_ANNOTATION.to_string(), chrono::Utc::now().to_rfc3339());
-    let merged = merge_cluster_spec(current.spec.clone(), &patch);
-    let mut apply = crd::ClusterSettings::new("default", merged);
-    apply.metadata.annotations = Some(ann);
+    let apply = cluster_write(&current, &patch, restore, caller_name, &chrono::Utc::now().to_rfc3339());
     let patched = super::audited(
         s,
         caller_name,
@@ -501,7 +520,7 @@ pub(crate) async fn put_cluster(
     let current = api.get_opt("default").await.map_err(kube_err)?.unwrap_or_else(default_cluster_settings);
     apply_cluster_patch(
         &s,
-        ClusterWrite { caller_name: &c.name, action: "put-cluster-settings", note, region: &region },
+        ClusterWrite { caller_name: &c.name, action: "put-cluster-settings", note, region: &region, restore: false },
         client,
         current,
         patch,
@@ -523,9 +542,13 @@ pub(crate) async fn revert_cluster(
     let ann = current.metadata.annotations.clone().unwrap_or_default();
     let hist = history_from_annotations(&ann);
     let target = hist.get(n).cloned().ok_or_else(not_found)?;
+    // A snapshot from before a range tightened must not slip past it on the way back.
+    if let Err(msg) = validate_cluster_patch(&target) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response());
+    }
     apply_cluster_patch(
         &s,
-        ClusterWrite { caller_name: &c.name, action: "revert-cluster-settings", note, region: &region },
+        ClusterWrite { caller_name: &c.name, action: "revert-cluster-settings", note, region: &region, restore: true },
         client,
         current,
         target,
@@ -628,6 +651,33 @@ mod cluster_tests {
         push_cluster_history(&base, &mut ann);
         let reverted = merge_cluster_spec(changed, &history_from_annotations(&ann)[0]);
         assert_eq!(wire(&reverted), wire(&base), "history/revert dropped a field");
+        // The real revert path: every field of the snapshot back, a newer one cleared, and a new entry.
+        let cur = crd::ClusterSettings::new("default", next.clone());
+        let written = cluster_write(&cur, &base, true, "a", "t");
+        assert_eq!(wire(&written.spec), wire(&base), "revert did not restore the snapshot");
+        let empty = cluster_write(&cur, &crd::ClusterSettingsSpec::default(), true, "a", "t");
+        assert_eq!(wire(&empty.spec), serde_json::json!({}), "revert kept a field the snapshot never set");
+        let hist = history_from_annotations(written.metadata.annotations.as_ref().unwrap());
+        assert_eq!(hist.len(), 1);
+        assert_eq!(wire(&hist[0]), wire(&next), "the pre-revert spec is a new history entry");
+    }
+
+    /// A revert to an entry predating `traceSampleRatio` resets it, and a boot field the snapshot
+    /// never set still counts as changed so its readers are prechecked and rolled.
+    #[test]
+    fn revert_resets_newer_fields_and_prechecks_boot_readers() {
+        let old = crd::ClusterSettingsSpec { sync_secs: Some(60), ..Default::default() };
+        let cur = crd::ClusterSettingsSpec {
+            sync_secs: Some(90),
+            trace_sample_ratio: Some(0.9),
+            default_image: Some("img:new".into()),
+            ..Default::default()
+        };
+        let written = cluster_write(&crd::ClusterSettings::new("default", cur.clone()), &old, true, "a", "t");
+        assert_eq!((written.spec.sync_secs, written.spec.trace_sample_ratio), (Some(60), None));
+        let boot: Vec<_> = changed_cluster_boot_fields(&cur, &old, true).into_iter().map(|(f, _)| f).collect();
+        assert_eq!(boot, vec!["defaultImage"]);
+        assert!(changed_cluster_boot_fields(&cur, &old, false).is_empty(), "a PUT leaves an unset field alone");
     }
 
     #[test]
