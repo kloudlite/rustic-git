@@ -90,8 +90,10 @@ the verdict on what is pinned.
 
 ## Web changes
 
-Bun and Node 20 live on the disk too (`/work/bun`, `/work/node`, on the pod's PATH; install once
-with `curl -fsSL https://bun.sh/install | BUN_INSTALL=/work/bun bash` and the Node 20 tarball into
-`/work/node`). `cd /work/src/web && bun install && bun run typecheck && bun run lint && bun run
-test && bun run build` is the gate `web.yml` runs; the web image itself is CI's (`web.yml` on a
-push touching `web/**`), then `deploy/pin.sh <sha> <web-sha>` and `deploy/roll.sh`.
+Bun and Node 22 live on the disk too (`/work/bun`, `/work/node`, on the pod's PATH; install once
+with `curl -fsSL https://bun.sh/install | BUN_INSTALL=/work/bun bash` and the Node 22 LTS tarball
+into `/work/node` — matches the web image's `node:22-bookworm-slim`, and is what makes
+`test:node`'s `--experimental-strip-types` work). `cd /work/src/web && bun install && bun run
+typecheck && bun run lint && bun run test && bun run build` is the gate `web.yml` runs; the web
+image itself is CI's (`web.yml` on a push touching `web/**`), then `deploy/pin.sh <sha> <web-sha>`
+and `deploy/roll.sh`.

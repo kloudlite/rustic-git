@@ -9,7 +9,7 @@
     "lint": "eslint",
     "typecheck": "rm -rf .next/types .next/dev/types && tsc --noEmit",
     "test": "bun test src && bun run test:node",
-    "test:node": "node --test test-node/*.test.ts"
+    "test:node": "node --experimental-strip-types --test test-node/*.test.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
