@@ -224,33 +224,33 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
     assert!(rec.sent("DELETE", &pod_path()).is_empty(), "{:?}", rec.calls());
 }
 
-/// I5: an attached bench gets both halves of the grant, the environment side owned by the Environment.
+/// A bench is a pod of the space like any workspace: the space's choice gives it the namespace
+/// pair (owned by the SpaceEnvironment) and the environment in its resolv.conf; clearing the
+/// choice drops the egress half.
 #[tokio::test]
-async fn an_attached_bench_gets_both_halves_of_the_grant() {
+async fn a_bench_follows_its_spaces_environment() {
     let tmp = homes_pool();
-    let np = |ns: &str| kloudlite_workspaces::kube_test::patch(
-        format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-{BENCH}"),
-        serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": format!("attach-{BENCH}")}}),
-    );
+    let np = |path: String| kloudlite_workspaces::kube_test::patch(path, serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "space"}}));
+    let egress = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/space-env", ns());
+    let ingress = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/space-{}", crd::env_namespace("env-abc"), ns());
     let mut routes = up_to_the_pod(not_found(pod_path()));
-    routes.extend([np(&ns()), np(&crd::env_namespace("env-abc")), env_route("env-abc", "r1")]);
+    routes.extend([np(egress.clone()), np(ingress.clone()), env_route("env-abc", "r1")]);
     let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({"attachedEnvironment": "env-abc"}), placed())), ctx).await.unwrap();
-    let egress = rec.sent("PATCH", &format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns()));
-    assert_eq!(egress.len(), 1, "{:?}", rec.calls());
-    assert_eq!(egress[0]["metadata"]["ownerReferences"][0]["kind"], "Bench");
-    let ingress = rec.sent("PATCH", &format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", crd::env_namespace("env-abc")));
-    assert_eq!(ingress.len(), 1, "{:?}", rec.calls());
-    assert_eq!(ingress[0]["metadata"]["ownerReferences"][0]["kind"], "Environment");
-    assert!(has_cond(&last_status(&rec), "Attached", "True", "Converged"), "{}", last_status(&rec));
+    ctx.remember_spaces(vec![space("alice", "acme", "env-abc")]);
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx.clone()).await.unwrap();
+    for path in [&egress, &ingress] {
+        let sent = rec.sent("PATCH", path);
+        assert_eq!(sent.len(), 1, "{path}: {:?}", rec.calls());
+        assert_eq!(sent[0]["metadata"]["ownerReferences"][0]["kind"], "SpaceEnvironment");
+    }
+    let written = std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, BENCH)).unwrap();
+    assert!(written.contains("env-abc.svc."), "{written}");
+    assert!(has_cond(&last_status(&rec), "Attached", "True", "Space"), "{}", last_status(&rec));
 
-    // Detach: the bench side goes by name, the environment side by the recorded id.
     let st = last_status(&rec);
     let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st)), ctx).await.unwrap();
-    let calls = rec.calls();
-    assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns())), "{calls:?}");
-    assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", crd::env_namespace("env-abc"))), "{calls:?}");
+    assert!(rec.calls().contains(&format!("DELETE {egress}")), "{:?}", rec.calls());
 }
 
 /// I5: the environment's own prune keeps a grant an attached Bench names, and drops one it does not.

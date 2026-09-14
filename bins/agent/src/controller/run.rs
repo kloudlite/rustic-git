@@ -61,6 +61,19 @@ where
         .collect()
 }
 
+/// Every object in `store` whose space namespace is `space` — the mapper for a `SpaceEnvironment`
+/// watch, since a space is named by its namespace.
+fn in_space<K>(
+    store: &kube::runtime::reflector::Store<K>,
+    space: &str,
+    ns_of: impl Fn(&K) -> String,
+) -> Vec<kube::runtime::reflector::ObjectRef<K>>
+where
+    K: Resource<DynamicType = ()> + Clone + 'static,
+{
+    store.state().iter().filter(|k| ns_of(k) == space).map(|k| kube::runtime::reflector::ObjectRef::from_obj(k.as_ref())).collect()
+}
+
 fn all_in_store<K>(store: &kube::runtime::reflector::Store<K>) -> Vec<kube::runtime::reflector::ObjectRef<K>>
 where
     K: Resource<DynamicType = ()> + Clone + 'static,
@@ -301,8 +314,13 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         );
     // Every workspace this node hosts wakes on its own Node changing — see `my_node_only`. The
     // store is read at mapper time, not now, so a workspace claimed later is included too.
-    let ws_store_for_replicas = ws_store.clone();
+    let (ws_store_for_replicas, ws_store_for_spaces) = (ws_store.clone(), ws_store.clone());
     let workspaces = workspaces
+        // A space's choice changing moves every pod of that space live: wake this node's workspaces
+        // in that namespace. A store read in the mapper, no I/O.
+        .watches(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config(), move |s: crd::SpaceEnvironment| {
+            in_space(&ws_store_for_spaces, &s.name_any(), |w: &crd::Workspace| crd::ws_namespace(&w.spec.owner, &w.spec.team))
+        })
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only.clone(), move |_: Node| all_in_store(&ws_store))
         // `Replicated` is computed by the OWNER from other nodes' `VolumeReplica` rows, so the
         // owner must wake when one of those moves — the probe measured a stop's final sync point
@@ -327,7 +345,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     // A bench holds one pod and no volume, so its only child watch is that pod.
     let benches = Controller::new(Api::<crd::Bench>::all(ctx.client.clone()), placed.clone());
     let bench_store = benches.store();
+    let bench_store_for_spaces = bench_store.clone();
     let benches = benches
+        .watches(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config(), move |s: crd::SpaceEnvironment| {
+            in_space(&bench_store_for_spaces, &s.name_any(), |b: &crd::Bench| crd::ws_namespace(&b.spec.owner, &b.spec.team))
+        })
         .watches(Api::<Pod>::all(ctx.client.clone()), crate::controller::watch_config().labels(&format!("{}=bench", k8s::KIND_LABEL)), move |p| {
             held(&bench_store, owned_by::<crd::Bench, _>(&p))
         })
@@ -376,6 +398,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             move |r| held(&env_store_for_stops, owned_by::<crd::Environment, _>(&r)),
         );
     let env_store_for_quota = env_store.clone();
+    let env_store_for_spaces = env_store.clone();
     let env_store_for_replicas = env_store.clone();
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
@@ -395,14 +418,21 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         // An intercept is in force only while the workspace serving it is up, so the environment
         // has to reconcile on the workspace's OWN transitions — stopping, losing its pod, being
         // deleted — or the real service would stay at zero replicas until the next tick.
-        // `spec.attachedEnvironment` is a field read and costs no API call; a workspace attached to
-        // nothing maps to nothing. Deliberately not `crd::attached_environment`, whose condition
-        // fallback would keep waking an environment a workspace has already left.
+        // Mapped by the environments whose intercepts name the workspace — a store read, no I/O.
         .watches(Api::<crd::Workspace>::all(ctx.client.clone()), crate::controller::watch_config(), move |w: crd::Workspace| {
-            held(
-                &env_store_for_ws,
-                w.spec.attached_environment.as_deref().map(kube::runtime::reflector::ObjectRef::<crd::Environment>::new),
-            )
+            let name = w.name_any();
+            env_store_for_ws
+                .state()
+                .iter()
+                .filter(|e| e.spec.intercepts.iter().any(|i| i.workspace == name))
+                .map(|e| kube::runtime::reflector::ObjectRef::from_obj(e.as_ref()))
+                .collect::<Vec<_>>()
+        })
+        // A space switching environments releases its intercepts in the OLD one and prunes the old
+        // ingress half there, and the event carries only the new choice — so every environment
+        // this node hosts re-decides. Few per node, same shape as the Quota watch above.
+        .watches(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config(), move |_: crd::SpaceEnvironment| {
+            all_in_store(&env_store_for_spaces)
         })
         .shutdown_on_signal()
         .run(|e, c| async move { observed("environment", &*e, &c, reconcile_environment(e.clone(), c.clone())).await }, error_policy, ctx.clone())
@@ -608,7 +638,18 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                     tracing::warn!(kind = "Environment", reason = "cache", error = %e, "reconcile.queue.failed")
                 }
             });
-        async { tokio::join!(ws, env); }
+        let space_writer =
+            ctx.space_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the space writer is already taken")?;
+        let spaces = watcher(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config())
+            .default_backoff()
+            .reflect(space_writer)
+            .touched_objects()
+            .for_each(|r| async move {
+                if let Err(e) = r {
+                    tracing::warn!(kind = "SpaceEnvironment", reason = "cache", error = %e, "reconcile.queue.failed")
+                }
+            });
+        async { tokio::join!(ws, env, spaces); }
     };
     let everything = async {
         tokio::join!(

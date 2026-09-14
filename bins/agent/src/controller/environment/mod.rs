@@ -59,6 +59,22 @@ async fn prune_attach_grants(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<(),
     let benches: Api<crd::Bench> = Api::all(ctx.client.clone());
     for p in list {
         let name = p.name_any();
+        // A space's ingress half: kept while that space still points here. A switch leaves the
+        // old environment's half behind under the same owner, so this is what collects it.
+        if let Some(space) = name.strip_prefix("space-") {
+            let Some(spaces) = ctx.spaces() else { continue };
+            let here = spaces
+                .get(&kube::runtime::reflector::ObjectRef::new(space))
+                .is_some_and(|s| s.spec.environment == e.name_any());
+            // ponytail: a legacy field-fallback grant (no object yet) is kept until the api's
+            // migration writes the object; dropped with the fallback next release.
+            let fallback = spaces.get(&kube::runtime::reflector::ObjectRef::new(space)).is_none();
+            if !here && !fallback {
+                tracing::info!(environment = %e.name_any(), space = %space, "space.grant.pruned");
+                delete_ignoring_404(&policies, &name).await?;
+            }
+            continue;
+        }
         let Some(ws) = name.strip_prefix("attach-") else { continue };
         let keep = match workspaces.get_opt(ws).await.map_err(|err| ReconcileErr(err.to_string()))? {
             Some(w) => crd::attached_environment(&w).as_deref() == Some(e.name_any().as_str()),

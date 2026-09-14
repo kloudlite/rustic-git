@@ -38,6 +38,7 @@ pub use workspace::kept_conditions;
 pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status};
 pub(crate) mod keys;
 mod bench;
+pub mod space;
 pub use bench::reconcile_bench;
 
 /// Every watcher this process opens, list and watch alike, asks the server to end the call after
@@ -275,6 +276,10 @@ pub struct Ctx {
     pub workspace_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Workspace>>>,
     pub environment_store: kube::runtime::reflector::Store<crd::Environment>,
     pub environment_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::Environment>>>,
+    /// EVERY `SpaceEnvironment`, unfiltered: which environment a person's space follows. Read
+    /// through `spaces()` and never without `store_ready` — see `controller::space`.
+    pub space_store: kube::runtime::reflector::Store<crd::SpaceEnvironment>,
+    pub space_writer: Mutex<Option<kube::runtime::reflector::store::Writer<crd::SpaceEnvironment>>>,
     /// What `ensure` last applied, by kind/namespace/name: the hash of the desired object and when.
     /// A converged parent reconciles on every child event and re-applied ~10 objects each time;
     /// an apply whose body has not changed is skipped. See `ensure` for the ceiling.
@@ -336,6 +341,7 @@ impl Ctx {
         // Environment controllers have their own node-scoped streams — so there is no subscriber.
         let (workspace_store, workspace_writer) = kube::runtime::reflector::store();
         let (environment_store, environment_writer) = kube::runtime::reflector::store();
+        let (space_store, space_writer) = kube::runtime::reflector::store();
         Ctx {
             volumes,
             volume_writer: Mutex::new(Some(volume_writer)),
@@ -343,6 +349,8 @@ impl Ctx {
             workspace_writer: Mutex::new(Some(workspace_writer)),
             environment_store,
             environment_writer: Mutex::new(Some(environment_writer)),
+            space_store,
+            space_writer: Mutex::new(Some(space_writer)),
             node_store,
             node_writer: Mutex::new(Some(node_writer)),
             applied: Mutex::new(HashMap::new()),
@@ -393,6 +401,22 @@ impl Ctx {
 
     pub fn environments(&self) -> Option<&kube::runtime::reflector::Store<crd::Environment>> {
         store_ready(&self.environment_store).then_some(&self.environment_store)
+    }
+
+    /// The cluster-wide space cache. `None` until its first list — unknown, never "no choice".
+    pub fn spaces(&self) -> Option<&kube::runtime::reflector::Store<crd::SpaceEnvironment>> {
+        store_ready(&self.space_store).then_some(&self.space_store)
+    }
+
+    /// Seed the space cache as a finished list would. For tests; a no-op once `run` took the writer.
+    pub fn remember_spaces(&self, spaces: Vec<crd::SpaceEnvironment>) {
+        if let Some(w) = self.space_writer.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+            w.apply_watcher_event(&watcher::Event::Init);
+            for s in spaces {
+                w.apply_watcher_event(&watcher::Event::InitApply(s));
+            }
+            w.apply_watcher_event(&watcher::Event::InitDone);
+        }
     }
 
     /// Seed the two cluster-wide stores by hand, as a finished initial list would. For tests,

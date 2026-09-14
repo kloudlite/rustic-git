@@ -7,11 +7,10 @@
 //! stay here.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
-use super::{my_node, conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
+use super::{my_node, conditions_eq, create_if_absent, delete_ignoring_404, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
 use crate::binding;
 use std::time::Duration;
 use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference};
 use kube::api::{Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
@@ -340,84 +339,26 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         system: None,
         registry_host: &ctx.registry_host,
     };
-    // Resolve the attachment before writing anything: a missing or cross-region environment is
-    // reported and treated as unattached, never as a half-applied grant.
-    let (env, refusal) = match w.spec.attached_environment.as_deref() {
-        None => (None, None),
-        Some(env_id) => match Api::<crd::Environment>::all(ctx.client.clone()).get_opt(env_id).await? {
-            None => (None, Some(("EnvironmentNotFound", format!("environment {env_id} is gone")))),
-            // A different region is a different cluster: there is no route and no DNS to grant.
-            Some(e) if e.spec.region != w.spec.region => {
-                (None, Some(("RegionMismatch", format!("environment {env_id} is in {}", e.spec.region))))
-            }
-            Some(e) => (Some((crd::env_namespace(env_id), e)), None),
+    // The space's environment, resolved and converged before the pod: resolv.conf in place, the
+    // namespace-level grant, the legacy per-pod grant collected (`controller::space`).
+    let space = super::space::converge_space(
+        ctx,
+        super::space::Pod {
+            id: &w.name_any(),
+            owner: &w.spec.owner,
+            team: &w.spec.team,
+            region: &w.spec.region,
+            field: w.spec.attached_environment.as_deref(),
+            prev: &prev.conditions,
+            gen,
         },
-    };
-    let env_ns = env.as_ref().map(|(ns, _)| ns.clone());
-    // Per-WORKSPACE, like the pod that mounts it: `id` is the shared VOLUME for a clone, and
-    // writing this file under the volume's name leaves every clone's pod stuck FailedMount on a
-    // resolv.conf that does not exist under its own name.
-    // Same rule: `create_dir_all` + `read_to_string` + `write`, on the shared home's NFS mount in
-    // the worst case, on every workspace pass.
-    let (pool, ws_id, ns_owned, env_ns_owned) =
-        (ctx.pool.clone(), w.name_any(), ns.clone(), env_ns.clone());
-    tokio::task::spawn_blocking(move || write_resolv_conf(&pool, &ws_id, &ns_owned, env_ns_owned.as_deref()))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))??;
-    let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
-    match &env {
-        Some((env_ns, e)) => {
-            ensure(&policies, &k8s::attach_egress(&ns, &w.name_any(), env_ns, &w.spec.owner, &pod_ctx.owner_ref), ctx).await?;
-            // The environment-side half cannot be owned by this Workspace: an ownerReference may
-            // not cross namespaces. It is owned by the ENVIRONMENT instead, so deleting the
-            // environment collects it, and a detach deletes it by name.
-            let env_ref = owner_ref_of_kind(e)?;
-            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
-            // `ws_id`: these policies select the workspace POD by `WORKSPACE_LABEL`, which names
-            // the workspace, and siblings share the namespace — keyed by the shared volume a
-            // clone's grant would select its source's pod instead of its own.
-            ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, &w.name_any(), &w.spec.owner, &env_ref), ctx).await?;
-        }
-        // Detach is this same pass with the field cleared, so the workspace-side half goes by name
-        // — but ONLY when an attachment was ever recorded (2026-09-12). Every workspace that has
-        // never been attached issued this DELETE on every single reconcile, and there has never
-        // been anything there to delete. The condition is the same record the re-attach cleanup
-        // below reads, and it survives a detach (it goes False, it is not removed).
-        None if prev.conditions.iter().any(|c| c.type_ == crd::ATTACHED) => {
-            delete_ignoring_404(&policies, &k8s::attach_policy_name(&w.name_any())).await?
-        }
-        None => {}
-    }
-    // The environment-side half lives in a namespace this spec no longer names, so a detach — or a
-    // re-attach to a DIFFERENT environment — would strand it there until that environment is
-    // deleted. Which namespace it was in is not lost: the previous pass wrote the environment id
-    // into the `Attached` condition's message, and that is where it is read back from. A grant left
-    // behind is dormant only until something re-adds an egress with the same workspace id.
-    //
-    // ponytail: a True condition is the only address kept, so an attach that created the ingress
-    // and then died before its status write leaves no record and this pass collects nothing. The
-    // environment's own delete collects it; upgrade path is a label on the ingress and a
-    // list-by-label sweep in the janitor, if that window ever costs anything.
-    let now = env.as_ref().map(|_| w.spec.attached_environment.as_deref().unwrap_or(""));
-    let was = prev
-        .conditions
-        .iter()
-        .find(|c| c.type_ == crd::ATTACHED && c.status == "True")
-        .map(|c| c.message.clone())
-        .filter(|was| now != Some(was.as_str()));
-    if let Some(was) = was {
-        let old: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &crd::env_namespace(&was));
-        delete_ignoring_404(&old, &k8s::attach_policy_name(&w.name_any())).await?;
-    }
-    let mut attached = match (&env_ns, &refusal) {
-        // The message is the BARE environment id and must stay that: the next pass parses it back
-        // out of status to find a grant left in an environment this spec no longer names.
-        (Some(_), _) => {
-            Some(crd::condition(crd::ATTACHED, true, "Converged", w.spec.attached_environment.as_deref().unwrap_or(""), gen))
-        }
-        (None, Some((reason, msg))) => Some(crd::condition(crd::ATTACHED, false, reason, msg, gen)),
-        // Not attached at all says nothing: an absent condition, not a False one.
-        (None, None) => None,
+    )
+    .await?;
+    let env_ns = space.env_ns();
+    let mut attached = match space {
+        // Unknown cache: whatever the last converged pass recorded stands.
+        super::space::Attached::Keep => prev.conditions.iter().find(|c| c.type_ == crd::ATTACHED).cloned(),
+        super::space::Attached::Set(c) => c,
     };
     // Before the pod, never after: a container started on a stale profile is a workspace whose
     // tools silently disagree with its spec.

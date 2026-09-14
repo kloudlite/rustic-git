@@ -1,12 +1,12 @@
 //! The `Bench` reconciler: a person's bench on one team, placed by the claim like any parent but
-//! holding no volume. What it converges is small — the folder on the region share, the attach
+//! holding no volume. What it converges is small — the folder on the region share, the space's
 //! `resolv.conf`, the gateway-only ingress policy, and at most one pod — and what it decides is
 //! mostly the pod's lifecycle: `harness-bench` keeps the idle clock and exits 0 when nobody has
 //! used it for `benchIdleSecs`; this pass turns that exit into `Idle` and creates no pod again until
 //! `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the container's own `finishedAt`, never
 //! this node's clock, so a replayed pass writes the identical status.
 
-use super::{delete_ignoring_404, ensure, heal_labels, my_node, owner_ref_of_kind, replaced, write_status, Ctx, ReconcileErr, TICK};
+use super::{delete_ignoring_404, ensure, heal_labels, my_node, replaced, write_status, Ctx, ReconcileErr, TICK};
 use k8s_openapi::api::core::v1::{ContainerStateTerminated, Node, Pod, Secret};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::runtime::controller::Action;
@@ -113,46 +113,6 @@ async fn on_unplaceable_node(pod: &Pod, ctx: &Arc<Ctx>) -> Result<bool, Reconcil
     Ok(crate::peer::unplaceable(Some(&node), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()))
 }
 
-/// Both halves of an attachment, as `apply_workspace` writes them: egress in the bench's namespace,
-/// ingress in the environment's, owned by the Environment because an ownerReference cannot cross
-/// namespaces. The bench pod carries `WORKSPACE_LABEL` = its id, so the same selectors apply. The
-/// `Attached` condition's message is the bare environment id, which is how a detach or a re-attach
-/// finds the grant it left behind; a detach removes the condition once it has cleaned up.
-async fn attach_grants(
-    b: &crd::Bench,
-    name: &str,
-    ns: &str,
-    policies: &Api<NetworkPolicy>,
-    prev: &mut crd::BenchStatus,
-    gen: i64,
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
-    let env = match b.spec.attached_environment.as_deref() {
-        None => None,
-        Some(id) => Api::<crd::Environment>::all(ctx.client.clone()).get_opt(id).await?.filter(|e| e.spec.region == ctx.region),
-    };
-    let was = prev.conditions.iter().find(|c| c.type_ == crd::ATTACHED && c.status == "True").map(|c| c.message.clone());
-    let now = env.as_ref().map(|e| e.name_any());
-    if let Some(was) = was.as_ref().filter(|w| now.as_ref() != Some(*w)) {
-        delete_ignoring_404(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &crd::env_namespace(was)), &k8s::attach_policy_name(name)).await?;
-    }
-    match &env {
-        Some(e) => {
-            let env_ns = crd::env_namespace(&e.name_any());
-            ensure(policies, &k8s::attach_egress(ns, name, &env_ns, &b.spec.owner, &owner_ref_of_kind(b)?), ctx).await?;
-            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &env_ns);
-            ensure(&in_env, &k8s::attach_ingress(&env_ns, ns, name, &b.spec.owner, &owner_ref_of_kind(e)?), ctx).await?;
-            prev.conditions = replaced(&prev.conditions, crd::condition(crd::ATTACHED, true, "Converged", &e.name_any(), gen));
-        }
-        None if prev.conditions.iter().any(|c| c.type_ == crd::ATTACHED) => {
-            delete_ignoring_404(policies, &k8s::attach_policy_name(name)).await?;
-            prev.conditions.retain(|c| c.type_ != crd::ATTACHED);
-        }
-        None => {}
-    }
-    Ok(())
-}
-
 pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     // No finalizer: the pod is ownerReference-collected and the folder outlives the bench on purpose.
     if b.meta().deletion_timestamp.is_some() {
@@ -195,14 +155,26 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     prev.conditions = with(&prev, cond(crd::FOLDER_READY, true, "Ready", "the bench folder exists on the region share"));
 
     let ns = crd::ws_namespace(&owner, &team);
-    let (pool, id, ns_owned, env_ns) = (ctx.pool.clone(), name.clone(), ns.clone(), b.spec.attached_environment.as_deref().map(crd::env_namespace));
-    tokio::task::spawn_blocking(move || super::write_resolv_conf(&pool, &id, &ns_owned, env_ns.as_deref()))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))??;
-
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     ensure(&policies, &k8s::bench_ingress_policy(&ns, &name), &ctx).await?;
-    attach_grants(&b, &name, &ns, &policies, &mut prev, gen, &ctx).await?;
+    // The same converge every pod of the space runs: a bench follows the space's environment.
+    let space = super::space::converge_space(
+        &ctx,
+        super::space::Pod {
+            id: &name,
+            owner: &owner,
+            team: &team,
+            region: &ctx.region,
+            field: b.spec.attached_environment.as_deref(),
+            prev: &prev.conditions,
+            gen,
+        },
+    )
+    .await?;
+    if let super::space::Attached::Set(c) = space {
+        prev.conditions.retain(|c| c.type_ != crd::ATTACHED);
+        prev.conditions.extend(c);
+    }
 
     if Api::<Secret>::namespaced(ctx.client.clone(), &ns).get_opt(k8s::USER_KEY_SECRET).await?.is_none() {
         let c = cond("Ready", false, "KeysNotReady", "the user-key Secret is not in the namespace yet");

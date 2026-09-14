@@ -23,6 +23,13 @@ pub(crate) fn ssh_routes() -> Vec<Route> {
 pub(crate) const WS_SSH_SECRET: &str = "/api/v1/namespaces/ws-alice/secrets/ws-ssh-ws-1";
 
 pub(crate) fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
+    let (ctx, rec, fake) = ws_ctx_with_ssh_unlisted(pool, ssh);
+    ctx.remember_spaces(vec![]);
+    (ctx, rec, fake)
+}
+
+/// `ws_ctx_with_ssh` with the space cache not yet listed.
+pub(crate) fn ws_ctx_with_ssh_unlisted(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<Ctx>, Recorder, Arc<FakeNix>) {
     let vol = serde_json::json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
@@ -45,7 +52,7 @@ pub(crate) fn ws_ctx_with_ssh(pool: &std::path::Path, ssh: Vec<Route>) -> (Arc<C
     // so `Engine::checkout` converges on `WORKTREE_EXISTS` instead of shelling out to a real
     // `btrfs subvolume create` this test environment doesn't have.
     std::fs::create_dir_all(pool.join("vol/ws-1/live/ws-1")).unwrap();
-    let (ctx, rec) = ctx_full(pool, routes, fake.clone());
+    let (ctx, rec) = ctx_on_node_unlisted("node-a", pool, routes, fake.clone(), Some("127.0.0.1:/".into()));
     // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     (ctx, rec, fake)

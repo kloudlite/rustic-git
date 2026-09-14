@@ -378,3 +378,51 @@ pub fn attach_ingress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, owner
         }),
     )
 }
+
+
+/// The name of a space's egress half in its own namespace. One per space, not per pod: the
+/// choice is the whole space's, so every pod in the namespace follows it.
+pub const SPACE_EGRESS_POLICY: &str = "space-env";
+
+
+/// The name of a space's ingress half in the environment's namespace, keyed by the space so two
+/// spaces pointing at one environment never share (or delete) each other's grant.
+pub fn space_ingress_name(space_ns: &str) -> String {
+    format!("space-{space_ns}")
+}
+
+
+/// Lets every pod of a person's space reach the environment's namespace. Namespace-wide on
+/// purpose (the per-pod `attach_egress` stopped at one workspace): the choice belongs to the space,
+/// and a pod kind added later follows it with no wiring of its own. Egress needs its own rule
+/// because `allow_internet_egress` excludes RFC 1918.
+pub fn space_egress(space_ns: &str, env_ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        SPACE_EGRESS_POLICY,
+        space_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Egress"],
+            "egress": [{ "to": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": env_ns } } }] }],
+        }),
+    )
+}
+
+
+/// Lets the environment accept every pod of that one space. The peer is the space NAMESPACE alone,
+/// which is exactly the space: a `ws_namespace` holds one person in one team and nobody else.
+pub fn space_ingress(env_ns: &str, space_ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        &space_ingress_name(space_ns),
+        env_ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": {},
+            "policyTypes": ["Ingress"],
+            "ingress": [{ "from": [{ "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": space_ns } } }] }],
+        }),
+    )
+}

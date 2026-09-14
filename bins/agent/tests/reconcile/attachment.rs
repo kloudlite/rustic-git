@@ -1,30 +1,26 @@
-//! attachment.
+//! A person's space follows one environment (`controller::space`): the resolver, the converge
+//! every pod of the space runs, the legacy per-pod grant it collects, and the unknown-cache rule.
 
 use super::*;
 
+const WS_EGRESS: &str = "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/space-env";
 
-/// The workspace-side objects an attachment adds, on top of `ws_ctx_with_nix`'s: the shared attach
-/// claim, and both halves of the grant answered with themselves.
+fn env_ingress(env: &str) -> String {
+    format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/space-ws-alice", crd::env_namespace(env))
+}
+
+fn np(path: String, name: &str) -> Route {
+    kloudlite_workspaces::kube_test::patch(path, serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": name}}))
+}
+
+/// The workspace-side objects a space adds on top of `ws_ctx_with_ssh`'s: the host key and both
+/// halves of the grant for `env-abc` and `env-def`, answered with themselves.
 pub(crate) fn attach_routes() -> Vec<Route> {
-    let np = |ns: &str| Route {
-        method: "PATCH",
-        path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1"),
-        status: 200,
-        body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-                                 "metadata": {"name": "attach-ws-1"}}),
-    };
-    vec![
-        kloudlite_workspaces::kube_test::not_found(WS_SSH_SECRET),
-        kloudlite_workspaces::kube_test::post(
-            "/api/v1/namespaces/ws-alice/secrets",
-            serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "ws-ssh-ws-1"}}),
-        ),
-        np("ws-alice"),
-        np("env-abc"),
-        // `attached_workspace` sets `spec.attachedEnvironment` with no label to match, so the
-        // reconcile's `heal_attached_label` patches it back in on the first pass.
-        Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) },
-    ]
+    let mut r = ssh_routes();
+    r.push(np(WS_EGRESS.into(), "space-env"));
+    r.push(np(env_ingress("env-abc"), "space-ws-alice"));
+    r.push(np(env_ingress("env-def"), "space-ws-alice"));
+    r
 }
 
 pub(crate) fn env_route(id: &str, region: &str) -> Route {
@@ -39,183 +35,208 @@ pub(crate) fn env_route(id: &str, region: &str) -> Route {
     )
 }
 
-pub(crate) fn attached_workspace(env_id: &str) -> crd::Workspace {
-    let mut w = ready_workspace("ws-1", vec![]);
-    w.spec.attached_environment = Some(env_id.into());
-    w
+/// A choice as `/v1` writes it, with the uid the policies' owner reference needs.
+pub(crate) fn space(owner: &str, team: &str, env: &str) -> crd::SpaceEnvironment {
+    let mut s = crd::space_environment(owner, team, env);
+    s.metadata.uid = Some(format!("space-uid-{owner}-{team}"));
+    s
 }
 
-pub(crate) fn attached_condition(rec: &Recorder) -> serde_json::Value {
+pub(crate) fn attached_condition(rec: &Recorder) -> Option<serde_json::Value> {
     let st = rec.sent("PATCH", WS_STATUS).last().expect("a status write").clone();
-    st["status"]["conditions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["type"] == "Attached")
-        .unwrap_or_else(|| panic!("no Attached condition in {st}"))
-        .clone()
+    st["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Attached").cloned()
 }
 
-/// Attaching writes both halves of the grant. The file itself is asserted by the k8s tests — here
-/// what matters is that the reconcile reaches the policies at all, and before the pod.
+fn resolv(ctx: &Arc<Ctx>, id: &str) -> String {
+    std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, id)).unwrap()
+}
+
+/// One choice answers for every pod of the space — any number of workspaces, the bench, a kind
+/// added later — and for nobody else: a teammate's space in the same team is its own.
 #[tokio::test]
-async fn an_attached_workspace_gets_both_halves_of_the_grant() {
+async fn one_choice_answers_for_every_pod_of_the_space_and_no_teammate() {
+    use kloudlite_agent::controller::space::{space_environment, SpaceEnv};
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    ctx.remember_spaces(vec![space("alice", "acme", "env-abc")]);
+    let chosen = |owner: &str, team: &str| match space_environment(&ctx, owner, team, None) {
+        SpaceEnv::Known(c) => c.map(|c| c.environment),
+        SpaceEnv::Unknown => panic!("listed"),
+    };
+    // A workspace, a second workspace and the bench of alice in acme all ask with (alice, acme).
+    assert_eq!(chosen("alice", "acme").as_deref(), Some("env-abc"));
+    assert_eq!(chosen("Alice", "acme").as_deref(), Some("env-abc"), "handles fold like ws_namespace");
+    assert_eq!(chosen("bob", "acme"), None, "a teammate chooses independently");
+    assert_eq!(chosen("alice", ""), None, "the personal space is its own");
+}
+
+/// The cache is known and holds no choice: an object still carrying the retired field resolves
+/// through it (the migration window). A choice, once written, wins over the field; an unlisted
+/// cache is Unknown whatever the field says.
+#[tokio::test]
+async fn the_retired_field_is_a_fallback_only_while_the_cache_is_known_and_empty() {
+    use kloudlite_agent::controller::space::{space_environment, SpaceEnv};
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx_unlisted(tmp.path(), vec![]);
+    assert_eq!(space_environment(&ctx, "alice", "", Some("env-old")), SpaceEnv::Unknown);
+    ctx.remember_spaces(vec![]);
+    match space_environment(&ctx, "alice", "", Some("env-old")) {
+        SpaceEnv::Known(Some(c)) => assert!(c.environment == "env-old" && c.space.is_none()),
+        other => panic!("{other:?}"),
+    }
+    ctx.remember_spaces(vec![space("alice", "", "env-new")]);
+    match space_environment(&ctx, "alice", "", Some("env-old")) {
+        SpaceEnv::Known(Some(c)) => assert_eq!(c.environment, "env-new"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A workspace in a space with a choice gets the environment first in its search line and the
+/// namespace-level pair, both owned by the SpaceEnvironment, before its pod.
+#[tokio::test]
+async fn a_workspace_follows_its_spaces_environment() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = attach_routes();
     routes.push(env_route("env-abc", "r1"));
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+    ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
 
     let calls = rec.calls();
-    let policy = |ns: &str| format!("PATCH /apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1");
-    let ws_half = calls.iter().position(|c| *c == policy("ws-alice")).expect("workspace-side policy");
-    let env_half = calls.iter().position(|c| *c == policy("env-abc")).expect("environment-side policy");
+    let egress = calls.iter().position(|c| *c == format!("PATCH {WS_EGRESS}")).expect("space egress");
+    let ingress = calls.iter().position(|c| *c == format!("PATCH {}", env_ingress("env-abc"))).expect("space ingress");
     let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
-    assert!(ws_half < pod && env_half < pod, "the grant lands before the pod: {calls:?}");
-
-    // A `subPath` whose target is missing becomes a directory: the file exists before the pod.
-    let written = std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, "ws-1")).unwrap();
-    assert!(written.contains("env-abc.svc."), "the environment leads the search line: {written}");
-
-    // The environment-side half is owned by the ENVIRONMENT: an ownerReference cannot cross
-    // namespaces, so a Workspace ref there would never be collected.
-    let sent = rec.sent("PATCH", "/apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1");
-    assert_eq!(sent.last().unwrap()["metadata"]["ownerReferences"][0]["kind"], "Environment");
-    assert_eq!(attached_condition(&rec)["status"], "True");
-    assert_eq!(attached_condition(&rec)["message"], "env-abc");
+    assert!(egress < pod && ingress < pod, "the grant lands before the pod: {calls:?}");
+    assert!(resolv(&ctx, "ws-1").contains("env-abc.svc."), "{}", resolv(&ctx, "ws-1"));
+    for path in [WS_EGRESS.to_string(), env_ingress("env-abc")] {
+        assert_eq!(rec.sent("PATCH", &path).last().unwrap()["metadata"]["ownerReferences"][0]["kind"], "SpaceEnvironment");
+    }
+    let cond = attached_condition(&rec).expect("Attached");
+    assert_eq!((cond["status"].as_str(), cond["reason"].as_str(), cond["message"].as_str()), (Some("True"), Some("Space"), Some("env-abc")));
 }
 
-/// A stale id is not an error. `/v1` clears the field when an environment is deleted, but a crash
-/// mid-delete must degrade to "not attached" rather than leaving a grant pointing at nothing.
+/// A switch rewrites the SAME file (the running pod holds the inode) and grants the new
+/// environment; the old environment's half is the Environment reconciler's to prune.
 #[tokio::test]
-async fn a_workspace_attached_to_a_missing_environment_reconciles_unattached() {
+async fn a_switch_rewrites_resolv_conf_in_place() {
+    use std::os::unix::fs::MetadataExt;
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = attach_routes();
-    routes.push(kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/environments/env-gone"));
+    routes.extend([env_route("env-abc", "r1"), env_route("env-def", "r1")]);
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-    apply_until_settled(&attached_workspace("env-gone"), &ctx).await;
+    ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    let path = kloudlite_workspaces::k8s::attach_file(&ctx.pool, "ws-1");
+    let inode = std::fs::metadata(&path).unwrap().ino();
 
-    assert!(
-        !rec.calls().iter().any(|c| c.contains("/networkpolicies/attach-ws-1") && c.starts_with("PATCH")),
-        "no grant for an environment that is not there: {:?}",
-        rec.calls()
-    );
-    let written = std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, "ws-1")).unwrap();
-    assert!(!written.contains("env-"), "no search domain either: {written}");
-    let cond = attached_condition(&rec);
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "EnvironmentNotFound", "the refusal is reported, not silent");
+    ctx.remember_spaces(vec![space("alice", "", "env-def")]);
+    apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode, "written in place, never renamed");
+    assert!(resolv(&ctx, "ws-1").contains("env-def.svc.") && !resolv(&ctx, "ws-1").contains("env-abc"));
+    assert!(rec.calls().contains(&format!("PATCH {}", env_ingress("env-def"))));
 }
 
-/// A different region is a different cluster: no route, no DNS. Refused by the reconciler as well
-/// as by `/v1`, because a spec can arrive by any path.
+/// The environment's own prune drops a `space-*` ingress whose space points elsewhere, keeps the one
+/// that still points here, and keeps everything while the cache is unlisted.
 #[tokio::test]
-async fn a_cross_region_attachment_is_refused() {
+async fn the_environment_prunes_a_space_grant_left_by_a_switch() {
+    for (spaces, deleted) in [(Some("env-other"), true), (Some("env-1"), false), (None, false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let routes = vec![kloudlite_workspaces::kube_test::get(
+            "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies",
+            serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicyList", "metadata": {},
+                               "items": [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "space-ws-alice"}}]}),
+        )];
+        let (ctx, rec) = ctx_unlisted(tmp.path(), routes);
+        if let Some(env) = spaces {
+            ctx.remember_spaces(vec![space("alice", "", env)]);
+        }
+        let _ = kloudlite_agent::controller::apply_environment(&environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"})), &ctx).await;
+        let did = rec.calls().contains(&"DELETE /apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/space-ws-alice".to_string());
+        assert_eq!(did, deleted, "space -> {spaces:?}: {:?}", rec.calls());
+    }
+}
+
+/// An unlisted cache touches nothing: no policy written or deleted, an existing resolv.conf left as
+/// it is, and the last recorded `Attached` kept — read as "no environment" it would strip DNS from
+/// every pod in the region on every agent restart.
+#[tokio::test]
+async fn an_unlisted_space_cache_rewrites_and_deletes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh_unlisted(tmp.path(), attach_routes());
+    let path = kloudlite_workspaces::k8s::attach_file(&ctx.pool, "ws-1");
+    std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
+    std::fs::write(&path, "search env-abc.svc.cluster.local\n").unwrap();
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Space", "env-abc", 1)];
+    apply_until_settled(&w, &ctx).await;
+
+    assert!(!rec.calls().iter().any(|c| c.contains("/networkpolicies/space") || c.contains("/networkpolicies/attach-")), "{:?}", rec.calls());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "search env-abc.svc.cluster.local\n");
+    assert_eq!(attached_condition(&rec).expect("kept")["message"], "env-abc");
+}
+
+/// The legacy per-pod pair an older build wrote is collected once — both halves, by the id its
+/// `Attached` condition recorded — and a pass already in the new shape deletes nothing.
+#[tokio::test]
+async fn the_legacy_per_pod_grant_is_collected_once() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = attach_routes();
-    routes.push(env_route("env-abc", "other-region"));
+    routes.push(env_route("env-abc", "r1"));
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
+    ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Converged", "env-abc", 1)];
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let calls = rec.calls();
+    for ns in ["ws-alice", "env-abc"] {
+        assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1")), "{ns}: {calls:?}");
+    }
 
-    assert!(
-        !rec.calls().iter().any(|c| c.contains("/networkpolicies/attach-ws-1") && c.starts_with("PATCH")),
-        "no grant across a region boundary: {:?}",
-        rec.calls()
-    );
-    assert_eq!(attached_condition(&rec)["reason"], "RegionMismatch");
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), { let mut r = attach_routes(); r.push(env_route("env-abc", "r1")); r });
+    ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+    w.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Space", "env-abc", 1)];
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE") && c.contains("networkpolicies")), "{:?}", rec.calls());
 }
 
-/// An unattached workspace has no `Attached` condition at all — and no grant is deleted, because
-/// one was never recorded (2026-09-12). This DELETE used to run on every reconcile of every
-/// workspace that has never been attached, against a policy that has never existed.
+/// A choice naming a gone environment, or one in another region, reports why and grants nothing.
 #[tokio::test]
-async fn a_workspace_that_was_never_attached_reports_nothing_and_deletes_nothing() {
+async fn a_missing_or_cross_region_environment_is_reported_and_grants_nothing() {
+    for (route, reason) in [
+        (kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/environments/env-abc"), "EnvironmentNotFound"),
+        (env_route("env-abc", "other-region"), "RegionMismatch"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut routes = attach_routes();
+        routes.push(route);
+        let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+        ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+        apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+        assert!(!rec.calls().iter().any(|c| c.starts_with("PATCH") && c.contains("/networkpolicies/space")), "{:?}", rec.calls());
+        assert!(!resolv(&ctx, "ws-1").contains("env-"), "{}", resolv(&ctx, "ws-1"));
+        let cond = attached_condition(&rec).expect("reported");
+        assert_eq!((cond["status"].as_str(), cond["reason"].as_str()), (Some("False"), Some(reason)));
+    }
+}
+
+/// No choice and never attached: no condition and no DELETE on every pass (2026-09-12). Once a
+/// choice is cleared the egress half goes by name, exactly once.
+#[tokio::test]
+async fn no_choice_reports_nothing_and_a_cleared_choice_drops_the_egress_once() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
-    let _ = kloudlite_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
+    kloudlite_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
+    assert!(!rec.calls().iter().any(|c| c.contains("networkpolicies/space") || c.contains("networkpolicies/attach")), "{:?}", rec.calls());
+    assert!(attached_condition(&rec).is_none());
 
-    assert!(
-        !rec.calls().iter().any(|c| c.contains("networkpolicies/attach-ws-1")),
-        "nothing was ever attached, so there is nothing to delete: {:?}",
-        rec.calls()
-    );
-    let st = rec.sent("PATCH", WS_STATUS).last().unwrap().clone();
-    assert!(
-        !st["status"]["conditions"].as_array().unwrap().iter().any(|c| c["type"] == "Attached"),
-        "not attached is not a condition: {st}"
-    );
-}
-
-/// The detach the DELETE exists for: the field is cleared but the LAST pass recorded an
-/// attachment, so the workspace-side grant goes by name.
-#[tokio::test]
-async fn a_detached_workspace_deletes_the_grant_it_was_recorded_as_holding() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
     let mut w = ready_workspace("ws-1", vec![]);
-    let st = w.status.get_or_insert_with(Default::default);
-    st.conditions = vec![crd::condition(crd::ATTACHED, true, "Converged", "env-1", 1)];
-    let _ = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-
-    assert!(
-        rec.calls().iter().any(|c| *c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"),
-        "the grant is deleted by name: {:?}",
-        rec.calls()
-    );
+    w.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Space", "env-abc", 1)];
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert!(rec.calls().contains(&format!("DELETE {WS_EGRESS}")), "{:?}", rec.calls());
+    assert!(attached_condition(&rec).is_none(), "the condition goes with the choice");
 }
 
-/// The status this workspace would carry after a pass attached to `env_id` — the `Attached`
-/// message is where the previous environment's namespace is read back from.
-pub(crate) fn was_attached_to(env_id: &str) -> crd::Workspace {
-    let mut w = ready_workspace("ws-1", vec![]);
-    let mut st = w.status.unwrap_or_default();
-    st.conditions.push(crd::condition("Attached", true, "Converged", env_id, 1));
-    w.status = Some(st);
-    w
-}
-
-/// Detaching, and re-attaching elsewhere, must collect the ingress in the OLD environment's
-/// namespace. Left behind it is a dormant cross-namespace grant that goes live again the moment
-/// anything re-adds an egress with the same workspace id.
-#[tokio::test]
-async fn detaching_deletes_the_grant_in_the_old_environments_namespace() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = attach_routes();
-    routes.push(env_route("env-def", "r1"));
-    routes.push(Route {
-        method: "PATCH",
-        path: "/apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1".into(),
-        status: 200,
-        body: serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-                                 "metadata": {"name": "attach-ws-1"}}),
-    });
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-    let stale = "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1";
-
-    // Cleared: both halves go.
-    apply_until_settled(&was_attached_to("env-abc"), &ctx).await;
-    let after_detach = rec.calls().iter().filter(|c| *c == stale).count();
-    assert!(after_detach > 0, "the old environment's half: {:?}", rec.calls());
-    assert!(rec
-        .calls()
-        .iter()
-        .any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1"));
-
-    // Re-attached elsewhere: the new grant is applied and the old namespace is still cleaned up.
-    let mut moved = was_attached_to("env-abc");
-    moved.spec.attached_environment = Some("env-def".into());
-    apply_until_settled(&moved, &ctx).await;
-    assert!(rec.calls().iter().filter(|c| *c == stale).count() > after_detach, "on the re-attach too");
-    assert!(rec
-        .calls()
-        .iter()
-        .any(|c| c == "PATCH /apis/networking.k8s.io/v1/namespaces/env-def/networkpolicies/attach-ws-1"));
-}
-
-/// A pod created before this feature shipped has no attach volume, and `create_if_absent` never
-/// replaces it — so the file and the policies this pass writes reach nothing. The condition is
-/// gated on the LIVE pod rather than on the spec, because "attached" that resolves nothing is a
-/// success the user cannot see through.
 pub(crate) fn workspace_pod_json(volumes: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"},
@@ -225,104 +246,27 @@ pub(crate) fn workspace_pod_json(volumes: serde_json::Value) -> serde_json::Valu
     })
 }
 
+/// A pod created before the resolv.conf mount existed resolves nothing, so it does not report
+/// `Attached=True`; one that carries the mount does.
 #[tokio::test]
-async fn an_attached_workspace_whose_pod_predates_the_mount_does_not_report_attached() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = attach_routes();
-    routes.push(env_route("env-abc", "r1"));
-    routes.push(kloudlite_workspaces::kube_test::get(
-        "/api/v1/namespaces/ws-alice/pods/ws-1",
-        workspace_pod_json(serde_json::json!([{"name": "home", "persistentVolumeClaim": {"claimName": "home"}}])),
-    ));
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-
-    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
-
-    let cond = attached_condition(&rec);
-    assert_eq!(cond["status"], "False", "a pod with no attach mount resolves nothing: {cond}");
-    assert_eq!(cond["reason"], "PodPredatesAttachment");
-    assert!(cond["message"].as_str().unwrap().contains("stop and start"), "{cond}");
-}
-
-/// The same pass on a pod that DOES carry the mount reports the attachment, addressed by the bare
-/// environment id the next pass reads back.
-#[tokio::test]
-async fn an_attached_workspace_whose_pod_carries_the_mount_reports_attached() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut routes = attach_routes();
-    routes.push(env_route("env-abc", "r1"));
-    routes.push(kloudlite_workspaces::kube_test::get(
-        "/api/v1/namespaces/ws-alice/pods/ws-1",
-        workspace_pod_json(serde_json::json!([{"name": "attach", "hostPath": {"path": "/pool/attach/ws-1/resolv.conf", "type": "File"}}])),
-    ));
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-
-    apply_until_settled(&attached_workspace("env-abc"), &ctx).await;
-
-    assert_eq!(attached_condition(&rec)["status"], "True");
-    assert_eq!(attached_condition(&rec)["message"], "env-abc");
-}
-
-/// A stop between the attach and the detach must not lose the grant's address. `ws_conditions`
-/// rebuilds the condition list on every stop, so an `Attached` dropped there is finding 1 coming
-/// back through a different door — the ingress stranded in `env-abc` with nothing left that knows
-/// where it is.
-#[tokio::test]
-async fn a_stop_between_the_attach_and_the_detach_still_collects_the_old_grant() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
-
-    // Stop while attached: this pass rewrites the whole condition list.
-    let mut stopping = was_attached_to("env-abc");
-    stopping.spec.desired_state = crd::DesiredState::Stopped;
-    kloudlite_agent::controller::apply_workspace(&stopping, &ctx).await.unwrap();
-    let stopped = rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone();
-
-    // Detach, starting from exactly the status that stop wrote — not from a hand-built one.
-    let mut detached: crd::Workspace = serde_json::from_value(ws_json(stopped)).unwrap();
-    detached.spec.attached_environment = None;
-    apply_until_settled(&detached, &ctx).await;
-
-    assert!(
-        rec.calls().iter().any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1"),
-        "the stop must carry the environment id through: {:?}",
-        rec.calls()
-    );
-}
-
-/// The invariant, not one site: any pass that rebuilds the condition list must carry `Attached`
-/// through, because a detach after it is what collects the grant in the old environment's
-/// namespace. A volume wait — a node reboot, a restore, a re-materialize — is the cheapest such
-/// pass to force; the stop path is covered above, and both go through `ws_conditions`.
-#[tokio::test]
-async fn a_volume_wait_between_the_attach_and_the_detach_still_collects_the_old_grant() {
-    let tmp = tempfile::tempdir().unwrap();
-    // First read of the Volume is NOT ready, so this pass settles into a wait and writes status;
-    // the fixture's own ready route answers every read after it.
-    let mut routes = vec![kloudlite_workspaces::kube_test::get(
-        "/apis/kloudlite.io/v1alpha1/volumes/ws-1",
-        serde_json::json!({
-            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
-            "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
-            "status": {"phase": "creating", "subvolumePresent": false}
-        }),
-    )];
-    routes.extend(attach_routes());
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-
-    kloudlite_agent::controller::apply_workspace(&was_attached_to("env-abc"), &ctx).await.unwrap();
-    let waited = rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone();
-
-    let mut detached: crd::Workspace = serde_json::from_value(ws_json(waited)).unwrap();
-    detached.spec.attached_environment = None;
-    apply_until_settled(&detached, &ctx).await;
-
-    assert!(
-        rec.calls().iter().any(|c| c == "DELETE /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1"),
-        "the wait must carry the environment id through: {:?}",
-        rec.calls()
-    );
+async fn attached_is_reported_only_for_a_pod_that_carries_the_mount() {
+    for (volumes, status) in [
+        (serde_json::json!([{"name": "home", "persistentVolumeClaim": {"claimName": "home"}}]), "False"),
+        (serde_json::json!([{"name": "attach", "hostPath": {"path": "/pool/attach/ws-1/resolv.conf", "type": "File"}}]), "True"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut routes = attach_routes();
+        routes.push(env_route("env-abc", "r1"));
+        routes.push(kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1", workspace_pod_json(volumes)));
+        let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+        ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+        apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+        let cond = attached_condition(&rec).expect("Attached");
+        assert_eq!(cond["status"], status, "{cond}");
+        if status == "False" {
+            assert_eq!(cond["reason"], "PodPredatesAttachment");
+        }
+    }
 }
 
 /// The whole point: a workspace whose inputs another workspace already built on this node reaches

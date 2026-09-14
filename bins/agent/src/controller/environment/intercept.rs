@@ -174,10 +174,14 @@ pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::E
     if w.spec.desired_state == DesiredState::Stopped {
         return off("WorkspaceStopped", format!("{} is stopped", ic.workspace), Some(w));
     }
-    // `spec` only, never `crd::attached_environment`'s condition fallback: that reads back a
-    // DETACHED workspace's last attachment, which is the one answer this must not accept.
-    if w.spec.attached_environment.as_deref() != Some(env_name) {
-        return off("WorkspaceDetached", format!("{} is not attached to this environment", ic.workspace), Some(w));
+    // Attached means the workspace's SPACE uses this environment. An unlisted space cache is
+    // `Keep`, for the same reason the workspace cache above is.
+    match crate::controller::space::space_environment(ctx, &w.spec.owner, &w.spec.team, w.spec.attached_environment.as_deref()) {
+        crate::controller::space::SpaceEnv::Unknown => return Intercepting::Keep { since: None },
+        crate::controller::space::SpaceEnv::Known(Some(c)) if c.environment == env_name => {}
+        crate::controller::space::SpaceEnv::Known(_) => {
+            return off("WorkspaceDetached", format!("{} is in a space that does not use this environment", ic.workspace), Some(w));
+        }
     }
     // `podRef` is `{namespace}/{name}`, written that way by the workspace's own controller — the
     // whole string is not a pod name, and passing it as one is a request the API server rejects

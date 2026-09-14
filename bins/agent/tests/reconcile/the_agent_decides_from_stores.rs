@@ -92,3 +92,23 @@ async fn parents_on_volume_names_a_parent_only_the_store_knows() {
         rec.calls()
     );
 }
+
+
+/// Attached means the workspace's SPACE uses this environment: a space pointing elsewhere releases
+/// the intercept (the wish stays in spec), and an unlisted space cache decides nothing.
+#[tokio::test]
+async fn an_intercept_follows_the_workspaces_space() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec) = ctx(tmp.path(), vec![]);
+    ctx.remember_parents(vec![intercepting_ws("node-b")], vec![]);
+    ctx.remember_spaces(vec![space("alice", "", "env-2")]);
+    let d = decide_intercept(&intercept(), "env-1", &Default::default(), &ctx).await;
+    assert!(matches!(d, Intercepting::Off { reason: "WorkspaceDetached", .. }));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx_unlisted(tmp.path(), vec![]);
+    ctx.remember_parents(vec![intercepting_ws("node-b")], vec![]);
+    let d = decide_intercept(&intercept(), "env-1", &Default::default(), &ctx).await;
+    assert!(matches!(d, Intercepting::Keep { since: None }));
+    assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+}

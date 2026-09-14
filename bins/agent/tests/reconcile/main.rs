@@ -182,7 +182,20 @@ fn ctx_with_homes_export(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<Fa
 
 /// The same fixture as some OTHER node — what the hand-off half of a capacity decline needs: one
 /// node with no room, and a second one that takes the parent it left unplaced.
-fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+fn ctx_on_node(node: &str, pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+    let (ctx, rec) = ctx_on_node_unlisted(node, pool, routes, nix, homes_export);
+    // The space cache listed and empty: "no choice" for every test that is not about the unknown
+    // window, which asks for `ctx_unlisted` instead.
+    ctx.remember_spaces(vec![]);
+    (ctx, rec)
+}
+
+/// `ctx` with the space cache NOT yet listed.
+fn ctx_unlisted(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
+    ctx_on_node_unlisted("node-a", pool, routes, Arc::new(FakeNix::default()), Some("127.0.0.1:/".into()))
+}
+
+fn ctx_on_node_unlisted(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have snapshots yet"
     // (`claim::placement`/`has_snapshots`, the checkout/migrate step) — a call no test fixture
     // needed before the snapshot model became the only model (Task 8). Appended AFTER the caller's

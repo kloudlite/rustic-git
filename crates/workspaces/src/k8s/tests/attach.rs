@@ -112,3 +112,45 @@ pub(crate) fn the_attachment_ingress_names_the_namespace_and_the_pod() {
     assert_eq!(from["podSelector"]["matchLabels"][WORKSPACE_LABEL], "ws-1");
     assert_eq!(spec["policyTypes"], serde_json::json!(["Ingress"]));
 }
+
+
+/// A space's grant opens the whole space namespace to the environment and nothing else: one peer,
+/// a namespace selector, no pod selector — the choice is the space's, not one pod's.
+#[test]
+pub(crate) fn the_space_pair_selects_namespaces_in_one_peer() {
+    let e = space_egress("wt-alice-1", "env-abc", "alice", &owner_ref());
+    assert_eq!(e.metadata.name.as_deref(), Some(SPACE_EGRESS_POLICY));
+    assert_eq!(e.metadata.namespace.as_deref(), Some("wt-alice-1"));
+    let spec = serde_json::to_value(e.spec.unwrap()).unwrap();
+    assert_eq!(spec["podSelector"], serde_json::json!({}));
+    let to = spec["egress"][0]["to"].as_array().unwrap();
+    assert_eq!(to.len(), 1);
+    assert_eq!(to[0], serde_json::json!({"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "env-abc"}}}));
+
+    let i = space_ingress("env-abc", "wt-alice-1", "alice", &owner_ref());
+    assert_eq!(i.metadata.name.as_deref(), Some("space-wt-alice-1"));
+    assert_eq!(i.metadata.namespace.as_deref(), Some("env-abc"));
+    let spec = serde_json::to_value(i.spec.unwrap()).unwrap();
+    let from = spec["ingress"][0]["from"].as_array().unwrap();
+    assert_eq!(from.len(), 1);
+    assert_eq!(from[0], serde_json::json!({"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "wt-alice-1"}}}));
+}
+
+
+/// Every pod the platform builds for a space namespace carries the resolv.conf mount: that, not
+/// convention, is what lets any pod kind follow the space's environment by bare name.
+#[test]
+pub(crate) fn every_space_pod_builder_carries_the_resolv_conf_mount() {
+    let has_mount = |p: k8s_openapi::api::core::v1::Pod, id: &str| {
+        let spec = p.spec.unwrap();
+        let vol = spec.volumes.unwrap().into_iter().find(|v| v.name == "attach").expect("attach volume");
+        assert_eq!(vol.host_path.unwrap().path, attach_file(ctx().pool, id));
+        assert!(spec.containers.iter().any(|c| c.volume_mounts.iter().flatten().any(|m| m.name == "attach" && m.mount_path == "/etc/resolv.conf")));
+    };
+    has_mount(workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).unwrap(), "ws-1");
+    let b = crate::crd::Bench::new(
+        "bench-1",
+        serde_json::from_value(serde_json::json!({"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"})).unwrap(),
+    );
+    has_mount(bench_pod(&b, "bench-1", ctx().pool, None, "cr.example", 600).unwrap(), "bench-1");
+}
