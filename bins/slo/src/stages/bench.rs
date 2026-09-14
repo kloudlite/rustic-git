@@ -21,7 +21,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kloudlite_workspaces::crd::{self, ClusterSettings};
 use kube::api::Api;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use super::{api, call, get, post, raw};
@@ -95,19 +95,16 @@ async fn forward(c: &Ctx) -> Result<(Child, u16)> {
     Ok((child, port))
 }
 
-/// One raw HTTP/1.1 GET through the forward: `(status, body)`.
+/// One GET through the forward: `(status, body)`. A hand-rolled `read_to_end` + split on
+/// `\r\n\r\n` read the body as literal bytes, which is wrong the moment harness-bench answers
+/// `Transfer-Encoding: chunked` (Node's default for a streamed JSON body) — the chunk framing
+/// (`5f\r\n...\r\n0\r\n\r\n`) landed inside what the probe parsed as JSON and `ok` was never seen.
+/// reqwest/hyper decode both chunked and Content-Length correctly, so let it own the response.
 async fn through(port: u16, path: &str) -> Result<(u16, String)> {
-    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
-    s.write_all(format!("GET {path} HTTP/1.1\r\nhost: bench\r\nconnection: close\r\n\r\n").as_bytes()).await?;
-    let mut buf = Vec::new();
-    s.read_to_end(&mut buf).await?;
-    split_response(&String::from_utf8_lossy(&buf))
-}
-
-fn split_response(r: &str) -> Result<(u16, String)> {
-    let (head, body) = r.split_once("\r\n\r\n").ok_or_else(|| anyhow!("no HTTP answer: {}", super::clip(r)))?;
-    let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("bad status line"))?;
-    Ok((status, body.to_string()))
+    let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{port}{path}")).header("host", "bench").send().await?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await?;
+    Ok((status, body))
 }
 
 fn is_stub(healthz: &str) -> bool {
@@ -292,8 +289,54 @@ mod tests {
         assert!(!is_stub(real) && health_ok(real));
         assert!(health_ok("ok stub running"));
         assert!(!health_ok("{\"ok\":false}") && !health_ok("oops") && !health_ok("{\"ok\":\"true\"}"));
-        assert_eq!(split_response("HTTP/1.1 200 OK\r\na: b\r\n\r\nok stub read-only").unwrap(), (200, "ok stub read-only".into()));
         assert_eq!(total_of("{\"messages\":[],\"total\": 12}"), Some(12));
+    }
+
+    /// A local listener that answers `/healthz` chunked (split across writes, the exact shape
+    /// from the fleet evidence) and one that answers with `Content-Length` instead; `through`
+    /// must read the JSON body correctly either way, and `health_ok` must see `ok==true`.
+    #[tokio::test]
+    async fn through_decodes_chunked_and_content_length_bodies() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        async fn serve_once(listener: TcpListener, response: &'static [u8]) {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            // Split the write so a body straddling two reads is exercised too.
+            let mid = response.len() / 2;
+            sock.write_all(&response[..mid]).await.unwrap();
+            tokio::task::yield_now().await;
+            sock.write_all(&response[mid..]).await.unwrap();
+            sock.shutdown().await.unwrap();
+        }
+
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+            5f\r\n{\"ok\":true,\"readOnly\":false,\"writable\":true,\"clients\":0,\"busy\":false,\"idleSince\":1789355813019}\r\n0\r\n\r\n";
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(serve_once(listener, chunked));
+        let (status, body) = through(port, "/healthz").await.unwrap();
+        assert_eq!(status, 200);
+        assert!(health_ok(&body), "chunked body did not parse as ok: {body}");
+
+        let cl_body = b"{\"ok\":true}";
+        let cl_response: Vec<u8> = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            cl_body.len(),
+            std::str::from_utf8(cl_body).unwrap()
+        )
+        .into_bytes();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let leaked: &'static [u8] = Box::leak(cl_response.into_boxed_slice());
+        tokio::spawn(serve_once(listener, leaked));
+        let (status, body) = through(port, "/healthz").await.unwrap();
+        assert_eq!(status, 200);
+        assert!(health_ok(&body));
+
+        assert!(!health_ok("{\"ok\":false}"));
     }
 
     #[test]
