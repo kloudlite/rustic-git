@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { TitleBar } from "./components/TitleBar";
 import { MachinePanel } from "./components/MachinePanel";
@@ -9,7 +9,8 @@ import { Inspector } from "./components/inspector/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { makeTab, type TermTab } from "./components/terminal/tabs";
-import { ENVIRONMENTS, IMAGES, MACHINE, REPOS, SNAPSHOTS, threadOf, type Thread } from "./model";
+import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
+import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
 import { KEYS, threadIndex } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
@@ -25,15 +26,62 @@ export function App() {
   // reloads this page, so nothing here resets state by hand.
   const [teams, setTeams] = createSignal<Team[]>([]);
   const [teamId, setTeamId] = createSignal("");
-  void window.harness.auth.status().then((s) => s.phase === "ready" && setTeamId(s.team));
-  void window.harness.auth.teams().then(setTeams);
+  const [who, setWho] = createSignal("");
   const teamName = () => teams().find((t) => t.slug === teamId())?.name || teamId();
-  const machine = createMemo(() => MACHINE);
+  // The team's real workspaces and environments, read by main from /v1. What the API has no field
+  // for — the bench's goal and plan — stays empty rather than faked.
+  const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
+  const [environments, setEnvironments] = createSignal<Environment[]>([]);
+  const [snapshots, setSnapshots] = createSignal<Snapshot[]>([]);
+  const [wsNote, setWsNote] = createSignal<string | undefined>(LOADING);
+  const [envNote, setEnvNote] = createSignal<string | undefined>(LOADING);
+  const machine = createMemo(() => ({ ...MACHINE, owner: who(), goal: "", todos: [], workspaces: workspaces() }));
 
   // Environments belong to the team, not the machine: the machine is connected
   // to one of them at a time.
-  const [connected, setConnected] = createSignal(machine().environmentId);
-  const environment = createMemo(() => ENVIRONMENTS.find((e) => e.id === connected()) ?? ENVIRONMENTS[0]);
+  const [connected, setConnected] = createSignal("");
+  const environment = createMemo(() => environments().find((e) => e.id === connected()) ?? environments()[0]);
+  const envId = createMemo(() => environment()?.id);
+
+  const platform = window.harness.platform;
+  /** The open environment page reads its one environment fresh, then that volume's history. */
+  const loadEnvPage = async (id: string) => {
+    try {
+      const e = toEnvironment(await platform.environment(id), teamId());
+      setEnvironments((l) => l.map((x) => (x.id === e.id ? e : x)));
+      setSnapshots(e.volume ? (await platform.snapshots(e.volume)).map((s) => toSnapshot(s, e.name)) : []);
+    } catch (e) {
+      setEnvNote(ipcError(e));
+    }
+  };
+  // One read at a time: a focus landing mid-refresh is dropped, not queued.
+  let refreshing = false;
+  const refresh = async () => {
+    if (refreshing || !teamId()) return;
+    refreshing = true;
+    try {
+      await Promise.all([
+        platform.workspaces().then((r) => (setWorkspaces(r.map(toWorkspace)), setWsNote(undefined)), (e) => setWsNote(ipcError(e))),
+        platform.environments().then((r) => (setEnvironments(r.map((x) => toEnvironment(x, teamId()))), setEnvNote(undefined)), (e) => setEnvNote(ipcError(e))),
+      ]);
+      const id = envTab() ? envId() : undefined;
+      if (id) await loadEnvPage(id);
+    } finally {
+      refreshing = false;
+    }
+  };
+  void window.harness.auth.status().then((s) => {
+    if (s.phase !== "ready") return;
+    setWho(s.username);
+    setTeamId(s.team);
+    void refresh();
+  });
+  void window.harness.auth.teams().then(setTeams);
+  // A team change reloads this page (leaving ready does), so only focus and the beat remain.
+  const onFocus = () => void refresh();
+  window.addEventListener("focus", onFocus);
+  const beat = setInterval(() => document.visibilityState === "visible" && void refresh(), 30_000);
+  onCleanup(() => (window.removeEventListener("focus", onFocus), clearInterval(beat)));
 
   // Tabs are threads, and a thread belongs to a node: selecting the machine, a
   // workspace or an ephemeral opens its thread as a tab. There is nothing to
@@ -219,6 +267,12 @@ export function App() {
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
   const switchTeam = (slug: string) => void window.harness.auth.chooseTeam(slug);
+  // Opening the environment page, or switching which one, reads it fresh. Keyed on the id memo, so
+  // the page's own write back into the list does not re-run this.
+  createEffect(() => {
+    const id = envTab() ? envId() : undefined;
+    if (id) untrack(() => (setSnapshots([]), void loadEnvPage(id)));
+  });
 
   // Either side dock can be put away; the conversation takes the room.
   const [leftOpen, setLeftOpen] = createSignal(true);
@@ -240,7 +294,7 @@ export function App() {
   const [height, setHeight] = createSignal(300);
 
   const openShell = (scopeId: string) => {
-    const t = makeTab(machine(), environment().name, scopeId);
+    const t = makeTab(machine(), environment()?.name ?? "no environment", scopeId);
     setTabs((ts) => [...ts, t]);
     setActive(t.id);
   };
@@ -335,9 +389,10 @@ export function App() {
     const out = [...placeItems()];
     for (const w of machine().workspaces)
       for (const c of w.changes) out.push({ id: `${w.id}:${c.path}`, label: c.path, detail: w.name, kind: "file", icon: "diff", run: () => (setEnvTab(false), setFile({ path: c.path, status: c.status })) });
-    for (const s of environment().services)
+    const env = environment();
+    for (const s of env?.services ?? [])
       for (const p of s.ports)
-        if (p.url) out.push({ id: `${s.name}:${p.port}`, label: `${s.name}:${p.port}`, detail: environment().name, kind: "service", icon: "globe", run: () => window.harness.openPreview(p.url!, `${environment().name} · ${s.name}:${p.port}`) });
+        if (p.url) out.push({ id: `${s.name}:${p.port}`, label: `${s.name}:${p.port}`, detail: env!.name, kind: "service", icon: "globe", run: () => window.harness.openPreview(p.url!, `${env!.name} · ${s.name}:${p.port}`) });
     return out;
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
@@ -380,7 +435,7 @@ export function App() {
       },
     })),
     ...teams().filter((t) => t.slug !== teamId() && t.region).map((t) => ({ id: `team:${t.slug}`, label: `Switch to ${t.name || t.slug}`, run: () => switchTeam(t.slug) })),
-    ...ENVIRONMENTS.filter((e) => e.id !== connected()).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => setConnected(e.id) })),
+    ...environments().filter((e) => e.id !== environment()?.id).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => setConnected(e.id) })),
   ]);
 
   const onKey = (e: KeyboardEvent) => {
@@ -632,7 +687,9 @@ export function App() {
             sides={sides}
             onCloseSide={removeSide}
             environment={environment()}
-            environments={ENVIRONMENTS}
+            environments={environments()}
+            wsNote={wsNote()}
+            envNote={envNote()}
             selected={selected()}
             onSelect={showThread}
             onOpenEnv={() => setEnvTab(true)}
@@ -654,7 +711,7 @@ export function App() {
               onCloseFile={() => setFile(undefined)}
               task={isActive() ? (live.tasks.find((t) => t.id === taskId()) ?? asTask(live.procs.find((p) => p.id === taskId()))) : undefined}
               onCloseTask={() => setTaskId(undefined)}
-              snapshots={SNAPSHOTS.filter((s) => s.environment === environment().name)}
+              snapshots={snapshots()}
               onCloseEnv={() => setEnvTab(false)}
               settings={isActive() && settingsTab()}
               settingsPage={settingsPage()}
@@ -716,7 +773,7 @@ export function App() {
       <StatusBar
         machine={machine()}
         shells={tabs().length}
-        env={environment().name}
+        env={environment()?.name ?? "no environment"}
       />
     </div>
   );

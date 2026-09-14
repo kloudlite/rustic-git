@@ -236,6 +236,7 @@ export type Environment = {
   owner: "team" | "you";
   from?: { kind: "environment" | "snapshot"; name: string };
   region: string;
+  volume?: string;   // the volume its snapshot history is read from; absent until something was pushed
   services: Service[];
 };
 
@@ -332,49 +333,6 @@ export type Message =
   | { role: "user"; text: string; at: string; ts?: number; images?: number[] }
   | { role: "assistant"; text: string; at: string; ts?: number }
   | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ts?: number; ok?: boolean; output?: string; pending?: boolean; tool?: string; args?: Record<string, unknown>; ms?: number };
-
-/** The team's environments. A machine connects to one; a developer clones one. */
-export const ENVIRONMENTS: Environment[] = [
-  {
-    id: "env-7c21a9", name: "staging", owner: "team", region: "in-south",
-    services: [
-      { name: "api", image: "kloudlite/api:bc5a5062", state: "running", ports: [{ port: 8080, protocol: "http", url: "https://api.staging.khost.dev" }] },
-      { name: "srv", image: "kloudlite/server:bc5a5062", state: "running", ports: [{ port: 3000, protocol: "http", url: "https://staging.khost.dev" }, { port: 3001, protocol: "tcp" }] },
-      { name: "worker", image: "kloudlite/worker:bc5a5062", state: "running", ports: [] },
-      { name: "gateway", image: "kloudlite/gateway:bc5a5062", state: "running", ports: [{ port: 2222, protocol: "tcp" }] },
-      { name: "redis", image: "redis:7.4", state: "running", ports: [{ port: 6379, protocol: "tcp" }] },
-      { name: "minio", image: "minio/minio:2026-08", state: "running", ports: [{ port: 9000, protocol: "http", url: "https://s3.staging.khost.dev" }] },
-      { name: "clickhouse", image: "clickhouse/clickhouse-server:25.8", state: "running", ports: [{ port: 8123, protocol: "http" }, { port: 9000, protocol: "tcp" }] },
-    ],
-  },
-  {
-    id: "env-2f80bb", name: "production", owner: "team", region: "in-south",
-    services: [
-      { name: "api", image: "kloudlite/api:925536aa", state: "running", ports: [{ port: 8080, protocol: "http", url: "https://api.khost.dev" }] },
-      { name: "srv", image: "kloudlite/server:925536aa", state: "running", ports: [{ port: 3000, protocol: "http", url: "https://khost.dev" }] },
-      { name: "worker", image: "kloudlite/worker:925536aa", state: "running", ports: [] },
-    ],
-  },
-  {
-    id: "env-1dfa74", name: "kloudlite-dev", owner: "you", from: { kind: "environment", name: "staging" }, region: "in-south",
-    services: [
-      { name: "api", image: "kloudlite/api:bc5a5062", state: "running", ports: [{ port: 8080, protocol: "http", url: "https://api.env-1dfa7432.khost.dev", intercept: { workspace: "rustic-git", port: 3000 } }] },
-      { name: "srv", image: "kloudlite/server:bc5a5062", state: "running", ports: [{ port: 3000, protocol: "http", url: "https://srv.env-1dfa7432.khost.dev" }, { port: 3001, protocol: "tcp" }] },
-      { name: "worker", image: "kloudlite/worker:bc5a5062", state: "running", ports: [] },
-      { name: "gateway", image: "kloudlite/gateway:bc5a5062", state: "running", ports: [{ port: 2222, protocol: "tcp" }] },
-      { name: "redis", image: "redis:7.4", state: "running", ports: [{ port: 6379, protocol: "tcp" }] },
-      { name: "minio", image: "minio/minio:2026-08", state: "starting", note: "pulling image", ports: [{ port: 9000, protocol: "http", url: "https://minio.env-1dfa7432.khost.dev" }, { port: 9001, protocol: "http", url: "https://console.minio.env-1dfa7432.khost.dev" }] },
-      { name: "clickhouse", image: "clickhouse/clickhouse-server:25.8", state: "stopped", ports: [{ port: 8123, protocol: "http" }, { port: 9000, protocol: "tcp" }] },
-    ]
-  },
-];
-
-/** Snapshots of the team's environments, newest first. */
-export const SNAPSHOTS: Snapshot[] = [
-  { id: "snap-9f21", name: "before the churn fix", environment: "kloudlite-dev", at: "12:01 today", by: "karthik", services: 7, note: "known good on d16ac7dc" },
-  { id: "snap-7c04", name: "staging nightly", environment: "staging", at: "02:00 today", by: "automation", services: 7 },
-  { id: "snap-4a88", name: "before the keys migration", environment: "staging", at: "Sep 11", by: "karthik", services: 7 },
-];
 
 export const MACHINE: Machine = {
   id: "wm-karthik-kloudlite",

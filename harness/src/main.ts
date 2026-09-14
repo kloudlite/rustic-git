@@ -10,6 +10,7 @@ import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/devic
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, listTeams, mintSession } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
+import { getEnvironment, listEnvironments, listWorkspaces, volumeHistory } from "./connect/platform";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
 // `quit`: quit is asynchronous and whenReady below would still open a window first.
@@ -496,6 +497,23 @@ ipcMain.handle("auth:chooseTeam", (_e, slug: unknown) => {
 });
 // Slug, name and region only: the list the controller last read, never a fresh fetch per call.
 ipcMain.handle("auth:teams", () => auth.teams());
+// The /v1 reads, one fixed route each, scoped to the connected team; ids are validated and encoded
+// in connect/platform. A 401 ends the login exactly as the re-check does.
+async function platform<T>(read: (api: string, token: string, team: string) => Promise<T>): Promise<T> {
+  const s = auth.state();
+  const c = s.phase === "ready" ? store.load() : undefined;
+  if (s.phase !== "ready" || !c) throw new Error("not signed in");
+  try {
+    return await read(c.api, c.token, s.team);
+  } catch (e) {
+    if (e instanceof Error && e.name === "Expired") auth.expired();
+    throw e;
+  }
+}
+ipcMain.handle("platform:workspaces", () => platform(listWorkspaces));
+ipcMain.handle("platform:environments", () => platform(listEnvironments));
+ipcMain.handle("platform:environment", (_e, id: unknown) => platform((api, token) => getEnvironment(api, token, id as string)));
+ipcMain.handle("platform:snapshots", (_e, volume: unknown) => platform((api, token) => volumeHistory(api, token, volume as string)));
 ipcMain.handle("auth:api", () => apiBase());
 ipcMain.handle("auth:setApi", (_e, url: unknown) => {
   if (auth.state().phase !== "signed-out") throw new Error("sign out before changing the Kloudlite address");

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AuthState } from "./auth/controller";
 import type { Team } from "./connect/bench";
+import type { ApiEnvironment, ApiSnapshot, ApiWorkspace } from "./connect/platform";
 
 /**
  * The only surface the renderer sees. Every call is a request to the main
@@ -44,6 +45,13 @@ const harness = {
     api: (): Promise<string> => ipcRenderer.invoke("auth:api"),
     setApi: (url: string): Promise<void> => ipcRenderer.invoke("auth:setApi", url),
     onState: (fn: (s: AuthState) => void): void => void ipcRenderer.on("auth:state", (_e, s: AuthState) => fn(s)),
+  },
+  /** Kloudlite's /v1, read by main for the connected team: one call per read, plain validated JSON back. */
+  platform: {
+    workspaces: (): Promise<ApiWorkspace[]> => ipcRenderer.invoke("platform:workspaces"),
+    environments: (): Promise<ApiEnvironment[]> => ipcRenderer.invoke("platform:environments"),
+    environment: (id: string): Promise<ApiEnvironment> => ipcRenderer.invoke("platform:environment", id),
+    snapshots: (volume: string): Promise<ApiSnapshot[]> => ipcRenderer.invoke("platform:snapshots", volume),
   },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
 };

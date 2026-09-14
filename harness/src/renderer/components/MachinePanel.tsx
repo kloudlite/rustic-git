@@ -23,8 +23,10 @@ function StateDot(props: { state: AgentState; label: string }) {
 
 export function MachinePanel(props: {
   machine: Machine;
-  environment: Environment;
+  environment?: Environment;       // none while loading, on an error, or in a team with none
   environments: Environment[];
+  wsNote?: string;                 // loading or the last read's error; unset once read
+  envNote?: string;
   team: string;
   sessions: { id: string; name: string }[];   // the bench's sessions; the first is "bench"
   busy: (id: string) => boolean;
@@ -165,7 +167,8 @@ export function MachinePanel(props: {
         </Show>
 
         <Heading>Workspaces</Heading>
-        <Show when={props.machine.workspaces.length === 0}>
+        <Show when={props.wsNote}>{(n) => <Empty tone={n() === "loading…" ? undefined : "danger"}>{n()}</Empty>}</Show>
+        <Show when={!props.wsNote && props.machine.workspaces.length === 0}>
           <Empty>No workspaces yet. Ask for something and the AI will make what it needs.</Empty>
         </Show>
 
@@ -237,12 +240,27 @@ export function MachinePanel(props: {
             a fresh one — the way a workspace begins. */}
       </div>
 
-      <EnvironmentDock
-        env={props.environment}
-        environments={props.environments}
-        onOpen={props.onOpenEnv}
-        onConnect={props.onConnect}
-      />
+      <Show when={props.environment && props.envNote && props.envNote !== "loading…"}>
+        <Empty tone="danger">{props.envNote}</Empty>
+      </Show>
+      <Show
+        when={props.environment}
+        fallback={
+          <section class="shrink-0 border-t border-line">
+            <Heading>Environment</Heading>
+            <Empty tone={props.envNote && props.envNote !== "loading…" ? "danger" : undefined}>{props.envNote ?? "No environments in this team yet."}</Empty>
+          </section>
+        }
+      >
+        {(env) => (
+          <EnvironmentDock
+            env={env()}
+            environments={props.environments}
+            onOpen={props.onOpenEnv}
+            onConnect={props.onConnect}
+          />
+        )}
+      </Show>
     </nav>
   );
 }
