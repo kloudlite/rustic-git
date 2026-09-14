@@ -286,6 +286,12 @@ pub const CATALOGUE: &[Slo] = &[
     // The promise itself: a workspace ALREADY running when the space chose resolves the service,
     // with no restart.
     Slo { id: "env.space.live", feature: "Environments", sli: "A second workspace already running when the space chooses an environment resolves its service without a restart", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
+    // A CLONE shares its source's volume, so it has no `{pool}/vol/{id}` of its own — which the
+    // janitor's old keep-set read as "not live", deleting a running clone's attach file an hour
+    // in. The probe cannot wait out that 1 h floor, so it judges the thing that sweep would
+    // destroy: the file is still mounted and the environment's names still resolve INSIDE the
+    // clone. Hourly, not fast: it is a second exec against a pod the fast journey already pays for.
+    Slo { id: "ws.clone.attach.survives", feature: "Environments", sli: "A cloned workspace, which owns no volume directory of its own, still mounts its attach file: `/etc/resolv.conf` inside the clone names the environment and its service resolves", target: bound(10_000), suite: Suite::Hourly, stage: "6 · Environment" },
     Slo { id: "env.push.p95", feature: "Environments", sli: "Pushing an environment snapshot completes", target: p95(90_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.exec.ok", feature: "Environments", sli: "Exec into a running service pod of the environment succeeds", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
     // 120 s, not the workspace clone's 60: an environment copies LIVE bytes from the node that

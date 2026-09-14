@@ -97,6 +97,7 @@ first destructive stage.
 | `env.attach` | Environments | Choosing an environment for a space takes effect in its workspace | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
 | `env.detach` | Environments | Clearing a space's environment takes effect in its workspace | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
 | `env.space.live` | Environments | A second workspace already running when the space chooses an environment resolves its service without a restart | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
+| `ws.clone.attach.survives` | Environments | A cloned workspace, which owns no volume directory of its own, still mounts its attach file: `/etc/resolv.conf` inside the clone names the environment and its service resolves | 99.9 % ≤ 10000 ms | hourly | 6 · Environment |
 | `env.push.p95` | Environments | Pushing an environment snapshot completes | 95 % ≤ 90000 ms | fast | 6 · Environment |
 | `env.exec.ok` | Environments | Exec into a running service pod of the environment succeeds | 99.9 % | fast | 6 · Environment |
 | `env.clone.p95` | Environments | Cloning a running environment completes with its services ready | 95 % ≤ 120000 ms | fast | 6 · Environment |

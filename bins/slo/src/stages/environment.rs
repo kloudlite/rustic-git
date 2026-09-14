@@ -303,7 +303,7 @@ async fn attach(c: &mut Ctx, env: &str) {
         for id in ["env.attach", "env.space.live", "env.detach"] {
             c.skip(id, why);
         }
-        return;
+        return skip_clone_attach(c, why);
     };
     let (e, w) = (env.to_string(), ws.clone());
     let attached = c
@@ -322,7 +322,8 @@ async fn attach(c: &mut Ctx, env: &str) {
         // The failure was counted where it happened: a clear that was never a choice measures
         // nothing about clearing.
         c.skip("env.space.live", "the space never chose the environment");
-        return c.skip("env.detach", "the space never chose the environment");
+        c.skip("env.detach", "the space never chose the environment");
+        return skip_clone_attach(c, "the space never chose the environment");
     }
     match c.state.clone.clone() {
         Some(other) => {
@@ -330,12 +331,71 @@ async fn attach(c: &mut Ctx, env: &str) {
         }
         None => c.skip("env.space.live", "no second workspace in the space"),
     }
+    clone_attach_survives(c, env).await;
     c.step("env.detach", ATTACH_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let url = my_space(c);
         async move {
             call(c, reqwest::Method::DELETE, &url, &jwt, None).await.context("could not clear the environment")?;
             until(c, &ws, false, ATTACH_CEILING).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The hourly id `attach` owns beside its three fast ones. `const`, not a literal in four places:
+/// the skip paths below must name exactly the id the step files, or a run reports it twice.
+const CLONE_ATTACH_ID: &str = "ws.clone.attach.survives";
+
+/// Skipped only on an HOURLY run — a fast run files no sample for this id at all, the same gate
+/// `intercepts` uses.
+fn skip_clone_attach(c: &mut Ctx, why: &str) {
+    if c.suite == Suite::Hourly {
+        c.skip(CLONE_ATTACH_ID, why);
+    }
+}
+
+/// `ws.clone.attach.survives`: the CLONE keeps the attach file the janitor once took from it.
+///
+/// A clone is a second worktree of its SOURCE's volume, so no `{pool}/vol/{clone}` is ever created
+/// — and the janitor's keep-set used to be that directory listing, which read a running clone as
+/// garbage and `remove_dir_all`ed `{pool}/attach/{clone}` an hour after it was created. The
+/// `resolv.conf` the pod holds open by inode is what went with it, so the clone silently lost the
+/// environment's names until its next reconcile.
+///
+/// The probe cannot wait out the sweep's 1 h age floor inside an hourly run, so it judges what the
+/// sweep would destroy, from inside the clone: `/etc/resolv.conf` names the environment's namespace
+/// AND the service resolves through it. Judged on the OUTPUT of both, never an exit code — an exec
+/// that cannot read the file exits zero on some shells.
+///
+/// The other half the owner asked for — that no `janitor.attach.reclaimed` line names this clone
+/// over the run — is NOT probed: those are tracing logs in ClickStack and the probe holds no
+/// ClickStack credential (the same reason `edge.rs` asks the admin process rather than ClickHouse).
+/// Query that line by id in ClickStack instead; a hit for an id this step passed for is the
+/// regression.
+async fn clone_attach_survives(c: &mut Ctx, env: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let Some(clone) = c.state.clone.clone() else {
+        return c.skip(CLONE_ATTACH_ID, "no second workspace in the space");
+    };
+    let ns = kloudlite_workspaces::crd::env_namespace(env);
+    c.step(CLONE_ATTACH_ID, ATTACH_CEILING, move |c| {
+        let (clone, ns) = (clone.clone(), ns.clone());
+        async move {
+            // `cat`, not `getent` alone: the mounted FILE is what the sweep deletes, and a resolver
+            // that still answers from a cached inode would hide its absence for the life of the pod.
+            let script = format!("cat /etc/resolv.conf; getent hosts {SERVICE} || nslookup {SERVICE}");
+            let (_, out, err) = super::workspace::ws_exec(c, &clone, &script, EXEC_CEILING).await?;
+            if !out.contains(&ns) {
+                return Err(anyhow!("the clone's /etc/resolv.conf never named {ns}: {:?} {}", out, err.trim()));
+            }
+            if !out.contains(SERVICE) {
+                return Err(anyhow!("`{SERVICE}` did not resolve inside the clone: {:?} {}", out, err.trim()));
+            }
+            Ok(())
         }
         .boxed()
     })
@@ -861,6 +921,24 @@ mod tests {
         assert_eq!(rows.len(), 1, "builder.hidden was not reported exactly once");
     }
 
+    /// `ws.clone.attach.survives` is hourly too, and — unlike the intercept ids — it lives inside
+    /// a FAST function, so the gate that keeps it out of a fast run is the one worth pinning.
+    #[tokio::test]
+    async fn the_clone_attach_id_belongs_to_the_hourly_suite_only() {
+        let mut c = testkit::ctx().await;
+        c.kube = None;
+        attach(&mut c, "env-x").await;
+        assert!(!c.steps.iter().any(|s| s.slo_id == CLONE_ATTACH_ID), "a fast run reported an hourly id");
+
+        let mut c = testkit::ctx().await;
+        c.kube = None;
+        c.suite = Suite::Hourly;
+        attach(&mut c, "env-x").await;
+        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == CLONE_ATTACH_ID).collect();
+        assert_eq!(rows.len(), 1, "{CLONE_ATTACH_ID} was not reported exactly once");
+        assert!(rows[0].skipped && rows[0].detail == "no kubeconfig", "{:?}", rows[0]);
+    }
+
     /// The gate above and the catalogue's own `walks()` are two statements of one rule.
     #[test]
     fn the_catalogue_walks_the_intercept_ids_in_exactly_the_hourly_journey() {
@@ -869,7 +947,7 @@ mod tests {
                 .into_iter()
                 .flat_map(|(_, ids)| ids)
                 .collect();
-            for id in INTERCEPT_IDS {
+            for id in INTERCEPT_IDS.iter().copied().chain([CLONE_ATTACH_ID]) {
                 assert_eq!(ids.contains(&id), suite == Suite::Hourly, "{id} in {suite:?}'s journey disagrees with the stage's own gate");
             }
         }

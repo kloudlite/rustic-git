@@ -188,6 +188,10 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration, li
         if live.contains(&id) || younger_than(&entry, min_age) {
             continue;
         }
+        // Per directory, BEFORE the delete: the aggregate `janitor.reclaimed` count says an attach
+        // directory went but never which one, so the clone bug this sweep's keep-set fixed could
+        // only be guessed at from timing. This line is the fleet evidence — queryable by id.
+        tracing::info!(%id, age_secs = age_secs(&entry), "janitor.attach.reclaimed");
         if std::fs::remove_dir_all(&p).is_ok() {
             swept += 1;
         }
@@ -260,6 +264,13 @@ fn younger_than(entry: &std::fs::DirEntry, min_age: std::time::Duration) -> bool
         .and_then(|m| m.modified())
         .map(|t| t.elapsed().map(|e| e < min_age).unwrap_or(true))
         .unwrap_or(true)
+}
+
+/// The entry's age in seconds, for the log line beside a delete. `0` when the clock or the
+/// metadata says nothing — a log field, never a decision (`younger_than` is the decision, and it
+/// answers keep-biased on exactly these failures).
+fn age_secs(entry: &std::fs::DirEntry) -> u64 {
+    entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(0, |e| e.as_secs())
 }
 
 /// Shared floor for every age-gated sweep in this file: young enough to still be mid-operation is
