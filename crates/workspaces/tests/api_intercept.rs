@@ -287,6 +287,39 @@ async fn a_workspace_port_of_zero_is_422() {
     assert!(patched(&s).is_empty(), "nothing written");
 }
 
+/// The tool server listens on the pod IP with no auth of its own, so an intercept delivering there
+/// hands the environment an `exec`. Pinned through the whole `/v1` path, not just the helper, so
+/// the proxy rewrite cannot quietly drop it.
+#[tokio::test]
+async fn the_tool_server_port_is_still_refused_after_the_proxy_rewrite() {
+    let s = server(routes(json!([]), attached_running())).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 7788}]})).await;
+    assert_eq!(r.status(), 422);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("7788"), "the tool server's port is named: {body}");
+    assert!(patched(&s).is_empty(), "nothing written");
+}
+
+/// A service with no ports has nothing to forward: the port loop is vacuous, so without this the
+/// wish is stored and the controller refuses it as `NoPorts` long after the 202.
+#[tokio::test]
+async fn a_service_that_declares_no_ports_is_422() {
+    let mut e = env_obj(json!([]));
+    e["spec"]["services"][0]["ports"] = json!([]);
+    let rs = vec![
+        get(format!("{API}/environments/env-1"), e.clone()),
+        get(format!("{API}/workspaces/ws-1"), attached_running()),
+        empty("Snapshot", "snapshots"),
+        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: e },
+    ];
+    let s = server(rs).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": []})).await;
+    assert_eq!(r.status(), 422);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("declares no ports"), "{body}");
+    assert!(patched(&s).is_empty(), "nothing written");
+}
+
 /// The window this closes: two writes naming two different services each merge-patch the whole
 /// list they read, and the second discards the first after answering it 202. The `test` op turns
 /// that into a refusal — the API server answers 409, and a caller that keeps losing is told so

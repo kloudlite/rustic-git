@@ -307,6 +307,8 @@ pub const CATALOGUE: &[Slo] = &[
     // the automatic path — and both halves are asserted, because a fallback that also cleared
     // `spec.intercepts` would silently discard what the person asked for.
     Slo { id: "env.intercept.fallback", feature: "Environments", sli: "Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    // The UDP refusal is skipped until `model::Service` carries a protocol: nothing can declare a
+    // UDP port today, so the probe has no way to provoke one.
     Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
     // Hourly: the bench may be asleep, and waking it is not a five-minute cost.
     Slo { id: "env.space.bench", feature: "Environments", sli: "The probe owner's bench follows its space's environment in its resolv.conf", target: bound(120_000), suite: Suite::Hourly, stage: "6 · Environment" },

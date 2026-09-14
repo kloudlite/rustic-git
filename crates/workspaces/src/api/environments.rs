@@ -591,7 +591,21 @@ async fn validate_intercept(
         )
             .into_response());
     }
+    // A service declaring no ports has nothing to forward: the port loop below is vacuous, so the
+    // wish would be accepted here and only refused by the controller (`NoPorts`) minutes later.
+    if svc.ports.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("service {} declares no ports; nothing to intercept", svc.name),
+        )
+            .into_response());
+    }
     let mut seen = HashSet::new();
+    // ponytail: no UDP refusal — `model::Service` carries no protocol and `service_clusterip`
+    // hard-codes TCP, so nothing can declare one. When it grows a protocol field, refuse a
+    // non-TCP port here with 422 ("port {n} is UDP, and an intercept forwards TCP only"): the
+    // forwarder is TCP, and rendering a UDP port would scale the real service to 0 and drop half
+    // a protocol on the floor.
     for p in &want.ports {
         if !svc.ports.contains(&p.service) {
             return Err((
