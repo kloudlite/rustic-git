@@ -271,26 +271,13 @@ pub(crate) fn a_slice_with_no_pod_ip_has_ports_but_no_endpoints() {
 }
 
 
-/// A Service that keeps its selector has its endpoints overwritten by Kubernetes, and the
-/// selector can only match pods in the environment's own namespace — the intercept would
-/// silently never take effect.
-#[test]
-pub(crate) fn an_intercepted_service_has_no_selector() {
-    let s = two_port_svc();
-    let on = service_clusterip(&s, "env-1", "team", &owner_ref(), true).unwrap();
-    assert!(on.spec.unwrap().selector.is_none());
-    let off = service_clusterip(&s, "env-1", "team", &owner_ref(), false).unwrap();
-    assert!(off.spec.unwrap().selector.is_some());
-}
-
-
 /// Same AND-not-OR rule as the attach pair: two peers would open the whole workspace namespace
 /// to the environment, plus any pod anywhere carrying that workspace label.
 #[test]
 pub(crate) fn the_intercept_policies_name_one_peer_each() {
     let r = owner_ref();
-    let eg = intercept_egress("env-abc", "ws-acme", "ws-1", "acme", &r);
-    assert_eq!(eg.metadata.name.as_deref(), Some("intercept-ws-1"));
+    let eg = intercept_egress("env-abc", "ws-acme", "ws-1", "api", "acme", &r);
+    assert_eq!(eg.metadata.name.as_deref(), Some("intercept-ws-1-api"));
     assert_eq!(eg.metadata.namespace.as_deref(), Some("env-abc"));
     let spec = serde_json::to_value(eg.spec.unwrap()).unwrap();
     let to = spec["egress"][0]["to"].as_array().unwrap();

@@ -8,6 +8,7 @@ use crate::model::Mount;
 mod attach;
 mod pod;
 mod environment;
+mod intercept;
 mod policies;
 mod bench;
 

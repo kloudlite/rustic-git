@@ -284,11 +284,13 @@ pub(crate) async fn intercept_policies(
             }
         }
     }
-    for d in plan.values() {
+    for (svc, d) in plan {
         let Intercepting::Force { ws, .. } = d else { continue };
         let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
         in_force.insert(ws.name_any());
-        ensure(&here, &k8s::intercept_egress(ns, &ws_ns, &ws.name_any(), &e.spec.owner, owner_ref), ctx).await?;
+        // The environment half is per SERVICE now: its `podSelector` names one proxy pod, and one
+        // policy cannot name two of them.
+        ensure(&here, &k8s::intercept_egress(ns, &ws_ns, &ws.name_any(), svc, &e.spec.owner, owner_ref), ctx).await?;
         // The workspace-side half cannot be owned by this Environment: an ownerReference may not
         // cross namespaces. Owned by the Workspace instead, exactly as the attach pair splits.
         let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
@@ -304,23 +306,23 @@ pub(crate) async fn intercept_policies(
     // ponytail: a grant whose wish AND whose status record are both gone (a release that raced a
     // lost status write) is left until the Environment is deleted, which collects it; a label
     // selector over the namespace's policies is the upgrade path.
-    let mut stale: Vec<(String, Option<crd::Workspace>)> = Vec::new();
-    for d in plan.values() {
+    let mut stale: Vec<(String, String, Option<crd::Workspace>)> = Vec::new();
+    for (svc, d) in plan {
         if let Intercepting::Off { ws: Some(w), .. } = d {
-            stale.push((w.name_any(), Some((**w).clone())));
+            stale.push((w.name_any(), (*svc).to_string(), Some((**w).clone())));
         }
     }
     for s in &prev.service_status {
         if let Some(by) = &s.intercepted_by {
-            stale.push((by.clone(), None));
+            stale.push((by.clone(), s.name.clone(), None));
         }
     }
-    for (id, ws) in stale {
+    for (id, svc, ws) in stale {
         if in_force.contains(&id) {
             continue;
         }
-        delete_ignoring_404(&here, &k8s::intercept_policy_name(&id)).await?;
-        forget_applied(ctx, "NetworkPolicy", ns, &k8s::intercept_policy_name(&id));
+        delete_ignoring_404(&here, &k8s::intercept_egress_name(&id, &svc)).await?;
+        forget_applied(ctx, "NetworkPolicy", ns, &k8s::intercept_egress_name(&id, &svc));
         // The workspace-side half lives in a namespace only the Workspace itself can name, so a
         // release recorded in status alone costs one GET to find it. Worth it: the ingress rule
         // opens this environment's whole namespace to that pod, and it would otherwise sit there

@@ -6,32 +6,42 @@
 use super::*;
 
 
-/// Both halves of an intercept grant share this name, one in each namespace, so a release can
-/// delete them by name without a lookup.
+/// The WORKSPACE side of an intercept grant: one ingress per workspace, admitting the union of the
+/// ports it serves, so a release can delete it by name without a lookup.
+///
+/// The two halves no longer share a name — see `intercept_egress_name` for the environment side and
+/// the asymmetry that forces it.
 pub fn intercept_policy_name(ws_id: &str) -> String {
     format!("intercept-{ws_id}")
 }
 
 
-/// Lets the environment's pods reach the intercepting workspace pod — the attach pair's direction
-/// reversed, and needed for the same reason: `allow_internet_egress` excludes RFC 1918, so the
-/// workspace's pod IP is unreachable from an environment pod by default.
+/// The ENVIRONMENT side, per SERVICE rather than per workspace: the policy's own `podSelector` now
+/// names one proxy pod, and one object cannot name two of them — a workspace serving two of an
+/// environment's services needs two grants.
+pub fn intercept_egress_name(ws_id: &str, service: &str) -> String {
+    format!("intercept-{ws_id}-{service}")
+}
+
+
+/// Lets the intercept's proxy pod reach the intercepting workspace pod — the attach pair's
+/// direction reversed, and needed for the same reason: `allow_internet_egress` excludes RFC 1918,
+/// so the workspace's pod IP is unreachable from an environment pod by default.
 ///
 /// Namespace and pod selector sit in ONE element of `to`, which ANDs them; as two elements they
 /// would OR, opening the whole workspace namespace and every pod anywhere carrying that label.
 ///
-/// The policy's own `podSelector` is empty — every pod in the environment — because any of them
-/// may be the one dialling the intercepted service, and they are all this environment's already.
-/// The ingress half is the opposite: it names the one workspace pod, since an owner's workspaces
-/// share a namespace.
-pub fn intercept_egress(env_ns: &str, ws_ns: &str, ws_id: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+/// Strictly tighter than before: only the proxy may reach the workspace, where every pod in the
+/// environment could dial it directly. The ingress half stays scoped to the one workspace pod,
+/// since an owner's workspaces share a namespace.
+pub fn intercept_egress(env_ns: &str, ws_ns: &str, ws_id: &str, service: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
     policy(
-        &intercept_policy_name(ws_id),
+        &intercept_egress_name(ws_id, service),
         env_ns,
         owner,
         owner_ref,
         json!({
-            "podSelector": {},
+            "podSelector": { "matchLabels": proxy_selector(owner, service) },
             "policyTypes": ["Egress"],
             "egress": [{
                 "to": [{

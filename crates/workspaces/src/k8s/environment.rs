@@ -161,11 +161,11 @@ pub fn service_statefulset(
 /// `sleep 1d`) gets a StatefulSet but no ClusterIP — its bare name simply does not resolve, which
 /// is correct for something nothing can connect to.
 ///
-/// `intercepted` drops the selector. Kubernetes maintains the endpoints of a Service that HAS one,
-/// and a selector can only ever match pods in the Service's own namespace — so it can never name a
-/// workspace. Selector-less is the supported way to say "these exact addresses", and
-/// `intercept_slice` supplies them; the ClusterIP, the DNS name and the ports callers dial are
-/// untouched either way.
+/// `intercepted` SWITCHES the selector rather than dropping it: it names the intercept's proxy pod
+/// (`proxy_selector`), which stands in for the service in this same namespace and forwards to the
+/// workspace. So the Service always has a selector, its endpoints are always Kubernetes' own — no
+/// hand-written slice and no abandoned `Endpoints` object to clean up — and the ClusterIP, the DNS
+/// name and the ports callers dial are untouched either way.
 pub fn service_clusterip(
     svc: &model::Service,
     env_id: &str,
@@ -187,7 +187,7 @@ pub fn service_clusterip(
             owner_ref,
         ),
         spec: Some(ServiceSpec {
-            selector: (!intercepted).then_some(sel),
+            selector: Some(if intercepted { proxy_selector(owner, &svc.name) } else { sel }),
             ports: Some(
                 svc.ports
                     .iter()
