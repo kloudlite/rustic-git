@@ -348,7 +348,7 @@
                   "spec": {
                     "properties": {
                       "attachedEnvironment": {
-                        "description": "The environment whose services this workspace resolves by bare name, or `None`.\n\nOne, not a list: bare-name resolution has to be unambiguous, and two attached environments\nboth exposing `db` would let search-domain order silently pick the winner.\n\nWritten only by `/v1` — the agent's admission policy forbids it writing spec, and a stale\nid here is not an error: the reconciler treats a missing or wrong-region environment as\nunattached rather than leaving a grant behind.",
+                        "description": "RETIRED (2026-09-14): the environment is chosen per space now (`SpaceEnvironment`). Kept\nparseable one release: the api's migration beat copies it into a `SpaceEnvironment` and\nclears it, and the agent falls back to it only while the space cache is known and empty.\nNothing else writes it.\n\nThe environment whose services this workspace resolves by bare name, or `None`.\n\nOne, not a list: bare-name resolution has to be unambiguous, and two attached environments\nboth exposing `db` would let search-domain order silently pick the winner.\n\nWritten only by `/v1` — the agent's admission policy forbids it writing spec, and a stale\nid here is not an error: the reconciler treats a missing or wrong-region environment as\nunattached rather than leaving a grant behind.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -2572,6 +2572,7 @@
                         "type": "string"
                       },
                       "attachedEnvironment": {
+                        "description": "RETIRED like `WorkspaceSpec::attached_environment`: migrated into a `SpaceEnvironment`.",
                         "nullable": true,
                         "type": "string"
                       },
@@ -2734,6 +2735,88 @@
                 "jsonPath": ".status.nodeName"
               }
             ],
+            "served": true,
+            "storage": true,
+            "subresources": {
+              "status": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition",
+      "metadata": {
+        "name": "spaceenvironments.kloudlite.io"
+      },
+      "spec": {
+        "group": "kloudlite.io",
+        "names": {
+          "kind": "SpaceEnvironment",
+          "plural": "spaceenvironments",
+          "singular": "spaceenvironment"
+        },
+        "scope": "Cluster",
+        "versions": [
+          {
+            "additionalPrinterColumns": [
+              {
+                "jsonPath": ".spec.owner",
+                "name": "Owner",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".spec.team",
+                "name": "Team",
+                "type": "string"
+              },
+              {
+                "jsonPath": ".spec.environment",
+                "name": "Environment",
+                "type": "string"
+              }
+            ],
+            "name": "v1alpha1",
+            "schema": {
+              "openAPIV3Schema": {
+                "description": "Auto-generated derived type for SpaceEnvironmentSpec via `CustomResource`",
+                "properties": {
+                  "spec": {
+                    "properties": {
+                      "environment": {
+                        "description": "The environment id every pod of the space resolves by bare name.",
+                        "type": "string"
+                      },
+                      "owner": {
+                        "description": "The PERSON's handle. Never a team: a choice is always the caller's own.",
+                        "type": "string"
+                      },
+                      "team": {
+                        "description": "The team, or the owner's own handle for their personal space.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "environment",
+                      "owner",
+                      "team"
+                    ],
+                    "type": "object"
+                  },
+                  "status": {
+                    "description": "Empty on purpose: the observed fact stays on each pod's parent as its `Attached` condition,\nwhere every reader already looks. It exists only so the kind has the `/status` split every\nsibling has.",
+                    "nullable": true,
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "spec"
+                ],
+                "title": "SpaceEnvironment",
+                "type": "object"
+              }
+            },
             "served": true,
             "storage": true,
             "subresources": {

@@ -67,6 +67,11 @@ pub struct WorkspaceSpec {
     /// `Lock`. A bare entry (no `@`) has no lock.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locks: Vec<Lock>,
+    /// RETIRED (2026-09-14): the environment is chosen per space now (`SpaceEnvironment`). Kept
+    /// parseable one release: the api's migration beat copies it into a `SpaceEnvironment` and
+    /// clears it, and the agent falls back to it only while the space cache is known and empty.
+    /// Nothing else writes it.
+    ///
     /// The environment whose services this workspace resolves by bare name, or `None`.
     ///
     /// One, not a list: bare-name resolution has to be unambiguous, and two attached environments

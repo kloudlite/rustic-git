@@ -36,6 +36,7 @@ pub struct BenchSpec {
     pub wake_at: Option<String>,
     #[serde(default)]
     pub resources: PodResources,
+    /// RETIRED like `WorkspaceSpec::attached_environment`: migrated into a `SpaceEnvironment`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_environment: Option<String>,
 }

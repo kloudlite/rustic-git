@@ -45,6 +45,10 @@
 #                                                                       with no worktree and no
 #                                                                       snapshot has no
 #                                                                       ownerReference left to GC it)
+#   spaceenvironments (kloudlite.io)      get,list,watch               the cluster-wide space cache
+#                                                                       (Ctx::spaces): which env a
+#                                                                       space's pods resolve. READ
+#                                                                       ONLY — /v1 is the one writer
 #   ownerbindings (kloudlite.io)          get,list,watch               Controller; namespace_ready
 #                                          create                       claim::ensure_binding
 #   ownerkeys (kloudlite.io)              get,list,watch               Controller; the authorized_keys
@@ -196,6 +200,12 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["benches"]
     verbs: ["get", "list", "watch", "patch"]
+  # A person's space choice is desired state written only by /v1; the agent reads it into a
+  # cluster-wide cache and converges pods, policies and resolv.conf from it. No write verb, so
+  # agent-admission.yaml needs nothing for it.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["spaceenvironments"]
+    verbs: ["get", "list", "watch"]
   # `create` on the children: a controller that creates a child owns it, and the API lost the same
   # verbs. `delete` is `collect_unreferenced_volumes` (peer/sweeps.rs): an ownerless Volume with no
   # worktree and no snapshot has no ownerReference left to garbage-collect it, so the sweep is the
