@@ -115,6 +115,16 @@ impl kloudlite_workspaces::api::Directory for Dir {
         self.0.get(slug).await.ok().flatten().is_some()
     }
 
+    // Straight from the directory, no cache: a removed member's next call no longer lists the team.
+    async fn member_teams(&self, user: &str) -> std::result::Result<Vec<String>, String> {
+        let Some(email) = self.email_of(user).await.map_err(|e| e.to_string())? else { return Ok(vec![]) };
+        self.0.slugs_for(&email).await.map_err(|e| e.to_string())
+    }
+
+    async fn bench_team(&self, slug: &str) -> std::result::Result<Option<(String, String)>, String> {
+        Ok(self.0.get(slug).await.map_err(|e| e.to_string())?.map(|t| (t.name, t.region)))
+    }
+
     async fn region_of(&self, slug: &str) -> Option<String> {
         let region = match self.0.get(slug).await.ok()? {
             Some(t) => t.region,

@@ -129,6 +129,17 @@ pub trait Directory: Send + Sync {
         None
     }
 
+    /// `teams_for`, but an unreadable directory is an `Err`, never "no teams": `/v1/bench/teams`
+    /// shows this list to a person and must fail closed as a 503. Defaulted to refuse.
+    async fn member_teams(&self, _user: &str) -> Result<Vec<String>, String> {
+        Err("no directory".into())
+    }
+
+    /// A team's display name and bound region ("" = unbound); `Ok(None)` = no such team.
+    async fn bench_team(&self, _slug: &str) -> Result<Option<(String, String)>, String> {
+        Err("no directory".into())
+    }
+
     /// `Directory::bind_region` — set once; `Ok(None)` = no such owner, `Ok(Some(r))` = what the
     /// slug is bound to afterwards, which differs from the ask when it was already bound.
     async fn bind_region(&self, _slug: &str, _region: &str) -> Result<Option<String>, String> {

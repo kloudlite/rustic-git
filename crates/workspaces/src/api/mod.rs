@@ -84,7 +84,7 @@ use environments::{
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
-use bench::{attach_bench, bench_session, create_bench, detach_bench, get_bench, start_bench, stop_bench};
+use bench::{attach_bench, bench_session, bench_teams, create_bench, detach_bench, get_bench, start_bench, stop_bench};
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
@@ -214,6 +214,14 @@ pub fn router(state: Arc<ApiState>) -> Router {
         )
         .route("/v1/volumes/{name}/refs", get(volume_refs))
         .route("/v1/bench", get(get_bench).post(create_bench))
+        // Limited before auth, per client address, so the list cannot be used to probe tokens.
+        .route(
+            "/v1/bench/teams",
+            get(bench_teams).layer(axum::middleware::from_fn_with_state(
+                Arc::new(kloudlite_core::ratelimit::Limiter::from_env("KLOUDLITE_BENCH_TEAMS_LIMIT", "60/60")),
+                kloudlite_core::ratelimit::per_ip,
+            )),
+        )
         .route("/v1/bench/start", post(start_bench))
         .route("/v1/bench/stop", post(stop_bench))
         .route("/v1/bench/session", post(bench_session))

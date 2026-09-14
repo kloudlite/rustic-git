@@ -178,6 +178,36 @@ fn found(b: Option<crd::Bench>) -> Result<crd::Bench, Response> {
     b.ok_or_else(|| err(StatusCode::NOT_FOUND, "no bench"))
 }
 
+/// The teams a bench may be opened in, for the desktop picker: `[{slug, name, region}]` for the
+/// teams the TOKEN's person is a current member of ("" region = unbound) and nothing else — no
+/// members, roles or quotas. Identity is only ever the verified bearer (`caller`, which checks a
+/// CLI login's revocation); nothing in the query or headers names a user. Membership is read
+/// uncached, so a removed member loses the row on the next call; an unreadable directory is a 503
+/// with no detail, never an empty list. `no-store` on every answer; per-IP limited in `router`.
+pub(crate) async fn bench_teams(State(s): State<Arc<ApiState>>, headers: HeaderMap) -> Response {
+    let mut r = list_bench_teams(&s, &headers).await.unwrap_or_else(|e| e);
+    r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    r
+}
+
+async fn list_bench_teams(s: &ApiState, headers: &HeaderMap) -> Result<Response, Response> {
+    let caller = caller(s, headers).await?;
+    let unavailable = |e: String| {
+        tracing::error!(caller = %caller.name, error = %e, "bench.teams.directory.failed");
+        err(StatusCode::SERVICE_UNAVAILABLE, "team list unavailable")
+    };
+    let dir = s.directory.as_ref().ok_or_else(|| unavailable("no directory".into()))?;
+    let mut out = Vec::new();
+    for slug in dir.member_teams(&caller.name).await.map_err(&unavailable)? {
+        // A team deleted between the two reads is simply not listed.
+        if let Some((name, region)) = dir.bench_team(&slug).await.map_err(&unavailable)? {
+            out.push(json!({"slug": slug, "name": name, "region": region}));
+        }
+    }
+    tracing::info!(caller = %caller.name, count = out.len(), "bench.teams.listed");
+    Ok(Json(out).into_response())
+}
+
 pub(crate) async fn get_bench(
     State(s): State<Arc<ApiState>>,
     headers: HeaderMap,
