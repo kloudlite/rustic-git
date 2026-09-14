@@ -29,9 +29,12 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>, client: kube::Client)
         loop {
             iv.tick().await;
             let pool = pool.clone();
-            let benches = live_benches(&client).await;
+            let live = live_attach_ids(&client).await;
+            if live.is_none() {
+                tracing::warn!(reason = "listing-unavailable", "janitor.attach.skipped");
+            }
             let beat = tokio::task::spawn_blocking(move || {
-                let (attach, profiles) = janitor_beat(&pool, benches.as_ref());
+                let (attach, profiles) = janitor_beat(&pool, live.as_ref());
                 if attach > 0 || profiles > 0 {
                     tracing::info!(attach, profiles, "janitor.reclaimed");
                 }
@@ -62,9 +65,9 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>, client: kube::Client)
 }
 
 /// One sweep of the pool: (attach dirs reclaimed, profile index entries reclaimed).
-fn janitor_beat(pool: &str, benches: Option<&std::collections::HashSet<String>>) -> (usize, usize) {
+fn janitor_beat(pool: &str, live: Option<&std::collections::HashSet<String>>) -> (usize, usize) {
     warn_oversized_homes(std::path::Path::new(pool));
-    let attach = benches.map_or(0, |b| janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE, b));
+    let attach = live.map_or(0, |l| janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE, l));
     let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
     (attach, profiles)
 }
@@ -79,7 +82,7 @@ fn janitor_beat(pool: &str, benches: Option<&std::collections::HashSet<String>>)
 ///
 /// The keep-set is store PATHS, not hashes: `nix::indexed` keys by input hash, but two workspaces
 /// with identical inputs share one entry, and what actually keeps a store path alive is whether
-/// ANY `current` resolves to it — read once, same shape as `janitor_sweep_attach`'s `vol/` read,
+/// ANY `current` resolves to it — read once, same shape as `janitor_sweep_attach`'s keep-set,
 /// so an unreadable profiles root sweeps nothing rather than reading as "nothing is live".
 ///
 /// Unlike `janitor_sweep_attach`, the keep-set build below does not `.flatten()`/`.ok()` its way
@@ -130,40 +133,50 @@ fn live_profile_targets(profiles: &std::path::Path) -> Option<std::collections::
     Some(live)
 }
 
-/// Every Bench id in the cluster, or `None` when that cannot be read — and `None` skips the attach
-/// sweep for the beat: a bench has no `vol/{id}`, so an unknown bench set would sweep every bench's
-/// `resolv.conf` out from under its running pod. A 404 is a cluster without the Bench CRD: no benches.
-async fn live_benches(client: &kube::Client) -> Option<std::collections::HashSet<String>> {
-    use kube::ResourceExt;
-    match kube::Api::<kloudlite_workspaces::crd::Bench>::all(client.clone()).list(&Default::default()).await {
-        Ok(l) => Some(l.items.iter().map(|b| b.name_any()).collect()),
-        Err(kube::Error::Api(e)) if e.code == 404 => Some(Default::default()),
-        Err(e) => {
-            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
-            None
+/// Every id that may own an attach directory — every Workspace and Bench name in the cluster — or
+/// `None` when either listing cannot be read. `None` skips the attach sweep for the whole beat: read
+/// as "nothing is live", an unavailable listing would sweep every `resolv.conf` on the pool out from
+/// under its running pod (the unknown-is-not-empty rule). A 404 is a cluster without that CRD
+/// installed: none of that kind.
+///
+/// Two cluster-wide LISTs per ten-minute beat. The janitor holds no reflector of its own and the
+/// controller's stores are node-scoped, which is the wrong set here anyway — an attach directory on
+/// this node belongs to a workspace this node may not have claimed.
+async fn live_attach_ids(client: &kube::Client) -> Option<std::collections::HashSet<String>> {
+    async fn names<K>(client: &kube::Client, kind: &str) -> Option<Vec<String>>
+    where
+        K: kube::Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+    {
+        use kube::ResourceExt;
+        match kube::Api::<K>::all(client.clone()).list(&Default::default()).await {
+            Ok(l) => Some(l.items.iter().map(|o| o.name_any()).collect()),
+            Err(kube::Error::Api(e)) if e.code == 404 => Some(Vec::new()),
+            Err(e) => {
+                tracing::warn!(%kind, error = %e, "listing.failed");
+                None
+            }
         }
     }
+    let ws = names::<kloudlite_workspaces::crd::Workspace>(client, "Workspace").await?;
+    let bench = names::<kloudlite_workspaces::crd::Bench>(client, "Bench").await?;
+    Some(ws.into_iter().chain(bench).collect())
 }
 
 /// Reclaims `{pool}/attach/{id}` directories a deleted workspace or bench leaves behind. There is no
 /// Workspace finalizer (see `crates/workspaces/src/api.rs`'s `delete_ws` — the Volume carries the
 /// ownerReference and its own finalizer, so deleting a Workspace is pure garbage collection), so
 /// nothing ever observes the delete to clean this up directly; this sweep is the actual mechanism.
-/// `{pool}/vol/{id}`
-/// exists for every live workspace and disappears with it (ownerReference -> Volume -> finalizer ->
-/// subvolume gone), so an attach directory with no matching `vol/{id}` is an orphan.
 ///
-/// The keep-set is ONE read of `vol/` — never a `Path::exists` probe per entry, because an
-/// unreadable or unmounted `vol/` would then make every probe answer false and read as "nothing is
-/// live", sweeping every attach directory on the pool. Bailing keep-biased on that read failing is
-/// the same shape every other sweep here uses. Same age floor as the rest: a workspace mid-create
-/// can have its attach directory written before the Volume shows up in `vol/`.
-fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration, benches: &std::collections::HashSet<String>) -> usize {
-    let Ok(vol_entries) = std::fs::read_dir(pool.join("vol")) else { return 0 };
-    let mut live: std::collections::HashSet<String> =
-        vol_entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
-    // A bench holds no volume; the Bench object is its liveness.
-    live.extend(benches.iter().cloned());
+/// The keep-set is the LIVE OBJECTS (`live_attach_ids`), never `{pool}/vol/` any more: a cloned or
+/// restored workspace is a second worktree of its SOURCE's volume (`controller::volume`'s shared
+/// branch), so `vol/{clone-id}` never exists at all — and the old `vol/`-derived keep-set therefore
+/// `remove_dir_all`ed a RUNNING clone's attach directory one hour after it was created, taking the
+/// `resolv.conf` hostPath File out from under the pod and losing the environment's names until its
+/// next reconcile. A bench never had a `vol/` entry either, which is why it needed its own list.
+///
+/// Keep-biased both ways: an unreadable listing (`None`) sweeps nothing, and the age floor stays,
+/// since an attach directory is written before the object is necessarily visible to a later list.
+fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration, live: &std::collections::HashSet<String>) -> usize {
     let mut swept = 0;
     let Ok(entries) = std::fs::read_dir(pool.join("attach")) else { return 0 };
     for entry in entries.flatten() {
@@ -435,13 +448,15 @@ mod janitor_tests {
         (bare_engine(tmp.path().to_path_buf()), tmp)
     }
 
-    /// The mechanism Task 6's ruling replaced a (dead) Workspace finalizer branch with: no
-    /// `vol/{id}` for the id at all (deleted, or never existed) and past the age floor is an
-    /// orphan.
+    fn ids(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The mechanism Task 6's ruling replaced a (dead) Workspace finalizer branch with: no live
+    /// object for the id at all (deleted, or never existed) and past the age floor is an orphan.
     #[test]
-    fn attach_sweep_reclaims_an_old_orphan_with_no_matching_volume() {
+    fn attach_sweep_reclaims_an_old_orphan_with_no_live_object() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
         let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("resolv.conf"), b"search env-abc.svc.").unwrap();
@@ -450,13 +465,38 @@ mod janitor_tests {
         assert!(!dir.exists());
     }
 
-    /// The age floor: a workspace mid-create can have its attach directory written before its
-    /// Volume shows up under `vol/`, so a young orphan is presumed live, same as every other
+    /// The bug this keep-set replaced a `vol/` read to fix: a clone shares its SOURCE's volume, so
+    /// `vol/{clone-id}` never exists — and the old sweep deleted a RUNNING clone's `resolv.conf`
+    /// an hour after it was created.
+    #[test]
+    fn attach_sweep_keeps_a_clone_that_has_no_volume_directory_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("vol").join("ws-src")).unwrap();
+        let dir = tmp.path().join("attach").join("ws-clone");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &ids(&["ws-src", "ws-clone"])), 0);
+        assert!(dir.exists());
+    }
+
+    /// Unknown is not empty: `live_attach_ids` answering `None` must sweep nothing at all, rather
+    /// than reading an unavailable API server as "no workspace exists".
+    #[test]
+    fn attach_sweep_is_skipped_entirely_when_the_listing_is_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("attach").join("ws-1");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(janitor_beat(tmp.path().to_str().unwrap(), None).0, 0);
+        assert!(dir.exists());
+    }
+
+    /// The age floor: a workspace mid-create can have its attach directory written before the
+    /// object is visible to a later list, so a young orphan is presumed live, same as every other
     /// sweep's crash window.
     #[test]
     fn attach_sweep_spares_a_young_orphan() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
         let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -464,44 +504,27 @@ mod janitor_tests {
         assert!(dir.exists());
     }
 
-    /// The keep half: a `vol/{id}` still on the pool means the workspace is still live, however
-    /// old its attach directory is.
+    /// The keep half: a live Workspace object means the attach directory stays, however old it is.
     #[test]
     fn attach_sweep_keeps_a_directory_whose_workspace_is_still_live() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("attach").join("ws-1");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol").join("ws-1")).unwrap();
 
-        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &Default::default()), 0, "the workspace is still live");
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &ids(&["ws-1"])), 0, "the workspace is still live");
         assert!(dir.exists());
     }
 
-    /// The keep-biased bail Finding 1 asked for: an unreadable (here, absent) `vol/` must never
-    /// read as "nothing is live" — that would sweep every attach directory on the pool at once,
-    /// live workspaces included, the moment the pool the check depends on is unmounted.
-    #[test]
-    fn attach_sweep_sweeps_nothing_when_vol_is_unreadable() {
-        let tmp = tempfile::tempdir().unwrap();
-        // No `vol/` at all — same failure shape as an unmounted or unreadable one.
-        let dir = tmp.path().join("attach").join("ws-1");
-        std::fs::create_dir_all(&dir).unwrap();
-
-        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &Default::default()), 0, "an unreadable vol/ keeps everything");
-        assert!(dir.exists());
-    }
-
-    /// A bench has no `vol/{id}`: its attach dir lives while the Bench does, and goes once it is gone.
+    /// A bench is in the same keep-set: its attach dir lives while the Bench does, and goes once
+    /// it is gone.
     #[test]
     fn attach_sweep_keeps_a_live_benchs_directory_and_reclaims_a_deleted_ones() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("vol")).unwrap();
         let (live, gone) = (tmp.path().join("attach/bench-aaa"), tmp.path().join("attach/bench-bbb"));
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(&gone).unwrap();
-        let benches = std::collections::HashSet::from(["bench-aaa".to_string()]);
 
-        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &benches), 1);
+        assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &ids(&["bench-aaa"])), 1);
         assert!(live.exists() && !gone.exists());
     }
 
