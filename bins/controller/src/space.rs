@@ -212,7 +212,12 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
                 Some(_) => false,
                 None => exists(&in_space, k8s::SPACE_EGRESS_POLICY).await?,
             };
-            if act && may_write(&ctx).await {
+            if act {
+                // Return BEFORE the memory write, as the ingress arm below does: settling the
+                // memory to empty on a fenced pass would mean the delete is never retried.
+                if !may_write(&ctx).await {
+                    return Ok(Action::requeue(RESYNC));
+                }
                 drop_object(&in_space, &ctx, &d.egress_ns, k8s::SPACE_EGRESS_POLICY).await?;
             }
         }
@@ -719,6 +724,41 @@ mod tests {
         let gets: Vec<_> = rec.calls().into_iter().filter(|c| c == &format!("GET {path}")).collect();
         assert_eq!(gets.len(), 1, "{gets:?}");
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+    }
+
+    /// A transition that finds the fence shut writes nothing AND leaves the memory as it was, so
+    /// the delete is retried: settling the memory on a fenced pass would lose it for good. The
+    /// second pass leads again and issues the one DELETE.
+    #[tokio::test]
+    async fn a_fenced_transition_keeps_its_memory_and_retries() {
+        let space_ns = ns("alice", "acme");
+        let path = policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY);
+        let (client, rec) = kube_test::mock_client(vec![
+            // Pass 1: the pass-level fence agrees (3), the pre-delete re-read finds a newer term.
+            lease_route("ctl-test", 3),
+            lease_route("someone-else", 9),
+            // Pass 2: ours again, for both reads.
+            lease_route("ctl-test", 3),
+            delete(path.clone()),
+        ]);
+        let ctx = Arc::new(Ctx::for_test_with(client));
+        ctx.promote(3);
+        ctx.remember_environments(vec![]);
+        ctx.last_choice.lock().unwrap().insert(space_ns.clone(), ("uid-space".into(), "env-1".into()));
+        let s = Arc::new(space("alice", "acme", "env-1"));
+
+        reconcile_space(s.clone(), ctx.clone()).await.unwrap();
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+        assert_eq!(
+            ctx.last_choice.lock().unwrap().get(&space_ns).map(|(_, e)| e.as_str()),
+            Some("env-1"),
+            "a fenced pass must not settle the memory"
+        );
+
+        ctx.promote(3);
+        reconcile_space(s, ctx.clone()).await.unwrap();
+        let deletes: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes, vec![format!("DELETE {path}")]);
     }
 
     /// A space deleted and recreated under the same name is a DIFFERENT space: the dead one's
