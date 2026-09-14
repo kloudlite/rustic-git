@@ -19,6 +19,7 @@
 # | teardown deletes the requests this run opened | requests, quotarequests: get, list, delete         |
 # | the roll guard reads gateway/builder-gate     | deployments: get, list                             |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
+# | bench.idle.wake reads the region's idle secs  | clustersettings: get                               |
 #
 # There is no `pods: delete`: the monthly dead-node drill is a hard skip
 # (`bins/slo/src/stages/monthly/nodes.rs`, `c.skip("drill.dead.node", …)`), so the
@@ -46,6 +47,10 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments", "volumes", "snapshots", "volumereplicas", "benches"]
     verbs: ["get", "list"]
+  # `bench.idle.wake` reads `ClusterSettings/default`'s `benchIdleSecs` to know how long to wait.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["clustersettings"]
+    verbs: ["get"]
   # Its own rule rather than a sixth resource above: the keys journey WAITS for the agent's ack,
   # so it needs `watch`, and nothing else the probe reads does.
   - apiGroups: ["kloudlite.io"]

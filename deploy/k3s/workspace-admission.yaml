@@ -74,6 +74,11 @@ spec:
     # not reachable from outside, because the path comes from the agent and volume ids are
     # opaque. ponytail: the fix is `{pool}/vol/{owner}/{id}`, at which point this line becomes
     # the same comparison the two below already make.
+    #
+    # The bench folder (`k8s::bench_folder`, `{pool}/homes/.benches/{team}/{owner}`) is admitted
+    # EXACTLY, both segments from the pod's own labels (`k8s::bench_pod` stamps both). `.benches`
+    # is not an owner handle, so the `homes/{owner}` rule never admitted it, and a prefix on
+    # `homes/.benches/` would admit every other person's bench folder.
     - expression: >-
         has(object.metadata.labels) && 'kloudlite.io/owner' in object.metadata.labels
           && (has(object.spec.volumes) ? object.spec.volumes : [])
@@ -89,8 +94,10 @@ spec:
                             || v.hostPath.path.startsWith('/wspool-prod/homecache/' + object.metadata.labels['kloudlite.io/owner'] + '/')
                             || v.hostPath.path == '/wspool-prod/keys/' + object.metadata.labels['kloudlite.io/owner'] + '/authorized_keys'
                             || ('kloudlite.io/team' in object.metadata.labels
-                                && v.hostPath.path == '/wspool-prod/keys/' + object.metadata.labels['kloudlite.io/team'] + '/authorized_keys'))))
-      message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, this owner's own homes/homecache directory, or this owner's or team's keys file"
+                                && v.hostPath.path == '/wspool-prod/keys/' + object.metadata.labels['kloudlite.io/team'] + '/authorized_keys')
+                            || ('kloudlite.io/team' in object.metadata.labels
+                                && v.hostPath.path == '/wspool-prod/homes/.benches/' + object.metadata.labels['kloudlite.io/team'] + '/' + object.metadata.labels['kloudlite.io/owner']))))
+      message: "workspace/environment hostPath volumes must be /nix, under /nix/, under /wspool-prod/vol|attach/, this owner's own homes/homecache directory or bench folder, or this owner's or team's keys file"
     # gVisor is what makes tenant isolation three independent things instead of two. It is live —
     # `WS_RUNTIME_CLASS=gvisor` in the `kloudlite-agent` Secret, read into `PodContext.runtime_class`
     # — but until this validation existed the kernel boundary rested on that one env var: unset it

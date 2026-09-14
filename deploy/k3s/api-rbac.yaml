@@ -167,6 +167,11 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["volumes", "snapshots", "volumereplicas"]
     verbs: ["get", "list", "watch"]
+  # `quota::usage` lists Benches for an owner's allocation (Owners, Overview). No `watch`:
+  # `history::watch` runs no Bench reflector.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["benches"]
+    verbs: ["get", "list"]
   # `patch` is the Clusters area's drain / undrain / decommission: the decommission LABEL, the
   # status annotation undrain clears, and `spec.unschedulable`. A node cannot be name-restricted
   # in RBAC (no `resourceNames` on a cluster-scoped list of one), so the scoping is in the handler
