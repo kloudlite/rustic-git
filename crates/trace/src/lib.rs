@@ -6,6 +6,10 @@
 //! `BatchSpanProcessor` on its own thread with a bounded queue: a full queue drops (`try_send`),
 //! a dead collector drops, and neither is visible to a request. `tests/exporter_down.rs` holds that.
 //!
+//! Probe traffic (`x-kloudlite-probe: 1`) may force sampling, capped per process by the sampler's
+//! token bucket. The header is forgeable, so ingress (Task 7) should also strip it from outside
+//! traffic as defence in depth; the bucket is what holds when a path bypasses ingress (`/v1`).
+//!
 //! Module map: `sampler` (who is kept at the head, and whether a remote flag is trusted),
 //! `promote` (who is kept at the tail: errored or slow local roots, in-process), `http` (the
 //! in/out seams), `testing` (an in-memory subscriber for other crates' tests).
@@ -22,7 +26,7 @@ pub mod testing;
 
 pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, stamp, traced, untraced, PROBE_HEADER, UNTRACED};
 pub use promote::Promote;
-pub use sampler::{bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO};
+pub use sampler::{bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO, PROBE_BURST, PROBE_RATE};
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{ExporterBuildError, WithExportConfig as _};
@@ -61,7 +65,7 @@ pub fn provider(url: &str, service: &str) -> Result<SdkTracerProvider, ExporterB
         )
         .build();
     Ok(SdkTracerProvider::builder()
-        .with_sampler(Sampler)
+        .with_sampler(Sampler::default())
         .with_span_processor(Promote::new(batch))
         .with_resource(Resource::builder().with_service_name(service.to_string()).build())
         .build())
