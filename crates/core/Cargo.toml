@@ -26,6 +26,7 @@ schemars = { workspace = true }
 # Pulled in transitively via metrics-exporter-prometheus already; promoted to direct because
 # `LiveSettings<T>` (settings.rs) is core's own hot-path handle, not borrowed from a dependency.
 arc-swap = "1"
+kloudlite-trace = { workspace = true }
 # Only for `sshkeys`: two crates (the server binary and the api) both need the fingerprint of an
 # OpenSSH public key, and a hand-mirrored copy of a security-relevant parse drifts. Optional so
 # `storage`, which depends on core and must stay free of ssh parsing, does not pull it in.
@@ -35,5 +36,7 @@ russh = { workspace = true, optional = true }
 ssh = ["dep:russh"]
 
 [dev-dependencies]
+kloudlite-trace = { workspace = true, features = ["testing"] }
+tower = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

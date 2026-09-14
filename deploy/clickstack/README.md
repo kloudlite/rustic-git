@@ -71,6 +71,23 @@ HyperDX creates its collections and indexes in one burst and the serverless tier
 Retrying the form works; enabling the account's `DisableRateLimitingResponses` capability
 (server-side retry) makes it a non-event.
 
+## Traces retention: 7 days
+
+The exporter's `ttl` (`clickstack-values.yaml`, `720h`) is one value for every table it creates,
+applied only at `CREATE TABLE IF NOT EXISTS` — it cannot give traces their own window, and it never
+rewrites a table that exists. Traces are the largest per-request signal and are only read for
+recent incidents, so they get a week, set once on the table itself:
+
+```sh
+kubectl -n clickstack exec -it chi-clickstack-clickhouse-0-0-0 -- clickhouse-client -q \
+  "ALTER TABLE default.otel_traces MODIFY TTL toDate(Timestamp) + INTERVAL 7 DAY"
+kubectl -n clickstack exec -it chi-clickstack-clickhouse-0-0-0 -- clickhouse-client -q \
+  "SHOW CREATE TABLE default.otel_traces" | grep TTL
+```
+
+A chart upgrade does not undo it. A table dropped and recreated by the exporter comes back at 30
+days; re-run this. The pod name is the operator's; `kubectl -n clickstack get pods` if it differs.
+
 ## Wiring the admin process
 
 The chart mints two ClickHouse users of its own in `clickstack-secret`: `app`

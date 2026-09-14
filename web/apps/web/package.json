@@ -8,9 +8,19 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "rm -rf .next/types .next/dev/types && tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test src && bun run test:node",
+    "test:node": "node --test test-node/*.test.ts"
   },
   "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.11.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.222.0",
+    "@opentelemetry/instrumentation": "0.222.0",
+    "@opentelemetry/instrumentation-http": "0.222.0",
+    "@opentelemetry/instrumentation-undici": "0.32.0",
+    "@opentelemetry/resources": "2.11.0",
+    "@opentelemetry/sdk-trace-base": "2.11.0",
+    "@opentelemetry/sdk-trace-node": "2.11.0",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.2",
     "class-variance-authority": "^0.7.1",

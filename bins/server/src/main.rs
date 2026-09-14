@@ -96,6 +96,7 @@ async fn serve() -> Result<()> {
         None => kloudlite_server::pulls::Source::Absent,
     };
     let app = Arc::new(App::new(store.clone(), Arc::new(ownership), me, addr_of, peer_secret, dir));
+    kloudlite_core::settings::bind_trace(&app.central);
     // One synchronous GET before serving anything, so the first request already sees whatever an
     // admin has already set rather than waiting out the first `SETTINGS_REFRESH_SECS` beat.
     // Missing key or a corrupt document: keep the env-only default and let the beat try again.

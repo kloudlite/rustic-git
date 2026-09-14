@@ -147,6 +147,10 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kube-system.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-gateway
             # A separate listener: 8080 and 443 are the internet-facing ones. NOT a hostPort.
             - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464

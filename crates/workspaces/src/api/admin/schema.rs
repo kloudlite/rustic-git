@@ -118,6 +118,11 @@ fn central_range(name: &str) -> Option<(f64, f64)> {
         "sshPort" => Some((1.0, 65_535.0)),
         "builderIdleSecs" => Some((60.0, 86_400.0)),
         "builderStartSecs" => Some((30.0, 600.0)),
+        "traceSampleRatio" => Some((0.0, 1.0)),
+        "traceProbeRate" => Some((0.0, 1000.0)),
+        "traceProbeBurst" => Some((1.0, 10_000.0)),
+        "tracePromoteRate" => Some((0.0, 1000.0)),
+        "tracePromoteBurst" => Some((1.0, 10_000.0)),
         _ => None,
     }
 }
@@ -197,6 +202,11 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "defaultImage" => serde_json::Value::String(String::new()),
         "gitInitImage" => defaults::git_init_image().into(),
         "runtimeClass" => serde_json::Value::String(String::new()),
+        "traceSampleRatio" => kloudlite_trace::DEFAULT_RATIO.into(),
+        "traceProbeRate" => kloudlite_trace::PROBE_RATE.into(),
+        "traceProbeBurst" => kloudlite_trace::PROBE_BURST.into(),
+        "tracePromoteRate" => kloudlite_trace::PROMOTE_RATE.into(),
+        "tracePromoteBurst" => kloudlite_trace::PROMOTE_BURST.into(),
         _ => serde_json::Value::Null,
     }
 }
@@ -214,6 +224,11 @@ fn cluster_range(name: &str) -> Option<(f64, f64)> {
         "nixTimeoutSecs" => Some((60.0, 7_200.0)),
         "defaultReplicas" => Some((1.0, 5.0)),
         "quotaGbCeiling" => Some((10.0, 5_000.0)),
+        "traceSampleRatio" => Some((0.0, 1.0)),
+        "traceProbeRate" => Some((0.0, 1000.0)),
+        "traceProbeBurst" => Some((1.0, 10_000.0)),
+        "tracePromoteRate" => Some((0.0, 1000.0)),
+        "tracePromoteBurst" => Some((1.0, 10_000.0)),
         _ => None,
     }
 }

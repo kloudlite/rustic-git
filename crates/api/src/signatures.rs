@@ -60,9 +60,7 @@ pub(crate) async fn commit_patch(
     obj.insert("authorEmail".into(), serde_json::Value::String(who.email));
 
     let url = format!("{}/api/{}/{}/patch", api.upstream, encode(&owner), encode(&name));
-    let sent = api
-        .client
-        .post(url)
+    let sent = kloudlite_trace::inject_reqwest(api.client.post(url))
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
         .header(kloudlite_core::peer::OWNER_HEADER, &owner)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -115,9 +113,7 @@ pub(crate) async fn verify_commit(
     // node applies the same read check it applies to any browse request and needs
     // to be told WHO is reading. `settings_caller` has already established that
     // the caller may act under this owner, which is what is asserted here.
-    let r = match api
-        .client
-        .get(url)
+    let r = match kloudlite_trace::inject_reqwest(api.client.get(url))
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
         .header(kloudlite_core::peer::OWNER_HEADER, &owner)
         .send()

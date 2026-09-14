@@ -125,7 +125,8 @@ pub(crate) async fn raw(
 ) -> Result<(reqwest::StatusCode, String)> {
     let method_name = method.to_string();
     let req_id = request_id(c);
-    let mut req = c.http.request(method, url).header(REQUEST_ID, &req_id);
+    let tp = traceparent();
+    let mut req = probe_headers(c.http.request(method, url).header(REQUEST_ID, &req_id), &tp);
     if !token.is_empty() {
         req = req.header("authorization", c.bearer(token));
     }
@@ -155,7 +156,7 @@ pub(crate) async fn raw(
             flight.done = true;
             let (connect, timeout) = (e.is_connect(), e.is_timeout());
             let e = e.without_url();
-            tracing::warn!(method = %method_name, path = %flight.path, %req_id, phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
+            tracing::warn!(method = %method_name, path = %flight.path, %req_id, trace_id = trace_of(&tp), phase = "send", ms = flight.started.elapsed().as_millis() as u64, connect, timeout, error = %e, "slo.http.failed");
             return Err(anyhow!("{e} ({})", flight.path));
         }
     };
@@ -169,13 +170,13 @@ pub(crate) async fn raw(
         Err(e) => {
             flight.done = true;
             let e = e.without_url();
-            tracing::warn!(method = %method_name, path = %flight.path, %req_id, phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
+            tracing::warn!(method = %method_name, path = %flight.path, %req_id, trace_id = trace_of(&tp), phase = "body", ms = flight.started.elapsed().as_millis() as u64, %status, error = %e, "slo.http.failed");
             return Err(anyhow!("{e} while reading the body of {status} ({})", flight.path));
         }
     };
     flight.done = true;
     let total_ms = flight.started.elapsed().as_millis() as u64;
-    done(&method_name, &flight.path, &req_id, status.as_u16(), headers_ms, total_ms);
+    done(&method_name, &flight.path, &req_id, &tp, status.as_u16(), headers_ms, total_ms);
     Ok((status, text))
 }
 
@@ -192,12 +193,31 @@ pub(crate) fn request_id(c: &Ctx) -> String {
 /// Every request, not only the slow ones: an SLO judged against 300 ms fails on samples far under
 /// any slow floor, and the probe's request count per run is bounded, so the line costs little and
 /// is the only client-side record of a sub-threshold sample. Slow ones still warn.
-pub(crate) fn done(method: &str, path: &str, req_id: &str, status: u16, headers_ms: u64, total_ms: u64) {
+pub(crate) fn done(method: &str, path: &str, req_id: &str, tp: &str, status: u16, headers_ms: u64, total_ms: u64) {
+    let trace_id = trace_of(tp);
     if total_ms > SLOW_HTTP_MS {
-        tracing::warn!(%method, %path, %req_id, status, headers_ms, total_ms, "slo.http.slow");
+        tracing::warn!(%method, %path, %req_id, trace_id, status, headers_ms, total_ms, "slo.http.slow");
     } else {
-        tracing::info!(%method, %path, %req_id, status, headers_ms, total_ms, "slo.http.done");
+        tracing::info!(%method, %path, %req_id, trace_id, status, headers_ms, total_ms, "slo.http.done");
     }
+}
+
+/// A fresh sampled W3C `traceparent` per request. With `x-kloudlite-probe: 1` beside it, every
+/// hop obeys the sampled flag (within its probe bucket), so a probe sample always has its trace.
+pub(crate) fn traceparent() -> String {
+    use rand::Rng as _;
+    let mut r = rand::thread_rng();
+    format!("00-{:032x}-{:016x}-01", r.gen::<u128>() | 1, r.gen::<u64>() | 1)
+}
+
+fn trace_of(tp: &str) -> &str {
+    tp.get(3..35).unwrap_or("")
+}
+
+/// The probe marker and its trace, on one request. The one path every probe request takes
+/// (`raw`, and `registry::delete_tag` by hand).
+pub(crate) fn probe_headers(req: reqwest::RequestBuilder, tp: &str) -> reqwest::RequestBuilder {
+    req.header("traceparent", tp).header("x-kloudlite-probe", "1")
 }
 
 /// Anything over this is logged whatever its status: the step's own ceiling says a request was
@@ -952,6 +972,20 @@ pub(crate) fn owns(c: &Ctx, now: i64) -> impl Fn(&str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// probe -> first hop: a W3C sampled traceparent and the probe marker ride every request.
+    #[test]
+    fn probe_requests_carry_a_sampled_traceparent_and_the_marker() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let t = super::traceparent();
+        assert_eq!(t.len(), 55);
+        assert!(t.starts_with("00-") && t.ends_with("-01"));
+        assert_ne!(&t[3..35], "00000000000000000000000000000000");
+        assert_ne!(super::traceparent(), t, "fresh per request");
+        let req = super::probe_headers(reqwest::Client::new().get("http://127.0.0.1:1/"), &t).build().unwrap();
+        assert_eq!(req.headers()["traceparent"], t.as_str());
+        assert_eq!(req.headers()[kloudlite_trace::PROBE_HEADER], "1");
+    }
+
     /// A request cancelled mid-flight must say so: the step ceiling that cancels it cannot.
     #[tokio::test]
     async fn an_abandoned_request_is_logged_from_drop() {

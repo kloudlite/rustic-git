@@ -197,9 +197,7 @@ pub(crate) async fn create_upstream(api: &Api, owner: &str, name: &str, visibili
         encode(&repo.created_by),
         repo.created_at,
     );
-    let sent = api
-        .client
-        .post(url)
+    let sent = kloudlite_trace::inject_reqwest(api.client.post(url))
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
         .send()
         .await;
@@ -432,9 +430,7 @@ pub(crate) async fn list_protection(
     // The owner header is what lets the server open a PRIVATE repo for this read: `settings_caller`
     // has already established the caller may act under `owner`, exactly as the browse proxy does
     // before it forwards the same header. Without it the server sees an anonymous read and 401s.
-    let r = match api
-        .client
-        .get(url)
+    let r = match kloudlite_trace::inject_reqwest(api.client.get(url))
         .header(kloudlite_core::peer::PEER_HEADER, &api.secret)
         .header(kloudlite_core::peer::OWNER_HEADER, &owner)
         .send()

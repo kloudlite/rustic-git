@@ -43,6 +43,7 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 # The workspace host keypair, generated in-process (see `sshkeys.rs`).
 ssh-key = { workspace = true }
+kloudlite-trace = { workspace = true }
 # `kubeclient.rs`'s per-request bound is a tower `Layer` on kube's own client stack. Also a
 # dev-dependency below, where `peer.rs`'s router is driven with `oneshot`.
 
@@ -58,3 +59,5 @@ kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"
 base64 = { workspace = true }
 # In the tree already via axum; peer.rs's router is driven directly with `oneshot`.
 tower = { workspace = true }
+kloudlite-trace = { workspace = true, features = ["testing"] }
+opentelemetry_sdk = { workspace = true }

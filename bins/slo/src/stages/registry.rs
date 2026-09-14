@@ -361,10 +361,8 @@ async fn image_delete(c: &mut Ctx, secret: &str, image: &str) {
 async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
     // Not through `raw`, which only sends JSON; carries the same id and timing line by hand so the
     // first call of `reg.image.delete` joins the server's lines too.
-    let (req_id, started) = (super::request_id(c), std::time::Instant::now());
-    let r = c
-        .http
-        .post(url)
+    let (req_id, tp, started) = (super::request_id(c), super::traceparent(), std::time::Instant::now());
+    let r = super::probe_headers(c.http.post(url), &tp)
         .header("authorization", c.bearer(jwt))
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .header(super::REQUEST_ID, &req_id)
@@ -376,7 +374,7 @@ async fn delete_tag(c: &Ctx, url: &str, jwt: &str, tag: &str) -> Result<()> {
     let status = r.status();
     let headers_ms = started.elapsed().as_millis() as u64;
     let body = r.text().await.unwrap_or_default();
-    super::done("POST", &super::path_of(url), &req_id, status.as_u16(), headers_ms, started.elapsed().as_millis() as u64);
+    super::done("POST", &super::path_of(url), &req_id, &tp, status.as_u16(), headers_ms, started.elapsed().as_millis() as u64);
     if status.is_success() {
         return Ok(());
     }

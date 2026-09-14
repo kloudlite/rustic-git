@@ -108,6 +108,8 @@ pub(crate) async fn relay(r: reqwest::Response) -> Response {
 /// have been a slow success, and a second `POST /pulls` would open a second pull request.
 // ponytail: fixed 250 ms, one attempt; jittered backoff when a profile says so.
 pub(crate) async fn send_retrying(req: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    // Before the clone, so a retry carries the same trace context as the first send.
+    let req = kloudlite_trace::inject_reqwest(req);
     let again = req.try_clone();
     let read_only = again
         .as_ref()
@@ -130,6 +132,33 @@ pub(crate) async fn send_retrying(req: reqwest::RequestBuilder) -> reqwest::Resu
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// api -> srv: the peer call carries the trace of the request it serves.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_peer_call_carries_the_callers_trace() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (dispatch, _spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let s = seen.clone();
+        let app = axum::Router::new().route("/p", axum::routing::get(move |h: axum::http::HeaderMap| {
+            let s = s.clone();
+            async move {
+                *s.lock().unwrap() = h.get("traceparent").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
+            }
+        }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".parse().unwrap());
+        h.insert(kloudlite_trace::PROBE_HEADER, "1".parse().unwrap());
+        let span = kloudlite_trace::server_span(&axum::http::Method::GET, "/v1/x", &h, "r", "v1");
+        tracing::Instrument::instrument(super::send_retrying(reqwest::Client::new().get(format!("http://{addr}/p"))), span).await.unwrap();
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(&got[3..35], "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert!(got.ends_with("-01"), "{got}");
+    }
 
     /// A node that answers `codes` in order, then 200, counting every call it got.
     async fn flaky(codes: Vec<u16>) -> (String, Arc<AtomicUsize>) {

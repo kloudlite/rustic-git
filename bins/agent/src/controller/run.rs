@@ -175,7 +175,14 @@ where
         }
     }
     let start = std::time::Instant::now();
-    let r = fut.await;
+    // One span per pass, never per watch event: the pass is the unit that decides and writes. No
+    // object name on it — names carry owner handles and ids, which stay in the log lines.
+    let span = tracing::info_span!("reconcile", otel.name = %format!("reconcile {kind}"), otel.status_code = tracing::field::Empty, kind, trace_id = tracing::field::Empty);
+    kloudlite_trace::stamp(&span);
+    let r = tracing::Instrument::instrument(fut, span.clone()).await;
+    if r.is_err() {
+        span.record("otel.status_code", "ERROR");
+    }
     let result = if r.is_ok() { "ok" } else { "error" };
     metrics::counter!("reconciles_total", "kind" => kind, "result" => result).increment(1);
     metrics::histogram!("reconcile_duration_seconds", "kind" => kind).record(start.elapsed().as_secs_f64());
@@ -786,6 +793,36 @@ pub fn wake_on_finish<T: Send + 'static>(
 
 pub fn running_contains(ctx: &Arc<Ctx>, uid: &str) -> bool {
     ctx.running.lock().unwrap_or_else(|p| p.into_inner()).contains_key(uid)
+}
+
+#[cfg(test)]
+mod trace_tests {
+    /// One span per pass — the events inside a pass are span events, not spans — and a failed
+    /// pass is ERROR. No object name reaches the span.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reconcile_pass_is_exactly_one_span() {
+        kloudlite_trace::bind_ratio(|| 1.0);
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, _) = crate::testsupport::test_ctx(tmp.path(), "n1", vec![]);
+        let mut pod = k8s_openapi::api::core::v1::Pod::default();
+        pod.metadata.name = Some("ws-alice-secret".into());
+        let pass = || async {
+            tracing::info!("one");
+            tracing::info!("two");
+            Ok::<_, ()>(())
+        };
+        super::observed("workspace", &pod, &ctx, pass()).await.unwrap();
+        super::observed("workspace", &pod, &ctx, pass()).await.unwrap();
+        let _ = super::observed("workspace", &pod, &ctx, async { Err::<(), _>(()) }).await;
+        let got = spans.get_finished_spans().unwrap();
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(|s| s.name == "reconcile workspace"));
+        assert!(got[0].events.is_empty(), "log lines inside a pass carry names: they stay logs");
+        assert!(format!("{:?}", got[2].status).starts_with("Error"));
+        assert!(!format!("{got:?}").contains("alice"));
+    }
 }
 
 #[cfg(test)]

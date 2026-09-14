@@ -108,7 +108,7 @@ pub(crate) fn allow_dns_reaches_coredns_only() {
 pub(crate) fn an_environment_namespace_denies_by_default_and_still_resolves_dns() {
     let pols = default_policies("env-1", "team", &owner_ref());
     let names: Vec<_> = pols.iter().filter_map(|p| p.metadata.name.as_deref()).collect();
-    assert_eq!(names, vec!["default-deny", "allow-dns", "allow-internet-egress", "allow-same-namespace"]);
+    assert_eq!(names, vec!["default-deny", "allow-dns", "allow-internet-egress", "allow-otlp", "allow-same-namespace"]);
 
     let deny = pols[0].spec.as_ref().unwrap();
     assert_eq!(deny.policy_types.as_ref().unwrap().len(), 2, "deny must cover BOTH directions");
@@ -202,4 +202,28 @@ pub(crate) fn internet_egress_excludes_the_metadata_service_and_all_of_rfc_1918(
         assert!(except.contains(&want.to_string()), "{want} is not excluded: {except:?}");
     }
     assert_eq!(spec["egress"].as_array().unwrap().len(), 1, "one rule; a second would union it open");
+}
+
+
+/// Tenants reach the node collector and nothing else in the cluster through this hole: one peer
+/// (namespace AND pod), TCP 4318 only, no ipBlock, egress only.
+#[test]
+pub(crate) fn tenants_may_reach_only_the_node_collectors_otlp_http_port() {
+    let p = default_policies("ws-alice", "alice", &owner_ref())
+        .into_iter()
+        .find(|p| p.metadata.name.as_deref() == Some("allow-otlp"))
+        .expect("allow-otlp");
+    let v = serde_json::to_value(p.spec.unwrap()).unwrap();
+    assert_eq!(v["policyTypes"], serde_json::json!(["Egress"]));
+    assert!(v.get("ingress").is_none());
+    assert_eq!(v["egress"].as_array().unwrap().len(), 1);
+    assert_eq!(v["egress"][0]["ports"], serde_json::json!([{ "protocol": "TCP", "port": 4318 }]));
+    assert_eq!(
+        v["egress"][0]["to"],
+        serde_json::json!([{
+            "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
+            "podSelector": { "matchLabels": { "app": "kloudlite-otel-agent" } },
+        }])
+    );
+    assert!(OTLP_URL.starts_with("http://kloudlite-otel-agent-otlp.kube-system.svc:4318"));
 }

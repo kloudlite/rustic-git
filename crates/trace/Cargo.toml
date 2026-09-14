@@ -1,0 +1,31 @@
+[package]
+name = "kloudlite-trace"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[dependencies]
+axum = { workspace = true }
+http = "1"
+# Optional under `tls`: the OTLP exporter speaks plain HTTP to the node collector, so `kl` (a musl
+# binary with a size budget) builds with `default-features = false` and carries no TLS stack.
+reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-http = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[features]
+default = ["tls"]
+# `inject_reqwest` and the rustls provider install that the workspace reqwest (`rustls-no-provider`) needs.
+tls = ["dep:reqwest", "dep:rustls"]
+testing = ["opentelemetry_sdk/testing"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "time", "io-util"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-subscriber = { workspace = true }

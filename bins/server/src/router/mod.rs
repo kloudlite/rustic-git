@@ -57,6 +57,11 @@ pub fn peer_router(app: Arc<App>) -> Router {
         .route("/api/admin/settings/revert", post(admin_settings::revert_settings))
         .layer(axum::middleware::from_fn_with_state(app.clone(), route_peer))
         .layer(axum::middleware::from_fn_with_state(app.clone(), trust_peer))
-        .layer(axum::middleware::from_fn_with_state("peer", kloudlite_core::metrics::http_metrics))
+        // The one listener whose callers' sampled flag is trusted, and only with the secret —
+        // an api -> srv hop keeps the api's decision rather than re-rolling it.
+        .layer(axum::middleware::from_fn_with_state(
+            ("peer", std::sync::Arc::<str>::from(app.forwarder.secret.as_str())),
+            kloudlite_core::metrics::http_metrics_peer,
+        ))
         .with_state(app)
 }

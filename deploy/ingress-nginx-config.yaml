@@ -16,6 +16,26 @@
 # `deploy/ingress-nginx-service.yaml` is applied: it makes nginx honour a client-supplied
 # `X-Forwarded-For`, which is harmless when every connection provably comes from Cloudflare and a
 # one-header bypass of every IP check the moment one does not.
+#
+# OpenTelemetry (the controller's built-in module — confirmed present in the deployed
+# registry.k8s.io/ingress-nginx/controller:v1.15.1 image via
+# `kubectl -n ingress-nginx exec deploy/ingress-nginx-controller -- ls /etc/nginx/modules/`, so
+# this is a ConfigMap-only change, no Helm value). Spans go to the collector on the controller's
+# own node over gRPC — the only protocol this module speaks. `opentelemetry-trust-incoming-span`
+# is left at its published default of "false" here on purpose, the opposite of that default's
+# usual reading: nginx sits behind Cloudflare and cannot tell the SLO probe's `traceparent` from
+# one any internet caller sends (there is no source-IP or header check that survives the edge —
+# the same reason `x-kloudlite-probe` is NOT stripped below), so trusting incoming spans at all
+# would let outside traffic dictate this trace's parent. The ingress therefore always roots a new
+# trace; the probe's own pre-edge span becomes a separate trace, which is the accepted cost of
+# having no safe way to distinguish it. Downstream, real trust boundaries (the Rust/Node token
+# buckets keyed on `x-kloudlite-probe`) are unaffected — this key only concerns nginx's tracing
+# parent choice. Parent-based sampling with a static 10 % root ratio, matching `traceSampleRatio`'s
+# default; it is static here because nginx reads no Live setting — a changed ratio needs this file
+# changed too. `http.target` here is the raw `$request_uri` (method/path/query, no cookies) per
+# the opentelemetry-cpp-contrib nginx module source — there is no ConfigMap key to trim it, so the
+# collector's traces pipeline (both copies) strips the query string before export; see the
+# `transform/redact-span-target` processor in `deploy/kloudlite.yaml` and `deploy/k3s/otel-agent.yaml`.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -32,5 +52,17 @@ data:
   # connect, wait-for-headers and whole response: the part of a slow sample no pod can see.
   generate-request-id: "true"
   log-format-escape-json: "true"
-  log-format-upstream: '{"timestamp":"$time_iso8601","level":"INFO","message":"ingress.access","req_id":"$req_id","host":"$host","method":"$request_method","uri":"$uri","status":$status,"request_time":$request_time,"upstream_connect_time":"$upstream_connect_time","upstream_header_time":"$upstream_header_time","upstream_response_time":"$upstream_response_time","upstream":"$upstream_addr","bytes":$bytes_sent}'
+  log-format-upstream: '{"timestamp":"$time_iso8601","level":"INFO","message":"ingress.access","req_id":"$req_id","trace_id":"$opentelemetry_trace_id","host":"$host","method":"$request_method","uri":"$uri","status":$status,"request_time":$request_time,"upstream_connect_time":"$upstream_connect_time","upstream_header_time":"$upstream_header_time","upstream_response_time":"$upstream_response_time","upstream":"$upstream_addr","bytes":$bytes_sent}'
   proxy-real-ip-cidr: "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22"
+  enable-opentelemetry: "true"
+  opentelemetry-trust-incoming-span: "false"
+  opentelemetry-operation-name: "HTTP $request_method $service_name"
+  otlp-collector-host: "kloudlite-otel-agent-otlp.kloudlite.svc"
+  otlp-collector-port: "4317"
+  otel-service-name: "ingress-nginx"
+  otel-sampler: "TraceIdRatioBased"
+  otel-sampler-ratio: "0.1"
+  otel-sampler-parent-based: "true"
+  otel-max-queuesize: "2048"
+  otel-schedule-delay-millis: "5000"
+  otel-max-export-batch-size: "512"

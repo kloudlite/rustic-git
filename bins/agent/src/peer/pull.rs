@@ -475,6 +475,37 @@ pub async fn pull_one(
     max_bytes: u64,
     timeout: Duration,
 ) -> Result<(), String> {
+    // One CLIENT span per transfer, never per chunk. No volume or snapshot id on it: ids stay in
+    // the log lines, out of trace storage. The request inside carries this span's `traceparent`.
+    let span = tracing::info_span!(
+        "peer.pull",
+        otel.name = "peer pull",
+        otel.kind = "client",
+        otel.status_code = tracing::field::Empty,
+        incremental = parent.is_some(),
+        trace_id = tracing::field::Empty,
+    );
+    kloudlite_trace::stamp(&span);
+    let r = tracing::Instrument::instrument(transfer(engine, btrfs_bin, http, addr, secret, volume, name, parent, max_bytes, timeout), span.clone()).await;
+    if r.is_err() {
+        span.record("otel.status_code", "ERROR");
+    }
+    r
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transfer(
+    engine: &Engine,
+    btrfs_bin: &str,
+    http: &reqwest::Client,
+    addr: &str,
+    secret: &str,
+    volume: &str,
+    name: &str,
+    parent: Option<&str>,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<(), String> {
     let mut url = format!("http://{addr}/peer/v1/snapshot/{volume}/{name}?max={max_bytes}");
     if let Some(p) = parent {
         url = format!("{url}&parent={p}");
@@ -484,7 +515,7 @@ pub async fn pull_one(
     // the next source rather than finishing. `peer_send_timeout_secs` is the escape hatch;
     // splitting "connect" from "whole body" is the upgrade if a legitimately huge first pull ever
     // needs longer than an operator wants to raise it for everyone.
-    let resp = http.get(&url).header("x-peer-secret", secret).timeout(timeout).send().await.map_err(|e| e.to_string())?;
+    let resp = kloudlite_trace::inject_reqwest(http.get(&url)).header("x-peer-secret", secret).timeout(timeout).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("GET {url}: status {}", resp.status()));
     }

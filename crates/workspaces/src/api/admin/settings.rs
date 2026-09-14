@@ -310,6 +310,11 @@ pub(crate) fn validate_cluster_patch(patch: &crd::ClusterSettingsSpec) -> Result
     range!(nix_timeout_secs, 60u64, 7200u64);
     range!(default_replicas, 1u32, 5u32);
     range!(quota_gb_ceiling, 10u32, 5000u32);
+    range!(trace_sample_ratio, 0.0f64, 1.0f64);
+    range!(trace_probe_rate, 0.0f64, 1000.0f64);
+    range!(trace_probe_burst, 1.0f64, 10000.0f64);
+    range!(trace_promote_rate, 0.0f64, 1000.0f64);
+    range!(trace_promote_burst, 1.0f64, 10000.0f64);
     // Unbounded pin string (constraints.md's exact carve-out): only non-emptiness is checked,
     // and only when the admin actually set it.
     if let Some(v) = &patch.nixpkgs {
@@ -335,6 +340,11 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     }
     over!(sync_secs);
     over!(bench_idle_secs);
+    over!(trace_sample_ratio);
+    over!(trace_probe_rate);
+    over!(trace_probe_burst);
+    over!(trace_promote_rate);
+    over!(trace_promote_burst);
     over!(replica_secs);
     over!(decommission_secs);
     over!(node_dead_secs);
@@ -548,6 +558,7 @@ mod tests {
                 .iter()
                 .map(|(wire, _, _)| {
                     let v = match *wire {
+                        n if n.starts_with("trace") => serde_json::json!(0.125 * tag as f64),
                         "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => {
                             serde_json::json!(format!("test-{wire}-{tag}"))
                         }
@@ -582,5 +593,50 @@ mod tests {
                 "field {key} did not revert via merge_cluster_spec — add it to the `over!` list"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+
+    /// Every `ClusterSettingsSpec` field survives a write and a revert: a field added to the
+    /// struct but missed in `merge_cluster_spec` fails here. Keys are `CLUSTER_SETTING_META`'s, so
+    /// the table being exhaustive (`cluster_setting_meta_is_exhaustive`) makes this one too.
+    #[test]
+    fn every_cluster_field_round_trips_through_write_and_revert() {
+        let full = |bump: bool| -> crd::ClusterSettingsSpec {
+            let v: serde_json::Map<_, _> = crd::CLUSTER_SETTING_META
+                .iter()
+                .map(|(name, _, _)| {
+                    let x = match *name {
+                        n if n.starts_with("trace") => serde_json::json!(if bump { 0.25 } else { 0.5 }),
+                        "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => serde_json::json!(if bump { "b" } else { "a" }),
+                        _ => serde_json::json!(if bump { 61 } else { 62 }),
+                    };
+                    (name.to_string(), x)
+                })
+                .collect();
+            serde_json::from_value(serde_json::Value::Object(v)).unwrap()
+        };
+        let wire = |s: &crd::ClusterSettingsSpec| serde_json::to_value(s).unwrap();
+        let (base, next) = (full(false), full(true));
+        assert_eq!(wire(&next).as_object().unwrap().len(), crd::CLUSTER_SETTING_META.len(), "a field did not parse");
+        let changed = merge_cluster_spec(base.clone(), &next);
+        assert_eq!(wire(&changed), wire(&next), "the write dropped a field");
+        let mut ann = BTreeMap::new();
+        push_cluster_history(&base, &mut ann);
+        let reverted = merge_cluster_spec(changed, &history_from_annotations(&ann)[0]);
+        assert_eq!(wire(&reverted), wire(&base), "history/revert dropped a field");
+    }
+
+    #[test]
+    fn trace_fields_are_range_checked() {
+        let with = |r, rate, burst| crd::ClusterSettingsSpec { trace_sample_ratio: r, trace_probe_rate: rate, trace_probe_burst: burst, ..Default::default() };
+        assert!(validate_cluster_patch(&with(Some(1.5), None, None)).unwrap_err().starts_with("trace_sample_ratio must be between 0 and 1"));
+        assert!(validate_cluster_patch(&with(Some(-0.1), None, None)).is_err());
+        assert!(validate_cluster_patch(&with(None, Some(1001.0), None)).is_err());
+        assert!(validate_cluster_patch(&with(None, None, Some(0.0))).is_err());
+        assert!(validate_cluster_patch(&with(Some(0.0), Some(0.0), Some(1.0))).is_ok());
     }
 }

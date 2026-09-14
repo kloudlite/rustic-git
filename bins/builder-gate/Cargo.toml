@@ -20,6 +20,7 @@ kloudlite-workspaces = { path = "../../crates/workspaces" }
 # The same single, read-only GET of `cluster/settings` the gateway makes, and nothing else from
 # the object store — `object_store_views`, not the SlateDB pool.
 kloudlite-storage = { path = "../../crates/storage" }
+kloudlite-trace = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 axum = { workspace = true }
@@ -34,3 +35,7 @@ serde_json = { workspace = true }
 # faked client would not prove the bearer header or the paths.
 axum = { workspace = true }
 tokio = { workspace = true }
+kloudlite-trace = { workspace = true, features = ["testing"] }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+serde_json = { workspace = true }
