@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { context, ROOT_CONTEXT, SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
-import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { childTraceEnv, KlPropagator, Promote, startTracing, traceparent } from "../src/tracing.ts";
+import { InMemorySpanExporter, SamplingDecision, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { childTraceEnv, KlPropagator, KlSampler, Promote, startTracing, traceparent } from "../src/tracing.ts";
 
 test("the child's traceparent is the active span's trace", async () => {
   assert.equal(traceparent(), undefined, "no provider, no header");
@@ -29,6 +29,27 @@ test("a child spawned inside a probe request carries KL_PROBE, and only then", (
   const b = context.with(plain, childTraceEnv);
   assert.equal(b.KL_PROBE, undefined);
   assert.equal(b.KL_TRACEPARENT?.slice(3, 35), TID);
+});
+
+const remoteCx = (flags: number, probe = false) => {
+  const cx = trace.setSpanContext(ROOT_CONTEXT, { traceId: TID, spanId: "00f067aa0ba902b7", traceFlags: flags, isRemote: true });
+  return probe ? new KlPropagator().extract(cx, { "x-kloudlite-probe": "1" }, getter) : cx;
+};
+const decide = (s: KlSampler, cx = ROOT_CONTEXT, tid = TID) => s.shouldSample(cx, tid, "n", 0, {}, []).decision;
+
+test("sampler: no probe header, a sampled outside parent still lets the ratio decide", () => {
+  const s = new KlSampler(0, 2, 2);
+  assert.equal(decide(s, remoteCx(TraceFlags.SAMPLED)), SamplingDecision.RECORD, "outside caller cannot force a sample");
+  assert.equal(decide(new KlSampler(1, 2, 2), remoteCx(TraceFlags.SAMPLED)), SamplingDecision.RECORD_AND_SAMPLED, "ratio can still sample it");
+});
+
+// ingress-nginx (Task 7) never trusts an incoming traceparent and samples at 10%, so a probe
+// request reaches this tier with `-00` nine times in ten — the bucket must catch it regardless.
+test("sampler: a probe header is sampled through the bucket regardless of the incoming flag", () => {
+  const s = new KlSampler(0, 2, 2);
+  assert.equal(decide(s, remoteCx(TraceFlags.NONE, true)), SamplingDecision.RECORD_AND_SAMPLED, "unsampled parent, bucket decides");
+  assert.equal(decide(s, remoteCx(TraceFlags.SAMPLED, true)), SamplingDecision.RECORD_AND_SAMPLED);
+  assert.equal(decide(s, remoteCx(TraceFlags.NONE, true)), SamplingDecision.RECORD, "past the burst the ratio decides");
 });
 
 const mk = (id: string, code: SpanStatusCode) =>

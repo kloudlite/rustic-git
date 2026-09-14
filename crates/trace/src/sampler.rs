@@ -21,6 +21,13 @@
 //! default 20 traces/s, burst 100). Past the cap the ratio decides, exactly as for an outside
 //! caller — a flood costs at most the bucket, and the real probe (a few req/s) never touches it.
 //! Only a remote probe root is charged; its children have local parents and are free.
+//!
+//! The bucket decides for probe traffic REGARDLESS of the remote parent's sampled flag, not only
+//! when that flag is already `-01`. ingress-nginx (Task 7) roots a new trace and honours no
+//! incoming `traceparent` — it samples at a static 10%, so 90% of the probe's requests reach a
+//! backend with `-00`. Gating the bucket on `!sc.is_sampled()` would read that as "the parent
+//! already decided not to sample" and drop the probe's trace on exactly those 90%. The bucket
+//! still bounds a forged header the same as before.
 
 use opentelemetry::trace::{Link, SpanKind, TraceContextExt, TraceId};
 use opentelemetry::{Context, KeyValue};
@@ -168,11 +175,19 @@ pub(crate) fn decide_with(parent: Option<&Context>, trace_id: TraceId, ratio: f6
     let trusted = parent.is_some_and(|c| c.get::<Trusted>().is_some());
     let parent = parent.map(|c| c.span().span_context().clone()).filter(|sc| sc.is_valid());
     if let Some(sc) = parent {
-        let obeyed = !sc.is_remote() || trust_remote || trusted || (probe && (!sc.is_sampled() || probes.take()));
-        if obeyed {
+        if !sc.is_remote() || trust_remote || trusted {
             return if sc.is_sampled() { SamplingDecision::RecordAndSample } else { SamplingDecision::RecordOnly };
         }
+        // A remote, untrusted, probe-marked parent: the bucket decides, ignoring `sc.is_sampled()`
+        // (see the module doc — nginx sends `-00` on 90% of probe requests by design).
+        if probe {
+            return if probes.take() { SamplingDecision::RecordAndSample } else { ratio_decision(ratio, trace_id) };
+        }
     }
+    ratio_decision(ratio, trace_id)
+}
+
+fn ratio_decision(ratio: f64, trace_id: TraceId) -> SamplingDecision {
     let root = opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(ratio);
     match root.should_sample(None, trace_id, "", &SpanKind::Internal, &[], &[]).decision {
         SamplingDecision::RecordAndSample => SamplingDecision::RecordAndSample,
@@ -271,6 +286,30 @@ mod tests {
         let p = remote(TraceFlags::SAMPLED);
         assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &open()), SamplingDecision::RecordOnly);
         let p = remote(TraceFlags::default());
+        assert_eq!(decide_with(Some(&p), TraceId::from(1u128), 1.0, false, &open()), SamplingDecision::RecordAndSample);
+    }
+
+    // ingress-nginx (Task 7) never trusts an incoming traceparent and samples at 10%, so a probe
+    // request reaches a backend with `-00` nine times in ten. The bucket must still catch it.
+
+    #[test]
+    fn a_probe_header_with_an_unsampled_parent_is_sampled_while_under_the_bucket() {
+        let p = remote(TraceFlags::default()).with_value(Probe);
+        assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &open()), SamplingDecision::RecordAndSample);
+    }
+
+    #[test]
+    fn a_probe_header_past_the_bucket_falls_back_to_the_ratio_even_when_unsampled() {
+        let empty = Bucket::new(0.0, 0.0);
+        let p = remote(TraceFlags::default()).with_value(Probe);
+        assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &empty), SamplingDecision::RecordOnly);
+        assert_eq!(decide_with(Some(&p), TraceId::from(1u128), 1.0, false, &empty), SamplingDecision::RecordAndSample);
+    }
+
+    #[test]
+    fn no_probe_header_and_a_sampled_outside_parent_still_lets_the_ratio_decide() {
+        let p = remote(TraceFlags::SAMPLED);
+        assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &open()), SamplingDecision::RecordOnly);
         assert_eq!(decide_with(Some(&p), TraceId::from(1u128), 1.0, false, &open()), SamplingDecision::RecordAndSample);
     }
 }

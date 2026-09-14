@@ -117,8 +117,14 @@ export class KlSampler implements Sampler {
     const parent = trace.getSpanContext(cx);
     if (parent && trace.isSpanContextValid(parent)) {
       const sampled = (parent.traceFlags & TraceFlags.SAMPLED) !== 0;
-      if (!parent.isRemote || (cx.getValue(PROBE) && (!sampled || this.probes.take()))) {
+      if (!parent.isRemote) {
         return { decision: sampled ? SamplingDecision.RECORD_AND_SAMPLED : SamplingDecision.RECORD, traceState: parent.traceState };
+      }
+      // A remote, probe-marked parent: the bucket decides, ignoring `sampled` — ingress-nginx
+      // (Task 7) never trusts an incoming traceparent and samples at 10%, so 90% of the probe's
+      // requests arrive here unsampled by design. Gating on `!sampled` would drop those.
+      if (cx.getValue(PROBE) && this.probes.take()) {
+        return { decision: SamplingDecision.RECORD_AND_SAMPLED, traceState: parent.traceState };
       }
     }
     const d = this.root.shouldSample(cx, traceId).decision;

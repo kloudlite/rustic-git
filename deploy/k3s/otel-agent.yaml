@@ -284,18 +284,21 @@ data:
         metric_statements:
           - context: resource
             statements: *identity
-      # ingress-nginx's OpenTelemetry module has no key to trim `http.target` (it is
-      # `$request_uri` verbatim — method/path/query, per the opentelemetry-cpp-contrib nginx
-      # module source) and every other emitter's spans go through our own `kloudlite-trace`
-      # crate, which never sets a full-URL attribute — so this only ever touches ingress-nginx
-      # spans. Drop the query string before export; the path segment is not treated as secret
-      # (routes carry no token, see CLAUDE.md's routing key shape).
+      # ingress-nginx's OpenTelemetry module (opentelemetry-cpp-contrib/nginx,
+      # otel_ngx_module.cpp, read at the pinned version) sets exactly one attribute carrying the
+      # raw request: `http.target` = `$request_uri` verbatim (method/path/query) — it never sets
+      # `url.path`/`url.full`/`http.url`/`http.request.uri`. The path alone still names
+      # owner/repo/image (CLAUDE.md's routing keys), so trimming the query is not enough: the
+      # route-template-or-nothing rule means the attribute is dropped whole. Span name is our own
+      # `opentelemetry-operation-name` template (method + service name), never the URI, so nothing
+      # to rename there. Every other emitter goes through `kloudlite-trace`, which never sets a
+      # full-URL attribute, so this only ever touches ingress-nginx spans.
       transform/redact-span-target:
         error_mode: ignore
         trace_statements:
           - context: span
             statements:
-              - replace_pattern(attributes["http.target"], "\\?.*$", "")
+              - delete_key(attributes, "http.target")
       batch:
         timeout: 10s
         send_batch_size: 1024

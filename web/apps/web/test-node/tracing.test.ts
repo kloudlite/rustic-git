@@ -14,13 +14,22 @@ const remote = (flags: number, probe = false) => {
 };
 const decide = (s: KlSampler, cx = ROOT_CONTEXT, tid = TID) => s.shouldSample(cx, tid, "n", SpanKind.SERVER, {}, []).decision;
 
-test("sampler: a remote sampled flag is obeyed only for probe traffic, within the bucket", () => {
+test("sampler: no probe header, a sampled outside parent still lets the ratio decide", () => {
   const s = new KlSampler(0, 2, 2);
   assert.equal(decide(s, remote(TraceFlags.SAMPLED)), SamplingDecision.RECORD, "outside caller cannot force a sample");
-  assert.equal(decide(s, remote(TraceFlags.NONE, true)), SamplingDecision.RECORD);
+  assert.equal(decide(new KlSampler(1, 2, 2), remote(TraceFlags.SAMPLED)), SamplingDecision.RECORD_AND_SAMPLED, "ratio can still sample it");
+});
+
+// ingress-nginx (Task 7) never trusts an incoming traceparent and samples at 10%, so a probe
+// request reaches this tier with `-00` nine times in ten — the bucket must catch it regardless.
+test("sampler: a probe header is sampled through the bucket regardless of the incoming flag", () => {
+  const s = new KlSampler(0, 2, 2);
+  assert.equal(decide(s, remote(TraceFlags.NONE, true)), SamplingDecision.RECORD_AND_SAMPLED, "unsampled parent, bucket decides");
   assert.equal(decide(s, remote(TraceFlags.SAMPLED, true)), SamplingDecision.RECORD_AND_SAMPLED);
-  assert.equal(decide(s, remote(TraceFlags.SAMPLED, true)), SamplingDecision.RECORD_AND_SAMPLED);
-  assert.equal(decide(s, remote(TraceFlags.SAMPLED, true)), SamplingDecision.RECORD, "past the burst the ratio decides");
+  assert.equal(decide(s, remote(TraceFlags.NONE, true)), SamplingDecision.RECORD, "past the burst the ratio decides");
+});
+
+test("sampler: local parent decides, and a root is never dropped", () => {
   const local = trace.setSpanContext(ROOT_CONTEXT, { traceId: TID, spanId: "00f067aa0ba902b7", traceFlags: TraceFlags.SAMPLED, isRemote: false });
   assert.equal(decide(new KlSampler(0), local), SamplingDecision.RECORD_AND_SAMPLED, "a local parent decides");
   assert.equal(decide(new KlSampler(0), ROOT_CONTEXT, "ffffffffffffffffffffffffffffffff"), SamplingDecision.RECORD, "never dropped");
