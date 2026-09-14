@@ -82,40 +82,99 @@ pub fn on_stall(method: &http::Method, path: &str, elapsed_ms: u64, newest_conn:
     tracing::warn!(%method, %resource, elapsed_ms, newest_conn, "kube.stall.dump.unsupported");
 }
 
-/// Drops every `<...>` (nested, `->` inside kept balanced) and the registry prefix of a path.
-pub fn strip(trace: &str) -> String {
-    let (mut out, mut depth, mut prev) = (String::with_capacity(trace.len() / 2), 0usize, ' ');
-    for c in trace.chars() {
-        match c {
-            '<' => depth += 1,
-            '>' if depth > 0 && prev != '-' => depth -= 1,
-            _ if depth == 0 => out.push(c),
-            _ => {}
+/// Past this, a generic argument list that is not a qualified path (`<X as Trait>`) prints `<…>`.
+const MAX_GENERIC: usize = 40;
+
+/// One frame as `name at file:line`. tokio's own `Display` for a frame drops the last `::`
+/// segment (tokio 1.53.1 `task/trace/symbol.rs:69`), which turned `<X as Future>::poll` into
+/// `<X as Future>` and, with generics stripped, into nothing — every decisive frame of the
+/// 2026-09-14 in-stall dump printed as an empty line. So names come from the demangled symbol.
+pub fn frame_line(demangled: &str, file: Option<&str>, line: Option<u32>) -> String {
+    let name = match demangled.rsplit_once("::h") {
+        Some((n, h)) if h.len() == 16 && h.bytes().all(|c| c.is_ascii_hexdigit()) => n,
+        _ => demangled,
+    };
+    let mut out = shorten(name);
+    if let Some(f) = file {
+        let f = f.find("index.crates.io-").map_or(f, |ix| f[ix..].find('/').map_or(f, |i| &f[ix + i + 1..]));
+        out.push_str(" at ");
+        out.push_str(f);
+        if let Some(l) = line {
+            out.push_str(&format!(":{l}"));
         }
-        prev = c;
     }
-    out.lines()
-        .map(|l| match (l.find(" at "), l.find("index.crates.io-")) {
-            (Some(at), Some(ix)) if ix > at => {
-                let rest = &l[ix..];
-                format!("{} at {}", &l[..at], rest.find('/').map_or(rest, |i| &rest[i + 1..]))
-            }
-            _ => l.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    out
 }
 
-/// `(task id, raw trace)` in, one block per distinct stripped trace out: callers (kube/tower/our
+/// Index of the `>` closing the `<` at `open`; a `->` inside is not a close.
+fn close_of(s: &str, open: usize) -> Option<usize> {
+    let (b, mut depth) = (s.as_bytes(), 0usize);
+    for i in open..b.len() {
+        match b[i] {
+            b'<' => depth += 1,
+            b'>' if i == 0 || b[i - 1] != b'-' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Byte index of the last `pat` outside every `<…>`.
+fn rfind_top(s: &str, pat: &str) -> Option<usize> {
+    let (b, mut depth, mut hit) = (s.as_bytes(), 0usize, None);
+    for i in 0..b.len() {
+        match b[i] {
+            b'<' => depth += 1,
+            b'>' if depth > 0 && (i == 0 || b[i - 1] != b'-') => depth -= 1,
+            _ if depth == 0 && s[i..].starts_with(pat) => hit = Some(i),
+            _ => {}
+        }
+    }
+    hit
+}
+
+/// The outer path stays whole; each `<…>` inside it is shortened by `generic`.
+fn shorten(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let (mut i, mut run) = (0, 0);
+    while let Some(off) = s[i..].find('<') {
+        let open = i + off;
+        let Some(end) = close_of(s, open) else { break };
+        out.push_str(&s[run..open]);
+        out.push('<');
+        out.push_str(&generic(&s[open + 1..end]));
+        out.push('>');
+        i = end + 1;
+        run = i;
+    }
+    out.push_str(&s[run..]);
+    out
+}
+
+/// `X as Trait` keeps both type names' last path segment; a long plain list collapses to `…`.
+fn generic(inner: &str) -> String {
+    let last = |p: &str| shorten(rfind_top(p, "::").map_or(p, |i| &p[i + 2..]));
+    match rfind_top(inner, " as ") {
+        Some(i) => format!("{} as {}", last(&inner[..i]), last(&inner[i + 4..])),
+        None if inner.len() > MAX_GENERIC => "…".to_string(),
+        None => shorten(inner),
+    }
+}
+
+/// `(task id, formatted trace)` in, one block per distinct trace out: callers (kube/tower/our
 /// own frames) first, connection tasks after, each `count x tasks [ids]`. Returns (text, distinct).
 pub fn render(tasks: &[(String, String)]) -> (String, usize) {
     use std::fmt::Write as _;
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
-    for (id, raw) in tasks {
-        let t = strip(raw);
-        match groups.iter_mut().find(|g| g.0 == t) {
+    for (id, t) in tasks {
+        match groups.iter_mut().find(|g| &g.0 == t) {
             Some(g) => g.1.push(id),
-            None => groups.push((t, vec![id])),
+            None => groups.push((t.clone(), vec![id])),
         }
     }
     let caller = |t: &str| ["kube", "tower", "kloudlite"].iter().any(|k| t.contains(k));
@@ -171,7 +230,22 @@ pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
     let mut hits = Vec::new();
     for t in snap.tasks().iter() {
         tasks += 1;
-        let trace = t.trace().to_string();
+        let trace = t
+            .trace()
+            .resolve_backtraces()
+            .iter()
+            .map(|bt| {
+                bt.frames()
+                    .flat_map(|f| f.symbols())
+                    .filter_map(|sym| {
+                        let file = sym.filename().map(|p| p.to_string_lossy().into_owned());
+                        sym.name_demangled().map(|n| frame_line(n, file.as_deref(), sym.lineno()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n--\n");
         if ["hyper", "kube", "tower"].iter().any(|k| trace.contains(k)) {
             hits.push((t.id().to_string(), trace));
         }
@@ -203,9 +277,23 @@ mod tests {
     }
 
     #[test]
-    fn generics_and_registry_prefixes_are_stripped() {
-        let t = "╼ hyper::proto::h1::dispatch::Dispatcher<D, Bs, I, T>::poll_catch<F: Fn() -> Vec<u8>> at /root/.cargo/registry/src/index.crates.io-abc/hyper-1.11.0/src/x.rs:1:2";
-        assert_eq!(strip(t), "╼ hyper::proto::h1::dispatch::Dispatcher::poll_catch at hyper-1.11.0/src/x.rs:1:2");
+    fn frames_keep_the_method_and_the_qualified_types() {
+        let t = frame_line(
+            "<hyper_util::client::legacy::client::Client<C,B> as tower_service::Service<http::request::Request<B>>>::call::{{closure}}::h0123456789abcdef",
+            Some("/root/.cargo/registry/src/index.crates.io-abc/hyper-util-0.1.10/src/client/legacy/client.rs"),
+            Some(233),
+        );
+        assert_eq!(t, "<Client<C,B> as Service<Request<B>>>::call::{{closure}} at hyper-util-0.1.10/src/client/legacy/client.rs:233");
+        assert_eq!(
+            frame_line("hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T>::poll_read_head", None, None),
+            "hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T>::poll_read_head"
+        );
+        let long = frame_line(
+            "tokio::runtime::task::Harness<hyper::client::conn::Connection<tokio_rustls::client::TlsStream<tokio::net::TcpStream>,F: Fn() -> Vec<u8>>>::poll",
+            Some("/src/x.rs"),
+            Some(7),
+        );
+        assert_eq!(long, "tokio::runtime::task::Harness<…>::poll at /src/x.rs:7");
     }
 
     #[test]

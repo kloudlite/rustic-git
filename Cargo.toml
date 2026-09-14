@@ -219,6 +219,7 @@ inherits = "release"
 lto = false
 codegen-units = 16
 strip = false
+debug = "line-tables-only"
 
 # foyer-memory 0.22.3 holds its inflight lock while it spawns the fetch task, which deadlocks the
 # spawning thread when the runtime is shutting down (tokio cancels and drops the task inline, and
