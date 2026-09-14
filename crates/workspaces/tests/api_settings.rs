@@ -332,6 +332,55 @@ async fn revert_cluster_restores_the_named_entry_and_grows_history_again() {
     assert_eq!(new_hist[0]["syncSecs"], 60, "the CURRENT spec (pre-revert) is pushed onto history by the revert write");
 }
 
+/// `stallDumps` round-trips: a PUT turns it on (live, no roll), and a revert to an entry that holds
+/// it off turns it off. A revert merges like a PUT, so an entry that never named the field would
+/// leave it on — hence the explicit `false`.
+#[tokio::test]
+async fn stall_dumps_turns_on_and_reverts_off() {
+    let on = json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "ClusterSettings",
+        "metadata": {"name": "default", "annotations": {"kloudlite.io/settings-history": json!([{"syncSecs": 60, "stallDumps": false}]).to_string()}},
+        "spec": {"syncSecs": 60, "stallDumps": true}});
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+            patch(format!("{API}/clustersettings/default"), on.clone()),
+        ],
+        None,
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .put(format!("{}/admin/settings/clusters/us", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"stallDumps": true, "note": "investigate"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
+    assert_eq!(sent[0]["spec"]["stallDumps"], true);
+    assert!(s.rec.calls().iter().all(|c| !c.contains("daemonsets")), "a live field rolls nothing");
+
+    let s = admin_server(
+        vec![
+            get(format!("{API}/regions/us"), region("us")),
+            get(format!("{API}/clustersettings/default"), on),
+            patch(format!("{API}/clustersettings/default"), cluster_settings(json!({}))),
+        ],
+        None,
+        None,
+    )
+    .await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/admin/settings/clusters/us/revert/0", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .json(&json!({"note": "done"}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let sent = s.rec.sent("PATCH", &format!("{API}/clustersettings/default"));
+    let spec: kloudlite_workspaces::crd::ClusterSettingsSpec = serde_json::from_value(sent[0]["spec"].clone()).unwrap();
+    assert_eq!(spec.stall_dumps, Some(false), "the revert must turn stall dumps back off: {}", sent[0]["spec"]);
+}
+
 // ── boot vs live field rolls (fix round 2) ──────────────────────────────
 
 fn daemonset(ready: i32, desired: i32) -> Value {

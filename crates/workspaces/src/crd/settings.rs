@@ -128,6 +128,10 @@ pub struct ClusterSettingsSpec {
     /// k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); `None` = host kernel. **Boot**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class: Option<String>,
+    /// On a `kube.timeout layer=inner`, log a tokio task dump (`kube.stall.dump`, at most one per
+    /// 10 min per agent). Diagnostic only; leave off unless investigating a kube stall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_dumps: Option<bool>,
 }
 
 
@@ -148,6 +152,7 @@ pub struct ClusterSettingsStatus {
 /// entry here fails loudly instead of shipping unreadable.
 pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str])] = &[
     ("syncSecs", kloudlite_core::settings::Mark::Live, &[]),
+    ("stallDumps", kloudlite_core::settings::Mark::Live, &[]),
     ("benchIdleSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("replicaSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("decommissionSecs", kloudlite_core::settings::Mark::Live, &[]),

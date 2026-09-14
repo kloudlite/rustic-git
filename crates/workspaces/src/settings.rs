@@ -27,6 +27,7 @@ pub struct AgentSettings {
     pub default_image: String,
     pub git_init_image: String,
     pub runtime_class: String,
+    pub stall_dumps: bool,
 }
 
 impl Default for AgentSettings {
@@ -59,6 +60,7 @@ impl AgentSettings {
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
             runtime_class: std::env::var("WS_RUNTIME_CLASS").unwrap_or_default(),
+            stall_dumps: kloudlite_core::settings::env_parsed("WS_STALL_DUMPS", false),
         }
     }
 
@@ -90,6 +92,7 @@ impl AgentSettings {
         over!(default_image);
         over!(git_init_image);
         over!(runtime_class);
+        over!(stall_dumps);
         self
     }
 }
@@ -112,7 +115,10 @@ mod tests {
         let mut spec: ClusterSettingsSpec =
             serde_json::from_value(serde_json::json!({})).expect("every field is Option, so an empty object parses");
         spec.replica_secs = Some(900);
+        assert!(!base.clone().merged_with(&spec).stall_dumps, "stall dumps are off unless someone turns them on");
+        spec.stall_dumps = Some(true);
         let merged = base.clone().merged_with(&spec);
+        assert!(merged.stall_dumps);
         assert_eq!(merged.replica_secs, 900, "an admin-set field in the stored spec must override env/default");
         assert_eq!(merged.sync_secs, 45, "a field the stored spec never touched (None) keeps env's value, not the CRD's own default");
         assert_eq!(

@@ -349,6 +349,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(default_image);
     over!(git_init_image);
     over!(runtime_class);
+    over!(stall_dumps);
     current
 }
 
@@ -551,6 +552,7 @@ mod tests {
                         "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => {
                             serde_json::json!(format!("test-{wire}-{tag}"))
                         }
+                        "stallDumps" => serde_json::json!(tag.is_multiple_of(2)),
                         _ => serde_json::json!(1000 + tag),
                     };
                     (wire.to_string(), v)
