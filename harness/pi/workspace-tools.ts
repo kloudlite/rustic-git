@@ -20,6 +20,16 @@ function validAddress(addr: string, source: string): string {
   return addr;
 }
 
+/** A child older than this stops joining the trace it was spawned in: its calls start fresh traces
+ *  at the tool server, so one long session is not one waterfall forever. */
+export const TRACE_MAX_AGE_S = 3600;
+
+/** The bench's trace, handed down at spawn (`KL_TRACEPARENT`, `KL_PROBE`). */
+export function traceHeaders(env: NodeJS.ProcessEnv = process.env, ageS = process.uptime()): Record<string, string> {
+  if (!env.KL_TRACEPARENT || ageS >= TRACE_MAX_AGE_S) return {};
+  return { traceparent: env.KL_TRACEPARENT, ...(env.KL_PROBE === "1" ? { "x-kloudlite-probe": "1" } : {}) };
+}
+
 export type IdeCall = { tool: string; args: Record<string, unknown> };
 type Result = { content: { type: "text"; text: string }[]; isError: boolean };
 const text = (t: string, isError = false): Result => ({ content: [{ type: "text", text: t || "(no output)" }], isError });
@@ -98,8 +108,7 @@ export class ToolServer {
       const at = this.address;
       try {
         // The bench's trace, handed down at spawn: pi's RPC protocol has no field for it per call.
-        const headers: Record<string, string> = { "content-type": "application/json" };
-        if (process.env.KL_TRACEPARENT) headers.traceparent = process.env.KL_TRACEPARENT;
+        const headers: Record<string, string> = { "content-type": "application/json", ...traceHeaders() };
         const r = await fetch(`http://${at}/tools/${c.tool}`, { method: "POST", headers, body: JSON.stringify(c.args), signal });
         const body = await r.json().catch(() => ({ error: `the tool server answered ${r.status} without JSON` }));
         if (r.status === 409) {

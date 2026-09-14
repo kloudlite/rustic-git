@@ -319,11 +319,17 @@ export function startTracing(service: string, url: string, exporter?: SpanExport
   return provider;
 }
 
-/** The active context as a W3C header, for a child process that makes the next hop itself: pi's
- *  RPC protocol carries no per-prompt context, so a tool call joins the trace of whichever request
- *  started the child. `undefined` with no provider or no active span. */
+/** The active context as a W3C header, for a child process that makes the next hop itself. */
 export function traceparent(): string | undefined {
+  return childTraceEnv().KL_TRACEPARENT;
+}
+
+/** The env a pi child carries its parent's trace in: pi's RPC protocol carries no per-prompt
+ *  context, so every tool call of the child's life joins the trace of the request that started
+ *  it. `KL_PROBE` passes the probe marker on, as `KlPropagator.inject` does for a fetch. Empty with
+ *  no provider or no active span. */
+export function childTraceEnv(): { KL_TRACEPARENT?: string; KL_PROBE?: string } {
   const carrier: Record<string, string> = {};
   propagation.inject(otelContext.active(), carrier);
-  return carrier.traceparent;
+  return { ...(carrier.traceparent ? { KL_TRACEPARENT: carrier.traceparent } : {}), ...(carrier[PROBE_HEADER] ? { KL_PROBE: "1" } : {}) };
 }

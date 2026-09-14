@@ -140,6 +140,7 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
             // and the bench -> tool server hop never reaches HyperDX. Only the collector's pods
             // (namespace AND pod in ONE peer — two peers would OR into all of kube-system) and
             // only OTLP/HTTP: nothing in a tenant pod speaks gRPC to it. No CIDR.
+            // Environment namespaces get it too: harmless, since the only peer is the collector.
             json!({
                 "podSelector": {},
                 "policyTypes": ["Egress"],

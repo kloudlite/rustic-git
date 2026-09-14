@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { trace } from "@opentelemetry/api";
-import { startTracing, traceparent } from "../src/tracing.ts";
+import { context, ROOT_CONTEXT, SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
+import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { childTraceEnv, KlPropagator, Promote, startTracing, traceparent } from "../src/tracing.ts";
 
 test("the child's traceparent is the active span's trace", async () => {
   assert.equal(traceparent(), undefined, "no provider, no header");
@@ -12,4 +13,56 @@ test("the child's traceparent is the active span's trace", async () => {
     assert.equal(tp.slice(3, 35), span.spanContext().traceId);
     span.end();
   });
+});
+
+const TID = "4bf92f3577b34da6a3ce929d0e0e4736";
+const getter = { get: (c: unknown, k: string) => (c as Record<string, string>)[k], keys: (c: unknown) => Object.keys(c as object) };
+
+test("a child spawned inside a probe request carries KL_PROBE, and only then", () => {
+  startTracing("bench-test", "http://127.0.0.1:9");
+  const tp = `00-${TID}-00f067aa0ba902b7-01`;
+  const probe = new KlPropagator().extract(ROOT_CONTEXT, { traceparent: tp, "x-kloudlite-probe": "1" }, getter);
+  const plain = new KlPropagator().extract(ROOT_CONTEXT, { traceparent: tp }, getter);
+  const a = context.with(probe, childTraceEnv);
+  assert.equal(a.KL_PROBE, "1");
+  assert.equal(a.KL_TRACEPARENT?.slice(3, 35), TID);
+  const b = context.with(plain, childTraceEnv);
+  assert.equal(b.KL_PROBE, undefined);
+  assert.equal(b.KL_TRACEPARENT?.slice(3, 35), TID);
+});
+
+const mk = (id: string, code: SpanStatusCode) =>
+  ({
+    name: "GET",
+    attributes: {},
+    events: [],
+    resource: { attributes: {} },
+    spanContext: () => ({ traceId: TID, spanId: id, traceFlags: TraceFlags.NONE }),
+    parentSpanContext: undefined,
+    status: { code },
+    duration: [0, 1e6],
+  }) as object;
+
+// web's "export view" test, against the bench's copy: a tool call's workspace path, a session id
+// in a query, an error message and a stray event must not leave the process.
+test("export view: allow-listed attributes, status code only, exception events only", () => {
+  const out = new InMemorySpanExporter();
+  const p = new Promote(new SimpleSpanProcessor(out), 10, 10);
+  p.onEnd({
+    ...mk("0000000000000007", SpanStatusCode.ERROR),
+    name: "fetch POST http://10.42.0.9:7788/tools/read?session=secret-session",
+    attributes: { "url.full": "http://10.42.0.9:7788/tools/read?session=secret-session", "http.target": "/home/kl/workspaces/secret-ws/a.rs", "http.request.header.cookie": "c", "http.request.method": "POST", "http.response.status_code": 500 },
+    status: { code: SpanStatusCode.ERROR, message: "read /home/kl/workspaces/secret-ws/a.rs failed" },
+    events: [
+      { name: "exception", attributes: { "exception.message": "ENOENT secret-ws/a.rs", "exception.type": "Error" } },
+      { name: "prompt secret-prompt", attributes: {} },
+    ],
+  } as never);
+  const s = out.getFinishedSpans()[0];
+  const dump = JSON.stringify({ name: s.name, attributes: s.attributes, events: s.events, status: s.status });
+  assert.equal(s.name, "fetch POST");
+  assert.deepEqual(s.status, { code: SpanStatusCode.ERROR });
+  assert.deepEqual(s.attributes, { "http.request.method": "POST", "http.response.status_code": 500 });
+  assert.deepEqual(s.events.map((e) => [e.name, e.attributes]), [["exception", { "exception.type": "Error" }]]);
+  for (const bad of ["secret-session", "secret-ws", "secret-prompt", "a.rs", "cookie", "?", "10.42"]) assert.ok(!dump.includes(bad), `${bad} leaked: ${dump}`);
 });
