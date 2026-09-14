@@ -85,14 +85,17 @@ pub fn finish(span: &tracing::Span, status: u16) {
     }
 }
 
-pub fn client_span(name: &'static str, method: &str, path: &str) -> tracing::Span {
+/// `route` must be a template or fixed label (bounded cardinality), never a raw path — the same
+/// rule as `server_span`'s `http.route`: a raw path can carry an owner/repo name or a digest, and
+/// none of that belongs in trace storage.
+pub fn client_span(name: &'static str, method: &str, route: &str) -> tracing::Span {
     let span = tracing::info_span!(
         "client",
         otel.name = name,
         otel.kind = "client",
         otel.status_code = tracing::field::Empty,
         http.request.method = %method,
-        url.path = %path,
+        http.route = %route,
         kube.timeout_layer = tracing::field::Empty,
         trace_id = tracing::field::Empty,
     );
@@ -176,6 +179,26 @@ mod tests {
         let all = format!("{:?}", spans[0]);
         assert!(!all.contains("secret-repo"), "raw path leaked: {all}");
         assert!(all.contains("/api/{owner}/{name}/tree"));
+    }
+
+    #[test]
+    fn client_span_carries_the_route_label_not_a_raw_path_field() {
+        let (d, out) = crate::testing::subscriber();
+        tracing::dispatcher::with_default(&d, || {
+            // Force the sampling decision (as a real hop would inherit it from its parent), so the
+            // span actually reaches the exporter rather than being dropped by the default ratio.
+            let parent = server_span(&http::Method::GET, "/v1/x", &headers(true), "r", "/v1/x");
+            parent.in_scope(|| {
+                let span = client_span("gate", "POST", "/start");
+                finish(&span, 200);
+                drop(span);
+            });
+        });
+        let spans = out.get_finished_spans().unwrap();
+        let client = spans.iter().find(|s| s.name == "gate").expect("client span exported");
+        let all = format!("{client:?}");
+        assert!(!all.contains("url.path"), "no raw-path field allowed: {all}");
+        assert!(all.contains("/start"));
     }
 
     #[test]
