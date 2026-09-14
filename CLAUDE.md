@@ -309,7 +309,9 @@ per follower. The grant for the hop itself is deliberately asymmetric: egress pe
 environment side (`intercept-{ws}-{service}`, since one policy cannot `podSelector` two proxy
 pods), ingress per WORKSPACE on the workspace side (`intercept-{ws}`, the union of the ports that
 workspace serves). Order is the whole safety of the switch: target Service → proxy pod → its
-listener Ready → the selector moves → the StatefulSet to 0, and a release reverses it; a proxy that
+listener Ready → the StatefulSet to 0 and the selector onto the proxy, and a release reverses it.
+The load-bearing half is the Ready: nothing moves at all until the proxy answers, and the last two
+writes are one pass apart in the same loop (replicas first, `run.rs`). A proxy that
 WAS ready and is NotReady-but-not-Failed is HELD for `INTERCEPT_GRACE_SECS` before the service is
 handed back, because a restart is not a flap. A Pod is immutable, so an args or image change
 recreates it. `status.services[].proxy` — `starting`/`ready`/`failed` — is what the web shows

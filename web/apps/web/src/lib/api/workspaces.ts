@@ -90,7 +90,7 @@ export type ApiEnvironment = {
    *  CAMEL CASE, alone in this snake_case document, and not a typo: these entries are the CRD's
    *  own `ServiceStatus`, which `/v1` re-serializes verbatim and which is `rename_all =
    *  "camelCase"` because Kubernetes objects are. Renaming it server-side would rewrite keys in
-   *  every stored object on the fleet, so the wire name wins here. `env_doc_service_status_keys_are_camel_case`
+   *  every stored object on the fleet, so the wire name wins here. `the_service_status_keys_are_camel_case`
    *  in `crates/workspaces/src/api/environments.rs` pins it. */
   service_status?: {
     name: string;

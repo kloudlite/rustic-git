@@ -16,7 +16,7 @@
 //! - `secrets`: the user-key and pull Secrets, the sshd host key and config
 //! - `workspace`: the workspace Pod and everything mounted into it
 //! - `attach`: the per-workspace resolv.conf and the projected authorized_keys file
-//! - `environment`: a service's StatefulSet, ClusterIP, and the intercept EndpointSlice
+//! - `environment`: a service's StatefulSet and its ClusterIP (an intercept is `intercept`'s now)
 //! - `intercept`: the proxy pod, the workspace-side target Service and the proxy's egress grant
 //! - `policies`: every NetworkPolicy
 //! - `bench`: the bench Pod, its home-relative folder, and its gateway-only ingress policy
