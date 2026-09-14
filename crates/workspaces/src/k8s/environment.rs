@@ -1,6 +1,7 @@
 //! An environment's services: one StatefulSet per service with the env unit or its own
-//! resources, the ClusterIP Service in front of it, the builder's wider security context, and the
-//! EndpointSlice an intercept writes to send the service's traffic to a workspace.
+//! resources, the ClusterIP Service in front of it, and the builder's wider security context.
+//! What an intercept renders lives in `intercept.rs`; the ClusterIP's selector is the one thing
+//! here that knows about one.
 
 use super::*;
 
@@ -203,66 +204,4 @@ pub fn service_clusterip(
         }),
         ..Default::default()
     })
-}
-
-
-/// The endpoints a selector-less intercepted Service is delivered to: the attached workspace's pod,
-/// in another namespace, which kube-proxy programs without caring where the address lives.
-///
-/// The Service's `ports[].port` stays what callers dial and the slice's `ports[].port` is where it
-/// lands; the two are matched BY NAME, so these entries must carry `service_clusterip`'s own
-/// `p{port}` names or the remap silently does nothing.
-///
-/// `pod_ip: None` renders the ports with no address rather than nothing at all: an empty
-/// `endpoints` list is a Service that refuses connections, which is what a workspace whose pod has
-/// gone should do — the alternative, leaving stale endpoints, sends traffic to whoever holds that
-/// IP next.
-pub fn intercept_slice(
-    svc: &model::Service,
-    env_id: &str,
-    owner: &str,
-    owner_ref: &OwnerReference,
-    ic: &crate::crd::Intercept,
-    pod_ip: Option<&str>,
-) -> EndpointSlice {
-    let mut meta = meta(
-        &format!("{}-intercept", svc.name),
-        Some(&crate::crd::env_namespace(env_id)),
-        owner,
-        "environment",
-        owner_ref,
-    );
-    // How kube-proxy joins a slice to its Service; without it the slice is inert.
-    meta.labels
-        .get_or_insert_with(BTreeMap::new)
-        .insert("kubernetes.io/service-name".to_string(), svc.name.clone());
-    EndpointSlice {
-        metadata: meta,
-        address_type: "IPv4".to_string(),
-        endpoints: pod_ip
-            .map(|ip| {
-                vec![Endpoint {
-                    addresses: vec![ip.to_string()],
-                    // Stated rather than left to default: an endpoint the controller only writes
-                    // once it has seen the pod Ready is ready, and a nil condition is a guess.
-                    conditions: Some(EndpointConditions {
-                        ready: Some(true),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]
-            })
-            .unwrap_or_default(),
-        ports: Some(
-            svc.ports
-                .iter()
-                .map(|p| EndpointPort {
-                    name: Some(format!("p{p}")),
-                    port: Some(ic.workspace_port(*p) as i32),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                })
-                .collect(),
-        ),
-    }
 }

@@ -1,32 +1,7 @@
-//! Reading the services back: StatefulSet readiness into `status.services[]`, the Endpoints and
-//! EndpointSlices Kubernetes abandons when a Service loses its selector, and the status write.
+//! Reading the services back: StatefulSet readiness into `status.services[]`, the intercept's own
+//! proxy state beside it, and the status write.
 
 use super::*;
-
-
-/// Every endpoint object for `service` that this controller did not write, gone.
-///
-/// Bounded by the service's own label and by `ours`, so it can only ever remove what Kubernetes
-/// abandoned for the one service being intercepted, in a namespace this controller reconciles.
-pub(crate) async fn drop_abandoned_endpoints(
-    slices: &Api<EndpointSlice>,
-    ns: &str,
-    service: &str,
-    ours: &str,
-    ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
-    let lp = kube::api::ListParams::default().labels(&format!("kubernetes.io/service-name={service}"));
-    for s in slices.list(&lp).await?.items {
-        let name = s.name_any();
-        if name == ours {
-            continue;
-        }
-        forget_applied(ctx, "EndpointSlice", ns, &name);
-        delete_ignoring_404(slices, &name).await?;
-    }
-    // Named exactly for the Service, which is what makes this safe to delete by name.
-    delete_ignoring_404(&Api::<Endpoints>::namespaced(ctx.client.clone(), ns), service).await
-}
 
 
 /// One service's observed readiness, from the StatefulSet's own status.
@@ -43,6 +18,9 @@ pub(crate) fn deployment_status(
     // Decided by `intercept_plan`, threaded in rather than recomputed: this function reconstructs
     // the whole `ServiceStatus` every pass, so anything it defaults here is stomped every pass.
     intercepted_by: Option<String>,
+    // What `apply_intercept` answered this pass: `starting`, `ready` or `failed`, and `None` for a
+    // service no intercept wrote anything about.
+    proxy: Option<String>,
     unreachable_since: Option<i64>,
 ) -> crd::ServiceStatus {
     let Some(d) = set else {
@@ -51,7 +29,7 @@ pub(crate) fn deployment_status(
             ready: false,
             message: Some("statefulset not created yet".into()),
             intercepted_by,
-            proxy: None,
+            proxy,
             unreachable_since,
         };
     };
@@ -65,7 +43,7 @@ pub(crate) fn deployment_status(
             ready: true,
             message: Some(format!("intercepted by {ws}")),
             intercepted_by: intercepted_by.clone(),
-            proxy: None,
+            proxy,
             unreachable_since,
         };
     }
@@ -74,7 +52,7 @@ pub(crate) fn deployment_status(
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
         intercepted_by,
-        proxy: None,
+        proxy,
         unreachable_since,
     }
 }

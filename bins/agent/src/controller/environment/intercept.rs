@@ -1,7 +1,8 @@
 //! Intercepts as the controller sees them: the wish in `spec.intercepts`, what is in force in
 //! `status.services[].intercepted_by`, the grace a blip is given before the real service comes
-//! back, and the clocks that grace is measured from. The wiring itself (scale to 0, selector
-//! off, EndpointSlice) is in `k8s`; this file decides WHEN.
+//! back, and the clocks that grace is measured from. What an intercept RENDERS (the proxy pod,
+//! the workspace-side target Service, both halves of the grant) is in `k8s::intercept`; this file
+//! decides WHEN, applies it in `apply_intercept`, and takes it back in `converge_intercepts`.
 
 use super::*;
 
@@ -18,7 +19,8 @@ pub(crate) const INTERCEPT_GRACE_SECS: i64 = 30;
 /// What this pass decided about one intercept — the spec's three states, plus the one thing an
 /// unreadable API answer is allowed to do, which is nothing.
 pub enum Intercepting {
-    /// In force: the real service off, the slice pointing at this pod.
+    /// Wished and decidable: the workspace is up and serving. Whether the switch actually
+    /// COMPLETES this pass is `apply_intercept`'s answer — the proxy has to be Ready first.
     Force { ws: Box<crd::Workspace>, pod_ip: String },
     /// Either nothing is known (an API error) or the pod has not been unreachable long enough.
     /// Render what the last pass rendered and look again — a blip in the API server must never
@@ -126,6 +128,20 @@ pub(crate) async fn intercept_plan<'a>(
         // with the reason instead, which leaves the real service up and says why.
         if let Some(bad) = invalid_port_map(svc, ic) {
             plan.insert(&ic.service, Intercepting::Off { reason: "PortsInvalid", message: bad, ws: None });
+            continue;
+        }
+        // The two things `intercept_render` refuses, decided HERE for the same reason the port map
+        // is: a bare reconcile error would retry forever with the real service already handed over
+        // and nothing saying what to fix, where an `Off` leaves the service serving and the
+        // condition names it. Their messages are the render's own.
+        if ctx.intercept_proxy_image.is_empty() {
+            let message = "no intercept proxy image is configured on this region's agent".to_string();
+            plan.insert(&ic.service, Intercepting::Off { reason: "ProxyImageUnset", message, ws: None });
+            continue;
+        }
+        if svc.ports.is_empty() {
+            let message = format!("{} declares no ports, so there is nothing to intercept", svc.name);
+            plan.insert(&ic.service, Intercepting::Off { reason: "NoPorts", message, ws: None });
             continue;
         }
         plan.insert(&ic.service, decide_intercept(ic, &e.name_any(), prev, ctx).await);
@@ -259,17 +275,117 @@ pub(crate) fn intercepted_ports(e: &crd::Environment, plan: &std::collections::H
 }
 
 
-/// The environment → workspace direction, which `allow_internet_egress` denies by default: without
-/// this pair an in-force intercept renders perfectly and delivers nothing.
+/// Everything an intercept in force renders, and how far along it is: the workspace-side target
+/// Service, the proxy Pod that stands in for the real service, and both halves of the grant —
+/// which `allow_internet_egress` denies by default, so without them an intercept renders perfectly
+/// and delivers nothing. Written from HERE and not from the workspace's own pass because the wish
+/// is this object's, and this pass already holds the Workspace the workspace-side halves need.
 ///
-/// Written from HERE and not from the workspace's own pass because the wish is this object's, and
-/// this pass already holds the Workspace the workspace-side half needs.
-pub(crate) async fn intercept_policies(
+/// The answer is what to record in `status.services[].proxy`, and the caller moves the selector
+/// only on `ready`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_intercept(
     e: &crd::Environment,
+    svc: &model::Service,
+    ic: &crd::Intercept,
+    ws: &crd::Workspace,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+    ns: &str,
+    owner_ref: &OwnerReference,
+    ctx: &Arc<Ctx>,
+) -> Result<Option<String>, ReconcileErr> {
+    let ws_id = ws.name_any();
+    let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
+    let ws_ref = owner_ref_of_kind(ws)?;
+    // The union over every service this workspace serves here: there is ONE target Service per
+    // workspace and one ingress policy per workspace, and a sibling proxy dials the same object.
+    let ports = intercepted_ports(e, plan, &ws_id);
+    let render = k8s::intercept_render(k8s::RenderArgs {
+        svc,
+        ic,
+        env_id: &e.name_any(),
+        owner: &e.spec.owner,
+        env_ref: owner_ref,
+        ws_id: &ws_id,
+        ws_ns: &ws_ns,
+        ws_ref: &ws_ref,
+        ws_ports: &ports,
+        image: &ctx.intercept_proxy_image,
+        runtime_class: ctx.runtime_class.as_deref(),
+    })
+    // Both refusals are decided as `Off` in `intercept_plan`, so reaching here with one is a bug,
+    // not a configuration mistake.
+    .map_err(ReconcileErr)?;
+
+    // What the proxy dials, before the proxy: its readiness probe is the listener, not the dial,
+    // but a proxy whose target does not resolve is a pass spent for nothing.
+    ensure(&Api::<Service>::namespaced(ctx.client.clone(), &ws_ns), &render.target, ctx).await?;
+    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let name = k8s::proxy_pod_name(&svc.name);
+    let existing = pods.get_opt(&name).await?;
+    let Some(p) = existing else {
+        // `create_if_absent`, never `ensure`: a Pod is immutable, so a server-side apply of one
+        // that already exists is a permanent error on every later pass.
+        create_if_absent(&pods, &render.pod).await?;
+        ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns), &render.egress, ctx).await?;
+        ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ws_ns), &k8s::intercept_ingress(&ws_ns, ns, &ws_id, &ports, &e.spec.owner, &ws_ref), ctx).await?;
+        return Ok(Some("starting".into()));
+    };
+    // The spec of an intercept is immutable while it runs; a change to ports or workspace is a new
+    // pod, and this is where that becomes true.
+    let args = |p: &Pod| p.spec.as_ref().and_then(|s| s.containers.first()).and_then(|c| c.args.clone()).unwrap_or_default();
+    if args(&p) != args(&render.pod) {
+        delete_ignoring_404(&pods, &name).await?;
+        forget_applied(ctx, "Pod", ns, &name);
+        tracing::info!(environment = %e.name_any(), service = %svc.name, "intercept.proxy.respawned");
+        return Ok(Some("starting".into()));
+    }
+    ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns), &render.egress, ctx).await?;
+    ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ws_ns), &k8s::intercept_ingress(&ws_ns, ns, &ws_id, &ports, &e.spec.owner, &ws_ref), ctx).await?;
+    Ok(Some(proxy_state(&p, &e.name_any(), &svc.name)))
+}
+
+
+/// The one thing that cannot start on its own: a pod whose image will not pull sits in
+/// `ImagePullBackOff` forever, and reported as `starting` it reads as "any second now" while the
+/// real service stays up and nobody knows why the intercept never takes.
+fn proxy_state(p: &Pod, env: &str, service: &str) -> String {
+    if pod_ready(p).0 {
+        return "ready".into();
+    }
+    let status = p.status.as_ref();
+    let stuck = status
+        .and_then(|s| s.container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.state.as_ref()?.waiting.as_ref())
+        .find(|w| matches!(w.reason.as_deref(), Some("ImagePullBackOff" | "ErrImagePull" | "CreateContainerError")));
+    if status.and_then(|s| s.phase.as_deref()) == Some("Failed") || stuck.is_some() {
+        // The pod's own message, which is the only place the real reason (a private registry, a
+        // typo'd tag) is written down.
+        let why = stuck
+            .and_then(|w| w.message.clone().or_else(|| w.reason.clone()))
+            .or_else(|| status.and_then(|s| s.message.clone()))
+            .unwrap_or_else(|| "the proxy pod failed".into());
+        tracing::warn!(environment = %env, service = %service, reason = %why, "intercept.proxy.failed");
+        return "failed".into();
+    }
+    "starting".into()
+}
+
+
+/// Everything an intercept that is no longer in force leaves behind, taken back in one sweep: the
+/// proxy Pod and its egress grant per (workspace, service), and — only once NO service of that
+/// workspace is still in force — the workspace-side target Service and ingress grant, which are
+/// per workspace.
+///
+/// Called AFTER every service's selector and replicas are back, never before: the mirror of the
+/// order `apply_services` takes an intercept in, and for the same reason — the service must never
+/// be without a ready endpoint in either direction.
+pub(crate) async fn converge_intercepts(
     ns: &str,
     prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
-    owner_ref: &OwnerReference,
     ctx: &Arc<Ctx>,
 ) -> Result<(), ReconcileErr> {
     let here: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
@@ -287,21 +403,12 @@ pub(crate) async fn intercept_policies(
             }
         }
     }
+    // A `Force` holds its grants whatever `apply_intercept` answered: a proxy still starting is
+    // an intercept being taken, not one being released, and sweeping it would delete the pod this
+    // same pass created.
     for (svc, d) in plan {
         let Intercepting::Force { ws, .. } = d else { continue };
-        let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
         in_force.insert((ws.name_any(), (*svc).to_string()));
-        // The environment half is per SERVICE now: its `podSelector` names one proxy pod, and one
-        // policy cannot name two of them.
-        ensure(&here, &k8s::intercept_egress(ns, &ws_ns, &ws.name_any(), svc, &e.spec.owner, owner_ref), ctx).await?;
-        // The workspace-side half cannot be owned by this Environment: an ownerReference may not
-        // cross namespaces. Owned by the Workspace instead, exactly as the attach pair splits.
-        let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
-        let ws_ref = owner_ref_of_kind(&**ws)?;
-        // Only the ports this workspace's slices land on: the tool server listens on the pod IP too.
-        // One policy per workspace, so a workspace serving two services admits both port sets.
-        let ports = intercepted_ports(e, plan, &ws.name_any());
-        ensure(&in_ws, &k8s::intercept_ingress(&ws_ns, ns, &ws.name_any(), &ports, &e.spec.owner, &ws_ref), ctx).await?;
     }
     // Every workspace this environment could still be holding a grant open for: one it wishes for
     // and is not serving, and one the LAST pass recorded as in force — which is the ordinary
@@ -329,6 +436,11 @@ pub(crate) async fn intercept_policies(
         }
         delete_ignoring_404(&here, &k8s::intercept_egress_name(&id, &svc)).await?;
         forget_applied(ctx, "NetworkPolicy", ns, &k8s::intercept_egress_name(&id, &svc));
+        // The proxy is per SERVICE, like the egress grant beside it: the pod that stood in for
+        // this one service has nothing left to forward.
+        let proxy = k8s::proxy_pod_name(&svc);
+        delete_ignoring_404(&Api::<Pod>::namespaced(ctx.client.clone(), ns), &proxy).await?;
+        forget_applied(ctx, "Pod", ns, &proxy);
         // The workspace-side half lives in a namespace only the Workspace itself can name, so a
         // release recorded in status alone costs one GET to find it. Worth it: the ingress rule
         // opens this environment's whole namespace to that pod, and it would otherwise sit there
@@ -346,12 +458,17 @@ pub(crate) async fn intercept_policies(
                 None => Api::<crd::Workspace>::all(ctx.client.clone()).get_opt(&id).await.map_err(|e| ReconcileErr(e.to_string()))?,
             },
         };
-        // A workspace that is GONE takes its half with it: the policy is ownerReferenced.
+        // A workspace that is GONE takes its half with it: both objects are ownerReferenced.
         if let Some(w) = ws.filter(|_| !ws_in_force.contains(&id)) {
             let ws_ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
             let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
             delete_ignoring_404(&in_ws, &k8s::intercept_policy_name(&id)).await?;
             forget_applied(ctx, "NetworkPolicy", &ws_ns, &k8s::intercept_policy_name(&id));
+            // Per workspace for the same reason the ingress is: one Service carries the union of
+            // the ports every proxy of this workspace dials.
+            let target = k8s::target_service_name(&id);
+            delete_ignoring_404(&Api::<Service>::namespaced(ctx.client.clone(), &ws_ns), &target).await?;
+            forget_applied(ctx, "Service", &ws_ns, &target);
         }
     }
     Ok(())

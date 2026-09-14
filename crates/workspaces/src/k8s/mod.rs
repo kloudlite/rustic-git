@@ -33,7 +33,7 @@ use k8s_openapi::api::core::v1::{
     SecurityContext, Service as CoreService,
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
 };
-use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort, EndpointSlice};
+
 use k8s_openapi::api::rbac::v1::{RoleBinding, RoleRef, Subject};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;

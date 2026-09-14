@@ -231,46 +231,6 @@ pub(crate) fn a_service_gets_a_clusterip_for_each_declared_port() {
 }
 
 
-/// The Service keeps the dialled number and the slice carries the mapped one; they are joined
-/// by the `p{port}` name, so a rename here breaks the remap silently.
-#[test]
-pub(crate) fn the_slice_delivers_a_mapped_port_and_the_service_still_dials_the_declared_one() {
-    let s = two_port_svc();
-    let ic = intercept(&[(80, 3000)]);
-    let sl = intercept_slice(&s, "env-1", "team", &owner_ref(), &ic, Some("10.42.3.231"));
-    assert_eq!(sl.metadata.name.as_deref(), Some("web-intercept"));
-    assert_eq!(sl.metadata.namespace.as_deref(), Some("env-1"));
-    assert_eq!(sl.metadata.labels.as_ref().unwrap()["kubernetes.io/service-name"], "web");
-    assert_eq!(sl.address_type, "IPv4");
-
-    let ports = sl.ports.unwrap();
-    assert_eq!(ports.len(), 2);
-    assert_eq!(ports[0].name.as_deref(), Some("p80"));
-    assert_eq!(ports[0].port, Some(3000), "the mapped port");
-    // Unmapped: answered on its own number.
-    assert_eq!(ports[1].name.as_deref(), Some("p5432"));
-    assert_eq!(ports[1].port, Some(5432));
-
-    assert_eq!(sl.endpoints[0].addresses, vec!["10.42.3.231".to_string()]);
-
-    let dialled = service_clusterip(&s, "env-1", "team", &owner_ref(), true).unwrap().spec.unwrap();
-    let dialled = dialled.ports.unwrap();
-    assert_eq!(dialled[0].name.as_deref(), Some("p80"), "the join is by NAME");
-    assert_eq!(dialled[0].port, 80, "what callers dial never changes");
-}
-
-
-/// No pod means no address, but the slice still has to exist with its ports: an intercepted
-/// Service with no endpoints refuses connections, which is right, while a slice with stale
-/// endpoints sends traffic to whoever holds that IP next.
-#[test]
-pub(crate) fn a_slice_with_no_pod_ip_has_ports_but_no_endpoints() {
-    let sl = intercept_slice(&two_port_svc(), "env-1", "team", &owner_ref(), &intercept(&[]), None);
-    assert!(sl.endpoints.is_empty());
-    assert_eq!(sl.ports.unwrap().len(), 2);
-}
-
-
 /// Same AND-not-OR rule as the attach pair: two peers would open the whole workspace namespace
 /// to the environment, plus any pod anywhere carrying that workspace label.
 #[test]

@@ -18,6 +18,7 @@ pub(crate) fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<
     let profiles = pool.join("profiles");
     let _ = std::fs::create_dir_all(&profiles);
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
+    std::env::set_var("WS_INTERCEPT_PROXY_IMAGE", "ghcr.io/kloudlite/kloudlite-intercept-proxy:deadbeef");
     (
         Arc::new(Ctx::new(
             client,

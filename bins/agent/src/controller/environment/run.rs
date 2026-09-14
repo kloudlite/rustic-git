@@ -50,8 +50,8 @@ pub(crate) async fn run_environment(
     // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
     // three states below, and the rendering is a straight read of that decision.
     let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
-    apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
-    let service_status = read_services_back(e, deployments, &prev, &plan).await?;
+    let proxies = apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
+    let service_status = read_services_back(e, deployments, &prev, &plan, &proxies).await?;
     let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
@@ -303,8 +303,9 @@ async fn capacity_gate(
     Ok(None)
 }
 
-/// Phase 4: one StatefulSet, ClusterIP and (when intercepted) EndpointSlice per service, then the
-/// intercept policies.
+/// Phase 4: one StatefulSet and ClusterIP per service, the proxy an intercept in force stands
+/// behind, and the sweep that takes back the ones that are not. Answers what each service's
+/// `status.proxy` should say.
 #[allow(clippy::too_many_arguments)]
 async fn apply_services(
     e: &crd::Environment,
@@ -317,18 +318,34 @@ async fn apply_services(
     plan: &std::collections::HashMap<&str, Intercepting>,
     owner_ref: &OwnerReference,
     ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
+) -> Result<std::collections::HashMap<String, String>, ReconcileErr> {
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
+    let mut proxies: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for svc in &e.spec.services {
         let decided = plan.get(svc.name.as_str());
-        let intercepted = match decided {
+        let mut intercepted = match decided {
             Some(Intercepting::Force { .. }) => true,
             // Nothing is known, or the grace has not run out: render what the LAST pass rendered,
-            // which is exactly what `intercepted_by` records.
+            // which is exactly what `intercepted_by` records — including its proxy, which this
+            // pass writes nothing about.
             Some(Intercepting::Keep { .. }) => was_intercepted(prev, &svc.name),
             _ => false,
         };
+        // The old spec wrote the slice before the selector went; here the proxy must be Ready
+        // before the selector moves — the same principle, that the service is never without a
+        // ready endpoint. While it is `starting` or `failed` the real service keeps its selector
+        // and its replicas, and the next pass looks again.
+        // `get`, not the index: a `Force` decision always has its wish beside it today, but the
+        // two maps are built in one loop and a panic in a reconciler takes the whole controller
+        // down — an absent wish means there is nothing to render, not a crash (2026-09-12).
+        if let (Some(Intercepting::Force { ws, .. }), Some(ic)) = (decided, wishes.get(svc.name.as_str())) {
+            let state = apply_intercept(e, svc, ic, ws, plan, ns, owner_ref, ctx).await?;
+            intercepted = state.as_deref() == Some("ready");
+            if let Some(state) = state {
+                proxies.insert(svc.name.clone(), state);
+            }
+        }
         let mut set = k8s::service_statefulset(svc, &e.name_any(), id, &e.spec.owner, pod_ctx).map_err(ReconcileErr)?;
         if intercepted {
             // The real service is STOPPED while its traffic goes elsewhere. Leaving it running is
@@ -339,19 +356,6 @@ async fn apply_services(
             }
         }
         ensure(deployments, &set, ctx).await?;
-        let slice = format!("{}-intercept", svc.name);
-        // BEFORE the Service loses its selector, never after. A Service with no selector and no
-        // slice has no endpoints at all — a total outage of that service — and the wish stays, so
-        // every retry would repeat the same order; a slice write that fails because this region's
-        // `agent-rbac.yaml` has not been applied yet would strand it there forever. Written first,
-        // a failure leaves the real service serving and the next pass repairs it. The release
-        // path is the mirror of this: the selector is back before the slice is deleted.
-        // `get`, not the index: a `Force` decision always has its wish beside it today, but the
-        // two maps are built in one loop and a panic in a reconciler takes the whole controller
-        // down — an absent wish means there is nothing to render, not a crash (2026-09-12).
-        if let (Some(Intercepting::Force { pod_ip, .. }), Some(ic)) = (decided, wishes.get(svc.name.as_str())) {
-            ensure(&slices, &k8s::intercept_slice(svc, &e.name_any(), &e.spec.owner, owner_ref, ic, Some(pod_ip)), ctx).await?;
-        }
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
         // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
         // by an earlier definition that did have ports; `ensure` has no delete path of its own.
@@ -362,42 +366,25 @@ async fn apply_services(
                 forget_applied(ctx, "Service", ns, &svc.name);
             }
         }
-        // Kubernetes ABANDONS what it built while the Service had a selector rather than deleting
-        // it: the endpointslice controller's own slice, and the legacy `Endpoints` object, both
-        // keep naming the stopped pod. kube-proxy unions every slice of a service, so the real
-        // pod's address survives beside ours — measured on the fleet as two of six connections
-        // going nowhere. Deleted AFTER the selector is gone, never before, or the controllers that
-        // own them write them straight back; and the `Endpoints` object is the load-bearing half,
-        // since the mirroring controller rebuilds a slice from it and deleting slices alone does
-        // not hold.
-        if intercepted {
-            drop_abandoned_endpoints(&slices, ns, &svc.name, &slice, ctx).await?;
-        }
-        match decided {
-            // Already written, above.
-            Some(Intercepting::Force { .. }) => {}
-            // Inside the grace, or with an unreadable answer, AND the last pass really did render
-            // an intercept: the slice is left exactly as it is. Held without that second half it
-            // would survive a pass that has just put the selector back — kube-proxy unions the
-            // two, splitting the service's traffic at random between the real pod and the
-            // workspace, which is worse than either end state.
-            Some(Intercepting::Keep { .. }) if intercepted => {}
-            // Deleted only when this service has a wish that is not in force, or had one in force
-            // last pass — not on every reconcile of every environment that never intercepted
-            // anything, which would be one wasted DELETE per service per tick.
-            // ponytail: a slice whose wish AND whose status record are both gone is collected only
-            // by the Environment's own delete (it is ownerReferenced); a list of the namespace's
-            // slices per pass is the upgrade path if one is ever seen stranded.
-            _ => {
-                if decided.is_some() || was_intercepted(prev, &svc.name) {
-                    forget_applied(ctx, "EndpointSlice", ns, &slice);
-                    delete_ignoring_404(&slices, &slice).await?;
-                }
-            }
+        // The legacy hand-written slice from the endpoint-rewriting mechanism. An intercept in force
+        // under the old shape is converted by this pass with no downtime and no flag: the proxy comes
+        // up, the selector goes back (a selector-less Service gaining one is an ordinary update), and
+        // the slice goes. Mixed builds are safe both ways — an old agent rewrites both to its own
+        // shape, a new agent deletes what it finds. Delete this, `k8s::intercept_slice` and the
+        // endpointslices RBAC row one release after the fleet is fully on this build.
+        //
+        // Only where an intercept is wished or was recorded, never on every service of every
+        // environment that has never intercepted anything — and never under a `Keep`, which
+        // renders exactly what the last pass did and decides nothing of its own.
+        let holding = matches!(decided, Some(Intercepting::Keep { .. })) && intercepted;
+        if !holding && (decided.is_some() || was_intercepted(prev, &svc.name)) {
+            let slice = format!("{}-intercept", svc.name);
+            forget_applied(ctx, "EndpointSlice", ns, &slice);
+            delete_ignoring_404(&slices, &slice).await?;
         }
     }
-    intercept_policies(e, ns, prev, plan, owner_ref, ctx).await?;
-    Ok(())
+    converge_intercepts(ns, prev, plan, ctx).await?;
+    Ok(proxies)
 }
 
 /// Phase 5a: what the StatefulSets actually say, per service, with the intercept that is in
@@ -407,6 +394,9 @@ async fn read_services_back(
     deployments: &Api<StatefulSet>,
     prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
+    // What `apply_intercept` answered this pass, per service — absent for a service it wrote
+    // nothing about (a `Keep`, or no intercept at all).
+    proxies: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<crd::ServiceStatus>, ReconcileErr> {
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
@@ -420,8 +410,14 @@ async fn read_services_back(
     for svc in &e.spec.services {
         // What is actually IN FORCE, never the wish: a stopped workspace leaves its intercept in
         // spec and this reports `None`, which is what the web and the CLI show.
+        // In force is the SELECTOR having moved, which happens only once the proxy is Ready — a
+        // wished intercept whose proxy is still starting is not intercepting anything yet, and
+        // reporting it as such would tell the web the service is being served from a workspace
+        // while its own pods are still the ones answering.
         let by = match plan.get(svc.name.as_str()) {
-            Some(Intercepting::Force { ws, .. }) => Some(ws.name_any()),
+            Some(Intercepting::Force { ws, .. }) => {
+                (proxies.get(&svc.name).map(String::as_str) == Some("ready")).then(|| ws.name_any())
+            }
             Some(Intercepting::Keep { .. }) => prev_intercepted_by(prev, &svc.name),
             _ => None,
         };
@@ -435,7 +431,7 @@ async fn read_services_back(
             }
             _ => None,
         };
-        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, unreachable_since));
+        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, proxies.get(&svc.name).cloned(), unreachable_since));
     }
     Ok(service_status)
 }

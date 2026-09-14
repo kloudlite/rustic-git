@@ -63,17 +63,3 @@ pub(super) fn ws_spec() -> WorkspaceSpec {
 }
 
 
-pub(super) fn intercept(ports: &[(u16, u16)]) -> crate::crd::Intercept {
-    crate::crd::Intercept {
-        service: "web".into(),
-        workspace: "ws-1".into(),
-        ports: ports.iter().map(|(s, w)| crate::crd::PortMap { service: *s, workspace: *w }).collect(),
-    }
-}
-
-
-pub(super) fn two_port_svc() -> model::Service {
-    let mut s = svc("data", "/data");
-    s.ports = vec![80, 5432];
-    s
-}

@@ -111,6 +111,25 @@ pub(crate) const WEB_SLICE: &str = "/apis/discovery.k8s.io/v1/namespaces/env-1/e
 /// The environment side is per (workspace, SERVICE): one policy cannot select two proxy pods.
 pub(crate) const ENV_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1-web";
 pub(crate) const WS_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/intercept-ws-1";
+/// The proxy that stands in for `web`, and what it dials — one per service, one per workspace.
+pub(crate) const PROXY_POD: &str = "/api/v1/namespaces/env-1/pods/intercept-web";
+pub(crate) const PODS: &str = "/api/v1/namespaces/env-1/pods";
+pub(crate) const TARGET_SVC: &str = "/api/v1/namespaces/ws-alice/services/intercept-target-ws-1";
+
+/// The proxy Pod as the API server answers it back, with the args `intercept_render` gives it: a
+/// different arg list is a different intercept, and the controller deletes rather than patches.
+pub(crate) fn proxy_pod(ready: bool) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "Pod",
+        "metadata": {"name": "intercept-web", "namespace": "env-1"},
+        "spec": {"containers": [{"name": "proxy", "image": "proxy:test",
+                                 "args": ["--target", "intercept-target-ws-1.ws-alice.svc.cluster.local.",
+                                          "--forward", "80:3000"]}]},
+        "status": {"phase": "Running",
+                   "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" },
+                                   "lastTransitionTime": secs_ago(5)}]},
+    })
+}
 
 /// A `StatefulSetList` as `read_services_back`'s ONE listing reads it back (2026-09-12: it used to
 /// GET each set by name).
@@ -195,23 +214,14 @@ pub(crate) fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
         Route { method: "DELETE", path: WEB_SLICE.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "PATCH", path: ENV_POLICY.into(), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: TARGET_SVC.into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        Route { method: "POST", path: PODS.into(), status: 201, body: serde_json::json!({"kind": "Pod"}) },
+        Route { method: "DELETE", path: PROXY_POD.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: TARGET_SVC.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         kloudlite_workspaces::kube_test::get(WEB_STS, ready_sts.clone()),
         kloudlite_workspaces::kube_test::get("/apis/apps/v1/namespaces/env-1/statefulsets", sts_list(vec![ready_sts])),
         Route { method: "PATCH", path: ENV_STATUS_PATH.into(), status: 200, body: env_json(serde_json::json!({})) },
     ];
-    // The slice list an in-force intercept reads to find what Kubernetes abandoned. Only added
-    // when the test has not supplied its own — a test about the abandoned slices needs the list to
-    // answer with them, and the first route for a path is the one that answers first.
-    let slice_list = format!("/apis/discovery.k8s.io/v1/namespaces/{ns}/endpointslices");
-    if !extra.iter().any(|e| e.method == "GET" && e.path == slice_list) {
-        r.push(kloudlite_workspaces::kube_test::get(
-            slice_list,
-            serde_json::json!({
-                "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "metadata": {},
-                "items": [{"metadata": {"name": "web-intercept", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []}],
-            }),
-        ));
-    }
     r.extend(extra);
     r
 }
@@ -253,41 +263,6 @@ pub(crate) fn env_tmp() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("vol/env-1/live/env-1")).unwrap();
     tmp
-}
-
-/// (a) In force: the real service is STOPPED, its Service loses the selector Kubernetes would
-/// otherwise maintain, and the slice carries the workspace pod's live IP on the MAPPED port.
-#[tokio::test]
-async fn an_intercept_in_force_stops_the_real_service_and_points_the_slice_at_the_workspace() {
-    let tmp = env_tmp();
-    let routes = intercept_routes(vec![
-        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
-        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
-    ]);
-    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
-
-    let action = kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
-
-    // The pass that hands the service back when the workspace vanishes is a TIMED one: nothing
-    // in this namespace announces a pod that lives in ws-alice. Waiting for a change here left an
-    // environment intercepted for good on 2026-09-12 (env.intercept.fallback).
-    assert_ne!(action, kube::runtime::controller::Action::await_change(), "an intercept in force keeps the tick");
-    let sts = rec.sent("PATCH", WEB_STS);
-    assert_eq!(sts.last().unwrap()["spec"]["replicas"], 0, "the real service is stopped: {:?}", sts.last());
-    let svc = rec.sent("PATCH", WEB_SVC);
-    // The Service keeps a selector and it names the PROXY, which stands in for the service in this
-    // same namespace — a selector can never name another one.
-    assert_eq!(svc.last().unwrap()["spec"]["selector"]["kloudlite.io/kind"], "intercept", "{:?}", svc.last());
-    let slice = rec.sent("PATCH", WEB_SLICE);
-    assert_eq!(slice.last().unwrap()["endpoints"][0]["addresses"][0], "10.42.3.231");
-    assert_eq!(slice.last().unwrap()["ports"][0]["name"], "p80", "matched to the Service port BY NAME");
-    assert_eq!(slice.last().unwrap()["ports"][0]["port"], 3000, "delivered on the workspace's port");
-    let st = rec.sent("PATCH", ENV_STATUS_PATH);
-    assert_eq!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"], "ws-1");
-    assert!(
-        rec.calls().iter().any(|c| c == &format!("PATCH {ENV_POLICY}")) && rec.calls().iter().any(|c| c == &format!("PATCH {WS_POLICY}")),
-        "both halves of the grant, or the traffic is denied: {:?}", rec.calls()
-    );
 }
 
 /// (b) The wish REMOVED: the real service comes back and the slice goes.
@@ -333,6 +308,7 @@ async fn releasing_one_of_two_intercepts_deletes_only_that_services_grant() {
         Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/api".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
         Route { method: "DELETE", path: "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/api-intercept".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: api_policy.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: "/api/v1/namespaces/env-1/pods/intercept-api".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
     let (ctx, rec) = intercept_ctx(tmp.path(), routes);
@@ -492,26 +468,6 @@ async fn a_long_ready_workspace_that_has_just_lost_its_pod_is_held_not_dated_fro
 }
 
 
-/// The ORDER, which is the whole difference between a failed slice write costing nothing and
-/// costing the service: a Service with its selector dropped and no slice behind it has no
-/// endpoints at all, and the wish stays, so every retry repeats it.
-#[tokio::test]
-async fn the_slice_is_written_before_the_service_loses_its_selector() {
-    let tmp = env_tmp();
-    let routes = intercept_routes(vec![
-        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
-        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
-    ]);
-    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
-
-    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
-
-    let calls = rec.calls();
-    let slice = calls.iter().position(|c| c == &format!("PATCH {WEB_SLICE}")).expect("the slice is written");
-    let svc = calls.iter().position(|c| c == &format!("PATCH {WEB_SVC}")).expect("the Service is written");
-    assert!(slice < svc, "the endpoints go in before the selector goes: {calls:?}");
-}
-
 /// A Force pass whose status write failed, then an unreadable Workspace: `prev` records no
 /// intercept, so the Service is rendered WITH its selector again — and the slice from that first
 /// pass has to go with it. kube-proxy unions the two, so a survivor splits the service's traffic
@@ -535,45 +491,6 @@ async fn a_held_pass_that_rendered_no_intercept_last_time_deletes_the_stale_slic
         rec.calls().iter().any(|c| c == &format!("DELETE {WEB_SLICE}")),
         "a slice beside a selectored Service splits the traffic: {:?}", rec.calls()
     );
-}
-
-/// Kubernetes does not clean up after a Service that loses its selector: the endpointslice
-/// controller's slice and the legacy `Endpoints` object both keep naming the stopped pod, and
-/// kube-proxy unions them with ours. Measured on the fleet before this: two dials in six reached
-/// nothing. Our own slice must survive — deleting it is the outage this feature exists to avoid.
-#[tokio::test]
-async fn an_intercept_deletes_the_endpoints_kubernetes_abandoned_and_keeps_its_own() {
-    let tmp = env_tmp();
-    let abandoned = "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/web-x9k2p";
-    let endpoints = "/api/v1/namespaces/env-1/endpoints/web";
-    let routes = intercept_routes(vec![
-        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
-        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
-        kloudlite_workspaces::kube_test::get(
-            "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices",
-            serde_json::json!({
-                "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSliceList", "metadata": {},
-                "items": [
-                    {"metadata": {"name": "web-intercept", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []},
-                    {"metadata": {"name": "web-x9k2p", "namespace": "env-1"}, "addressType": "IPv4", "endpoints": []},
-                ],
-            }),
-        ),
-        Route { method: "DELETE", path: abandoned.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-        Route { method: "DELETE", path: endpoints.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-    ]);
-    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
-
-    kloudlite_agent::controller::apply_environment(&intercept_env(one_intercept(), None), &ctx).await.unwrap();
-
-    let calls = rec.calls();
-    assert!(calls.iter().any(|c| c == &format!("DELETE {abandoned}")), "the abandoned slice goes: {calls:?}");
-    assert!(calls.iter().any(|c| c == &format!("DELETE {endpoints}")), "the legacy Endpoints goes: {calls:?}");
-    assert!(!calls.iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "ours stays: {calls:?}");
-    // AFTER the selector is gone, or the controllers that own them write them straight back.
-    let svc = calls.iter().position(|c| c == &format!("PATCH {WEB_SVC}")).expect("the Service is written");
-    let gone = calls.iter().position(|c| c == &format!("DELETE {abandoned}")).unwrap();
-    assert!(svc < gone, "the selector goes first: {calls:?}");
 }
 
 /// The clock-less hold, BOUNDED. No pod, and a workspace whose own controller has stopped stamping

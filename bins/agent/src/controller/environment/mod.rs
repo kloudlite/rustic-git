@@ -7,9 +7,9 @@
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::workspace::{cleared_node_dead, replaced};
-use super::{my_node, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
+use super::{my_node, create_if_absent, delete_ignoring_404, ensure, forget_applied, heal_labels, kept_conditions, owner_ref_of_kind, resolve_volume, settle, write_status, conditions_eq, Ctx, Outcome, ReconcileErr, Resolved, API_NAMESPACE, API_SERVICE_ACCOUNT, TICK};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{Endpoints, LimitRange, Namespace, Pod, ResourceQuota, Service};
+use k8s_openapi::api::core::v1::{LimitRange, Namespace, Pod, ResourceQuota, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::RoleBinding;

@@ -29,6 +29,7 @@ mod attachment;
 mod snapshot_model_clone_restore_task_6b;
 mod starts_spread_the_owner_gives_a_movable;
 mod filter_foreign_snapshots_against_the_nod;
+mod intercept_proxy;
 mod the_agent_decides_from_stores;
 mod bench;
 #[allow(unused_imports)]
@@ -41,6 +42,8 @@ use completion_wakes_the_reconciler::*;
 use filter_foreign_snapshots_against_the_nod::*;
 #[allow(unused_imports)]
 use in_place_restore::*;
+#[allow(unused_imports)]
+use intercept_proxy::*;
 #[allow(unused_imports)]
 use placement_claims::*;
 #[allow(unused_imports)]
@@ -269,6 +272,8 @@ fn ctx_on_node_unlisted(node: &str, pool: &std::path::Path, mut routes: Vec<Rout
     let engine = Engine::new(Pool::new(pool));
     // Ctx::new reads the pinned default image from the environment, as the agent does.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
+    // Without this every intercept decides `ProxyImageUnset` and renders nothing at all.
+    std::env::set_var("WS_INTERCEPT_PROXY_IMAGE", "ghcr.io/kloudlite/kloudlite-intercept-proxy:deadbeef");
     (
         Arc::new(Ctx::new(
             client,
