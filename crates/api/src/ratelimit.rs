@@ -1,4 +1,4 @@
-//! Token buckets for the anonymous write surfaces (`POST /v1/cli/code`, which writes a Mongo
+//! Token buckets for the two anonymous write surfaces (`POST /v1/cli/code`, which writes a Mongo
 //! row per call, and `POST /v1/signin/email`, which sends a mail per call). Keyed by the client
 //! address the ingress supplies, or by the email inside the body — the one thing the caller
 //! cannot make up fresh per request without it costing them the mail.
@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 /// information, so forgetting it changes nothing. Same sweep-on-overflow as `storage::auth`.
 const SWEEP_AT: usize = 10_000;
 
-pub struct Limiter {
+pub(crate) struct Limiter {
     capacity: f64,
     per_sec: f64,
     buckets: Mutex<HashMap<String, (f64, Instant)>>,
@@ -29,7 +29,7 @@ pub struct Limiter {
 
 impl Limiter {
     /// `capacity` calls at once, refilling evenly over `period`.
-    pub fn new(capacity: u32, period: Duration) -> Self {
+    pub(crate) fn new(capacity: u32, period: Duration) -> Self {
         Self {
             capacity: f64::from(capacity.max(1)),
             per_sec: f64::from(capacity.max(1)) / period.as_secs_f64().max(1e-9),
@@ -40,7 +40,7 @@ impl Limiter {
     /// `N/SECONDS`, e.g. `20/600`. An unparseable value falls back to `default` rather than to
     /// no limit: a typo must not open the surface.
     #[allow(clippy::expect_used)] // the default is a compile-time literal parsed once at boot
-    pub fn from_env(var: &str, default: &str) -> Self {
+    pub(crate) fn from_env(var: &str, default: &str) -> Self {
         let parse = |s: &str| {
             let (n, secs) = s.trim().split_once('/')?;
             Some(Self::new(n.trim().parse().ok()?, Duration::from_secs(secs.trim().parse().ok()?)))
@@ -52,7 +52,7 @@ impl Limiter {
     }
 
     /// Ok to proceed, or the seconds until one token is back.
-    pub fn check(&self, key: &str) -> std::result::Result<(), u64> {
+    pub(crate) fn check(&self, key: &str) -> std::result::Result<(), u64> {
         self.check_at(key, Instant::now())
     }
 
@@ -77,7 +77,7 @@ impl Limiter {
 /// The address ingress-nginx derived (`X-Real-IP`, from `CF-Connecting-IP` behind Cloudflare —
 /// see deploy/ingress-nginx-config.yaml), or the first hop of `X-Forwarded-For`. Anything
 /// arriving without either (dev, tests) shares one bucket, which is the safe direction.
-pub fn client_ip(headers: &HeaderMap) -> String {
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
     let first = |name| {
         headers
             .get(name)
@@ -99,7 +99,7 @@ fn too_many(retry_after: u64) -> Response {
 }
 
 /// One bucket per client address.
-pub async fn per_ip(State(l): State<Arc<Limiter>>, req: Request, next: Next) -> Response {
+pub(crate) async fn per_ip(State(l): State<Arc<Limiter>>, req: Request, next: Next) -> Response {
     match l.check(&client_ip(req.headers())) {
         Ok(()) => next.run(req).await,
         Err(secs) => too_many(secs),
@@ -108,7 +108,7 @@ pub async fn per_ip(State(l): State<Arc<Limiter>>, req: Request, next: Next) -> 
 
 /// One bucket per `email` in a JSON body. The body is read here and handed on intact; a body
 /// that is not `{ "email": … }` passes through for the handler to refuse as it already does.
-pub async fn per_email(State(l): State<Arc<Limiter>>, req: Request, next: Next) -> Response {
+pub(crate) async fn per_email(State(l): State<Arc<Limiter>>, req: Request, next: Next) -> Response {
     let (parts, body) = req.into_parts();
     // 4 KiB is generous for an address; anything bigger is not a sign-in request.
     let bytes = match axum::body::to_bytes(body, 4096).await {

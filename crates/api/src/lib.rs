@@ -37,7 +37,7 @@ mod forward;
 mod images;
 mod passkeys;
 mod pulls;
-use kloudlite_core::ratelimit;
+mod ratelimit;
 mod repos;
 mod signatures;
 mod teams;

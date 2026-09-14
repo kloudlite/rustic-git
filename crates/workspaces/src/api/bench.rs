@@ -183,7 +183,7 @@ fn found(b: Option<crd::Bench>) -> Result<crd::Bench, Response> {
 /// members, roles or quotas. Identity is only ever the verified bearer (`caller`, which checks a
 /// CLI login's revocation); nothing in the query or headers names a user. Membership is read
 /// uncached, so a removed member loses the row on the next call; an unreadable directory is a 503
-/// with no detail, never an empty list. `no-store` on every answer; per-IP limited in `router`.
+/// with no detail, never an empty list. `no-store` on every answer.
 pub(crate) async fn bench_teams(State(s): State<Arc<ApiState>>, headers: HeaderMap) -> Response {
     let mut r = list_bench_teams(&s, &headers).await.unwrap_or_else(|e| e);
     r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));

@@ -81,7 +81,7 @@ Importing laptop sessions, OAuth/passkey inside the app window, token refresh (s
 
 Owner decision 2026-09-13: a bench belongs to a TEAM and the team owns the region, so the app offers no personal bench (that path is what failed with "choose a region for your personal bench").
 
-- After sign-in the controller reads `GET /v1/bench/teams` (`[{slug, name, region}]`, the caller's current teams only; bearer identity with CLI revocation check, uncached membership, 503 when the directory is unreadable, `Cache-Control: no-store`, per-IP limit `KLOUDLITE_BENCH_TEAMS_LIMIT`, default 60/60). It sits under the existing `/v1/bench` ingress path.
+- After sign-in the controller reads `GET /v1/bench/teams` (`[{slug, name, region}]`, the caller's current teams only; bearer identity with CLI revocation check, uncached membership, 503 when the directory is unreadable, `Cache-Control: no-store`; authorization is the gate, no rate limit). It sits under the existing `/v1/bench` ingress path.
 - New phase `choose-team`. A lone team with a region is picked automatically. A team with `region: ""` is shown disabled ("no region yet — ask an admin") and can't be chosen, so no bench is created for it.
 - The choice is saved in `userData/team.txt` (a plain setting). On the next launch it is checked against the live list. A team the person left, or one without a region, clears the setting and shows the picker with the reason.
 - Connect passes the team on `POST /v1/bench` (body) and on `/v1/bench/session` and `/v1/bench/start` (`?team=`).
