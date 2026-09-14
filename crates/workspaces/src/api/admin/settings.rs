@@ -334,6 +334,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
         };
     }
     over!(sync_secs);
+    over!(bench_idle_secs);
     over!(replica_secs);
     over!(decommission_secs);
     over!(node_dead_secs);
@@ -520,4 +521,66 @@ pub(crate) async fn revert_cluster(
         target,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generic round trip over every `ClusterSettingsSpec` field: a field missing from
+    /// `merge_cluster_spec`'s `over!` list (like `bench_idle_secs` was) is silently dropped by a
+    /// PUT even though it passed validation and got recorded in history — this fails loudly
+    /// instead. Built via JSON so a field added to the struct is picked up automatically rather
+    /// than needing a new assertion here.
+    #[test]
+    fn merge_cluster_spec_carries_every_field() {
+        // The field list comes from `CLUSTER_SETTING_META` — already held exhaustive against the
+        // struct by `cluster_setting_meta_is_exhaustive` — not `ClusterSettingsSpec::default()`,
+        // which serializes to `{}` (every field `None` and `skip_serializing_if`d).
+        //
+        // Both `base` and `patch` set every field (distinct values) so a revert exercises a real
+        // history-snapshot shape — `merge_cluster_spec` only overrides a field when the patch
+        // side is `Some`, so a `None` patch (an admin-never-set field) leaves it untouched on
+        // purpose, and a base of all-`None` would make a real bug in the `over!` list look like
+        // a pass.
+        let field_json = |tag: u64| -> serde_json::Map<String, serde_json::Value> {
+            crd::CLUSTER_SETTING_META
+                .iter()
+                .map(|(wire, _, _)| {
+                    let v = match *wire {
+                        "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => {
+                            serde_json::json!(format!("test-{wire}-{tag}"))
+                        }
+                        _ => serde_json::json!(1000 + tag),
+                    };
+                    (wire.to_string(), v)
+                })
+                .collect()
+        };
+        let base_obj = field_json(1);
+        let patch_obj = field_json(2);
+        let base: crd::ClusterSettingsSpec = serde_json::from_value(serde_json::Value::Object(base_obj.clone())).unwrap();
+        let patch: crd::ClusterSettingsSpec = serde_json::from_value(serde_json::Value::Object(patch_obj.clone())).unwrap();
+
+        let merged = merge_cluster_spec(base.clone(), &patch);
+        let merged_json = serde_json::to_value(&merged).unwrap();
+        for (key, expected) in &patch_obj {
+            assert_eq!(
+                merged_json.get(key),
+                Some(expected),
+                "field {key} did not survive merge_cluster_spec — add it to the `over!` list"
+            );
+        }
+
+        // A revert re-applies the pre-change snapshot as the patch; every field must go back.
+        let reverted = merge_cluster_spec(merged, &base);
+        let reverted_json = serde_json::to_value(&reverted).unwrap();
+        for (key, expected) in &base_obj {
+            assert_eq!(
+                reverted_json.get(key),
+                Some(expected),
+                "field {key} did not revert via merge_cluster_spec — add it to the `over!` list"
+            );
+        }
+    }
 }
