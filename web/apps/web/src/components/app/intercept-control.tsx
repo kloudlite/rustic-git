@@ -20,9 +20,8 @@ export type InterceptCandidate = { id: string; name: string };
  *  declares — defaulting to the service's own number, which is the mapping the api applies when
  *  an entry is left out.
  *
- *  The list is the viewer's own workspaces in this environment's region, not "the attached ones":
- *  the workspace document carries no attachment, so the api — which does — is what decides, and
- *  it refuses an unattached one with a sentence naming the problem. */
+ *  The list is the viewer's own workspaces in this environment's region; whether their space uses
+ *  this environment is the api's to decide, and it refuses one that does not with a sentence. */
 export function InterceptDialog({
   owner,
   id,
@@ -72,7 +71,7 @@ export function InterceptDialog({
               </SelectContent>
             </Select>
             <p className="text-caption text-muted-foreground">
-              It has to be running and attached to this environment.
+              It has to be running, in a space that uses this environment.
             </p>
           </div>
           {ports.length > 0 && (

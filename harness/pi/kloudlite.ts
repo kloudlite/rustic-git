@@ -116,12 +116,15 @@ export default function (pi: ExtensionAPI) {
   reg("kl_workspace_stop", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/stop`));
   reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }));
   reg("kl_workspace_clone", { id: S("source workspace id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/workspaces/${a.id}/clone`, { name: a.name }));
-  reg("kl_workspace_attach", { id: S("workspace id"), environment: S("environment id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/attach`, { environment: a.environment }));
-  reg("kl_workspace_detach", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/detach`));
   reg("kl_workspace_packages", { id: S("workspace id"), packages: Type.Array(Type.String(), { description: "the whole list: attr or attr@version" }) }, (a) => answer("PATCH", `/v1/workspaces/${a.id}`, { packages: a.packages }));
   reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
 
   // environments
+  // A person's space (one per team, plus personal = their handle) follows one environment; every
+  // workspace and the bench in it resolve its services by bare name.
+  reg("kl_my_environment", {}, () => answer("GET", "/v1/me/environments"));
+  reg("kl_my_environment_set", { team: S("team slug, or your handle for your personal space"), environment: S("environment id owned by that team") }, (a) => answer("PUT", `/v1/me/environments/${a.team}`, { environment: a.environment }));
+  reg("kl_my_environment_clear", { team: S("team slug, or your handle for your personal space") }, (a) => answer("DELETE", `/v1/me/environments/${a.team}`));
   reg("kl_environments", { owner: O(S("owner slug to list for")) }, (a) => answer("GET", `/v1/environments${q({ owner: a.owner })}`));
   reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
   reg(

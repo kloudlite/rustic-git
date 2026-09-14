@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { SetCrumbTitle } from "@/components/app/shell-context";
 import { EnvHeaderActions } from "@/components/app/env-actions";
+import { SpaceEnvControl } from "@/components/app/space-env-control";
+import { myEnvironments, spaceUses } from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
 import { loadEnvPage } from "@/lib/env-page";
 import { apiToken } from "@/lib/api-token";
@@ -40,6 +42,9 @@ export default async function Layout({
   const page = await loadEnvPage(token, owner, id);
   if (!page) notFound();
   const { env, history } = page;
+  // A failed read offers "Use" rather than failing the header; the PUT is idempotent.
+  const mine = env ? await myEnvironments(token) : null;
+  const inUse = mine?.ok ? spaceUses(mine.value, owner, id) : false;
   // The same call the Snapshots tab makes, so the header and the tab cannot disagree about where
   // the environment sits — they did, and the header was the wrong one.
   const { current: at } = envCurrent(history, {
@@ -71,6 +76,7 @@ export default async function Layout({
             </>
           ) : null}
           <span className="ml-auto flex items-center gap-2">
+            {env && <SpaceEnvControl owner={owner} id={id} inUse={inUse} />}
             <EnvHeaderActions owner={owner} id={id} state={env?.state ?? null} />
           </span>
         </div>

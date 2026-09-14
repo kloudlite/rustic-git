@@ -47,8 +47,8 @@ export default async function Page({ params }: { params: Promise<{ owner: string
   }
 
   // Candidates for an intercept: the viewer's workspaces in this environment's region. Whether
-  // one is ATTACHED is the api's to know — the workspace document does not carry it — and it
-  // refuses an unattached one with a sentence the dialog shows. A failed read leaves the button
+  // their space uses this environment is the api's to decide, and it refuses one that does not
+  // with a sentence the dialog shows. A failed read leaves the button
   // disabled rather than failing the page: the services above are what someone came here for.
   const scope = owner === session.user.owner ? undefined : owner;
   const wsRes = await listWorkspaces(token, scope);

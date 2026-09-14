@@ -257,3 +257,29 @@ export async function deleteEnvironmentSnapshots(_prev: EnvActionState, formData
   revalidatePath(`/${owner}/environments`);
   return { ok: true };
 }
+
+/** Use this environment for every workspace and the bench in the caller's space for `owner` (the
+ *  team, or their personal space when `owner` is their handle). Running pods follow it live. */
+export async function useForMySpace(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const id = safeSegment(String(formData.get("id") ?? ""));
+  if (!id) return { error: "That environment is not valid." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+  const r = await api.setMyEnvironment(token, api.spaceTeam(owner), id);
+  if (!r.ok) return { error: r.message || "Could not use this environment." };
+  revalidatePath(`/${owner}/environments`, "layout");
+  return { ok: true };
+}
+
+export async function stopUsingForMySpace(_prev: EnvActionState, formData: FormData): Promise<EnvActionState> {
+  const owner = safeSegment(String(formData.get("owner") ?? ""));
+  if (!owner) return { error: "That owner name is not valid." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+  const r = await api.clearMyEnvironment(token, api.spaceTeam(owner));
+  if (!r.ok) return { error: r.message || "Could not stop using this environment." };
+  revalidatePath(`/${owner}/environments`, "layout");
+  return { ok: true };
+}

@@ -1,16 +1,15 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState } from "react";
 import { Loader2, SquareTerminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FieldLabel } from "@/components/auth/auth-card";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { environmentsFor, openInWorkspace, type WsActionState } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
+import { openInWorkspace, type WsActionState } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
 import { QuotaRequestDialog } from "@/components/app/quota-request-dialog";
 
 /** The default name: what the workspace is for, as a slug. Editable — it is a suggestion. */
@@ -23,12 +22,11 @@ export function suggestedName(repo: string, branch: string) {
     .slice(0, 40);
 }
 
-type Env = { id: string; name: string; region: string };
-
 /** One button, two homes: the repo Clone menu and the PR header. Both want the same
  *  thing — a workspace with this repo on this branch — so the dialog lives here once and
  *  the callers only differ in how the button is sized. It asks for the two things the
- *  backend cannot guess: the name, and whether to attach an environment. */
+ *  backend cannot guess: the name. The environment its services resolve from is the SPACE's
+ *  choice, made once on the environment's page, never per workspace. */
 export function OpenInWorkspace({
   owner, repo, branch, label = "Open in a workspace", className, size,
 }: {
@@ -41,16 +39,6 @@ export function OpenInWorkspace({
 }) {
   const [state, action, pending] = useActionState<WsActionState, FormData>(openInWorkspace, null);
   const [open, setOpen] = useDialogUntilSuccess(state);
-  const [envs, setEnvs] = useState<Env[] | null>(null);
-  const [environment, setEnvironment] = useState("");
-  useEffect(() => {
-    if (!open || envs !== null) return;
-    let live = true;
-    // An unhandled rejection here would be a dialog that never leaves its loading state and a
-    // console error nobody reads; an empty list says "none to attach to" (2026-09-12).
-    environmentsFor(owner).then((e) => { if (live) setEnvs(e); }).catch(() => { if (live) setEnvs([]); });
-    return () => { live = false; };
-  }, [open, envs, owner]);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -70,26 +58,6 @@ export function OpenInWorkspace({
           <div className="grid gap-1">
             <FieldLabel htmlFor="ows-name">Name</FieldLabel>
             <Input id="ows-name" name="name" defaultValue={suggestedName(repo, branch)} required maxLength={40} className="h-9 font-mono" autoFocus />
-          </div>
-          <div className="grid gap-1">
-            <FieldLabel htmlFor="ows-env">Environment</FieldLabel>
-            {/* The select's value goes through a hidden input: the form is a server action, and
-                a Radix select carries no `name` of its own. */}
-            <input type="hidden" name="environment" value={environment} />
-            <Select value={environment || "none"} onValueChange={(v) => setEnvironment(v === "none" ? "" : v)}>
-              <SelectTrigger id="ows-env" className="h-9">
-                <SelectValue placeholder="None" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None</SelectItem>
-                {(envs ?? []).map((e) => (
-                  <SelectItem key={e.id} value={e.id}>{e.name} <span className="text-muted-foreground">· {e.region}</span></SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-caption text-muted-foreground">
-              {envs === null ? "Loading your environments…" : envs.length === 0 ? "No environments yet; the workspace runs on its own." : "Attached, its services resolve by bare name from the workspace."}
-            </p>
           </div>
           {state?.error && (
             <div className="flex flex-wrap items-center gap-2">

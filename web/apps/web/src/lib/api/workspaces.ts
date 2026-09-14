@@ -162,17 +162,9 @@ export function listRegions(token: string) {
   return call<ApiRegion[]>("/v1/regions", { method: "GET", token });
 }
 
-/** Attach a workspace to one environment: its services resolve by bare name from then on.
- *  409 when the environment is in another region; the message says so. */
-export function attachWorkspace(token: string, id: string, environment: string) {
-  return call<void>(`/v1/workspaces/${encodeURIComponent(id)}/attach`, {
-    method: "POST", token, body: JSON.stringify({ environment }),
-  });
-}
-
-/** Deliver the environment's traffic for one service to an attached workspace instead. 202 with
+/** Deliver the environment's traffic for one service to a workspace whose space uses it instead. 202 with
  *  the environment; the controller stops the real service and points its endpoints at the
- *  workspace pod. Refusals are one sentence: 404 unknown service or workspace, 409 not attached /
+ *  workspace pod. Refusals are one sentence: 404 unknown service or workspace, 409 its space does not use this environment /
  *  not running / already intercepted (naming the holder), 422 a port the service does not
  *  declare or named twice. A `ports` entry may be omitted — the same number answers it. */
 export function setIntercept(

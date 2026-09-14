@@ -6,5 +6,6 @@ export * from "./api/repos";
 export * from "./api/keys";
 export * from "./api/pulls";
 export * from "./api/workspaces";
+export * from "./api/me";
 export * from "./api/requests";
 export * from "./api/admin";
