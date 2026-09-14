@@ -153,8 +153,9 @@ async fn settings_revert(c: &mut Ctx) {
 /// Two things the review turned up, and both move this off the central scope entirely. First,
 /// there is no `Mark::Boot` field in `CENTRAL_SETTING_META` at all — every central knob is `Live`
 /// — so a Boot precheck could never fire on `PUT /admin/settings/central` and an id pointed there
-/// was measuring a liveness check wearing the roll id. The Boot fields are the agent's three
-/// (`crd::CLUSTER_SETTING_META`: `defaultImage`, `gitInitImage`, `runtimeClass`), so the guard
+/// was measuring a liveness check wearing the roll id. The Boot fields are the agent's
+/// (`crd::CLUSTER_SETTING_META`: `defaultImage`, `interceptProxyImage`, `gitInitImage`,
+/// `runtimeClass`), so the guard
 /// lives on `PUT /admin/settings/clusters/{region}`.
 ///
 /// Second, accepting "2xx or 409" proved nothing: delete `precheck_readers` and the id stays
@@ -232,10 +233,10 @@ async fn settings_roll(c: &mut Ctx) {
 /// The DaemonSet every Boot field in `crd::CLUSTER_SETTING_META` names as its reader.
 const AGENT: &str = "kloudlite-agent";
 
-/// The three cluster-scoped Boot fields, in the order `CLUSTER_SETTING_META` lists them. Repeated
+/// The cluster-scoped Boot fields, in the order `CLUSTER_SETTING_META` lists them. Repeated
 /// rather than imported: what this step needs is a field the SAVE will carry, which is a fact
 /// about the wire shape, and the test below is what holds the two lists together.
-const BOOT_FIELDS: [&str; 3] = ["defaultImage", "gitInitImage", "runtimeClass"];
+const BOOT_FIELDS: [&str; 4] = ["defaultImage", "interceptProxyImage", "gitInitImage", "runtimeClass"];
 
 /// The Boot field this step will try to save: the first one the settings actually STORE, and
 /// otherwise simply the first the meta names. A stored value is preferred only because the

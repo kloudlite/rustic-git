@@ -81,9 +81,10 @@ fi
 PROFILE=dev-image
 echo "==> $PROFILE build"
 cargo build --profile $PROFILE --locked --bins $FEATURES 2>&1 | tail -1
-# The workspace CLI, for the Alpine workspace image: its own target, so it never lands in
-# target/$PROFILE beside the glibc binaries.
-cargo build --profile $PROFILE --locked -p kl --target x86_64-unknown-linux-musl 2>&1 | tail -1
+# Its own target, so these never land in target/$PROFILE beside the glibc binaries.
+# The workspace CLI and the intercept proxy, one musl invocation: the workspace image is Alpine
+# and the proxy image is `scratch`, and neither has a glibc to link against.
+cargo build --profile $PROFILE --locked -p kl -p kloudlite-intercept-proxy --target x86_64-unknown-linux-musl 2>&1 | tail -1
 
 # The Dockerfile COPYs target/release/* relative to its context and .dockerignore drops the rest,
 # so a staging dir with hardlinks to the binaries is the whole context — nothing else is sent.
@@ -100,6 +101,7 @@ for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gate
 done
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/$PROFILE"
 ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kl"
+ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kloudlite-intercept-proxy" "$CTX/target/x86_64-unknown-linux-musl/$PROFILE/kloudlite-intercept-proxy"
 # deploy/bench/Dockerfile COPYs the musl kl from the release path literally (CI builds release);
 # the pod only ever builds dev-image, so link it under the name the Dockerfile expects too.
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
@@ -111,7 +113,7 @@ mkdir -p "$CTX/harness"
 cp harness/package.json harness/package-lock.json "$CTX/harness/"
 cp -r harness/bench harness/pi "$CTX/harness/"
 
-for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace; do
+for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
   buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX" \

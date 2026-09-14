@@ -358,6 +358,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(default_replicas);
     over!(quota_gb_ceiling);
     over!(default_image);
+    over!(intercept_proxy_image);
     over!(git_init_image);
     over!(runtime_class);
     over!(stall_dumps);
@@ -386,6 +387,7 @@ fn changed_cluster_boot_fields(
         };
     }
     chk!(default_image, "defaultImage");
+    chk!(intercept_proxy_image, "interceptProxyImage");
     chk!(git_init_image, "gitInitImage");
     chk!(runtime_class, "runtimeClass");
     out
@@ -583,7 +585,7 @@ mod tests {
                 .map(|(wire, _, _)| {
                     let v = match *wire {
                         n if n.starts_with("trace") => serde_json::json!(0.125 * tag as f64),
-                        "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => {
+                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => {
                             serde_json::json!(format!("test-{wire}-{tag}"))
                         }
                         "stallDumps" => serde_json::json!(tag.is_multiple_of(2)),
@@ -636,7 +638,7 @@ mod cluster_tests {
                 .map(|(name, _, _)| {
                     let x = match *name {
                         n if n.starts_with("trace") => serde_json::json!(if bump { 0.25 } else { 0.5 }),
-                        "nixpkgs" | "basePackages" | "defaultImage" | "gitInitImage" | "runtimeClass" => serde_json::json!(if bump { "b" } else { "a" }),
+                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => serde_json::json!(if bump { "b" } else { "a" }),
                         "stallDumps" => serde_json::json!(bump),
                         _ => serde_json::json!(if bump { 61 } else { 62 }),
                     };

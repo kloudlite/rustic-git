@@ -2384,6 +2384,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "interceptProxyImage": {
+                        "description": "The forwarder image an intercepted service's proxy pod runs. **Boot** — read at pod-render\ntime; a change rolls `kloudlite-agent`. `None` = keep today's env value, so an admin who\nnever opens this row cannot blank a required image.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "nixTimeoutSecs": {
                         "description": "Nix build timeout. 60..=7200 seconds.",
                         "format": "uint64",

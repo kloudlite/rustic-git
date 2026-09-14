@@ -105,7 +105,9 @@ jobs:
           --bin kloudlite-slo --bin kl-connect
       # The workspace CLI is a musl binary (the workspace image is Alpine); its own target and,
       # below, its own artifact, so the flat `target/release` restore in the image job stays flat.
-      - run: rustup target add x86_64-unknown-linux-musl && cargo build --release --locked -p kl --target x86_64-unknown-linux-musl
+      # The intercept proxy rides the same invocation: its image is `scratch`, which has no glibc
+      # for the same reason Alpine has none.
+      - run: rustup target add x86_64-unknown-linux-musl && cargo build --release --locked -p kl -p kloudlite-intercept-proxy --target x86_64-unknown-linux-musl
       - name: glibc ceiling
         run: |
           set -eu
@@ -133,7 +135,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kl-musl
-          path: /ci-target/x86_64-unknown-linux-musl/release/kl
+          path: |
+            /ci-target/x86_64-unknown-linux-musl/release/kl
+            /ci-target/x86_64-unknown-linux-musl/release/kloudlite-intercept-proxy
           if-no-files-found: error
           retention-days: 1
 
@@ -161,7 +165,7 @@ jobs:
           name: kl-musl
           path: target/x86_64-unknown-linux-musl/release
       # upload-artifact drops the mode bits and the Dockerfile COPYs the files as they are.
-      - run: chmod +x target/release/kloudlite* target/release/kl-connect target/x86_64-unknown-linux-musl/release/kl
+      - run: chmod +x target/release/kloudlite* target/release/kl-connect target/x86_64-unknown-linux-musl/release/kl target/x86_64-unknown-linux-musl/release/kloudlite-intercept-proxy
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           # The classic driver: the VM's own daemon keeps every layer between runs, which is the
@@ -211,6 +215,17 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-builder-gate:latest
             ghcr.io/kloudlite/kloudlite-builder-gate:${{ github.sha }}
+      # The forwarder behind an intercepted service. Same commit as the agent that renders its
+      # pod: the argv is a contract between the two.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: intercept-proxy
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-intercept-proxy:latest
+            ghcr.io/kloudlite/kloudlite-intercept-proxy:${{ github.sha }}
       # The SLO probe. Same commit as the tier it probes, deliberately: a probe pinned behind the
       # fleet reports the previous release's journey and calls it green.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6

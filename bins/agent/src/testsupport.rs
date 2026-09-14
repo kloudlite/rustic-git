@@ -36,6 +36,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
     // Set, not read from the environment: a pod spec built without an image is a reconcile error,
     // and every test in this binary shares one process env — hence `--test-threads=1`.
     std::env::set_var("WS_DEFAULT_IMAGE", "ghcr.io/kloudlite/kloudlite-workspace:deadbeef");
+    std::env::set_var("WS_INTERCEPT_PROXY_IMAGE", "ghcr.io/kloudlite/kloudlite-intercept-proxy:deadbeef");
     // `LiveSettings::new` directly, not a fake reflector — a beat's test never has to touch
     // `std::env` for a field it wants to override, only for `WS_DEFAULT_IMAGE` above (a `Ctx::new`
     // boot-time read, unrelated to the beats this fixture serves).

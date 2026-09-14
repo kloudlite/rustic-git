@@ -117,6 +117,16 @@ USER kloudlite
 EXPOSE 1234 8080
 ENTRYPOINT ["kloudlite-builder-gate"]
 
+# The intercept proxy. `scratch`, not bookworm-slim like its neighbours: the binary is a static
+# musl build that opens no file, resolves DNS through the kernel's own getaddrinfo-free path in
+# std's resolver, and talks to nothing but two TCP sockets — so there is no libc, no CA bundle and
+# no shell for it to need. `USER` is not set here: the pod spec runs it as uid 1000 with a
+# read-only root, and a scratch image has no /etc/passwd to name an account in.
+FROM scratch AS intercept-proxy
+ARG PROFILE=release
+COPY target/x86_64-unknown-linux-musl/${PROFILE}/kloudlite-intercept-proxy /kloudlite-intercept-proxy
+ENTRYPOINT ["/kloudlite-intercept-proxy"]
+
 # The default workspace image: what `ws-{id}` runs when a workspace names no image of its own.
 # Stock alpine plus exactly what the platform itself needs and cannot get from Nix:
 #   - libstdc++/libgcc: VS Code Remote-SSH's Alpine server ships a musl `node` that still

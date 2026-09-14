@@ -122,6 +122,11 @@ pub struct ClusterSettingsSpec {
     /// today's env value, so an admin who never opens this row cannot blank a required image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_image: Option<String>,
+    /// The forwarder image an intercepted service's proxy pod runs. **Boot** — read at pod-render
+    /// time; a change rolls `kloudlite-agent`. `None` = keep today's env value, so an admin who
+    /// never opens this row cannot blank a required image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept_proxy_image: Option<String>,
     /// The init container that clones a workspace's seed repo over SSH. **Boot**, same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_init_image: Option<String>,
@@ -182,6 +187,7 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("defaultReplicas", kloudlite_core::settings::Mark::Live, &[]),
     ("quotaGbCeiling", kloudlite_core::settings::Mark::Live, &[]),
     ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
+    ("interceptProxyImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("runtimeClass", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("traceSampleRatio", kloudlite_core::settings::Mark::Live, &[]),

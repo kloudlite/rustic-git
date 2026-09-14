@@ -11,6 +11,8 @@
 !target/release/kl-connect
 !target/x86_64-unknown-linux-musl/release/kl
 !target/x86_64-unknown-linux-musl/dev-image/kl
+!target/x86_64-unknown-linux-musl/release/kloudlite-intercept-proxy
+!target/x86_64-unknown-linux-musl/dev-image/kloudlite-intercept-proxy
 !target/dev-image/kloudlite
 !target/dev-image/kloudlite-api
 !target/dev-image/kloudlite-worker

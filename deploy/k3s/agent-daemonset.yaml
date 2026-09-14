@@ -228,6 +228,9 @@ spec:
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
               value: ghcr.io/kloudlite/kloudlite-workspace:ebc59db931b5e470896ff745db59fd5a76563753@sha256:1e38eed05485b9b811c5b30d0995e17e1884c8342b42bf9f1d4832d1ad655f75
+            # The forwarder that stands in for an intercepted service. Pinned by deploy/pin.sh.
+            - name: WS_INTERCEPT_PROXY_IMAGE
+              value: ghcr.io/kloudlite/kloudlite-intercept-proxy:latest
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.

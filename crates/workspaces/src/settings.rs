@@ -25,6 +25,8 @@ pub struct AgentSettings {
     pub quota_gb_ceiling: u32,
     /// Boot-marked (`CLUSTER_SETTING_META`) — read once at `Ctx` construction, not per reconcile.
     pub default_image: String,
+    /// Boot-marked too: the forwarder image an intercepted service's proxy pod runs.
+    pub intercept_proxy_image: String,
     pub git_init_image: String,
     pub runtime_class: String,
     pub trace_sample_ratio: f64,
@@ -63,6 +65,7 @@ impl AgentSettings {
             default_replicas: crd::DEFAULT_REPLICAS,
             quota_gb_ceiling: crd::defaults::quota_gb_ceiling(),
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
+            intercept_proxy_image: std::env::var("WS_INTERCEPT_PROXY_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
             runtime_class: std::env::var("WS_RUNTIME_CLASS").unwrap_or_default(),
             // No env: a tunable, not boot wiring — `ClusterSettings` is its only override.
@@ -101,6 +104,7 @@ impl AgentSettings {
         over!(default_replicas);
         over!(quota_gb_ceiling);
         over!(default_image);
+        over!(intercept_proxy_image);
         over!(git_init_image);
         over!(runtime_class);
         over!(trace_sample_ratio);

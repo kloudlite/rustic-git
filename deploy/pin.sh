@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
-# THE CONTRACT. Six images, two SHAs, one edit:
-#   - kloudlite, kloudlite-agent, kloudlite-gateway, kloudlite-workspace, kloudlite-slo are five targets of ONE Dockerfile, built
+# THE CONTRACT. Nine images, two SHAs, one edit:
+#   - kloudlite, kloudlite-agent, kloudlite-gateway, kloudlite-builder-gate, kloudlite-workspace,
+#     kloudlite-bench, kloudlite-intercept-proxy, kloudlite-slo are eight targets of ONE Dockerfile (the bench's
+#     is deploy/bench/Dockerfile over the same context), built
 #     from ONE commit by image.yml. The server tier, the agent and the gateway therefore always
 #     pin the SAME sha — the agent speaks to the server's `vol/` surface, and two SHAs there is a
 #     wire-compatibility bet nobody placed. That is <sha>: kloudlite.yaml (srv, api, worker, the
@@ -43,7 +45,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -67,6 +69,9 @@ pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/buil
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
+# The proxy image is not a workload of ours either: the agent hands it to a pod in a tenant
+# namespace (WS_INTERCEPT_PROXY_IMAGE), so it lives in the DaemonSet's env, not an `image:` line.
+pin 'kloudlite-intercept-proxy' "$SHA" "${DIGEST[kloudlite-intercept-proxy]}" k3s/agent-daemonset.yaml
 # The bench image is the api's to write into a Bench spec (KLOUDLITE_BENCH_IMAGE on the api
 # Deployment).
 pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" kloudlite.yaml

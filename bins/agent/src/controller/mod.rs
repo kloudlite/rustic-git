@@ -202,6 +202,10 @@ pub struct Ctx {
     pub runtime_class: Option<String>,
     /// `WS_DEFAULT_IMAGE`: the tagged platform image behind `model::DEFAULT_WS_IMAGE`.
     pub default_image: String,
+    /// `WS_INTERCEPT_PROXY_IMAGE`: the forwarder an intercepted service's proxy pod runs. Empty is
+    /// NOT a panic, unlike `default_image`: a region whose DaemonSet has not been rolled yet must
+    /// keep reconciling everything else, so an intercept settles `Off`/`ProxyImageUnset` instead.
+    pub intercept_proxy_image: String,
     /// In-flight long btrfs operations, keyed by the uid of the object that asked for them (a
     /// `Volume` being materialized, or a `Snapshot` being cut). THE idempotency guard,
     /// and a local in-memory check rather than a distributed lease because exactly one agent ever
@@ -326,6 +330,7 @@ impl Ctx {
             tracing::info!(mode = "sandboxed", runtime_class = %rc, "sandbox.mode");
         }
         let git_init_image = merged.git_init_image.clone();
+        let intercept_proxy_image = merged.intercept_proxy_image.clone();
         // Unbounded on purpose: the only senders are this agent's own finished operations, one
         // wake each, so the queue can never hold more than the operations in flight.
         let (wake_volume, vol_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -371,6 +376,7 @@ impl Ctx {
             git_init_image,
             runtime_class,
             default_image,
+            intercept_proxy_image,
             running: Mutex::new(HashMap::new()),
             region,
             has_pool,
