@@ -103,9 +103,15 @@
 #   namespaces                             get,create,patch             ensure (server-side apply); get for the per-node gate
 #   limitranges                            create,patch                 ensure (server-side apply)
 #   resourcequotas                         create,patch                 ensure (server-side apply)
-#   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports
+#   services                               create,patch,delete          ensure; delete removes the ClusterIP of a service whose definition lost its ports,
+#                                                                       and the `intercept-target-{ws}`
+#                                                                       ClusterIP in the WORKSPACE
+#                                                                       namespace, which the proxy dials
 #   networkpolicies                        create,patch,list            ensure (incl. both halves of
-#                                                                       an attachment grant)
+#                                                                       an attachment grant; the
+#                                                                       env-side intercept grant is
+#                                                                       per service now, named
+#                                                                       `intercept-{ws}-{service}`)
 #                                          delete                       delete_ignoring_404 — the
 #                                                                       unattached branch of EVERY
 #                                                                       workspace pass takes it, and
@@ -118,32 +124,30 @@
 #                                                                       grant
 #   pods                                   get,list,watch               pod_is_ready; writing_pods;
 #                                                                       Controller watches
-#                                          create                       create_if_absent
-#                                          delete                       delete_ignoring_404 (stop)
+#                                          create                       create_if_absent — a workspace
+#                                                                       pod, and the intercept proxy
+#                                                                       pod in an environment namespace
+#                                          delete                       delete_ignoring_404 (stop); also
+#                                                                       recreates a proxy pod whose
+#                                                                       forwards changed (a Pod is
+#                                                                       immutable) and releases one on
+#                                                                       intercept release
 #   statefulsets (apps)                    get,list,watch               deployment_status; watch
 #                                          create,patch                 ensure; restore_gate scale
 #                                          delete                       stop
-#   endpointslices (discovery.k8s.io)     create,patch                 intercept controller: names
-#                                                                       the intercepting workspace pod's
-#                                                                       IP for the service an attached
-#                                                                       workspace is intercepting
-#                                          list                         the slices Kubernetes abandoned
-#                                                                       for an intercepted service
-#                                          delete                       release: only a slice this
-#                                                                       controller wrote, for a service
-#                                                                       of an environment it reconciles,
-#                                                                       in a namespace it reconciles
-#   endpoints                              delete                       intercept controller: the
-#                                                                       legacy Endpoints object
-#                                                                       Kubernetes abandons for an
-#                                                                       intercepted Service, deleted
-#                                                                       by the Service's own name so
-#                                                                       the mirroring controller
-#                                                                       cannot rebuild a slice
-#                                                                       naming the stopped pod
-#                                                                       (agent-admission.yaml's
-#                                                                       DELETE fence pins the
-#                                                                       namespace)
+#   endpointslices (discovery.k8s.io)     delete                       the migration: an intercept
+#                                                                       rendered under the old
+#                                                                       endpoint-rewriting shape left a
+#                                                                       `{service}-intercept` slice this
+#                                                                       controller wrote, deleted when
+#                                                                       the proxy takes over — only for
+#                                                                       a service of an environment it
+#                                                                       reconciles, in a namespace it
+#                                                                       reconciles.
+#                                                                       Retired with the endpoint-rewriting
+#                                                                       mechanism — delete this row and
+#                                                                       the rule one release after the
+#                                                                       fleet is fully on the proxy build.
 #   secrets                                get,create                   ensure_ssh — NOT here: bound
 #                                                                       per `ws-*` namespace by the
 #                                                                       agent itself (below)
@@ -297,25 +301,23 @@ rules:
     verbs: ["create", "patch"]
   # `delete` on services only: a service whose definition dropped its ports gets no ClusterIP any
   # more, and the stale one from the earlier definition has to go — nothing else the agent writes
-  # is ever removed except by its owner's garbage collection.
+  # is ever removed except by its owner's garbage collection. The same verb also takes the
+  # `intercept-target-{ws}` ClusterIP in the WORKSPACE namespace, which the proxy dials, when the
+  # intercept it exists for is released.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "patch", "delete"]
-  # `endpointslices`: written only while an environment's service is intercepted by an attached
-  # workspace, naming the workspace pod's IP so traffic reaches it instead of the stopped service's
-  # own pods. `delete` releases the intercept — bounded the same way every other delete here is
-  # bounded: only a slice this controller wrote, for a service of an environment it reconciles, in
-  # a namespace it reconciles (agent-admission.yaml's DELETE fence pins the namespace).
+  # `endpointslices`: DELETE only, and only the migration. The proxy keeps the Service's selector,
+  # so the endpoints stay Kubernetes' own and nothing here writes a slice any more; what is left is
+  # the `{service}-intercept` slice an intercept rendered under the old endpoint-rewriting shape,
+  # deleted as the proxy takes over. Bounded the same way every other delete here is bounded: only
+  # a slice this controller wrote, for a service of an environment it reconciles, in a namespace it
+  # reconciles (agent-admission.yaml's DELETE fence pins the namespace).
+  #
+  # Retired with the endpoint-rewriting mechanism — delete this row and the rule one release after
+  # the fleet is fully on the proxy build.
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["create", "patch", "list", "delete"]
-  # `endpoints`: the legacy object beside the slices. Kubernetes abandons it — neither updating nor
-  # deleting it — when an intercepted Service loses its selector, and the mirroring controller
-  # rebuilds a slice from it, so an intercept that deletes only slices still splits the service's
-  # traffic between the workspace and the stopped pod. Deleted by the Service's own name, for a
-  # service of an environment this controller reconciles.
-  - apiGroups: [""]
-    resources: ["endpoints"]
     verbs: ["delete"]
   # Namespaces are the one thing read back: `namespace_ready` GETs the workspace's own namespace
   # so a node that has never seen a team is gated on the namespace's existence, not on a
