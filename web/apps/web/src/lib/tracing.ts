@@ -31,7 +31,6 @@
  *  them through `lib/clone.ts`'s cached `centralSettings()` on a beat. */
 import {
   createContextKey,
-  SamplingDecision,
   SpanStatusCode,
   trace,
   TraceFlags,
@@ -44,6 +43,7 @@ import {
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import {
   BatchSpanProcessor,
+  SamplingDecision,
   TraceIdRatioBasedSampler,
   type ReadableSpan,
   type Sampler,
@@ -61,8 +61,11 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { createRequire } from "node:module";
 
 const SLOW_MS = 1_000;
-const MAX_TRACES = 4096;
+const MAX_PENDING = 16_384;
 const MAX_SPANS = 512;
+const MAX_PROMOTED = 4096;
+const PROMOTED_MS = 60_000;
+const LOG_EVERY_MS = 10_000;
 export const PROBE_HEADER = "x-kloudlite-probe";
 const UNTRACED = new Set(["/healthz", "/readyz", "/livez", "/metrics", "/api/health"]);
 const PROBE = createContextKey("kloudlite probe");
@@ -161,8 +164,17 @@ function exported(s: ReadableSpan, promote: boolean): ReadableSpan {
   const route = s.attributes["http.route"];
   const method = s.attributes["http.request.method"] ?? s.attributes["http.method"] ?? s.name.split(" ")[0];
   const name = typeof route === "string" && route ? `${method} ${route}` : s.name.split(/\s+https?:\/\/|\?/)[0];
-  const events = (s.events ?? []).map((e) => ({ ...e, attributes: e.attributes?.["exception.type"] ? { "exception.type": e.attributes["exception.type"] } : {} }));
-  const props: PropertyDescriptorMap = { name: { value: name }, attributes: { value: attributes }, events: { value: events } };
+  const events = (s.events ?? [])
+    .filter((e) => e.name === "exception")
+    .map((e) => ({ ...e, attributes: e.attributes?.["exception.type"] ? { "exception.type": e.attributes["exception.type"] } : {} }));
+  // The code only: Next's `closeSpanWithError` copies `error.message` into the status, and a
+  // message is where a path or URL rides along.
+  const props: PropertyDescriptorMap = {
+    name: { value: name },
+    attributes: { value: attributes },
+    events: { value: events },
+    status: { value: { code: s.status.code } },
+  };
   if (promote) {
     const c = s.spanContext();
     props.spanContext = { value: () => ({ ...c, traceFlags: c.traceFlags | TraceFlags.SAMPLED }) };
@@ -172,6 +184,12 @@ function exported(s: ReadableSpan, promote: boolean): ReadableSpan {
 
 export class Promote implements SpanProcessor {
   private pending = new Map<string, ReadableSpan[]>();
+  /** Waiting spans across every trace; capped at `MAX_PENDING`, as in Rust. */
+  pendingTotal = 0;
+  /** Trace id -> expiry of a recently promoted trace, so a child ending after its root still goes. */
+  private promoted = new Map<string, number>();
+  private dropped = 0;
+  private lastLog = -Infinity;
   private cap: Bucket;
   private inner: SpanProcessor;
   constructor(inner: SpanProcessor, rate = env("KLOUDLITE_TRACE_PROMOTE_RATE", 2), burst = env("KLOUDLITE_TRACE_PROMOTE_BURST", 20)) {
@@ -185,22 +203,48 @@ export class Promote implements SpanProcessor {
     const sc = span.spanContext();
     if (sc.traceFlags & TraceFlags.SAMPLED) return this.inner.onEnd(exported(span, false));
     const parent = span.parentSpanContext;
+    const now = performance.now();
     if (parent && !parent.isRemote) {
-      let waiting = this.pending.get(sc.traceId);
-      if (!waiting) {
-        // ponytail: evict the oldest-started trace when full (Map keeps insertion order); the
-        // Rust side's last-touched order is the upgrade if a long request ever loses its children.
-        if (this.pending.size >= MAX_TRACES) this.pending.delete(this.pending.keys().next().value!);
-        this.pending.set(sc.traceId, (waiting = []));
+      const until = this.promoted.get(sc.traceId);
+      if (until !== undefined) {
+        if (until > now) return this.inner.onEnd(exported(span, true));
+        this.promoted.delete(sc.traceId);
       }
-      if (waiting.length < MAX_SPANS) waiting.push(span);
+      let waiting = this.pending.get(sc.traceId);
+      if (waiting && waiting.length >= MAX_SPANS) return this.drop(1, now);
+      // ponytail: evicts the oldest-STARTED trace (Map insertion order); the Rust side's
+      // least-recently-touched order is the upgrade if a long request ever loses its children.
+      while (this.pendingTotal >= MAX_PENDING) {
+        const [id, spans] = this.pending.entries().next().value!;
+        this.pending.delete(id);
+        this.pendingTotal -= spans.length;
+        this.drop(spans.length, now);
+        if (id === sc.traceId) waiting = undefined;
+      }
+      if (!waiting) this.pending.set(sc.traceId, (waiting = []));
+      waiting.push(span);
+      this.pendingTotal += 1;
       return;
     }
     const children = this.pending.get(sc.traceId) ?? [];
     this.pending.delete(sc.traceId);
+    this.pendingTotal -= children.length;
     const ms = span.duration[0] * 1e3 + span.duration[1] / 1e6;
-    if ((span.status.code !== SpanStatusCode.ERROR && ms <= SLOW_MS) || !this.cap.take()) return;
+    if (span.status.code !== SpanStatusCode.ERROR && ms <= SLOW_MS) return;
+    if (!this.cap.take()) return this.drop(children.length + 1, now);
+    if (this.promoted.size >= MAX_PROMOTED) this.promoted.delete(this.promoted.keys().next().value!);
+    this.promoted.set(sc.traceId, now + PROMOTED_MS);
     for (const s of [...children, span]) this.inner.onEnd(exported(s, true));
+  }
+  /** Count drops; one `trace.promote.dropped` line per `LOG_EVERY_MS` at most, in `lib/log.ts`'s
+   *  shape (this file cannot import it). */
+  private drop(n: number, now: number) {
+    this.dropped += n;
+    if (now - this.lastLog < LOG_EVERY_MS) return;
+    this.lastLog = now;
+    const line = { timestamp: new Date().toISOString(), level: "WARN", target: "web::tracing", message: "trace.promote.dropped", count: this.dropped };
+    this.dropped = 0;
+    process.stderr.write(`${JSON.stringify(line)}\n`);
   }
   forceFlush() {
     return this.inner.forceFlush();

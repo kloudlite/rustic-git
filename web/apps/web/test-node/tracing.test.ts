@@ -3,8 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { ROOT_CONTEXT, SamplingDecision, SpanKind, SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
-import { InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
+import { InMemorySpanExporter, SamplingDecision, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { KlPropagator, KlSampler, Promote, startTracing } from "../src/lib/tracing.ts";
 
 const TID = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -61,16 +61,43 @@ test("export view: raw paths, queries, cookies and auth never leave the process"
     ...(mk("0000000000000007", undefined, SpanStatusCode.ERROR, 1) as object),
     name: "fetch GET http://api:8080/v1/acme/secret-repo?token=x",
     attributes: { "http.route": undefined, "url.full": "http://api/acme/secret-repo?x=1", "http.target": "/acme/secret-repo", "http.request.header.cookie": "c", "http.request.method": "GET" },
-    events: [{ name: "exception", attributes: { "exception.message": "GET /acme/secret-repo failed", "exception.type": "Error" } }],
+    status: { code: SpanStatusCode.ERROR, message: "fetch http://api/acme/secret-repo?token=x failed" },
+    events: [
+      { name: "exception", attributes: { "exception.message": "GET /acme/secret-repo failed", "exception.type": "Error" } },
+      { name: "loaded /acme/secret-repo", attributes: {} },
+    ],
   } as never;
   p.onEnd(span);
   const s = out.getFinishedSpans()[0];
-  const dump = JSON.stringify({ name: s.name, attributes: s.attributes, events: s.events });
+  const dump = JSON.stringify({ name: s.name, attributes: s.attributes, events: s.events, status: s.status });
   assert.equal(s.name, "fetch GET");
+  assert.deepEqual(s.status, { code: SpanStatusCode.ERROR });
+  assert.deepEqual(s.events.map((e) => e.name), ["exception"]);
   for (const bad of ["acme", "secret-repo", "token", "cookie", "?"]) assert.ok(!dump.includes(bad), `${bad} leaked: ${dump}`);
   const routed = { ...(mk("0000000000000008", undefined, SpanStatusCode.ERROR, 1) as object), name: "GET", attributes: { "http.route": "/[owner]/[repo]", "http.target": "/acme/x" } } as never;
   p.onEnd(routed);
   assert.equal(out.getFinishedSpans()[1].name, "GET /[owner]/[repo]");
+});
+
+const hex16 = (n: number) => n.toString(16).padStart(16, "0");
+const child = (t: number, id: number) =>
+  ({ ...(mk(hex16(id), "00000000000000ff", SpanStatusCode.UNSET, 1) as object), spanContext: () => ({ traceId: hex16(t).padStart(32, "0"), spanId: hex16(id), traceFlags: TraceFlags.NONE }) }) as never;
+
+test("promote: a flood of waiting spans never holds more than 16384", () => {
+  const p = new Promote(new SimpleSpanProcessor(new InMemorySpanExporter()), 0, 0);
+  let id = 1;
+  for (let t = 1; t <= 40; t++) for (let i = 0; i < 511; i++) p.onEnd(child(t, id++));
+  for (let t = 100; t < 20_100; t++) p.onEnd(child(t, id++));
+  assert.ok(p.pendingTotal <= 16_384 && p.pendingTotal > 16_000, `pending ${p.pendingTotal}`);
+});
+
+test("promote: a child ending after its promoted root is still exported", () => {
+  const out = new InMemorySpanExporter();
+  const p = new Promote(new SimpleSpanProcessor(out), 10, 10);
+  p.onEnd(mk("0000000000000009", undefined, SpanStatusCode.ERROR, 1));
+  assert.equal(out.getFinishedSpans().length, 1);
+  p.onEnd(mk("000000000000000a", "0000000000000009", SpanStatusCode.UNSET, 1));
+  assert.equal(out.getFinishedSpans().length, 2);
 });
 
 const listen = (h: http.RequestListener) =>
