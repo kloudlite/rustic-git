@@ -49,8 +49,27 @@ On a **fresh cluster** — nothing running yet, so none of the ordering below ap
 everything in one command:
 
 ```sh
-kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f api-rbac.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f builder-gate.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml
+kubectl apply -f crds.yaml -f agent-rbac.yaml -f agent-admission.yaml -f api-rbac.yaml -f workspace-admission.yaml -f nix-conf.yaml -f agent-daemonset.yaml -f agent-peer.yaml -f gateway.yaml -f builder-gate.yaml -f otel-agent.yaml -f quotas-slo.yaml -f slo-rbac.yaml -f controller-rbac.yaml -f controller.yaml
 ```
+
+### Rolling the space policies onto the controller (stage 1, one release)
+
+Order matters and is not the usual one:
+
+1. `kubectl apply -f deploy/k3s/agent-daemonset.yaml` and wait for the DaemonSet to report fully
+   rolled. The new agent no longer writes `space-env`/`space-{ns}`; the policies it already wrote
+   stay exactly where they are, so nothing loses its grant during the roll.
+2. `kubectl apply -f deploy/k3s/controller-rbac.yaml -f deploy/k3s/controller.yaml`. The
+   controller adopts the existing objects on its first pass (a forced server-side apply moves the
+   field manager from `kloudlite-agent` to `kloudlite-controller`; identical bytes, so no pod sees
+   a change).
+3. `kubectl apply -f deploy/k3s/agent-rbac.yaml` LAST. It removes the agent's NetworkPolicy write
+   verbs. Applied before step 1, a still-writing agent gets a 403 and aborts its whole reconcile —
+   the same failure as the missing `networkpolicies: delete` verb on 2026-09-11, which stopped
+   every environment on the fleet converging for eight minutes.
+
+Rollback is the reverse: re-apply the old `agent-rbac.yaml`, scale the controller to 0, roll the
+previous agent image.
 
 ### The SLO probe's six owners
 

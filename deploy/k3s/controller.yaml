@@ -1,0 +1,86 @@
+# The cluster controller: one leader-elected writer per k3s cluster.
+#
+# ONE replica, `Recreate`, no PDB, and each of those is a decision:
+#   - a second replica is a hot standby that only shortens a 15 s failover, and every object this
+#     process owns is level-triggered — while it is down nothing converges and nothing breaks;
+#   - `Recreate` plus the lease bounds a roll to one TTL (the departing pod releases the lease on
+#     shutdown, so the usual handover is seconds, not the full TTL);
+#   - a PDB with `minAvailable: 1` on a one-replica Deployment BLOCKS node drains, which is an
+#     operation this fleet performs deliberately (`decommission`), so it would cost more than the
+#     failover it buys.
+# Add the second replica if a measured failover ever hurts.
+#
+# `kube-system`, not `kloudlite-system`: this is cluster infra like the agent DaemonSet, and it
+# accepts no connection from anywhere (the gateway's namespace exists because that one does).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kloudlite-controller
+  namespace: kube-system
+  labels:
+    app: kloudlite-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kloudlite-controller
+  template:
+    metadata:
+      labels:
+        app: kloudlite-controller
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: kloudlite-controller
+      containers:
+        - name: controller
+          image: ghcr.io/kloudlite/kloudlite-controller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: KLOUDLITE_LOG_FORMAT
+              value: json
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kube-system.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-controller
+            - name: KLOUDLITE_METRICS_ADDR
+              value: 0.0.0.0:9464
+            # The lease's holderIdentity. Downward API, never a generated string: `kubectl get
+            # lease kloudlite-controller -n kube-system` must name a pod somebody can look at.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WS_REGION
+              value: centralindia-k3s
+            - name: RUST_BACKTRACE
+              value: "1"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          # Liveness only, and it passes for a FOLLOWER too: a follower is healthy, it is simply
+          # not writing, and failing its probe would restart the pod that is about to take over.
+          # There is no Service and no traffic, so there is nothing a readiness gate would gate.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 20
+          securityContext:
+            runAsUser: 1001
+            runAsGroup: 1001
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

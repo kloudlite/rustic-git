@@ -78,14 +78,18 @@ pub const KNOWN_CENTRAL: &[(&str, Kind)] = &[
 pub const KNOWN_PER_REGION: &[(&str, Kind)] = &[
     ("kloudlite-agent", Kind::DaemonSet),
     ("kloudlite-gateway", Kind::Deployment),
+    // One per CLUSTER, and a region is one k3s cluster today — so it resolves on the region's
+    // client like everything else here. Listed so a `Mark::Boot` settings save rolls it.
+    ("kloudlite-controller", Kind::Deployment),
 ];
 
 /// `spec.template` lives under a different namespace per name, not per cluster — the agent's
-/// DaemonSet is cluster-infra (`kube-system`), the gateway is its own namespace.
+/// DaemonSet and the cluster controller are cluster-infra (`kube-system`), the gateway is its own
+/// namespace.
 fn namespace(scope: &Scope, name: &str) -> &'static str {
     match scope {
         Scope::Central => "kloudlite",
-        Scope::Region(_) if name == "kloudlite-agent" => "kube-system",
+        Scope::Region(_) if name == "kloudlite-agent" || name == "kloudlite-controller" => "kube-system",
         Scope::Region(_) => "kloudlite-system",
     }
 }
@@ -339,7 +343,7 @@ pub async fn list_workloads(s: &ApiState, regions: &[String]) -> Result<Vec<Work
 
 #[cfg(test)]
 mod scope_tests {
-    use super::Scope;
+    use super::{namespace, resolve, Kind, Scope};
 
     /// The wire form (`"central"` / the bare region id) is what the web reads and what a path
     /// segment carries back; the two must agree or a roll from the infrastructure tab would target
@@ -350,5 +354,18 @@ mod scope_tests {
             let wire: String = serde_json::from_str(&serde_json::to_string(&scope).unwrap()).unwrap();
             assert_eq!(crate::api::admin::parse_scope(&wire), scope);
         }
+    }
+
+    /// A roll target's namespace is per NAME, not per cluster — the agent's DaemonSet and the
+    /// controller are cluster infra in `kube-system`, the gateway has its own namespace. A
+    /// controller resolved into `kloudlite-system` would patch nothing and report "rolled".
+    #[test]
+    fn the_controller_is_a_per_region_deployment_in_kube_system() {
+        let scope = Scope::Region("centralindia-k3s".into());
+        assert_eq!(resolve(&scope, "kloudlite-controller"), Some(Kind::Deployment));
+        assert_eq!(namespace(&scope, "kloudlite-controller"), "kube-system");
+        assert_eq!(namespace(&scope, "kloudlite-gateway"), "kloudlite-system");
+        // Never central: AKS runs no cluster controller.
+        assert_eq!(resolve(&Scope::Central, "kloudlite-controller"), None);
     }
 }

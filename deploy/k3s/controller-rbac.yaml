@@ -1,0 +1,105 @@
+# RBAC for the cluster controller (`kloudlite-controller`).
+#
+# THE TABLE BELOW IS THE ROLE, same contract as agent-rbac.yaml: every Kubernetes call this binary
+# makes, with its call site. A verb not in the table is not in the rules, and a call added without
+# a row fails with a 403 naming this file.
+#
+# Stage 1 only. Every other row in the spec's single-writer table arrives with its own stage, and
+# an unused verb granted early is a verb nobody notices being wrong.
+#
+#   resource (group)                       verb(s)                 call site
+#   ---------------------------------------------------------------------------------------------
+#   spaceenvironments (kloudlite.io)       get,list,watch          the space reflector; the wish
+#                                                                  itself. READ ONLY — /v1 is the
+#                                                                  one writer, here as in the agent
+#   environments (kloudlite.io)            get,list,watch          the environment reflector: the
+#                                                                  ingress half's namespace, its
+#                                                                  region, its ownerReference
+#   workspaces, benches (kloudlite.io)     get,list,watch          space::render's owner lookup and
+#                                                                  the legacy `attach-*` collection
+#   clustersettings (kloudlite.io)         get,list,watch          the settings reflector (lib.rs):
+#                                                                  the per-cluster tunables every
+#                                                                  reader resolves through
+#                                                                  `LiveSettings`. Read only — the
+#                                                                  admin process is the writer
+#   networkpolicies (networking.k8s.io)    create,patch            space_egress / space_ingress via
+#                                                                  server-side apply
+#                                          list                    the env-side derived-set render:
+#                                                                  which space-* halves exist here
+#                                          delete                  a switch removes the old half; a
+#                                                                  cleared choice removes both
+#   leases (coordination.k8s.io)           get,create,update       lease.rs: elect, renew, release.
+#                                                                  Namespaced to kube-system, by
+#                                                                  NAME — see the Role below
+#
+# What the controller deliberately does NOT get in stage 1: namespaces, limitranges,
+# resourcequotas, rolebindings, services, statefulsets, pods, and any `/status` subresource. Those
+# are stages 2 and 3.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kloudlite-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kloudlite-controller
+rules:
+  - apiGroups: ["kloudlite.io"]
+    resources: ["spaceenvironments", "environments", "workspaces", "benches", "clustersettings"]
+    verbs: ["get", "list", "watch"]
+  # NetworkPolicies are namespaced, and the namespaces are `ws-*`, `wt-*` and `env-*` — RBAC has
+  # no globbing, so "only those namespaces" is not expressible as a rule. A Role per namespace
+  # would need something to write it, in every namespace, before the first policy: that something
+  # would be this controller, holding namespace-create it otherwise does not need. Cluster-wide
+  # on exactly one resource is the narrower of the two.
+  # ponytail: cluster-scoped NetworkPolicy write; narrows to per-namespace Roles if stage 2 (which
+  # owns namespace creation) makes writing them free.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "patch", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kloudlite-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kloudlite-controller
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-controller
+    namespace: kube-system
+---
+# The lease, by name, in one namespace: a namespaced Role, never the ClusterRole above. `create`
+# is needed once, on a cluster that has never run a controller; `update` is the renew and the
+# takeover (the resourceVersion on it is the CAS).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-controller-lease
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["kloudlite-controller"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-controller-lease
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-controller-lease
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-controller
+    namespace: kube-system
