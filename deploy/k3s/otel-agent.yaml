@@ -210,6 +210,12 @@ data:
             trace_id:
               parse_from: attributes.span.trace_id
               layout: '2006-01-02T15:04:05.999999999Z07:00'
+          # ingress-nginx's own JSON access line (deploy/ingress-nginx-config.yaml) carries
+          # trace_id at the top level, not nested under `span` like our own binaries' lines.
+          - type: trace_parser
+            if: 'attributes.trace_id != nil and attributes.trace_id != ""'
+            trace_id:
+              parse_from: attributes.trace_id
           - type: move
             if: 'attributes.message != nil'
             from: attributes.message
@@ -278,6 +284,18 @@ data:
         metric_statements:
           - context: resource
             statements: *identity
+      # ingress-nginx's OpenTelemetry module has no key to trim `http.target` (it is
+      # `$request_uri` verbatim — method/path/query, per the opentelemetry-cpp-contrib nginx
+      # module source) and every other emitter's spans go through our own `kloudlite-trace`
+      # crate, which never sets a full-URL attribute — so this only ever touches ingress-nginx
+      # spans. Drop the query string before export; the path segment is not treated as secret
+      # (routes carry no token, see CLAUDE.md's routing key shape).
+      transform/redact-span-target:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - replace_pattern(attributes["http.target"], "\\?.*$", "")
       batch:
         timeout: 10s
         send_batch_size: 1024
@@ -310,7 +328,7 @@ data:
         # `OTEL_SERVICE_NAME` is the name the service map should show.
         traces:
           receivers: [otlp]
-          processors: [k8sattributes, resource, batch]
+          processors: [k8sattributes, resource, transform/redact-span-target, batch]
           exporters: [otlphttp]
 ---
 # The cluster-wide half. Same image, same ServiceAccount, one receiver.
