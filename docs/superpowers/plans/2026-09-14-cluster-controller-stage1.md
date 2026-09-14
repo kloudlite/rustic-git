@@ -1,18 +1,22 @@
-# Region Controller — Stage 1 Implementation Plan
+# Cluster Controller — Stage 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A new leader-elected `kloudlite-controller` Deployment runs in each k3s region and becomes the ONE writer of a space's two NetworkPolicies (`space-env` in the space namespace, `space-{ns}` in the environment namespace). The agents stop writing them in the same release. Nothing else moves in stage 1.
+**Goal:** A new leader-elected `kloudlite-controller` Deployment runs in each k3s cluster and becomes the ONE writer of a space's two NetworkPolicies (`space-env` in the space namespace, `space-{ns}` in the environment namespace). The agents stop writing them in the same release. Nothing else moves in stage 1.
 
 **Architecture:** `bins/controller` is a new binary with no disk, no object store and no Azure credential — it talks to the k3s API server and nothing else. It holds a `coordination.k8s.io/v1` Lease named `kloudlite-controller` in `kube-system`; `leaseTransitions` is the epoch and every write checks the epoch it was elected under before it lands. Three reflectors (`SpaceEnvironment`, `Environment`, `Workspace`) feed two reconcilers: one keyed on `SpaceEnvironment` (renders that space's egress half plus the ingress half in the environment it names) and one keyed on `Environment` (prunes `space-*` ingress halves in that namespace that no space points at). Both apply server-side under field manager `kloudlite-controller` with `force`, which is also how the objects the agents already wrote are adopted. An unlisted reflector answers `None` and the pass decides nothing.
 
 **Tech Stack:** Rust 2021, `kube` + `k8s-openapi` (workspace pins; `k8s_openapi::api::coordination::v1::Lease` already ships), `axum` for one `/healthz` route, `tokio`, `tracing`. Tests are ordinary `#[test]`/`#[tokio::test]` in-crate; the lease tests take `now_ms` as a parameter and use no clock at all.
 
-**Spec:** `docs/superpowers/specs/2026-09-14-region-controller-design.md` (commit `4fee9974`), stage 1 only.
+Terms: a **Region** is the unit a team is bound to and may hold SEVERAL k3s clusters; this
+controller is per **cluster** — one elected leader per k3s cluster, over that cluster's agents.
+"Region" below means only the `Region` CRD, a team's bound region or an Azure region.
+
+**Spec:** `docs/superpowers/specs/2026-09-14-cluster-controller-design.md` (commit `4fee9974`), stage 1 only.
 
 **Rulings recorded here (the owner has NOT answered the spec's open questions; these are the spec's own recommendations, taken provisionally — mark each as provisional in code comments where it matters):**
 
-1. **One controller per k3s region only.** AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so nothing is deployed there. *(Provisional — spec open question 1.)*
+1. **One controller per k3s CLUSTER only.** A Region is the unit a team is bound to and may hold several clusters; the controller is per cluster, over that cluster's agents. AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so nothing is deployed there. *(Settled by the owner, 2026-09-14.)*
 2. **Stage 3 ships later behind a `Mark::Boot` flag.** Nothing in this plan adds that flag; it is named only so a reader knows stage 1 does not pre-empt it. *(Provisional — spec open question 2.)*
 3. **`OwnerKeys` per-node status entries are out of stage 1 scope.** They are stage 2. Do not touch `keys.rs`. *(Provisional — spec open question 3.)*
 4. **Snapshot retention stays in the agent.** *(Provisional — spec open question 4.)*
@@ -24,7 +28,7 @@
 - **Every controller write is epoch-checked.** Read `Ctx::epoch` before the write; if the Lease's `leaseTransitions` has moved past it, demote and write nothing. There is no writer fence under the API server, so the per-object CAS (SSA under our own field manager, or a delete by name) is the backstop — never a blind force over an object we did not derive from spec.
 - **An unlisted reflector is UNKNOWN, never empty.** `Ctx::spaces()`/`environments()`/`workspaces()` return `None` until the first list finishes (`store_ready`, copied from `bins/agent/src/controller/mod.rs:447`). A pass that reads `None` renders nothing and deletes nothing.
 - **Fan-out is bounded.** One `SpaceEnvironment` event re-renders exactly one space's egress half and at most two environments' ingress halves (the one it names, and the one it named before). Never `all_in_store`. That is the whole point of the move — `bins/agent/src/controller/run.rs:432-436` wakes every environment on every node today.
-- **`forget_applied` after every delete.** The `ensure` memory (`APPLY_RESYNC`) is now the truth for the whole region, so a child mutated outside `ensure` must be forgotten first or it stays un-reapplied for ten minutes. F1 in the spec is exactly this bug.
+- **`forget_applied` after every delete.** The `ensure` memory (`APPLY_RESYNC`) is now the truth for the whole cluster, so a child mutated outside `ensure` must be forgotten first or it stays un-reapplied for ten minutes. F1 in the spec is exactly this bug.
 - **No new NetworkPolicy shapes.** `crates/workspaces/src/k8s/policies.rs::{space_egress, space_ingress, SPACE_EGRESS_POLICY, space_ingress_name}` are unchanged and stay the single definition; the controller calls them.
 - **The controller holds no secret.** No `WS_PEER_SECRET`, no `KLOUDLITE_S3_URL`, no `KLOUDLITE_JWT_SECRET`. Ordinary uid 1001, read-only root, no hostPath, no privileged context.
 - **RBAC is the table.** Every verb the controller gains has a row in `deploy/k3s/controller-rbac.yaml`'s header table with its call site, the same contract `agent-rbac.yaml` carries. A call added without a row 403s naming the file.
@@ -62,7 +66,7 @@
 | `crates/workspaces/src/slo/catalogue.rs` | modify | seven rows |
 | `deploy/slo.md` | modify | the same seven rows |
 | `crates/workspaces/src/history/watch.rs` | modify | Lease holder transitions → `controller.leader` rows |
-| `CLAUDE.md` | modify | a "Region controller" paragraph; edits to the agent paragraph |
+| `CLAUDE.md` | modify | a "Cluster controller" paragraph; edits to the agent paragraph |
 
 **Not in this plan (blocked):** the intercept objects. See Task 8.
 
@@ -204,7 +208,7 @@ Add `"bins/controller"` to the root `Cargo.toml`'s `members` list, next to `"bin
 - [ ] **Step 4: Write `bins/controller/src/lease.rs`** (above the test module)
 
 ```rust
-//! Leader election for the region controller, on a `coordination.k8s.io/v1` Lease.
+//! Leader election for the cluster controller, on a `coordination.k8s.io/v1` Lease.
 //!
 //! The same semantics as `crates/storage/src/ownership/lease.rs` — "the store is the arbiter,
 //! never the clock and never the ordinal" — with the API server's resourceVersion CAS playing
@@ -222,7 +226,7 @@ use kube::api::{Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
 use std::time::Duration;
 
-/// One object, one name, one namespace: the region's controller lease.
+/// One object, one name, one namespace: the cluster's controller lease.
 pub const LEASE_NAME: &str = "kloudlite-controller";
 pub const LEASE_NAMESPACE: &str = "kube-system";
 
@@ -348,9 +352,9 @@ pub async fn release(api: &Api<Lease>, me: &str) {
 Stub `bins/controller/src/lib.rs` for this task:
 
 ```rust
-//! `kloudlite-controller`: the region's single elected writer of every object that is shared
+//! `kloudlite-controller`: the cluster's single elected writer of every object that is shared
 //! across nodes or derived purely from spec. See
-//! `docs/superpowers/specs/2026-09-14-region-controller-design.md`.
+//! `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`.
 
 pub mod lease;
 ```
@@ -375,7 +379,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo clippy -p kloudlite-contr
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline && git status --short
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add Cargo.toml Cargo.lock bins/controller && git commit -m "Add the region controller crate and its leader lease" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add Cargo.toml Cargo.lock bins/controller && git commit -m "Add the cluster controller crate and its leader lease" && git push platform HEAD
 ```
 
 ---
@@ -447,7 +451,7 @@ use std::sync::Mutex;
 
 /// Env-derived config. No secret, by design: this process holds none.
 pub struct Config {
-    /// `WS_REGION` — logged and stamped, never used to filter: one controller per region means
+    /// `WS_REGION` — logged and stamped, never used to filter: one controller per cluster means
     /// every object it can see is its own.
     pub region: String,
     /// `POD_NAME`, from the downward API. The lease's `holderIdentity`.
@@ -481,7 +485,7 @@ pub struct Ctx {
     /// before every write (`lease::may_write`); a stale term demotes instead of finishing.
     epoch: AtomicU32,
     /// `ensure`'s memory, exactly as the agent's (`bins/agent/src/controller/status.rs`), except
-    /// that with ONE writer per region it is now the truth for the whole region rather than one
+    /// that with ONE writer per cluster it is now the truth for the whole cluster rather than one
     /// of N per-process guesses.
     pub applied: Mutex<HashMap<String, (u64, std::time::Instant)>>,
     pub settings: LiveSettings<AgentSettings>,
@@ -567,7 +571,7 @@ pub fn app(ctx: Arc<crate::ctx::Ctx>) -> axum::Router {
 - [ ] **Step 5: Write `bins/controller/src/lib.rs`**
 
 ```rust
-//! `kloudlite-controller`: the region's single elected writer of every object shared across nodes
+//! `kloudlite-controller`: the cluster's single elected writer of every object shared across nodes
 //! or derived purely from spec. Stage 1 owns exactly one thing — a space's two NetworkPolicies —
 //! and the node agents stop writing them in the same release.
 //!
@@ -575,10 +579,10 @@ pub fn app(ctx: Arc<crate::ctx::Ctx>) -> axum::Router {
 //! process's only dependency, which is also why the lease lives there
 //! (`coordination.k8s.io/v1`) rather than in the object store the ownership map uses.
 //!
-//! One per k3s region. AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so
+//! One per k3s cluster. AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so
 //! nothing of this is deployed there.
-//! ponytail: one-per-k3s-region is the spec's recommendation, not an owner ruling (open question
-//! 1); a second deployment shape would be a `WS_REGION`-scoped selector, nothing more.
+//! ponytail: one-per-k3s-cluster is the owner's ruling (2026-09-14; a Region may hold several
+//! clusters); a second deployment shape would be a `WS_REGION`-scoped selector, nothing more.
 
 pub mod ctx;
 pub mod health;
@@ -681,7 +685,7 @@ deletes from, and it would collide with the concurrent branches.
 - [ ] **Step 6: Write `bins/controller/src/main.rs`**
 
 ```rust
-//! `kloudlite-controller`: one leader-elected process per k3s region.
+//! `kloudlite-controller`: one leader-elected process per k3s cluster.
 
 use kloudlite_controller::{run, Config};
 
@@ -729,7 +733,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo clippy -p kloudlite-contr
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/controller Cargo.lock && git commit -m "Boot the region controller with a health route and the election beat" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/controller Cargo.lock && git commit -m "Boot the cluster controller with a health route and the election beat" && git push platform HEAD
 ```
 
 ---
@@ -748,7 +752,7 @@ the ENTRYPOINT, and DROPPING the `setcap NET_BIND_SERVICE` line if the gateway s
 this process binds 8080 and never a privileged port:
 
 ```dockerfile
-# The region controller. No capability, no hostPath, no secret: the API server is its only
+# The cluster controller. No capability, no hostPath, no secret: the API server is its only
 # dependency, and its one listener is the health route on 8080.
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS controller
 ARG PROFILE=release
@@ -795,7 +799,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && bash -n deploy/pin.sh
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add Dockerfile .github/workflows/image.yml deploy/pin.sh && git commit -m "Build and pin the region controller image" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add Dockerfile .github/workflows/image.yml deploy/pin.sh && git commit -m "Build and pin the cluster controller image" && git push platform HEAD
 ```
 
 ---
@@ -822,7 +826,7 @@ In `crates/workspaces/src/api/workloads.rs`'s test module (or create one at the 
         assert_eq!(resolve(&scope, "kloudlite-controller"), Some(Kind::Deployment));
         assert_eq!(namespace(&scope, "kloudlite-controller"), "kube-system");
         assert_eq!(namespace(&scope, "kloudlite-gateway"), "kloudlite-system");
-        // Never central: AKS runs no region controller.
+        // Never central: AKS runs no cluster controller.
         assert_eq!(resolve(&Scope::Central, "kloudlite-controller"), None);
     }
 ```
@@ -843,7 +847,7 @@ spec's "admin/workloads gains the Deployment").
 - [ ] **Step 3: Write `deploy/k3s/controller-rbac.yaml`**
 
 ```yaml
-# RBAC for the region controller (`kloudlite-controller`).
+# RBAC for the cluster controller (`kloudlite-controller`).
 #
 # THE TABLE BELOW IS THE ROLE, same contract as agent-rbac.yaml: every Kubernetes call this binary
 # makes, with its call site. A verb not in the table is not in the rules, and a call added without
@@ -948,7 +952,7 @@ subjects:
 - [ ] **Step 4: Write `deploy/k3s/controller.yaml`**
 
 ```yaml
-# The region controller: one leader-elected writer per k3s region.
+# The cluster controller: one leader-elected writer per k3s cluster.
 #
 # ONE replica, `Recreate`, no PDB, and each of those is a decision:
 #   - a second replica is a hot standby that only shortens a 15 s failover, and every object this
@@ -1074,7 +1078,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && python3 -c "import sys,yaml;[li
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add deploy/k3s/controller.yaml deploy/k3s/controller-rbac.yaml deploy/k3s/README.md crates/workspaces/src/api/workloads.rs && git commit -m "Deploy the region controller with a stage-one role" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add deploy/k3s/controller.yaml deploy/k3s/controller-rbac.yaml deploy/k3s/README.md crates/workspaces/src/api/workloads.rs && git commit -m "Deploy the cluster controller with a stage-one role" && git push platform HEAD
 ```
 
 ---
@@ -1141,7 +1145,7 @@ mod tests {
     }
 
     /// The bytes themselves come from the one definition in `policies.rs` and are unchanged by
-    /// this move — if they were not, an adopting apply would rewrite every policy in the region.
+    /// this move — if they were not, an adopting apply would rewrite every policy in the cluster.
     #[test]
     fn the_rendered_bytes_are_the_shared_definition() {
         let s = space("alice", "acme", "env-1");
@@ -1156,7 +1160,7 @@ mod tests {
 
     /// The env-side derived set: which `space-*` halves belong in THIS namespace, given the cache.
     /// A space pointing elsewhere is collected; a space pointing here is kept; and a cache that
-    /// has not listed keeps EVERYTHING — read as empty it would strip every grant in the region
+    /// has not listed keeps EVERYTHING — read as empty it would strip every grant in the cluster
     /// on each controller restart.
     #[test]
     fn the_env_side_keeps_only_the_spaces_that_point_here() {
@@ -1195,12 +1199,12 @@ Three stores plus their writers, the agent's shape exactly
 seeders behind `#[cfg(test)]`:
 
 ```rust
-    /// EVERY `SpaceEnvironment`, `Environment` and `Workspace` in the region. Unfiltered: one
-    /// process decides for the whole region, which is the point.
+    /// EVERY `SpaceEnvironment`, `Environment` and `Workspace` in the cluster. Unfiltered: one
+    /// process decides for the whole cluster, which is the point.
     ///
     /// Read through `spaces()`/`environments()`/`workspaces()` and NEVER without `store_ready`. An
     /// unlisted cache is UNKNOWN, never empty — read as empty, the env-side prune below would
-    /// delete every grant in the region on each controller restart.
+    /// delete every grant in the cluster on each controller restart.
     pub space_store: kube::runtime::reflector::Store<crd::SpaceEnvironment>,
 ```
 
@@ -1215,7 +1219,7 @@ wrote, in one apply, with identical bytes and therefore no observable change.
 Module doc first — this is the file a 3am reader lands on:
 
 ```rust
-//! The region's space grants: `space-env` in the space's namespace, `space-{ns}` in the
+//! The cluster's space grants: `space-env` in the space's namespace, `space-{ns}` in the
 //! environment's, and nothing else in stage 1.
 //!
 //! ONE writer, which is what deletes a whole class of bug rather than patching instances of it.
@@ -1231,7 +1235,7 @@ Module doc first — this is the file a 3am reader lands on:
 //! never "every environment", which is what `run.rs`'s `all_in_store` mapper did on every node.
 //!
 //! An unlisted cache is UNKNOWN: decide nothing, delete nothing. That rule matters more here than
-//! in an agent, because this process decides for the whole region at once.
+//! in an agent, because this process decides for the whole cluster at once.
 ```
 
 Then, in order:
@@ -1278,7 +1282,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo clippy -p kloudlite-contr
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/controller crates/workspaces/src/crd/mod.rs && git commit -m "Render every space grant from the region controller" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/controller crates/workspaces/src/crd/mod.rs && git commit -m "Render every space grant from the cluster controller" && git push platform HEAD
 ```
 
 ---
@@ -1299,7 +1303,7 @@ In `bins/agent/tests/reconcile/attachment.rs`, every case that asserted a `space
 ```rust
     /// The agent renders the pod's `/etc/resolv.conf` and writes the `Attached` condition, and
     /// NOTHING else: both halves of the grant belong to `kloudlite-controller` since stage 1 of
-    /// the region-controller split. Two writers across a roll is the one thing that release must
+    /// the cluster-controller split. Two writers across a roll is the one thing that release must
     /// never have.
     #[tokio::test]
     async fn the_agent_writes_no_network_policy_for_a_space() {
@@ -1406,7 +1410,7 @@ fn the_agent_source_names_no_space_policy_builder() {
                 !src.contains(needle),
                 "{file} names `{needle}`: the space grants belong to kloudlite-controller — \
                  see bins/controller/src/space.rs and the spec at \
-                 docs/superpowers/specs/2026-09-14-region-controller-design.md"
+                 docs/superpowers/specs/2026-09-14-cluster-controller-design.md"
             );
         }
     }
@@ -1444,14 +1448,14 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/agent/tests/reconc
 `docs/superpowers/specs/2026-09-14-intercept-proxy-design.md`, commit `0c5ca8ae`), which must ship
 first.
 
-The region-controller spec puts the intercept objects — the `intercept-{service}` proxy pod, the
+The cluster-controller spec puts the intercept objects — the `intercept-{service}` proxy pod, the
 Service's selector, the StatefulSet scale, and the fixed grant pair — in the controller in stage 1,
 "per `2026-09-14-intercept-proxy-design.md`". Those objects change SHAPE in that plan (a proxy pod
 in the environment namespace replaces the hand-written `EndpointSlice`), so moving today's writer
 (`bins/agent/src/controller/environment/intercept.rs:267-349`) into the controller now would port
 code that plan deletes. That plan says the same thing from its own side: it puts every decision in
 a pure render module in `crates/workspaces`, leaves the agent's environment reconciler as the only
-caller, and states that moving to the region controller is then "a change to the CALLER only".
+caller, and states that moving to the cluster controller is then "a change to the CALLER only".
 
 **Do not implement this task from this plan.** After the intercept-proxy plan has shipped, the move
 is one new reconciler in `bins/controller/src/space.rs`'s sibling module calling that render module,
@@ -1488,21 +1492,21 @@ comment (`ctl.leader` reads the Lease because the lease IS the output; `ctl.agen
 In `crates/workspaces/src/slo/catalogue.rs`, a new block after the workspaces rows:
 
 ```rust
-    // 15 · Region controller. The single elected writer of the space grants (stage 1 of
-    // `docs/superpowers/specs/2026-09-14-region-controller-design.md`). Every id but `ctl.leader`
+    // 15 · Cluster controller. The single elected writer of the space grants (stage 1 of
+    // `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`). Every id but `ctl.leader`
     // and `ctl.agent.nowrite` judges by CONNECTING, never by reading a policy object: a rendered
     // NetworkPolicy that the CNI never programmed is exactly the outage these exist to catch.
-    Slo { id: "ctl.leader", feature: "Region controller", sli: "Exactly one controller pod holds the `kloudlite-controller` Lease and has renewed it within its TTL", target: avail(99.9), suite: Suite::Fast, stage: "15 · Region controller" },
-    Slo { id: "ctl.grant.set", feature: "Region controller", sli: "Choosing an environment for a space lets a probe workspace resolve and connect to one of its services", target: bound(30_000), suite: Suite::Fast, stage: "15 · Region controller" },
-    Slo { id: "ctl.grant.switch", feature: "Region controller", sli: "Switching the choice makes the new environment's service reachable and the old one unreachable", target: bound(30_000), suite: Suite::Fast, stage: "15 · Region controller" },
-    Slo { id: "ctl.grant.cleared", feature: "Region controller", sli: "Clearing the choice refuses the connect and leaves no `space-*` policy for that space", target: bound(30_000), suite: Suite::Fast, stage: "15 · Region controller" },
-    Slo { id: "ctl.failover", feature: "Region controller", sli: "Deleting the leader pod elects another within 20 s and a choice made during the gap converges once it is up", target: bound(120_000), suite: Suite::Hourly, stage: "15 · Region controller" },
-    Slo { id: "ctl.agent.nowrite", feature: "Region controller", sli: "Every `space-*` NetworkPolicy in the region is managed by `kloudlite-controller` and by no agent", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Region controller" },
-    Slo { id: "ctl.fanout", feature: "Region controller", sli: "One change of a space's choice reconciles at most two environments", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Region controller" },
+    Slo { id: "ctl.leader", feature: "Cluster controller", sli: "Exactly one controller pod holds the `kloudlite-controller` Lease and has renewed it within its TTL", target: avail(99.9), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.set", feature: "Cluster controller", sli: "Choosing an environment for a space lets a probe workspace resolve and connect to one of its services", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.switch", feature: "Cluster controller", sli: "Switching the choice makes the new environment's service reachable and the old one unreachable", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.cleared", feature: "Cluster controller", sli: "Clearing the choice refuses the connect and leaves no `space-*` policy for that space", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.failover", feature: "Cluster controller", sli: "Deleting the leader pod elects another within 20 s and a choice made during the gap converges once it is up", target: bound(120_000), suite: Suite::Hourly, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.agent.nowrite", feature: "Cluster controller", sli: "Every `space-*` NetworkPolicy in the cluster is managed by `kloudlite-controller` and by no agent", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.fanout", feature: "Cluster controller", sli: "One change of a space's choice reconciles at most two environments", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Cluster controller" },
 ```
 
 Mirror all seven into `deploy/slo.md`'s table in the same order, with the same wording and
-`| fast |`/`| hourly |` and `| 15 · Region controller |` columns. The equality test
+`| fast |`/`| hourly |` and `| 15 · Cluster controller |` columns. The equality test
 (`the_catalogue_matches_deploy_slo_md`) is what holds them.
 
 ```sh
@@ -1512,7 +1516,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo test -p kloudlite-workspa
 - [ ] **Step 2: Write `bins/slo/src/stages/controller.rs`**
 
 ```rust
-//! 15 · Region controller. The controller is invisible from outside — a person never calls it —
+//! 15 · Cluster controller. The controller is invisible from outside — a person never calls it —
 //! so every id here is judged the way a person would notice it failing: a workspace that cannot
 //! reach its environment, or one that still can after the grant was taken away.
 //!
@@ -1527,7 +1531,7 @@ Then, in journey order:
 1. **`ctl.leader`** — `coordination.k8s.io` `Lease` `kloudlite-controller` in `kube-system`:
    `holderIdentity` is non-empty, `renewTime` is within `leaseDurationSeconds` of now, and that
    holder names a pod that is `Running` (a lease held by a pod that is gone is a stale lease, not
-   a leader). Also asserts the region has exactly ONE controller pod `Running` — two would mean a
+   a leader). Also asserts the cluster has exactly ONE controller pod `Running` — two would mean a
    replica count somebody raised without moving the counts.
 2. **`ctl.grant.set`** — `PUT /v1/me/environments/{team}` with the run's environment, then from the
    probe WORKSPACE pod (not the env pod): `(getent hosts redis || nslookup redis) && redis-cli -h
@@ -1548,9 +1552,9 @@ Then, in journey order:
    issue a `PUT /v1/me/environments/{team}` DURING the gap (immediately after the delete) and
    assert the connect from the workspace succeeds once the new leader is up. Converging exactly
    once is what the epoch guard buys; a wish lost in a handover is the failure this catches.
-6. **`ctl.agent.nowrite`** (hourly) — list every `NetworkPolicy` named `space-*` in the region and
+6. **`ctl.agent.nowrite`** (hourly) — list every `NetworkPolicy` named `space-*` in the cluster and
    assert each one's `metadata.managedFields` carries `kloudlite-controller` and carries no entry
-   for `kloudlite-agent`. Skip with "no space grants in the region" if the list is empty — an empty
+   for `kloudlite-agent`. Skip with "no space grants in the cluster" if the list is empty — an empty
    list is not evidence.
 7. **`ctl.fanout`** (hourly) — change one space's choice and assert the controller reconciled at
    most two environments for it. Read it from the controller's own log lines
@@ -1584,7 +1588,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo clippy -p kloudlite-slo -
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/slo crates/workspaces/src/slo/catalogue.rs deploy/slo.md && git commit -m "Probe the region controller's lease and its space grants" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add bins/slo crates/workspaces/src/slo/catalogue.rs deploy/slo.md && git commit -m "Probe the cluster controller's lease and its space grants" && git push platform HEAD
 ```
 
 ---
@@ -1602,7 +1606,7 @@ Beside the other mapper tests in `history/watch.rs`:
 
 ```rust
     /// Only a change of HOLDER is an event. A Lease is rewritten every 5 s by the renew beat, and
-    /// a row per renew would be 17 k rows a day per region saying nothing happened.
+    /// a row per renew would be 17 k rows a day per cluster saying nothing happened.
     #[test]
     fn only_a_change_of_holder_is_a_leader_event() {
         let a = lease("ctl-a", 3, "100");
@@ -1624,13 +1628,13 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo test -p kloudlite-workspa
 
 - [ ] **Step 2: Implement**
 
-A mapper beside `snapshot_events`/`volume_events`, and one reflector per region over
+A mapper beside `snapshot_events`/`volume_events`, and one reflector per cluster over
 `coordination.k8s.io/v1` `Lease` in `kube-system` with `metadata.name=kloudlite-controller` (a
-field selector, so it streams one object per region, not every Lease in the cluster). `ts` comes
+field selector, so it streams one object per cluster, not every Lease in it). `ts` comes
 from `spec.renewTime` — derived from the object, so a replayed watch is byte-identical, the rule
 every other mapper here follows. Reuse the existing row builder; add no table and no migration.
 
-If the region's history client cannot list `Lease` (RBAC on an older cluster), the reflector logs
+If the cluster's history client cannot list `Lease` (RBAC on an older cluster), the reflector logs
 once and the rest of `history::watch` is unaffected — the same fallback shape the other kinds have.
 
 - [ ] **Step 3: Tests**
@@ -1657,16 +1661,16 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add crates/workspaces/src/h
 **Files:**
 - Modify: `CLAUDE.md`
 
-- [ ] **Step 1: Add the "Region controller" paragraph**
+- [ ] **Step 1: Add the "Cluster controller" paragraph**
 
 After "Workspaces and environments" and before "Live settings", matching the file's density — one
 paragraph, the load-bearing facts only:
 
 ```md
-## Region controller
+## Cluster controller
 
 `bins/controller` (`kloudlite-controller`) is a second control-plane process in every **k3s**
-region — one Deployment, one replica, `Recreate`, in `kube-system`, no PDB — and it is the ONE
+cluster — one Deployment, one replica, `Recreate`, in `kube-system`, no PDB — and it is the ONE
 writer of every object that is shared across nodes or derived purely from spec. AKS runs none: it
 has no `Region` CRD and no agents. Leadership is a `coordination.k8s.io/v1` `Lease` named
 `kloudlite-controller` in `kube-system` (`bins/controller/src/lease.rs`): `holderIdentity` is the
@@ -1684,12 +1688,12 @@ environment's — and the agents' writes of them were deleted in the same releas
 re-renders that space's egress half and the ingress half in at most two environments, never every
 environment on every node. An unlisted reflector is UNKNOWN and the pass decides nothing — the
 same rule as the agents', and it matters more here, because this process decides for the whole
-region at once. Rolling it is not the usual order: agents first, then the controller, then the
+cluster at once. Rolling it is not the usual order: agents first, then the controller, then the
 narrowed `agent-rbac.yaml` (`deploy/k3s/README.md`) — RBAC applied early 403s a still-writing
 agent and aborts its whole reconcile. Stages 2 (namespaces, quotas, `OwnerKeys`/`OwnerBinding`
 status) and 3 (the sweeps, behind a `Mark::Boot` flag) are designed and not built; placement
 stays in the agents deliberately, because the claiming node is the authority on the bytes it
-holds. Spec: `docs/superpowers/specs/2026-09-14-region-controller-design.md`.
+holds. Spec: `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`.
 ```
 
 - [ ] **Step 2: Edit the agent's paragraph**
@@ -1704,7 +1708,7 @@ AGENTS' peer listeners … and to nothing else", leave it — that is still true
 
 ```sh
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && git log -3 --oneline
-cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add CLAUDE.md && git commit -m "Document the region controller beside the node agents" && git push platform HEAD
+cd /Volumes/kdisk/rustic-git-wt/desktop-login && git add CLAUDE.md && git commit -m "Document the cluster controller beside the node agents" && git push platform HEAD
 ```
 
 ---
@@ -1716,7 +1720,7 @@ cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo clippy --workspace --all-
 cd /Volumes/kdisk/rustic-git-wt/desktop-login && cargo test --locked
 ```
 
-both green, and on the region after the three-step apply: `kubectl -n kube-system get lease
+both green, and on the cluster after the three-step apply: `kubectl -n kube-system get lease
 kloudlite-controller` names a Running controller pod, every `space-*` NetworkPolicy's
 `managedFields` names `kloudlite-controller` and no `kloudlite-agent`, and one fast SLO run reports
 `ctl.leader`, `ctl.grant.set`, `ctl.grant.switch` and `ctl.grant.cleared` good. Until that run

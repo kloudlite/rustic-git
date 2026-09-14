@@ -1,14 +1,19 @@
-# A region controller beside the node agents
+# A cluster controller beside the node agents
 
 Status: design, 2026-09-14. Sources: the two read-only audits (`coordination-audit.md`,
 `space-env-vet.md`), `docs/superpowers/specs/2026-09-14-person-environment-design.md`,
 `bins/agent/src/controller/**`, `bins/agent/src/peer/sweeps.rs`, `bins/agent/src/janitor.rs`,
 `crates/workspaces/src/k8s/policies.rs`, `crates/storage/src/ownership/lease.rs`.
 
+Terms: a **Region** is the unit a team is bound to and may hold SEVERAL k3s clusters; the
+controller in this document is per **cluster** — one elected leader per k3s cluster, over that
+cluster's agents. "Region" below means the `Region` CRD, a team's bound region or an Azure region,
+and nothing else.
+
 ## The ruling and the shape
 
 Owner: "can we actually run controllers separately and delegate the tasks to the agents when
-needed?" — yes. A new `kloudlite-controller` Deployment per region, leader-elected, ONE active
+needed?" — yes. A new `kloudlite-controller` Deployment per cluster, leader-elected, ONE active
 writer, owns every object that is **shared across nodes or derived purely from spec**. The agent
 keeps only what is bound to a host: btrfs, snapshots, replication (`btrfs send`/`receive`), nix
 profiles, the two per-pod files (`resolv.conf`, `authorized_keys`), homes/homecache, the local
@@ -16,7 +21,7 @@ janitor. The api does NOT take controller work — it stays a writer of spec ("u
 responsibility on api server"). Delegation is through Kubernetes objects only: the controller
 writes desired state, the node's agent watches its own node and reports status. No RPC, no queue.
 
-The whole justification is in the audit's own table: seventeen rows say "EVERY node in the region"
+The whole justification is in the audit's own table: seventeen rows say "EVERY node in the cluster"
 for an object that is not per node. Every one of those is either N× write amplification or a
 provable disagreement (F3, the `OwnerKeys` `WriteFailed` flap, the `OwnerBinding` per-node fact in
 a cluster-scoped field). A single writer deletes the class, it does not patch instances of it.
@@ -86,10 +91,10 @@ Recommendation: **claims, un-placement and `take_volume` stay where they are; on
 `may_claim` (`claim.rs:44-53`) is decided from the claiming node's OWN `VolumeReplica.branches` —
 the node is the authority on what bytes it holds, and the claim is settled by a `replace_status`
 CAS that already admits exactly one winner. Moving it would (a) make the controller read every
-replica row in the region to decide something the node knows locally, (b) make placement stop
+replica row in the cluster to decide something the node knows locally, (b) make placement stop
 entirely while the controller is down, where today a node can still pick up its own work, and
 (c) put the unknown-cache rule in a worse place: a controller with an unlisted cache would be
-deciding for the whole region at once, instead of one node declining to claim.
+deciding for the whole cluster at once, instead of one node declining to claim.
 
 The **sweeps** are the opposite case and move in stage 3: the dead-node, drain, retire, reap and
 collect passes each compute a CLUSTER-wide verdict, every node computes the same one, and the audit
@@ -159,7 +164,7 @@ one it named before, read from the controller's own cache. That is the fix for t
 | audit: `Volume.status` sweep marks by every node | controller. Stage 3. |
 | audit: reap without uid precondition | controller + uid precondition. Stage 3. |
 | audit: `ResourceQuota` body depends on a live `Quota` read | controller, one reader. Stage 2. |
-| audit: `ensure`'s 600 s memory | **keep.** It was per-process and the fleet had N of them; with one writer the memory is now the truth for the whole region, which is strictly better. The rule stands unchanged and gets a test: any path that mutates a child outside `ensure` calls `forget_applied` first. |
+| audit: `ensure`'s 600 s memory | **keep.** It was per-process and the fleet had N of them; with one writer the memory is now the truth for the whole cluster, which is strictly better. The rule stands unchanged and gets a test: any path that mutates a child outside `ensure` calls `forget_applied` first. |
 | audit: bench pod delete on another node | controller; the `harness-bench` folder lock stays the fence — never weaken it to "the delete fences it". |
 | audit: `hosted` from a beat-old listing | stays with the agent (own bytes), fresh GET unchanged. |
 | vet F6/F7 LOW (`condition` vs `condition_since`, per-pod Environment GET) | folded into stage 1's move — the controller reads the environment from its cache, so F7 disappears; use `condition_since`. |
@@ -288,8 +293,9 @@ already uses for the attach migration. Placement is NOT in this stage and is not
 
 ## Open questions
 
-1. Does the controller roll with the region (one per k3s cluster) or is there ever a case for one
-   per AKS region too? This spec assumes one per cluster, named by region.
+1. *Settled (owner, 2026-09-14):* one controller per k3s CLUSTER. A Region may hold several
+   clusters, so there is no per-Region controller — only a per-cluster one, stamped with the
+   Region it belongs to.
 2. Stage 3's `Mark::Boot` flag is an extra knob that exists for one release — acceptable, or ship
    stage 3 as a hard cutover with a documented maintenance window?
 3. `OwnerKeys.status.nodes[]` grows with the node count for every owner. Cap it (drop entries for

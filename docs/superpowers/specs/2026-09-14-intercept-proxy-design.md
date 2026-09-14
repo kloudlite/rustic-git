@@ -139,8 +139,8 @@ rule, and `forget_applied` is called for it the way the vetting demands of every
 
 ## Behaviour
 
-**Single writer.** The region controller owns the proxy pod, the Service selector, the StatefulSet
-scale and both grants — see `2026-09-14-region-controller-design.md`. Nothing here changes who
+**Single writer.** The cluster controller owns the proxy pod, the Service selector, the StatefulSet
+scale and both grants — see `2026-09-14-cluster-controller-design.md`. Nothing here changes who
 decides; `decide_intercept` and its grace are untouched. This spec defines only the objects and
 their behaviour.
 
