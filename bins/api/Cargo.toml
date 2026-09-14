@@ -19,6 +19,8 @@ kube = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+slatedb = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }

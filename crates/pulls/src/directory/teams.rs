@@ -150,6 +150,23 @@ impl Directory {
         }
     }
 
+    /// Slugs of every team with no region yet — the one-off backfill's work list. Unbounded on
+    /// purpose: it runs once at an admin boot, and a capped list would silently skip teams.
+    pub async fn unbound_teams(&self) -> Result<Vec<String>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let filter = doc! { "$or": [{ "region": { "$exists": false } }, { "region": "" }] };
+                let cursor = m.teams.find(filter).await.map_err(|e| err(format!("mongo: {e}")))?;
+                let teams: Vec<Team> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(teams.into_iter().map(|t| t.slug).collect())
+            }
+            Backend::Memory(s) => {
+                Ok(s.lock().unwrap().teams.values().filter(|t| t.region.is_empty()).map(|t| t.slug.clone()).collect())
+            }
+        }
+    }
+
     pub async fn get(&self, slug: &str) -> Result<Option<Team>> {
         match &self.backend {
             Backend::Mongo(m) => m
@@ -742,6 +759,16 @@ mod tests {
         assert_eq!(t.region, "r1");
         assert_eq!(d.get("acme").await.unwrap().unwrap().region, "r1");
         assert_eq!(d.bind_region("acme", "r2").await.unwrap().as_deref(), Some("r1"), "created bound stays bound");
+    }
+
+    #[tokio::test]
+    async fn unbound_teams_lists_only_teams_without_a_region() {
+        let d = Directory::in_memory();
+        d.upsert_user("alice@x.io", "Alice").await.unwrap();
+        d.claim_username("alice@x.io", "alice").await.unwrap().unwrap();
+        d.create("old", "Old", "alice@x.io", "").await.unwrap().unwrap();
+        d.create("fresh", "Fresh", "alice@x.io", "r1").await.unwrap().unwrap();
+        assert_eq!(d.unbound_teams().await.unwrap(), vec!["old".to_string()], "a person's handle is never listed");
     }
 
     #[test]

@@ -20,6 +20,8 @@ use kloudlite_core::{require_jwt_secret_from_env, Result};
 use kloudlite_storage::config::{env, install_crypto_provider, open_store};
 use std::sync::Arc;
 
+mod backfill;
+
 /// The mongo-backed `Directory` wearing the workspaces api's own `Directory` trait: team
 /// membership, the CLI-token revocation list (a token works only while its row stands, the same
 /// rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
@@ -519,6 +521,13 @@ async fn run() -> Result<()> {
     if role != "admin" {
         if let Some(ws) = workspaces.clone().filter(|ws| ws.keys.is_some()) {
             tokio::spawn(kloudlite_workspaces::packages::mirror_beat::run_beat(ws));
+        }
+    }
+    // Teams made before a region was required get the one region there is; admin role only, the
+    // tier that writes owner placement.
+    if role == "admin" {
+        if let (Some(k), Some(dir)) = (workspaces.as_ref().and_then(|ws| ws.kube.clone()), directory.clone()) {
+            tokio::spawn(backfill::at_boot(k, dir, store.os.clone()));
         }
     }
     // The hourly folds and the alert evaluator. Spawned from the admin role only, and only with
