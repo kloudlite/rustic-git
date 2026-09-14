@@ -656,7 +656,7 @@ async fn team_push(c: &mut Ctx) {
         c,
         &api(c, "/v1/teams"),
         &c.probe_jwt.clone(),
-        serde_json::json!({ "slug": slug, "name": "kloudlite slo registry probe" }),
+        serde_json::json!({ "slug": slug, "name": "kloudlite slo registry probe", "region": c.cfg.region }),
     )
     .await
     {
