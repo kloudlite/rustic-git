@@ -134,9 +134,23 @@ async fn attempt<R, E: Into<tower::BoxError>>(
     layer: &'static str,
     method: &http::Method,
     path: &str,
+    watch_stall: bool,
 ) -> Result<R, tower::BoxError> {
     let dials = Dials::now();
-    match tokio::time::timeout(after, fut).await {
+    let start = tokio::time::Instant::now();
+    let mut fut = std::pin::pin!(fut);
+    // Dump while the request is still parked: at the bound the future is dropped, hyper closes
+    // the connection and the retry answers before an OS thread could look (k3s-stall part 3).
+    // One timer only when dumps are on; the deadline below is unchanged either way.
+    if watch_stall && super::stall_dump::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::select! {
+            r = &mut fut => return r.map_err(Into::into),
+            _ = tokio::time::sleep(super::stall_dump::STALL_AT) => {
+                super::stall_dump::on_stall(method, path, start.elapsed().as_millis() as u64, DIALS.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        }
+    }
+    match tokio::time::timeout_at(start + after, fut).await {
         Ok(r) => r.map_err(Into::into),
         Err(_) => {
             // Both layers poll inside the outer layer's client span, so this names the bound that
@@ -145,9 +159,6 @@ async fn attempt<R, E: Into<tower::BoxError>>(
             let (dials, dials_ok) = dials.since();
             let inflight = INFLIGHT.load(std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(%method, %path, layer, secs = after.as_secs_f32(), inflight, dials, dials_ok, "kube.timeout");
-            if layer == "inner" {
-                super::stall_dump::on_inner_timeout(method, path);
-            }
             Err(KubeTimeout { layer, method: method.clone(), path: path.to_string(), after }.into())
         }
     }
@@ -178,7 +189,7 @@ where
             return Box::pin(async move { fut.await.map_err(Into::into) });
         }
         if layer == "inner" {
-            return Box::pin(async move { attempt(fut, after, layer, &method, &path).await });
+            return Box::pin(async move { attempt(fut, after, layer, &method, &path, kind == Kind::Read).await });
         }
         let spare = self.inner.clone();
         // One CLIENT span per non-watch call, opened in the outer layer so both bounds, the retry
@@ -189,7 +200,7 @@ where
             let start = Instant::now();
             let flight = Flight::start();
             let dials = Dials::now();
-            let mut out = attempt(fut, after, layer, &method, &path).await;
+            let mut out = attempt(fut, after, layer, &method, &path, false).await;
             // Retrying drops the stalled future first. hyper-util's `Pooled` only returns a
             // connection to the pool when `is_open` (= its HTTP/1 sender is ready, i.e. the
             // dispatcher is idle and wanting), so a connection wedged mid-request is discarded and
@@ -201,7 +212,7 @@ where
                 tracing::warn!(verb = %method, resource = %path, first_attempt_ms = start.elapsed().as_millis() as u64, layer = fired, "kube.retry");
                 let ready = spare.ready_oneshot().await.map_err(Into::<tower::BoxError>::into);
                 out = match ready {
-                    Ok(mut svc) => attempt(svc.call(req), after, layer, &method, &path).await,
+                    Ok(mut svc) => attempt(svc.call(req), after, layer, &method, &path, false).await,
                     Err(e) => Err(e),
                 };
             }
@@ -337,12 +348,16 @@ where
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
         use std::sync::atomic::Ordering::Relaxed;
-        DIALS.fetch_add(1, Relaxed);
+        // The dial count doubles as the connection's serial. It cannot be tied to a request:
+        // hyper-util surfaces `Connected::extra` only in the RESPONSE extensions, which a stalled
+        // request never gets, so a stall dump carries the newest serial, not its own.
+        let serial = DIALS.fetch_add(1, Relaxed) + 1;
         let fut = self.0.call(uri);
         Box::pin(async move {
             let out = fut.await;
             if out.is_ok() {
                 DIALS_OK.fetch_add(1, Relaxed);
+                tracing::debug!(serial, "kube.dial");
             }
             out
         })

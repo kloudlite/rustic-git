@@ -1,5 +1,10 @@
-//! Where is a stalled kube request parked? A tokio task dump taken at the moment the inner bound
-//! fires (`kube.timeout layer=inner`), logged as one `kube.stall.dump` line.
+//! Where is a stalled kube request parked? A tokio task dump taken while an inner-layer read is
+//! still waiting (`STALL_AT`, before its bound), logged as one `kube.stall.dump` line.
+//!
+//! Part 3 of the investigation: dumps taken AFTER the bound were useless — the stalled future was
+//! already dropped, hyper had closed its connection and the retry had answered, and 64 KB of
+//! repeated monomorphized names kept 16 of 37 tasks. So the dump fires mid-stall, generics are
+//! stripped, identical traces print once with a count, and caller tasks lead.
 //!
 //! 2026-09-14 (`k3s-stall` investigation): inner-layer stalls on a pooled HTTP/1 connection
 //! (dials=0) answer in ms on retry and start just after the keys tick's fsync loop. The candidate
@@ -18,6 +23,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Before the inner read bound (4.5 s), so the stalled request is still parked when we look.
+pub const STALL_AT: Duration = Duration::from_millis(3500);
 
 pub const MIN_GAP: Duration = Duration::from_secs(600);
 /// `Handle::dump` never resolves while another worker is blocked past 250 ms; a timeout here is
@@ -55,28 +63,76 @@ pub fn resource_of(path: &str) -> &str {
     }
 }
 
-pub fn on_inner_timeout(method: &http::Method, path: &str) {
+pub fn on_stall(method: &http::Method, path: &str, elapsed_ms: u64, newest_conn: u64) {
     if !ENABLED.load(Ordering::Relaxed) || !claim(secs_now()) {
         return;
     }
     let (method, resource) = (method.clone(), resource_of(path).to_string());
+    // `conn_serial` is unobtainable (see `Counted`); `newest_conn` is the last dial's serial.
     #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         // An OS thread, never a task: the bound and the log line must not need a runtime worker,
         // since a wedged worker is exactly what this is looking for.
         std::thread::spawn(move || match dump(handle, MAX_BYTES) {
-            Some(d) => tracing::warn!(%method, %resource, tasks = d.tasks, matched = d.matched, dump_ms = d.ms, truncated = d.truncated, dump = %d.text, "kube.stall.dump"),
-            None => tracing::warn!(%method, %resource, timeout_ms = DUMP_TIMEOUT.as_millis() as u64, "kube.stall.dump.timeout"),
+            Some(d) => tracing::warn!(%method, %resource, elapsed_ms, newest_conn, conn_serial = "unknown", tasks = d.tasks, matched = d.matched, distinct = d.distinct, dump_ms = d.ms, truncated = d.truncated, dump = %d.text, "kube.stall.dump"),
+            None => tracing::warn!(%method, %resource, elapsed_ms, newest_conn, timeout_ms = DUMP_TIMEOUT.as_millis() as u64, "kube.stall.dump.timeout"),
         });
     }
     #[cfg(not(all(tokio_unstable, feature = "stall-dump", target_os = "linux")))]
-    tracing::warn!(%method, %resource, "kube.stall.dump.unsupported");
+    tracing::warn!(%method, %resource, elapsed_ms, newest_conn, "kube.stall.dump.unsupported");
+}
+
+/// Drops every `<...>` (nested, `->` inside kept balanced) and the registry prefix of a path.
+pub fn strip(trace: &str) -> String {
+    let (mut out, mut depth, mut prev) = (String::with_capacity(trace.len() / 2), 0usize, ' ');
+    for c in trace.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 && prev != '-' => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+        prev = c;
+    }
+    out.lines()
+        .map(|l| match (l.find(" at "), l.find("index.crates.io-")) {
+            (Some(at), Some(ix)) if ix > at => {
+                let rest = &l[ix..];
+                format!("{} at {}", &l[..at], rest.find('/').map_or(rest, |i| &rest[i + 1..]))
+            }
+            _ => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `(task id, raw trace)` in, one block per distinct stripped trace out: callers (kube/tower/our
+/// own frames) first, connection tasks after, each `count x tasks [ids]`. Returns (text, distinct).
+pub fn render(tasks: &[(String, String)]) -> (String, usize) {
+    use std::fmt::Write as _;
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for (id, raw) in tasks {
+        let t = strip(raw);
+        match groups.iter_mut().find(|g| g.0 == t) {
+            Some(g) => g.1.push(id),
+            None => groups.push((t, vec![id])),
+        }
+    }
+    let caller = |t: &str| ["kube", "tower", "kloudlite"].iter().any(|k| t.contains(k));
+    groups.sort_by_key(|g| !caller(&g.0));
+    let mut text = String::new();
+    for (t, ids) in &groups {
+        let shown: Vec<&str> = ids.iter().take(8).copied().collect();
+        let _ = writeln!(text, "{}x tasks [{}]:\n{t}", ids.len(), shown.join(","));
+    }
+    (text, groups.len())
 }
 
 #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
 pub struct Dump {
     pub tasks: usize,
     pub matched: usize,
+    pub distinct: usize,
     pub ms: u64,
     pub truncated: bool,
     pub text: String,
@@ -98,7 +154,6 @@ static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// Tasks whose trace touches the HTTP stack only; the rest of the runtime is counted, not printed.
 #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
 pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
-    use std::fmt::Write as _;
     if IN_FLIGHT.swap(true, Ordering::Relaxed) {
         return None;
     }
@@ -112,15 +167,17 @@ pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
     });
     let snap = rx.recv_timeout(DUMP_TIMEOUT).ok()?;
     let ms = start.elapsed().as_millis() as u64;
-    let (mut tasks, mut matched, mut text) = (0, 0, String::new());
+    let mut tasks = 0;
+    let mut hits = Vec::new();
     for t in snap.tasks().iter() {
         tasks += 1;
         let trace = t.trace().to_string();
         if ["hyper", "kube", "tower"].iter().any(|k| trace.contains(k)) {
-            matched += 1;
-            let _ = writeln!(text, "task {}:\n{trace}", t.id());
+            hits.push((t.id().to_string(), trace));
         }
     }
+    let matched = hits.len();
+    let (mut text, distinct) = render(&hits);
     let truncated = text.len() > max;
     if truncated {
         let mut cut = max;
@@ -129,7 +186,7 @@ pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
         }
         text.truncate(cut);
     }
-    Some(Dump { tasks, matched, ms, truncated, text })
+    Some(Dump { tasks, matched, distinct, ms, truncated, text })
 }
 
 #[cfg(test)]
@@ -143,6 +200,27 @@ mod tests {
         assert_eq!(resource_of("/api/v1/namespaces/ws-karthik/pods/p"), "pods");
         assert_eq!(resource_of("/apis/kloudlite.io/v1alpha1/snapshots"), "snapshots");
         assert_eq!(resource_of("/version"), "unknown");
+    }
+
+    #[test]
+    fn generics_and_registry_prefixes_are_stripped() {
+        let t = "╼ hyper::proto::h1::dispatch::Dispatcher<D, Bs, I, T>::poll_catch<F: Fn() -> Vec<u8>> at /root/.cargo/registry/src/index.crates.io-abc/hyper-1.11.0/src/x.rs:1:2";
+        assert_eq!(strip(t), "╼ hyper::proto::h1::dispatch::Dispatcher::poll_catch at hyper-1.11.0/src/x.rs:1:2");
+    }
+
+    #[test]
+    fn identical_traces_print_once_callers_first() {
+        let conn = "hyper_util::client::legacy::Client<A>::connect_to\n  tokio_rustls::Stream<B>::read".to_string();
+        let tasks = vec![
+            ("1".into(), conn.clone()),
+            ("2".into(), conn.replace("<A>", "<Z, Y>")),
+            ("3".into(), "kube_client::Client::send<W>\n  tower::buffer::Buffer::call".into()),
+            ("4".into(), conn),
+        ];
+        let (text, distinct) = render(&tasks);
+        assert_eq!(distinct, 2);
+        assert!(text.starts_with("1x tasks [3]:\nkube_client::Client::send\n"), "{text}");
+        assert!(text.contains("3x tasks [1,2,4]:\nhyper_util::client::legacy::Client::connect_to\n"), "{text}");
     }
 
     #[test]
