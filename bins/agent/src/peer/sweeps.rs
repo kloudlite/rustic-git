@@ -465,7 +465,7 @@ pub(crate) async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listin
         if v.metadata.deletion_timestamp.is_some() || !ctx.engine.pool.voldir(&id).exists() {
             continue;
         }
-        let local = match ctx.engine.local_snapshots(&id) {
+        let local = match crate::snapshot::local_snapshots(ctx, &id).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(kind = "Snapshot", volume = %id, reason = "local", error = %e, "listing.failed");

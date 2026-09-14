@@ -293,7 +293,7 @@ pub(crate) async fn pull_volume(ctx: &Arc<Ctx>, beat: &crate::listing::Beat, btr
     let ready: Vec<crd::Snapshot> =
         all.into_iter().filter(|s| s.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Ready)).collect();
 
-    let mut have: HashSet<String> = match ctx.engine.local_snapshots(volume) {
+    let mut have: HashSet<String> = match crate::snapshot::local_snapshots(ctx, volume).await {
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
             tracing::warn!(kind = "Snapshot", %volume, reason = "local", error = %e, "listing.failed");

@@ -7,13 +7,17 @@ use kube::{Api, ResourceExt};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// In place, never by rename: pods hold the inode through their hostPath mount.
+/// In place, never by rename: pods hold the inode through their hostPath mount. Answers whether it
+/// wrote: a file already holding these bytes, mode and uid is left alone — no truncate, no fsync.
+/// On 2026-09-14 the tick blanked ~316 stale owners a minute per node, an fsync each on btrfs, on
+/// a runtime worker: ~1 s a minute of a worker whose LIFO slot held a kube connection task, which
+/// is `kube.timeout layer=inner dials=0` at boot+k·60 s. Every caller runs this on the blocking pool.
 ///
 // ponytail: between the `O_TRUNC` and the `write_all` the file is empty, so a login racing the
 // write is refused. Sub-millisecond, and the next attempt succeeds. Upgrade path if that ever
 // matters: keep the file open, write from offset 0 and `set_len` after, or stage the bytes in a
 // temp file and `copy_file_range` them into the same inode.
-pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Result<()> {
+pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Result<bool> {
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let path = k8s::keys_file(pool, owner);
@@ -23,6 +27,18 @@ pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Resu
         .parent()
         .ok_or_else(|| std::io::Error::other(format!("{path} has no parent directory")))?;
     std::fs::create_dir_all(dir)?;
+    if let Ok(m) = std::fs::metadata(&path) {
+        // A non-root test process cannot give a file away, so the uid only counts as root.
+        let uid_ok = m.uid() == k8s::SSH_UID as u32 || unsafe { libc::geteuid() } != 0;
+        if m.is_file()
+            && m.len() == contents.len() as u64
+            && m.mode() & 0o777 == 0o600
+            && uid_ok
+            && std::fs::read(&path).is_ok_and(|b| b == contents.as_bytes())
+        {
+            return Ok(false);
+        }
+    }
     let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path)?;
     f.write_all(contents.as_bytes())?;
     f.sync_all()?;
@@ -42,12 +58,10 @@ pub fn write_keys_file(pool: &str, owner: &str, contents: &str) -> std::io::Resu
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    Ok(true)
 }
 
-/// Owner directories under `keys_root` with no live `OwnerKeys` behind them. Their file is blanked
-/// rather than removed: a pod already running holds the inode, and an empty file is "nobody is
-/// admitted" where a deleted one would be a mount the kubelet refuses on the next start.
+/// Owner directories under `keys_root` with no live `OwnerKeys` behind them.
 fn stale_owners(pool: &str, live: &HashSet<String>) -> Vec<String> {
     let Ok(dir) = std::fs::read_dir(k8s::keys_root(pool)) else { return vec![] };
     dir.flatten()
@@ -56,7 +70,7 @@ fn stale_owners(pool: &str, live: &HashSet<String>) -> Vec<String> {
         .collect()
 }
 
-/// The write is unconditional — no read-back compare first: it is idempotent and cheap, and
+/// The write skips a file already in the desired state and runs on the blocking pool; the
 /// `condition_since` keeps `lastTransitionTime` when nothing actually transitioned.
 ///
 /// Status is per CLUSTER while the file is per NODE, so what lands here is the last node to
@@ -67,9 +81,13 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
     let owner = obj.name_any();
     let generation = obj.spec.generation;
     let prev = obj.status.as_ref().and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::KEYS_SYNCED));
-    let (ok, reason, msg) = match write_keys_file(&ctx.pool, &owner, &obj.spec.authorized_keys) {
-        Ok(()) if obj.spec.authorized_keys.is_empty() => (true, "NoKeys", "no member has a key; nobody is admitted"),
-        Ok(()) => (true, "Applied", "written to this node's keys file"),
+    let (pool, o, keys) = (ctx.pool.clone(), owner.clone(), obj.spec.authorized_keys.clone());
+    let written = tokio::task::spawn_blocking(move || write_keys_file(&pool, &o, &keys))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+    let (ok, reason, msg) = match written {
+        Ok(_) if obj.spec.authorized_keys.is_empty() => (true, "NoKeys", "no member has a key; nobody is admitted"),
+        Ok(_) => (true, "Applied", "written to this node's keys file"),
         Err(e) => {
             tracing::warn!(%owner, error = %e, "keys.write.failed");
             (false, "WriteFailed", "could not write this node's keys file")
@@ -123,7 +141,7 @@ async fn converge(ctx: &Ctx, api: &Api<crd::OwnerKeys>, obj: crd::OwnerKeys) {
         // revoke the Delete event does, which a deletion this node was disconnected across never
         // delivered.
         Err(kube::Error::Api(e)) if e.code == 404 => {
-            revoke(&ctx.pool, &owner);
+            revoke_off_worker(&ctx.pool, &owner).await;
             tracing::info!(%owner, "keys.status.gone");
         }
         Err(e) => tracing::warn!(%owner, error = %e, "keys.status.failed"),
@@ -147,10 +165,70 @@ pub async fn converge_owner(ctx: &Ctx, owner: &str) {
 
 /// An owner whose projection is gone is an owner nobody may log in as. No status patch — the
 /// object it would be written to is what just disappeared.
-fn revoke(pool: &str, owner: &str) {
-    if let Err(e) = write_keys_file(pool, owner, "") {
-        tracing::warn!(%owner, error = %e, "keys.revoke.failed");
+fn revoke(pool: &str, owner: &str) -> bool {
+    match write_keys_file(pool, owner, "") {
+        Ok(wrote) => wrote,
+        Err(e) => {
+            tracing::warn!(%owner, error = %e, "keys.revoke.failed");
+            false
+        }
     }
+}
+
+/// Blanks only, never removes: a pod on this node may hold the inode, and only the tick knows
+/// which pods do.
+async fn revoke_off_worker(pool: &str, owner: &str) {
+    let (pool, owner) = (pool.to_string(), owner.to_string());
+    let _ = tokio::task::spawn_blocking(move || revoke(&pool, &owner)).await;
+}
+
+/// Owners whose keys file some pod on this node mounts (`k8s::keys_volume`'s hostPath).
+fn referenced_owners(pool: &str, pods: &[k8s_openapi::api::core::v1::Pod]) -> HashSet<String> {
+    let prefix = format!("{}/", k8s::keys_root(pool));
+    pods.iter()
+        .flat_map(|p| p.spec.iter().flat_map(|s| s.volumes.iter().flatten()))
+        .filter_map(|v| v.host_path.as_ref()?.path.strip_prefix(&prefix)?.split('/').next().map(str::to_string))
+        .collect()
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct Sweep {
+    checked: usize,
+    rewritten: usize,
+    removed: usize,
+}
+
+/// One tick's worth of stale owners, blocking; the caller runs it on the blocking pool.
+///
+/// `referenced` is `None` when this node's pods could not be listed: UNKNOWN, so nothing is
+/// removed and every stale file is only blanked (keep-biased). A directory no `OwnerKeys` names
+/// and no pod here mounts is removed outright — on 2026-09-14 ~310 of them were dead probe
+/// owners, and blanking them forever was the whole per-minute cost. A pod that mounts one keeps
+/// its (empty) file: removing it would strand the inode it holds and fail its next start.
+// ponytail: bounded at 1000 per tick; the rest wait a minute. Raise if a node ever holds more.
+fn sweep(pool: &str, live: &HashSet<String>, referenced: Option<&HashSet<String>>) -> Sweep {
+    let mut out = Sweep::default();
+    for owner in stale_owners(pool, live).into_iter().take(1000) {
+        out.checked += 1;
+        if referenced.is_some_and(|r| !r.contains(&owner)) {
+            let dir = format!("{}/{owner}", k8s::keys_root(pool));
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    out.removed += 1;
+                    tracing::info!(%owner, "keys.dir.removed");
+                }
+                Err(e) => tracing::warn!(%owner, error = %e, "keys.dir.remove_failed"),
+            }
+        } else if revoke(pool, &owner) {
+            out.rewritten += 1;
+        }
+    }
+    out
+}
+
+/// `f` on the blocking pool: the async task that awaits it stays free to poll kube connections.
+async fn off_worker<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(f).await.ok()
 }
 
 /// Every `OwnerKeys` in the cluster, converged on every event and on a one-minute tick — the tick
@@ -190,7 +268,7 @@ where
         tokio::select! {
             event = events.next() => match event {
                 Some(Ok(watcher::Event::Apply(obj) | watcher::Event::InitApply(obj))) => converge(&ctx, &api, obj).await,
-                Some(Ok(watcher::Event::Delete(obj))) => revoke(&ctx.pool, &obj.name_any()),
+                Some(Ok(watcher::Event::Delete(obj))) => revoke_off_worker(&ctx.pool, &obj.name_any()).await,
                 Some(Ok(watcher::Event::Init | watcher::Event::InitDone)) => {}
                 Some(Err(e)) => tracing::warn!(error = %e, "keys.watch.failed"),
                 None => {
@@ -204,8 +282,20 @@ where
             _ = tick.tick() => {
                 if let Ok(list) = api.list(&Default::default()).await {
                     let live: HashSet<String> = list.items.iter().map(|o| o.name_any()).collect();
-                    for owner in stale_owners(&ctx.pool, &live) {
-                        revoke(&ctx.pool, &owner);
+                    let started = std::time::Instant::now();
+                    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(ctx.client.clone());
+                    let lp = kube::api::ListParams::default().fields(&format!("spec.nodeName={}", ctx.node));
+                    let referenced = match pods.list(&lp).await {
+                        Ok(l) => Some(referenced_owners(&ctx.pool, &l.items)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "keys.pods.list_failed");
+                            None
+                        }
+                    };
+                    let pool = ctx.pool.clone();
+                    if let Some(s) = off_worker(move || sweep(&pool, &live, referenced.as_ref())).await {
+                        let ms = started.elapsed().as_millis() as u64;
+                        tracing::info!(checked = s.checked, rewritten = s.rewritten, removed = s.removed, ms, "keys.sweep.done");
                     }
                     for obj in list.items {
                         converge(&ctx, &api, obj).await;
@@ -353,6 +443,74 @@ mod tests {
         assert_eq!(stale_owners(pool, &live), ["acme"], "still stale: the file stays, blanked");
         // The live owner is untouched.
         assert!(!std::fs::read_to_string(kloudlite_workspaces::k8s::keys_file(pool, "alice")).unwrap().is_empty());
+    }
+
+    /// Already right: no truncate, no fsync (mtime untouched). A change is written in place.
+    #[test]
+    fn an_already_correct_file_is_not_rewritten_and_a_change_keeps_the_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let pool = tempfile::tempdir().unwrap();
+        let pool = pool.path().to_str().unwrap();
+        assert!(write_keys_file(pool, "acme", "ssh-ed25519 AAAA a\n").unwrap());
+        let path = k8s::keys_file(pool, "acme");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let ino = std::fs::metadata(&path).unwrap().ino();
+        assert!(!write_keys_file(pool, "acme", "ssh-ed25519 AAAA a\n").unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        assert!(write_keys_file(pool, "acme", "ssh-ed25519 BBBB b\n").unwrap());
+        assert_ne!(std::fs::metadata(&path).unwrap().modified().unwrap(), old);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+        assert!(revoke(pool, "acme"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino, "revoke blanks in place");
+        assert!(!revoke(pool, "acme"), "a blank file is not blanked again");
+    }
+
+    /// Stale dirs go only when nothing names them: no `OwnerKeys` AND no pod here mounts them. A
+    /// referenced one keeps its (blanked) file; an unknown pod list removes nothing.
+    #[test]
+    fn a_stale_dir_is_removed_only_when_no_pod_mounts_it() {
+        let pool = tempfile::tempdir().unwrap();
+        let pool = pool.path().to_str().unwrap();
+        for owner in ["alice", "gone", "held"] {
+            write_keys_file(pool, owner, "ssh-ed25519 AAAA a\n").unwrap();
+        }
+        let live = HashSet::from(["alice".to_string()]);
+        let dir = |o: &str| std::path::Path::new(&k8s::keys_root(pool)).join(o);
+        // Unknown pods: blank both stale ones, remove nothing.
+        assert_eq!(sweep(pool, &live, None), Sweep { checked: 2, rewritten: 2, removed: 0 });
+        assert!(dir("gone").exists() && dir("held").exists());
+        let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "p"},
+            "spec": {"containers": [], "volumes": [{"name": "authorized-keys",
+                "hostPath": {"path": k8s::keys_file(pool, "held"), "type": "File"}}]}
+        }))
+        .unwrap();
+        let refs = referenced_owners(pool, &[pod]);
+        assert_eq!(refs, HashSet::from(["held".to_string()]));
+        assert_eq!(sweep(pool, &live, Some(&refs)), Sweep { checked: 2, rewritten: 0, removed: 1 });
+        assert!(!dir("gone").exists());
+        assert_eq!(std::fs::read_to_string(k8s::keys_file(pool, "held")).unwrap(), "");
+        assert!(!std::fs::read_to_string(k8s::keys_file(pool, "alice")).unwrap().is_empty());
+    }
+
+    /// The stall itself: on a ONE-thread runtime, a slow sweep must not starve other tasks. A timer
+    /// due in 20 ms fires while a 400 ms blocking sweep is still running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_sweep_does_not_hold_the_runtime() {
+        let t0 = std::time::Instant::now();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            t0.elapsed()
+        });
+        let slow = off_worker(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+        let (fired, done) = tokio::join!(timer, async {
+            slow.await;
+            t0.elapsed()
+        });
+        let fired = fired.unwrap();
+        assert!(fired < std::time::Duration::from_millis(200) && fired < done, "timer {fired:?}, sweep {done:?}");
     }
 
     /// No `keys/` directory yet (a node that has never converged) is not an error.

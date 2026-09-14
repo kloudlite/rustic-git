@@ -204,7 +204,7 @@ async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, na
 /// candidate, so the fallback chain in the caller does the rest.
 pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &str) -> Result<Option<String>, ReconcileErr> {
     let local: std::collections::HashSet<String> =
-        ctx.engine.local_snapshots(volume).map_err(|e| ReconcileErr(e.0))?.into_iter().collect();
+        local_snapshots(ctx, volume).await.map_err(|e| ReconcileErr(e.0))?.into_iter().collect();
     let list = Api::<crd::Snapshot>::all(ctx.client.clone())
         .list(&ListParams::default().fields(&format!("spec.volume={volume}")))
         .await?;
@@ -212,6 +212,15 @@ pub(crate) async fn latest_transient(ctx: &Arc<Ctx>, volume: &str, worktree: &st
     // peer reads can never disagree about which name is newest — including the tie-break.
     let held: Vec<crd::Snapshot> = list.items.into_iter().filter(|s| local.contains(&s.name_any())).collect();
     Ok(crate::peer::newest_transient_of(&held, worktree))
+}
+
+/// `Engine::local_snapshots` on the blocking pool: a btrfs `read_dir` must not hold a runtime
+/// worker (see `controller::keys::write_keys_file` for what that cost on 2026-09-14).
+pub(crate) async fn local_snapshots(ctx: &Arc<Ctx>, volume: &str) -> Result<Vec<String>, kloudlite_workspaces::engine::EngErr> {
+    let (engine, volume) = (ctx.engine.clone(), volume.to_string());
+    tokio::task::spawn_blocking(move || engine.local_snapshots(&volume))
+        .await
+        .unwrap_or_else(|e| Err(kloudlite_workspaces::engine::EngErr(e.to_string())))
 }
 
 /// `status.head = name` on the worktree's own Workspace/Environment — a guarded status write,
