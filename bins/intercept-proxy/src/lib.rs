@@ -78,6 +78,11 @@ pub fn parse(argv: impl Iterator<Item = String>) -> Result<Args, String> {
     if forwards.is_empty() {
         return Err("at least one --forward is required".into());
     }
+    // A zero ceiling binds every port and serves nothing, forever: the Service goes Ready and the
+    // person debugs their own app. Refuse it here, the way a zero port is refused.
+    if max_conns == 0 {
+        return Err("--max-conns 0 would serve nothing".into());
+    }
     Ok(Args {
         target,
         forwards,
@@ -114,8 +119,10 @@ pub async fn serve(args: Args) -> Result<(), String> {
             limit.clone(),
         )));
     }
+    // A panicked accept loop must not look like an orderly shutdown: swallowing the JoinError
+    // exits 0 and Kubernetes reads that as a container that finished its work.
     for t in tasks {
-        let _ = t.await;
+        t.await.map_err(|_| "accept loop panicked".to_string())?;
     }
     Ok(())
 }
@@ -131,6 +138,10 @@ pub async fn accept_loop(l: TcpListener, to: u16, target: Arc<String>, limit: Ar
             Ok(x) => x,
             Err(e) => {
                 tracing::warn!(error = %e, port = to, "proxy.accept_failed");
+                // A persistent accept error (EMFILE is the one that happens) would otherwise spin
+                // this loop at the speed of the permit it just re-acquired: a warn flood and a
+                // pegged core. Back off before looking again.
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
         };
@@ -143,7 +154,7 @@ pub async fn accept_loop(l: TcpListener, to: u16, target: Arc<String>, limit: Ar
             match TcpStream::connect((target.as_str(), to)).await {
                 Ok(up) => match pump(sock, up).await {
                     Ok((up_bytes, down_bytes)) => {
-                        tracing::debug!(%peer, port = to, up_bytes, down_bytes, "proxy.closed")
+                        tracing::info!(%peer, port = to, up_bytes, down_bytes, "proxy.closed")
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, %peer, port = to, "proxy.closed_with_error")

@@ -89,6 +89,22 @@ fn args_carry_the_remap_and_refuse_nonsense() {
         .is_err(),
         "0 is not a port"
     );
+    assert!(
+        parse(
+            [
+                "--target",
+                "t",
+                "--forward",
+                "8080:3000",
+                "--max-conns",
+                "0"
+            ]
+            .iter()
+            .map(|s| s.to_string())
+        )
+        .is_err(),
+        "a zero ceiling binds every port and serves nothing, which must be refused"
+    );
 }
 
 #[tokio::test]
