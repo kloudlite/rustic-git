@@ -43,14 +43,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         move || s.load().trace_sample_ratio
     });
 
-    let ctx = Arc::new(Ctx {
-        client: client.clone(),
-        holder: cfg.holder,
-        region: cfg.region,
-        epoch: Default::default(),
-        applied: Default::default(),
-        settings: settings.clone(),
-    });
+    let ctx = Arc::new(Ctx::new(client.clone(), cfg.holder, cfg.region, settings.clone()));
     spawn_settings_reflector(client, settings);
 
     let l = tokio::net::TcpListener::bind("0.0.0.0:8080")

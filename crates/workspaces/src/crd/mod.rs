@@ -70,6 +70,11 @@ pub const VERSION: &str = "v1alpha1";
 /// The controller writes status under its own manager; a server-side-apply conflict against it
 /// therefore means another controller, not `/v1`.
 pub const AGENT_FIELD_MANAGER: &str = "kloudlite-agent";
+/// The CLUSTER controller's (`bins/controller`), the single writer of the space grants. Distinct
+/// from the agent's so that during the one release where both builds exist, "which writer wrote
+/// this policy" is answerable from `managedFields` alone — and so the controller's first forced
+/// apply is a visible ADOPTION rather than an anonymous overwrite.
+pub const CONTROLLER_FIELD_MANAGER: &str = "kloudlite-controller";
 /// The admin process's own field manager on the settings routes — distinct from
 /// `AGENT_FIELD_MANAGER` so a settings write and the agent's own status writes are never
 /// attributed to the same manager in a server-side-apply conflict.

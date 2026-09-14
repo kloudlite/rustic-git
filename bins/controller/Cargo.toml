@@ -20,14 +20,19 @@ kloudlite-trace = { workspace = true }
 # The process-level rustls CryptoProvider main() installs before the kube client's first handshake.
 rustls = { workspace = true }
 kube = { workspace = true }
+# Named directly, like the agent's: the shared-store gates (`store_shared`, `for_shared_stream`)
+# live behind kube-runtime's own unstable features, which the workspace pin turns on.
+kube-runtime = { workspace = true }
 k8s-openapi = { workspace = true }
 # One route, `/healthz`. No TLS, no ws, no object store: this process talks to the API server only.
 axum = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+# `ensure` hashes the desired object's own JSON before applying it; the canned API-server bodies
+# in the lease, election and space tests are the other user.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 
 [dev-dependencies]
 kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
-# Canned API-server bodies in the lease and election tests only.
-serde_json = { workspace = true }
