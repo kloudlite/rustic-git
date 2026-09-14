@@ -265,7 +265,7 @@ pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::E
 
 
 /// The workspace-side ports of every service `ws_id` is serving in force this pass — the same
-/// `workspace_port` over the service's ports that `intercept_slice` writes, deduplicated.
+/// `workspace_port` over the service's ports that each proxy pod forwards to, deduplicated.
 pub(crate) fn intercepted_ports(e: &crd::Environment, plan: &std::collections::HashMap<&str, Intercepting>, ws_id: &str) -> Vec<u16> {
     let mut ports: Vec<u16> = e
         .spec

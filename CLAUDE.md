@@ -35,10 +35,12 @@ Run a server locally without S3: `KLOUDLITE_S3_URL=file://./x` (or `mem://`, los
 Local scratch (host key, cache) defaults under `./.local/`, which is git-ignored.
 
 Workspace layout: `crates/{core,storage,gitbase,pulls,app,git,registry,api,workspaces}` are the
-library crates; `bins/{server,api,worker,agent,gateway,kl-connect}` build the six binaries (`kloudlite`,
+library crates; `bins/{server,api,worker,agent,gateway,intercept-proxy,kl-connect}` build the seven binaries (`kloudlite`,
 `kloudlite-api`, `kloudlite-worker`, `kloudlite-agent` — the agent is root-only and runs as a
 DaemonSet, one per btrfs-capable node, see "Workspaces and environments" — `kloudlite-gateway`,
-the workspace SSH tunnel, and `kl-connect`, the laptop CLI, which is built by `kl-connect.yml` and never deployed);
+the workspace SSH tunnel, `kloudlite-intercept-proxy`, a musl-static TCP forwarder the agent
+renders into TENANT namespaces (see "Workspaces and environments") and never a workload of ours,
+and `kl-connect`, the laptop CLI, which is built by `kl-connect.yml` and never deployed);
 the root package is `tests/`'s host only, not a facade.
 
 ## The one invariant everything hangs off
@@ -288,18 +290,40 @@ The other direction is an **intercept**: a workspace whose space uses the enviro
 services, so everything the environment sends to `api:8080` is delivered to that workspace instead.
 The wish is `Environment.spec.intercepts` (`{service, workspace, ports}`, written only by `/v1`);
 what is IN FORCE is each service's `status.intercepted_by`, and the web reads only that. Traffic
-moves by ENDPOINTS, never DNS and never a proxy: the real service's StatefulSet is scaled to 0 —
-leaving it running would let a queue consumer eat messages the workspace never sees — its ClusterIP
-Service loses its selector, and the agent writes the `EndpointSlice` itself, which is the only way
-to name an address in another namespace (a selector can never leave its own). Kubernetes does not
-clean up after a Service that loses its selector — the endpointslice controller's own slice and the
-legacy `Endpoints` object both keep naming the stopped pod, and the mirroring controller rebuilds a
-slice from that `Endpoints` — so the agent deletes both AFTER the selector is gone (measured: two
-dials in six went to the dead pod until it did). The ClusterIP and the
+moves through a PROXY POD, never DNS and never a hand-written endpoint: the real service's
+StatefulSet is still scaled to 0 — leaving it running would let a queue consumer eat messages the
+workspace never sees — but its ClusterIP KEEPS its selector, which now names
+`intercept-{service}` (`kloudlite.io/kind=intercept` plus the service label, so a second intercept
+in the namespace cannot match it), one pod per intercepted service in the environment's own
+namespace, owned by the Environment, non-root with a read-only root and `restartPolicy: Always`,
+running `kloudlite-intercept-proxy` — a byte-for-byte TCP forwarder, protocol-blind, with no
+configuration a person ever sees, from `WS_INTERCEPT_PROXY_IMAGE` / `ClusterSettings`'s
+`interceptProxyImage` (`Mark::Boot`). It dials
+`intercept-target-{ws}.{ws_ns}.svc.cluster.local.` — trailing dot, because it re-resolves per
+connection and an unrooted name walks the whole `ndots: 5` search list first — a ClusterIP in the
+WORKSPACE's namespace selecting `WORKSPACE_LABEL` and owned by the Workspace (an ownerReference may
+not cross namespaces), so a workspace pod restart moves nothing of ours. **Why a proxy at all**:
+the endpoints are then in the environment's namespace, which every following space already reaches
+through its own `space_egress` grant — the cross-space bug is fixed by construction, with no grant
+per follower. The grant for the hop itself is deliberately asymmetric: egress per SERVICE on the
+environment side (`intercept-{ws}-{service}`, since one policy cannot `podSelector` two proxy
+pods), ingress per WORKSPACE on the workspace side (`intercept-{ws}`, the union of the ports that
+workspace serves). Order is the whole safety of the switch: target Service → proxy pod → its
+listener Ready → the selector moves → the StatefulSet to 0, and a release reverses it; a proxy that
+WAS ready and is NotReady-but-not-Failed is HELD for `INTERCEPT_GRACE_SECS` before the service is
+handed back, because a restart is not a flap. A Pod is immutable, so an args or image change
+recreates it. `status.services[].proxy` — `starting`/`ready`/`failed` — is what the web shows
+beside `interceptedBy` (the api emits service-status keys in camelCase; the web read the wrong key
+until 3ef67db9). The ClusterIP and the
 DNS name are untouched, so callers dial exactly what they dialled before, and ports may be REMAPPED
-— the Service's port is what callers dial, the slice's is where it lands, matched by the port name
-`p{port}` — because the process being debugged listens where a dev server listens
-(`api:8080 → workspace:3000`). One workspace per service; a second is refused naming the holder. A
+— the Service's port is what callers dial, the proxy's `--forward` is where it lands, matched by the
+port name `p{port}` — because the process being debugged listens where a dev server listens
+(`api:8080 → workspace:3000`). `/v1` refuses a portless service (nothing to forward) and 7788 (an
+environment may not take over the tool server). The old endpoint-rewriting shape converts with no
+downtime and no flag: the legacy slice `{service}-intercept` is deleted by name once the proxy is
+ready, and `drop_abandoned_endpoints`, `k8s::intercept_slice` and the `endpoints` RBAC row are gone,
+`endpointslices` narrowed to `delete` for the one release that migration needs. One workspace per
+service; a second is refused naming the holder. A
 stopped, deleted or unreachable workspace RELEASES the intercept on its own (after
 `INTERCEPT_GRACE_SECS`, so an ordinary pod restart does not bounce the StatefulSet; the grace is
 measured from the pod's own `Ready=False`, else the workspace's, else `status.services[].unreachableSince`,
@@ -673,7 +697,8 @@ passed** (`image.yml`'s image job `needs: [build, test]`), so a red commit has n
 and a repin to it is an ImagePullBackOff, not a bad deploy. `web.yml` only runs when `web/**`
 changed, so the two images do NOT move in lockstep; pin each yaml to the last SHA that actually
 built that image. Flow: push → wait for the run → `deploy/pin.sh <sha> [web-sha]` (rewrites every
-pin in `deploy/` — server, api, worker, agent, gateway from one SHA, web from the other — and
+pin in `deploy/` — server, api, worker, agent, gateway, intercept-proxy (pinned on the agent
+DaemonSet, which is what renders it) from one SHA, web from the other — and
 refuses a SHA with no package) → commit → `deploy/roll.sh` (one apply, then the rollout waits; the k3s side is applied by
 hand per `deploy/k3s/README.md`). The StatefulSet roll moves DB ownership between nodes, and the
 map's writer moves with the lease when the holder rolls (≤ one TTL plus one tick); the first registry request to a moved image

@@ -395,8 +395,8 @@ async fn apply_services(
         // under the old shape is converted by this pass with no downtime and no flag: the proxy comes
         // up, the selector goes back (a selector-less Service gaining one is an ordinary update), and
         // the slice goes. Mixed builds are safe both ways — an old agent rewrites both to its own
-        // shape, a new agent deletes what it finds. Delete this, `k8s::intercept_slice` and the
-        // endpointslices RBAC row one release after the fleet is fully on this build.
+        // shape, a new agent deletes what it finds. Delete this block and the `endpointslices:
+        // delete` RBAC row one release after the fleet is fully on this build.
         //
         // Only where an intercept is wished or was recorded, never on every service of every
         // environment that has never intercepted anything — and never under a `Keep`, which
