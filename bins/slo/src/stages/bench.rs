@@ -290,9 +290,10 @@ async fn sessions(c: &mut Ctx) {
                 let (mut a, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket A")?;
                 let (b, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket B")?;
                 // Both sockets are open before the prompt, so each must see the whole turn.
-                let watch_b = tokio::spawn(until_agent_end(b));
+                // Aborted on drop, so a timeout or an early `?` never leaks socket B.
+                let mut watch_b = AbortOnDrop(tokio::spawn(until_agent_end(b)));
                 a.send(Message::text(json!({"id": "1", "type": "prompt", "message": PROMPT}).to_string())).await?;
-                let (ea, eb) = (until_agent_end(a).await?, watch_b.await??);
+                let (ea, eb) = (until_agent_end(a).await?, (&mut watch_b.0).await??);
                 *seen_w.lock().unwrap() = Some((ea, eb));
                 let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
                 if status != 200 {
@@ -329,10 +330,13 @@ async fn sessions(c: &mut Ctx) {
     if let Some(sid) = sid {
         let del = async {
             let (_child, port) = forward(c).await?;
-            through_with(port, reqwest::Method::DELETE, &format!("/sessions/{sid}"), Some(json!({"stop": true}))).await
+            delete_session(port, &sid, TEARDOWN_BOUND).await
         };
-        if let Err(e) = del.await {
-            tracing::warn!(error = %e, "slo.bench.session.teardown");
+        // The forward bounds itself at 10 s; this bounds the whole teardown so a hung bench never stalls the suite.
+        match tokio::time::timeout(TEARDOWN_BOUND + Duration::from_secs(10), del).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "slo.bench.session.teardown"),
+            Err(_) => tracing::warn!("slo.bench.session.teardown timed out"),
         }
     }
 }
@@ -375,6 +379,21 @@ async fn exchanges(c: &mut Ctx) {
             .await;
         }
     }
+}
+
+const TEARDOWN_BOUND: Duration = Duration::from_secs(10);
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn delete_session(port: u16, sid: &str, bound: Duration) -> Result<(u16, String)> {
+    tokio::time::timeout(bound, through_with(port, reqwest::Method::DELETE, &format!("/sessions/{sid}"), Some(json!({"stop": true}))))
+        .await
+        .map_err(|_| anyhow!("DELETE session did not answer within {} s", bound.as_secs()))?
 }
 
 const NO_MODEL: &str = "no model credential in the probe tenant";
@@ -569,6 +588,30 @@ mod tests {
         assert!(health_ok(&body));
 
         assert!(!health_ok("{\"ok\":false}"));
+    }
+
+    #[tokio::test]
+    async fn teardown_delete_returns_within_its_bound_against_a_silent_bench() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await
+        });
+        let start = Instant::now();
+        assert!(delete_session(port, "s-1", Duration::from_millis(200)).await.is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn abort_on_drop_cancels_the_task() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let guard = AbortOnDrop(tokio::spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await
+        }));
+        drop(guard);
+        assert!(rx.await.is_err(), "the task still holds its sender");
     }
 
     #[test]
