@@ -138,6 +138,12 @@ pub struct ClusterSettingsSpec {
     /// The probe bucket's burst allowance. 1.0..=10000.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_probe_burst: Option<f64>,
+    /// ERROR or slow traces promoted per second per process (`kloudlite_trace::Promote`); past it they stay unexported. 0.0..=1000.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_promote_rate: Option<f64>,
+    /// The promotion bucket's burst allowance. 1.0..=10000.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_promote_burst: Option<f64>,
 }
 
 
@@ -176,6 +182,8 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("traceSampleRatio", kloudlite_core::settings::Mark::Live, &[]),
     ("traceProbeRate", kloudlite_core::settings::Mark::Live, &[]),
     ("traceProbeBurst", kloudlite_core::settings::Mark::Live, &[]),
+    ("tracePromoteRate", kloudlite_core::settings::Mark::Live, &[]),
+    ("tracePromoteBurst", kloudlite_core::settings::Mark::Live, &[]),
 ];
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
 //! its sequence number is the trace's latest), compacted when it doubles the cap — O(1) per span
 //! with a rare O(n) compaction. A real LRU is the upgrade if the compaction ever shows in profiles.
 
+use crate::sampler::Bucket;
 use crate::SLOW;
 use opentelemetry::trace::{SpanContext, SpanId, Status, TraceId};
 use opentelemetry::KeyValue;
@@ -54,31 +55,46 @@ pub struct Promote<P> {
     max_pending: usize,
     max_spans: usize,
     pub(crate) pending: Mutex<Pending>,
-    /// Drops not yet logged: [evicted for capacity, past the per-trace cap].
-    unlogged: [AtomicU64; 2],
+    /// Drops not yet logged: [evicted for capacity, past the per-trace cap, over the promotion cap].
+    unlogged: [AtomicU64; 3],
     last_log: Mutex<Option<Instant>>,
+    /// Caps promotions per process: an API-server stall fails every reconcile pass at once, and
+    /// each would otherwise be a kept trace. Past the cap a failure stays a log line only.
+    cap: Bucket,
 }
 
 impl<P> Promote<P> {
+    /// The live promotion bucket (`bind_promote_budget`, else `PROMOTE_RATE`/`PROMOTE_BURST`).
     pub fn new(inner: P) -> Self {
-        Self::with_limits(inner, MAX_PENDING, MAX_SPANS)
+        Self::build(inner, MAX_PENDING, MAX_SPANS, Bucket::live_promote())
     }
 
+    /// A fixed promotion cap of `rate` per second with a `burst` allowance.
+    pub fn with_cap(inner: P, rate: f64, burst: f64) -> Self {
+        Self::build(inner, MAX_PENDING, MAX_SPANS, Bucket::new(rate, burst))
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_limits(inner: P, max_pending: usize, max_spans: usize) -> Self {
-        Self { inner, max_pending, max_spans, pending: Mutex::default(), unlogged: Default::default(), last_log: Mutex::default() }
+        Self::build(inner, max_pending, max_spans, Bucket::new(f64::MAX, f64::MAX))
+    }
+
+    fn build(inner: P, max_pending: usize, max_spans: usize, cap: Bucket) -> Self {
+        Self { inner, max_pending, max_spans, pending: Mutex::default(), unlogged: Default::default(), last_log: Mutex::default(), cap }
     }
 
     /// Called with the lock released: the log line is an event, and must not run under `pending`.
-    fn report(&self, capacity: u64, per_trace: u64) {
+    fn report(&self, capacity: u64, per_trace: u64, error_cap: u64) {
         self.unlogged[0].fetch_add(capacity, Ordering::Relaxed);
         self.unlogged[1].fetch_add(per_trace, Ordering::Relaxed);
+        self.unlogged[2].fetch_add(error_cap, Ordering::Relaxed);
         let mut last = self.last_log.lock().unwrap_or_else(|p| p.into_inner());
         if last.is_some_and(|t| t.elapsed() < LOG_EVERY) {
             return;
         }
         *last = Some(Instant::now());
         drop(last);
-        for (n, reason) in self.unlogged.iter().zip(["capacity", "per_trace"]) {
+        for (n, reason) in self.unlogged.iter().zip(["capacity", "per_trace", "error_cap"]) {
             let count = n.swap(0, Ordering::Relaxed);
             if count > 0 {
                 tracing::warn!(count, reason, "trace.promote.dropped");
@@ -139,7 +155,7 @@ impl<P: SpanProcessor> SpanProcessor for Promote<P> {
             }
             drop(guard);
             if evicted + per_trace > 0 {
-                self.report(evicted, per_trace);
+                self.report(evicted, per_trace, 0);
             }
             return;
         }
@@ -147,6 +163,10 @@ impl<P: SpanProcessor> SpanProcessor for Promote<P> {
         p.total -= w.spans.len();
         drop(guard);
         if interesting(&span) {
+            if !self.cap.take() {
+                self.report(0, 0, 1);
+                return;
+            }
             if w.dropped > 0 {
                 span.attributes.push(KeyValue::new("dropped_children", w.dropped as i64));
             }
@@ -290,6 +310,20 @@ mod tests {
         assert_eq!(got.len(), 3);
         let root = got.iter().find(|s| s.parent_span_id == SpanId::INVALID).unwrap();
         assert!(root.attributes.contains(&KeyValue::new("dropped_children", 1i64)));
+    }
+
+    #[test]
+    fn an_error_flood_promotes_at_most_the_bucket() {
+        let out = InMemorySpanExporter::default();
+        let p = Promote::with_cap(SimpleSpanProcessor::new(out.clone()), 2.0, 20.0);
+        let started = Instant::now();
+        for t in 1..=5_000u128 {
+            p.on_end(span(t, 1, 0, false, Duration::ZERO, Status::error("stall"), false));
+        }
+        let kept = out.get_finished_spans().unwrap().len();
+        assert!(kept as f64 <= 20.0 + 2.0 * started.elapsed().as_secs_f64(), "kept {kept}");
+        assert!(kept >= 20, "under the cap every failure is kept, got {kept}");
+        assert!(p.unlogged[2].load(Ordering::Relaxed) + kept as u64 <= 5_000);
     }
 
     #[test]

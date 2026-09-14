@@ -330,6 +330,13 @@ pub async fn run(cfg: Config) -> Result<(), String> {
             (v.trace_probe_rate, v.trace_probe_burst)
         }
     });
+    kloudlite_trace::bind_promote_budget({
+        let s = settings.clone();
+        move || {
+            let v = s.load();
+            (v.trace_promote_rate, v.trace_promote_burst)
+        }
+    });
     // The gauges the collector cannot get from the kubelet: the btrfs pool is this process's
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.

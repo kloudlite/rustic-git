@@ -26,7 +26,7 @@ pub mod testing;
 
 pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, server_span_with, stamp, traced, traced_as, untraced, PROBE_HEADER, UNTRACED};
 pub use promote::Promote;
-pub use sampler::{bind_probe_budget, bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO, PROBE_BURST, PROBE_RATE};
+pub use sampler::{bind_probe_budget, bind_promote_budget, bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO, PROBE_BURST, PROBE_RATE, PROMOTE_BURST, PROMOTE_RATE};
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{ExporterBuildError, WithExportConfig as _};

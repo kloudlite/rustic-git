@@ -116,6 +116,10 @@ pub struct CentralSettings {
     pub trace_probe_rate: f64,
     /// The bucket's burst allowance. 1.0..=10000.0.
     pub trace_probe_burst: f64,
+    /// ERROR or slow traces promoted per second per process (`kloudlite_trace::Promote`); past it they stay unexported. 0.0..=1000.0.
+    pub trace_promote_rate: f64,
+    /// The promotion bucket's burst allowance. 1.0..=10000.0.
+    pub trace_promote_burst: f64,
 }
 
 impl Default for CentralSettings {
@@ -151,6 +155,8 @@ impl CentralSettings {
             trace_sample_ratio: kloudlite_trace::DEFAULT_RATIO,
             trace_probe_rate: kloudlite_trace::PROBE_RATE,
             trace_probe_burst: kloudlite_trace::PROBE_BURST,
+            trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
+            trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
         }
     }
 
@@ -202,6 +208,8 @@ impl CentralSettings {
         over!(trace_sample_ratio);
         over!(trace_probe_rate);
         over!(trace_probe_burst);
+        over!(trace_promote_rate);
+        over!(trace_promote_burst);
         self
     }
 }
@@ -248,6 +256,8 @@ pub struct StoredCentralSettings {
     pub trace_probe_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_probe_burst: Option<f64>,
+    pub trace_promote_rate: Option<f64>,
+    pub trace_promote_burst: Option<f64>,
     /// Last ten versions, newest first, kept inline rather than as ten separate object-store
     /// keys — one small object either way, and one GET beats eleven.
     #[serde(default)]
@@ -298,6 +308,8 @@ pub struct StoredCentralSettingsSnapshot {
     pub trace_probe_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_probe_burst: Option<f64>,
+    pub trace_promote_rate: Option<f64>,
+    pub trace_promote_burst: Option<f64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub updated_by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -328,6 +340,8 @@ impl From<&StoredCentralSettingsSnapshot> for StoredCentralSettings {
             trace_sample_ratio: snap.trace_sample_ratio,
             trace_probe_rate: snap.trace_probe_rate,
             trace_probe_burst: snap.trace_probe_burst,
+            trace_promote_rate: snap.trace_promote_rate,
+            trace_promote_burst: snap.trace_promote_burst,
             history: Vec::new(),
             updated_by: String::new(),
             updated_at: String::new(),
@@ -367,6 +381,8 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
     ("traceSampleRatio", Mark::Live),
     ("traceProbeRate", Mark::Live),
     ("traceProbeBurst", Mark::Live),
+    ("tracePromoteRate", Mark::Live),
+    ("tracePromoteBurst", Mark::Live),
 ];
 
 /// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
@@ -413,6 +429,8 @@ pub fn validate_stored(patch: &StoredCentralSettings) -> Result<(), String> {
     range!(trace_sample_ratio, 0.0f64, 1.0f64);
     range!(trace_probe_rate, 0.0f64, 1000.0f64);
     range!(trace_probe_burst, 1.0f64, 10000.0f64);
+    range!(trace_promote_rate, 0.0f64, 1000.0f64);
+    range!(trace_promote_burst, 1.0f64, 10000.0f64);
     Ok(())
 }
 
@@ -438,6 +456,8 @@ fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
         trace_sample_ratio: old.trace_sample_ratio,
         trace_probe_rate: old.trace_probe_rate,
         trace_probe_burst: old.trace_probe_burst,
+        trace_promote_rate: old.trace_promote_rate,
+        trace_promote_burst: old.trace_promote_burst,
         updated_by: old.updated_by.clone(),
         updated_at: old.updated_at.clone(),
     };
@@ -482,6 +502,8 @@ pub fn apply_patch(
     over!(trace_sample_ratio);
     over!(trace_probe_rate);
     over!(trace_probe_burst);
+    over!(trace_promote_rate);
+    over!(trace_promote_burst);
     push_history(current, &mut next);
     next.updated_by = updated_by.to_string();
     next.updated_at = updated_at.to_string();
@@ -497,6 +519,11 @@ pub fn bind_trace(central: &LiveSettings<CentralSettings>) {
     kloudlite_trace::bind_probe_budget(move || {
         let s = c.load();
         (s.trace_probe_rate, s.trace_probe_burst)
+    });
+    let c = central.clone();
+    kloudlite_trace::bind_promote_budget(move || {
+        let s = c.load();
+        (s.trace_promote_rate, s.trace_promote_burst)
     });
 }
 
@@ -675,6 +702,8 @@ mod tests {
             trace_sample_ratio: snap.trace_sample_ratio,
             trace_probe_rate: snap.trace_probe_rate,
             trace_probe_burst: snap.trace_probe_burst,
+            trace_promote_rate: snap.trace_promote_rate,
+            trace_promote_burst: snap.trace_promote_burst,
             history: vec![],
             updated_by: String::new(),
             updated_at: String::new(),

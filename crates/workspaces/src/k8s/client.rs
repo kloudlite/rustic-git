@@ -139,11 +139,9 @@ async fn attempt<R, E: Into<tower::BoxError>>(
     match tokio::time::timeout(after, fut).await {
         Ok(r) => r.map_err(Into::into),
         Err(_) => {
-            // Both layers poll inside the outer layer's client span, so this names the bound
-            // that fired on it. A retry that then succeeds keeps the ERROR: that is what happened.
-            let cur = tracing::Span::current();
-            cur.record("kube.timeout_layer", layer);
-            cur.record("otel.status_code", "ERROR");
+            // Both layers poll inside the outer layer's client span, so this names the bound that
+            // fired on it. Status comes only from the final result: a retry that answered is fine.
+            tracing::Span::current().record("kube.timeout_layer", layer);
             let (dials, dials_ok) = dials.since();
             let inflight = INFLIGHT.load(std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(%method, %path, layer, secs = after.as_secs_f32(), inflight, dials, dials_ok, "kube.timeout");
@@ -584,6 +582,7 @@ mod tests {
         assert_eq!(got.len(), 1, "one span for both attempts");
         let has = |k: &str| got[0].attributes.iter().any(|kv| kv.key.as_str() == k);
         assert!(has("kube.retry") && has("kube.timeout_layer"));
+        assert!(!format!("{:?}", got[0].status).starts_with("Error"), "a retry that answered is not a failure: {:?}", got[0].status);
         // The log lines carry the raw path, so they stay logs (linked by `trace_id`), never span events.
         assert!(got[0].events.is_empty(), "{:?}", got[0].events);
     }

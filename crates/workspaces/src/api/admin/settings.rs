@@ -313,6 +313,8 @@ pub(crate) fn validate_cluster_patch(patch: &crd::ClusterSettingsSpec) -> Result
     range!(trace_sample_ratio, 0.0f64, 1.0f64);
     range!(trace_probe_rate, 0.0f64, 1000.0f64);
     range!(trace_probe_burst, 1.0f64, 10000.0f64);
+    range!(trace_promote_rate, 0.0f64, 1000.0f64);
+    range!(trace_promote_burst, 1.0f64, 10000.0f64);
     // Unbounded pin string (constraints.md's exact carve-out): only non-emptiness is checked,
     // and only when the admin actually set it.
     if let Some(v) = &patch.nixpkgs {
@@ -341,6 +343,8 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(trace_sample_ratio);
     over!(trace_probe_rate);
     over!(trace_probe_burst);
+    over!(trace_promote_rate);
+    over!(trace_promote_burst);
     over!(replica_secs);
     over!(decommission_secs);
     over!(node_dead_secs);

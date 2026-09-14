@@ -54,6 +54,21 @@ pub fn bind_probe_budget(f: impl Fn() -> (f64, f64) + Send + Sync + 'static) {
     let _ = BUDGET.set(Box::new(f));
 }
 
+static PROMOTE_BUDGET: OnceLock<Budget> = OnceLock::new();
+
+/// Bind `Promote`'s ERROR/slow promotion bucket `(rate, burst)`, the same way.
+pub fn bind_promote_budget(f: impl Fn() -> (f64, f64) + Send + Sync + 'static) {
+    let _ = PROMOTE_BUDGET.set(Box::new(f));
+}
+
+fn probe_budget() -> (f64, f64) {
+    BUDGET.get().map_or((PROBE_RATE, PROBE_BURST), |f| f())
+}
+
+fn promote_budget() -> (f64, f64) {
+    PROMOTE_BUDGET.get().map_or((PROMOTE_RATE, PROMOTE_BURST), |f| f())
+}
+
 /// Bind the root ratio to a live settings handle. First call wins; a binary binds exactly once.
 pub fn bind_ratio(f: impl Fn() -> f64 + Send + Sync + 'static) {
     let _ = RATIO.set(Box::new(f));
@@ -70,27 +85,44 @@ fn ratio() -> f64 {
 
 pub const PROBE_RATE: f64 = 20.0;
 pub const PROBE_BURST: f64 = 100.0;
+/// Promotions of unsampled ERROR/slow traces per second per process. During an API-server stall
+/// every failing reconcile pass would otherwise be promoted.
+pub const PROMOTE_RATE: f64 = 2.0;
+pub const PROMOTE_BURST: f64 = 20.0;
 
-/// Token bucket for probe-honoured samples. A mutex, not atomics: it is taken only for a remote
-/// probe root, a few times a second, never on an ordinary span.
+/// Token bucket for probe-honoured samples and for promotions. A mutex, not atomics: it is taken
+/// only for a remote probe root or an errored/slow local root, never on an ordinary span.
 #[derive(Debug)]
 pub(crate) struct Bucket {
-    /// `None`: the bound live budget (`bind_probe_budget`), else `PROBE_RATE`/`PROBE_BURST`.
-    fixed: Option<(f64, f64)>,
+    /// `rate, burst`: fixed, or read from a bound live budget on every take.
+    budget: Source,
     state: Mutex<(f64, Instant)>,
+}
+
+#[derive(Debug)]
+enum Source {
+    Fixed(f64, f64),
+    Live(fn() -> (f64, f64)),
 }
 
 impl Bucket {
     pub(crate) fn new(rate: f64, burst: f64) -> Self {
-        Self { fixed: Some((rate, burst)), state: Mutex::new((burst, Instant::now())) }
+        Self { budget: Source::Fixed(rate, burst), state: Mutex::new((burst, Instant::now())) }
     }
 
     pub(crate) fn live() -> Self {
-        Self { fixed: None, state: Mutex::new((PROBE_BURST, Instant::now())) }
+        Self { budget: Source::Live(probe_budget), state: Mutex::new((PROBE_BURST, Instant::now())) }
+    }
+
+    pub(crate) fn live_promote() -> Self {
+        Self { budget: Source::Live(promote_budget), state: Mutex::new((PROMOTE_BURST, Instant::now())) }
     }
 
     pub(crate) fn take(&self) -> bool {
-        let (rate, burst) = self.fixed.unwrap_or_else(|| BUDGET.get().map_or((PROBE_RATE, PROBE_BURST), |f| f()));
+        let (rate, burst) = match self.budget {
+            Source::Fixed(r, b) => (r, b),
+            Source::Live(f) => f(),
+        };
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         st.0 = (st.0 + now.duration_since(st.1).as_secs_f64() * rate).min(burst);

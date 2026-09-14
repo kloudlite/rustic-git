@@ -30,6 +30,8 @@ pub struct AgentSettings {
     pub trace_sample_ratio: f64,
     pub trace_probe_rate: f64,
     pub trace_probe_burst: f64,
+    pub trace_promote_rate: f64,
+    pub trace_promote_burst: f64,
 }
 
 impl Default for AgentSettings {
@@ -66,6 +68,8 @@ impl AgentSettings {
             trace_sample_ratio: kloudlite_trace::DEFAULT_RATIO,
             trace_probe_rate: kloudlite_trace::PROBE_RATE,
             trace_probe_burst: kloudlite_trace::PROBE_BURST,
+            trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
+            trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
         }
     }
 
@@ -100,6 +104,8 @@ impl AgentSettings {
         over!(trace_sample_ratio);
         over!(trace_probe_rate);
         over!(trace_probe_burst);
+        over!(trace_promote_rate);
+        over!(trace_promote_burst);
         self
     }
 }

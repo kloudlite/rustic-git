@@ -2462,6 +2462,18 @@
                         "nullable": true,
                         "type": "number"
                       },
+                      "tracePromoteBurst": {
+                        "description": "The promotion bucket's burst allowance. 1.0..=10000.0.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "tracePromoteRate": {
+                        "description": "ERROR or slow traces promoted per second per process (`kloudlite_trace::Promote`); past it they stay unexported. 0.0..=1000.0.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
                       "traceSampleRatio": {
                         "description": "Root sampling ratio for this region's agent traces. 0.0..=1.0. Errors, slow passes and\nsampled parents are kept regardless (`kloudlite_trace`); this only thins the rest.",
                         "format": "double",
