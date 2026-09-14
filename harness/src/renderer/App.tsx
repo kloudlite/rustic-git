@@ -436,7 +436,7 @@ export function App() {
   });
   void window.harness.benchState().then(async (st) => {
     live.setConnected(st.connected);
-    if (!st.configured) return void live.thread("bench").note("no bench: start the harness with HARNESS_BENCH=http://127.0.0.1:<port>");
+    if (!st.configured) return void live.thread("bench").note("not connected to your bench yet");
     // Cold and offline: the cached list and messages, read-only until connected.
     setSessions(reconcile(st.sessions as Session[]));
     for (const x of live_()) void loadThread(x.id);
@@ -454,7 +454,6 @@ export function App() {
     "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
     "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },
     "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void pi({ type: "set_model", provider, modelId }); else L().note("usage: /model provider/id"); } },
-    "/login": { help: "log in to Kloudlite in your browser", run: () => void pi({ type: "prompt", message: "/kl-login" }) },
     "/settings": { help: "open settings", local: true, run: openSettings },
     "/btw": {
       help: "ask one question of a read-only fork of this session: /btw <question>",

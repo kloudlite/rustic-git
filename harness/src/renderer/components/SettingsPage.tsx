@@ -21,7 +21,7 @@ export function SettingsPage(props: { machine: Machine }) {
   const of = (k: Plugin["kind"]) => props.machine.plugins.filter((p) => p.kind === k && hit(p.name, p.from));
   const keys = () => Object.values(KEYS).filter((b) => hit(b.label, b.keys));
 
-  type Page = "model" | "providers" | "tools" | "skills" | "mcp" | "hooks" | "keys" | "discover";
+  type Page = "model" | "providers" | "tools" | "skills" | "mcp" | "hooks" | "keys" | "account" | "discover";
   const PAGES: { id: Page; label: string }[] = [
     { id: "model", label: "Model" },
     { id: "providers", label: "Providers" },
@@ -30,7 +30,12 @@ export function SettingsPage(props: { machine: Machine }) {
     { id: "mcp", label: "MCP servers" },
     { id: "hooks", label: "Hooks" },
     { id: "keys", label: "Keyboard" },
+    { id: "account", label: "Account" },
   ];
+  const [who, setWho] = createSignal("");
+  const [api, setApi] = createSignal("");
+  void window.harness.auth.status().then((s) => s.phase === "ready" && setWho(s.username));
+  void window.harness.auth.api().then(setApi);
   const [page, setPage] = createSignal<Page>(location.hash.endsWith("/discover") ? "discover" : "model");
   const [filter, setFilter] = createSignal("all");
   const installed = (name: string) => props.machine.plugins.some((p) => p.name === name);
@@ -61,6 +66,19 @@ export function SettingsPage(props: { machine: Machine }) {
           />
         </div>
         <div class="flex w-full max-w-[760px] flex-col gap-10 px-6 py-6">
+          <Show when={page() === "account"}>
+            <Section id="account" title="Account" hint="this app's Kloudlite login">
+              <Row name="signed in as" detail="a CLI login labelled with this computer's name and (desktop)">
+                <span class="font-mono text-sm text-fg">{who()}</span>
+              </Row>
+              <Row name="address" detail="change it from the login screen, after signing out">
+                <span class="font-mono text-sm text-fg">{api()}</span>
+              </Row>
+              <Row name="sign out" detail="revokes this login, forgets it here, and disconnects the bench">
+                <Button variant="danger" onClick={() => void window.harness.auth.signOut()}>Sign out</Button>
+              </Row>
+            </Section>
+          </Show>
           <Show when={page() === "model"}>
           <Section id="model" title="Model" hint="what the machine thinks with">
             <Show when={hit("model", props.machine.model)}>
