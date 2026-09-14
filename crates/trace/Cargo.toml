@@ -1,0 +1,27 @@
+[package]
+name = "kloudlite-trace"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[dependencies]
+axum = { workspace = true }
+http = "1"
+reqwest = { workspace = true }
+rustls = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-http = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[features]
+testing = ["opentelemetry_sdk/testing"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "time"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+reqwest = { workspace = true }
+tracing-subscriber = { workspace = true }
