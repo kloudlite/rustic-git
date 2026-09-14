@@ -107,8 +107,15 @@ export class KlSampler implements Sampler {
     this.root = new TraceIdRatioBasedSampler(Math.min(1, ratio));
     this.probes = new Bucket(probeRate, probeBurst);
   }
-  shouldSample(cx: Context, traceId: string): SamplingResult {
+  shouldSample(cx: Context, traceId: string, _name?: string, _kind?: unknown, attrs?: Attributes): SamplingResult {
     const parent = trace.getSpanContext(cx);
+    // Health is never traced. The http hook skips its own span, but Next opens a SERVER root of
+    // its own (`http.target` = the raw url) with children under it. A non-recording local parent
+    // passes that on: otherwise its children would RECORD and wait in `Promote` for a root that
+    // never ends.
+    const target = attrs?.["http.target"];
+    if (typeof target === "string" && UNTRACED.has(new URL(target, "http://x").pathname)) return { decision: SamplingDecision.NOT_RECORD };
+    if (parent && !parent.isRemote && !(parent.traceFlags & TraceFlags.SAMPLED) && trace.getSpan(cx)?.isRecording() === false) return { decision: SamplingDecision.NOT_RECORD };
     if (parent && trace.isSpanContextValid(parent)) {
       const sampled = (parent.traceFlags & TraceFlags.SAMPLED) !== 0;
       if (!parent.isRemote) {

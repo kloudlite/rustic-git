@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
-import { InMemorySpanExporter, SamplingDecision, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { BasicTracerProvider, InMemorySpanExporter, SamplingDecision, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { KlPropagator, KlSampler, Promote, startTracing } from "../src/lib/tracing.ts";
 
 const TID = "4bf92f3577b34da6a3ce929d0e0e4736";
@@ -34,6 +34,25 @@ test("sampler: local parent decides, and a root is never dropped", () => {
   assert.equal(decide(new KlSampler(0), local), SamplingDecision.RECORD_AND_SAMPLED, "a local parent decides");
   assert.equal(decide(new KlSampler(0), ROOT_CONTEXT, "ffffffffffffffffffffffffffffffff"), SamplingDecision.RECORD, "never dropped");
   assert.equal(decide(new KlSampler(1), ROOT_CONTEXT, "00000000000000000000000000000001"), SamplingDecision.RECORD_AND_SAMPLED);
+});
+
+test("health: Next's own /api/health server span and its children export nothing, even sampled or errored", async () => {
+  const out = new InMemorySpanExporter();
+  const provider = new BasicTracerProvider({ sampler: new KlSampler(1), spanProcessors: [new Promote(new SimpleSpanProcessor(out), 10, 10)] });
+  const tracer = provider.getTracer("next.js");
+  // Next's `BaseServer.handleRequest` shape: a SERVER root with the raw url, an internal child.
+  const root = tracer.startSpan("GET", { kind: SpanKind.SERVER, attributes: { "http.method": "GET", "http.target": "/api/health?x=1" } });
+  const child = tracer.startSpan("executing api route (app) /api/health", {}, trace.setSpan(ROOT_CONTEXT, root));
+  child.setStatus({ code: SpanStatusCode.ERROR });
+  child.end();
+  root.end();
+  await provider.forceFlush();
+  assert.equal(out.getFinishedSpans().length, 0);
+  const other = tracer.startSpan("GET", { kind: SpanKind.SERVER, attributes: { "http.target": "/api/other" } });
+  tracer.startSpan("c", {}, trace.setSpan(ROOT_CONTEXT, other)).end();
+  other.end();
+  await provider.forceFlush();
+  assert.equal(out.getFinishedSpans().length, 2, "any other route is still traced");
 });
 
 const mk = (id: string, parent: string | undefined, code: SpanStatusCode, ms: number) =>

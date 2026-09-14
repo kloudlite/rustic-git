@@ -183,6 +183,13 @@ impl<P: SpanProcessor> SpanProcessor for Promote<P> {
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         self.inner.shutdown_with_timeout(timeout)
     }
+
+    // The trait default is a no-op, and the provider hands its Resource to the exporter only
+    // through this call: without the forward every span left with no `service.name` (fleet,
+    // 2026-09-14). `tests/resource.rs` holds it on the wire.
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.inner.set_resource(resource)
+    }
 }
 
 #[cfg(test)]
