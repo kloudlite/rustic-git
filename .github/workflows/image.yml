@@ -102,7 +102,7 @@ jobs:
           cargo build --release --locked
           --bin kloudlite --bin kloudlite-api --bin kloudlite-worker
           --bin kloudlite-agent --bin kloudlite-gateway --bin kloudlite-builder-gate
-          --bin kloudlite-slo --bin kl-connect
+          --bin kloudlite-slo --bin kloudlite-controller --bin kl-connect
       # The workspace CLI is a musl binary (the workspace image is Alpine); its own target and,
       # below, its own artifact, so the flat `target/release` restore in the image job stays flat.
       # The intercept proxy rides the same invocation: its image is `scratch`, which has no glibc
@@ -111,7 +111,7 @@ jobs:
       - name: glibc ceiling
         run: |
           set -eu
-          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
+          for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kloudlite-controller kl-connect; do
             need=$(objdump -T "/ci-target/release/$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
             echo "$b needs $need"
             if [ "$(printf '%s\nGLIBC_2.36\n' "$need" | sort -V | tail -1)" != GLIBC_2.36 ]; then
@@ -129,6 +129,7 @@ jobs:
             /ci-target/release/kloudlite-gateway
             /ci-target/release/kloudlite-builder-gate
             /ci-target/release/kloudlite-slo
+            /ci-target/release/kloudlite-controller
             /ci-target/release/kl-connect
           if-no-files-found: error
           retention-days: 1
@@ -205,6 +206,16 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-gateway:latest
             ghcr.io/kloudlite/kloudlite-gateway:${{ github.sha }}
+      # The cluster controller. Same commit as everything else: it reconciles the same CRDs.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: controller
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-controller:latest
+            ghcr.io/kloudlite/kloudlite-controller:${{ github.sha }}
       # The build gate. Same commit as the api whose internal routes it calls.
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

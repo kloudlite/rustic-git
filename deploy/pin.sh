@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
-# THE CONTRACT. Nine images, two SHAs, one edit:
+# THE CONTRACT. Ten images, two SHAs, one edit:
 #   - kloudlite, kloudlite-agent, kloudlite-gateway, kloudlite-builder-gate, kloudlite-workspace,
-#     kloudlite-bench, kloudlite-intercept-proxy, kloudlite-slo are eight targets of ONE Dockerfile (the bench's
-#     is deploy/bench/Dockerfile over the same context), built
+#     kloudlite-bench, kloudlite-intercept-proxy, kloudlite-slo, kloudlite-controller are nine
+#     targets of ONE Dockerfile (the bench's is deploy/bench/Dockerfile over the same context), built
 #     from ONE commit by image.yml. The server tier, the agent and the gateway therefore always
 #     pin the SAME sha — the agent speaks to the server's `vol/` surface, and two SHAs there is a
 #     wire-compatibility bet nobody placed. That is <sha>: kloudlite.yaml (srv, api, worker, the
@@ -45,7 +45,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -60,11 +60,24 @@ pin() {
   # The digest-pinned alternative comes FIRST: perl alternation is ordered, and the loose tag
   # class would otherwise stop at the `@`, leave the old digest in place and append a second one.
   # `*` on the digest group also collapses a reference that already got doubled that way.
-  perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})*|[A-Za-z0-9_.-]+)#\${1}$2\@$3#" "${@:4}"
+  # A manifest that does not exist yet is skipped with a notice, not an error: a new tier's image
+  # is built a commit or two before the yaml that runs it lands, and perl -pi only warns on an
+  # unopenable file, so without this the run would "succeed" having pinned nothing.
+  local f targets=()
+  for f in "${@:4}"; do
+    [ -f "$f" ] || { echo "pin: $f not present yet — skipping $1" >&2; continue; }
+    targets+=("$f")
+  done
+  [ ${#targets[@]} -gt 0 ] || return 0
+  perl -pi -e "s#(ghcr\.io/kloudlite/$1:)(?:[0-9a-f]{40}(?:\@sha256:[0-9a-f]{64})*|[A-Za-z0-9_.-]+)#\${1}$2\@$3#" "${targets[@]}"
 }
 pin 'kloudlite(?!-)' "$SHA" "${DIGEST[kloudlite]}" kloudlite.yaml
 pin 'kloudlite-agent' "$SHA" "${DIGEST[kloudlite-agent]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
+# The cluster controller. NOTE: a new ghcr package is PRIVATE by default, and digest_of fetches
+# the manifest anonymously — a new package must be made public once in the GitHub UI before the
+# first pin succeeds.
+pin 'kloudlite-controller' "$SHA" "${DIGEST[kloudlite-controller]}" k3s/controller.yaml
 pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/builder-gate.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
@@ -84,5 +97,5 @@ cat <<EOF
 pinned. Next:
   git commit -am "Pin every tier to $SHA"
   deploy/roll.sh                                   # AKS: one apply, then the rollout waits
-  KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml -f deploy/k3s/builder-gate.yaml
+  KUBECONFIG=.local/k3s.yaml kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml -f deploy/k3s/builder-gate.yaml -f deploy/k3s/controller.yaml
 EOF

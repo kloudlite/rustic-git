@@ -102,6 +102,20 @@ USER kloudlite
 EXPOSE 443 8080
 ENTRYPOINT ["kloudlite-gateway"]
 
+# The cluster controller. No capability, no hostPath, no secret: the API server is its only
+# dependency, and its one listener is the health route on 8080 — so none of the gateway's setcap
+# dance applies here.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS controller
+# ca-certificates only: the controller talks TLS to the kube API server and to nothing else.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG PROFILE=release
+COPY target/${PROFILE}/kloudlite-controller /usr/local/bin/kloudlite-controller
+RUN useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite
+USER kloudlite
+EXPOSE 8080
+ENTRYPOINT ["kloudlite-controller"]
+
 # The build gate. Its own image for the same reason the gateway has one: a different pod, a
 # different ServiceAccount, and no reason for the git server's pods to carry either binary.
 FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS builder-gate

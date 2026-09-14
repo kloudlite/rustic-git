@@ -96,7 +96,7 @@ cp Dockerfile .dockerignore "$CTX/"
 # The workspace image COPYs two scripts from deploy/workspace-image (CI's context is `.`, so it
 # never notices); a staging context that holds only binaries fails that COPY with "not found".
 mkdir -p "$CTX/deploy" && cp -r deploy/workspace-image "$CTX/deploy/"
-for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kl-connect; do
+for b in kloudlite kloudlite-api kloudlite-worker kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-slo kloudlite-controller kl-connect; do
   ln -f "$CARGO_TARGET_DIR/$PROFILE/$b" "$CTX/target/$PROFILE/$b"
 done
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/$PROFILE"
@@ -113,7 +113,7 @@ mkdir -p "$CTX/harness"
 cp harness/package.json harness/package-lock.json "$CTX/harness/"
 cp -r harness/bench harness/pi "$CTX/harness/"
 
-for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
+for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway controller:kloudlite-controller builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
   buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX" \

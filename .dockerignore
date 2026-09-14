@@ -8,6 +8,7 @@
 !target/release/kloudlite-gateway
 !target/release/kloudlite-builder-gate
 !target/release/kloudlite-slo
+!target/release/kloudlite-controller
 !target/release/kl-connect
 !target/x86_64-unknown-linux-musl/release/kl
 !target/x86_64-unknown-linux-musl/dev-image/kl
@@ -20,6 +21,7 @@
 !target/dev-image/kloudlite-gateway
 !target/dev-image/kloudlite-builder-gate
 !target/dev-image/kloudlite-slo
+!target/dev-image/kloudlite-controller
 !target/dev-image/kl-connect
 !deploy/workspace-image/docker-credential-kl
 !deploy/workspace-image/kl-build.sh
