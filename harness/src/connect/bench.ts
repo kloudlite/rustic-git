@@ -78,24 +78,39 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export async function ensureBench(api: string, token: string, step: (s: string) => void, opts: Opts = {}) {
+/** A team the person may open a bench in; `region` "" = none bound yet (no bench can exist). */
+export type Team = { slug: string; name: string; region: string };
+
+/** `GET /v1/bench/teams`: the person's own teams only (`crates/workspaces/src/api/bench.rs`). */
+export async function listTeams(api: string, token: string, signal?: AbortSignal): Promise<Team[]> {
+  const r = await fetch(`${api}/v1/bench/teams`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal });
+  if (r.status === 401) throw new Expired();
+  if (!r.ok) throw new Error(`Kloudlite answered ${r.status} listing your teams`);
+  const list = (await r.json()) as unknown;
+  if (!Array.isArray(list)) throw new Error("Kloudlite answered an unreadable team list");
+  return list.map((t) => ({ slug: String(t?.slug ?? ""), name: String(t?.name ?? t?.slug ?? ""), region: String(t?.region ?? "") })).filter((t) => t.slug);
+}
+
+const q = (team: string) => `?team=${encodeURIComponent(team)}`;
+
+export async function ensureBench(api: string, token: string, team: string, step: (s: string) => void, opts: Opts = {}) {
   const deadline = Date.now() + (opts.waitMs ?? 90_000);
   let created = false;
   let started = false;
   for (;;) {
-    const a = await call(api, token, "POST", "/v1/bench/session", undefined, opts.signal);
+    const a = await call(api, token, "POST", `/v1/bench/session${q(team)}`, undefined, opts.signal);
     if (a.status >= 200 && a.status < 300 && a.status !== 202) return;
     if (a.status === 404 && !created) {
       created = true;
       step("creating your bench");
-      const c = await call(api, token, "POST", "/v1/bench", {}, opts.signal);
+      const c = await call(api, token, "POST", "/v1/bench", { team }, opts.signal);
       if (c.status >= 300) throw refused(c);
       continue;
     }
     if (a.status === 409 && a.body.error === STOPPED && !started) {
       started = true;
       step("starting your bench");
-      const s = await call(api, token, "POST", "/v1/bench/start", undefined, opts.signal);
+      const s = await call(api, token, "POST", `/v1/bench/start${q(team)}`, undefined, opts.signal);
       if (s.status >= 300) throw refused(s);
       continue;
     }
@@ -106,10 +121,10 @@ export async function ensureBench(api: string, token: string, step: (s: string) 
   }
 }
 
-export async function mintSession(api: string, token: string, opts: Opts = {}): Promise<Session> {
+export async function mintSession(api: string, token: string, team: string, opts: Opts = {}): Promise<Session> {
   const deadline = Date.now() + (opts.waitMs ?? 90_000);
   for (;;) {
-    const a = await call(api, token, "POST", "/v1/bench/session", undefined, opts.signal);
+    const a = await call(api, token, "POST", `/v1/bench/session${q(team)}`, undefined, opts.signal);
     if (a.status === 202) {
       if (Date.now() >= deadline) throw new Error("your bench did not start within 90 s");
       await sleep(opts.sleepMs ?? 1000, opts.signal);

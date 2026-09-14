@@ -8,7 +8,7 @@ import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from 
 import { createStore } from "./auth/store";
 import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/device";
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
-import { ensureBench, mintSession } from "./connect/bench";
+import { ensureBench, listTeams, mintSession } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
@@ -380,25 +380,40 @@ function credentialStore(): Deps["store"] {
     },
   };
 }
+// The chosen team: a plain setting, not a secret; the controller re-checks it against the live list.
+const teamFile = () => path.join(app.getPath("userData"), "team.txt");
+const teamStore: Deps["team"] = {
+  load: () => {
+    try {
+      return readFileSync(teamFile(), "utf8").trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  save: (slug) => writeFileSync(teamFile(), slug),
+  clear: () => rmSync(teamFile(), { force: true }),
+};
 function authDeps(): Deps {
   return {
     api: apiBase,
     store,
+    team: teamStore,
+    teams: (c: Credential) => listTeams(c.api, c.token, AbortSignal.timeout(10_000)),
     startLogin: (api: string, signal: AbortSignal) => startLogin(api, `${os.hostname()} (desktop)`, { signal }),
     openExternal: async (url: string) => {
       if (!isAuthorizeUrl(apiBase(), url)) throw new Error("refusing to open a URL that is not Kloudlite's login page");
       await shell.openExternal(url);
     },
     validate,
-    connect: async (c: Credential, step: (s: string) => void) => {
+    connect: async (c: Credential, team: string, step: (s: string) => void) => {
       const cache = path.join(app.getPath("userData"), "bench-cache.json");
       try {
         if (BENCH) {
           bench = new BenchClient(BENCH, toRenderer, cache, `${c.username}@${BENCH}`);
         } else {
-          await ensureBench(c.api, c.token, step);
+          await ensureBench(c.api, c.token, team, step);
           const t = await openTunnel(
-            () => mintSession(c.api, c.token),
+            () => mintSession(c.api, c.token, team),
             (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
           );
           closeTunnel = t.close;
@@ -475,6 +490,11 @@ ipcMain.handle("auth:openBrowser", async () => {
   if (s.phase === "waiting") await deps.openExternal(s.url);
 });
 ipcMain.handle("auth:signOut", () => auth.signOut());
+ipcMain.handle("auth:chooseTeam", (_e, slug: unknown) => {
+  if (typeof slug !== "string") throw new Error("not a team");
+  return auth.chooseTeam(slug);
+});
+ipcMain.handle("auth:switchTeam", () => auth.switchTeam());
 ipcMain.handle("auth:api", () => apiBase());
 ipcMain.handle("auth:setApi", (_e, url: unknown) => {
   if (auth.state().phase !== "signed-out") throw new Error("sign out before changing the Kloudlite address");

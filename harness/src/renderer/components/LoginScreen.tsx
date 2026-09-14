@@ -1,12 +1,12 @@
-import { Show, createSignal } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import type { AuthState } from "../../auth/controller";
 import { Button } from "../ui/Button";
-import { screen } from "../login";
+import { screen, type LoginAction } from "../login";
 
 /** The whole window until the person is signed in and connected. Holds no credential. */
 export function LoginScreen(props: { state: AuthState }) {
   const v = () => screen(props.state);
-  const has = (a: "signIn" | "cancel" | "openBrowser" | "retry" | "address") => v().actions.includes(a);
+  const has = (a: LoginAction) => v().actions.includes(a);
   const [editing, setEditing] = createSignal(false);
   const [address, setAddress] = createSignal("");
   const [note, setNote] = createSignal("");
@@ -28,11 +28,26 @@ export function LoginScreen(props: { state: AuthState }) {
         <Show when={v().code}>{(c) => <div class="select-text font-mono text-2xl tracking-widest">{c()}</div>}</Show>
         <Show when={v().body}>{(b) => <p class="text-sm text-subtle">{b()}</p>}</Show>
         <Show when={v().url}>{(u) => <p class="select-text break-all font-mono text-xs text-subtle">{u()}</p>}</Show>
+        <Show when={v().teams}>
+          {(ts) => (
+            <div class="flex w-full flex-col gap-1.5">
+              <For each={ts()}>
+                {(t) => (
+                  <Button disabled={t.disabled} onClick={() => void window.harness.auth.chooseTeam(t.slug)}>
+                    {t.label}
+                    <Show when={t.note}>{(n) => <span class="ml-2 text-xs text-subtle">{n()}</span>}</Show>
+                  </Button>
+                )}
+              </For>
+            </div>
+          )}
+        </Show>
         <div class="flex gap-2">
           <Show when={has("signIn")}><Button variant="primary" onClick={() => void window.harness.auth.signIn()}>Sign in with browser</Button></Show>
           <Show when={has("openBrowser")}><Button onClick={() => void window.harness.auth.openBrowser()}>Open browser again</Button></Show>
           <Show when={has("cancel")}><Button onClick={() => void window.harness.auth.cancel()}>Cancel</Button></Show>
           <Show when={has("retry")}><Button variant="primary" onClick={() => void window.harness.auth.retry()}>Retry</Button></Show>
+          <Show when={has("signOut")}><Button onClick={() => void window.harness.auth.signOut()}>Sign out</Button></Show>
         </div>
         <Show when={has("address")}>
           <Show when={editing()} fallback={<button class="text-xs text-subtle underline" onClick={() => void openAddress()}>Kloudlite address</button>}>

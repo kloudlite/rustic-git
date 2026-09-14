@@ -34,7 +34,8 @@ export function SettingsPage(props: { machine: Machine }) {
   ];
   const [who, setWho] = createSignal("");
   const [api, setApi] = createSignal("");
-  void window.harness.auth.status().then((s) => s.phase === "ready" && setWho(s.username));
+  const [team, setTeam] = createSignal("");
+  void window.harness.auth.status().then((s) => s.phase === "ready" && (setWho(s.username), setTeam(s.team)));
   void window.harness.auth.api().then(setApi);
   const [page, setPage] = createSignal<Page>(location.hash.endsWith("/discover") ? "discover" : "model");
   const [filter, setFilter] = createSignal("all");
@@ -70,6 +71,10 @@ export function SettingsPage(props: { machine: Machine }) {
             <Section id="account" title="Account" hint="this app's Kloudlite login">
               <Row name="signed in as" detail="a CLI login labelled with this computer's name and (desktop)">
                 <span class="font-mono text-sm text-fg">{who()}</span>
+              </Row>
+              <Row name="team" detail="the team whose bench this app is connected to">
+                <span class="font-mono text-sm text-fg">{team()}</span>
+                <Button onClick={() => void window.harness.auth.switchTeam()}>Switch team</Button>
               </Row>
               <Row name="address" detail="change it from the login screen, after signing out">
                 <span class="font-mono text-sm text-fg">{api()}</span>
