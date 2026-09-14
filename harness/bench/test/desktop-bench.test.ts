@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { ensureBench, Expired, mintSession } from "../../src/connect/bench.ts";
+import { BadGateway, ensureBench, Expired, mintSession } from "../../src/connect/bench.ts";
 
 type Answer = { status: number; body?: unknown };
 /** A stub api answering each route from its own queue; the last answer repeats. */
@@ -21,7 +21,7 @@ async function stub(routes: Record<string, Answer[]>) {
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
   return { api: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, calls, auth, close: () => srv.close() };
 }
-const ready = { status: 201, body: { id: "bench-k", token: "s1", gateway: "wss://g/tunnel/bench-k", expires_at: "2030" } };
+const ready = { status: 201, body: { id: "bench-k", token: "s1", gateway: "wss://ws-r1.khost.dev/tunnel/bench-k", expires_at: "2030" } };
 const fast = { sleepMs: 1, waitMs: 2000 };
 
 test("a ready bench: one session call, bearer auth", async () => {
@@ -99,5 +99,63 @@ test("mintSession waits through waking and gives up after waitMs", async () => {
     await assert.rejects(mintSession(never.api, "tok", { sleepMs: 5, waitMs: 30 }), /did not start/);
   } finally {
     never.close();
+  }
+});
+
+test("a gateway address that isn't ours is refused, never returned", async () => {
+  const bad = async (gateway: string) => {
+    const s = await stub({ "POST /v1/bench/session": [{ status: 201, body: { id: "b", token: "s1", gateway, expires_at: "2030" } }] });
+    try {
+      await assert.rejects(mintSession(s.api, "tok", fast), BadGateway);
+    } finally {
+      s.close();
+    }
+  };
+  await bad("wss://evil.test/tunnel/bench-k"); // foreign host
+  await bad("ws://ws-r1.khost.dev/tunnel/bench-k"); // not wss
+  await bad("https://ws-r1.khost.dev/tunnel/bench-k"); // not a ws scheme at all
+  await bad("wss://ws-r1.khost.dev@evil.test/tunnel/bench-k"); // userinfo trick: host is really evil.test
+  await bad("wss://ws-r1.khost.dev/other/bench-k"); // wrong path
+  // a local test gateway is refused unless explicitly allowed
+  const s = await stub({ "POST /v1/bench/session": [{ status: 201, body: { id: "b", token: "s1", gateway: "ws://127.0.0.1:1/tunnel/x", expires_at: "2030" } }] });
+  try {
+    await assert.rejects(mintSession(s.api, "tok", fast), BadGateway);
+    const session = await mintSession(s.api, "tok", { ...fast, allowLocalGateway: true });
+    assert.equal(session.gateway, "ws://127.0.0.1:1/tunnel/x");
+  } finally {
+    s.close();
+  }
+});
+
+test("a redirect to a foreign origin is refused, never followed", async () => {
+  const foreign = http.createServer((_req, res) => res.writeHead(200).end("hit"));
+  await new Promise<void>((r) => foreign.listen(0, "127.0.0.1", r));
+  let hit = false;
+  foreign.on("request", () => (hit = true));
+  const foreignUrl = `http://127.0.0.1:${(foreign.address() as AddressInfo).port}/`;
+  const evil = http.createServer((_req, res) => res.writeHead(307, { location: foreignUrl }).end());
+  await new Promise<void>((r) => evil.listen(0, "127.0.0.1", r));
+  const api = `http://127.0.0.1:${(evil.address() as AddressInfo).port}`;
+  try {
+    await assert.rejects(ensureBench(api, "tok", () => undefined, fast));
+    assert.equal(hit, false);
+  } finally {
+    evil.close();
+    foreign.close();
+  }
+});
+
+test("an abort cancels the 202 wait loop instead of retrying forever", async () => {
+  const s = await stub({ "POST /v1/bench/session": [{ status: 202, body: { state: "waking" } }] });
+  const ac = new AbortController();
+  try {
+    const p = mintSession(s.api, "tok", { sleepMs: 20, waitMs: 2000, signal: ac.signal });
+    setTimeout(() => ac.abort(), 5);
+    await assert.rejects(p);
+    const seenAfterAbort = s.calls.length;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(s.calls.length, seenAfterAbort); // no further polling after abort
+  } finally {
+    s.close();
   }
 });

@@ -87,6 +87,28 @@ test("claim reads the JWT payload without verifying it", () => {
   assert.equal(claim("not-a-jwt", "jti"), undefined);
 });
 
+test("a 3xx to a foreign origin is refused, never followed", async () => {
+  const foreign = http.createServer((req, res) => {
+    res.writeHead(200).end("should never be hit");
+  });
+  await new Promise<void>((r) => foreign.listen(0, "127.0.0.1", r));
+  const foreignUrl = `http://127.0.0.1:${(foreign.address() as AddressInfo).port}/`;
+  let hit = false;
+  foreign.on("request", () => (hit = true));
+  const evil = http.createServer((req, res) => {
+    res.writeHead(307, { location: foreignUrl }).end();
+  });
+  await new Promise<void>((r) => evil.listen(0, "127.0.0.1", r));
+  const api = `http://127.0.0.1:${(evil.address() as AddressInfo).port}`;
+  try {
+    await assert.rejects(startLogin(api, "mac (desktop)", { signal: new AbortController().signal, pollMs: 5 }));
+    assert.equal(hit, false);
+  } finally {
+    evil.close();
+    foreign.close();
+  }
+});
+
 test("only the api's own authorize URL is openable", () => {
   const api = "https://dev.kloudlite.io";
   assert.ok(isAuthorizeUrl(api, authorizeUrl(api, "BCDF-GH23")));

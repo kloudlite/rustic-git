@@ -47,6 +47,7 @@ export async function startLogin(api: string, device: string, opts: { signal: Ab
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ device }),
     signal: opts.signal,
+    redirect: "error",
   });
   if (!r.ok) throw new LoginFailed(`Kloudlite would not start a login (${r.status})`);
   const dc = (await r.json()) as { code: string; poll: string; expiresIn: number };
@@ -60,7 +61,10 @@ export async function startLogin(api: string, device: string, opts: { signal: Ab
       let status = 0;
       let body: { token?: string; expiresAt?: string } = {};
       try {
-        const p = await fetch(`${api}/v1/cli/token?poll=${encodeURIComponent(dc.poll)}`, { signal: opts.signal });
+        const p = await fetch(`${api}/v1/cli/token?poll=${encodeURIComponent(dc.poll)}`, {
+          signal: opts.signal,
+          redirect: "error",
+        });
         status = p.status;
         if (status === 200) body = (await p.json()) as typeof body;
         else await p.body?.cancel();
