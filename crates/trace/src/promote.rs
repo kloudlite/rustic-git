@@ -8,30 +8,82 @@
 //! too, so each process promotes its own part. A fast upstream wrapped around a slow downstream
 //! cannot happen by construction.
 //!
-//! ponytail: a trace whose root never ends (a cancelled future) parks its children until the map
-//! reaches `MAX_TRACES`, at which point the whole map is cleared — those traces are lost, not
-//! leaked. A time-ordered eviction is the upgrade if Task 8 shows promoted traces going missing.
+//! Bounded by the TOTAL number of waiting spans (`MAX_PENDING`), evicting the trace whose last
+//! child arrived longest ago first. A still-running slow request keeps adding children, so it
+//! stays at the back of that order; what goes first is a trace whose root never ended (a
+//! cancelled future) or has been quiet the longest. One trace holds at most `MAX_SPANS`; children
+//! past that are counted and stamped as `dropped_children` on the promoted root rather than lost
+//! silently. Every drop is logged as `trace.promote.dropped`, at most once per `LOG_EVERY`.
+//!
+//! ponytail: eviction order is an append-only queue with lazy deletion (an entry is live only if
+//! its sequence number is the trace's latest), compacted when it doubles the cap — O(1) per span
+//! with a rare O(n) compaction. A real LRU is the upgrade if the compaction ever shows in profiles.
 
 use crate::SLOW;
 use opentelemetry::trace::{SpanContext, SpanId, Status, TraceId};
+use opentelemetry::KeyValue;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{Span, SpanData, SpanProcessor};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub(crate) const MAX_TRACES: usize = 4096;
+const MAX_PENDING: usize = 16_384;
 const MAX_SPANS: usize = 512;
+const LOG_EVERY: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Default)]
+struct Waiting {
+    spans: Vec<SpanData>,
+    last: u64,
+    dropped: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Pending {
+    traces: HashMap<TraceId, Waiting>,
+    order: VecDeque<(TraceId, u64)>,
+    seq: u64,
+    pub(crate) total: usize,
+}
 
 #[derive(Debug)]
 pub struct Promote<P> {
     inner: P,
-    pub(crate) pending: Mutex<HashMap<TraceId, Vec<SpanData>>>,
+    max_pending: usize,
+    max_spans: usize,
+    pub(crate) pending: Mutex<Pending>,
+    /// Drops not yet logged: [evicted for capacity, past the per-trace cap].
+    unlogged: [AtomicU64; 2],
+    last_log: Mutex<Option<Instant>>,
 }
 
 impl<P> Promote<P> {
     pub fn new(inner: P) -> Self {
-        Self { inner, pending: Mutex::new(HashMap::new()) }
+        Self::with_limits(inner, MAX_PENDING, MAX_SPANS)
+    }
+
+    pub(crate) fn with_limits(inner: P, max_pending: usize, max_spans: usize) -> Self {
+        Self { inner, max_pending, max_spans, pending: Mutex::default(), unlogged: Default::default(), last_log: Mutex::default() }
+    }
+
+    /// Called with the lock released: the log line is an event, and must not run under `pending`.
+    fn report(&self, capacity: u64, per_trace: u64) {
+        self.unlogged[0].fetch_add(capacity, Ordering::Relaxed);
+        self.unlogged[1].fetch_add(per_trace, Ordering::Relaxed);
+        let mut last = self.last_log.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|t| t.elapsed() < LOG_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+        drop(last);
+        for (n, reason) in self.unlogged.iter().zip(["capacity", "per_trace"]) {
+            let count = n.swap(0, Ordering::Relaxed);
+            if count > 0 {
+                tracing::warn!(count, reason, "trace.promote.dropped");
+            }
+        }
     }
 }
 
@@ -50,26 +102,53 @@ impl<P: SpanProcessor> SpanProcessor for Promote<P> {
         self.inner.on_start(span, cx);
     }
 
-    fn on_end(&self, span: SpanData) {
+    fn on_end(&self, mut span: SpanData) {
         if span.span_context.is_sampled() {
             return self.inner.on_end(span);
         }
         let id = span.span_context.trace_id();
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let p = &mut *guard;
         if !(span.parent_span_is_remote || span.parent_span_id == SpanId::INVALID) {
-            if pending.len() >= MAX_TRACES && !pending.contains_key(&id) {
-                pending.clear();
+            p.seq += 1;
+            let w = p.traces.entry(id).or_default();
+            w.last = p.seq;
+            let mut per_trace = 0;
+            if w.spans.len() < self.max_spans {
+                w.spans.push(span);
+                p.total += 1;
+            } else {
+                w.dropped += 1;
+                per_trace = 1;
             }
-            let waiting = pending.entry(id).or_default();
-            if waiting.len() < MAX_SPANS {
-                waiting.push(span);
+            p.order.push_back((id, p.seq));
+            let mut evicted = 0;
+            while p.total > self.max_pending {
+                let Some((old, seq)) = p.order.pop_front() else { break };
+                if p.traces.get(&old).is_some_and(|w| w.last == seq) {
+                    let n = p.traces.remove(&old).map_or(0, |w| w.spans.len());
+                    p.total -= n;
+                    evicted += n as u64;
+                }
+            }
+            if p.order.len() > 2 * self.max_pending {
+                let traces = &p.traces;
+                p.order.retain(|(id, seq)| traces.get(id).is_some_and(|w| w.last == *seq));
+            }
+            drop(guard);
+            if evicted + per_trace > 0 {
+                self.report(evicted, per_trace);
             }
             return;
         }
-        let children = pending.remove(&id).unwrap_or_default();
-        drop(pending);
+        let w = p.traces.remove(&id).unwrap_or_default();
+        p.total -= w.spans.len();
+        drop(guard);
         if interesting(&span) {
-            for s in children.into_iter().chain(std::iter::once(span)) {
+            if w.dropped > 0 {
+                span.attributes.push(KeyValue::new("dropped_children", w.dropped as i64));
+            }
+            for s in w.spans.into_iter().chain(std::iter::once(span)) {
                 self.inner.on_end(sampled(s));
             }
         }
@@ -110,9 +189,23 @@ mod tests {
         }
     }
 
-    fn promote() -> (Promote<SimpleSpanProcessor<InMemorySpanExporter>>, InMemorySpanExporter) {
+    type Mem = Promote<SimpleSpanProcessor<InMemorySpanExporter>>;
+
+    fn promote_with(max_pending: usize, max_spans: usize) -> (Mem, InMemorySpanExporter) {
         let out = InMemorySpanExporter::default();
-        (Promote::new(SimpleSpanProcessor::new(out.clone())), out)
+        (Promote::with_limits(SimpleSpanProcessor::new(out.clone()), max_pending, max_spans), out)
+    }
+
+    fn promote() -> (Mem, InMemorySpanExporter) {
+        promote_with(MAX_PENDING, MAX_SPANS)
+    }
+
+    fn child(trace: u128, id: u64) -> SpanData {
+        span(trace, id, 1, false, Duration::ZERO, Status::Unset, false)
+    }
+
+    fn waiting(p: &Mem, trace: u128) -> usize {
+        p.pending.lock().unwrap().traces.get(&TraceId::from(trace)).map_or(0, |w| w.spans.len())
     }
 
     #[test]
@@ -128,6 +221,7 @@ mod tests {
         p.on_end(span(1, 3, 2, false, Duration::from_millis(5), Status::Unset, false));
         p.on_end(span(1, 2, 0, false, Duration::from_millis(9), Status::Unset, false));
         assert!(out.get_finished_spans().unwrap().is_empty());
+        assert_eq!(p.pending.lock().unwrap().total, 0);
     }
 
     #[test]
@@ -148,11 +242,68 @@ mod tests {
     }
 
     #[test]
-    fn pending_is_bounded() {
-        let (p, _) = promote();
-        for t in 0..(MAX_TRACES as u128 + 10) {
-            p.on_end(span(t + 1, 3, 2, false, Duration::ZERO, Status::Unset, false));
+    fn pending_is_bounded_by_total_spans() {
+        let (p, _) = promote_with(100, 8);
+        for t in 0..10_000u128 {
+            p.on_end(child(t % 300 + 1, t as u64 + 2));
         }
-        assert!(p.pending.lock().unwrap().len() <= MAX_TRACES);
+        let pending = p.pending.lock().unwrap();
+        assert!(pending.total <= 100);
+        assert!(pending.order.len() <= 200);
+    }
+
+    #[test]
+    fn overflow_evicts_the_oldest_trace_first() {
+        let (p, _) = promote_with(4, 8);
+        for t in 1..=5u128 {
+            p.on_end(child(t, 2));
+        }
+        assert_eq!(waiting(&p, 1), 0, "the oldest trace went");
+        assert!((2..=5).all(|t| waiting(&p, t) == 1), "the newer ones stayed");
+    }
+
+    #[test]
+    fn a_still_running_slow_root_keeps_its_children() {
+        let (p, out) = promote_with(8, 64);
+        p.on_end(child(1, 2));
+        for (i, t) in (100..112u128).enumerate() {
+            p.on_end(child(t, 2));
+            if i % 4 == 3 {
+                p.on_end(child(1, 10 + i as u64));
+            }
+        }
+        assert_eq!(waiting(&p, 1), 4);
+        p.on_end(span(1, 1, 0, false, SLOW + Duration::from_millis(1), Status::Unset, false));
+        assert_eq!(out.get_finished_spans().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn children_past_the_per_trace_cap_are_counted_on_the_root() {
+        let (p, out) = promote_with(100, 2);
+        for id in 2..5 {
+            p.on_end(child(1, id));
+        }
+        p.on_end(span(1, 1, 0, false, Duration::ZERO, Status::error("boom"), false));
+        let got = out.get_finished_spans().unwrap();
+        assert_eq!(got.len(), 3);
+        let root = got.iter().find(|s| s.parent_span_id == SpanId::INVALID).unwrap();
+        assert!(root.attributes.contains(&KeyValue::new("dropped_children", 1i64)));
+    }
+
+    #[test]
+    fn a_failed_request_exports_its_whole_tree() {
+        let (d, out) = crate::testing::subscriber();
+        let mut h = http::HeaderMap::new();
+        // An unsampled remote parent: head sampling says RecordOnly, so only promotion can keep it.
+        h.insert("traceparent", http::HeaderValue::from_static("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00"));
+        tracing::dispatcher::with_default(&d, || {
+            let span = crate::server_span(&http::Method::GET, "/v1/x", &h, "r", "/v1/x");
+            span.in_scope(|| drop(tracing::info_span!("child")));
+            crate::finish(&span, 500);
+        });
+        let got = out.get_finished_spans().unwrap();
+        assert_eq!(got.len(), 2, "server span and its child");
+        assert!(got.iter().all(|s| s.span_context.is_sampled() && s.span_context.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()));
+        assert!(got.iter().any(|s| matches!(s.status, Status::Error { .. })));
     }
 }

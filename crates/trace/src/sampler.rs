@@ -102,6 +102,15 @@ impl Default for Sampler {
     }
 }
 
+/// A remote parent that is neither probe-marked nor trusted falls through to the ratio — including
+/// our OWN internal hops (api -> srv, agent -> agent). That still keeps a trace whole because
+/// `TraceIdRatioBased` is a pure function of the trace id: every process with the same ratio
+/// re-rolls the same answer. It diverges only while a ratio change is mid-rollout, or when an
+/// upstream kept the trace by promotion (the downstream then promotes only its own failure or
+/// stall). Task 2 should trust the sampled flag on the authenticated peer listener
+/// (`WS_PEER_SECRET` / peer auth). `trust_remote_sampled` is process-wide, so that needs a
+/// per-listener context mark set after peer auth passes, the way `Probe` is — which removes both
+/// gaps for internal traffic without trusting the public listener.
 pub(crate) fn decide_with(parent: Option<&Context>, trace_id: TraceId, ratio: f64, trust_remote: bool, probes: &Bucket) -> SamplingDecision {
     let probe = parent.is_some_and(|c| c.get::<Probe>().is_some());
     let parent = parent.map(|c| c.span().span_context().clone()).filter(|sc| sc.is_valid());
