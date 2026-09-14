@@ -8,6 +8,12 @@
 //! directory on every call and never stored on the Bench (decision 1). Waking is a `wakeAt`
 //! patch — `/v1` is spec's only writer, and the agent compares it to `status.idleSince`
 //! (decision 6).
+//!
+//! Image upgrades: `spec.image` tracks `KLOUDLITE_BENCH_IMAGE` (pinned per release). Every patch
+//! that starts or wakes a bench (`wake_patch`) re-stamps it when it differs, so a stopped or idle
+//! bench starts on the new image. A RUNNING pod is never replaced for an image change — the agent
+//! compares only access — so a session is never killed mid-turn; the pod exits on its own idle
+//! clock and the next wake creates it from the new `spec.image`.
 
 use super::scope::may_allocate_for;
 use super::workspaces::{check_attach, gateway_url, install_user_key_when, set_desired, AttachBody};
@@ -144,6 +150,26 @@ async fn ensure_access(api: &Api<crd::Bench>, b: &mut crd::Bench, standing: Stan
     Ok(())
 }
 
+fn configured_image() -> String {
+    std::env::var("KLOUDLITE_BENCH_IMAGE")
+        .ok()
+        .filter(|i| !i.is_empty())
+        .unwrap_or_else(|| crate::model::DEFAULT_BENCH_IMAGE.to_string())
+}
+
+/// The spec patch that starts or wakes `b`; carries `image` only when it moved, so an unchanged
+/// bench's patch stays as small as it was.
+fn wake_patch(b: &crd::Bench, image: &str, running: bool, at: &str) -> serde_json::Value {
+    let mut spec = json!({"wakeAt": at});
+    if running {
+        spec["desiredState"] = json!(DesiredState::Running);
+    }
+    if b.spec.image != image {
+        spec["image"] = json!(image);
+    }
+    json!({"spec": spec})
+}
+
 fn bench_api(s: &ApiState) -> Result<Api<crd::Bench>, Response> {
     Ok(Api::all(kube(s)?.clone()))
 }
@@ -181,16 +207,13 @@ pub(crate) async fn create_bench(
             guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
         }
         let name = b.metadata.name.clone().unwrap_or_default();
-        let patch = json!({"spec": {"desiredState": DesiredState::Running, "wakeAt": now()}});
+        let patch = wake_patch(&b, &configured_image(), true, &now());
         let b = api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
         return Ok(Json(bench_doc(&b, &region)).into_response());
     }
     guard_alloc(&s, &caller.name, false, &bench_cost(&crd::PodResources::default())).await?;
     let id = crd::bench_id(&caller.name, &team);
-    let image = std::env::var("KLOUDLITE_BENCH_IMAGE")
-        .ok()
-        .filter(|i| !i.is_empty())
-        .unwrap_or_else(|| crate::model::DEFAULT_BENCH_IMAGE.to_string());
+    let image = configured_image();
     let mut b = crd::Bench::new(
         &id,
         crd::BenchSpec {
@@ -233,7 +256,7 @@ pub(crate) async fn start_bench(
     if !crd::bench_wants_pod(&b) {
         guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
     }
-    let patch = json!({"spec": {"desiredState": DesiredState::Running, "wakeAt": now()}});
+    let patch = wake_patch(&b, &configured_image(), true, &now());
     api.patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .map_err(kube_err)?;
@@ -270,7 +293,7 @@ pub(crate) async fn bench_session(
     if phase == Phase::Idle {
         // Waking re-charges cpu and memory, so it is an allocation like any start.
         guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
-        api.patch(&id, &PatchParams::default(), &Patch::Merge(&json!({"spec": {"wakeAt": now()}})))
+        api.patch(&id, &PatchParams::default(), &Patch::Merge(&wake_patch(&b, &configured_image(), false, &now())))
             .await
             .map_err(kube_err)?;
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": "waking"}))).into_response());
@@ -342,4 +365,23 @@ pub(crate) async fn detach_bench(
         .await
         .map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wake_on_an_old_image_moves_spec_image_and_an_unchanged_one_does_not() {
+        let b = crd::Bench::new(
+            "bench-1",
+            serde_json::from_value(json!({"owner": "alice", "team": "acme", "image": "bench:old", "desiredState": "stopped"})).unwrap(),
+        );
+        let p = wake_patch(&b, "bench:new", true, "t");
+        assert_eq!(p["spec"]["image"], "bench:new");
+        assert_eq!(p["spec"]["desiredState"], "running");
+        let p = wake_patch(&b, "bench:old", false, "t");
+        assert!(p["spec"].get("image").is_none() && p["spec"].get("desiredState").is_none());
+        assert_eq!(p["spec"]["wakeAt"], "t");
+    }
 }

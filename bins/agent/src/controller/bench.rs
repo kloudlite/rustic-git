@@ -348,6 +348,25 @@ mod tests {
     }
 
     #[test]
+    fn an_image_change_never_replaces_a_live_pod_and_the_next_wake_creates_on_the_new_image() {
+        let mut b = fixture_bench(DesiredState::Running);
+        b.spec.image = "bench:new".into();
+        let mut busy = pod_with(&["harness-bench"], None, true);
+        busy.spec.as_mut().unwrap().containers[0].image = Some("bench:old".into());
+        assert!(matches!(bench_state(&b, Some(&busy)), PodVerdict::Ready), "a session mid-turn keeps its pod");
+        let mut idle = busy.clone();
+        idle.status.as_mut().unwrap().phase = Some("Succeeded".into());
+        idle.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].last_state =
+            Some(ContainerState { terminated: Some(ContainerStateTerminated { exit_code: 0, finished_at: Some(serde_json::from_value(serde_json::json!(FINISHED_AT)).unwrap()), ..Default::default() }), ..Default::default() });
+        assert!(matches!(bench_state(&b, Some(&idle)), PodVerdict::Idle(_)), "the idle exit removes the old pod");
+        b.status.as_mut().unwrap().idle_since = Some(FINISHED_AT.into());
+        b.spec.wake_at = Some("2099-01-01T00:00:00Z".into());
+        assert!(matches!(bench_state(&b, None), PodVerdict::Create));
+        let p = k8s::bench_pod(&b, "bench-1", "/pool", None, "cr.example", 600).unwrap();
+        assert_eq!(p.spec.unwrap().containers.iter().find(|c| c.name == k8s::BENCH_CONTAINER).unwrap().image.as_deref(), Some("bench:new"));
+    }
+
+    #[test]
     fn an_exit_without_finished_at_sleeps_from_the_ready_transition_or_keeps_starting() {
         let running = fixture_bench(DesiredState::Running);
         let mut exited = pod_with(&["harness-bench"], None, false);
