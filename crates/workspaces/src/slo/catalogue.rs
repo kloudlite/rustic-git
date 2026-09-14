@@ -307,8 +307,25 @@ pub const CATALOGUE: &[Slo] = &[
     // the automatic path — and both halves are asserted, because a fallback that also cleared
     // `spec.intercepts` would silently discard what the person asked for.
     Slo { id: "env.intercept.fallback", feature: "Environments", sli: "Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
-    // The UDP refusal is skipped until `model::Service` carries a protocol: nothing can declare a
-    // UDP port today, so the probe has no way to provoke one.
+    // The proxy's own ids. Every one of them ends in a DIAL whose bytes are checked: the bug this
+    // journey exists for is one where every object was perfect and the packets were dropped, so an
+    // id that asserts an object's state and not an answer would have passed straight through it.
+    Slo { id: "env.intercept.proxy.up", feature: "Environments", sli: "The proxy pod for an intercepted service is Ready and the service's endpoints name it", target: p95(90_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.delivered", feature: "Environments", sli: "A request from an environment pod to the intercepted service is answered by the workspace", target: p95(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.remap", feature: "Environments", sli: "The intercepted service answers on its own port while the workspace listens on another", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+    // The bug, as a probe: a follower's packets used to be DNAT'd into another owner's namespace,
+    // whose ingress admitted only the environment's.
+    Slo { id: "env.intercept.peer", feature: "Environments", sli: "A second space following the same environment reaches the intercepted service", target: p95(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.bench", feature: "Environments", sli: "The probe owner's bench reaches the intercepted service", target: p95(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    // The uid assertion is the whole claim of a proxy over baked-in addressing: the workspace's pod
+    // comes back with a new IP and the SAME proxy keeps serving.
+    Slo { id: "env.intercept.proxy.restart", feature: "Environments", sli: "Killing the intercepting workspace's pod does not interrupt delivery beyond the pod's own restart, and no proxy is recreated", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.release", feature: "Environments", sli: "Releasing the intercept brings the real service back, removes the proxy and leaves no grant behind", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    // The UDP refusal is SKIPPED, not passed, until `model::Service` carries a protocol: nothing can
+    // declare a UDP port today, so the probe has no way to provoke one — and a silent pass would
+    // report a guard nobody has as kept.
+    Slo { id: "env.intercept.udp.refused", feature: "Environments", sli: "An intercept of a UDP port is refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.tools.refused", feature: "Environments", sli: "An intercept mapping onto the tool server's port is refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
     Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
     // Hourly: the bench may be asleep, and waking it is not a five-minute cost.
     Slo { id: "env.space.bench", feature: "Environments", sli: "The probe owner's bench follows its space's environment in its resolv.conf", target: bound(120_000), suite: Suite::Hourly, stage: "6 · Environment" },

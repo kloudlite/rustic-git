@@ -103,6 +103,15 @@ first destructive stage.
 | `env.clone.p95` | Environments | Cloning a running environment completes with its services ready | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.intercept` | Environments | An intercepted service answers from the attached workspace on a remapped port | 95 % ≤ 120000 ms | hourly | 6 · Environment |
 | `env.intercept.fallback` | Environments | Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec | 95 % ≤ 180000 ms | hourly | 6 · Environment |
+| `env.intercept.proxy.up` | Environments | The proxy pod for an intercepted service is Ready and the service's endpoints name it | 95 % ≤ 90000 ms | hourly | 6 · Environment |
+| `env.intercept.delivered` | Environments | A request from an environment pod to the intercepted service is answered by the workspace | 95 % ≤ 120000 ms | hourly | 6 · Environment |
+| `env.intercept.remap` | Environments | The intercepted service answers on its own port while the workspace listens on another | 99.9 % | hourly | 6 · Environment |
+| `env.intercept.peer` | Environments | A second space following the same environment reaches the intercepted service | 95 % ≤ 120000 ms | hourly | 6 · Environment |
+| `env.intercept.bench` | Environments | The probe owner's bench reaches the intercepted service | 95 % ≤ 120000 ms | hourly | 6 · Environment |
+| `env.intercept.proxy.restart` | Environments | Killing the intercepting workspace's pod does not interrupt delivery beyond the pod's own restart, and no proxy is recreated | 95 % ≤ 180000 ms | hourly | 6 · Environment |
+| `env.intercept.release` | Environments | Releasing the intercept brings the real service back, removes the proxy and leaves no grant behind | 95 % ≤ 180000 ms | hourly | 6 · Environment |
+| `env.intercept.udp.refused` | Environments | An intercept of a UDP port is refused | 99.9 % | hourly | 6 · Environment |
+| `env.intercept.tools.refused` | Environments | An intercept mapping onto the tool server's port is refused | 99.9 % | hourly | 6 · Environment |
 | `env.intercept.refused` | Environments | An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused | 99.9 % | hourly | 6 · Environment |
 | `env.space.bench` | Environments | The probe owner's bench follows its space's environment in its resolv.conf | 99.9 % ≤ 120000 ms | hourly | 6 · Environment |
 | `builder.hidden` | Environments | The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots | 99.9 % | hourly | 6 · Environment |
