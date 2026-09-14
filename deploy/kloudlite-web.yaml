@@ -248,8 +248,9 @@ spec:
           # not unauthenticated. `builders` is the one person-facing read of the hidden builder
           # (`GET /v1/builders/me`, session JWT again) — `kl-connect builder status` on a laptop has no
           # other way in. `bench` is the CLI's and the harness's route to their own bench
-          # (`/v1/bench*`, session JWT, answered only to the bench's owner).
-          - path: /v1/(cli|workspaces|keys|internal|builders|bench|environments|regions|quota|volumes)(/.*)?$
+          # (`/v1/bench*`, session JWT, answered only to the bench's owner). `me` is the caller's own
+          # space environments (`/v1/me/environments*`, session JWT, the caller's choices only).
+          - path: /v1/(cli|workspaces|keys|internal|builders|bench|environments|regions|quota|volumes|me)(/.*)?$
             pathType: ImplementationSpecific
             backend:
               service:

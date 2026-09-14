@@ -230,7 +230,7 @@ async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
     let (st, _) = t.call("POST", "/v1/bench", &tok, Some(json!({"team": "acme"}))).await;
     assert_eq!(st, 404);
     let (st, _) = t.call("POST", "/v1/bench/attach?team=acme", &tok, Some(json!({"environment": "env-1"}))).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 410, "attach is chosen per space now");
 
     let ready = bench_obj("alice", "acme", "running", Some("ready"), "readOnly");
     let t = setup(vec![get(path.clone(), ready), region("r1")], Stub::new(&[], &[("acme", "r1")]));
@@ -417,32 +417,3 @@ async fn re_posting_a_stopped_bench_at_the_cpu_limit_is_refused() {
     assert!(t.rec.sent("PATCH", &path).is_empty());
 }
 
-/// Deleting an environment clears `attachedEnvironment` and the attach label on a bench naming it.
-#[tokio::test]
-async fn deleting_an_environment_detaches_its_benches() {
-    let path = bench_path("alice", "alice");
-    let mut attached = bench_obj("alice", "alice", "running", Some("ready"), "full");
-    attached["spec"]["attachedEnvironment"] = json!("env-1");
-    let env = json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment", "metadata": {"name": "env-1"},
-                     "spec": {"owner": "alice", "name": "api", "region": "r1", "services": [], "desiredState": "running"}});
-    let t = setup(
-        with(
-            vec![
-                get(format!("{API}/environments/env-1"), env.clone()),
-                Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: env },
-                get(format!("{API}/benches"), list("Bench", vec![attached.clone()])),
-                patch(path.clone(), attached),
-            ],
-            alloc("alice", vec![]),
-        ),
-        Stub::new(&[], &[]),
-    );
-    let (st, body) = t.call("DELETE", "/v1/environments/env-1", &t.tok("alice"), None).await;
-    assert!(st.is_success(), "{st} {body}");
-    let p = t.rec.sent("PATCH", &path);
-    assert_eq!(p.len(), 1, "{:?}", t.rec.calls());
-    assert_eq!(p[0]["spec"]["attachedEnvironment"], Value::Null);
-    let labels = p[0]["metadata"]["labels"].as_object().expect("the patch names the label");
-    assert_eq!(labels.get("kloudlite.io/attached-environment"), Some(&Value::Null), "{}", p[0]);
-    assert!(t.rec.calls().iter().any(|c| c.starts_with(&format!("GET {API}/benches")) ), "{:?}", t.rec.calls());
-}

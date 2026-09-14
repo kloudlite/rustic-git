@@ -143,7 +143,7 @@ async fn a_workspace_attached_elsewhere_is_409() {
     let r = intercept(&s, good()).await;
     assert_eq!(r.status(), 409);
     let body = r.text().await.unwrap();
-    assert!(body.contains("attached"), "{body}");
+    assert!(body.contains("does not use this environment"), "{body}");
 }
 
 /// DETACHED in spec, and its `Attached` condition still naming this environment: the condition is

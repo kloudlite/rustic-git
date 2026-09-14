@@ -16,10 +16,10 @@
 //! clock and the next wake creates it from the new `spec.image`.
 
 use super::scope::may_allocate_for;
-use super::workspaces::{check_attach, gateway_url, install_user_key_when, set_desired, AttachBody};
+use super::workspaces::{gateway_url, install_user_key_when, set_desired};
 use super::{bench_cost, caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
 use crate::crd::{self, BenchAccess, DesiredState, Phase};
-use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
+use crate::k8s::{labels, TEAM_LABEL};
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
@@ -178,8 +178,10 @@ fn found(b: Option<crd::Bench>) -> Result<crd::Bench, Response> {
     b.ok_or_else(|| err(StatusCode::NOT_FOUND, "no bench"))
 }
 
-/// The teams a bench may be opened in, for the desktop picker: `[{slug, name, region}]` for the
-/// teams the TOKEN's person is a current member of ("" region = unbound) and nothing else — no
+/// The spaces a bench may be opened in, for the desktop picker: `[{slug, name, region, personal}]` —
+/// first the caller's own personal space (slug = their handle, which is exactly the `team` every
+/// bench route already treats as personal), then the teams the TOKEN's person is a current member
+/// of ("" region = unbound), and nothing else — no
 /// members, roles or quotas. Identity is only ever the verified bearer (`caller`, which checks a
 /// CLI login's revocation); nothing in the query or headers names a user. Membership is read
 /// uncached, so a removed member loses the row on the next call; an unreadable directory is a 503
@@ -197,11 +199,12 @@ async fn list_bench_teams(s: &ApiState, headers: &HeaderMap) -> Result<Response,
         err(StatusCode::SERVICE_UNAVAILABLE, "team list unavailable")
     };
     let dir = s.directory.as_ref().ok_or_else(|| unavailable("no directory".into()))?;
-    let mut out = Vec::new();
+    let region = dir.personal_region(&caller.name).await.map_err(&unavailable)?;
+    let mut out = vec![json!({"slug": caller.name, "name": "Personal", "region": region, "personal": true})];
     for slug in dir.member_teams(&caller.name).await.map_err(&unavailable)? {
         // A team deleted between the two reads is simply not listed.
         if let Some((name, region)) = dir.bench_team(&slug).await.map_err(&unavailable)? {
-            out.push(json!({"slug": slug, "name": name, "region": region}));
+            out.push(json!({"slug": slug, "name": name, "region": region, "personal": false}));
         }
     }
     tracing::info!(caller = %caller.name, count = out.len(), "bench.teams.listed");
@@ -351,50 +354,6 @@ pub(crate) async fn bench_session(
         Json(json!({"id": id, "token": token, "gateway": gateway_url(&region, &id), "expires_at": expires_at})),
     )
         .into_response())
-}
-
-pub(crate) async fn attach_bench(
-    State(s): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Query(q): Query<TeamQuery>,
-    Json(body): Json<AttachBody>,
-) -> Result<Response, Response> {
-    let (caller, _, region, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    if standing == Standing::Departed {
-        return Err(no_team());
-    }
-    let b = found(b)?;
-    check_attach(&s, &caller, &body.environment, &region).await?;
-    let patch = json!({
-        "spec": {"attachedEnvironment": body.environment},
-        "metadata": {"labels": {ATTACHED_ENV_LABEL: body.environment}},
-    });
-    bench_api(&s)?
-        .patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(kube_err)?;
-    Ok(StatusCode::ACCEPTED.into_response())
-}
-
-pub(crate) async fn detach_bench(
-    State(s): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Query(q): Query<TeamQuery>,
-) -> Result<Response, Response> {
-    let (_, _, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    if standing == Standing::Departed {
-        return Err(no_team());
-    }
-    let b = found(b)?;
-    let patch = json!({
-        "spec": {"attachedEnvironment": serde_json::Value::Null},
-        "metadata": {"labels": {ATTACHED_ENV_LABEL: serde_json::Value::Null}},
-    });
-    bench_api(&s)?
-        .patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(kube_err)?;
-    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 #[cfg(test)]

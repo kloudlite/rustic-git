@@ -271,7 +271,7 @@ async fn the_builder_is_invisible_to_every_environment_route() {
     assert_eq!(checked, 9, "every environment-id route, both methods of `/{{id}}`");
     // The two that name an environment from somewhere other than the path.
     let extra: Vec<(&str, String, Value)> = vec![
-        ("POST", format!("{}/v1/workspaces/ws-1/attach", s.base), json!({"environment": "bld-karthik"})),
+        ("PUT", format!("{}/v1/me/environments/karthik", s.base), json!({"environment": "bld-karthik"})),
         // Not a route at all, and a 404 either way: the gate's own surface is `/v1/internal`.
         ("GET", format!("{}/v1/environments/bld-karthik/snapshots", s.base), Value::Null),
     ];

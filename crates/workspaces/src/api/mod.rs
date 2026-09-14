@@ -65,6 +65,8 @@ mod push;
 pub(crate) mod scope;
 
 mod bench;
+mod me;
+pub mod spaces;
 mod volumes;
 // `pub`: the SLO probe reads `KNOWN_CENTRAL` so its rollout yield asks about exactly the
 // workloads a roll moves — one list, not a second copy that drifts.
@@ -84,11 +86,12 @@ use environments::{
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
-use bench::{attach_bench, bench_session, bench_teams, create_bench, detach_bench, get_bench, start_bench, stop_bench};
+use bench::{bench_session, bench_teams, create_bench, get_bench, start_bench, stop_bench};
+use me::{attach_gone, clear_my_environment, list_my_environments, set_my_environment};
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
-    attach_ws, clone_ws, create_ws, delete_ws, detach_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
+    clone_ws, create_ws, delete_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
     ssh_session, start_ws, stop_ws, update_ws_packages, ws_tools,
 };
 
@@ -189,8 +192,10 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))
         .route("/v1/workspaces/{id}/stop", post(stop_ws))
-        .route("/v1/workspaces/{id}/attach", post(attach_ws))
-        .route("/v1/workspaces/{id}/detach", post(detach_ws))
+        .route("/v1/workspaces/{id}/attach", post(attach_gone))
+        .route("/v1/workspaces/{id}/detach", post(attach_gone))
+        .route("/v1/me/environments", get(list_my_environments))
+        .route("/v1/me/environments/{team}", axum::routing::put(set_my_environment).delete(clear_my_environment))
         .route("/v1/workspaces/{id}/ssh-session", post(ssh_session))
         .route("/v1/environments", post(create_env).get(list_env))
         // Before `/{id}`: `restore` is a verb, not an environment id.
@@ -218,8 +223,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/bench/start", post(start_bench))
         .route("/v1/bench/stop", post(stop_bench))
         .route("/v1/bench/session", post(bench_session))
-        .route("/v1/bench/attach", post(attach_bench))
-        .route("/v1/bench/detach", post(detach_bench))
+        .route("/v1/bench/attach", post(attach_gone))
+        .route("/v1/bench/detach", post(attach_gone))
         .with_state(state)
 }
 
@@ -468,6 +473,14 @@ pub async fn region_active(s: &ApiState, region: &str) -> Result<bool, String> {
     let Some(client) = s.kube.as_ref() else { return Err("kubernetes not configured".into()) };
     let api: Api<crd::Region> = Api::all(client.clone());
     Ok(api.get_opt(region).await.map_err(|e| e.to_string())?.is_some_and(|r| r.spec.status == "active"))
+}
+
+/// Every ACTIVE region's name, for the directory tier's "place a new person in the only region".
+pub async fn active_regions(s: &ApiState) -> Result<Vec<String>, String> {
+    let Some(client) = s.kube.as_ref() else { return Err("kubernetes not configured".into()) };
+    let api: Api<crd::Region> = Api::all(client.clone());
+    let list = api.list(&Default::default()).await.map_err(|e| e.to_string())?;
+    Ok(list.items.iter().filter(|r| r.spec.status == "active").map(kube::ResourceExt::name_any).collect())
 }
 
 pub(crate) async fn check_region(s: &ApiState, region: &str) -> Result<(), Response> {

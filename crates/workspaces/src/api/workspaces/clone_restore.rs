@@ -106,8 +106,6 @@ pub(crate) struct RestoreBody {
     // source, then the default.
     #[serde(default)]
     quota_gb: Option<u64>,
-    #[serde(default)]
-    attached_environment: Option<String>,
 }
 
 
@@ -206,19 +204,6 @@ pub(crate) async fn restore_ws(
         // also what `create` sends by default.
         (None, None, None) => FALLBACK_QUOTA_GB,
     };
-    // An attachment the caller cannot see is dropped rather than refused: the environment may
-    // simply be gone or someone else's now, and that must not make the snapshot unrestorable.
-    // `find_env` is the same visibility check `attach_ws` applies.
-    let attached_environment = match body.attached_environment.clone().or_else(|| frozen.as_ref().and_then(|f| f.4.clone())) {
-        // Only a 404 is "gone, or not mine". An unreachable API server is a 5xx and must be
-        // reported as one, not laundered into a silently unattached workspace.
-        Some(e) => match find_env(&s, &owner, &e).await {
-            Ok(_) => Some(e),
-            Err(r) if r.status() == StatusCode::NOT_FOUND => None,
-            Err(r) => return Err(r),
-        },
-        None => None,
-    };
     // A restore is an allocation like any other: the snapshot survives the refusal untouched, so
     // the person can raise their quota and try the same id again.
     let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
@@ -252,7 +237,8 @@ pub(crate) async fn restore_ws(
             resources,
             packages,
             locks,
-            attached_environment,
+            // Retired: an environment is the space's choice now, so a frozen value is not carried.
+            attached_environment: None,
         },
     )
     .await?;

@@ -9,7 +9,7 @@ use super::workspaces::{
 };
 use super::{caller, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
 use crate::crd::{self, DesiredState, VolumeSource};
-use crate::k8s::{labels, ATTACHED_ENV_LABEL};
+use crate::k8s::labels;
 use crate::model::*;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::ResourceExt;
@@ -388,57 +388,32 @@ pub(crate) async fn delete_env(
     let c = kube(&s)?;
     let envs: Api<crd::Environment> = Api::all(c.clone());
     envs.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
-    // Only `/v1` writes spec, so clearing the attachments is this handler's job. Best-effort: the
-    // reconciler treats a missing environment as unattached anyway, so a failure here degrades to a
-    // stale field rather than a dangling grant.
-    let wss: Api<crd::Workspace> = Api::all(c.clone());
-    // NOT `owned_by(&e.spec.owner)`: `attach_ws` authorizes through `may_act_on`, which admits
-    // team members, so a teammate's workspace can be attached to this environment while owned by
-    // someone else entirely — an owner-scoped selector would miss it. `ATTACHED_ENV_LABEL` is the
-    // view of `spec.attachedEnvironment` built for exactly this (`heal_attached_label` keeps it honest),
-    // so it is the one selector that cannot miss an attached workspace regardless of who owns it.
-    // The `Err` arm is LOGGED, not dropped: a failed list leaves workspaces pointing at a deleted
-    // environment, and the reconciler treating that as unattached is a degradation somebody has
-    // to be able to find in the logs.
-    let attached_to = ListParams::default().labels(&format!("{ATTACHED_ENV_LABEL}={id}"));
-    // Same warning shape `stop_ws` uses: a body the caller can act on, not just a log line only an
-    // operator sees.
+    // Every space that chose this environment lets go of it. Best-effort: the agent treats a
+    // missing environment as none regardless, so a failure here leaves a choice naming nothing,
+    // never a grant. Selected by the label and re-checked against spec, the label being a view.
+    let spaces: Api<crd::SpaceEnvironment> = Api::all(c.clone());
     let mut warning = None;
-    match wss.list(&attached_to).await {
+    match spaces.list(&ListParams::default().labels(&format!("{}={id}", crd::ENVIRONMENT_LABEL))).await {
         Ok(list) => {
             let mut failed = 0;
-            for w in list.items.iter().filter(|w| w.spec.attached_environment.as_deref() == Some(id.as_str())) {
-                let patch = serde_json::json!({"spec": {"attachedEnvironment": serde_json::Value::Null}});
-                if let Err(e) = wss.patch(&w.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-                    tracing::warn!(workspace = %w.name_any(), error = %e, "attach.clear.failed");
-                    failed += 1;
+            for x in list.items.iter().filter(|x| x.spec.environment == id) {
+                match spaces.delete(&x.name_any(), &DeleteParams::default()).await {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+                    Err(e) => {
+                        tracing::warn!(space = %x.name_any(), error = %e, "space.clear.failed");
+                        failed += 1;
+                    }
                 }
             }
             if failed > 0 {
-                warning = Some(format!("{failed} workspace(s) may still name this deleted environment"));
+                warning = Some(format!("{failed} space(s) may still name this deleted environment"));
             }
         }
         Err(err) => {
-            tracing::warn!(kind = "Workspace", environment = %id, error = %err, "listing.failed");
-            warning = Some("could not list workspaces to clear; some may still name this deleted environment".to_string());
+            tracing::warn!(kind = "SpaceEnvironment", environment = %id, error = %err, "listing.failed");
+            warning = Some("could not list the spaces using this environment; some may still name it".to_string());
         }
-    }
-    // Benches name an environment the same way and carry the same label.
-    let benches: Api<crd::Bench> = Api::all(c.clone());
-    match benches.list(&attached_to).await {
-        Ok(list) => {
-            for b in list.items.iter().filter(|b| b.spec.attached_environment.as_deref() == Some(id.as_str())) {
-                let patch = serde_json::json!({
-                    "spec": {"attachedEnvironment": serde_json::Value::Null},
-                    "metadata": {"labels": {ATTACHED_ENV_LABEL: serde_json::Value::Null}},
-                });
-                if let Err(e) = benches.patch(&b.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-                    tracing::warn!(bench = %b.name_any(), error = %e, "attach.clear.failed");
-                }
-            }
-        }
-        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
-        Err(err) => tracing::warn!(kind = "Bench", environment = %id, error = %err, "listing.failed"),
     }
     let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
     let mut doc = env_doc(&e, &pushed);
@@ -589,11 +564,19 @@ async fn validate_intercept(
     // 404, not 403, exactly as everywhere else: a caller learns nothing about workspaces that are
     // not theirs, not even that the id exists.
     let w = my_ws(s, caller, &want.workspace).await?;
-    // `spec` only, exactly as `decide_intercept` reads it: `crd::attached_environment` falls back
-    // to the condition, which reads back a DETACHED workspace's last attachment — accepting one
-    // here is a 202 for something the controller will refuse forever as `WorkspaceDetached`.
-    if w.spec.attached_environment.as_deref() != Some(e.name_any().as_str()) {
-        return Err((StatusCode::CONFLICT, "that workspace is not attached to this environment; attach it first").into_response());
+    // The workspace's SPACE must use this environment — the same answer `decide_intercept` reads
+    // from the agent's cache, including its one-release fallback to the retired field while the
+    // space has no choice yet.
+    let space = Api::<crd::SpaceEnvironment>::all(kube(s)?.clone())
+        .get_opt(&crd::space_name(&w.spec.owner, &w.spec.team))
+        .await
+        .map_err(kube_err)?;
+    let chosen = match &space {
+        Some(x) => Some(x.spec.environment.as_str()),
+        None => w.spec.attached_environment.as_deref(),
+    };
+    if chosen != Some(e.name_any().as_str()) {
+        return Err((StatusCode::CONFLICT, "that workspace's space does not use this environment; choose it first").into_response());
     }
     // `spec`, not `status`: desired state is what this tier owns, and a workspace whose pod is
     // merely between restarts is still one the person means to serve. Whether an intercept is

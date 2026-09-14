@@ -1,12 +1,12 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
-use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
+use super::scope::{may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
 use super::{caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
-use crate::k8s::{labels, ATTACHED_ENV_LABEL, TEAM_LABEL};
+use crate::k8s::{labels, TEAM_LABEL};
 use crate::model::*;
 use crate::packages::resolve::Refusal;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
@@ -24,8 +24,6 @@ mod keys;
 pub use keys::*;
 mod ssh;
 pub(crate) use ssh::*;
-mod attach;
-pub(crate) use attach::*;
 mod packages;
 pub(crate) use packages::*;
 mod clone_restore;
@@ -102,7 +100,12 @@ pub(super) fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace 
         locks: w.spec.locks.iter().map(LockDoc::from).collect(),
         repo: seed.as_ref().map(|(r, _)| r.clone()),
         branch: seed.map(|(_, b)| b),
-        attached_environment: crd::attached_environment(w),
+        // The space's environment as this workspace's node last converged it — the `Attached`
+        // condition, never the retired spec field.
+        attached_environment: st
+            .and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::ATTACHED && c.status == "True"))
+            .map(|c| c.message.clone())
+            .filter(|m| !m.is_empty()),
         id,
     }
 }
