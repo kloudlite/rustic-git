@@ -3,8 +3,8 @@
 //!
 //! Part 3 of the investigation: dumps taken AFTER the bound were useless — the stalled future was
 //! already dropped, hyper had closed its connection and the retry had answered, and 64 KB of
-//! repeated monomorphized names kept 16 of 37 tasks. So the dump fires mid-stall, generics are
-//! stripped, identical traces print once with a count, and caller tasks lead.
+//! repeated monomorphized names kept 16 of 37 tasks. So the dump fires mid-stall, long generics
+//! collapse to `<…>`, identical traces print once with a count, and caller tasks lead.
 //!
 //! 2026-09-14 (`k3s-stall` investigation): inner-layer stalls on a pooled HTTP/1 connection
 //! (dials=0) answer in ms on retry and start just after the keys tick's fsync loop. The candidate
@@ -283,7 +283,7 @@ mod tests {
             Some("/root/.cargo/registry/src/index.crates.io-abc/hyper-util-0.1.10/src/client/legacy/client.rs"),
             Some(233),
         );
-        assert_eq!(t, "<Client<C,B> as Service<Request<B>>>::call::{{closure}} at hyper-util-0.1.10/src/client/legacy/client.rs:233");
+        assert_eq!(t, "<Client<C,B> as Service<http::request::Request<B>>>::call::{{closure}} at hyper-util-0.1.10/src/client/legacy/client.rs:233");
         assert_eq!(
             frame_line("hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T>::poll_read_head", None, None),
             "hyper::proto::h1::dispatch::Dispatcher<D,Bs,I,T>::poll_read_head"
@@ -301,14 +301,14 @@ mod tests {
         let conn = "hyper_util::client::legacy::Client<A>::connect_to\n  tokio_rustls::Stream<B>::read".to_string();
         let tasks = vec![
             ("1".into(), conn.clone()),
-            ("2".into(), conn.replace("<A>", "<Z, Y>")),
+            ("2".into(), conn.clone()),
             ("3".into(), "kube_client::Client::send<W>\n  tower::buffer::Buffer::call".into()),
             ("4".into(), conn),
         ];
         let (text, distinct) = render(&tasks);
         assert_eq!(distinct, 2);
-        assert!(text.starts_with("1x tasks [3]:\nkube_client::Client::send\n"), "{text}");
-        assert!(text.contains("3x tasks [1,2,4]:\nhyper_util::client::legacy::Client::connect_to\n"), "{text}");
+        assert!(text.starts_with("1x tasks [3]:\nkube_client::Client::send<W>\n"), "{text}");
+        assert!(text.contains("3x tasks [1,2,4]:\nhyper_util::client::legacy::Client<A>::connect_to\n"), "{text}");
     }
 
     #[test]
