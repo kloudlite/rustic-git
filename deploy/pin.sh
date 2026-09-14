@@ -46,6 +46,11 @@ digest_of() {
 
 declare -A DIGEST
 for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
+  # Only an image that is actually pinned is demanded. The controller's manifest
+  # (k3s/controller.yaml) lands after its Dockerfile stage does, and a SHA built before that stage
+  # existed has no controller package at all — a hard failure here would block every unrelated
+  # roll. The tests-passed signal stays hard for every image that IS pinned.
+  if [ "$img" = kloudlite-controller ] && [ ! -f k3s/controller.yaml ]; then continue; fi
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -77,7 +82,7 @@ pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
 # The cluster controller. NOTE: a new ghcr package is PRIVATE by default, and digest_of fetches
 # the manifest anonymously — a new package must be made public once in the GitHub UI before the
 # first pin succeeds.
-pin 'kloudlite-controller' "$SHA" "${DIGEST[kloudlite-controller]}" k3s/controller.yaml
+pin 'kloudlite-controller' "$SHA" "${DIGEST[kloudlite-controller]:-}" k3s/controller.yaml
 pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/builder-gate.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
