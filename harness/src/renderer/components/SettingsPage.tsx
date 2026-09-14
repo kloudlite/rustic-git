@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../ui/Icon";
 import { Button } from "../ui/Button";
 import { Kbd } from "../ui/parts";
@@ -15,7 +15,7 @@ import { TOOLS } from "../../../pi/catalog";
  * can be told to follow, the servers that lend it tools, the hooks that run in
  * its loop. A workspace has no settings of its own; an agent inherits these.
  */
-export function SettingsPage(props: { machine: Machine }) {
+export function SettingsPage(props: { machine: Machine; open?: { id: string } }) {
   const [q, setQ] = createSignal("");
   const hit = (...s: (string | undefined)[]) => !q() || s.some((x) => x?.toLowerCase().includes(q().toLowerCase()));
   const of = (k: Plugin["kind"]) => props.machine.plugins.filter((p) => p.kind === k && hit(p.name, p.from));
@@ -38,6 +38,10 @@ export function SettingsPage(props: { machine: Machine }) {
   void window.harness.auth.status().then((s) => s.phase === "ready" && (setWho(s.username), setTeam(s.team)));
   void window.harness.auth.api().then(setApi);
   const [page, setPage] = createSignal<Page>(location.hash.endsWith("/discover") ? "discover" : "model");
+  createEffect(() => {
+    const want = props.open?.id;
+    if (want && PAGES.some((p) => p.id === want)) setPage(want as Page);
+  });
   const [filter, setFilter] = createSignal("all");
   const installed = (name: string) => props.machine.plugins.some((p) => p.name === name);
 

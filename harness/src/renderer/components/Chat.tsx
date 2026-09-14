@@ -31,6 +31,7 @@ export function Chat(props: {
   snapshots: Snapshot[];
   onCloseEnv: () => void;
   settings: boolean;        // the machine's settings page, a tab like the environment
+  settingsPage?: { id: string }; // the section a caller asked to land on
   onCloseSettings: () => void;
   threads: Thread[];
   threadId: string;
@@ -271,7 +272,7 @@ export function Chat(props: {
         {(env) => <EnvironmentPage env={env} snapshots={props.snapshots} />}
       </Show>
       <Show when={props.settings && !props.env}>
-        <SettingsPage machine={props.machine} />
+        <SettingsPage machine={props.machine} open={props.settingsPage} />
       </Show>
 
 

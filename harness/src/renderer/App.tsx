@@ -193,9 +193,12 @@ export function App() {
     if (next) setSettingsTab(false);
     setEnvTabRaw(next);
   };
-  const openSettings = () => {
+  // Which settings section to land on; a fresh object each time so asking for the same section twice still moves there.
+  const [settingsPage, setSettingsPage] = createSignal<{ id: string }>();
+  const openSettings = (page?: string) => {
     setEnvTabRaw(false);
     setFile(undefined);
+    if (page) setSettingsPage({ id: page });
     setSettingsTab(true);
   };
 
@@ -349,7 +352,7 @@ export function App() {
     { id: "inspector", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
     { id: "workspaces", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
     { id: "go", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
-    { id: "settings", label: "Settings", keys: KEYS.settings.keys, run: openSettings },
+    { id: "settings", label: "Settings", keys: KEYS.settings.keys, run: () => openSettings() },
     { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
     { id: "abort", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", label: "New session", run: newSession },
@@ -454,7 +457,7 @@ export function App() {
     "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
     "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },
     "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void pi({ type: "set_model", provider, modelId }); else L().note("usage: /model provider/id"); } },
-    "/settings": { help: "open settings", local: true, run: openSettings },
+    "/settings": { help: "open settings", local: true, run: () => openSettings() },
     "/btw": {
       help: "ask one question of a read-only fork of this session: /btw <question>",
       run: (arg) => {
@@ -610,7 +613,7 @@ export function App() {
           "grid-template-columns": `48px ${leftOpen() ? "280px " : ""}minmax(0,1fr)${inspector() ? " 300px" : ""}`,
         }}
       >
-        <ActivityBar view={view()} panelOpen={leftOpen()} onView={pickView} onSettings={openSettings} owner={machine().owner} />
+        <ActivityBar view={view()} panelOpen={leftOpen()} onView={pickView} onSettings={() => openSettings()} onProfile={() => openSettings("account")} owner={machine().owner} />
         <Show when={leftOpen() && view() === "repos"}>
           <ReposPanel repos={REPOS.filter((r) => r.teamId === teamId())} workspaces={machine().workspaces} />
         </Show>
@@ -658,6 +661,7 @@ export function App() {
               snapshots={SNAPSHOTS.filter((s) => s.environment === environment().name)}
               onCloseEnv={() => setEnvTab(false)}
               settings={isActive() && settingsTab()}
+              settingsPage={settingsPage()}
               onCloseSettings={() => setSettingsTab(false)}
               threads={threadsOf(p)}
               threadId={p.sel}
