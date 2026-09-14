@@ -137,3 +137,36 @@ test("expired mid-use clears and disconnects without a revoke call", async () =>
   assert.equal(h.get(), undefined);
   assert.deepEqual(h.auth.state(), { phase: "signed-out", reason: "signed out: expired or revoked" });
 });
+
+test("retry connect with the stored login gone lands on signed-out, not error", async () => {
+  const h = harness({ connect: async () => { throw new Error("bench refused"); } });
+  h.set(cred);
+  await h.auth.launch();
+  assert.equal(h.auth.state().phase, "error");
+  h.set(undefined);
+  await h.auth.retry();
+  assert.deepEqual(h.auth.state(), { phase: "signed-out" });
+});
+
+test("a sign-out reason stays in the state for a reloaded window", async () => {
+  const h = harness();
+  h.set(cred);
+  await h.auth.launch();
+  await h.auth.signOut("keychain went away");
+  assert.deepEqual(h.auth.state(), { phase: "signed-out", reason: "keychain went away" });
+});
+
+test("expired while connect is in flight closes what connect built and stays signed out", async () => {
+  let finish!: () => void;
+  const h = harness({ connect: async () => { await new Promise<void>((r) => (finish = r)); log.push("built"); return () => void log.push("closed"); } });
+  const log = h.log;
+  h.set(cred);
+  const p = h.auth.launch();
+  await new Promise((r) => setImmediate(r));
+  h.auth.expired();
+  finish();
+  await p;
+  assert.deepEqual(log, ["built", "closed"]);
+  assert.equal(h.get(), undefined);
+  assert.deepEqual(h.auth.state(), { phase: "signed-out", reason: "signed out: expired or revoked" });
+});

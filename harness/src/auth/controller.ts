@@ -32,6 +32,9 @@ export function createAuth(d: Deps) {
   let state: AuthState = { phase: "starting" };
   let pending: AbortController | undefined;
   let disconnect: (() => void) | undefined;
+  // Bumped by every connect, sign-out and expiry: a connect whose attempt moved on while it was
+  // awaiting closes what it just built instead of flipping the state back to ready.
+  let attempt = 0;
   const set = (s: AuthState) => {
     state = s;
     d.emit(s);
@@ -42,11 +45,17 @@ export function createAuth(d: Deps) {
   };
 
   const connect = async (c: Credential) => {
+    const mine = ++attempt;
     set({ phase: "connecting", step: "connecting to your bench" });
     try {
-      disconnect = await d.connect(c, (step) => set({ phase: "connecting", step }));
+      const close = await d.connect(c, (step) => {
+        if (mine === attempt) set({ phase: "connecting", step });
+      });
+      if (mine !== attempt) return close();
+      disconnect = close;
       set({ phase: "ready", username: c.username });
     } catch (e) {
+      if (mine !== attempt) return;
       if (named(e, "Expired")) return expired();
       set({ phase: "error", message: msg(e), retry: "connect" });
     }
@@ -72,10 +81,11 @@ export function createAuth(d: Deps) {
     await connect(c);
   };
 
-  function expired() {
+  function expired(reason = EXPIRED) {
+    attempt++;
     drop();
     d.store.clear();
-    set({ phase: "signed-out", reason: EXPIRED });
+    set({ phase: "signed-out", reason });
   }
 
   return {
@@ -84,8 +94,11 @@ export function createAuth(d: Deps) {
     async retry() {
       if (state.phase !== "error") return;
       if (state.retry === "launch") return launch();
-      const c = state.retry === "connect" ? d.store.load() : undefined;
-      if (c) return connect(c);
+      if (state.retry !== "connect") return;
+      const c = d.store.load();
+      // The stored login is gone (a corrupt file was dropped): nothing left to reconnect with.
+      if (!c) return set({ phase: "signed-out" });
+      return connect(c);
     },
     async signIn() {
       if (state.phase === "waiting" || state.phase === "connecting" || state.phase === "ready") return;
@@ -109,7 +122,9 @@ export function createAuth(d: Deps) {
     cancel() {
       pending?.abort();
     },
-    async signOut() {
+    /** `reason` stays in the state, so a reloaded window's `status()` still shows it. */
+    async signOut(reason?: string) {
+      attempt++;
       const c = (() => {
         try {
           return d.store.load();
@@ -120,7 +135,7 @@ export function createAuth(d: Deps) {
       if (c) await d.revoke(c);
       d.store.clear();
       drop();
-      set({ phase: "signed-out" });
+      set(reason ? { phase: "signed-out", reason } : { phase: "signed-out" });
     },
     expired,
   };

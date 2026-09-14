@@ -1,7 +1,7 @@
 import type { AuthState } from "../auth/controller";
 
 /** What the login screen shows for a state: kept pure so the transitions are tested without a DOM. */
-export function screen(s: AuthState): { title: string; body?: string; code?: string; url?: string; actions: ("signIn" | "cancel" | "retry" | "address")[]; busy: boolean } {
+export function screen(s: AuthState): { title: string; body?: string; code?: string; url?: string; actions: ("signIn" | "cancel" | "openBrowser" | "retry" | "address")[]; busy: boolean } {
   switch (s.phase) {
     case "starting":
     case "ready":
@@ -9,7 +9,7 @@ export function screen(s: AuthState): { title: string; body?: string; code?: str
     case "signed-out":
       return { title: "Sign in to Kloudlite", ...(s.reason ? { body: s.reason } : {}), actions: ["signIn", "address"], busy: false };
     case "waiting":
-      return { title: "Confirm this code in your browser", body: "waiting for approval", code: s.code, url: s.url, actions: ["cancel"], busy: true };
+      return { title: "Confirm this code in your browser", body: "waiting for approval", code: s.code, url: s.url, actions: ["openBrowser", "cancel"], busy: true };
     case "connecting":
       return { title: "Connecting", body: s.step, actions: [], busy: true };
     case "error":

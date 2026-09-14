@@ -35,6 +35,7 @@ const harness = {
     status: (): Promise<AuthState> => ipcRenderer.invoke("auth:status"),
     signIn: (): Promise<void> => ipcRenderer.invoke("auth:signIn"),
     cancel: (): Promise<void> => ipcRenderer.invoke("auth:cancel"),
+    openBrowser: (): Promise<void> => ipcRenderer.invoke("auth:openBrowser"),
     retry: (): Promise<void> => ipcRenderer.invoke("auth:retry"),
     signOut: (): Promise<void> => ipcRenderer.invoke("auth:signOut"),
     api: (): Promise<string> => ipcRenderer.invoke("auth:api"),

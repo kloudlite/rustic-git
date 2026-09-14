@@ -7,7 +7,7 @@ import { BenchClient } from "./bench-client";
 import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from "./import-payload";
 import { createStore } from "./auth/store";
 import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/device";
-import { createAuth, type AuthState } from "./auth/controller";
+import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, mintSession } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 
@@ -351,6 +351,7 @@ function disconnect() {
 }
 
 let auth: ReturnType<typeof createAuth>;
+let deps: Deps;
 let wasReady = false;
 let revalidateTimer: NodeJS.Timeout | undefined;
 const emitAuth = (s: AuthState) => {
@@ -366,9 +367,10 @@ const emitAuth = (s: AuthState) => {
 };
 
 const credentialFile = () => path.join(app.getPath("userData"), "credential.bin");
-function authDeps() {
+let store: Deps["store"];
+function credentialStore(): Deps["store"] {
   const raw = createStore(credentialFile(), safeStorage);
-  const store = {
+  return {
     ...raw,
     load() {
       const c = raw.load();
@@ -377,6 +379,8 @@ function authDeps() {
       return c;
     },
   };
+}
+function authDeps(): Deps {
   return {
     api: apiBase,
     store,
@@ -388,19 +392,24 @@ function authDeps() {
     validate,
     connect: async (c: Credential, step: (s: string) => void) => {
       const cache = path.join(app.getPath("userData"), "bench-cache.json");
-      if (BENCH) {
-        bench = new BenchClient(BENCH, toRenderer, cache, `${c.username}@${BENCH}`);
-      } else {
-        await ensureBench(c.api, c.token, step);
-        const t = await openTunnel(
-          () => mintSession(c.api, c.token),
-          (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
-        );
-        closeTunnel = t.close;
-        // The nonce stays in this process: handed to the client, never to IPC, disk or a log.
-        bench = new BenchClient(t.base, toRenderer, cache, `${c.username}@${c.api}`, t.nonce);
+      try {
+        if (BENCH) {
+          bench = new BenchClient(BENCH, toRenderer, cache, `${c.username}@${BENCH}`);
+        } else {
+          await ensureBench(c.api, c.token, step);
+          const t = await openTunnel(
+            () => mintSession(c.api, c.token),
+            (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
+          );
+          closeTunnel = t.close;
+          // The nonce stays in this process: handed to the client, never to IPC, disk or a log.
+          bench = new BenchClient(t.base, toRenderer, cache, `${c.username}@${c.api}`, t.nonce);
+        }
+        bench.start();
+      } catch (e) {
+        disconnect(); // a half-built connection (tunnel up, bench refused) is not left open
+        throw e;
       }
-      bench.start();
       return disconnect;
     },
     revoke: async (c: Credential) => {
@@ -439,7 +448,7 @@ async function revalidate() {
   if (revalidating || auth?.state().phase !== "ready") return;
   revalidating = true;
   try {
-    const c = createStore(credentialFile(), safeStorage).load();
+    const c = store.load();
     if (!c || (await validate(c)) === "expired") auth.expired();
   } catch (e) {
     console.error(`login re-check: ${e instanceof Error ? e.message : String(e)}`);
@@ -457,9 +466,13 @@ ipcMain.handle("auth:retry", async () => {
     await auth.retry();
   } catch (e) {
     // The keychain went away between the error and the retry: sign out, and say why.
-    await auth.signOut();
-    emitAuth({ phase: "signed-out", reason: e instanceof Error ? e.message : String(e) });
+    await auth.signOut(e instanceof Error ? e.message : String(e));
   }
+});
+// Reopens only the current attempt's authorize URL; the renderer names nothing.
+ipcMain.handle("auth:openBrowser", async () => {
+  const s = auth.state();
+  if (s.phase === "waiting") await deps.openExternal(s.url);
 });
 ipcMain.handle("auth:signOut", () => auth.signOut());
 ipcMain.handle("auth:api", () => apiBase());
@@ -491,7 +504,9 @@ void app.whenReady().then(() => {
       { label: "Account", submenu: [{ label: "Sign Out", click: () => void auth.signOut() }] },
     ]),
   );
-  auth = createAuth(authDeps());
+  store = credentialStore();
+  deps = authDeps();
+  auth = createAuth(deps);
   createWindow();
   void auth.launch();
   app.on("activate", () => {

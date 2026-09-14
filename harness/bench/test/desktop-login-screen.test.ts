@@ -7,11 +7,11 @@ test("signed out offers sign in and the address, with the reason when there is o
   assert.equal(screen({ phase: "signed-out", reason: "signed out: expired or revoked" }).body, "signed out: expired or revoked");
 });
 
-test("waiting shows the code and the URL, and only cancel", () => {
+test("waiting shows the code and the URL, reopen the browser or cancel", () => {
   const s = screen({ phase: "waiting", code: "BCDF-GH23", url: "https://k/cli/authorize?code=BCDF-GH23" });
   assert.equal(s.code, "BCDF-GH23");
   assert.equal(s.url, "https://k/cli/authorize?code=BCDF-GH23");
-  assert.deepEqual(s.actions, ["cancel"]);
+  assert.deepEqual(s.actions, ["openBrowser", "cancel"]);
   assert.equal(s.busy, true);
 });
 

@@ -6,7 +6,7 @@ import { screen } from "../login";
 /** The whole window until the person is signed in and connected. Holds no credential. */
 export function LoginScreen(props: { state: AuthState }) {
   const v = () => screen(props.state);
-  const has = (a: "signIn" | "cancel" | "retry" | "address") => v().actions.includes(a);
+  const has = (a: "signIn" | "cancel" | "openBrowser" | "retry" | "address") => v().actions.includes(a);
   const [editing, setEditing] = createSignal(false);
   const [address, setAddress] = createSignal("");
   const [note, setNote] = createSignal("");
@@ -30,6 +30,7 @@ export function LoginScreen(props: { state: AuthState }) {
         <Show when={v().url}>{(u) => <p class="select-text break-all font-mono text-xs text-subtle">{u()}</p>}</Show>
         <div class="flex gap-2">
           <Show when={has("signIn")}><Button variant="primary" onClick={() => void window.harness.auth.signIn()}>Sign in with browser</Button></Show>
+          <Show when={has("openBrowser")}><Button onClick={() => void window.harness.auth.openBrowser()}>Open browser again</Button></Show>
           <Show when={has("cancel")}><Button onClick={() => void window.harness.auth.cancel()}>Cancel</Button></Show>
           <Show when={has("retry")}><Button variant="primary" onClick={() => void window.harness.auth.retry()}>Retry</Button></Show>
         </div>
