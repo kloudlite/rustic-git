@@ -205,13 +205,30 @@ struct Sweep {
 /// and no pod here mounts is removed outright — on 2026-09-14 ~310 of them were dead probe
 /// owners, and blanking them forever was the whole per-minute cost. A pod that mounts one keeps
 /// its (empty) file: removing it would strand the inode it holds and fail its next start.
+///
+/// The lists race new owners: an `OwnerKeys` applied after the list gets converged, and its pod
+/// can start, before this runs. Removing that dir would leave the pod holding an unlinked inode
+/// with real keys that no later revoke reaches (fail-OPEN). So pods are listed BEFORE `OwnerKeys`,
+/// and a dir is removed only when its file is still EMPTY (re-read at the remove) and neither
+/// the file nor the dir has changed within `FRESH`. Anything younger is left alone entirely.
 // ponytail: bounded at 1000 per tick; the rest wait a minute. Raise if a node ever holds more.
-fn sweep(pool: &str, live: &HashSet<String>, referenced: Option<&HashSet<String>>) -> Sweep {
+fn sweep(pool: &str, live: &HashSet<String>, referenced: Option<&HashSet<String>>, each: fn(&str)) -> Sweep {
     let mut out = Sweep::default();
     for owner in stale_owners(pool, live).into_iter().take(1000) {
         out.checked += 1;
-        if referenced.is_some_and(|r| !r.contains(&owner)) {
-            let dir = format!("{}/{owner}", k8s::keys_root(pool));
+        each(&owner);
+        let dir = format!("{}/{owner}", k8s::keys_root(pool));
+        let file = k8s::keys_file(pool, &owner);
+        let young = |p: &str| {
+            std::fs::metadata(p).and_then(|m| m.modified()).map_or(true, |t| t.elapsed().map_or(true, |a| a < FRESH))
+        };
+        // A missing file is not young: the dir is debris either way.
+        let file_young = std::path::Path::new(&file).exists() && young(&file);
+        if file_young || young(&dir) {
+            continue;
+        }
+        let empty = std::fs::metadata(&file).map_or(true, |m| m.len() == 0);
+        if referenced.is_some_and(|r| !r.contains(&owner)) && empty {
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => {
                     out.removed += 1;
@@ -227,6 +244,14 @@ fn sweep(pool: &str, live: &HashSet<String>, referenced: Option<&HashSet<String>
 }
 
 /// `f` on the blocking pool: the async task that awaits it stays free to poll kube connections.
+const FRESH: std::time::Duration = std::time::Duration::from_secs(2 * TICK_SECS);
+const TICK_SECS: u64 = 60;
+
+/// The tick's sweep, always through `off_worker`; `each` is a per-owner hook (a no-op outside tests).
+async fn run_sweep(pool: String, live: HashSet<String>, referenced: Option<HashSet<String>>, each: fn(&str)) -> Option<Sweep> {
+    off_worker(move || sweep(&pool, &live, referenced.as_ref(), each)).await
+}
+
 async fn off_worker<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     tokio::task::spawn_blocking(f).await.ok()
 }
@@ -262,7 +287,7 @@ where
     use futures::StreamExt;
     use kube::runtime::watcher;
     let mut events = watch();
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -280,22 +305,25 @@ where
                 }
             },
             _ = tick.tick() => {
+                // Pods BEFORE OwnerKeys: see `sweep` for the race this ordering closes.
+                let started = std::time::Instant::now();
+                let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(ctx.client.clone());
+                let lp = kube::api::ListParams::default().fields(&format!("spec.nodeName={}", ctx.node));
+                let referenced = match pods.list(&lp).await {
+                    Ok(l) => Some(referenced_owners(&ctx.pool, &l.items)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "keys.pods.list_failed");
+                        None
+                    }
+                };
                 if let Ok(list) = api.list(&Default::default()).await {
                     let live: HashSet<String> = list.items.iter().map(|o| o.name_any()).collect();
-                    let started = std::time::Instant::now();
-                    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::all(ctx.client.clone());
-                    let lp = kube::api::ListParams::default().fields(&format!("spec.nodeName={}", ctx.node));
-                    let referenced = match pods.list(&lp).await {
-                        Ok(l) => Some(referenced_owners(&ctx.pool, &l.items)),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "keys.pods.list_failed");
-                            None
+                    match run_sweep(ctx.pool.clone(), live, referenced, |_| {}).await {
+                        Some(s) => {
+                            let ms = started.elapsed().as_millis() as u64;
+                            tracing::info!(checked = s.checked, rewritten = s.rewritten, removed = s.removed, ms, "keys.sweep.done");
                         }
-                    };
-                    let pool = ctx.pool.clone();
-                    if let Some(s) = off_worker(move || sweep(&pool, &live, referenced.as_ref())).await {
-                        let ms = started.elapsed().as_millis() as u64;
-                        tracing::info!(checked = s.checked, rewritten = s.rewritten, removed = s.removed, ms, "keys.sweep.done");
+                        None => tracing::warn!("keys.sweep.failed"),
                     }
                     for obj in list.items {
                         converge(&ctx, &api, obj).await;
@@ -478,8 +506,16 @@ mod tests {
         }
         let live = HashSet::from(["alice".to_string()]);
         let dir = |o: &str| std::path::Path::new(&k8s::keys_root(pool)).join(o);
-        // Unknown pods: blank both stale ones, remove nothing.
-        assert_eq!(sweep(pool, &live, None), Sweep { checked: 2, rewritten: 2, removed: 0 });
+        // Just written: a new owner racing the lists. Nothing is touched, not even blanked.
+        assert_eq!(sweep(pool, &live, Some(&HashSet::new()), |_| {}), Sweep { checked: 2, rewritten: 0, removed: 0 });
+        assert!(!std::fs::read_to_string(k8s::keys_file(pool, "gone")).unwrap().is_empty());
+        age(pool, &["gone", "held"]);
+        // Old but still holding keys: blanked, not removed, even though no pod names it.
+        assert_eq!(sweep(pool, &live, Some(&HashSet::new()), |_| {}), Sweep { checked: 2, rewritten: 2, removed: 0 });
+        assert!(dir("gone").exists() && dir("held").exists());
+        age(pool, &["gone", "held"]);
+        // Unknown pods: remove nothing.
+        assert_eq!(sweep(pool, &live, None, |_| {}), Sweep { checked: 2, rewritten: 0, removed: 0 });
         assert!(dir("gone").exists() && dir("held").exists());
         let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(serde_json::json!({
             "metadata": {"name": "p"},
@@ -489,24 +525,39 @@ mod tests {
         .unwrap();
         let refs = referenced_owners(pool, &[pod]);
         assert_eq!(refs, HashSet::from(["held".to_string()]));
-        assert_eq!(sweep(pool, &live, Some(&refs)), Sweep { checked: 2, rewritten: 0, removed: 1 });
+        assert_eq!(sweep(pool, &live, Some(&refs), |_| {}), Sweep { checked: 2, rewritten: 0, removed: 1 });
         assert!(!dir("gone").exists());
         assert_eq!(std::fs::read_to_string(k8s::keys_file(pool, "held")).unwrap(), "");
         assert!(!std::fs::read_to_string(k8s::keys_file(pool, "alice")).unwrap().is_empty());
     }
 
-    /// The stall itself: on a ONE-thread runtime, a slow sweep must not starve other tasks. A timer
-    /// due in 20 ms fires while a 400 ms blocking sweep is still running.
+    fn age(pool: &str, owners: &[&str]) {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for o in owners {
+            let d = format!("{}/{o}", k8s::keys_root(pool));
+            std::fs::File::options().write(true).open(k8s::keys_file(pool, o)).unwrap().set_modified(old).unwrap();
+            std::fs::File::open(&d).unwrap().set_modified(old).unwrap();
+        }
+    }
+
+    /// The stall itself: on a ONE-thread runtime the tick's real sweep path (`run_sweep`) over a
+    /// slow filesystem (100 ms per owner, four owners) must not starve other tasks — a timer due in
+    /// 20 ms fires before it ends. Moving the fs work back inline fails this.
     #[tokio::test(flavor = "current_thread")]
     async fn a_slow_sweep_does_not_hold_the_runtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = tmp.path().to_str().unwrap().to_string();
+        for o in ["a", "b", "c", "d"] {
+            write_keys_file(&pool, o, "").unwrap();
+        }
         let t0 = std::time::Instant::now();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             t0.elapsed()
         });
-        let slow = off_worker(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+        let slow = run_sweep(pool, HashSet::new(), None, |_| std::thread::sleep(std::time::Duration::from_millis(100)));
         let (fired, done) = tokio::join!(timer, async {
-            slow.await;
+            assert_eq!(slow.await.map(|s| s.checked), Some(4));
             t0.elapsed()
         });
         let fired = fired.unwrap();
