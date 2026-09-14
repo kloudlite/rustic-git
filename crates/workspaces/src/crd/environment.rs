@@ -1,5 +1,5 @@
 //! `Environment`: its services, the hidden builder variant (`system = "builder"`), intercepts and
-//! the per-service status the web reads (`intercepted_by`, `unreachable_since`).
+//! the per-service status the web reads (`intercepted_by`, `proxy`, `unreachable_since`).
 
 use super::*;
 
@@ -15,6 +15,14 @@ pub struct ServiceStatus {
     /// own `intercepts`, reported here so a browse of one service shows its own fate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intercepted_by: Option<String>,
+    /// The proxy pod backing this intercept: `starting` until it is Ready, `ready` once the
+    /// selector points at it, `failed` when the pod is Failed or its container cannot start (an
+    /// image pull, most often). Absent when the service is not intercepted.
+    ///
+    /// A string rather than an enum: it is read by the web and by `kubectl get -o json`, and a
+    /// fourth state added later must not make an older object fail to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
     /// Unix seconds at which the intercepting workspace was first observed unreachable, stamped by
     /// the environment's own controller and cleared the moment it is reachable again.
     ///

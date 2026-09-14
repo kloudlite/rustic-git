@@ -657,7 +657,7 @@ mod status_tests {
     }
 
     fn svc(name: &str, ready: bool) -> crd::ServiceStatus {
-        crd::ServiceStatus { name: name.into(), ready, message: None, intercepted_by: None, unreachable_since: None }
+        crd::ServiceStatus { name: name.into(), ready, message: None, intercepted_by: None, proxy: None, unreachable_since: None }
     }
 
     /// Converged only when every service is: a half-up environment stays unobserved so the next

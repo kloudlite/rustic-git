@@ -64,7 +64,12 @@ export default async function Page({ params }: { params: Promise<{ owner: string
           // `service_status` is what traffic is ACTUALLY doing, `wish` is what was asked for.
           // A wish with nothing in force is its own state — the workspace is stopped or
           // unreachable, and the real service is up and answering.
-          const inForce = env.service_status?.find((st) => st.name === s.name)?.intercepted_by ?? null;
+          const status = env.service_status?.find((st) => st.name === s.name);
+          const inForce = status?.intercepted_by ?? null;
+          // "The intercept is on but nothing answers" otherwise lives only in a controller log.
+          // `ready` adds nothing — the line already says traffic is redirected.
+          const proxy =
+            status?.proxy === "starting" ? "proxy starting" : status?.proxy === "failed" ? "proxy failed" : null;
           const wish = interceptSummary(s, env.intercepts);
           // DESCRIPTIVE, not authoritative: this is the wish's mapping. The api exposes no
           // in-force port list — `intercepted_by` is the whole of what status says of it — so this is
@@ -101,6 +106,11 @@ export default async function Page({ params }: { params: Promise<{ owner: string
               <p className="w-full text-caption text-warning">
                 Intercepted by <span className="font-mono">{inForce}</span>, service stopped
                 {mapping && <> · ports {mapping}</>}
+                {proxy && (
+                  <span className="ml-2 border border-border px-1.5 py-0.5 text-caption text-muted-foreground">
+                    {proxy}
+                  </span>
+                )}
               </p>
             ) : wish.heldBy ? (
               <p className="w-full text-caption text-muted-foreground">

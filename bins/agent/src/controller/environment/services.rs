@@ -51,6 +51,7 @@ pub(crate) fn deployment_status(
             ready: false,
             message: Some("statefulset not created yet".into()),
             intercepted_by,
+            proxy: None,
             unreachable_since,
         };
     };
@@ -64,6 +65,7 @@ pub(crate) fn deployment_status(
             ready: true,
             message: Some(format!("intercepted by {ws}")),
             intercepted_by: intercepted_by.clone(),
+            proxy: None,
             unreachable_since,
         };
     }
@@ -72,6 +74,7 @@ pub(crate) fn deployment_status(
         ready: ready >= 1,
         message: (ready < 1).then(|| "no ready replicas".to_string()),
         intercepted_by,
+        proxy: None,
         unreachable_since,
     }
 }

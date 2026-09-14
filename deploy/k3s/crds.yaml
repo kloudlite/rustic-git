@@ -1175,6 +1175,11 @@
                             "name": {
                               "type": "string"
                             },
+                            "proxy": {
+                              "description": "The proxy pod backing this intercept: `starting` until it is Ready, `ready` once the\nselector points at it, `failed` when the pod is Failed or its container cannot start (an\nimage pull, most often). Absent when the service is not intercepted.\n\nA string rather than an enum: it is read by the web and by `kubectl get -o json`, and a\nfourth state added later must not make an older object fail to parse.",
+                              "nullable": true,
+                              "type": "string"
+                            },
                             "ready": {
                               "type": "boolean"
                             },

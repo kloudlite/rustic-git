@@ -86,7 +86,15 @@ export type ApiEnvironment = {
    *  and this are separate facts and neither is ever inferred from the other: a wish with nothing
    *  in force means the intercepting workspace is stopped and the real service is answering.
    *  Absent while the environment has no status yet. */
-  service_status?: { name: string; ready: boolean; message?: string | null; intercepted_by?: string | null }[];
+  service_status?: {
+    name: string;
+    ready: boolean;
+    message?: string | null;
+    intercepted_by?: string | null;
+    /** The proxy pod behind an in-force intercept: `starting` | `ready` | `failed`. Absent when the
+     *  service is not intercepted. A string, not a union: a state added later must still parse. */
+    proxy?: string | null;
+  }[];
   /** The snapshot the volume last landed on, when an in-place restore put one there — only
    *  `GET /v1/environments/{id}` fills it in. Absent means "current" is simply the newest record. */
   restored_to?: string | null;
