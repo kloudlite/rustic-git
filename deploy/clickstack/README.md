@@ -79,14 +79,15 @@ rewrites a table that exists. Traces are the largest per-request signal and are 
 recent incidents, so they get a week, set once on the table itself:
 
 ```sh
-kubectl -n clickstack exec -it chi-clickstack-clickhouse-0-0-0 -- clickhouse-client -q \
+kubectl -n clickstack exec clickstack-clickhouse-clickhouse-0-0-0 -- clickhouse-client -q \
   "ALTER TABLE default.otel_traces MODIFY TTL toDate(Timestamp) + INTERVAL 7 DAY"
-kubectl -n clickstack exec -it chi-clickstack-clickhouse-0-0-0 -- clickhouse-client -q \
+kubectl -n clickstack exec clickstack-clickhouse-clickhouse-0-0-0 -- clickhouse-client -q \
   "SHOW CREATE TABLE default.otel_traces" | grep TTL
 ```
 
-A chart upgrade does not undo it. A table dropped and recreated by the exporter comes back at 30
-days; re-run this. The pod name is the operator's; `kubectl -n clickstack get pods` if it differs.
+Applied on 2026-09-14. A chart upgrade does not undo it. A table dropped and recreated by the
+exporter comes back at 30 days; re-run this. The pod name is the operator's;
+`kubectl -n clickstack get pods` if it differs.
 
 ## Wiring the admin process
 
