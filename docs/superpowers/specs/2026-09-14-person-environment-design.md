@@ -72,7 +72,7 @@ Lifecycle:
 |---|---|
 | Environment deleted | `delete_env` deletes every `SpaceEnvironment` labelled `environment={id}` (replaces today's two clear-the-field loops). Agent treats a missing env as none regardless. |
 | Environment stopped | Choice stays; Services keep their names, dials are refused until it starts. No change to the space. |
-| Member removed from team | The api's keys resync beat (`KEYS_RESYNC_SECS`, already running on membership change) deletes `SpaceEnvironment`s whose `owner` is no longer a member of `team`. Worst case one beat of stale grant, same bound as keys. |
+| Member removed from team | The api's keys resync beat (`KEYS_RESYNC_SECS`, already running on membership change) deletes `SpaceEnvironment`s whose `owner` is no longer a member of `team`. Worst case one beat of stale grant, same bound as keys — accepted by the owner (2026-09-14): every access goes through the app, which authorizes each `/v1` call with fresh membership, so no faster revocation is added. |
 | Person switches env | PUT overwrites spec; running pods move within one reconcile. |
 
 ## Agent fan-out
@@ -239,11 +239,10 @@ change (agent has no write verb). Ingress: add `me` to the allow-list at
   conflict and idempotence; attach routes 410.
 - web `bun test` for `lib/api/me.ts`; SLO catalogue equality test.
 
-## Open questions
+## Open questions (decided by the owner, 2026-09-14)
 
-1. Personal-space environments: environments are "usually" team-owned — may a personal space
-   choose only the person's own environments (as specified), or also a team's?
-2. Migration conflict (two workspaces of one space attached to different environments): is
-   "most recently updated wins" acceptable, or should the space be left unset?
-3. The 410 window for the old attach routes — one release, or remove immediately since every
-   client ships in the same rollout?
+1. Personal-space environments: **decided** — a personal space may choose only the person's own
+   environments.
+2. Migration conflict (two workspaces of one space attached to different environments):
+   **decided** — keep the most recently updated attach.
+3. The 410 window for the old attach routes: **decided** — they answer 410 for one release.
