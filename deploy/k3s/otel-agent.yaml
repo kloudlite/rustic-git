@@ -101,6 +101,11 @@ metadata:
 data:
   config.yaml: |
     receivers:
+      # Traces from our own services on THIS node, through the node-local Service below.
+      otlp:
+        protocols:
+          grpc: { endpoint: "0.0.0.0:4317" }
+          http: { endpoint: "0.0.0.0:4318" }
       # Every pod already annotated `prometheus.io/scrape` — the same annotation the retired
       # on-request scrape used, so nothing had to be re-annotated for this.
       prometheus:
@@ -198,6 +203,12 @@ data:
             timestamp:
               parse_from: attributes.timestamp
               layout_type: gotime
+          # A line inside a traced span carries `span.trace_id` (kloudlite_core::log); lifting it
+          # into the record's TraceId is what makes HyperDX's log -> trace link work.
+          - type: trace_parser
+            if: 'attributes.span != nil and attributes.span.trace_id != nil'
+            trace_id:
+              parse_from: attributes.span.trace_id
               layout: '2006-01-02T15:04:05.999999999Z07:00'
           - type: move
             if: 'attributes.message != nil'
@@ -294,6 +305,12 @@ data:
         logs:
           receivers: [filelog, filelog/syslog]
           processors: [k8sattributes, resource, transform/identity, batch]
+          exporters: [otlphttp]
+        # No `transform/identity`: it overwrites `service.name` from the pod name, and the SDK's
+        # `OTEL_SERVICE_NAME` is the name the service map should show.
+        traces:
+          receivers: [otlp]
+          processors: [k8sattributes, resource, batch]
           exporters: [otlphttp]
 ---
 # The cluster-wide half. Same image, same ServiceAccount, one receiver.
@@ -400,6 +417,9 @@ spec:
           # Bumping this tag without rewriting `history::series` empties both charts.
           image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
           args: ["--config=/conf/config.yaml"]
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
           env:
             - name: K8S_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
@@ -438,6 +458,20 @@ spec:
           configMap: { name: kloudlite-otel-agent }
         - name: varlog
           hostPath: { path: /var/log }
+---
+# Node-local OTLP door: `internalTrafficPolicy: Local` sends a pod's spans to the collector on its
+# own node, so export never crosses nodes and a node's collector outage costs only that node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kloudlite-otel-agent-otlp
+  namespace: kube-system
+spec:
+  selector: { app: kloudlite-otel-agent }
+  internalTrafficPolicy: Local
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }
 ---
 apiVersion: apps/v1
 kind: Deployment

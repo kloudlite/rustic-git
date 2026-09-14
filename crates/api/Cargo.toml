@@ -10,6 +10,7 @@ name = "kloudlite_api"
 [dependencies]
 tracing = { workspace = true }
 kloudlite-core = { path = "../core", features = ["ssh"] }
+kloudlite-trace = { workspace = true }
 kloudlite-storage = { path = "../storage" }
 kloudlite-pulls = { path = "../pulls" }
 kloudlite-workspaces = { path = "../workspaces" }
@@ -36,3 +37,7 @@ russh = { workspace = true }
 # removed even if the process dies mid-call.
 # Invitation tokens are stored by hash — already in the graph via storage.
 sha2 = { workspace = true }
+
+[dev-dependencies]
+kloudlite-trace = { workspace = true, features = ["testing"] }
+rustls = { workspace = true }

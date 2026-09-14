@@ -139,6 +139,7 @@ pub async fn serve(
     let central = kloudlite_core::settings::LiveSettings::new(
         kloudlite_core::settings::CentralSettings::from_env(),
     );
+    kloudlite_core::settings::bind_trace(&central);
     if let Some(bytes) = kloudlite_storage::config::get_central(&store.os).await {
         match serde_json::from_slice(&bytes) {
             Ok(doc) => central.store(

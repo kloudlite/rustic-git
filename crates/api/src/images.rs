@@ -49,6 +49,7 @@ fn request_id(headers: &HeaderMap) -> HeaderMap {
     if let Some(v) = headers.get(kloudlite_core::metrics::REQUEST_ID) {
         out.insert(kloudlite_core::metrics::REQUEST_ID, v.clone());
     }
+    kloudlite_trace::inject(&mut out);
     out
 }
 

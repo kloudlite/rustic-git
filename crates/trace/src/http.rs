@@ -15,7 +15,7 @@ use opentelemetry::trace::TraceContextExt;
 use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::sampler::Probe;
+use crate::sampler::{Probe, Trusted};
 
 pub const UNTRACED: &str = "kloudlite_trace::untraced";
 
@@ -43,6 +43,12 @@ pub fn stamp(span: &tracing::Span) {
 }
 
 pub fn server_span(method: &http::Method, path: &str, headers: &http::HeaderMap, req_id: &str, route: &str) -> tracing::Span {
+    server_span_with(method, path, headers, req_id, route, false)
+}
+
+/// `server_span` with the listener's trust choice: `trusted` only where the listener has already
+/// authenticated the caller as our own tier (the srv peer secret), never on a public door.
+pub fn server_span_with(method: &http::Method, path: &str, headers: &http::HeaderMap, req_id: &str, route: &str, trusted: bool) -> tracing::Span {
     if untraced(path) {
         return tracing::info_span!(target: UNTRACED, "http", req_id = %req_id);
     }
@@ -60,6 +66,9 @@ pub fn server_span(method: &http::Method, path: &str, headers: &http::HeaderMap,
     let mut parent = global::get_text_map_propagator(|p| p.extract(&HeaderExtractor(headers)));
     if is_probe(headers) {
         parent = parent.with_value(Probe);
+    }
+    if trusted {
+        parent = parent.with_value(Trusted);
     }
     // Err only when no OpenTelemetry layer is installed — exactly the case with nothing to do.
     let _ = span.set_parent(parent);

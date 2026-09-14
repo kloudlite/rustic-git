@@ -39,6 +39,21 @@ static TRUST_REMOTE: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Probe;
 
+/// Context value: this request arrived on a listener that authenticated the caller as one of our
+/// own tiers (the srv peer listener's secret), so its sampled flag is obeyed without a token —
+/// an api -> srv hop must not re-roll a trace the api already kept.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Trusted;
+
+type Budget = Box<dyn Fn() -> (f64, f64) + Send + Sync>;
+static BUDGET: OnceLock<Budget> = OnceLock::new();
+
+/// Bind the probe bucket's `(rate, burst)` to a live settings handle, the way `bind_ratio` binds
+/// the ratio. Read on every probe-root take, so a save reaches the bucket on the reader's next beat.
+pub fn bind_probe_budget(f: impl Fn() -> (f64, f64) + Send + Sync + 'static) {
+    let _ = BUDGET.set(Box::new(f));
+}
+
 /// Bind the root ratio to a live settings handle. First call wins; a binary binds exactly once.
 pub fn bind_ratio(f: impl Fn() -> f64 + Send + Sync + 'static) {
     let _ = RATIO.set(Box::new(f));
@@ -60,20 +75,25 @@ pub const PROBE_BURST: f64 = 100.0;
 /// probe root, a few times a second, never on an ordinary span.
 #[derive(Debug)]
 pub(crate) struct Bucket {
-    rate: f64,
-    burst: f64,
+    /// `None`: the bound live budget (`bind_probe_budget`), else `PROBE_RATE`/`PROBE_BURST`.
+    fixed: Option<(f64, f64)>,
     state: Mutex<(f64, Instant)>,
 }
 
 impl Bucket {
     pub(crate) fn new(rate: f64, burst: f64) -> Self {
-        Self { rate, burst, state: Mutex::new((burst, Instant::now())) }
+        Self { fixed: Some((rate, burst)), state: Mutex::new((burst, Instant::now())) }
+    }
+
+    pub(crate) fn live() -> Self {
+        Self { fixed: None, state: Mutex::new((PROBE_BURST, Instant::now())) }
     }
 
     pub(crate) fn take(&self) -> bool {
+        let (rate, burst) = self.fixed.unwrap_or_else(|| BUDGET.get().map_or((PROBE_RATE, PROBE_BURST), |f| f()));
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        st.0 = (st.0 + now.duration_since(st.1).as_secs_f64() * self.rate).min(self.burst);
+        st.0 = (st.0 + now.duration_since(st.1).as_secs_f64() * rate).min(burst);
         st.1 = now;
         if st.0 >= 1.0 {
             st.0 -= 1.0;
@@ -97,8 +117,9 @@ impl Sampler {
 }
 
 impl Default for Sampler {
+    /// The live bucket: `bind_probe_budget`'s values once a binary binds them.
     fn default() -> Self {
-        Self::new(PROBE_RATE, PROBE_BURST)
+        Self { probes: Arc::new(Bucket::live()) }
     }
 }
 
@@ -107,15 +128,15 @@ impl Default for Sampler {
 /// `TraceIdRatioBased` is a pure function of the trace id: every process with the same ratio
 /// re-rolls the same answer. It diverges only while a ratio change is mid-rollout, or when an
 /// upstream kept the trace by promotion (the downstream then promotes only its own failure or
-/// stall). Task 2 should trust the sampled flag on the authenticated peer listener
-/// (`WS_PEER_SECRET` / peer auth). `trust_remote_sampled` is process-wide, so that needs a
-/// per-listener context mark set after peer auth passes, the way `Probe` is — which removes both
-/// gaps for internal traffic without trusting the public listener.
+/// stall). A listener that authenticates its caller as our own tier marks the parent `Trusted`
+/// (`http::server_span_with`, chosen per listener), which removes both gaps for internal traffic
+/// without trusting the public listener.
 pub(crate) fn decide_with(parent: Option<&Context>, trace_id: TraceId, ratio: f64, trust_remote: bool, probes: &Bucket) -> SamplingDecision {
     let probe = parent.is_some_and(|c| c.get::<Probe>().is_some());
+    let trusted = parent.is_some_and(|c| c.get::<Trusted>().is_some());
     let parent = parent.map(|c| c.span().span_context().clone()).filter(|sc| sc.is_valid());
     if let Some(sc) = parent {
-        let obeyed = !sc.is_remote() || trust_remote || (probe && (!sc.is_sampled() || probes.take()));
+        let obeyed = !sc.is_remote() || trust_remote || trusted || (probe && (!sc.is_sampled() || probes.take()));
         if obeyed {
             return if sc.is_sampled() { SamplingDecision::RecordAndSample } else { SamplingDecision::RecordOnly };
         }
@@ -205,6 +226,12 @@ mod tests {
         let p = remote(TraceFlags::SAMPLED).with_value(Probe);
         assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &empty), SamplingDecision::RecordOnly);
         assert_eq!(decide_with(Some(&p), TraceId::from(1u128), 1.0, false, &empty), SamplingDecision::RecordAndSample);
+    }
+
+    #[test]
+    fn a_trusted_listener_obeys_the_remote_flag_without_a_token() {
+        let p = remote(TraceFlags::SAMPLED).with_value(Trusted);
+        assert_eq!(decide_with(Some(&p), TraceId::from(u128::MAX), 0.0, false, &Bucket::new(0.0, 0.0)), SamplingDecision::RecordAndSample);
     }
 
     #[test]

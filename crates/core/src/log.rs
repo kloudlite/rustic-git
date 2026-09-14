@@ -18,6 +18,10 @@
 //! `deploy/kloudlite.yaml`) parse that object so level, module (`target`) and the call-site
 //! fields become columns in HyperDX rather than text inside a coloured string. Unset — a
 //! laptop, a test — gives the human-readable form.
+//!
+//! With `KLOUDLITE_OTLP_URL` set, `kloudlite_trace::layer()` joins the stack; every span we open
+//! records `trace_id`, so a JSON line carries `span.trace_id` and the collector's `trace_parser`
+//! links it to its trace.
 
 use tracing::Subscriber;
 use tracing_subscriber::fmt::MakeWriter;
@@ -43,14 +47,15 @@ pub fn subscriber<W>(json: bool, w: W) -> Box<dyn Subscriber + Send + Sync>
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
+    use tracing_subscriber::layer::SubscriberExt as _;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
-    let b = fmt().with_writer(w).with_env_filter(filter);
+    let base = tracing_subscriber::registry().with(filter).with(kloudlite_trace::layer());
     if json {
         // `flatten_event`: `message` and the call-site fields land at the top level next to
         // `level`/`target`, which is what a pipeline query like `fields.repo == x` wants.
-        Box::new(b.json().flatten_event(true).finish())
+        Box::new(base.with(fmt::layer().json().flatten_event(true).with_writer(w)))
     } else {
-        Box::new(b.finish())
+        Box::new(base.with(fmt::layer().with_writer(w)))
     }
 }
 
@@ -81,6 +86,19 @@ mod tests {
         fn make_writer(&'a self) -> Buf {
             self.clone()
         }
+    }
+
+    #[test]
+    fn json_lines_carry_the_enclosing_span_trace_id() {
+        let buf = Buf::default();
+        tracing::subscriber::with_default(super::subscriber(true, buf.clone()), || {
+            let s = tracing::info_span!("http", trace_id = "4bf92f3577b34da6a3ce929d0e0e4736");
+            let _e = s.enter();
+            tracing::warn!("inside");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+        assert_eq!(v["span"]["trace_id"], "4bf92f3577b34da6a3ce929d0e0e4736");
     }
 
     #[test]

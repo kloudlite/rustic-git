@@ -61,6 +61,11 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            # Traces to the collector on this pod's own node (`kloudlite_trace`); unset = no tracing.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-srv
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
@@ -448,6 +453,11 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            # Traces to the collector on this pod's own node (`kloudlite_trace`); unset = no tracing.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-api
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
@@ -667,6 +677,11 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            # Traces to the collector on this pod's own node (`kloudlite_trace`); unset = no tracing.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-worker
             - name: KLOUDLITE_METRICS_ADDR
               value: 0.0.0.0:9464
             # Tokio sizes its pool from the NODE's cores — 64 threads inside a
@@ -896,6 +911,11 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            # Traces to the collector on this pod's own node (`kloudlite_trace`); unset = no tracing.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-admin
             - name: TOKIO_WORKER_THREADS
               value: "2"
             # The only line that turns this binary into the admin process: mounts
@@ -1204,6 +1224,11 @@ metadata:
 data:
   config.yaml: |
     receivers:
+      # Traces from our own services on THIS node, through the node-local Service below.
+      otlp:
+        protocols:
+          grpc: { endpoint: "0.0.0.0:4317" }
+          http: { endpoint: "0.0.0.0:4318" }
       # Every pod already annotated `prometheus.io/scrape` — the same annotation the retired
       # on-request scrape used, so nothing had to be re-annotated for this.
       prometheus:
@@ -1296,6 +1321,12 @@ data:
             timestamp:
               parse_from: attributes.timestamp
               layout_type: gotime
+          # A line inside a traced span carries `span.trace_id` (kloudlite_core::log); lifting it
+          # into the record's TraceId is what makes HyperDX's log -> trace link work.
+          - type: trace_parser
+            if: 'attributes.span != nil and attributes.span.trace_id != nil'
+            trace_id:
+              parse_from: attributes.span.trace_id
               layout: '2006-01-02T15:04:05.999999999Z07:00'
           - type: move
             if: 'attributes.message != nil'
@@ -1392,6 +1423,12 @@ data:
         logs:
           receivers: [filelog, filelog/syslog]
           processors: [k8sattributes, resource, transform/identity, batch]
+          exporters: [otlphttp]
+        # No `transform/identity`: it overwrites `service.name` from the pod name, and the SDK's
+        # `OTEL_SERVICE_NAME` is the name the service map should show.
+        traces:
+          receivers: [otlp]
+          processors: [k8sattributes, resource, batch]
           exporters: [otlphttp]
 ---
 # The cluster-wide half. Same image, same ServiceAccount, one receiver.
@@ -1601,6 +1638,9 @@ spec:
           # Bumping this tag without rewriting `history::series` empties both charts.
           image: otel/opentelemetry-collector-contrib:0.109.0@sha256:af0f72b2d2493fc17f06cf3bc136548240cd7ebb2c8b1c8a7be6f3eb03068389
           args: ["--config=/conf/config.yaml"]
+          ports:
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
           env:
             - name: K8S_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
@@ -1639,6 +1679,20 @@ spec:
           configMap: { name: kloudlite-otel-agent }
         - name: varlog
           hostPath: { path: /var/log }
+---
+# Node-local OTLP door: `internalTrafficPolicy: Local` sends a pod's spans to the collector on its
+# own node, so export never crosses nodes and a node's collector outage costs only that node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kloudlite-otel-agent-otlp
+  namespace: kloudlite
+spec:
+  selector: { app: kloudlite-otel-agent }
+  internalTrafficPolicy: Local
+  ports:
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1789,6 +1843,8 @@ metadata:
   namespace: kloudlite
 data:
   KLOUDLITE_LOG_FORMAT: json
+  KLOUDLITE_OTLP_URL: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+  OTEL_SERVICE_NAME: kloudlite-slo
   # hyper's pool and connect logs on every suite: a request the probe abandoned (`slo.http.abandoned`)
   # then carries whether it went out on a reused keep-alive connection or a fresh dial — the one
   # fact neither side logged when `GET /admin/workloads` stalled for 15 s on 2026-09-11 and the

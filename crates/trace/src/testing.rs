@@ -4,6 +4,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
 use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::Layer as _;
 
 pub fn subscriber() -> (tracing::Dispatch, InMemorySpanExporter) {
     let out = InMemorySpanExporter::default();
@@ -12,6 +13,11 @@ pub fn subscriber() -> (tracing::Dispatch, InMemorySpanExporter) {
         .with_span_processor(crate::Promote::new(SimpleSpanProcessor::new(out.clone())))
         .build();
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-    let sub = tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let sub = tracing_subscriber::registry().with(
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("test"))
+            // The production filter, so a test of an untraced path exercises what ships.
+            .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() != crate::UNTRACED)),
+    );
     (tracing::Dispatch::new(sub), out)
 }

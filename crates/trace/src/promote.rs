@@ -107,6 +107,8 @@ impl<P: SpanProcessor> SpanProcessor for Promote<P> {
             return self.inner.on_end(span);
         }
         let id = span.span_context.trace_id();
+        // ponytail: one global Mutex taken on every UNSAMPLED span end — the ceiling is contention
+        // on a busy srv; the upgrade is sharding `pending` by a TraceId hash. Task 8 measures it.
         let mut guard = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         let p = &mut *guard;
         if !(span.parent_span_is_remote || span.parent_span_id == SpanId::INVALID) {

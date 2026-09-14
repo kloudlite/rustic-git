@@ -158,6 +158,25 @@ pub async fn http_metrics(
     req: Request,
     next: Next,
 ) -> Response {
+    observe(listener, false, req, next).await
+}
+
+/// `http_metrics` for a listener that authenticates callers with the peer secret. The trace
+/// decision is taken when the span opens, before the listener's own auth layer runs, so the
+/// secret is compared HERE: a matching one means the caller is our own tier and its sampled flag
+/// is obeyed (a trace is not re-rolled mid-way); anything else is treated as outside traffic.
+/// `from_fn_with_state(("peer", secret), http_metrics_peer)`.
+pub async fn http_metrics_peer(
+    axum::extract::State((listener, secret)): axum::extract::State<(&'static str, std::sync::Arc<str>)>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let presented = req.headers().get(crate::peer::PEER_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let trusted = crate::peer::secret_eq(presented, &secret);
+    observe(listener, trusted, req, next).await
+}
+
+async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next) -> Response {
     let class = route_class(req.uri().path());
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -170,13 +189,16 @@ pub async fn http_metrics(
     // is how a 15 s `GET /admin/workloads` the probe abandoned left no trace on this side
     // (2026-09-11). The guard says it happened and how far it got; it is disarmed on completion.
     let mut abandoned = Abandoned { listener, class, method: method.clone(), path: path.clone(), start, armed: true, req_id: req_id.clone() };
-    let span = tracing::info_span!("http", req_id = %req_id);
-    let mut res = tracing::Instrument::instrument(next.run(req), span).await;
+    // The server span of the distributed trace: the caller's `traceparent` is its parent (its
+    // sampled flag obeyed only when `trusted` or probe-marked), `req_id` stays on it as before.
+    let span = kloudlite_trace::server_span_with(&method, &path, req.headers(), &req_id, class, trusted);
+    let mut res = tracing::Instrument::instrument(next.run(req), span.clone()).await;
     abandoned.armed = false;
     if let Ok(v) = axum::http::HeaderValue::from_str(&req_id) {
         res.headers_mut().insert(REQUEST_ID, v);
     }
     let status = res.status().as_u16();
+    kloudlite_trace::finish(&span, status);
     let labels = [("listener", listener), ("class", class), ("status", status_class(status))];
     metrics::counter!("http_requests_total", &labels).increment(1);
     let ms = start.elapsed().as_millis() as u64;
@@ -339,5 +361,87 @@ mod tests {
         assert!(text.contains("test_counter_total{state=\"error\"} 0"), "{text}");
         assert!(text.contains("test_gauge 0"), "{text}");
         assert!(!text.contains("test_duration_seconds"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    /// Sampled flag set; the default ratio (0.1) does not pick this trace id, so a `-01` out can
+    /// only come from the flag being obeyed.
+    const IN: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    fn echo() -> axum::Router {
+        axum::Router::new()
+            .route("/v1/x", axum::routing::get(|| async {
+                let mut h = axum::http::HeaderMap::new();
+                kloudlite_trace::inject(&mut h);
+                h.get("traceparent").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default()
+            }))
+            .route("/healthz", axum::routing::get(|| async { "ok" }))
+    }
+
+    async fn call(app: axum::Router, path: &str, headers: &[(&str, &str)]) -> String {
+        let mut req = Request::get(path);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let res = app.oneshot(req.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        String::from_utf8(axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap().to_vec()).unwrap()
+    }
+
+    fn public() -> axum::Router {
+        echo().layer(axum::middleware::from_fn_with_state("api", super::http_metrics))
+    }
+
+    fn peer() -> axum::Router {
+        echo().layer(axum::middleware::from_fn_with_state(("peer", std::sync::Arc::<str>::from("s3cret")), super::http_metrics_peer))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_public_listener_continues_the_trace_but_rerolls_the_flag() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let out = call(public(), "/v1/x", &[("traceparent", IN)]).await;
+        assert_eq!(&out[3..35], &IN[3..35], "same trace id out as in");
+        assert_ne!(&out[36..52], &IN[36..52], "a new span id: ours, not the caller's");
+        assert!(out.ends_with("-00"), "an outside sampled flag is not obeyed: {out}");
+        assert!(spans.get_finished_spans().unwrap().is_empty(), "unsampled and fast: not exported");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_probe_request_to_the_api_stays_sampled() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let out = call(public(), "/v1/x", &[("traceparent", IN), (kloudlite_trace::PROBE_HEADER, "1")]).await;
+        assert_eq!(&out[3..35], &IN[3..35]);
+        assert!(out.ends_with("-01"), "{out}");
+        let got = spans.get_finished_spans().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, format!("GET {}", super::route_class("/v1/x")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_peer_listener_trusts_the_flag_only_with_the_secret() {
+        let (dispatch, _spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let peer_header = crate::peer::PEER_HEADER;
+        let out = call(peer(), "/v1/x", &[("traceparent", IN), (peer_header, "s3cret")]).await;
+        assert_eq!(&out[3..35], &IN[3..35]);
+        assert!(out.ends_with("-01"), "an authenticated peer hop keeps the caller's decision: {out}");
+        let out = call(peer(), "/v1/x", &[("traceparent", IN), (peer_header, "wrong!")]).await;
+        assert!(out.ends_with("-00"), "a wrong secret is outside traffic: {out}");
+        let out = call(peer(), "/v1/x", &[("traceparent", IN)]).await;
+        assert!(out.ends_with("-00"), "no secret is outside traffic: {out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn healthz_is_never_a_span() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        call(public(), "/healthz", &[("traceparent", IN), (kloudlite_trace::PROBE_HEADER, "1")]).await;
+        assert!(spans.get_finished_spans().unwrap().is_empty());
     }
 }

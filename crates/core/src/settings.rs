@@ -108,6 +108,14 @@ pub struct CentralSettings {
     /// How long the gate waits for a builder to report `Ready` before giving up on a connection.
     /// 30..=600 seconds.
     pub builder_start_secs: u64,
+    /// Root sampling ratio for distributed traces. 0.0..=1.0. Errors, slow requests and probe
+    /// traffic are kept regardless (`kloudlite_trace`); this only thins the rest.
+    pub trace_sample_ratio: f64,
+    /// Probe-forced samples per second each process honours (`kloudlite_trace::Sampler`'s
+    /// bucket). 0.0..=1000.0; past it a probe trace falls back to the ratio.
+    pub trace_probe_rate: f64,
+    /// The bucket's burst allowance. 1.0..=10000.0.
+    pub trace_probe_burst: f64,
 }
 
 impl Default for CentralSettings {
@@ -140,6 +148,9 @@ impl CentralSettings {
             signup_open: true,
             builder_idle_secs: 600,
             builder_start_secs: 120,
+            trace_sample_ratio: kloudlite_trace::DEFAULT_RATIO,
+            trace_probe_rate: kloudlite_trace::PROBE_RATE,
+            trace_probe_burst: kloudlite_trace::PROBE_BURST,
         }
     }
 
@@ -188,6 +199,9 @@ impl CentralSettings {
         over!(signup_open);
         over!(builder_idle_secs);
         over!(builder_start_secs);
+        over!(trace_sample_ratio);
+        over!(trace_probe_rate);
+        over!(trace_probe_burst);
         self
     }
 }
@@ -228,6 +242,12 @@ pub struct StoredCentralSettings {
     pub builder_idle_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_start_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_sample_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_probe_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_probe_burst: Option<f64>,
     /// Last ten versions, newest first, kept inline rather than as ten separate object-store
     /// keys — one small object either way, and one GET beats eleven.
     #[serde(default)]
@@ -272,6 +292,12 @@ pub struct StoredCentralSettingsSnapshot {
     pub builder_idle_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_start_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_sample_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_probe_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_probe_burst: Option<f64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub updated_by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -299,6 +325,9 @@ impl From<&StoredCentralSettingsSnapshot> for StoredCentralSettings {
             signup_open: snap.signup_open,
             builder_idle_secs: snap.builder_idle_secs,
             builder_start_secs: snap.builder_start_secs,
+            trace_sample_ratio: snap.trace_sample_ratio,
+            trace_probe_rate: snap.trace_probe_rate,
+            trace_probe_burst: snap.trace_probe_burst,
             history: Vec::new(),
             updated_by: String::new(),
             updated_at: String::new(),
@@ -335,6 +364,9 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
     ("signupOpen", Mark::Live),
     ("builderIdleSecs", Mark::Live),
     ("builderStartSecs", Mark::Live),
+    ("traceSampleRatio", Mark::Live),
+    ("traceProbeRate", Mark::Live),
+    ("traceProbeBurst", Mark::Live),
 ];
 
 /// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
@@ -378,6 +410,9 @@ pub fn validate_stored(patch: &StoredCentralSettings) -> Result<(), String> {
     range!(ssh_port, 1u16, 65_535u16);
     range!(builder_idle_secs, 60u64, 86_400u64);
     range!(builder_start_secs, 30u64, 600u64);
+    range!(trace_sample_ratio, 0.0f64, 1.0f64);
+    range!(trace_probe_rate, 0.0f64, 1000.0f64);
+    range!(trace_probe_burst, 1.0f64, 10000.0f64);
     Ok(())
 }
 
@@ -400,6 +435,9 @@ fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
         signup_open: old.signup_open,
         builder_idle_secs: old.builder_idle_secs,
         builder_start_secs: old.builder_start_secs,
+        trace_sample_ratio: old.trace_sample_ratio,
+        trace_probe_rate: old.trace_probe_rate,
+        trace_probe_burst: old.trace_probe_burst,
         updated_by: old.updated_by.clone(),
         updated_at: old.updated_at.clone(),
     };
@@ -445,6 +483,18 @@ pub fn apply_patch(
     next.updated_by = updated_by.to_string();
     next.updated_at = updated_at.to_string();
     next
+}
+
+/// Point this process's trace sampler at the live central document: the root ratio and the probe
+/// bucket are read through `central` on every decision, so a save lands on the next beat.
+pub fn bind_trace(central: &LiveSettings<CentralSettings>) {
+    let c = central.clone();
+    kloudlite_trace::bind_ratio(move || c.load().trace_sample_ratio);
+    let c = central.clone();
+    kloudlite_trace::bind_probe_budget(move || {
+        let s = c.load();
+        (s.trace_probe_rate, s.trace_probe_burst)
+    });
 }
 
 /// One GET of `cluster/settings`, supplied by the caller rather than baked in here — `core` has
@@ -503,6 +553,25 @@ mod tests {
     }
 
     #[test]
+    fn trace_settings_default_merge_and_are_range_checked() {
+        let d = CentralSettings::built_in_defaults();
+        assert_eq!((d.trace_sample_ratio, d.trace_probe_rate, d.trace_probe_burst), (0.1, 20.0, 100.0));
+        let stored = StoredCentralSettings { trace_sample_ratio: Some(0.25), trace_probe_rate: Some(5.0), ..Default::default() };
+        let m = CentralSettings::built_in_defaults().merged_with(&stored);
+        assert_eq!((m.trace_sample_ratio, m.trace_probe_rate, m.trace_probe_burst), (0.25, 5.0, 100.0));
+        assert!(validate_stored(&StoredCentralSettings { trace_sample_ratio: Some(1.5), ..Default::default() }).unwrap_err().starts_with("trace_sample_ratio must be between 0 and 1"));
+        assert!(validate_stored(&StoredCentralSettings { trace_sample_ratio: Some(-0.1), ..Default::default() }).is_err());
+        assert!(validate_stored(&StoredCentralSettings { trace_probe_rate: Some(1001.0), ..Default::default() }).is_err());
+        assert!(validate_stored(&StoredCentralSettings { trace_probe_burst: Some(0.0), ..Default::default() }).is_err());
+        assert!(validate_stored(&StoredCentralSettings { trace_sample_ratio: Some(0.0), trace_probe_rate: Some(0.0), trace_probe_burst: Some(1.0), ..Default::default() }).is_ok());
+        let wire = serde_json::to_value(&stored).unwrap();
+        assert_eq!(wire["traceSampleRatio"], 0.25);
+        for f in ["traceSampleRatio", "traceProbeRate", "traceProbeBurst"] {
+            assert!(CENTRAL_SETTING_META.iter().any(|(n, _)| *n == f), "{f}");
+        }
+    }
+
+    #[test]
     fn validate_stored_rejects_out_of_range() {
         let bad = StoredCentralSettings { ssh_port: Some(0), ..Default::default() };
         let err = validate_stored(&bad).unwrap_err();
@@ -556,6 +625,9 @@ mod tests {
             signup_open: snap.signup_open,
             builder_idle_secs: snap.builder_idle_secs,
             builder_start_secs: snap.builder_start_secs,
+            trace_sample_ratio: snap.trace_sample_ratio,
+            trace_probe_rate: snap.trace_probe_rate,
+            trace_probe_burst: snap.trace_probe_burst,
             history: vec![],
             updated_by: String::new(),
             updated_at: String::new(),
