@@ -201,13 +201,18 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
             ensure(&in_env, &k8s::space_ingress(env_ns, &d.egress_ns, &space.spec.owner, &owner), &ctx).await?;
         }
         // Nothing to point at: an egress half granting reach to a namespace that is not there is a
-        // grant to whatever gets that name next, so it goes — ONCE. Either this pass is the
-        // transition away from a real choice, or a GET confirms the object is actually there
-        // (which is how a restarted process, with no memory at all, still collects it). A cleared
-        // choice would otherwise issue a DELETE on every pass forever.
+        // grant to whatever gets that name next, so it goes — ONCE, and the memory below is what
+        // makes it once. Three states, and only the middle one costs anything:
+        //   - we rendered a grant last pass  → this pass is the TRANSITION away from it: delete.
+        //   - we have no memory (a restart)  → one GET decides, and settles the memory either way.
+        //   - we already rendered nothing    → nothing to do, and NO GET: we know.
         _ => {
-            let transition = prev.as_deref().is_some_and(|p| !p.is_empty());
-            if (transition || exists(&in_space, k8s::SPACE_EGRESS_POLICY).await?) && may_write(&ctx).await {
+            let act = match prev.as_deref() {
+                Some(p) if !p.is_empty() => true,
+                Some(_) => false,
+                None => exists(&in_space, k8s::SPACE_EGRESS_POLICY).await?,
+            };
+            if act && may_write(&ctx).await {
                 drop_object(&in_space, &ctx, &d.egress_ns, k8s::SPACE_EGRESS_POLICY).await?;
             }
         }
@@ -224,10 +229,12 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
         }
         drop_object(&api, &ctx, &old_ns, &ingress_name).await?;
     }
-    ctx.last_choice
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(name.clone(), (uid, space.spec.environment.clone()));
+    // The RENDERED choice, not the wish: an orphaned wish (the environment is gone, or in another
+    // region) renders nothing, so it must be remembered as nothing. Remembering the wish instead
+    // made every later pass read "transition" and delete the same absent policy once per resync,
+    // forever — the wish does not change, so the transition never ends.
+    let rendered = if d.env_ns.is_some() { space.spec.environment.clone() } else { String::new() };
+    ctx.last_choice.lock().unwrap_or_else(|p| p.into_inner()).insert(name.clone(), (uid, rendered));
 
     // What was rendered, and from what. The vet's 3am note was that `space.grant.pruned` never
     // said which value it had read.
@@ -438,24 +445,6 @@ mod tests {
         assert_eq!(ing.metadata.namespace.as_deref(), Some("env-1"));
     }
 
-    /// BOTH halves name the `SpaceEnvironment` as their controller — the agents name it too, so the
-    /// adopting apply updates that one reference instead of adding a second. `ownerReferences` is an
-    /// SSA associative list keyed by uid: a second `controller: true` entry is a 422 the object
-    /// never recovers from.
-    #[test]
-    fn both_halves_are_owned_by_the_space() {
-        let s = space("alice", "acme", "env-1");
-        let r = owner_ref(&s).unwrap();
-        let space_ns = ns("alice", "acme");
-        for p in [k8s::space_egress(&space_ns, "env-1", "alice", &r), k8s::space_ingress("env-1", &space_ns, "alice", &r)] {
-            let refs = p.metadata.owner_references.clone().unwrap_or_default();
-            assert_eq!(refs.len(), 1);
-            assert_eq!(refs[0].uid, "uid-space");
-            assert_eq!(refs[0].kind, "SpaceEnvironment");
-            assert_eq!(refs[0].controller, Some(true));
-        }
-    }
-
     /// The env-side derived set: which `space-*` halves belong in THIS namespace, given the cache.
     /// A space pointing elsewhere is collected; a space pointing here is kept; and a cache that
     /// has not listed keeps EVERYTHING — read as empty it would strip every grant in the cluster
@@ -526,6 +515,33 @@ mod tests {
         assert!(reqs.contains("force=true"), "{reqs}");
         assert!(reqs.contains(&policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY)), "{reqs}");
         assert!(reqs.contains(&policy_path("env-1", &k8s::space_ingress_name(&space_ns))), "{reqs}");
+    }
+
+    /// BOTH halves name the `SpaceEnvironment` as their controller. Asserted on what the
+    /// RECONCILER sent, not on a hand-rolled render: naming the `Environment` on the ingress half
+    /// (the shape this replaced) would add a second `controller: true` reference to the object the
+    /// agents wrote, and the API server refuses that — "only one reference can have Controller set
+    /// to true" — forever.
+    #[tokio::test]
+    async fn both_halves_are_owned_by_the_space() {
+        let space_ns = ns("alice", "acme");
+        let (egress, ingress) =
+            (policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY), policy_path("env-1", &k8s::space_ingress_name(&space_ns)));
+        let (ctx, rec) = leading(vec![
+            kube_test::patch(egress.clone(), serde_json::json!({})),
+            kube_test::patch(ingress.clone(), serde_json::json!({})),
+        ]);
+        ctx.remember_environments(vec![env("env-1", "acme", "test")]);
+        reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
+        for path in [egress, ingress] {
+            let sent = rec.sent("PATCH", &path);
+            assert_eq!(sent.len(), 1, "{path}: {sent:?}");
+            let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an owner reference");
+            assert_eq!(refs.len(), 1, "{path}: {refs:?}");
+            assert_eq!(refs[0]["kind"], "SpaceEnvironment", "{path}");
+            assert_eq!(refs[0]["uid"], "uid-space", "{path}");
+            assert_eq!(refs[0]["controller"], true, "{path}");
+        }
     }
 
     /// Adoption, on the wire: the apply lands on an object the AGENT already wrote (same policy,
@@ -666,6 +682,43 @@ mod tests {
         reconcile_space(s, ctx.clone()).await.unwrap();
         let deletes: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deletes.len(), 1, "{deletes:?}");
+    }
+
+    /// The ORPHAN: the wish still names an environment, but the environment is gone (or in another
+    /// region), so nothing is rendered. The memory records what was RENDERED — nothing — so the
+    /// second pass is not a transition and issues no second DELETE. Remembering the wish instead
+    /// deleted the same absent policy once per resync forever, since the wish never changes.
+    #[tokio::test]
+    async fn an_orphaned_wish_deletes_the_egress_half_once() {
+        let space_ns = ns("alice", "acme");
+        let path = policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY);
+        let (ctx, rec) = leading(vec![
+            kube_test::get(path.clone(), serde_json::json!({"metadata": {"name": k8s::SPACE_EGRESS_POLICY}})),
+            delete(path.clone()),
+        ]);
+        // A ready cache with no environment at all: the wish is orphaned, not unknown.
+        ctx.remember_environments(vec![]);
+        let s = Arc::new(space("alice", "acme", "env-1"));
+        reconcile_space(s.clone(), ctx.clone()).await.unwrap();
+        reconcile_space(s, ctx.clone()).await.unwrap();
+        let deletes: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes.len(), 1, "{deletes:?}");
+    }
+
+    /// And a space with nothing to render whose policy is already gone settles after ONE GET: the
+    /// confirmed absence is remembered, so a settled space costs no API call at all per pass.
+    #[tokio::test]
+    async fn a_settled_space_stops_asking() {
+        let space_ns = ns("alice", "acme");
+        let path = policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY);
+        let (ctx, rec) = leading(vec![kube_test::not_found(path.clone())]);
+        ctx.remember_environments(vec![]);
+        let s = Arc::new(space("alice", "acme", ""));
+        reconcile_space(s.clone(), ctx.clone()).await.unwrap();
+        reconcile_space(s, ctx.clone()).await.unwrap();
+        let gets: Vec<_> = rec.calls().into_iter().filter(|c| c == &format!("GET {path}")).collect();
+        assert_eq!(gets.len(), 1, "{gets:?}");
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
 
     /// A space deleted and recreated under the same name is a DIFFERENT space: the dead one's
