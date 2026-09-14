@@ -181,6 +181,7 @@ pub(crate) fn intercept_routes(extra: Vec<Route>) -> Vec<Route> {
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/default-deny"), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/allow-dns"), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/allow-internet-egress"), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
+        Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/allow-otlp"), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/allow-same-namespace"), status: 200, body: serde_json::json!({"kind": "NetworkPolicy"}) },
         Route { method: "PATCH", path: format!("/apis/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/api-secrets"), status: 200, body: serde_json::json!({"kind": "RoleBinding"}) },
         Route { method: "PATCH", path: format!("/api/v1/namespaces/{ns}/limitranges/slot"), status: 200, body: serde_json::json!({"kind": "LimitRange"}) },
