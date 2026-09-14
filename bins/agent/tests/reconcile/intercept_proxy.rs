@@ -63,7 +63,8 @@ async fn in_force_writes_the_target_and_the_proxy_before_the_selector_moves() {
 
 
 /// A half-done switch is a service with no endpoints at all, which is worse than an intercept that
-/// has not taken yet. So while the proxy is `starting` the real service is still the one serving.
+/// has not taken yet. So on a FIRST take — nothing behind the proxy yet — a `starting` proxy
+/// changes nothing and the real service is still the one serving.
 #[tokio::test]
 async fn a_proxy_that_is_not_ready_leaves_the_real_service_serving() {
     let tmp = env_tmp();
@@ -110,7 +111,10 @@ async fn a_release_restores_the_service_before_it_deletes_the_proxy() {
 
     let calls = rec.calls();
     let svc = position(&calls, &format!("PATCH {WEB_SVC}"));
-    assert!(svc < position(&calls, &format!("DELETE {PROXY_POD}")), "the selector is back first: {calls:?}");
+    let sts = position(&calls, &format!("PATCH {WEB_STS}"));
+    let proxy = position(&calls, &format!("DELETE {PROXY_POD}"));
+    assert!(svc < proxy, "the selector is back first: {calls:?}");
+    assert!(sts < proxy, "and the replicas with it: {calls:?}");
     for gone in [PROXY_POD, TARGET_SVC, ENV_POLICY, WS_POLICY] {
         assert!(calls.iter().any(|c| c == &format!("DELETE {gone}")), "{gone} survives: {calls:?}");
     }
@@ -139,4 +143,90 @@ async fn an_intercept_in_force_under_the_old_mechanism_is_converted_in_place() {
     let svc = rec.sent("PATCH", WEB_SVC);
     assert_eq!(svc.last().unwrap()["spec"]["selector"]["kloudlite.io/kind"], "intercept", "{:?}", svc.last());
     assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0);
+}
+
+
+/// An intercept left in force by the previous mechanism: the Service is selector-less and a
+/// `web-intercept` slice is what delivers its traffic. Until the proxy is actually up, that is
+/// still the only thing serving — so this pass must leave BOTH alone. Deleting the slice here, or
+/// handing the service back to a StatefulSet that has to scale up first, is a real outage in the
+/// middle of a conversion nobody asked for.
+#[tokio::test]
+async fn a_conversion_holds_the_legacy_slice_until_the_proxy_is_up() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+        // First pass: no proxy pod at all. Second: the one it created, Ready.
+        kloudlite_workspaces::kube_test::not_found(PROXY_POD),
+        kloudlite_workspaces::kube_test::get(PROXY_POD, proxy_pod(true)),
+    ]);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
+    // As the previous build left it: in force, and nothing recorded about a proxy.
+    let e = intercept_env(one_intercept(), Some("ws-1"));
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let calls = rec.calls();
+    assert!(!calls.iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "the slice is still serving: {calls:?}");
+    assert!(!calls.iter().any(|c| c == &format!("PATCH {WEB_SVC}")), "the Service keeps no selector: {calls:?}");
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0, "not handed back either");
+    assert_eq!(status_proxy(&rec).as_deref(), Some("starting"));
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let calls = rec.calls();
+    assert!(calls.iter().any(|c| c == &format!("DELETE {WEB_SLICE}")), "the converted pass deletes it: {calls:?}");
+    let svc = rec.sent("PATCH", WEB_SVC);
+    assert_eq!(svc.last().unwrap()["spec"]["selector"]["kloudlite.io/kind"], "intercept", "{:?}", svc.last());
+}
+
+
+/// A proxy that WAS serving and has gone NotReady is a restart, not a handover. Handing the
+/// service back costs a StatefulSet scale-up and then a re-take — two real gaps — for a pod that
+/// is back in seconds, so the selector stays on it for the grace.
+#[tokio::test]
+async fn a_restarting_proxy_keeps_the_service_within_the_grace() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+        kloudlite_workspaces::kube_test::get(PROXY_POD, proxy_pod_since(false, 5)),
+    ]);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
+    let mut e = intercept_env(one_intercept(), Some("ws-1"));
+    e.status.as_mut().unwrap().service_status[0].proxy = Some("ready".into());
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    assert!(!rec.calls().iter().any(|c| c == &format!("PATCH {WEB_SVC}")), "the selector stays on the proxy: {:?}", rec.calls());
+    assert_eq!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0, "and the real service stays down");
+    assert_eq!(status_proxy(&rec).as_deref(), Some("starting"));
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert_eq!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"], "ws-1", "still in force");
+}
+
+
+/// The other side of that clock: a proxy NotReady for longer than the grace is not coming back on
+/// its own, and the service goes back to its own pods — a hold that never expires is a service
+/// that never returns.
+#[tokio::test]
+async fn a_proxy_notready_past_the_grace_hands_the_service_back() {
+    let tmp = env_tmp();
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+        kloudlite_workspaces::kube_test::get(PROXY_POD, proxy_pod_since(false, 600)),
+    ]);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
+    let mut e = intercept_env(one_intercept(), Some("ws-1"));
+    e.status.as_mut().unwrap().service_status[0].proxy = Some("ready".into());
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let svc = rec.sent("PATCH", WEB_SVC);
+    assert_eq!(svc.last().unwrap()["spec"]["selector"]["kloudlite.io/service"], "web", "{:?}", svc.last());
+    assert_ne!(rec.sent("PATCH", WEB_STS).last().unwrap()["spec"]["replicas"], 0, "its own pods come back");
+    let st = rec.sent("PATCH", ENV_STATUS_PATH);
+    assert!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"].is_null(), "{:?}", st.last());
 }

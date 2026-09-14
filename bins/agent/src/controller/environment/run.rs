@@ -50,8 +50,8 @@ pub(crate) async fn run_environment(
     // Every intercept decided BEFORE anything is rendered: each service is in exactly one of the
     // three states below, and the rendering is a straight read of that decision.
     let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
-    let proxies = apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
-    let service_status = read_services_back(e, deployments, &prev, &plan, &proxies).await?;
+    let rendered = apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
+    let service_status = read_services_back(e, deployments, &prev, &plan, &rendered).await?;
     let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
@@ -303,6 +303,13 @@ async fn capacity_gate(
     Ok(None)
 }
 
+/// What phase 4 settled for one service, for phase 5a to record: the proxy's own state, and
+/// whether the ClusterIP's selector is on it.
+pub(crate) struct Rendered {
+    pub proxy: Option<String>,
+    pub intercepted: bool,
+}
+
 /// Phase 4: one StatefulSet and ClusterIP per service, the proxy an intercept in force stands
 /// behind, and the sweep that takes back the ones that are not. Answers what each service's
 /// `status.proxy` should say.
@@ -318,10 +325,10 @@ async fn apply_services(
     plan: &std::collections::HashMap<&str, Intercepting>,
     owner_ref: &OwnerReference,
     ctx: &Arc<Ctx>,
-) -> Result<std::collections::HashMap<String, String>, ReconcileErr> {
+) -> Result<std::collections::HashMap<String, Rendered>, ReconcileErr> {
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), ns);
-    let mut proxies: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut rendered: std::collections::HashMap<String, Rendered> = std::collections::HashMap::new();
     for svc in &e.spec.services {
         let decided = plan.get(svc.name.as_str());
         let mut intercepted = match decided {
@@ -334,17 +341,30 @@ async fn apply_services(
         };
         // The old spec wrote the slice before the selector went; here the proxy must be Ready
         // before the selector moves — the same principle, that the service is never without a
-        // ready endpoint. While it is `starting` or `failed` the real service keeps its selector
-        // and its replicas, and the next pass looks again.
+        // ready endpoint.
+        //
+        // The rule is asymmetric on purpose, and the two halves are different events:
+        //   * TAKING an intercept, a proxy that is not yet Ready changes nothing at all — the real
+        //     service keeps its selector and its replicas, and the next pass looks again.
+        //   * A proxy that was serving and has gone NotReady is a RESTART, not a handover: the
+        //     selector stays on it and the StatefulSet stays at zero for `INTERCEPT_GRACE_SECS`,
+        //     because handing back costs a scale-up and a re-take — two real gaps — for a pod that
+        //     is back in seconds. A `failed` proxy, or one NotReady past the grace, is handed back.
+        // The held window writes NOTHING about this service: whatever the last pass left standing
+        // is what is still serving, including a legacy slice a conversion has not finished yet.
         // `get`, not the index: a `Force` decision always has its wish beside it today, but the
         // two maps are built in one loop and a panic in a reconciler takes the whole controller
         // down — an absent wish means there is nothing to render, not a crash (2026-09-12).
+        let mut held = false;
         if let (Some(Intercepting::Force { ws, .. }), Some(ic)) = (decided, wishes.get(svc.name.as_str())) {
-            let state = apply_intercept(e, svc, ic, ws, plan, ns, owner_ref, ctx).await?;
-            intercepted = state.as_deref() == Some("ready");
-            if let Some(state) = state {
-                proxies.insert(svc.name.clone(), state);
-            }
+            let proxy = apply_intercept(e, svc, ic, ws, plan, ns, owner_ref, ctx).await?;
+            // Only a service the last pass really had behind a proxy may be held: on a FIRST take
+            // there is nothing standing to leave alone, and holding would leave the real service
+            // scaled down behind a proxy that has never served.
+            let was_behind_it = prev_proxy(prev, &svc.name).as_deref() == Some("ready") || was_intercepted(prev, &svc.name);
+            held = proxy.state != "ready" && proxy.hold && was_behind_it;
+            intercepted = proxy.state == "ready" || held;
+            rendered.insert(svc.name.clone(), Rendered { proxy: Some(proxy.state), intercepted });
         }
         let mut set = k8s::service_statefulset(svc, &e.name_any(), id, &e.spec.owner, pod_ctx).map_err(ReconcileErr)?;
         if intercepted {
@@ -356,6 +376,11 @@ async fn apply_services(
             }
         }
         ensure(deployments, &set, ctx).await?;
+        if held {
+            // Nothing else: the ClusterIP and the legacy slice below are both "what is serving
+            // right now", and this pass has learned nothing that should change either.
+            continue;
+        }
         // A portless service (nothing declared to listen on) gets no ClusterIP — the API server
         // rejects a Service with an empty `ports` list outright. Clean up a stale one left behind
         // by an earlier definition that did have ports; `ensure` has no delete path of its own.
@@ -384,7 +409,7 @@ async fn apply_services(
         }
     }
     converge_intercepts(ns, prev, plan, ctx).await?;
-    Ok(proxies)
+    Ok(rendered)
 }
 
 /// Phase 5a: what the StatefulSets actually say, per service, with the intercept that is in
@@ -394,9 +419,9 @@ async fn read_services_back(
     deployments: &Api<StatefulSet>,
     prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
-    // What `apply_intercept` answered this pass, per service — absent for a service it wrote
-    // nothing about (a `Keep`, or no intercept at all).
-    proxies: &std::collections::HashMap<String, String>,
+    // What phase 4 settled for each service — absent for one it decided nothing about (a `Keep`,
+    // or no intercept at all).
+    rendered: &std::collections::HashMap<String, Rendered>,
 ) -> Result<Vec<crd::ServiceStatus>, ReconcileErr> {
     // Read each StatefulSet back rather than reporting `ready: true` from having applied it. A
     // service whose image will not pull, or whose pod cannot schedule, was previously reported
@@ -410,16 +435,22 @@ async fn read_services_back(
     for svc in &e.spec.services {
         // What is actually IN FORCE, never the wish: a stopped workspace leaves its intercept in
         // spec and this reports `None`, which is what the web and the CLI show.
-        // In force is the SELECTOR having moved, which happens only once the proxy is Ready — a
-        // wished intercept whose proxy is still starting is not intercepting anything yet, and
-        // reporting it as such would tell the web the service is being served from a workspace
-        // while its own pods are still the ones answering.
+        // In force is the SELECTOR being on the proxy — which is what phase 4 settled, not what
+        // was merely wished: a first take whose proxy is still starting is not intercepting
+        // anything yet, and reporting it as such would tell the web the service is served from a
+        // workspace while its own pods are still the ones answering.
         let by = match plan.get(svc.name.as_str()) {
             Some(Intercepting::Force { ws, .. }) => {
-                (proxies.get(&svc.name).map(String::as_str) == Some("ready")).then(|| ws.name_any())
+                rendered.get(&svc.name).is_some_and(|r| r.intercepted).then(|| ws.name_any())
             }
             Some(Intercepting::Keep { .. }) => prev_intercepted_by(prev, &svc.name),
             _ => None,
+        };
+        // Carried through a `Keep` exactly as `intercepted_by` is: the pass learned nothing about
+        // the proxy, and blanking it would read as "this intercept has no proxy" on every blip.
+        let proxy = match plan.get(svc.name.as_str()) {
+            Some(Intercepting::Keep { .. }) => prev_proxy(prev, &svc.name),
+            _ => rendered.get(&svc.name).and_then(|r| r.proxy.clone()),
         };
         // Reachable, gone, stopped or detached all CLEAR the clock — it dates one continuous
         // outage, and a workspace that came back and broke again is a new one. Only a `Keep` that
@@ -431,7 +462,7 @@ async fn read_services_back(
             }
             _ => None,
         };
-        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, proxies.get(&svc.name).cloned(), unreachable_since));
+        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, proxy, unreachable_since));
     }
     Ok(service_status)
 }

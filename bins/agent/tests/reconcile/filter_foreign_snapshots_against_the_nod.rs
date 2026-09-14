@@ -119,15 +119,23 @@ pub(crate) const TARGET_SVC: &str = "/api/v1/namespaces/ws-alice/services/interc
 /// The proxy Pod as the API server answers it back, with the args `intercept_render` gives it: a
 /// different arg list is a different intercept, and the controller deletes rather than patches.
 pub(crate) fn proxy_pod(ready: bool) -> serde_json::Value {
+    proxy_pod_since(ready, 5)
+}
+
+/// `ago` is how long the pod's `Ready` condition has said what it says — the clock the proxy's own
+/// grace is measured from.
+pub(crate) fn proxy_pod_since(ready: bool, ago: i64) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1", "kind": "Pod",
         "metadata": {"name": "intercept-web", "namespace": "env-1"},
-        "spec": {"containers": [{"name": "proxy", "image": "proxy:test",
+        // The image the fixtures set in `WS_INTERCEPT_PROXY_IMAGE`: a different one is a bumped
+        // setting, which the controller answers by recreating the pod.
+        "spec": {"containers": [{"name": "proxy", "image": "ghcr.io/kloudlite/kloudlite-intercept-proxy:deadbeef",
                                  "args": ["--target", "intercept-target-ws-1.ws-alice.svc.cluster.local.",
                                           "--forward", "80:3000"]}]},
         "status": {"phase": "Running",
                    "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" },
-                                   "lastTransitionTime": secs_ago(5)}]},
+                                   "lastTransitionTime": secs_ago(ago)}]},
     })
 }
 

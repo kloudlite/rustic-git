@@ -71,6 +71,12 @@ pub(crate) fn prev_intercepted_by(prev: &crd::EnvironmentStatus, svc: &str) -> O
 }
 
 
+/// The proxy state the LAST pass recorded for this service.
+pub(crate) fn prev_proxy(prev: &crd::EnvironmentStatus, svc: &str) -> Option<String> {
+    prev.service_status.iter().find(|s| s.name == svc)?.proxy.clone()
+}
+
+
 pub(crate) fn was_intercepted(prev: &crd::EnvironmentStatus, svc: &str) -> bool {
     prev_intercepted_by(prev, svc).is_some()
 }
@@ -281,8 +287,9 @@ pub(crate) fn intercepted_ports(e: &crd::Environment, plan: &std::collections::H
 /// and delivers nothing. Written from HERE and not from the workspace's own pass because the wish
 /// is this object's, and this pass already holds the Workspace the workspace-side halves need.
 ///
-/// The answer is what to record in `status.services[].proxy`, and the caller moves the selector
-/// only on `ready`.
+/// The answer is what to record in `status.services[].proxy` and whether the switch may STAND:
+/// the caller moves the selector onto the proxy only on `ready`, but leaves one already there
+/// alone while `hold` says the proxy is merely coming back.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_intercept(
     e: &crd::Environment,
@@ -293,7 +300,7 @@ pub(crate) async fn apply_intercept(
     ns: &str,
     owner_ref: &OwnerReference,
     ctx: &Arc<Ctx>,
-) -> Result<Option<String>, ReconcileErr> {
+) -> Result<Proxy, ReconcileErr> {
     let ws_id = ws.name_any();
     let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
     let ws_ref = owner_ref_of_kind(ws)?;
@@ -324,34 +331,66 @@ pub(crate) async fn apply_intercept(
     let name = k8s::proxy_pod_name(&svc.name);
     let existing = pods.get_opt(&name).await?;
     let Some(p) = existing else {
-        // `create_if_absent`, never `ensure`: a Pod is immutable, so a server-side apply of one
-        // that already exists is a permanent error on every later pass.
-        create_if_absent(&pods, &render.pod).await?;
+        // Created, never applied: a Pod is immutable, so a server-side apply of one that already
+        // exists is a permanent error on every later pass. A 409 is a race with our own earlier
+        // pass or with the kubelet, which is the desired state already reached.
+        match pods.create(&kube::api::PostParams::default(), &render.pod).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(st)) if st.code == 409 => {}
+            Err(err) => return Err(err.into()),
+        }
         ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns), &render.egress, ctx).await?;
         ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ws_ns), &k8s::intercept_ingress(&ws_ns, ns, &ws_id, &ports, &e.spec.owner, &ws_ref), ctx).await?;
-        return Ok(Some("starting".into()));
+        // A pod created THIS pass has not had a chance to be anything yet, so it holds: the next
+        // pass reads its own `Ready=False` and the grace runs from there.
+        // ponytail: a create that keeps succeeding while the object keeps vanishing holds forever;
+        // the bound is the same clock the grace uses, once there is a pod to read one off.
+        return Ok(Proxy { state: "starting".into(), hold: true });
     };
     // The spec of an intercept is immutable while it runs; a change to ports or workspace is a new
-    // pod, and this is where that becomes true.
-    let args = |p: &Pod| p.spec.as_ref().and_then(|s| s.containers.first()).and_then(|c| c.args.clone()).unwrap_or_default();
-    if args(&p) != args(&render.pod) {
+    // pod, and this is where that becomes true. The IMAGE is compared too, because it is a Boot
+    // setting: a rolled `WS_INTERCEPT_PROXY_IMAGE` otherwise reaches new intercepts only, and the
+    // running ones keep forwarding through the old binary until somebody releases them by hand.
+    let spec = |p: &Pod| {
+        let c = p.spec.as_ref().and_then(|s| s.containers.first());
+        (c.and_then(|c| c.args.clone()).unwrap_or_default(), c.and_then(|c| c.image.clone()).unwrap_or_default())
+    };
+    if spec(&p) != spec(&render.pod) {
         delete_ignoring_404(&pods, &name).await?;
         forget_applied(ctx, "Pod", ns, &name);
         tracing::info!(environment = %e.name_any(), service = %svc.name, "intercept.proxy.respawned");
-        return Ok(Some("starting".into()));
+        // A recreate this controller CHOSE is not an outage to hand the service back over: the
+        // replacement is one pass away, and handing back would cost a scale-up and a re-take.
+        return Ok(Proxy { state: "starting".into(), hold: true });
     }
     ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), ns), &render.egress, ctx).await?;
     ensure(&Api::<NetworkPolicy>::namespaced(ctx.client.clone(), &ws_ns), &k8s::intercept_ingress(&ws_ns, ns, &ws_id, &ports, &e.spec.owner, &ws_ref), ctx).await?;
-    Ok(Some(proxy_state(&p, &e.name_any(), &svc.name)))
+    Ok(proxy_state(&p, &e.name_any(), &svc.name))
+}
+
+
+/// How far along one proxy pod is, and whether a service already behind it should stay there.
+pub(crate) struct Proxy {
+    /// `status.services[].proxy`: `starting`, `ready` or `failed`.
+    pub state: String,
+    /// The switch may STAND — this is not an outage worth handing the service back for. `false`
+    /// only where waiting is pointless (the pod failed, or cannot start) or has gone on too long.
+    pub hold: bool,
 }
 
 
 /// The one thing that cannot start on its own: a pod whose image will not pull sits in
 /// `ImagePullBackOff` forever, and reported as `starting` it reads as "any second now" while the
 /// real service stays up and nobody knows why the intercept never takes.
-fn proxy_state(p: &Pod, env: &str, service: &str) -> String {
-    if pod_ready(p).0 {
-        return "ready".into();
+///
+/// A pod that is merely NotReady holds for `INTERCEPT_GRACE_SECS`, dated from its own
+/// `Ready=False` transition exactly as the workspace's grace is: an ordinary proxy restart would
+/// otherwise cost a StatefulSet scale-up and a re-take — two real gaps — for one pod that is back
+/// in seconds.
+fn proxy_state(p: &Pod, env: &str, service: &str) -> Proxy {
+    let (ready, since) = pod_ready(p);
+    if ready {
+        return Proxy { state: "ready".into(), hold: true };
     }
     let status = p.status.as_ref();
     let stuck = status
@@ -368,9 +407,13 @@ fn proxy_state(p: &Pod, env: &str, service: &str) -> String {
             .or_else(|| status.and_then(|s| s.message.clone()))
             .unwrap_or_else(|| "the proxy pod failed".into());
         tracing::warn!(environment = %env, service = %service, reason = %why, "intercept.proxy.failed");
-        return "failed".into();
+        return Proxy { state: "failed".into(), hold: false };
     }
-    "starting".into()
+    // Same shape as the workspace grace, including its rule about a clock that runs backwards:
+    // expired is the safe direction, because a hold that never expires is a service that never
+    // comes back. No clock at all is a pod too young to have stamped one — it holds.
+    let waited = since.map(|t| k8s_openapi::jiff::Timestamp::now().as_second() - t);
+    Proxy { state: "starting".into(), hold: waited.is_none_or(|w| (0..INTERCEPT_GRACE_SECS).contains(&w)) }
 }
 
 
