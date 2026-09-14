@@ -102,3 +102,26 @@ test("a second device that never sent anything streams another device's live tur
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a tunnel nonce rides every REST request and WebSocket upgrade; the cache is keyed by cacheKey", async () => {
+  const http = await import("node:http");
+  const seen: (string | undefined)[] = [];
+  const srv = http.createServer((q, r) => (seen.push(q.headers["x-kl-tunnel"] as string | undefined), r.end("[]")));
+  srv.on("upgrade", (q, s) => (seen.push(q.headers["x-kl-tunnel"] as string | undefined), s.destroy()));
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const cacheFile = path.join(os.tmpdir(), `bench-cl-nonce-${process.pid}.json`);
+  fs.writeFileSync(cacheFile, JSON.stringify({ base: "me@api", sessions: ["kept"], exchanges: [], messages: {} }));
+  const c = new BenchClient(base, () => undefined, cacheFile, "me@api", "n0nce");
+  try {
+    assert.deepEqual(c.cached().sessions, ["kept"]);
+    await c.rest("GET", "/sessions");
+    c.start();
+    await until(() => seen.length >= 2, 5_000, "the upgrade");
+    assert.deepEqual(seen.slice(0, 2), ["n0nce", "n0nce"]);
+  } finally {
+    c.close();
+    srv.close();
+    fs.rmSync(cacheFile, { force: true });
+  }
+});

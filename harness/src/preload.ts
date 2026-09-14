@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { AuthState } from "./auth/controller";
 
 /**
  * The only surface the renderer sees. Every call is a request to the main
@@ -29,6 +30,17 @@ const harness = {
     ipcRenderer.invoke("bench:import", sessions),
 
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */
+  /** The desktop login. The renderer sees only the state — the token never leaves main. */
+  auth: {
+    status: (): Promise<AuthState> => ipcRenderer.invoke("auth:status"),
+    signIn: (): Promise<void> => ipcRenderer.invoke("auth:signIn"),
+    cancel: (): Promise<void> => ipcRenderer.invoke("auth:cancel"),
+    retry: (): Promise<void> => ipcRenderer.invoke("auth:retry"),
+    signOut: (): Promise<void> => ipcRenderer.invoke("auth:signOut"),
+    api: (): Promise<string> => ipcRenderer.invoke("auth:api"),
+    setApi: (url: string): Promise<void> => ipcRenderer.invoke("auth:setApi", url),
+    onState: (fn: (s: AuthState) => void): void => void ipcRenderer.on("auth:state", (_e, s: AuthState) => fn(s)),
+  },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
 };
 

@@ -31,15 +31,22 @@ export class BenchClient {
   private waiting = new Map<string, { w: WebSocket; done: (r: Record<string, unknown>) => void }>();
   private seq = 0;
 
-  constructor(base: string, emit: Emit, cacheFile: string) {
+  private nonce?: string;
+
+  // `cacheKey` defaults to the address; the desktop app passes the username, because the
+  // tunnel's port is new every launch and would otherwise empty the cache every time.
+  // `nonce` is the in-process tunnel's per-launch secret, sent on every request and upgrade;
+  // unset for a HARNESS_BENCH address, which has no such gate.
+  constructor(base: string, emit: Emit, cacheFile: string, cacheKey = base, nonce?: string) {
     this.base = base.replace(/\/$/, "");
     this.emit = emit;
     this.cacheFile = cacheFile;
-    const empty: Cache = { base: this.base, sessions: [], exchanges: [], messages: {} };
+    this.nonce = nonce;
+    const empty: Cache = { base: cacheKey, sessions: [], exchanges: [], messages: {} };
     try {
       const c = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as Cache;
-      // Keyed by the bench's address: another bench's list is not this one's.
-      this.cache = c.base === this.base ? c : empty;
+      // Keyed by whose bench it is: another person's list is not this one's.
+      this.cache = c.base === cacheKey ? c : empty;
     } catch {
       this.cache = empty;
     }
@@ -64,8 +71,11 @@ export class BenchClient {
     this.up = v;
     this.emit({ type: "bench", connected: v });
   }
+  private tunnel(): Record<string, string> {
+    return this.nonce ? { "x-kl-tunnel": this.nonce } : {};
+  }
   private ws(p: string) {
-    return new WebSocket(this.base.replace(/^http/, "ws") + p);
+    return new WebSocket(this.base.replace(/^http/, "ws") + p, { headers: this.tunnel() });
   }
 
   start(): void {
@@ -128,7 +138,7 @@ export class BenchClient {
   async rest<T = unknown>(method: string, p: string, body?: unknown): Promise<T> {
     const r = await fetch(this.base + p, {
       method,
-      headers: body === undefined ? {} : { "content-type": "application/json" },
+      headers: { ...this.tunnel(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await r.text();

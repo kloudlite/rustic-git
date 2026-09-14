@@ -1,16 +1,38 @@
-import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTheme, type WebContents } from "electron";
+import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTheme, safeStorage, shell, type WebContents } from "electron";
+import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { BenchClient } from "./bench-client";
 import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from "./import-payload";
+import { createStore } from "./auth/store";
+import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/device";
+import { createAuth, type AuthState } from "./auth/controller";
+import { ensureBench, mintSession } from "./connect/bench";
+import { openTunnel } from "./connect/tunnel";
+
+// One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
+// `quit`: quit is asynchronous and whenReady below would still open a window first.
+if (!app.requestSingleInstanceLock()) app.exit(0);
 
 let mainWin: BrowserWindow | undefined;
-// The bench is remote: HARNESS_BENCH is the local end of the tunnel to this
-// person's harness-bench. Without it there is no bench, and the harness says so.
+// Login is always required. HARNESS_BENCH is a developer override for WHERE the bench is
+// (a hand-started tunnel or a local harness-bench); without it the app finds the person's own.
 const BENCH = process.env.HARNESS_BENCH;
 let bench: BenchClient | undefined;
 const toRenderer = (ev: Record<string, unknown>) => {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send("pi:event", ev);
+};
+
+// The API base: a build-time default, overridable from the login screen while signed out.
+const DEFAULT_API = "https://dev.kloudlite.io";
+const apiFile = () => path.join(app.getPath("userData"), "api.txt");
+const apiBase = () => {
+  try {
+    return readFileSync(apiFile(), "utf8").trim() || DEFAULT_API;
+  } catch {
+    return DEFAULT_API;
+  }
 };
 
 function createWindow(): void {
@@ -251,7 +273,7 @@ ipcMain.handle("preview:nav", (e, verb: unknown) => {
 // A DNS label after the prefix, as workspace and ephemeral ids are.
 const SESSION = /^(bench|btw-\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)$/;
 const needBench = () => {
-  if (!bench) throw new Error("no bench: set HARNESS_BENCH to the bench's address");
+  if (!bench) throw new Error("not connected to your bench yet");
   return bench;
 };
 ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
@@ -312,22 +334,166 @@ ipcMain.handle("bench:import", async (_e, rows: unknown) => {
   }
   return { added, files };
 });
-app.on("before-quit", () => bench?.close());
+app.on("before-quit", () => disconnect());
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {
   if (mode !== "system" && mode !== "light" && mode !== "dark") throw new Error("unknown theme");
   nativeTheme.themeSource = mode;
 });
 
+/** Tears down whatever Connect built; safe to call when nothing is connected. */
+let closeTunnel: (() => void) | undefined;
+function disconnect() {
+  bench?.close();
+  bench = undefined;
+  closeTunnel?.();
+  closeTunnel = undefined;
+}
+
+let auth: ReturnType<typeof createAuth>;
+let wasReady = false;
+let revalidateTimer: NodeJS.Timeout | undefined;
+const emitAuth = (s: AuthState) => {
+  // One re-validation timer, alive only while ready: leaving ready (sign-out, expiry) clears it.
+  if (s.phase === "ready") revalidateTimer ??= setInterval(() => void revalidate(), 5 * 60_000);
+  else if (revalidateTimer) (clearInterval(revalidateTimer), (revalidateTimer = undefined));
+  if (!mainWin || mainWin.isDestroyed()) return;
+  // Leaving `ready` reloads the window: App registers listeners for the life of the page, so a
+  // fresh page is the honest way back to the login screen.
+  if (wasReady && s.phase !== "ready") mainWin.webContents.reload();
+  wasReady = s.phase === "ready";
+  mainWin.webContents.send("auth:state", s);
+};
+
+const credentialFile = () => path.join(app.getPath("userData"), "credential.bin");
+function authDeps() {
+  const raw = createStore(credentialFile(), safeStorage);
+  const store = {
+    ...raw,
+    load() {
+      const c = raw.load();
+      // A file that exists but does not decrypt or parse is never going to: drop it.
+      if (!c && existsSync(credentialFile())) raw.clear();
+      return c;
+    },
+  };
+  return {
+    api: apiBase,
+    store,
+    startLogin: (api: string, signal: AbortSignal) => startLogin(api, `${os.hostname()} (desktop)`, { signal }),
+    openExternal: async (url: string) => {
+      if (!isAuthorizeUrl(apiBase(), url)) throw new Error("refusing to open a URL that is not Kloudlite's login page");
+      await shell.openExternal(url);
+    },
+    validate,
+    connect: async (c: Credential, step: (s: string) => void) => {
+      const cache = path.join(app.getPath("userData"), "bench-cache.json");
+      if (BENCH) {
+        bench = new BenchClient(BENCH, toRenderer, cache, `${c.username}@${BENCH}`);
+      } else {
+        await ensureBench(c.api, c.token, step);
+        const t = await openTunnel(
+          () => mintSession(c.api, c.token),
+          (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
+        );
+        closeTunnel = t.close;
+        // The nonce stays in this process: handed to the client, never to IPC, disk or a log.
+        bench = new BenchClient(t.base, toRenderer, cache, `${c.username}@${c.api}`, t.nonce);
+      }
+      bench.start();
+      return disconnect;
+    },
+    revoke: async (c: Credential) => {
+      const jti = claim(c.token, "jti");
+      if (!jti) return;
+      // Best effort: a login that cannot be revoked server-side still leaves this disk.
+      await fetch(`${c.api}/v1/cli/tokens/${encodeURIComponent(jti)}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${c.token}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      }).catch(() => undefined);
+    },
+    emit: emitAuth,
+  };
+}
+
+async function validate(c: Credential) {
+  let r: Response;
+  try {
+    r = await fetch(`${c.api}/v1/cli/tokens`, { headers: { authorization: `Bearer ${c.token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) });
+  } catch {
+    throw new Error("can't reach Kloudlite");
+  }
+  await r.body?.cancel();
+  if (r.status === 401) return "expired" as const;
+  if (!r.ok) throw new Error(`Kloudlite answered ${r.status}`);
+  return "ok" as const;
+}
+
+// A login revoked elsewhere (the web, `kl-connect`) ends here within 5 min or on the next focus.
+// Unreachable is not revoked: the credential stays, and the bench connection's own offline
+// state is what the person sees. ponytail: no separate retry banner for a failed re-check.
+let revalidating = false;
+async function revalidate() {
+  if (revalidating || auth?.state().phase !== "ready") return;
+  revalidating = true;
+  try {
+    const c = createStore(credentialFile(), safeStorage).load();
+    if (!c || (await validate(c)) === "expired") auth.expired();
+  } catch (e) {
+    console.error(`login re-check: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    revalidating = false;
+  }
+}
+app.on("browser-window-focus", () => void revalidate());
+
+ipcMain.handle("auth:status", () => auth.state());
+ipcMain.handle("auth:signIn", () => auth.signIn());
+ipcMain.handle("auth:cancel", () => auth.cancel());
+ipcMain.handle("auth:retry", async () => {
+  try {
+    await auth.retry();
+  } catch (e) {
+    // The keychain went away between the error and the retry: sign out, and say why.
+    await auth.signOut();
+    emitAuth({ phase: "signed-out", reason: e instanceof Error ? e.message : String(e) });
+  }
+});
+ipcMain.handle("auth:signOut", () => auth.signOut());
+ipcMain.handle("auth:api", () => apiBase());
+ipcMain.handle("auth:setApi", (_e, url: unknown) => {
+  if (auth.state().phase !== "signed-out") throw new Error("sign out before changing the Kloudlite address");
+  if (typeof url !== "string") throw new Error("not an address");
+  if (url.trim() === "") return void rmSync(apiFile(), { force: true });
+  const u = new URL(url.trim());
+  const local = u.protocol === "http:" && (u.hostname === "127.0.0.1" || u.hostname === "localhost");
+  if (u.protocol !== "https:" && !local) throw new Error("the Kloudlite address must be https");
+  writeFileSync(apiFile(), u.origin);
+});
+
+app.on("second-instance", () => {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.focus();
+});
+
 void app.whenReady().then(() => {
   // The standard menus, explicitly: on macOS ⌘C/⌘V/⌘X/⌘A reach a web page
   // only through Edit-menu roles, and a pasted image is a paste event first.
-  Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "viewMenu" }, { role: "windowMenu" }]));
-  if (BENCH) {
-    bench = new BenchClient(BENCH, toRenderer, path.join(app.getPath("userData"), "bench-cache.json"));
-    bench.start();
-  }
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      { role: "appMenu" },
+      { role: "editMenu" },
+      { role: "viewMenu" },
+      { role: "windowMenu" },
+      { label: "Account", submenu: [{ label: "Sign Out", click: () => void auth.signOut() }] },
+    ]),
+  );
+  auth = createAuth(authDeps());
   createWindow();
+  void auth.launch();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
