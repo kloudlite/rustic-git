@@ -231,11 +231,9 @@ pub async fn hourly(c: &mut Ctx) {
                     bail!("a new connection did not wake the bench: /healthz {status}");
                 }
                 wait_phase(c, "ready", START_WAIT).await?;
-                if let Some((list, total)) = before {
-                    let (after_list, after_total) = history(port).await?;
-                    if after_list != list || after_total != total {
-                        bail!("history changed across the sleep: {total:?} messages before, {after_total:?} after");
-                    }
+                if let Some(before) = before {
+                    let after = history(port).await?;
+                    diff_history(&before, &after)?;
                 }
                 Ok(())
             }
@@ -257,18 +255,38 @@ pub async fn hourly(c: &mut Ctx) {
     SESSION_IDS.iter().for_each(|id| c.skip(id, "the probe has no harness-bench RPC client yet"));
 }
 
-/// The session list and the first session's message total, as read through the forward.
-async fn history(port: u16) -> Result<(String, Option<u64>)> {
+/// Each session's id and message total, in list order — the stable projection compared across a
+/// sleep/wake. `lastActive` and other row fields legitimately change on wake (raw JSON does not
+/// round-trip identically), so the comparison must not use it; ids and totals must.
+async fn history(port: u16) -> Result<Vec<(String, Option<u64>)>> {
     let (status, list) = through(port, "/sessions").await?;
     if status != 200 {
         bail!("GET /sessions answered {status}");
     }
-    let first = list.split("\"id\":\"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string);
-    let total = match first {
-        Some(id) => total_of(&through(port, &format!("/sessions/{id}/messages")).await?.1),
-        None => None,
-    };
-    Ok((list, total))
+    let rows: Vec<Value> = serde_json::from_str(&list).context("parsing /sessions")?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id = row["id"].as_str().context("session row missing id")?.to_string();
+        let total = total_of(&through(port, &format!("/sessions/{id}/messages")).await?.1);
+        out.push((id, total));
+    }
+    Ok(out)
+}
+
+/// Fails on a dropped/renamed session or a changed message total; passes on anything else
+/// (row order and any field the projection dropped, e.g. `lastActive`, are not compared).
+fn diff_history(before: &[(String, Option<u64>)], after: &[(String, Option<u64>)]) -> Result<()> {
+    let before_ids: Vec<&str> = before.iter().map(|(id, _)| id.as_str()).collect();
+    let after_ids: Vec<&str> = after.iter().map(|(id, _)| id.as_str()).collect();
+    if before_ids != after_ids {
+        bail!("session ids changed: {before_ids:?} before, {after_ids:?} after");
+    }
+    for ((id, b), (_, a)) in before.iter().zip(after.iter()) {
+        if b != a {
+            bail!("session {id}: {b:?} messages before, {a:?} after");
+        }
+    }
+    Ok(())
 }
 
 pub async fn weekly(c: &mut Ctx) {
@@ -290,6 +308,20 @@ mod tests {
         assert!(health_ok("ok stub running"));
         assert!(!health_ok("{\"ok\":false}") && !health_ok("oops") && !health_ok("{\"ok\":\"true\"}"));
         assert_eq!(total_of("{\"messages\":[],\"total\": 12}"), Some(12));
+    }
+
+    #[test]
+    fn history_diff_ignores_volatile_fields_but_catches_a_real_loss() {
+        let before = vec![("s-1".to_string(), Some(3)), ("s-2".to_string(), Some(0))];
+        // Same ids and totals: a wake that only touched lastActive/ordering-irrelevant fields passes.
+        assert!(diff_history(&before, &before.clone()).is_ok());
+
+        let dropped = vec![("s-1".to_string(), Some(3))];
+        assert!(diff_history(&before, &dropped).unwrap_err().to_string().contains("session ids changed"));
+
+        let changed_total = vec![("s-1".to_string(), Some(3)), ("s-2".to_string(), Some(5))];
+        let err = diff_history(&before, &changed_total).unwrap_err().to_string();
+        assert!(err.contains("s-2") && err.contains("Some(0) messages before, Some(5) after"));
     }
 
     /// A local listener that answers `/healthz` chunked (split across writes, the exact shape
