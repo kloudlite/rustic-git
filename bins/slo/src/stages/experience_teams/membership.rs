@@ -269,7 +269,7 @@ pub(crate) async fn namespace_reaped(c: &mut Ctx) {
         async move {
             use kube::ResourceExt;
             let workspaces: kube::Api<crd::Workspace> = kube::Api::all(client.clone());
-            let keep: std::collections::BTreeSet<String> = workspaces
+            let mut keep: std::collections::BTreeSet<String> = workspaces
                 .list(&kube::api::ListParams::default())
                 .await
                 .context("could not list the workspaces")?
@@ -277,6 +277,19 @@ pub(crate) async fn namespace_reaped(c: &mut Ctx) {
                 .iter()
                 .map(|w| crd::ws_namespace(&w.spec.owner, &w.spec.team))
                 .collect();
+            // A bench resolves to a TEAM namespace too and holds it with no pod and no Workspace —
+            // `prune_namespaces` spares it for the `user-key` Secret — so a keep set counting only
+            // workspaces read an ordinary team bench as a leak (four red hourly runs, 2026-09-14).
+            let benches: kube::Api<crd::Bench> = kube::Api::all(client.clone());
+            keep.extend(
+                benches
+                    .list(&kube::api::ListParams::default())
+                    .await
+                    .context("could not list the benches")?
+                    .items
+                    .iter()
+                    .map(|b| crd::ws_namespace(&b.spec.owner, &b.spec.team)),
+            );
             let namespaces: kube::Api<k8s_openapi::api::core::v1::Namespace> = kube::Api::all(client);
             let now = chrono::Utc::now().timestamp();
             // THREE beats, not two: a namespace is only a candidate once it is a beat old, and the
