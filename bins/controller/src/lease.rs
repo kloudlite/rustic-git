@@ -14,7 +14,7 @@
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
 use k8s_openapi::jiff::Timestamp;
-use kube::api::{ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{ObjectMeta, PostParams};
 use kube::{Api, ResourceExt};
 use std::time::Duration;
 
@@ -60,7 +60,7 @@ pub fn decide(now_ms: u64, me: &str, cur: Option<&View>) -> Step {
                 (true, false) => Step::Wait,
                 // Expired, ours or not: a takeover is a takeover, and the epoch advances so the
                 // previous holder's next write demotes.
-                (false, _) => Step::Acquire { epoch: c.transitions + 1 },
+                (false, _) => Step::Acquire { epoch: c.transitions.saturating_add(1) },
             }
         }
     }
@@ -76,7 +76,10 @@ pub fn view(l: &Lease) -> Option<View> {
     Some(View {
         holder: s.holder_identity.clone().unwrap_or_default(),
         // A Lease written without it is epoch 0; `decide` advances from there like any other.
-        transitions: s.lease_transitions.unwrap_or(0) as u32,
+        // `.max(0)` before the cast: the field is an i32 on the wire and anything may have written
+        // it, and a negative one would wrap to a `u32` near the ceiling — an epoch no real term
+        // could ever reach, fencing every write we make.
+        transitions: s.lease_transitions.unwrap_or(0).max(0) as u32,
         renewed_ms: s
             .renew_time
             .as_ref()
@@ -107,7 +110,13 @@ pub async fn write(
         lease_duration_seconds: Some(TTL.as_secs() as i32),
         lease_transitions: Some(epoch as i32),
         renew_time: Some(MicroTime(now)),
-        acquire_time: matches!(step, Step::Acquire { .. }).then(|| MicroTime(now)),
+        // A Renew is the SAME term continuing, so it carries the term's own acquireTime forward;
+        // rebuilding the spec from `Default` would blank it every five seconds and lose the one
+        // field that says when this leadership began.
+        acquire_time: match step {
+            Step::Acquire { .. } => Some(MicroTime(now)),
+            _ => cur.and_then(|l| l.spec.as_ref()).and_then(|s| s.acquire_time.clone()),
+        },
         ..Default::default()
     };
     match cur {
@@ -143,23 +152,32 @@ pub async fn write(
 
 /// Release on shutdown so a rolling replacement is elected immediately instead of waiting out the
 /// TTL: blank the holder, keep the epoch. Best effort — a pod that dies hard is the TTL's case.
+///
+/// CAS'd on the object we just read, exactly like `write`, and NOT a merge patch: leadership can
+/// turn over inside the read-check-write window, and an unfenced patch would blank the NEW holder's
+/// identity and renewTime — discarding a perfectly valid term and forcing a takeover at
+/// `transitions + 1`. A 409 means somebody else already owns it, which is the outcome we wanted.
 pub async fn release(api: &Api<Lease>, me: &str) {
     let Ok(Some(cur)) = read(api).await else { return };
     if view(&cur).is_some_and(|v| v.holder != me) {
         return;
     }
-    let patch = serde_json::json!({ "spec": { "holderIdentity": "", "renewTime": null } });
-    if let Err(e) = api
-        .patch(LEASE_NAME, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-    {
-        tracing::warn!(lease = %cur.name_any(), error = %e, "leader.release.failed");
+    let mut next = cur.clone();
+    if let Some(spec) = next.spec.as_mut() {
+        spec.holder_identity = Some(String::new());
+        spec.renew_time = None;
+    }
+    match api.replace(LEASE_NAME, &PostParams::default(), &next).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(e)) if e.code == 409 => {}
+        Err(e) => tracing::warn!(lease = %cur.name_any(), error = %e, "leader.release.failed"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kloudlite_workspaces::kube_test;
 
     const TTL_MS: u64 = TTL.as_millis() as u64;
     fn v(holder: &str, transitions: u32, renewed_ms: u64) -> View {
@@ -227,5 +245,38 @@ mod tests {
         assert!(may_write(4, Some(&v("ctl-a", 4, 0))));
         assert!(!may_write(3, Some(&v("ctl-b", 4, 0))));
         assert!(!may_write(3, None));
+    }
+
+    const PATH: &str = "/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kloudlite-controller";
+
+    fn lease_json(holder: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": { "name": LEASE_NAME, "namespace": LEASE_NAMESPACE, "resourceVersion": "7" },
+            "spec": { "holderIdentity": holder, "leaseTransitions": 4, "renewTime": "2026-09-14T00:00:00.000000Z" },
+        })
+    }
+
+    /// Release is CAS'd, not patched: leadership that turned over inside the read-check-write
+    /// window answers 409, and nothing of ours lands on the new holder's term.
+    #[tokio::test]
+    async fn a_release_that_loses_the_cas_writes_nothing() {
+        let (client, rec) = kube_test::mock_client(vec![
+            kube_test::get(PATH, lease_json("ctl-a")),
+            kube_test::conflict("PUT", PATH),
+        ]);
+        release(&Api::namespaced(client, LEASE_NAMESPACE), "ctl-a").await;
+        // One CAS attempt, no merge patch anywhere — a PATCH here would be the unfenced write.
+        assert_eq!(rec.calls(), vec![format!("GET {PATH}"), format!("PUT {PATH}")]);
+    }
+
+    /// Somebody else already holds it: don't even try to write.
+    #[tokio::test]
+    async fn a_release_by_a_pod_that_no_longer_holds_it_is_a_no_op() {
+        let (client, rec) =
+            kube_test::mock_client(vec![kube_test::get(PATH, lease_json("ctl-b"))]);
+        release(&Api::namespaced(client, LEASE_NAMESPACE), "ctl-a").await;
+        assert_eq!(rec.calls(), vec![format!("GET {PATH}")]);
     }
 }
