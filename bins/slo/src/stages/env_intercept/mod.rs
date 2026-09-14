@@ -131,6 +131,9 @@ pub(super) struct Journey {
     team: String,
     env: String,
     ws: String,
+    /// Why this team has no bench, if it has none. The two bench ids skip with it rather than
+    /// failing: a bench that could not be created measures nothing about an intercept.
+    bench: Option<String>,
 }
 
 impl Journey {
@@ -143,6 +146,14 @@ impl Journey {
     fn ws_ns(&self, owner: &str) -> String {
         ws_namespace(owner, &self.team)
     }
+}
+
+/// Which bench a `/v1/bench*` call is about is a QUERY parameter, never a body field
+/// (`api::bench`: `Query<TeamQuery>` on the read and on `/session`) — a body `team` is silently
+/// ignored and the caller's PERSONAL bench answers instead, which is a different object in a
+/// different namespace. `POST /v1/bench` is the one exception: a create takes it in the body.
+fn bench_url(c: &Ctx, path: &str, team: &str) -> String {
+    api(c, &format!("/v1/bench{path}?team={team}"))
 }
 
 /// `env.intercept`, its nine neighbours and the three refusals, in journey order.
@@ -210,8 +221,11 @@ async fn stand_up(c: &mut Ctx) -> Result<Journey> {
             .context("a space could not choose the intercept environment")?;
     }
     let ws = create_as(c, &c.probe_jwt.clone(), &format!("{}-iceptws", c.prefix()), &team).await?;
-    let j = Journey { team, env, ws };
-    listen(c, &j, &j.ws, &c.probe_user.clone()).await?;
+    // A fresh team has NO bench, and every other `/v1/bench` route answers 404 until one is made
+    // (`my_bench` -> `found`): without this both bench ids failed every hour on "no bench".
+    let bench = make_bench(c, &team).await.err().map(|e| format!("{e:#}"));
+    let j = Journey { team, env, ws, bench };
+    listen(c, &j.ws_ns(&c.probe_user), &j.ws).await?;
     Ok(j)
 }
 
@@ -240,9 +254,18 @@ async fn make_team(c: &mut Ctx, slug: &str) -> Result<()> {
     Ok(())
 }
 
+/// The team's bench, which nothing else creates. The team and the region go in the BODY here —
+/// `create_bench` is the one bench route that reads them from one (`NewBench`) — and every call
+/// after it names the team in the query instead.
+async fn make_bench(c: &Ctx, team: &str) -> Result<()> {
+    let body = serde_json::json!({ "team": team, "region": c.cfg.region });
+    post(c, &api(c, "/v1/bench"), &c.probe_jwt, body).await.context("could not create the team's bench")?;
+    Ok(())
+}
+
 /// Start (or restart) a workspace's listener and wait until it answers itself.
-async fn listen(c: &Ctx, j: &Journey, ws: &str, owner: &str) -> Result<()> {
-    let (code, out, err) = ws_exec(c, &j.ws_ns(owner), ws, LISTENER, WS_CEILING).await?;
+async fn listen(c: &Ctx, ns: &str, ws: &str) -> Result<()> {
+    let (code, out, err) = ws_exec(c, ns, ws, LISTENER, WS_CEILING).await?;
     if code != 0 {
         return Err(anyhow!("the workspace listener never came up ({code}): {} {}", out.trim(), err.trim()));
     }
@@ -377,12 +400,15 @@ fn intercept_body(ws: &str, service_port: u16, ws_port: u16) -> Value {
 /// is the harness's, and the platform mount is the thing under test. Woken first — an idle bench
 /// has no pod.
 async fn space_bench(c: &mut Ctx, j: &Journey) {
+    if let Some(why) = &j.bench {
+        return c.skip("env.space.bench", &why.clone());
+    }
     let want = format!("{}.svc.", env_namespace(&j.env));
     let (team, ns) = (j.team.clone(), j.ws_ns(&c.probe_user));
     c.step("env.space.bench", SPACE_BENCH_CEILING, move |c| {
         async move {
-            let session = serde_json::json!({ "team": team });
-            let _ = raw(c, reqwest::Method::POST, &api(c, "/v1/bench/session"), &c.probe_jwt.clone(), Some(session), &[]).await;
+            let session = bench_url(c, "/session", &team);
+            let _ = raw(c, reqwest::Method::POST, &session, &c.probe_jwt.clone(), None, &[]).await;
             bench_ready(c, &team, Duration::from_secs(90)).await?;
             let start = std::time::Instant::now();
             loop {
@@ -404,7 +430,7 @@ async fn space_bench(c: &mut Ctx, j: &Journey) {
 /// Wait for the TEAM bench to report `ready`. `bench::wait_phase` reads the caller's PERSONAL
 /// bench (`GET /v1/bench` with no team), which is a different object entirely.
 async fn bench_ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
-    let url = api(c, &format!("/v1/bench?team={team}"));
+    let url = bench_url(c, "", team);
     let start = std::time::Instant::now();
     loop {
         let phase = get(c, &url, &c.probe_jwt).await.ok().and_then(|d| d.get("phase").and_then(Value::as_str).map(str::to_string));
@@ -515,17 +541,45 @@ async fn teardown(c: &mut Ctx, j: &Journey, peer_ws: Option<String>) {
     for who in [jwt.clone(), c.other_jwt.clone()] {
         warn_on_err(c, reqwest::Method::DELETE, &j.space(c), &who).await;
     }
-    for id in [Some(j.ws.clone()), peer_ws].into_iter().flatten() {
-        warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), &jwt).await;
+    warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{}", j.ws)), &jwt).await;
+    if let Some(id) = &peer_ws {
+        warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{id}")), &c.other_jwt.clone()).await;
     }
     warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/environments/{}", j.env)), &jwt).await;
     // A team with an orphaned workspace is worse than a leaked team, so the drain is what decides:
-    // on any doubt the team stays and the next run's `sweep_teams` takes it.
-    match super::drain_team(c, &j.team, &jwt).await {
+    // on any doubt the team stays and the next run's `sweep_teams` takes it. BOTH owners' drains
+    // are waited on — `/v1/workspaces?team=` lists only the CALLER's, so the probe owner's drain
+    // says nothing about the follower's, and a best-effort delete that failed would otherwise take
+    // the team with an orphan still in it.
+    let drained = match super::drain_team(c, &j.team, &jwt).await {
+        Ok(()) => peer_gone(c, peer_ws.as_deref()).await,
+        Err(e) => Err(e),
+    };
+    match drained {
         Ok(()) => warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{}", j.team)), &jwt).await,
         Err(e) => tracing::warn!(kind = "team", op = "drain", name = %j.team, error = %format!("{e:#}"), "slo.teardown.failed"),
     }
     no_proxy_left(c, j).await;
+}
+
+/// The follower's workspace is GONE, read as its own owner. `drain_team` lists
+/// `/v1/workspaces?team={slug}` with the probe owner's token and that listing is caller-scoped, so
+/// the second owner's workspace is invisible to it — a team deleted on the strength of that alone
+/// would strand a subvolume under an owner that no longer resolves.
+async fn peer_gone(c: &Ctx, id: Option<&str>) -> Result<()> {
+    let Some(id) = id else { return Ok(()) };
+    let url = api(c, &format!("/v1/workspaces/{id}"));
+    let start = std::time::Instant::now();
+    loop {
+        let (status, _) = raw(c, reqwest::Method::GET, &url, &c.other_jwt, None, &[]).await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        if start.elapsed() >= super::TEAM_DRAIN {
+            return Err(anyhow!("the follower's workspace {id} is still there ({status})"));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 /// Asserted, not hoped for: a proxy the deletes did not collect is a pod nobody is billed for and
@@ -565,6 +619,7 @@ async fn warn_on_err(c: &Ctx, method: reqwest::Method, url: &str, jwt: &str) {
 mod tests {
     use super::*;
     use crate::testkit;
+    use std::sync::{Arc, Mutex};
 
     /// The listener script and the constants the intercept is written against are one statement:
     /// a remapped port that the listener does not actually listen on would make every run fail
@@ -615,11 +670,45 @@ mod tests {
         assert!(!wished(&serde_json::json!({ "service_status": [], "intercepts": [] }), TARGET));
     }
 
+    /// Every `/v1/bench` call this journey makes names the team in the QUERY, and the recorder is
+    /// what says so: the api reads it with `Query<TeamQuery>`, so a body `team` is silently ignored
+    /// and the caller's PERSONAL bench answers — a different object, in a different namespace, in
+    /// which nothing this journey did is visible. That was a real regression (fix round 2).
+    #[tokio::test]
+    async fn every_bench_call_names_the_team_in_the_query() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(move |uri: axum::http::Uri| {
+            let rec = rec.clone();
+            async move {
+                rec.lock().expect("recorder").push(uri.to_string());
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }));
+        let mut c = testkit::ctx_against(app).await;
+        let team = "run-hourly-1-icept";
+        // The create, which is the ONE call that carries the team in a body, and the two reads.
+        let _ = make_bench(&c, team).await;
+        let _ = raw(&c, reqwest::Method::POST, &bench_url(&c, "/session", team), &c.probe_jwt.clone(), None, &[]).await;
+        c.retry_delay = Duration::from_millis(1);
+        let _ = bench_ready(&c, team, Duration::from_millis(1)).await;
+        let calls = seen.lock().expect("recorder").clone();
+        let bench: Vec<&String> = calls.iter().filter(|u| u.starts_with("/v1/bench")).collect();
+        assert!(bench.len() >= 3, "{calls:?}");
+        for u in &bench {
+            // The create is `/v1/bench` with no query; every other call must name the team.
+            let is_create = u.as_str() == "/v1/bench";
+            assert!(is_create || u.contains(&format!("?team={team}")), "{u} does not name the team in its query");
+        }
+        assert!(bench.iter().any(|u| u.as_str() == format!("/v1/bench/session?team={team}")), "{calls:?}");
+        assert!(bench.iter().any(|u| u.as_str() == format!("/v1/bench?team={team}")), "{calls:?}");
+    }
+
     /// The journey is a TEAM's, and every namespace it touches follows from that: two people in one
     /// team have two namespaces, and neither is the personal one the fast journey uses.
     #[test]
     fn both_owners_workspaces_live_in_the_teams_namespaces() {
-        let j = Journey { team: "run-hourly-1-icept".into(), env: "env-1".into(), ws: "ws-1".into() };
+        let j = Journey { team: "run-hourly-1-icept".into(), env: "env-1".into(), ws: "ws-1".into(), bench: None };
         let (mine, theirs) = (j.ws_ns("slo-hourly"), j.ws_ns("slo-hourly-other"));
         assert_ne!(mine, theirs);
         assert!(mine.starts_with("wt-"), "{mine}");

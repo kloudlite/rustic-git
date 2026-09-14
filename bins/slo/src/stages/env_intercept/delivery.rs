@@ -156,6 +156,9 @@ pub(super) async fn bench_reaches(c: &mut Ctx, j: &Journey, held: bool) {
     if !held {
         return c.skip("env.intercept.bench", NOT_HELD);
     }
+    if let Some(why) = &j.bench {
+        return c.skip("env.intercept.bench", &why.clone());
+    }
     let host = format!("{TARGET}.{}.svc.cluster.local", env_namespace(&j.env));
     let ns = j.ws_ns(&c.probe_user);
     c.step("env.intercept.bench", BENCH_DIAL_CEILING, move |c| {
@@ -197,16 +200,13 @@ pub(super) async fn proxy_restart(c: &mut Ctx, j: &Journey, held: bool) {
         Err(e) => return c.skip("env.intercept.proxy.restart", &format!("the proxy pod could not be read: {e:#}")),
     };
     let (e, w, ns) = (j.env.clone(), j.ws.clone(), j.ws_ns(&c.probe_user));
-    let team = j.team.clone();
     c.step("env.intercept.proxy.restart", RESTART_CEILING, move |c| {
         async move {
             let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
             let pods: kube::Api<Pod> = kube::Api::namespaced(k, &ns);
             pods.delete(&w, &Default::default()).await.context("could not delete the intercepting workspace's pod")?;
             // The pod comes back empty: the listener is a process, not a file.
-            let back = Journey { team, env: e.clone(), ws: w.clone() };
-            let owner = c.probe_user.clone();
-            listen(c, &back, &w, &owner).await.context("the listener never came back in the restarted pod")?;
+            listen(c, &ns, &w).await.context("the listener never came back in the restarted pod")?;
             answers(c, &e, &workspace_dial(), MARKER, RESTART_CEILING - SLACK).await?;
             let after = proxy_uid(c, &e).await.context("the proxy pod is gone after the restart")?;
             if after != before {
