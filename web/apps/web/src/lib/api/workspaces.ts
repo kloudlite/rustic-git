@@ -82,15 +82,23 @@ export type ApiEnvironment = {
    *  `service_status` below. Absent on an environment stored before intercepts existed. */
   intercepts?: { service: string; workspace: string; ports: ApiInterceptPort[] }[];
   /** STATUS: what the agent observed, one entry per service, matched to `services` BY NAME.
-   *  `intercepted_by` is the workspace actually receiving that service's traffic. The wish above
+   *  `interceptedBy` is the workspace actually receiving that service's traffic. The wish above
    *  and this are separate facts and neither is ever inferred from the other: a wish with nothing
    *  in force means the intercepting workspace is stopped and the real service is answering.
-   *  Absent while the environment has no status yet. */
+   *  Absent while the environment has no status yet.
+   *
+   *  CAMEL CASE, alone in this snake_case document, and not a typo: these entries are the CRD's
+   *  own `ServiceStatus`, which `/v1` re-serializes verbatim and which is `rename_all =
+   *  "camelCase"` because Kubernetes objects are. Renaming it server-side would rewrite keys in
+   *  every stored object on the fleet, so the wire name wins here. `env_doc_service_status_keys_are_camel_case`
+   *  in `crates/workspaces/src/api/environments.rs` pins it. */
   service_status?: {
     name: string;
     ready: boolean;
     message?: string | null;
-    intercepted_by?: string | null;
+    interceptedBy?: string | null;
+    /** Unix seconds since the intercepting workspace was first seen unreachable. */
+    unreachableSince?: number | null;
     /** The proxy pod behind an in-force intercept: `starting` | `ready` | `failed`. Absent when the
      *  service is not intercepted. A string, not a union: a state added later must still parse. */
     proxy?: string | null;

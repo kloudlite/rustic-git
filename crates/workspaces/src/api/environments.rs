@@ -981,6 +981,45 @@ mod tests {
         assert!(dec.message.contains("retired"));
     }
 
+    /// `ServiceStatus` is the CRD's own type, re-serialized verbatim into a doc whose every other
+    /// key is snake_case — so these entries alone are camelCase, and the web reads them by those
+    /// names. Renaming the CRD side would rewrite keys in every object already stored on the fleet,
+    /// so the wire name is the contract and this pins it.
+    #[test]
+    fn the_service_status_keys_are_camel_case() {
+        let mut e = crd::Environment::new(
+            "env-1",
+            crd::EnvironmentSpec {
+                owner: "karthik".into(),
+                name: "app".into(),
+                region: "centralindia".into(),
+                services: vec![],
+                storage: None,
+                desired_state: crd::DesiredState::Running,
+                restore: None,
+                intercepts: Vec::new(),
+                system: None,
+            },
+        );
+        e.status = Some(crd::EnvironmentStatus {
+            service_status: vec![crd::ServiceStatus {
+                name: "api".into(),
+                ready: true,
+                message: None,
+                intercepted_by: Some("ws-1".into()),
+                proxy: Some("starting".into()),
+                unreachable_since: Some(1_700_000_000),
+            }],
+            ..Default::default()
+        });
+        let j = serde_json::to_value(super::env_doc(&e, &Default::default())).expect("doc serializes");
+        let st = &j["service_status"][0];
+        assert_eq!(st["interceptedBy"], "ws-1");
+        assert_eq!(st["unreachableSince"], 1_700_000_000);
+        assert_eq!(st["proxy"], "starting");
+        assert!(st.get("intercepted_by").is_none(), "snake_case keys are not what /v1 emits: {st}");
+    }
+
     fn svc(folder: &str, path: &str) -> Service {
         Service {
             name: "web".into(),

@@ -65,14 +65,14 @@ export default async function Page({ params }: { params: Promise<{ owner: string
           // A wish with nothing in force is its own state — the workspace is stopped or
           // unreachable, and the real service is up and answering.
           const status = env.service_status?.find((st) => st.name === s.name);
-          const inForce = status?.intercepted_by ?? null;
+          const inForce = status?.interceptedBy ?? null;
           // "The intercept is on but nothing answers" otherwise lives only in a controller log.
           // `ready` adds nothing — the line already says traffic is redirected.
           const proxy =
             status?.proxy === "starting" ? "proxy starting" : status?.proxy === "failed" ? "proxy failed" : null;
           const wish = interceptSummary(s, env.intercepts);
           // DESCRIPTIVE, not authoritative: this is the wish's mapping. The api exposes no
-          // in-force port list — `intercepted_by` is the whole of what status says of it — so this is
+          // in-force port list — `interceptedBy` is the whole of what status says of it — so this is
           // the closest honest answer to "where does it land", and it is the same mapping the
           // controller applied unless the wish has been rewritten since.
           const mapping = wish.ports.map((m) => `${m.service} → ${m.workspace}`).join(", ");

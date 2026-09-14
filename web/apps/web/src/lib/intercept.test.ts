@@ -29,13 +29,13 @@ describe("interceptSummary", () => {
   });
 
   test("the wish is not what is in force: heldBy reads the wish alone", () => {
-    // Nothing in force (an empty `service_status`, or an entry with a null `intercepted_by`) while
+    // Nothing in force (an empty `service_status`, or an entry with a null `interceptedBy`) while
     // a wish is present is the state the page must render on its own — the helper is given only
     // the wish and never reaches for status, so heldBy still names the wish.
     const env: Pick<ApiEnvironment, "service_status"> = {
-      service_status: [{ name: "api", ready: true, intercepted_by: null }],
+      service_status: [{ name: "api", ready: true, interceptedBy: null }],
     };
-    expect(env.service_status?.[0].intercepted_by ?? null).toBeNull();
+    expect(env.service_status?.[0].interceptedBy ?? null).toBeNull();
     expect(interceptSummary(svc("api", [8080]), [{ service: "api", workspace: "ws-1", ports: [] }]).heldBy)
       .toBe("ws-1");
   });
