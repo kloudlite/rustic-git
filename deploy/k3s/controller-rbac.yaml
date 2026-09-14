@@ -88,7 +88,9 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     resourceNames: ["kloudlite-controller"]
-    verbs: ["get", "update", "patch"]
+    # No `patch`: lease.rs reads then `replace`s, and the resourceVersion carried on that PUT is
+    # the CAS two controllers depend on. A patch is exactly the write that skips it.
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

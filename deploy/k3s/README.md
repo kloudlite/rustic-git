@@ -71,6 +71,12 @@ Order matters and is not the usual one:
 Rollback is the reverse: re-apply the old `agent-rbac.yaml`, scale the controller to 0, roll the
 previous agent image.
 
+Step 2 belongs on EVERY region before, or with, the api tier that lists the controller as a roll
+target (`KNOWN_PER_REGION`) — and `api-rbac.yaml` with it, since the api's ServiceAccount needs the
+`kloudlite-controller` resourceName on `deployments`. A region that has not had the pair applied
+yet costs only the controller's own row in `/admin/workloads` (a 404 is a skipped row); a missing
+RBAC name is a 403 and fails the whole listing.
+
 ### The SLO probe's six owners
 
 `quotas-slo.yaml` is above because the probe (`deploy/kloudlite.yaml`'s four CronJobs) runs with

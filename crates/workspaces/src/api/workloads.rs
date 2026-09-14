@@ -328,17 +328,34 @@ pub async fn list_workloads(s: &ApiState, regions: &[String]) -> Result<Vec<Work
     let mut rows = Vec::new();
     if let Ok(client) = aks(s) {
         for (name, kind) in KNOWN_CENTRAL {
-            rows.push(doc(client, Scope::Central, name, *kind).await.map_err(kube_err)?);
+            rows.extend(present(doc(client, Scope::Central, name, *kind).await, name, "central")?);
         }
     }
     if let Ok(client) = kube(s) {
         for region in regions {
             for (name, kind) in KNOWN_PER_REGION {
-                rows.push(doc(client, Scope::Region(region.clone()), name, *kind).await.map_err(kube_err)?);
+                let row = doc(client, Scope::Region(region.clone()), name, *kind).await;
+                rows.extend(present(row, name, region)?);
             }
         }
     }
     Ok(rows)
+}
+
+/// A `KNOWN` entry with no object behind it is a SKIPPED row, never a failed listing: between the
+/// api roll that learns a new tier's name and the `kubectl apply` that creates it on each region,
+/// a 404 is the honest state of the fleet, and failing the whole page would hide every other
+/// workload for the length of a rollout. Anything else (a 403 from a resourceName this tier was
+/// never granted, an unreachable cluster) still fails — those are wrong, not merely early.
+fn present(row: Result<WorkloadDoc, kube::Error>, name: &str, region: &str) -> Result<Option<WorkloadDoc>, Response> {
+    match row {
+        Ok(doc) => Ok(Some(doc)),
+        Err(kube::Error::Api(e)) if e.code == 404 => {
+            tracing::info!(name, region, "workloads.target.absent");
+            Ok(None)
+        }
+        Err(e) => Err(kube_err(e)),
+    }
 }
 
 #[cfg(test)]
@@ -367,5 +384,40 @@ mod scope_tests {
         assert_eq!(namespace(&scope, "kloudlite-gateway"), "kloudlite-system");
         // Never central: AKS runs no cluster controller.
         assert_eq!(resolve(&Scope::Central, "kloudlite-controller"), None);
+    }
+
+    /// A tier the region has not applied yet must cost its own row and nothing else — the api
+    /// learns a new `KNOWN` name one roll before every region's `kubectl apply` lands it, and a
+    /// listing that 500s in between hides the agent and the gateway too.
+    #[test]
+    fn a_missing_roll_target_is_a_skipped_row_not_a_failed_listing() {
+        let rows: Vec<_> = ["kloudlite-agent", "kloudlite-controller", "kloudlite-gateway"]
+            .iter()
+            .filter_map(|name| {
+                let row = if *name == "kloudlite-controller" { Err(api_err(404)) } else { Ok(row(name)) };
+                super::present(row, name, "centralindia-k3s").expect("a 404 is not a listing failure")
+            })
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(rows, ["kloudlite-agent", "kloudlite-gateway"]);
+        // A 403 is a role that is wrong, not a tier that is early: it still fails the listing.
+        assert!(super::present(Err(api_err(403)), "kloudlite-controller", "centralindia-k3s").is_err());
+    }
+
+    fn api_err(code: u16) -> kube::Error {
+        kube::Error::Api(Box::new(kube::core::Status { code, ..Default::default() }))
+    }
+
+    fn row(name: &str) -> super::WorkloadDoc {
+        super::WorkloadDoc {
+            scope: Scope::Region("centralindia-k3s".into()),
+            name: name.to_string(),
+            kind: Kind::Deployment,
+            image: None,
+            ready: 1,
+            desired: 1,
+            rollout_state: "Stable",
+            last_roll: None,
+        }
     }
 }

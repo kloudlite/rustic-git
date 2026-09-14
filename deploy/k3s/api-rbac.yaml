@@ -198,16 +198,19 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch"]
   # admin::workloads' per-region half: rolling this region's own kloudlite-agent DaemonSet
-  # (kube-system) and kloudlite-gateway Deployment (kloudlite-system, deploy/k3s/gateway.yaml).
+  # (kube-system), kloudlite-gateway Deployment (kloudlite-system, deploy/k3s/gateway.yaml) and
+  # kloudlite-controller Deployment (kube-system, deploy/k3s/controller.yaml).
   # No `create`/`delete` — same reasoning as the central Role in deploy/kloudlite.yaml, a roll
-  # only ever patches an object that already exists.
+  # only ever patches an object that already exists. Every name in `KNOWN_PER_REGION` must appear
+  # here: `list_workloads` GETs each one, and a 403 on any of them fails the WHOLE
+  # `/admin/workloads` listing, not merely that row (a 404 does not — that is a skipped row).
   - apiGroups: ["apps"]
     resources: ["daemonsets"]
     resourceNames: ["kloudlite-agent"]
     verbs: ["get", "list", "patch"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    resourceNames: ["kloudlite-gateway"]
+    resourceNames: ["kloudlite-gateway", "kloudlite-controller"]
     verbs: ["get", "list", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
