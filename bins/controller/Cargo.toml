@@ -14,16 +14,17 @@ path = "src/main.rs"
 
 [dependencies]
 tracing = { workspace = true }
-metrics = { workspace = true }
 kloudlite-core = { path = "../../crates/core" }
 kloudlite-workspaces = { path = "../../crates/workspaces" }
+kloudlite-trace = { workspace = true }
+# The process-level rustls CryptoProvider main() installs before the kube client's first handshake.
+rustls = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 # One route, `/healthz`. No TLS, no ws, no object store: this process talks to the API server only.
 axum = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
