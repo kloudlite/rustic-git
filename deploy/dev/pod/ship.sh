@@ -58,7 +58,7 @@ if [ "${1:-}" != "--no-gate" ]; then
     sleep 5
     #  on every probe: a test process that exits between pgrep and ps is the common
     # case, and under  a failing substitution here silently ended the whole ship.
-    for pid in $(pgrep -f '^/work/target/debug/deps/' || true); do
+    for pid in $(pgrep -f "^$CARGO_TARGET_DIR/debug/deps/" || true); do
       age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)
       [ -n "$age" ] && [ "$age" -gt 90 ] || continue
       echo "HUNG: $(ps -o args= -p "$pid" | cut -c1-200) (${age}s) — stacks in /tmp/ship-hang-$pid.bt" >&2

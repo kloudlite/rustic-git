@@ -61,12 +61,14 @@ pub fn on_inner_timeout(method: &http::Method, path: &str) {
     }
     let (method, resource) = (method.clone(), resource_of(path).to_string());
     #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
-    tokio::spawn(async move {
-        match dump(MAX_BYTES).await {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // An OS thread, never a task: the bound and the log line must not need a runtime worker,
+        // since a wedged worker is exactly what this is looking for.
+        std::thread::spawn(move || match dump(handle, MAX_BYTES) {
             Some(d) => tracing::warn!(%method, %resource, tasks = d.tasks, matched = d.matched, dump_ms = d.ms, truncated = d.truncated, dump = %d.text, "kube.stall.dump"),
             None => tracing::warn!(%method, %resource, timeout_ms = DUMP_TIMEOUT.as_millis() as u64, "kube.stall.dump.timeout"),
-        }
-    });
+        });
+    }
     #[cfg(not(all(tokio_unstable, feature = "stall-dump", target_os = "linux")))]
     tracing::warn!(%method, %resource, "kube.stall.dump.unsupported");
 }
@@ -80,12 +82,35 @@ pub struct Dump {
     pub text: String,
 }
 
+/// A dump that never finished; a second one would spin in tokio's `start_trace_request` forever.
+#[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Blocks the CALLING OS thread for at most `DUMP_TIMEOUT` — call it from a plain thread, never a
+/// runtime worker. The bound is `recv_timeout`, outside the runtime, because tokio's own can hang:
+/// `trace_core` (tokio 1.53.1 `multi_thread/worker/taskdump.rs:21`) waits on a barrier with a
+/// 250 ms `wait_timeout`, and a timed-out waiter returns WITHOUT taking back its `count += 1`
+/// (`loom/std/barrier.rs`, `wait_timeout`), so a later worker becomes leader alone and then parks
+/// in the untimed `trace_end.wait()` (`taskdump.rs:54`) forever — with every worker so parked the
+/// timer driver never turns and a `tokio::time::timeout` around the dump never fires. On timeout
+/// the dump thread is abandoned: it owns only its own current-thread runtime and a oneshot, so
+/// dropping our receiver cancels nothing tokio relies on; whatever wedged stays wedged either way.
 /// Tasks whose trace touches the HTTP stack only; the rest of the runtime is counted, not printed.
 #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
-pub async fn dump(max: usize) -> Option<Dump> {
+pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
     use std::fmt::Write as _;
+    if IN_FLIGHT.swap(true, Ordering::Relaxed) {
+        return None;
+    }
     let start = Instant::now();
-    let snap = tokio::time::timeout(DUMP_TIMEOUT, tokio::runtime::Handle::current().dump()).await.ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("dump runtime");
+        let snap = rt.block_on(handle.dump());
+        IN_FLIGHT.store(false, Ordering::Relaxed);
+        let _ = tx.send(snap);
+    });
+    let snap = rx.recv_timeout(DUMP_TIMEOUT).ok()?;
     let ms = start.elapsed().as_millis() as u64;
     let (mut tasks, mut matched, mut text) = (0, 0, String::new());
     for t in snap.tasks().iter() {
@@ -129,23 +154,27 @@ mod tests {
     }
 
     /// Linux + `--cfg tokio_unstable` + `stall-dump` only, so it runs in the pod gate, never on a Mac.
+    /// A plain `#[test]` over a two-worker runtime (the agent's shape) so the test thread is never
+    /// a worker, and `shutdown_timeout` so a wedged worker fails the test instead of hanging it.
     #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dump_names_a_parked_http_task() {
+    #[test]
+    fn dump_names_a_parked_http_task() {
         #[inline(never)]
         async fn hyper_parked_marker(n: std::sync::Arc<tokio::sync::Notify>) {
             n.notified().await;
         }
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         let n = std::sync::Arc::new(tokio::sync::Notify::new());
-        let h = tokio::spawn(hyper_parked_marker(n.clone()));
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let d = dump(MAX_BYTES).await.expect("no worker is blocked, so the dump must finish");
+        rt.spawn(hyper_parked_marker(n.clone()));
+        std::thread::sleep(Duration::from_millis(50));
+        let d = dump(rt.handle().clone(), MAX_BYTES);
+        let tiny = d.as_ref().and_then(|_| dump(rt.handle().clone(), 16));
+        n.notify_one();
+        rt.shutdown_timeout(Duration::from_secs(1));
+        let d = d.expect("no worker is blocked, so the dump must finish inside DUMP_TIMEOUT");
         eprintln!("dump_ms={} tasks={} matched={}", d.ms, d.tasks, d.matched);
         assert!(d.text.contains("hyper_parked_marker"), "{}", d.text);
-        assert!(d.ms < DUMP_TIMEOUT.as_millis() as u64);
-        let tiny = dump(16).await.unwrap();
+        let tiny = tiny.expect("a second dump after a finished one");
         assert!(tiny.truncated && tiny.text.len() <= 16);
-        n.notify_one();
-        h.await.unwrap();
     }
 }
