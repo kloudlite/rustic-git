@@ -12,7 +12,7 @@ const remote = (flags: number, probe = false) => {
   const cx = trace.setSpanContext(ROOT_CONTEXT, { traceId: TID, spanId: "00f067aa0ba902b7", traceFlags: flags, isRemote: true });
   return probe ? new KlPropagator().extract(cx, { "x-kloudlite-probe": "1" }, { get: (c, k) => (c as Record<string, string>)[k], keys: Object.keys }) : cx;
 };
-const decide = (s: KlSampler, cx = ROOT_CONTEXT, tid = TID) => s.shouldSample(cx, tid, "n", SpanKind.SERVER, {}, []).decision;
+const decide = (s: KlSampler, cx = ROOT_CONTEXT, tid = TID) => s.shouldSample(cx, tid).decision;
 
 test("sampler: no probe header, a sampled outside parent still lets the ratio decide", () => {
   const s = new KlSampler(0, 2, 2);
