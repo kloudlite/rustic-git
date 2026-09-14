@@ -128,6 +128,16 @@ pub struct ClusterSettingsSpec {
     /// k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); `None` = host kernel. **Boot**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class: Option<String>,
+    /// Root sampling ratio for this region's agent traces. 0.0..=1.0. Errors, slow passes and
+    /// sampled parents are kept regardless (`kloudlite_trace`); this only thins the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_sample_ratio: Option<f64>,
+    /// Probe-forced samples per second each agent honours. 0.0..=1000.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_probe_rate: Option<f64>,
+    /// The probe bucket's burst allowance. 1.0..=10000.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_probe_burst: Option<f64>,
 }
 
 
@@ -163,6 +173,9 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("runtimeClass", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
+    ("traceSampleRatio", kloudlite_core::settings::Mark::Live, &[]),
+    ("traceProbeRate", kloudlite_core::settings::Mark::Live, &[]),
+    ("traceProbeBurst", kloudlite_core::settings::Mark::Live, &[]),
 ];
 
 #[cfg(test)]

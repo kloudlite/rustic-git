@@ -32,6 +32,7 @@ hex = { workspace = true }
 json-patch = "4.2.0"
 libc = { workspace = true }
 reqwest = { workspace = true }
+kloudlite-trace = { workspace = true }
 # `kube_bound`'s layer is in every binary that builds a kube client, so these two are not
 # optional. `http-body-util` is `kube_test`'s alone — it is compiled into the library (not behind
 # `#[cfg(test)]`) because the `/v1` integration tests in tests/ build an `ApiState` around a
@@ -51,6 +52,8 @@ testkit = ["dep:http-body-util"]
 
 [dev-dependencies]
 kloudlite-workspaces = { path = ".", features = ["testkit"] }
+kloudlite-trace = { workspace = true, features = ["testing"] }
+opentelemetry_sdk = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 rand = { workspace = true }

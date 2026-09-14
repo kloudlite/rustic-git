@@ -34,7 +34,7 @@ pub async fn wake_peers(ctx: &Arc<Ctx>, live: &[String], secret: &str) {
                 }
             };
             let url = format!("http://{addr}/peer/v1/wake");
-            match http.post(&url).header("x-peer-secret", *secret).timeout(Duration::from_secs(5)).send().await {
+            match kloudlite_trace::inject_reqwest(http.post(&url)).header("x-peer-secret", *secret).timeout(Duration::from_secs(5)).send().await {
                 Ok(r) if r.status().is_success() => {}
                 Ok(r) => tracing::warn!(%node, status = %r.status(), reason = "refused", "wake.failed"),
                 Err(e) => tracing::warn!(%node, reason = "unreachable", error = %e, "wake.failed"),

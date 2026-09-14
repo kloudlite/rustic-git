@@ -318,6 +318,18 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // so the CRD's admin-written value is what a fresh pod boots with, not just what a running
     // one picks up later.
     let settings = LiveSettings::new(initial_settings(&client).await);
+    // The sampler reads this region's `ClusterSettings` through the live handle, never env.
+    kloudlite_trace::bind_ratio({
+        let s = settings.clone();
+        move || s.load().trace_sample_ratio
+    });
+    kloudlite_trace::bind_probe_budget({
+        let s = settings.clone();
+        move || {
+            let v = s.load();
+            (v.trace_probe_rate, v.trace_probe_burst)
+        }
+    });
     // The gauges the collector cannot get from the kubelet: the btrfs pool is this process's
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.

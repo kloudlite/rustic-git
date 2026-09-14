@@ -106,12 +106,23 @@ impl PeerState {
 }
 
 pub fn router(state: PeerState) -> Router {
+    let state = Arc::new(state);
     Router::new()
         .route("/peer/v1/snapshot/{volume}/{name}", get(snapshot))
         // A poke, not a transfer: the body is empty and the answer is 204. Same secret as the
         // snapshot route and the same NetworkPolicy, because it drives the same root-run machinery.
         .route("/peer/v1/wake", axum::routing::post(wake))
-        .with_state(Arc::new(state))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), traced_peer))
+        .with_state(state)
+}
+
+/// One server span per peer request, named by the route template. The snapshot span ends when the
+/// streamed response is handed back — the `btrfs send` body gets no span of its own, by design.
+/// Only a caller holding the secret is our own tier, so only then is its sampled flag obeyed; the
+/// secret itself never reaches a span (the header is not a field).
+async fn traced_peer(State(state): State<Arc<PeerState>>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let trusted = secret_ok(req.headers(), &state.secret);
+    kloudlite_trace::traced_as(trusted, req, next).await
 }
 
 /// `WS_PEER_ADDR`, default `0.0.0.0:8444`. Spawned from `lib.rs` only when `WS_PEER_SECRET` is

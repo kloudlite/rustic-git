@@ -24,7 +24,7 @@ mod sampler;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, server_span_with, stamp, traced, untraced, PROBE_HEADER, UNTRACED};
+pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, server_span_with, stamp, traced, traced_as, untraced, PROBE_HEADER, UNTRACED};
 pub use promote::Promote;
 pub use sampler::{bind_probe_budget, bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO, PROBE_BURST, PROBE_RATE};
 
@@ -82,7 +82,15 @@ where
     let tracer = provider.tracer("kloudlite");
     Ok(tracing_opentelemetry::layer()
         .with_tracer(tracer)
-        .with_filter(filter_fn(|meta| meta.target() != UNTRACED)))
+        .with_filter(filter_fn(exported)))
+}
+
+/// Spans only, never events. tracing-opentelemetry copies every event inside a span into it with
+/// all its fields, and our log lines carry raw paths, object names and owner handles (`kube.timeout
+/// path=…`, `reconcile.done name=…`) — exactly what must not reach trace storage. Logs stay logs,
+/// linked to their trace by `span.trace_id`.
+pub(crate) fn exported(meta: &tracing::Metadata<'_>) -> bool {
+    meta.is_span() && meta.target() != UNTRACED
 }
 
 pub fn layer<S>() -> Option<impl Layer<S> + Send + Sync>

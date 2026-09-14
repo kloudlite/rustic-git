@@ -120,10 +120,16 @@ pub fn inject_reqwest(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 /// server, builder gate): the same server span, no metrics. Named by the matched route so ids in
 /// `/peer/v1/snapshot/{volume}/{name}` and `/stream/*/{id}` never reach a span name.
 pub async fn traced(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    traced_as(false, req, next).await
+}
+
+/// `traced` with the listener's trust choice (`server_span_with`): a listener that has checked its
+/// caller's secret passes `true`, so our own tier's hop keeps the caller's sampled flag.
+pub async fn traced_as(trusted: bool, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     use tracing::Instrument;
     let (method, path) = (req.method().clone(), req.uri().path().to_string());
     let route = req.extensions().get::<axum::extract::MatchedPath>().map_or_else(|| path.clone(), |m| m.as_str().to_string());
-    let span = server_span(&method, &path, req.headers(), "", &route);
+    let span = server_span_with(&method, &path, req.headers(), "", &route, trusted);
     let res = next.run(req).instrument(span.clone()).await;
     finish(&span, res.status().as_u16());
     res

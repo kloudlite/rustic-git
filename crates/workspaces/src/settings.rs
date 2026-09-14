@@ -27,6 +27,9 @@ pub struct AgentSettings {
     pub default_image: String,
     pub git_init_image: String,
     pub runtime_class: String,
+    pub trace_sample_ratio: f64,
+    pub trace_probe_rate: f64,
+    pub trace_probe_burst: f64,
 }
 
 impl Default for AgentSettings {
@@ -59,6 +62,10 @@ impl AgentSettings {
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
             runtime_class: std::env::var("WS_RUNTIME_CLASS").unwrap_or_default(),
+            // No env: a tunable, not boot wiring — `ClusterSettings` is its only override.
+            trace_sample_ratio: kloudlite_trace::DEFAULT_RATIO,
+            trace_probe_rate: kloudlite_trace::PROBE_RATE,
+            trace_probe_burst: kloudlite_trace::PROBE_BURST,
         }
     }
 
@@ -90,6 +97,9 @@ impl AgentSettings {
         over!(default_image);
         over!(git_init_image);
         over!(runtime_class);
+        over!(trace_sample_ratio);
+        over!(trace_probe_rate);
+        over!(trace_probe_burst);
         self
     }
 }
@@ -97,6 +107,15 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_settings_merge_from_cluster_settings() {
+        let d = AgentSettings::from_env();
+        assert_eq!((d.trace_sample_ratio, d.trace_probe_rate, d.trace_probe_burst), (kloudlite_trace::DEFAULT_RATIO, kloudlite_trace::PROBE_RATE, kloudlite_trace::PROBE_BURST));
+        let spec = ClusterSettingsSpec { trace_sample_ratio: Some(0.5), trace_probe_rate: Some(3.0), trace_probe_burst: Some(7.0), ..Default::default() };
+        let m = AgentSettings::from_env().merged_with(&spec);
+        assert_eq!((m.trace_sample_ratio, m.trace_probe_rate, m.trace_probe_burst), (0.5, 3.0, 7.0));
+    }
 
     /// `stored ?? env ?? default` precedence: an env var sets one field, the stored spec
     /// overrides a different field, a third field neither touches keeps the built-in default.

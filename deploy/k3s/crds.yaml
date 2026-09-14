@@ -2449,6 +2449,24 @@
                         "minimum": 0.0,
                         "nullable": true,
                         "type": "integer"
+                      },
+                      "traceProbeBurst": {
+                        "description": "The probe bucket's burst allowance. 1.0..=10000.0.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "traceProbeRate": {
+                        "description": "Probe-forced samples per second each agent honours. 0.0..=1000.0.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
+                      },
+                      "traceSampleRatio": {
+                        "description": "Root sampling ratio for this region's agent traces. 0.0..=1.0. Errors, slow passes and\nsampled parents are kept regardless (`kloudlite_trace`); this only thins the rest.",
+                        "format": "double",
+                        "nullable": true,
+                        "type": "number"
                       }
                     },
                     "type": "object"

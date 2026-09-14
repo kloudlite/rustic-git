@@ -139,6 +139,11 @@ async fn attempt<R, E: Into<tower::BoxError>>(
     match tokio::time::timeout(after, fut).await {
         Ok(r) => r.map_err(Into::into),
         Err(_) => {
+            // Both layers poll inside the outer layer's client span, so this names the bound
+            // that fired on it. A retry that then succeeds keeps the ERROR: that is what happened.
+            let cur = tracing::Span::current();
+            cur.record("kube.timeout_layer", layer);
+            cur.record("otel.status_code", "ERROR");
             let (dials, dials_ok) = dials.since();
             let inflight = INFLIGHT.load(std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(%method, %path, layer, secs = after.as_secs_f32(), inflight, dials, dials_ok, "kube.timeout");
@@ -175,7 +180,11 @@ where
             return Box::pin(async move { attempt(fut, after, layer, &method, &path).await });
         }
         let spare = self.inner.clone();
-        Box::pin(async move {
+        // One CLIENT span per non-watch call, opened in the outer layer so both bounds, the retry
+        // and hyper sit inside it. tower's Buffer re-enters the caller's span before calling us,
+        // so this is the child of the reconcile pass or request that made the call.
+        let span = kube_span(&method, &path);
+        Box::pin(tracing::Instrument::instrument(async move {
             let start = Instant::now();
             let flight = Flight::start();
             let dials = Dials::now();
@@ -187,6 +196,7 @@ where
             // connect starts a fresh race; a stall in the auth filter re-enters it.
             let fired = out.as_ref().err().and_then(|e| e.downcast_ref::<KubeTimeout>()).map(|t| t.layer);
             if let (Some(fired), Some(req)) = (fired, again) {
+                tracing::Span::current().record("kube.retry", true);
                 tracing::warn!(verb = %method, resource = %path, first_attempt_ms = start.elapsed().as_millis() as u64, layer = fired, "kube.retry");
                 let ready = spare.ready_oneshot().await.map_err(Into::<tower::BoxError>::into);
                 out = match ready {
@@ -200,9 +210,61 @@ where
             if out.is_ok() && ms >= KUBE_SLOW_MS {
                 tracing::warn!(%method, %path, ms, inflight, dials, dials_ok, "kube.slow");
             }
+            if out.is_err() {
+                tracing::Span::current().record("otel.status_code", "ERROR");
+            }
             out
-        })
+        }, span))
     }
+}
+
+/// The client span's shape. Attributes are the verb, the API group, the resource (with its
+/// subresource) and the KIND of namespace — never a namespace, an object name or the path: those
+/// carry owner handles and ids, which must not land in trace storage. The kube log lines keep them.
+fn kube_span(method: &http::Method, path: &str) -> tracing::Span {
+    let (group, resource, namespace) = describe(path);
+    let span = tracing::info_span!(
+        "kube",
+        otel.name = %format!("kube {method}"),
+        otel.kind = "client",
+        otel.status_code = tracing::field::Empty,
+        http.request.method = %method,
+        k8s.group = %group,
+        k8s.resource = %resource,
+        k8s.namespace_kind = namespace,
+        kube.timeout_layer = tracing::field::Empty,
+        kube.retry = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+    );
+    kloudlite_trace::stamp(&span);
+    span
+}
+
+/// `(group, resource[/subresource], namespace kind)` of a kube API path.
+pub(crate) fn describe(path: &str) -> (String, String, &'static str) {
+    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let (group, rest) = match segs.as_slice() {
+        ["api", _, rest @ ..] => ("core".to_string(), rest),
+        ["apis", g, _, rest @ ..] => (g.to_string(), rest),
+        _ => return (String::new(), "other".into(), "cluster"),
+    };
+    let (namespace, rest) = match rest {
+        ["namespaces", ns, r @ ..] if !r.is_empty() => (Some(*ns), r),
+        _ => (None, rest),
+    };
+    let resource = match rest {
+        [r, _name, sub, ..] => format!("{r}/{sub}"),
+        [r, ..] => r.to_string(),
+        [] => "other".into(),
+    };
+    let kind = match namespace {
+        None => "cluster",
+        Some(n) if n.starts_with("ws-") => "ws",
+        Some(n) if n.starts_with("wt-") => "wt",
+        Some(n) if n.starts_with("env-") => "env",
+        Some(_) => "system",
+    };
+    (group, resource, kind)
 }
 
 // Client-wide, not per client: a timeout is only readable against everything else the process
@@ -474,6 +536,69 @@ mod tests {
         let svc = tower::Layer::layer(&BoundLayer::OUTER, m);
         let e = svc.oneshot(req(http::Method::GET, "/api/v1/nodes")).await.unwrap_err();
         assert_eq!(e.downcast_ref::<KubeTimeout>().unwrap().layer, "outer");
+    }
+
+    #[test]
+    fn a_path_is_described_without_names() {
+        assert_eq!(describe("/api/v1/namespaces/ws-alice/pods/p1/status"), ("core".into(), "pods/status".into(), "ws"));
+        assert_eq!(describe("/apis/kloudlite.io/v1alpha1/workspaces/w1"), ("kloudlite.io".into(), "workspaces".into(), "cluster"));
+        assert_eq!(describe("/api/v1/namespaces/env-abc"), ("core".into(), "namespaces".into(), "cluster"));
+        assert_eq!(describe("/apis/apps/v1/namespaces/kube-system/daemonsets"), ("apps".into(), "daemonsets".into(), "system"));
+    }
+
+    fn finished(spans: &opentelemetry_sdk::trace::InMemorySpanExporter) -> Vec<opentelemetry_sdk::trace::SpanData> {
+        spans.get_finished_spans().unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_kube_call_is_an_error_client_span_naming_the_layer_and_no_names() {
+        kloudlite_trace::bind_ratio(|| 1.0);
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (m, _) = mock(usize::MAX);
+        let svc = tower::Layer::layer(&BoundLayer::OUTER, m);
+        let e = svc.oneshot(req(http::Method::POST, "/api/v1/namespaces/wt-alice-acme/pods/secret-pod")).await.unwrap_err();
+        assert!(e.downcast_ref::<KubeTimeout>().is_some());
+        let got = finished(&spans);
+        assert_eq!(got.len(), 1);
+        let s = &got[0];
+        assert_eq!(s.name, "kube POST");
+        assert!(format!("{:?}", s.status).starts_with("Error"), "{:?}", s.status);
+        let attr = |k: &str| s.attributes.iter().find(|kv| kv.key.as_str() == k).map(|kv| kv.value.as_str().to_string());
+        assert_eq!(attr("kube.timeout_layer").as_deref(), Some("outer"));
+        assert_eq!(attr("k8s.namespace_kind").as_deref(), Some("wt"));
+        assert_eq!(attr("k8s.resource").as_deref(), Some("pods"));
+        let all = format!("{s:?}");
+        assert!(!all.contains("alice") && !all.contains("secret-pod"), "a name leaked: {all}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retried_read_records_the_inner_layer_and_the_retry() {
+        kloudlite_trace::bind_ratio(|| 1.0);
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (m, _) = mock(1);
+        let svc = tower::Layer::layer(&BoundLayer::OUTER, tower::Layer::layer(&BoundLayer::INNER, m));
+        svc.oneshot(req(http::Method::GET, "/api/v1/nodes")).await.unwrap();
+        let got = finished(&spans);
+        assert_eq!(got.len(), 1, "one span for both attempts");
+        let has = |k: &str| got[0].attributes.iter().any(|kv| kv.key.as_str() == k);
+        assert!(has("kube.retry") && has("kube.timeout_layer"));
+        // The log lines carry the raw path, so they stay logs (linked by `trace_id`), never span events.
+        assert!(got[0].events.is_empty(), "{:?}", got[0].events);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_watch_opens_no_span() {
+        kloudlite_trace::bind_ratio(|| 1.0);
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (m, _) = mock(0);
+        let svc = tower::Layer::layer(&BoundLayer::OUTER, m);
+        svc.clone().oneshot(req(http::Method::GET, "/api/v1/pods?watch=true")).await.unwrap();
+        assert!(finished(&spans).is_empty());
+        svc.oneshot(req(http::Method::GET, "/api/v1/pods")).await.unwrap();
+        assert_eq!(finished(&spans).len(), 1, "the control: a plain GET does open one");
     }
 
     #[tokio::test(start_paused = true)]

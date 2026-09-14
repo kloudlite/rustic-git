@@ -138,6 +138,11 @@ spec:
             # JSON events, so the collector gets level/module/fields as columns (crates/core/src/log.rs).
             - name: KLOUDLITE_LOG_FORMAT
               value: json
+            # Not hostNetwork, so cluster DNS resolves the node-local collector Service.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kube-system.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-agent
             # kube-runtime says at debug when a watch stream went silent past its timeout and had
             # to be rebuilt ("watch stream idle timeout, reconnecting"); a normal server-side end
             # does not. Counting those lines per node is how a late event (a push the agent saw

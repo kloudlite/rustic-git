@@ -26,6 +26,46 @@ fn test_settings() -> Settings {
     LiveSettings::new(AgentSettings::from_env())
 }
 
+/// The peer listener continues the caller's trace, and obeys its sampled flag only with the
+/// secret. Ratio 1.0 (first bind wins, and every agent test wants it) so an ignored flag is
+/// visible: an untrusted `-00` is re-rolled to sampled and exported, a trusted `-00` is obeyed
+/// and — fast and fine — stays unexported.
+#[tokio::test(flavor = "current_thread")]
+async fn the_peer_listener_trusts_the_sampled_flag_only_with_the_secret() {
+    use tower::util::ServiceExt as _;
+    kloudlite_trace::bind_ratio(|| 1.0);
+    let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+    let _g = tracing::dispatcher::set_default(&dispatch);
+    const UNSAMPLED: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+    let tmp = tempfile::tempdir().unwrap();
+    let (client, _) = mock_client(vec![]);
+    let app = router(PeerState::new(client, tmp.path().to_string_lossy().into(), "n".into(), "s3cret".into(), "false".into(), test_settings()));
+    let call = |uri: &'static str, method: &'static str, secret: Option<&'static str>| {
+        let app = app.clone();
+        async move {
+            let mut r = axum::http::Request::builder().method(method).uri(uri).header("traceparent", UNSAMPLED);
+            if let Some(s) = secret {
+                r = r.header("x-peer-secret", s);
+            }
+            app.oneshot(r.body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+        }
+    };
+    call("/peer/v1/wake", "POST", Some("s3cret")).await;
+    assert!(spans.get_finished_spans().unwrap().is_empty(), "a trusted unsampled hop is obeyed");
+    call("/peer/v1/wake", "POST", Some("wrong")).await;
+    call("/peer/v1/snapshot/vol-secret/snap-secret", "GET", None).await;
+    let got = spans.get_finished_spans().unwrap();
+    assert_eq!(got.len(), 2, "without the secret the flag is re-rolled");
+    assert_eq!(got[0].name, "POST /peer/v1/wake");
+    assert_eq!(got[1].name, "GET /peer/v1/snapshot/{volume}/{name}");
+    for s in &got {
+        assert_eq!(s.span_context.trace_id().to_string(), "4bf92f3577b34da6a3ce929d0e0e4736", "the caller's trace continues");
+        assert!(s.parent_span_is_remote);
+        let all = format!("{s:?}");
+        assert!(!all.contains("vol-secret") && !all.contains("wrong") && !all.contains("s3cret"), "{all}");
+    }
+}
+
 /// M2: the code default IS the cluster's floor. Two numbers — a 600 s default with a 180 s
 /// deploy override — is a node declared dead at one interval in production and another in
 /// every test, and the comments disagreed about which.

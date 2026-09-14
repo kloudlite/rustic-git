@@ -17,7 +17,7 @@ pub fn subscriber() -> (tracing::Dispatch, InMemorySpanExporter) {
         tracing_opentelemetry::layer()
             .with_tracer(provider.tracer("test"))
             // The production filter, so a test of an untraced path exercises what ships.
-            .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() != crate::UNTRACED)),
+            .with_filter(tracing_subscriber::filter::filter_fn(crate::exported)),
     );
     (tracing::Dispatch::new(sub), out)
 }
