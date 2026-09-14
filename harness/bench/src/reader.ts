@@ -1,4 +1,4 @@
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 /**
  * History without an agent: pi's SDK reads its own JSONL (tree, compaction,
