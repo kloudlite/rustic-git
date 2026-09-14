@@ -19,7 +19,7 @@ use axum::{
     Json,
 };
 use kloudlite_core::httpx::bearer_token;
-use kloudlite_core::settings::{apply_patch, validate_stored, StoredCentralSettings, CENTRAL_SETTINGS_KEY};
+use kloudlite_core::settings::{apply_patch, restore_snapshot, validate_stored, StoredCentralSettings, CENTRAL_SETTINGS_KEY};
 use slatedb::object_store::{path::Path as OsPath, ObjectStoreExt, PutPayload};
 use std::sync::Arc;
 
@@ -111,9 +111,9 @@ pub(crate) async fn put_settings(
 /// `POST /api/admin/settings/revert`. No body: the target is always `history[0]` — "undo the
 /// last write" — the same one the CLUSTER twin's `revert_cluster` names by index into its own
 /// annotation-backed history, just with no index to pick since this route only ever means the
-/// most recent entry. `apply_patch` with that snapshot as the patch reproduces that instant AND
-/// pushes the current (pre-revert) document onto history as a new entry — same semantics as
-/// every other write, so a revert can itself be reverted.
+/// most recent entry. `restore_snapshot` replaces the document with that instant (never a merge:
+/// a field it did not name returns to `env ?? default`) AND pushes the current (pre-revert)
+/// document onto history as a new entry, so a revert can itself be reverted.
 pub(crate) async fn revert_settings(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     let updated_by = match require_superadmin(&app, &headers) {
         Ok(sub) => sub,
@@ -126,9 +126,12 @@ pub(crate) async fn revert_settings(State(app): State<Arc<App>>, headers: Header
     let Some(snap) = existing.history.first() else {
         return (StatusCode::UNPROCESSABLE_ENTITY, "no history to revert to").into_response();
     };
-    let patch: StoredCentralSettings = snap.into();
+    // A snapshot from before a range tightened must not slip past it on the way back.
+    if let Err(msg) = validate_stored(&StoredCentralSettings::from(snap)) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response();
+    }
     let updated_at = crate::ownership::now_ms().to_string();
-    let next = apply_patch(&existing, &patch, &updated_by, &updated_at);
+    let next = restore_snapshot(&existing, snap, &updated_by, &updated_at);
     let bytes = match serde_json::to_vec(&next) {
         Ok(b) => b,
         Err(e) => return internal(e),

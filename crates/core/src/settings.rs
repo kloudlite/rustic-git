@@ -466,10 +466,26 @@ fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
     new.history.truncate(10);
 }
 
+/// A revert: REPLACE the document with `snap` rather than merge it, push `current` onto history
+/// and stamp. A field the snapshot left `None` (unset then, or not yet invented) goes back to
+/// `env ?? default` — merging kept the current value instead, so a revert never undid a newer
+/// field (2026-09-14).
+pub fn restore_snapshot(
+    current: &StoredCentralSettings,
+    snap: &StoredCentralSettingsSnapshot,
+    updated_by: &str,
+    updated_at: &str,
+) -> StoredCentralSettings {
+    let mut next = StoredCentralSettings::from(snap);
+    push_history(current, &mut next);
+    next.updated_by = updated_by.to_string();
+    next.updated_at = updated_at.to_string();
+    next
+}
+
 /// Merge `patch` field-by-field onto `current` (only the fields the caller actually set), push
 /// `current` onto history, and stamp `updated_by`/`updated_at`. Called by the admin write handler
-/// AFTER `validate_stored` has passed; a revert is the same call with `patch` built from a full
-/// `history[n]` snapshot.
+/// AFTER `validate_stored` has passed; a revert is `restore_snapshot`, never this.
 pub fn apply_patch(
     current: &StoredCentralSettings,
     patch: &StoredCentralSettings,
@@ -620,8 +636,12 @@ mod tests {
         assert_eq!(n, serde_json::to_value(CentralSettings::built_in_defaults()).unwrap().as_object().unwrap().len(), "stored twin lacks a field");
         let changed = apply_patch(&base, &next, "a", "t1");
         assert_eq!(fields(&changed), fields(&next), "apply_patch dropped a field");
-        let reverted = apply_patch(&changed, &StoredCentralSettings::from(&changed.history[0]), "a", "t2");
+        let reverted = restore_snapshot(&changed, &changed.history[0], "a", "t2");
         assert_eq!(fields(&reverted), fields(&base), "history/revert dropped a field");
+        // Reverting to a document that named nothing must unset every field, not keep `next`'s.
+        let from_empty = apply_patch(&StoredCentralSettings::default(), &next, "a", "t1");
+        let cleared = restore_snapshot(&from_empty, &from_empty.history[0], "a", "t2");
+        assert_eq!(fields(&cleared), fields(&StoredCentralSettings::default()), "revert kept a field the snapshot never set");
         let one = apply_patch(&base, &StoredCentralSettings { trace_sample_ratio: Some(0.5), ..Default::default() }, "a", "t");
         assert_eq!(CentralSettings::built_in_defaults().merged_with(&one).trace_sample_ratio, 0.5);
     }
@@ -670,47 +690,24 @@ mod tests {
         assert_eq!(doc.history[0].max_body, Some(1_048_576 + 9));
     }
 
-    /// A revert is `apply_patch` called with a full `history[n]` snapshot as the patch — proving
-    /// the round trip restores every field, not just the ones a partial PUT would touch.
+    /// A revert to an entry that predates a field resets that field to `env ?? default`, and is
+    /// itself a new history entry (so it can be reverted in turn).
     #[test]
-    fn revert_round_trips_a_snapshot() {
-        let base = StoredCentralSettings { max_body: Some(2_000_000), ssh_port: Some(2200), ..Default::default() };
+    fn revert_resets_a_field_the_snapshot_predates() {
+        let base = StoredCentralSettings { max_body: Some(2_000_000), ..Default::default() };
         let changed = apply_patch(
             &base,
-            &StoredCentralSettings { max_body: Some(3_000_000), ..Default::default() },
+            &StoredCentralSettings { max_body: Some(3_000_000), trace_sample_ratio: Some(0.9), ..Default::default() },
             "admin@example.com",
             "t1",
         );
-        assert_eq!(changed.max_body, Some(3_000_000));
-        let snap = &changed.history[0];
-        let revert_patch = StoredCentralSettings {
-            max_body: snap.max_body,
-            max_layer: snap.max_layer,
-            max_manifest: snap.max_manifest,
-            upload_grace_secs: snap.upload_grace_secs,
-            gc_interval_secs: snap.gc_interval_secs,
-            merge_lease_secs: snap.merge_lease_secs,
-            announce_stranded_secs: snap.announce_stranded_secs,
-            feed_retention_secs: snap.feed_retention_secs,
-            clone_host: snap.clone_host.clone(),
-            ssh_host: snap.ssh_host.clone(),
-            ssh_port: snap.ssh_port,
-            registry_host: snap.registry_host.clone(),
-            signup_open: snap.signup_open,
-            builder_idle_secs: snap.builder_idle_secs,
-            builder_start_secs: snap.builder_start_secs,
-            trace_sample_ratio: snap.trace_sample_ratio,
-            trace_probe_rate: snap.trace_probe_rate,
-            trace_probe_burst: snap.trace_probe_burst,
-            trace_promote_rate: snap.trace_promote_rate,
-            trace_promote_burst: snap.trace_promote_burst,
-            history: vec![],
-            updated_by: String::new(),
-            updated_at: String::new(),
-        };
-        let reverted = apply_patch(&changed, &revert_patch, "admin@example.com", "t2");
-        assert_eq!(reverted.max_body, base.max_body);
-        assert_eq!(reverted.ssh_port, base.ssh_port);
+        let reverted = restore_snapshot(&changed, &changed.history[0], "admin@example.com", "t2");
+        assert_eq!(reverted.max_body, Some(2_000_000));
+        assert_eq!(reverted.trace_sample_ratio, None, "a field the snapshot never named must not keep its current value");
+        assert_eq!(CentralSettings::built_in_defaults().merged_with(&reverted).trace_sample_ratio, 0.1);
+        assert_eq!(reverted.history.len(), 2, "a revert is a new history entry");
+        assert_eq!(reverted.history[0].trace_sample_ratio, Some(0.9), "the pre-revert document is kept");
+        assert_eq!((reverted.updated_by.as_str(), reverted.updated_at.as_str()), ("admin@example.com", "t2"));
     }
 
     /// A corrupt document leaves the live handle untouched — "last good wins" is the beat's job,
