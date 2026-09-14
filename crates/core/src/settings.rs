@@ -479,6 +479,9 @@ pub fn apply_patch(
     over!(signup_open);
     over!(builder_idle_secs);
     over!(builder_start_secs);
+    over!(trace_sample_ratio);
+    over!(trace_probe_rate);
+    over!(trace_probe_burst);
     push_history(current, &mut next);
     next.updated_by = updated_by.to_string();
     next.updated_at = updated_at.to_string();
@@ -550,6 +553,50 @@ mod tests {
         unsafe {
             std::env::remove_var("KLOUDLITE_SSH_PORT");
         }
+    }
+
+    /// Every `CentralSettings` field survives a write and a revert: a field added to the structs
+    /// but missed in `apply_patch`, `push_history` or the snapshot conversion fails here.
+    #[test]
+    fn every_field_round_trips_through_apply_patch_and_revert() {
+        let full = |bump: bool| -> StoredCentralSettings {
+            let mut v = serde_json::to_value(CentralSettings::built_in_defaults()).unwrap();
+            for (_, x) in v.as_object_mut().unwrap() {
+                if bump {
+                    *x = match x.take() {
+                        serde_json::Value::Number(n) if n.is_f64() => serde_json::json!(n.as_f64().unwrap() / 2.0),
+                        serde_json::Value::Number(n) => serde_json::json!(n.as_u64().unwrap() - 1),
+                        serde_json::Value::Bool(b) => serde_json::json!(!b),
+                        serde_json::Value::String(s) => serde_json::json!(format!("{s}x")),
+                        o => o,
+                    };
+                }
+            }
+            let camel: serde_json::Map<_, _> = v.as_object().unwrap().iter().map(|(k, x)| {
+                let mut c = String::new();
+                let mut up = false;
+                for ch in k.chars() {
+                    if ch == '_' { up = true } else if up { c.extend(ch.to_uppercase()); up = false } else { c.push(ch) }
+                }
+                (c, x.clone())
+            }).collect();
+            serde_json::from_value(serde_json::Value::Object(camel)).unwrap()
+        };
+        let fields = |s: &StoredCentralSettings| {
+            let mut v = serde_json::to_value(s).unwrap();
+            let o = v.as_object_mut().unwrap();
+            for k in ["history", "updatedBy", "updatedAt"] { o.remove(k); }
+            v
+        };
+        let (base, next) = (full(false), full(true));
+        let n = fields(&next).as_object().unwrap().len();
+        assert_eq!(n, serde_json::to_value(CentralSettings::built_in_defaults()).unwrap().as_object().unwrap().len(), "stored twin lacks a field");
+        let changed = apply_patch(&base, &next, "a", "t1");
+        assert_eq!(fields(&changed), fields(&next), "apply_patch dropped a field");
+        let reverted = apply_patch(&changed, &StoredCentralSettings::from(&changed.history[0]), "a", "t2");
+        assert_eq!(fields(&reverted), fields(&base), "history/revert dropped a field");
+        let one = apply_patch(&base, &StoredCentralSettings { trace_sample_ratio: Some(0.5), ..Default::default() }, "a", "t");
+        assert_eq!(CentralSettings::built_in_defaults().merged_with(&one).trace_sample_ratio, 0.5);
     }
 
     #[test]

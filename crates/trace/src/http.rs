@@ -58,7 +58,9 @@ pub fn server_span_with(method: &http::Method, path: &str, headers: &http::Heade
         otel.kind = "server",
         otel.status_code = tracing::field::Empty,
         http.request.method = %method,
-        url.path = %path,
+        // The route TEMPLATE, never the raw path: a path carries owner/repo names and digests,
+        // and a private repository's name must not land in trace storage.
+        http.route = %route,
         http.response.status_code = tracing::field::Empty,
         req_id = %req_id,
         trace_id = tracing::field::Empty,
@@ -146,6 +148,21 @@ mod tests {
     fn trace_of(span: &tracing::Span) -> (TraceId, bool) {
         let sc = span.context().span().span_context().clone();
         (sc.trace_id(), sc.is_sampled())
+    }
+
+    #[test]
+    fn a_span_carries_the_route_template_not_the_raw_path() {
+        let (d, out) = crate::testing::subscriber();
+        tracing::dispatcher::with_default(&d, || {
+            let span = server_span(&http::Method::GET, "/api/alice/secret-repo/tree", &headers(true), "r", "/api/{owner}/{name}/tree");
+            finish(&span, 200);
+            drop(span);
+        });
+        let spans = out.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1);
+        let all = format!("{:?}", spans[0]);
+        assert!(!all.contains("secret-repo"), "raw path leaked: {all}");
+        assert!(all.contains("/api/{owner}/{name}/tree"));
     }
 
     #[test]

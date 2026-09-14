@@ -437,6 +437,26 @@ mod trace_tests {
         assert!(out.ends_with("-00"), "no secret is outside traffic: {out}");
     }
 
+    /// Unsampled (`-00`, untrusted) traffic is still exported when it failed or was slow: the
+    /// listener's span reaches `Promote` with its status and duration.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unsampled_request_that_fails_or_stalls_is_still_exported() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        const UNSAMPLED: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+        let app = axum::Router::new()
+            .route("/v1/boom", axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/v1/slow", axum::routing::get(|| async { tokio::time::sleep(kloudlite_trace::SLOW + std::time::Duration::from_millis(100)).await; "ok" }))
+            .route("/v1/fine", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state("api", super::http_metrics));
+        call(app.clone(), "/v1/fine", &[("traceparent", UNSAMPLED)]).await;
+        assert!(spans.get_finished_spans().unwrap().is_empty(), "a fast success stays unexported");
+        call(app.clone(), "/v1/boom", &[("traceparent", UNSAMPLED)]).await;
+        assert_eq!(spans.get_finished_spans().unwrap().len(), 1, "a 500 is kept");
+        call(app, "/v1/slow", &[("traceparent", UNSAMPLED)]).await;
+        assert_eq!(spans.get_finished_spans().unwrap().len(), 2, "a slow request is kept");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn healthz_is_never_a_span() {
         let (dispatch, spans) = kloudlite_trace::testing::subscriber();
