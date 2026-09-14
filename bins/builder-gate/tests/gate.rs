@@ -226,6 +226,35 @@ fn metric(labels: &str) -> f64 {
 
 // ── the cases ────────────────────────────────────────────────────────────
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_gate_call_to_the_api_carries_the_trace() {
+    let (dispatch, _spans) = kloudlite_trace::testing::subscriber();
+    let _g = tracing::dispatcher::set_default(&dispatch);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let s = seen.clone();
+    let api = axum::Router::new().route(
+        "/v1/internal/builders/{slug}/start",
+        axum::routing::post(move |h: axum::http::HeaderMap| {
+            let s = s.clone();
+            async move {
+                *s.lock().unwrap() = h.get("traceparent").map(|v| v.to_str().unwrap().into()).unwrap_or_default();
+                axum::Json(serde_json::json!({"ready": true}))
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, api).await.unwrap() });
+    let parent = kloudlite_trace::client_span("gate", "POST", "/start");
+    let want = {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        parent.context().span().span_context().trace_id().to_string()
+    };
+    tracing::Instrument::instrument(ApiClient::new(base, SECRET.into()).start("alice"), parent).await.unwrap();
+    assert_eq!(&seen.lock().unwrap()[3..35], want);
+}
+
 #[tokio::test]
 async fn a_workspace_pod_starts_its_owners_builder_and_the_bytes_cross() {
     let api = Arc::new(MockApi::default());

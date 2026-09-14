@@ -4230,14 +4230,17 @@ dependencies = [
  "k8s-openapi",
  "kloudlite-core",
  "kloudlite-storage",
+ "kloudlite-trace",
  "kloudlite-workspaces",
  "kube",
  "metrics",
+ "opentelemetry",
  "reqwest",
  "rustls",
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

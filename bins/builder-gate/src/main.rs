@@ -61,6 +61,7 @@ async fn main() {
         central: kloudlite_core::settings::LiveSettings::new(CentralSettings::from_env()),
         buildkit: None,
     });
+    kloudlite_core::settings::bind_trace(&gate.central);
 
     // The same one-key read the gateway makes, and not fatal for the same reason: without a store
     // the gate runs on its env/default timings rather than not running.

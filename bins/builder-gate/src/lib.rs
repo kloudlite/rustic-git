@@ -54,8 +54,7 @@ impl ApiClient {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str) -> Result<reqwest::Response, String> {
-        self.http
-            .request(method, format!("{}{path}", self.base))
+        kloudlite_trace::inject_reqwest(self.http.request(method, format!("{}{path}", self.base)))
             .bearer_auth(&self.secret)
             .send()
             .await
@@ -101,18 +100,20 @@ impl ApiClient {
 /// build after every roll as an unknown peer. Liveness reads the same route — a gate that never
 /// lists is a gate that will never work.
 pub fn health(pods: who::Pods) -> axum::Router {
-    axum::Router::new().route(
-        "/healthz",
-        axum::routing::get(move || {
-            let pods = pods.clone();
-            async move {
-                match pods.listed() {
-                    true => (axum::http::StatusCode::OK, "ok"),
-                    false => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "listing pods"),
+    axum::Router::new()
+        .route(
+            "/healthz",
+            axum::routing::get(move || {
+                let pods = pods.clone();
+                async move {
+                    match pods.listed() {
+                        true => (axum::http::StatusCode::OK, "ok"),
+                        false => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "listing pods"),
+                    }
                 }
-            }
-        }),
-    )
+            }),
+        )
+        .layer(axum::middleware::from_fn(kloudlite_trace::traced))
 }
 
 pub struct Gate {
@@ -150,6 +151,16 @@ pub async fn serve(gate: Arc<Gate>, sock: tokio::net::TcpStream, peer: IpAddr) {
     };
     let slug = who::slug_of(&owner, &team);
 
+    // One span for the whole connection — accept through splice end, never per byte. The slug is
+    // an owner handle and never becomes a span attribute or name (Global Constraints); the api
+    // calls made while this span is entered still propagate ITS trace id, which is all a
+    // waterfall needs.
+    let span = tracing::info_span!("gate.connection", otel.kind = "server", trace_id = tracing::field::Empty);
+    kloudlite_trace::stamp(&span);
+    tracing::Instrument::instrument(serve_connection(gate, sock, slug), span).await
+}
+
+async fn serve_connection(gate: Arc<Gate>, sock: tokio::net::TcpStream, slug: String) {
     // Counted BEFORE `start`, and this is the whole point of the ordering: the builder may
     // already be running and halfway through its idle countdown (or seeded by a restart), and the
     // beat would then POST `stop` for the very builder this connection is about to use. The count
