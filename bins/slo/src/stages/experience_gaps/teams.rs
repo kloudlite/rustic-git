@@ -1,4 +1,4 @@
-//! Experience probes on teams: invitations revoked, a team-owned environment, an attached pair.
+//! Experience probes on teams: invitations revoked, a team-owned environment, a space's grant cleared.
 
 use super::*;
 
@@ -164,51 +164,27 @@ pub(crate) async fn team_env_ready(c: &Ctx, id: &str, one: &str, jwt: &str) -> R
 }
 
 
-/// `env.attach.pair`: deleting an attached workspace takes the ENVIRONMENT-side policy with it.
-///
-/// `env.attach`/`env.detach` only ever exercise the workspace side. The environment-side
-/// `attach-{ws}` NetworkPolicy lives in the environment's namespace and cannot carry an
-/// ownerReference across it, so `delete_ws` removes it BY HAND while the spec is still readable —
-/// which is precisely the kind of hand-written cleanup that stops happening unnoticed. The policy
-/// is read from Kubernetes rather than inferred: there is no API that reports one.
-pub(crate) async fn attach_pair(c: &mut Ctx) {
+/// `env.space.cleared`: clearing a space's choice removes the environment-side half of its grant,
+/// which is owned by the choice itself — a garbage collection nobody has to remember to write. The
+/// policy is read from Kubernetes: there is no API that reports one. Present first, or the absence
+/// says nothing.
+pub(crate) async fn space_cleared(c: &mut Ctx) {
     let (Some(env), Some(k)) = (c.state.env_multi.clone(), c.kube.clone()) else {
-        let why = if c.kube.is_none() { "no kubeconfig" } else { "no environment to attach to" };
-        return c.skip("env.attach.pair", why);
+        let why = if c.kube.is_none() { "no kubeconfig" } else { "no environment to choose" };
+        return c.skip("env.space.cleared", why);
     };
-    let name = format!("{}-att", c.prefix());
-    c.step("env.attach.pair", ATTACH_PAIR_CEILING, move |c| {
+    c.step("env.space.cleared", ATTACH_PAIR_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let url = api(c, "/v1/workspaces");
-        let region = c.cfg.region.clone();
+        let space = api(c, &format!("/v1/me/environments/{}", c.probe_user));
+        let ns = kloudlite_workspaces::crd::env_namespace(&env);
+        let policy = kloudlite_workspaces::k8s::space_ingress_name(&kloudlite_workspaces::crd::ws_namespace(&c.probe_user, ""));
         async move {
-            let body = json!({ "name": name, "region": region, "quota_gb": QUOTA_GB, "packages": [] });
-            let doc = post(c, &url, &jwt, body).await.context("could not create the workspace")?;
-            let id = doc
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("the answer carried no workspace id"))?
-                .to_string();
-            let one = api(c, &format!("/v1/workspaces/{id}"));
-            poll_json(c, &one, &jwt, ATTACH_PAIR_CEILING - Duration::from_secs(30), |v| {
-                v.get("state").and_then(Value::as_str) == Some("ready")
-            })
-            .await
-            .context("the workspace never became ready")?;
-            post(c, &format!("{one}/attach"), &jwt, json!({ "environment": env }))
-                .await
-                .context("could not attach")?;
-            let ns = kloudlite_workspaces::crd::env_namespace(&env);
-            let policy = format!("attach-{id}");
-            // Present first, or the absence below says nothing: a policy that was never written is
-            // gone after the delete whether or not `delete_ws` removes anything.
-            netpol_is(&k, &ns, &policy, true, Duration::from_secs(30))
-                .await
-                .context("attaching wrote no environment-side policy")?;
-            call(c, reqwest::Method::DELETE, &one, &jwt, None).await.context("could not delete the workspace")?;
+            call(c, reqwest::Method::PUT, &space, &jwt, Some(json!({ "environment": env }))).await.context("could not choose the environment")?;
+            netpol_is(&k, &ns, &policy, true, Duration::from_secs(60)).await.context("choosing wrote no environment-side policy")?;
+            call(c, reqwest::Method::DELETE, &space, &jwt, None).await.context("could not clear the environment")?;
             netpol_is(&k, &ns, &policy, false, Duration::from_secs(30))
                 .await
-                .context("deleting the attached workspace left the environment-side policy standing")
+                .context("clearing the space left the environment-side policy standing")
         }
         .boxed()
     })

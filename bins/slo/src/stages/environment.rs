@@ -1,5 +1,5 @@
-//! Stage 6 · Environment: one environment with one service, and the attachment that makes it
-//! reachable from a workspace by bare name.
+//! Stage 6 · Environment: one environment with one service, and the space choice that makes it
+//! reachable by bare name from every workspace (and the bench) of the probe owner's space.
 //!
 //! Worst case 420 s if every step times out (120 + 20 + 20 + 20 + 90 + 30 + 120); see
 //! `workspace.rs`'s note
@@ -23,6 +23,8 @@ use crate::ctx::Ctx;
 const CREATE_CEILING: Duration = Duration::from_secs(120);
 const DNS_CEILING: Duration = Duration::from_secs(20);
 const ATTACH_CEILING: Duration = Duration::from_secs(20);
+/// `env.space.bench`: a wake (up to 90 s) plus the reconcile, against the catalogue's 120 s.
+const SPACE_BENCH_CEILING: Duration = Duration::from_secs(150);
 // The catalogue allows 90 s for an environment push; the ceiling may never be under its own
 // target, or a breach and a cut-off step become the same sample.
 const PUSH_CEILING: Duration = Duration::from_secs(90);
@@ -45,8 +47,13 @@ const PORT: u16 = 6379;
 const QUOTA_GB: u64 = 1;
 
 /// Every id after the create, in journey order.
-const AFTER_CREATE: [&str; 6] =
-    ["env.exec.ok", "env.dns", "env.attach", "env.detach", "env.push.p95", "env.clone.p95"];
+const AFTER_CREATE: [&str; 7] =
+    ["env.exec.ok", "env.dns", "env.attach", "env.space.live", "env.detach", "env.push.p95", "env.clone.p95"];
+
+/// The probe owner's personal space: every probe workspace is personal, so its team is the handle.
+fn my_space(c: &Ctx) -> String {
+    api(c, &format!("/v1/me/environments/{}", c.probe_user))
+}
 
 pub async fn run(c: &mut Ctx) {
     fast(c).await;
@@ -283,43 +290,51 @@ async fn resolves(c: &Ctx, env: &str, cap: Duration) -> Result<bool> {
     Ok(code == 0 && out.trim().eq_ignore_ascii_case("pong"))
 }
 
-/// `env.attach` and `env.detach`: the attachment takes effect, and stops having effect, INSIDE the
-/// workspace pod — a `/etc/resolv.conf` the agent renders in place, which is what makes both work
-/// without restarting the pod.
+/// `env.attach`, `env.space.live` and `env.detach`: the SPACE's choice takes effect, and stops
+/// having effect, INSIDE the workspace pods — a `/etc/resolv.conf` the agent renders in place, which
+/// is what makes all three work without restarting a pod.
 ///
-/// One function for both because they are one experiment: detaching proves nothing unless the same
-/// lookup resolved a moment earlier, and attaching proves nothing that a permanently-open resolver
-/// would not also pass.
+/// One function because they are one experiment: clearing proves nothing unless the same lookup
+/// resolved a moment earlier. `env.space.live` asks the run's CLONE, a second workspace of the same
+/// space that was already running before the choice was made.
 async fn attach(c: &mut Ctx, env: &str) {
     let (Some(ws), true) = (c.state.workspace.clone(), c.kube.is_some()) else {
         let why = if c.kube.is_none() { "no kubeconfig" } else { "no workspace" };
-        c.skip("env.attach", why);
-        c.skip("env.detach", why);
+        for id in ["env.attach", "env.space.live", "env.detach"] {
+            c.skip(id, why);
+        }
         return;
     };
     let (e, w) = (env.to_string(), ws.clone());
     let attached = c
         .step("env.attach", ATTACH_CEILING, move |c| {
             let jwt = c.probe_jwt.clone();
-            let url = api(c, &format!("/v1/workspaces/{w}/attach"));
+            let url = my_space(c);
             let body = serde_json::json!({ "environment": e });
             async move {
-                post(c, &url, &jwt, body).await.context("could not attach")?;
+                call(c, reqwest::Method::PUT, &url, &jwt, Some(body)).await.context("could not choose the environment")?;
                 until(c, &w, true, ATTACH_CEILING).await
             }
             .boxed()
         })
         .await;
     if !attached {
-        // The failure was counted where it happened: a detach that was never an attach measures
-        // nothing about detaching.
-        return c.skip("env.detach", "the workspace was never attached");
+        // The failure was counted where it happened: a clear that was never a choice measures
+        // nothing about clearing.
+        c.skip("env.space.live", "the space never chose the environment");
+        return c.skip("env.detach", "the space never chose the environment");
+    }
+    match c.state.clone.clone() {
+        Some(other) => {
+            c.step("env.space.live", ATTACH_CEILING, move |c| async move { until(c, &other, true, ATTACH_CEILING).await }.boxed()).await;
+        }
+        None => c.skip("env.space.live", "no second workspace in the space"),
     }
     c.step("env.detach", ATTACH_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/workspaces/{ws}/detach"));
+        let url = my_space(c);
         async move {
-            post(c, &url, &jwt, Value::Null).await.context("could not detach")?;
+            call(c, reqwest::Method::DELETE, &url, &jwt, None).await.context("could not clear the environment")?;
             until(c, &ws, false, ATTACH_CEILING).await
         }
         .boxed()
@@ -379,8 +394,8 @@ async fn push(c: &mut Ctx, env: &str) {
 /// The three ids `intercepts` owns. Hourly, and a fast run walks none of them — the same shape
 /// stage 2 uses for `git.branch.delete`, and for the same reason: this journey stands up a second
 /// environment and a second workspace, which is too much to pay every five minutes.
-const INTERCEPT_IDS: [&str; 3] =
-    ["env.intercept", "env.intercept.fallback", "env.intercept.refused"];
+const INTERCEPT_IDS: [&str; 4] =
+    ["env.intercept", "env.intercept.fallback", "env.intercept.refused", "env.space.bench"];
 
 /// The service the workspace takes over. A SECOND service, not `SERVICE`: an intercept scales the
 /// real StatefulSet to 0, so intercepting the only service would leave the namespace with no pod
@@ -474,8 +489,8 @@ async fn answers(c: &Ctx, env: &str, script: &str, want: &str, cap: Duration) ->
 
 /// `env.intercept`, `env.intercept.refused` and `env.intercept.fallback`, in that order.
 ///
-/// The refusals sit BETWEEN the other two on purpose: the 422 needs a workspace that is attached
-/// and running, and the fallback is the step that stops it. Two of them share one environment,
+/// The refusals come FIRST on purpose: the "no environment" case clears the space for a moment,
+/// which would release an intercept already in force, and the 422 needs the workspace running. Two of them share one environment,
 /// one workspace and one listener because standing those up is the whole cost.
 async fn intercepts(c: &mut Ctx) {
     if c.suite != Suite::Hourly {
@@ -488,8 +503,9 @@ async fn intercepts(c: &mut Ctx) {
         Ok(pair) => pair,
         Err(e) => return return_skip(c, &format!("{e:#}")),
     };
-    let held = intercept(c, &env, &ws).await;
+    space_bench(c, &env).await;
     refused(c, &env, &ws).await;
+    let held = intercept(c, &env, &ws).await;
     fallback(c, &env, &ws, held).await;
     // Best effort, exactly like `experience_ws`'s own cleanup: teardown's `run-{run_id}` prefix
     // sweep finds both by name anyway, and deleting here only keeps the run from holding a second
@@ -520,10 +536,9 @@ async fn stand_up(c: &mut Ctx) -> Result<(String, String)> {
     let ws = super::experience_ws::create(c, &format!("{}-iceptws", c.prefix()), serde_json::json!({ "packages": [] }))
         .await
         .context("could not create the intercepting workspace")?;
-    let url = api(c, &format!("/v1/workspaces/{ws}/attach"));
-    post(c, &url, &c.probe_jwt, serde_json::json!({ "environment": env }))
+    call(c, reqwest::Method::PUT, &my_space(c), &c.probe_jwt, Some(serde_json::json!({ "environment": env })))
         .await
-        .context("could not attach the intercepting workspace")?;
+        .context("could not choose the intercept environment for the space")?;
     let (code, out, err) = super::workspace::ws_exec(c, &ws, LISTENER, WS_CEILING).await?;
     if code != 0 {
         return Err(anyhow!("the workspace listener never came up ({code}): {} {}", out.trim(), err.trim()));
@@ -639,40 +654,72 @@ fn wished(doc: &Value, svc: &str) -> bool {
 }
 
 /// `env.intercept.refused`: the two guards that stop an intercept pointing traffic somewhere
-/// nobody authorised — a workspace that is not attached here, and a port the service does not
-/// declare. The status AND the sentence, because a 409 that names nothing leaves a person guessing.
+/// nobody authorised — a workspace whose space uses no environment, and a port the service does
+/// not declare. The status AND the sentence, because a 409 that names nothing leaves a person
+/// guessing. The first case clears the space and puts the choice back before the second.
 async fn refused(c: &mut Ctx, env: &str, ws: &str) {
-    // The fast journey's own workspace, which stage 6 has already detached: a workspace that is
-    // the caller's (so the route gets past its 404) and is attached somewhere else, or nowhere.
-    let Some(other) = c.state.workspace.clone() else {
-        return c.skip("env.intercept.refused", "no second workspace to refuse");
-    };
     let (e, w) = (env.to_string(), ws.to_string());
     c.step("env.intercept.refused", REFUSED_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let url = api(c, &format!("/v1/environments/{e}/intercepts"));
-        let unattached = serde_json::json!({ "service": TARGET, "workspace": other, "ports": [] });
-        // A port the service does not declare, on the workspace that IS attached — so the only
-        // thing wrong with the request is the port.
+        let space = my_space(c);
+        let unattached = serde_json::json!({ "service": TARGET, "workspace": w, "ports": [] });
+        // A port the service does not declare, on a workspace whose space DOES use it — so the
+        // only thing wrong with the request is the port.
         let bad_port = serde_json::json!({
             "service": TARGET,
             "workspace": w,
             "ports": [{ "service": 9999, "workspace": WS_PORT }],
         });
         async move {
-            for (body, want, names) in [
-                (unattached, reqwest::StatusCode::CONFLICT, "not attached"),
-                (bad_port, reqwest::StatusCode::UNPROCESSABLE_ENTITY, "9999"),
-            ] {
-                let (status, text) = raw(c, reqwest::Method::POST, &url, &jwt, Some(body), &[]).await?;
-                if status != want {
-                    return Err(anyhow!("the intercept answered {status}, not {want}: {}", text.trim()));
+            call(c, reqwest::Method::DELETE, &space, &jwt, None).await.context("could not clear the space")?;
+            let first = expect_refusal(c, &url, &jwt, unattached, reqwest::StatusCode::CONFLICT, "does not use this environment").await;
+            call(c, reqwest::Method::PUT, &space, &jwt, Some(serde_json::json!({ "environment": e })))
+                .await
+                .context("could not choose the environment again")?;
+            first?;
+            expect_refusal(c, &url, &jwt, bad_port, reqwest::StatusCode::UNPROCESSABLE_ENTITY, "9999").await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+async fn expect_refusal(c: &Ctx, url: &str, jwt: &str, body: Value, want: reqwest::StatusCode, names: &str) -> Result<()> {
+    let (status, text) = raw(c, reqwest::Method::POST, url, jwt, Some(body), &[]).await?;
+    if status != want {
+        return Err(anyhow!("the intercept answered {status}, not {want}: {}", text.trim()));
+    }
+    if !text.contains(names) {
+        return Err(anyhow!("the refusal does not say what was wrong ({names:?}): {}", text.trim()));
+    }
+    Ok(())
+}
+
+/// `env.space.bench`: the probe owner's bench is a pod of the same space, so the choice reaches its
+/// `/etc/resolv.conf` too. Read as a file rather than a lookup: the bench image is the harness's,
+/// and the platform mount is the thing under test. Woken first — an idle bench has no pod.
+async fn space_bench(c: &mut Ctx, env: &str) {
+    let want = format!("{}.svc.", kloudlite_workspaces::crd::env_namespace(env));
+    c.step("env.space.bench", SPACE_BENCH_CEILING, move |c| {
+        async move {
+            let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
+            let _ = raw(c, reqwest::Method::POST, &api(c, "/v1/bench/session"), &c.probe_jwt, None, &[]).await;
+            super::bench::wait_phase(c, "ready", Duration::from_secs(90)).await?;
+            let ns = kloudlite_workspaces::crd::ws_namespace(&c.probe_user, &c.probe_user);
+            let start = std::time::Instant::now();
+            loop {
+                let (_, out, _) = crate::kube::exec(&k, &ns, kloudlite_workspaces::k8s::BENCH_POD, Some(kloudlite_workspaces::k8s::BENCH_CONTAINER), &["cat", "/etc/resolv.conf"], EXEC_CEILING)
+                    .await
+                    .unwrap_or_default();
+                if out.contains(&want) {
+                    return Ok(());
                 }
-                if !text.contains(names) {
-                    return Err(anyhow!("the refusal does not say what was wrong ({names:?}): {}", text.trim()));
+                if start.elapsed() >= SPACE_BENCH_CEILING - Duration::from_secs(5) {
+                    return Err(anyhow!("the bench's resolv.conf never searched {want}: {:?}", out.lines().next().unwrap_or("")));
                 }
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            Ok(())
         }
         .boxed()
     })

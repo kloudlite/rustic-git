@@ -281,8 +281,11 @@ pub const CATALOGUE: &[Slo] = &[
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.dns", feature: "Environments", sli: "A service in an environment resolves a sibling by bare name and connects to it", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
-    Slo { id: "env.attach", feature: "Environments", sli: "Attaching a workspace to an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
-    Slo { id: "env.detach", feature: "Environments", sli: "Detaching a workspace from an environment takes effect", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
+    Slo { id: "env.attach", feature: "Environments", sli: "Choosing an environment for a space takes effect in its workspace", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
+    Slo { id: "env.detach", feature: "Environments", sli: "Clearing a space's environment takes effect in its workspace", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
+    // The promise itself: a workspace ALREADY running when the space chose resolves the service,
+    // with no restart.
+    Slo { id: "env.space.live", feature: "Environments", sli: "A second workspace already running when the space chooses an environment resolves its service without a restart", target: bound(10_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.push.p95", feature: "Environments", sli: "Pushing an environment snapshot completes", target: p95(90_000), suite: Suite::Fast, stage: "6 · Environment" },
     Slo { id: "env.exec.ok", feature: "Environments", sli: "Exec into a running service pod of the environment succeeds", target: avail(99.9), suite: Suite::Fast, stage: "6 · Environment" },
     // 120 s, not the workspace clone's 60: an environment copies LIVE bytes from the node that
@@ -298,7 +301,9 @@ pub const CATALOGUE: &[Slo] = &[
     // the automatic path — and both halves are asserted, because a fallback that also cleared
     // `spec.intercepts` would silently discard what the person asked for.
     Slo { id: "env.intercept.fallback", feature: "Environments", sli: "Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec", target: p95(180_000), suite: Suite::Hourly, stage: "6 · Environment" },
-    Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+    // Hourly: the bench may be asleep, and waking it is not a five-minute cost.
+    Slo { id: "env.space.bench", feature: "Environments", sli: "The probe owner's bench follows its space's environment in its resolv.conf", target: bound(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
     // Hourly: proving a hidden thing stays hidden is not a five-minute cost, and the builder
     // is not stood up by this id — it asks about whatever the owner's builder already is.
     Slo { id: "builder.hidden", feature: "Environments", sli: "The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
@@ -437,7 +442,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "pr.mergeability", feature: "Pull requests", sli: "Mergeability is reported clean for a clean change and dirty for a conflicting one", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.invite.revoke", feature: "Teams", sli: "A revoked invite token is refused", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.environment", feature: "Teams", sli: "A team environment lands in the team namespace and its services resolve", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "env.attach.pair", feature: "Environments", sli: "Deleting an attached workspace removes the environment-side policy", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.space.cleared", feature: "Environments", sli: "Clearing a space's environment removes the environment-side policy", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "vol.list", feature: "Workspace lifecycle", sli: "The volume list names every volume the run holds", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.stop.environment", feature: "Admin", sli: "An admin stop of an environment is visible to the owner as `stopped`", target: bound(30_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "admin.delete.workload", feature: "Admin", sli: "An admin delete takes a workspace and an environment away", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },

@@ -397,6 +397,13 @@ pub async fn teardown(c: &mut Ctx) {
     swept += drop_extra_volumes(c).await;
     // After the deny sweep above: a request is denied through the API and then the object goes.
     swept += sweep_requests(c).await;
+    // The probe owner's space choice: named by the owner, not the run, so the prefix sweep cannot
+    // see it, and a run killed between a choice and its clear leaves it pointing at a deleted
+    // environment. Idempotent.
+    let space = api(c, &format!("/v1/me/environments/{}", c.probe_user));
+    if let Err(e) = call(c, reqwest::Method::DELETE, &space, &c.probe_jwt, None).await {
+        tracing::warn!(kind = "space", op = "clear", error = %format!("{e:#}"), "slo.teardown.failed");
+    }
     tracing::info!(count = swept, "slo.teardown.completed");
 }
 

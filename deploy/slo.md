@@ -94,14 +94,16 @@ first destructive stage.
 | `ws.build.promote` | Workspaces | `kl push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
 | `env.create.p95` | Environments | Creating an environment completes | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.dns` | Environments | A service in an environment resolves a sibling by bare name and connects to it | 99.9 % | fast | 6 · Environment |
-| `env.attach` | Environments | Attaching a workspace to an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
-| `env.detach` | Environments | Detaching a workspace from an environment takes effect | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
+| `env.attach` | Environments | Choosing an environment for a space takes effect in its workspace | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
+| `env.detach` | Environments | Clearing a space's environment takes effect in its workspace | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
+| `env.space.live` | Environments | A second workspace already running when the space chooses an environment resolves its service without a restart | 99.9 % ≤ 10000 ms | fast | 6 · Environment |
 | `env.push.p95` | Environments | Pushing an environment snapshot completes | 95 % ≤ 90000 ms | fast | 6 · Environment |
 | `env.exec.ok` | Environments | Exec into a running service pod of the environment succeeds | 99.9 % | fast | 6 · Environment |
 | `env.clone.p95` | Environments | Cloning a running environment completes with its services ready | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.intercept` | Environments | An intercepted service answers from the attached workspace on a remapped port | 95 % ≤ 120000 ms | hourly | 6 · Environment |
 | `env.intercept.fallback` | Environments | Stopping the workspace brings the real service back on its own, and the intercept is still in the environment's spec | 95 % ≤ 180000 ms | hourly | 6 · Environment |
-| `env.intercept.refused` | Environments | An intercept of an unattached workspace, and one naming a port the service does not declare, are both refused | 99.9 % | hourly | 6 · Environment |
+| `env.intercept.refused` | Environments | An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused | 99.9 % | hourly | 6 · Environment |
+| `env.space.bench` | Environments | The probe owner's bench follows its space's environment in its resolv.conf | 99.9 % ≤ 120000 ms | hourly | 6 · Environment |
 | `builder.hidden` | Environments | The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots | 99.9 % | hourly | 6 · Environment |
 | `ws.stop.p95` | Workspace lifecycle | Stopping a workspace completes | 95 % ≤ 15000 ms | fast | 7 · Lifecycle |
 | `ws.replicated` | Workspace lifecycle | A stopped workspace's final sync point reaches a replica, named by that replica | 99.9 % ≤ 60000 ms | fast | 7 · Lifecycle |
@@ -189,7 +191,7 @@ first destructive stage.
 | `pr.mergeability` | Pull requests | Mergeability is reported clean for a clean change and dirty for a conflicting one | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `team.invite.revoke` | Teams | A revoked invite token is refused | 100 % | hourly | 14 · Experience |
 | `team.environment` | Teams | A team environment lands in the team namespace and its services resolve | 95 % ≤ 180000 ms | hourly | 14 · Experience |
-| `env.attach.pair` | Environments | Deleting an attached workspace removes the environment-side policy | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
+| `env.space.cleared` | Environments | Clearing a space's environment removes the environment-side policy | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `vol.list` | Workspace lifecycle | The volume list names every volume the run holds | 99.9 % | hourly | 14 · Experience |
 | `admin.stop.environment` | Admin | An admin stop of an environment is visible to the owner as `stopped` | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `admin.delete.workload` | Admin | An admin delete takes a workspace and an environment away | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |

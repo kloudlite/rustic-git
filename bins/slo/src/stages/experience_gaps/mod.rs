@@ -170,7 +170,7 @@ mod tests {
         mergeability(&mut c).await;
         invite_revoke(&mut c).await;
         team_environment(&mut c).await;
-        attach_pair(&mut c).await;
+        space_cleared(&mut c).await;
         vol_list(&mut c).await;
         admin_stop_environment(&mut c).await;
         admin_delete(&mut c).await;
@@ -202,7 +202,7 @@ mod tests {
         "pr.mergeability",
         "team.invite.revoke",
         "team.environment",
-        "env.attach.pair",
+        "env.space.cleared",
         "vol.list",
         "admin.stop.environment",
         "admin.delete.workload",

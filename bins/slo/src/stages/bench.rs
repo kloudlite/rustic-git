@@ -63,7 +63,7 @@ async fn phase(c: &Ctx) -> Result<String> {
     Ok(doc.get("phase").and_then(Value::as_str).unwrap_or_default().to_string())
 }
 
-async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()> {
+pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
         let p = phase(c).await?;
