@@ -84,9 +84,13 @@ test("a team slug is encoded into the query, never spliced raw", async () => {
 });
 
 test("listTeams reads slug, name and region; 401 is Expired", async () => {
-  const s = await stub({ "GET /v1/bench/teams": [{ status: 200, body: [{ slug: "acme", name: "Acme", region: "r1" }, { slug: "fresh", name: "Fresh", region: "" }] }] });
+  const s = await stub({ "GET /v1/bench/teams": [{ status: 200, body: [{ slug: "kay", name: "Personal", region: "r9", personal: true }, { slug: "acme", name: "Acme", region: "r1", personal: false }, { slug: "fresh", name: "Fresh", region: "" }] }] });
   try {
-    assert.deepEqual(await listTeams(s.api, "tok"), [{ slug: "acme", name: "Acme", region: "r1" }, { slug: "fresh", name: "Fresh", region: "" }]);
+    assert.deepEqual(await listTeams(s.api, "tok"), [
+      { slug: "kay", name: "Personal", region: "r9", personal: true },
+      { slug: "acme", name: "Acme", region: "r1", personal: false },
+      { slug: "fresh", name: "Fresh", region: "", personal: false },
+    ]);
     assert.equal(s.auth[0], "Bearer tok");
   } finally {
     s.close();

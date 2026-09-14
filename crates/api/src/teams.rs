@@ -99,6 +99,63 @@ pub(crate) struct NewUser {
     name: String,
 }
 
+/// A person made by THIS sign-in (`createdAt == lastSeenAt`, one `now` in the same upsert; a
+/// repeat within the same millisecond reads as new too, and binding then is harmless) gets
+/// the region when there is exactly one active; zero, several, or any failure leaves it empty —
+/// a region is never a reason to refuse a sign-in. The admin-boot backfill catches the rest.
+async fn place_new_user(api: &Api, db: &kloudlite_pulls::directory::Directory, u: &mut kloudlite_pulls::directory::User) {
+    let Some(list) = api.active_regions.clone() else { return };
+    if !u.region.is_empty() || u.created_at != u.last_seen_at {
+        return;
+    }
+    match list().await {
+        Ok(active) => {
+            let [region] = active.as_slice() else { return };
+            match db.bind_user_region(&u.email, region).await {
+                Ok(Some(r)) => u.region = r,
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "user.region.bind.failed"),
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "region.read.failed"),
+    }
+}
+
+#[cfg(test)]
+mod place_new_user_tests {
+    use super::*;
+
+    fn regions(names: &'static [&'static str]) -> Option<crate::ActiveRegions> {
+        Some(Arc::new(move || Box::pin(async move { Ok(names.iter().map(|s| s.to_string()).collect()) })))
+    }
+
+    #[tokio::test]
+    async fn only_a_new_person_and_only_the_sole_region() {
+        let db = kloudlite_pulls::directory::Directory::in_memory();
+        let mut api = crate::testing::test_api_with_secret("s").await;
+        api.active_regions = regions(&["r1", "r2"]);
+        let mut u = db.upsert_user("a@x.io", "A").await.unwrap();
+        place_new_user(&api, &db, &mut u).await;
+        assert_eq!(u.region, "", "several regions: a person's choice");
+
+        api.active_regions = regions(&["r1"]);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let mut again = db.upsert_user("a@x.io", "A").await.unwrap();
+        place_new_user(&api, &db, &mut again).await;
+        assert_eq!(db.user("a@x.io").await.unwrap().unwrap().region, "", "a returning sign-in is not a creation");
+
+        let mut b = db.upsert_user("b@x.io", "B").await.unwrap();
+        place_new_user(&api, &db, &mut b).await;
+        assert_eq!(b.region, "r1");
+        assert_eq!(db.user("b@x.io").await.unwrap().unwrap().region, "r1");
+
+        api.active_regions = Some(Arc::new(|| Box::pin(async { Err("down".to_string()) })));
+        let mut c = db.upsert_user("c@x.io", "C").await.unwrap();
+        place_new_user(&api, &db, &mut c).await;
+        assert_eq!(c.region, "", "an unreadable cluster never fails the sign-in");
+    }
+}
+
 pub(crate) async fn upsert_user(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -120,7 +177,8 @@ pub(crate) async fn upsert_user(
         Err(r) => return r,
     };
     match db.upsert_user(&body.email, &body.name).await {
-        Ok(u) => {
+        Ok(mut u) => {
+            place_new_user(&api, db, &mut u).await;
             // The token is minted here and nowhere else, so the signing key lives
             // in one process. The web app receives it and presents it on every
             // later call rather than re-asserting who the user is.

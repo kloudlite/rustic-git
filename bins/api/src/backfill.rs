@@ -1,5 +1,5 @@
-//! One-off: bind every team created before a region was required to the region, when there is
-//! exactly one to choose. With zero or several the right answer is a person's, so it does nothing.
+//! One-off: bind every team created before a region was required — and every person with a handle
+//! and no personal region — to the region, when there is exactly one to choose. With zero or several the right answer is a person's, so it does nothing.
 //! Idempotent through `bind_region`'s set-once CAS — a bound team is never touched, so running it
 //! on every admin boot is safe.
 
@@ -25,19 +25,32 @@ pub async fn at_boot(kube: kube::Client, dir: Arc<Directory>, os: Arc<dyn Object
     }
 }
 
-/// How many teams it bound.
-pub async fn run(active: &[String], dir: &Directory, os: &Arc<dyn ObjectStore>) -> usize {
+/// How many (teams, users) it bound.
+pub async fn run(active: &[String], dir: &Directory, os: &Arc<dyn ObjectStore>) -> (usize, usize) {
     let [region] = active else {
         tracing::info!(regions = active.len(), "team.region.backfill.skipped");
-        return 0;
+        return (0, 0);
     };
-    let slugs = match dir.unbound_teams().await {
-        Ok(s) => s,
+    let bound = match dir.unbound_teams().await {
+        Ok(s) => bind_all(s, region, dir, os).await,
         Err(e) => {
             tracing::warn!(error = %e, "team.region.backfill.failed");
-            return 0;
+            0
         }
     };
+    let users_bound = match dir.unbound_users().await {
+        Ok(h) => bind_all(h, region, dir, os).await,
+        Err(e) => {
+            tracing::warn!(error = %e, "team.region.backfill.failed");
+            0
+        }
+    };
+    tracing::info!(bound, users_bound, "team.region.backfill.done");
+    (bound, users_bound)
+}
+
+/// `bind_region` resolves a team slug or a person's handle alike; one audit row per bind landed.
+async fn bind_all(slugs: Vec<String>, region: &String, dir: &Directory, os: &Arc<dyn ObjectStore>) -> usize {
     let mut bound = 0;
     for slug in slugs {
         match dir.bind_region(&slug, region).await {
@@ -60,7 +73,6 @@ pub async fn run(active: &[String], dir: &Directory, os: &Arc<dyn ObjectStore>) 
             Err(e) => tracing::warn!(team = %slug, error = %e, "team.region.backfill.failed"),
         }
     }
-    tracing::info!(bound, "team.region.backfill.done");
     bound
 }
 
@@ -80,18 +92,23 @@ mod tests {
     #[tokio::test]
     async fn one_region_binds_unbound_teams_and_leaves_bound_ones() {
         let (d, os) = fixture().await;
-        assert_eq!(run(&["r1".into()], &d, &os).await, 1);
+        d.upsert_user("b@x.io", "B").await.unwrap();
+        d.claim_username("b@x.io", "bob").await.unwrap().unwrap();
+        d.bind_region("bob", "elsewhere").await.unwrap();
+        assert_eq!(run(&["r1".into()], &d, &os).await, (1, 1));
         assert_eq!(d.get("old").await.unwrap().unwrap().region, "r1");
         assert_eq!(d.get("placed").await.unwrap().unwrap().region, "elsewhere");
-        assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "", "a person is not a team");
-        assert_eq!(run(&["r1".into()], &d, &os).await, 0, "idempotent");
+        assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "r1");
+        assert_eq!(d.user_by_handle("bob").await.unwrap().unwrap().region, "elsewhere", "a bound person is kept");
+        assert_eq!(run(&["r1".into()], &d, &os).await, (0, 0), "idempotent");
     }
 
     #[tokio::test]
     async fn zero_or_several_regions_do_nothing() {
         let (d, os) = fixture().await;
-        assert_eq!(run(&[], &d, &os).await, 0);
-        assert_eq!(run(&["r1".into(), "r2".into()], &d, &os).await, 0);
+        assert_eq!(run(&[], &d, &os).await, (0, 0));
+        assert_eq!(run(&["r1".into(), "r2".into()], &d, &os).await, (0, 0));
         assert_eq!(d.get("old").await.unwrap().unwrap().region, "");
+        assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "");
     }
 }

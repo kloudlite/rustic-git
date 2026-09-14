@@ -29,9 +29,10 @@ test("errors always offer sign out, and retry only when there is something to re
 });
 
 test("the picker lists teams by name, a team with no region disabled with a note", () => {
-  const s = screen({ phase: "choose-team", teams: [{ slug: "acme", name: "Acme", region: "r1" }, { slug: "fresh", name: "", region: "" }] });
+  const s = screen({ phase: "choose-team", teams: [{ slug: "kay", name: "Personal", region: "", personal: true }, { slug: "acme", name: "Acme", region: "r1", personal: false }, { slug: "fresh", name: "", region: "", personal: false }] });
   assert.equal(s.title, "Choose a team");
   assert.deepEqual(s.teams, [
+    { slug: "kay", label: "Personal", disabled: true, note: "no region yet — ask an admin" },
     { slug: "acme", label: "Acme", disabled: false },
     { slug: "fresh", label: "fresh", disabled: true, note: "no region yet — ask an admin" },
   ]);

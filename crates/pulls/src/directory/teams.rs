@@ -771,6 +771,19 @@ mod tests {
         assert_eq!(d.unbound_teams().await.unwrap(), vec!["old".to_string()], "a person's handle is never listed");
     }
 
+    #[tokio::test]
+    async fn unbound_users_lists_handles_without_a_region_and_binds_by_email_once() {
+        let d = Directory::in_memory();
+        d.upsert_user("alice@x.io", "Alice").await.unwrap();
+        d.claim_username("alice@x.io", "alice").await.unwrap().unwrap();
+        d.upsert_user("nohandle@x.io", "N").await.unwrap();
+        d.create("old", "Old", "alice@x.io", "").await.unwrap().unwrap();
+        assert_eq!(d.unbound_users().await.unwrap(), vec!["alice".to_string()], "teams and handle-less people are not listed");
+        assert_eq!(d.bind_user_region("NoHandle@x.io", "r1").await.unwrap().as_deref(), Some("r1"));
+        assert_eq!(d.bind_user_region("nohandle@x.io", "r2").await.unwrap().as_deref(), Some("r1"), "set once");
+        assert_eq!(d.bind_user_region("ghost@x.io", "r1").await.unwrap(), None);
+    }
+
     #[test]
     fn an_older_team_document_still_parses() {
         let old = r#"{"_id":"acme","name":"Acme","createdBy":"a@x.io","createdAt":{"$date":{"$numberLong":"0"}},"members":[]}"#;

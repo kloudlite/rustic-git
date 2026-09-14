@@ -5,9 +5,9 @@ import type { Team } from "../../src/connect/bench.ts";
 
 const cred = { api: "https://k.test", token: "t", expiresAt: "2030", username: "karthik" };
 const expired = () => Object.assign(new Error("your login has expired"), { name: "Expired" });
-const ACME: Team = { slug: "acme", name: "Acme", region: "r1" };
-const BETA: Team = { slug: "beta", name: "Beta", region: "r2" };
-const FRESH: Team = { slug: "fresh", name: "Fresh", region: "" };
+const ACME: Team = { slug: "acme", name: "Acme", region: "r1", personal: false };
+const BETA: Team = { slug: "beta", name: "Beta", region: "r2", personal: false };
+const FRESH: Team = { slug: "fresh", name: "Fresh", region: "", personal: false };
 
 function harness(over: Partial<Deps> = {}, teams: Team[] = [ACME]) {
   let stored: typeof cred | undefined;
@@ -300,4 +300,20 @@ test("signing out while the team list is loading never lands on the picker", asy
   release([ACME, BETA]);
   await p;
   assert.deepEqual(h.auth.state(), { phase: "signed-out" });
+});
+
+test("Personal is chosen like a team: its handle is the team the bench is opened in", async () => {
+  const ME: Team = { slug: "kay", name: "Personal", region: "r9", personal: true };
+  const NONE: Team = { slug: "kay", name: "Personal", region: "", personal: true };
+  const h = harness({}, [ME, ACME]);
+  h.set(cred);
+  await h.auth.launch();
+  assert.deepEqual(h.auth.state(), { phase: "choose-team", teams: [ME, ACME] });
+  await h.auth.chooseTeam("kay");
+  assert.deepEqual(h.auth.state(), { phase: "ready", username: cred.username, team: "kay" });
+  const u = harness({}, [NONE, ACME]);
+  u.set(cred);
+  await u.auth.launch();
+  await u.auth.chooseTeam("kay");
+  assert.equal(u.auth.state().phase, "choose-team", "a region-less Personal is not choosable");
 });

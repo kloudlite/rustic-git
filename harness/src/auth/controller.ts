@@ -6,8 +6,8 @@ import type { Team } from "../connect/bench";
  * browser, tunnel) is injected so the transitions run under node --test; main.ts supplies the
  * real ones. The state never carries the token — it is what crosses to the renderer.
  *
- * A bench belongs to a TEAM and the team owns the region (owner decision 2026-09-13), so after
- * sign-in the person picks a team; there is no personal bench here. The choice is remembered
+ * A bench belongs to a space — the person's Personal one or a TEAM — and the space owns the
+ * region, so after sign-in the person picks one (Personal is listed first, as the server orders it). The choice is remembered
  * (a plain setting) and re-checked against the live team list on every connect.
  */
 export type AuthState =

@@ -135,6 +135,12 @@ pub trait Directory: Send + Sync {
         Err("no directory".into())
     }
 
+    /// The region a person's own space is bound to ("" = unbound), by handle; `Err` = unreadable,
+    /// which `/v1/bench/teams` turns into its 503. Defaulted to refuse.
+    async fn personal_region(&self, _handle: &str) -> Result<String, String> {
+        Err("no directory".into())
+    }
+
     /// A team's display name and bound region ("" = unbound); `Ok(None)` = no such team.
     async fn bench_team(&self, _slug: &str) -> Result<Option<(String, String)>, String> {
         Err("no directory".into())

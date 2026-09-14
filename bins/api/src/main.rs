@@ -127,6 +127,10 @@ impl kloudlite_workspaces::api::Directory for Dir {
         Ok(self.0.get(slug).await.map_err(|e| e.to_string())?.map(|t| (t.name, t.region)))
     }
 
+    async fn personal_region(&self, handle: &str) -> std::result::Result<String, String> {
+        Ok(self.0.user_by_handle(handle).await.map_err(|e| e.to_string())?.map(|u| u.region).unwrap_or_default())
+    }
+
     async fn region_of(&self, slug: &str) -> Option<String> {
         let region = match self.0.get(slug).await.ok()? {
             Some(t) => t.region,
@@ -506,6 +510,13 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<bool, String>> + Send>>
         }) as kloudlite_api::RegionCheck
     });
+    let active_regions: Option<kloudlite_api::ActiveRegions> = workspaces.clone().map(|ws| {
+        Arc::new(move || {
+            let ws = ws.clone();
+            Box::pin(async move { kloudlite_workspaces::api::active_regions(&ws).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Vec<String>, String>> + Send>>
+        }) as kloudlite_api::ActiveRegions
+    });
     // The hook is best effort and a cluster write can be lost; the beat is what makes a missed
     // projection at most `KEYS_RESYNC_SECS` old. Only on the user role, the one that mounts `/v1`
     // and owns the projection.
@@ -557,6 +568,7 @@ async fn run() -> Result<()> {
         workspaces_router,
         on_keys_changed,
         region_check,
+        active_regions,
         role == "admin",
     )
     .await

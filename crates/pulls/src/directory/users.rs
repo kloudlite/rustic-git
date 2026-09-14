@@ -172,6 +172,57 @@ impl Directory {
         }
     }
 
+    /// Set-once region by EMAIL, for the first sign-in, before a handle exists. `Ok(None)` = no
+    /// such user; otherwise the region held afterwards.
+    pub async fn bind_user_region(&self, email: &str, region: &str) -> Result<Option<String>> {
+        let email = email.trim().to_lowercase();
+        match &self.backend {
+            Backend::Mongo(m) => {
+                m.users
+                    .update_one(
+                        doc! { "_id": &email, "$or": [{ "region": { "$exists": false } }, { "region": "" }] },
+                        doc! { "$set": { "region": region } },
+                    )
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+            }
+            Backend::Memory(s) => {
+                if let Some(u) = s.lock().unwrap().users.get_mut(&email) {
+                    if u.region.is_empty() {
+                        u.region = region.to_string();
+                    }
+                }
+            }
+        }
+        Ok(self.user(&email).await?.map(|u| u.region))
+    }
+
+    /// Handles of every person with a handle and no region — the admin-boot backfill's work list.
+    /// Unbounded for the same reason as `unbound_teams`; a person with no handle yet is bound at
+    /// the backfill after they claim one.
+    pub async fn unbound_users(&self) -> Result<Vec<String>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let filter = doc! {
+                    "username": { "$exists": true },
+                    "$or": [{ "region": { "$exists": false } }, { "region": "" }],
+                };
+                let cursor = m.users.find(filter).await.map_err(|e| err(format!("mongo: {e}")))?;
+                let users: Vec<User> = cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))?;
+                Ok(users.into_iter().filter_map(|u| u.username).collect())
+            }
+            Backend::Memory(s) => Ok(s
+                .lock()
+                .unwrap()
+                .users
+                .values()
+                .filter(|u| u.region.is_empty())
+                .filter_map(|u| u.username.clone())
+                .collect()),
+        }
+    }
+
     pub async fn user(&self, email: &str) -> Result<Option<User>> {
         let email = email.trim().to_lowercase();
         match &self.backend {

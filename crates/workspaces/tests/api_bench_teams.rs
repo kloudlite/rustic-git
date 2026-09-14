@@ -16,6 +16,8 @@ struct Dir {
     lookups: AtomicUsize,
     /// (handle, team)
     members: Mutex<Vec<(&'static str, &'static str)>>,
+    /// The caller's personal region.
+    personal: Mutex<&'static str>,
 }
 
 impl Dir {
@@ -25,6 +27,7 @@ impl Dir {
             up: AtomicBool::new(true),
             lookups: AtomicUsize::new(0),
             members: Mutex::new(vec![("karthik", "acme"), ("karthik", "fresh"), ("meera", "other")]),
+            personal: Mutex::new("r9"),
         })
     }
 }
@@ -64,6 +67,12 @@ impl Directory for Dir {
             return Err("mongo: connection refused at 10.0.0.9:27017".into());
         }
         Ok(self.members.lock().unwrap().iter().filter(|(u, _)| *u == user).map(|(_, t)| t.to_string()).collect())
+    }
+    async fn personal_region(&self, _handle: &str) -> Result<String, String> {
+        if !self.up.load(Ordering::SeqCst) {
+            return Err("mongo: connection refused at 10.0.0.9:27017".into());
+        }
+        Ok(self.personal.lock().unwrap().to_string())
     }
     async fn bench_team(&self, slug: &str) -> Result<Option<(String, String)>, String> {
         let region = if slug == "fresh" { "" } else { "r1" };
@@ -137,8 +146,9 @@ async fn a_member_sees_only_their_own_teams_whatever_the_query_says() {
     assert_eq!(
         serde_json::from_str::<Value>(&a.text).unwrap(),
         json!([
-            {"slug": "acme", "name": "acme inc", "region": "r1"},
-            {"slug": "fresh", "name": "fresh inc", "region": ""},
+            {"slug": "karthik", "name": "Personal", "region": "r9", "personal": true},
+            {"slug": "acme", "name": "acme inc", "region": "r1", "personal": false},
+            {"slug": "fresh", "name": "fresh inc", "region": "", "personal": false},
         ]),
     );
     // A session token authenticates the same person the same way.
@@ -167,4 +177,22 @@ async fn an_unreadable_directory_is_503_without_detail_never_an_empty_list() {
     assert_eq!(a.status, 503);
     assert!(a.no_store);
     assert!(!a.text.contains("mongo") && !a.text.contains("10.0.0.9"), "{}", a.text);
+}
+
+#[tokio::test]
+async fn the_personal_space_comes_first_with_its_own_region_even_with_no_teams() {
+    let dir = Dir::new(true);
+    *dir.personal.lock().unwrap() = "";
+    let (base, jwt) = serve(dir.clone()).await;
+    let a = get(&base, "/v1/bench/teams", Some(&cli(&jwt, "nobody"))).await;
+    assert_eq!(a.status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&a.text).unwrap(),
+        json!([{"slug": "nobody", "name": "Personal", "region": "", "personal": true}]),
+    );
+    *dir.personal.lock().unwrap() = "r2";
+    let a = get(&base, "/v1/bench/teams", Some(&cli(&jwt, "meera"))).await;
+    let v = serde_json::from_str::<Value>(&a.text).unwrap();
+    assert_eq!(v[0], json!({"slug": "meera", "name": "Personal", "region": "r2", "personal": true}));
+    assert_eq!(v[1]["slug"], "other");
 }

@@ -103,6 +103,8 @@ pub struct Api {
     pub on_keys_changed: Option<KeysChanged>,
     /// `None` without a cluster: team creation then refuses (503) rather than place a team nowhere.
     pub region_check: Option<RegionCheck>,
+    /// `None` without a cluster: a new person then simply starts with no region.
+    pub active_regions: Option<ActiveRegions>,
     /// See `browse::Membership`: the browse path's answer to "may this person read under
     /// this owner", kept for a minute.
     pub membership: crate::browse::Membership,
@@ -117,6 +119,13 @@ pub struct Api {
 /// for the same reason as `KeysChanged`: regions are CRDs, read through `kloudlite-workspaces`.
 pub type RegionCheck = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<bool, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Every active `Region`'s name, boxed like `RegionCheck`.
+pub type ActiveRegions = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Vec<String>, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -137,6 +146,7 @@ pub async fn serve(
     workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
     region_check: Option<RegionCheck>,
+    active_regions: Option<ActiveRegions>,
     // Same `KLOUDLITE_API_ROLE` read that picks `workspaces`' router: the superadmin roster
     // routes are as admin-only as `/admin/*` is, so a user-role process must not compile them in
     // either, not just refuse them at auth time.
@@ -177,6 +187,7 @@ pub async fn serve(
             .expect("building an HTTP client cannot fail with these options"), // boot-time
         on_keys_changed,
         region_check,
+        active_regions,
         membership: crate::browse::Membership::default(),
         central,
     });
@@ -495,6 +506,7 @@ pub(crate) mod testing {
             client: reqwest::Client::new(),
             on_keys_changed: None,
             region_check: None,
+            active_regions: None,
             membership: crate::browse::Membership::default(),
             central: kloudlite_core::settings::LiveSettings::new(
                 kloudlite_core::settings::CentralSettings::from_env(),

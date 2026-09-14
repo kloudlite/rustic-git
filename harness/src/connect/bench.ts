@@ -78,17 +78,21 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** A team the person may open a bench in; `region` "" = none bound yet (no bench can exist). */
-export type Team = { slug: string; name: string; region: string };
+/**
+ * A space the person may open a bench in; `region` "" = none bound yet (no bench can exist).
+ * `personal`: the person's own space, listed first, whose slug is their handle — sent as `team`
+ * exactly like a team's, which the server already reads as the personal bench.
+ */
+export type Team = { slug: string; name: string; region: string; personal: boolean };
 
-/** `GET /v1/bench/teams`: the person's own teams only (`crates/workspaces/src/api/bench.rs`). */
+/** `GET /v1/bench/teams`: Personal first, then the person's own teams only (`crates/workspaces/src/api/bench.rs`). */
 export async function listTeams(api: string, token: string, signal?: AbortSignal): Promise<Team[]> {
   const r = await fetch(`${api}/v1/bench/teams`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal });
   if (r.status === 401) throw new Expired();
   if (!r.ok) throw new Error(`Kloudlite answered ${r.status} listing your teams`);
   const list = (await r.json()) as unknown;
   if (!Array.isArray(list)) throw new Error("Kloudlite answered an unreadable team list");
-  return list.map((t) => ({ slug: String(t?.slug ?? ""), name: String(t?.name ?? t?.slug ?? ""), region: String(t?.region ?? "") })).filter((t) => t.slug);
+  return list.map((t) => ({ slug: String(t?.slug ?? ""), name: String(t?.name ?? t?.slug ?? ""), region: String(t?.region ?? ""), personal: t?.personal === true })).filter((t) => t.slug);
 }
 
 const q = (team: string) => `?team=${encodeURIComponent(team)}`;
