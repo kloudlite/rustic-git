@@ -161,11 +161,12 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     let space = super::space::converge_space(
         &ctx,
         super::space::Pod {
+            owner_ref: super::owner_ref_of_kind(&*b)?,
             id: &name,
             owner: &owner,
             team: &team,
             region: &ctx.region,
-            field: b.spec.attached_environment.as_deref(),
+            field: crd::retired_attach(b.meta(), b.spec.attached_environment.as_deref()),
             prev: &prev.conditions,
             gen,
         },

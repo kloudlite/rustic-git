@@ -40,6 +40,22 @@ pub struct SpaceEnvironmentSpec {
 pub struct SpaceEnvironmentStatus {}
 
 
+/// Stamped by the api's migration on a Workspace or Bench whose retired `attachedEnvironment` it has
+/// settled (a choice exists, or the attach can never become one). From then on the field is ignored
+/// even while it is still set — so a clear that failed, or one deferred until every agent reads
+/// choices, can never resurrect an attach the person has since cleared.
+pub const SPACE_MIGRATED_ANNOTATION: &str = "kloudlite.io/space-migrated";
+
+
+/// The retired field, unless the migration has settled it.
+pub fn retired_attach<'a>(meta: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta, field: Option<&'a str>) -> Option<&'a str> {
+    if meta.annotations.as_ref().is_some_and(|a| a.contains_key(SPACE_MIGRATED_ANNOTATION)) {
+        return None;
+    }
+    field.filter(|f| !f.is_empty())
+}
+
+
 /// A listing view of `spec.environment`, what `delete_env` selects on. Never authorization.
 pub const ENVIRONMENT_LABEL: &str = "kloudlite.io/environment";
 

@@ -31,6 +31,12 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["spaceenvironments"]
     verbs: ["get", "list", "create", "patch", "delete"]
+  # Read-only, one object: the migration clears the retired `attachedEnvironment` only once the
+  # agent DaemonSet has fully rolled a template carrying `kloudlite.io/space-env`.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["kloudlite-agent"]
+    verbs: ["get"]
   # A push, the history/refs listings behind it, and `DELETE /v1/volumes/{name}/snapshots/{id}` —
   # the one explicit way a snapshot ever goes away, now that retention never prunes one. No
   # `watch`: nothing in the API watches — every read is a one-shot list on a request. `create` and

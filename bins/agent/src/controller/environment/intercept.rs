@@ -176,7 +176,7 @@ pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::E
     }
     // Attached means the workspace's SPACE uses this environment. An unlisted space cache is
     // `Keep`, for the same reason the workspace cache above is.
-    match crate::controller::space::space_environment(ctx, &w.spec.owner, &w.spec.team, w.spec.attached_environment.as_deref()) {
+    match crate::controller::space::space_environment(ctx, &w.spec.owner, &w.spec.team, crd::retired_attach(&w.metadata, w.spec.attached_environment.as_deref())) {
         crate::controller::space::SpaceEnv::Unknown => return Intercepting::Keep { since: None },
         crate::controller::space::SpaceEnv::Known(Some(c)) if c.environment == env_name => {}
         crate::controller::space::SpaceEnv::Known(_) => {

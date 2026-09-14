@@ -237,6 +237,69 @@ async fn no_choice_reports_nothing_and_a_cleared_choice_drops_the_egress_once() 
     assert!(attached_condition(&rec).is_none(), "the condition goes with the choice");
 }
 
+/// A pod whose space points at an environment in another region settles into `RegionMismatch`, and
+/// a settled pod issues no DELETE on any later pass (2026-09-12).
+#[tokio::test]
+async fn a_refused_pod_reconciled_twice_issues_no_deletes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.push(env_route("env-abc", "other-region"));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    ctx.remember_spaces(vec![space("alice", "", "env-abc")]);
+    let mut w = ready_workspace("ws-1", vec![]);
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    let st = rec.sent("PATCH", WS_STATUS).last().unwrap()["status"].clone();
+    w.status = Some(serde_json::from_value(st).unwrap());
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert_eq!(attached_condition(&rec).unwrap()["reason"], "RegionMismatch");
+    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE") && c.contains("networkpolicies")), "{:?}", rec.calls());
+}
+
+fn legacy_np(ns: &str) -> Route {
+    np(format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-ws-1"), "attach-ws-1")
+}
+
+/// Under the field fallback a pod manages only its OWN per-pod pair: `space-env` is the whole
+/// namespace's, and a sibling on a different field — or a detached one — must never touch it.
+#[tokio::test]
+async fn the_field_fallback_manages_only_the_pods_own_legacy_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.extend([env_route("env-abc", "r1"), legacy_np("ws-alice"), legacy_np("env-abc"), Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) }]);
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.spec.attached_environment = Some("env-abc".into());
+    apply_until_settled(&w, &ctx).await;
+    let calls = rec.calls();
+    assert!(calls.contains(&"PATCH /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1".to_string()), "{calls:?}");
+    assert!(calls.contains(&"PATCH /apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1".to_string()), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("/space-")), "the fallback never touches the namespace pair: {calls:?}");
+    assert_eq!(attached_condition(&rec).unwrap()["reason"], "Converged");
+
+    // A detached sibling carrying an old True condition: its own pair goes, `space-env` stays.
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
+    let mut sib = ready_workspace("ws-1", vec![]);
+    sib.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Converged", "env-abc", 1)];
+    kloudlite_agent::controller::apply_workspace(&sib, &ctx).await.unwrap();
+    let calls = rec.calls();
+    assert!(calls.contains(&"DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1".to_string()), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("space-env")), "{calls:?}");
+}
+
+/// Once the migration has settled an object, its still-set field is ignored: a choice the person
+/// cleared cannot come back through a clear that failed or was deferred.
+#[tokio::test]
+async fn a_settled_field_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), { let mut r = attach_routes(); r.push(Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) }); r });
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.spec.attached_environment = Some("env-abc".into());
+    w.metadata.annotations = Some([(crd::SPACE_MIGRATED_ANNOTATION.to_string(), "true".to_string())].into());
+    kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
+    assert!(!rec.calls().iter().any(|c| c.contains("networkpolicies")), "{:?}", rec.calls());
+    assert!(attached_condition(&rec).is_none());
+}
+
 pub(crate) fn workspace_pod_json(volumes: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"},

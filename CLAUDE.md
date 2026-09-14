@@ -263,20 +263,28 @@ resolves inside an environment's namespace. `model::validate_mount` still runs o
 is still load-bearing — a hostPath source escapes just as a bind source did, and the API server
 will happily mount `/` if we ask it to.
 
-A workspace may be attached to ONE environment (`Workspace.spec.attachedEnvironment`, written only
-by `/v1`), and then resolves that environment's services by bare name. The mechanism is a
-`/etc/resolv.conf` the agent renders per workspace into `{pool}/attach/{ws}/resolv.conf` and every
-pod mounts read-only through a hostPath volume of `type: File` — the volume IS that file, so there
-is no `subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes attach and detach
-take effect without a restart. That file is written IN PLACE and never renamed: the pod holds the
-inode, so a rename would leave it reading the old file forever. Two NetworkPolicies named
-`attach-{ws}` open the path, selecting the workspace POD (siblings share a namespace); the
-environment-side one is owned by the Environment because an ownerReference cannot cross namespaces.
-There is no Workspace finalizer for this: `/v1`'s `delete_ws` removes the environment-side policy
-itself while the spec is still readable, and the agent's janitor sweeps orphaned `{pool}/attach/{id}`
-directories left behind by a workspace that is simply gone.
+A person's SPACE follows ONE environment: every pod the platform runs for that person in one team
+(their workspaces, their bench, any kind added later) resolves that environment's services by bare
+name. A space already has a name, `crd::ws_namespace(owner, team)` (the personal space is the team
+spelled as the handle), and the choice is a cluster-scoped `SpaceEnvironment` of that name, written
+only by `/v1/me/environments/{team}` (the caller's own, a team they are a member of, an environment
+that team owns; the builder 404s). The agent reads it from an unfiltered cache (`Ctx::spaces()`,
+unknown until listed) and `controller/space.rs::converge_space` is the one pass every pod kind runs.
+DNS is a `/etc/resolv.conf` the agent renders per pod into `{pool}/attach/{id}/resolv.conf` and
+every pod mounts read-only through a hostPath volume of `type: File` — the volume IS that file, so
+there is no `subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes a
+choice take effect without a restart. That file is written IN PLACE and never renamed: the pod
+holds the inode, so a rename would leave it reading the old file forever. Two NetworkPolicies open
+the path for the whole namespace, `space-env` in the space and `space-{ns}` in the environment,
+both owned by the `SpaceEnvironment` (a cluster-scoped owner may own namespaced objects), so
+clearing the choice collects both; a switch leaves the old environment's half, which that
+environment's reconciler prunes. The builder is not in any space. The retired per-workspace
+`attachedEnvironment` is read only as a fallback while a space has no choice, managing that pod's
+old `attach-{id}` pair alone; the api's keys beat migrates it into a choice and clears it only
+once the agent DaemonSet has fully rolled a template marked `kloudlite.io/space-env`. The agent's
+janitor sweeps orphaned `{pool}/attach/{id}` directories left behind by a pod that is simply gone.
 
-The other direction is an **intercept**: an attached workspace takes over one of the environment's
+The other direction is an **intercept**: a workspace whose space uses the environment takes over one of its
 services, so everything the environment sends to `api:8080` is delivered to that workspace instead.
 The wish is `Environment.spec.intercepts` (`{service, workspace, ports}`, written only by `/v1`);
 what is IN FORCE is each service's `status.intercepted_by`, and the web reads only that. Traffic

@@ -344,11 +344,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let space = super::space::converge_space(
         ctx,
         super::space::Pod {
+            owner_ref: owner_ref.clone(),
             id: &w.name_any(),
             owner: &w.spec.owner,
             team: &w.spec.team,
             region: &w.spec.region,
-            field: w.spec.attached_environment.as_deref(),
+            field: crd::retired_attach(w.meta(), w.spec.attached_environment.as_deref()),
             prev: &prev.conditions,
             gen,
         },

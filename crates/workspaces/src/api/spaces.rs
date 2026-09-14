@@ -88,6 +88,30 @@ async fn allowed(s: &ApiState, envs: &Api<crd::Environment>, l: &Legacy) -> Resu
     if is_team(s, &l.team).await { Ok(false) } else { Err(()) }
 }
 
+/// Whether every agent reads space choices: the agent DaemonSet has fully rolled (updated ==
+/// desired == available) a template carrying `AGENT_MARKER`. Anything unreadable is "no" — an agent
+/// from before the choice existed reads the retired field alone, so clearing it under one strips a
+/// live attach and releases its intercepts.
+pub async fn agents_read_spaces(c: &kube::Client) -> bool {
+    let api: Api<k8s_openapi::api::apps::v1::DaemonSet> = Api::namespaced(c.clone(), "kube-system");
+    let Ok(Some(ds)) = api.get_opt("kloudlite-agent").await else { return false };
+    let marked = ds
+        .spec
+        .as_ref()
+        .and_then(|sp| sp.template.metadata.as_ref())
+        .and_then(|m| m.annotations.as_ref())
+        .is_some_and(|a| a.contains_key(AGENT_MARKER));
+    let Some(st) = ds.status else { return false };
+    marked && st.updated_number_scheduled == Some(st.desired_number_scheduled) && st.number_available == Some(st.desired_number_scheduled)
+}
+
+/// The agent DaemonSet template's marker for a build that reads `SpaceEnvironment`.
+pub const AGENT_MARKER: &str = "kloudlite.io/space-env";
+
+fn settled_marker(o: &kube::api::ObjectMeta) -> bool {
+    o.annotations.as_ref().is_some_and(|a| a.contains_key(crd::SPACE_MIGRATED_ANNOTATION))
+}
+
 pub async fn migrate(s: &ApiState) {
     let Some(c) = s.kube.as_ref() else { return };
     let space_api: Api<crd::SpaceEnvironment> = Api::all(c.clone());
@@ -98,18 +122,20 @@ pub async fn migrate(s: &ApiState) {
             return;
         }
     };
-    let mut legacy = Vec::new();
+    // `(object, already settled)`: a settled object only ever has its clear retried, never a
+    // choice written from it — the person may have cleared that choice since.
+    let mut legacy: Vec<(Legacy, bool)> = Vec::new();
     match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => legacy.extend(l.items.iter().filter_map(|w| {
             let env = w.spec.attached_environment.clone().filter(|e| !e.is_empty())?;
-            Some(Legacy { kind: "Workspace", name: w.name_any(), owner: w.spec.owner.to_lowercase(), team: team_of(&w.spec.owner, &w.spec.team), environment: env, updated_ms: updated_ms(w) })
+            Some((Legacy { kind: "Workspace", name: w.name_any(), owner: w.spec.owner.to_lowercase(), team: team_of(&w.spec.owner, &w.spec.team), environment: env, updated_ms: updated_ms(w) }, settled_marker(&w.metadata)))
         })),
         Err(e) => return tracing::warn!(kind = "Workspace", error = %e, "listing.failed"),
     }
     match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => legacy.extend(l.items.iter().filter_map(|b| {
             let env = b.spec.attached_environment.clone().filter(|e| !e.is_empty())?;
-            Some(Legacy { kind: "Bench", name: b.name_any(), owner: b.spec.owner.to_lowercase(), team: team_of(&b.spec.owner, &b.spec.team), environment: env, updated_ms: updated_ms(b) })
+            Some((Legacy { kind: "Bench", name: b.name_any(), owner: b.spec.owner.to_lowercase(), team: team_of(&b.spec.owner, &b.spec.team), environment: env, updated_ms: updated_ms(b) }, settled_marker(&b.metadata)))
         })),
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => return tracing::warn!(kind = "Bench", error = %e, "listing.failed"),
@@ -117,7 +143,8 @@ pub async fn migrate(s: &ApiState) {
     if legacy.is_empty() {
         return;
     }
-    let (writes, conflicts) = plan(&legacy, &existing);
+    let fresh: Vec<Legacy> = legacy.iter().filter(|(_, settled)| !settled).map(|(l, _)| l.clone()).collect();
+    let (writes, conflicts) = plan(&fresh, &existing);
     for l in &conflicts {
         tracing::warn!(kind = l.kind, name = %l.name, environment = %l.environment, space = %crd::space_name(&l.owner, &l.team), "space.migrate.conflict");
     }
@@ -127,10 +154,14 @@ pub async fn migrate(s: &ApiState) {
         let space = crd::space_name(&l.owner, &l.team);
         match allowed(s, &envs, &l).await {
             Ok(true) => {
+                // Create, never apply: a choice the person made after the list above must win.
                 let obj = crd::space_environment(&l.owner, &l.team, &l.environment);
-                match space_api.patch(&space, &PatchParams::apply(crd::API_FIELD_MANAGER).force(), &Patch::Apply(&obj)).await {
+                match space_api.create(&kube::api::PostParams::default(), &obj).await {
                     Ok(_) => {
                         tracing::info!(space = %space, environment = %l.environment, "space.migrated");
+                        existing.insert(space);
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 409 => {
                         existing.insert(space);
                     }
                     Err(e) => tracing::warn!(space = %space, error = %e, "space.migrate.failed"),
@@ -143,17 +174,27 @@ pub async fn migrate(s: &ApiState) {
             Err(()) => {}
         }
     }
-    // Clear only what is settled — a choice exists, or the attach can never become one — so a
-    // transient failure keeps the field for the agent's fallback and the next beat.
-    let clear = serde_json::json!({"spec": {"attachedEnvironment": null}, "metadata": {"labels": {k8s::ATTACHED_ENV_LABEL: null}}});
-    for l in legacy {
+    // Settled objects are stamped; the field itself is cleared only once no agent reads it alone.
+    // A failed or deferred clear leaves the field and the stamp, so the next beat retries it.
+    let ready = agents_read_spaces(c).await;
+    for (l, settled) in legacy {
         let space = crd::space_name(&l.owner, &l.team);
-        if !existing.contains(&space) && !refused.contains(&space) {
+        if !settled && !existing.contains(&space) && !refused.contains(&space) {
             continue;
         }
+        if settled && !ready {
+            continue;
+        }
+        let mut patch = serde_json::json!({"metadata": {"annotations": {crd::SPACE_MIGRATED_ANNOTATION: "true"}}});
+        if ready {
+            patch["spec"] = serde_json::json!({"attachedEnvironment": null});
+            patch["metadata"]["labels"] = serde_json::json!({k8s::ATTACHED_ENV_LABEL: null});
+        } else {
+            tracing::info!(kind = l.kind, name = %l.name, "space.migrate.clear.deferred");
+        }
         let r = match l.kind {
-            "Workspace" => Api::<crd::Workspace>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&clear)).await.map(|_| ()),
-            _ => Api::<crd::Bench>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&clear)).await.map(|_| ()),
+            "Workspace" => Api::<crd::Workspace>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()),
+            _ => Api::<crd::Bench>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()),
         };
         if let Err(e) = r {
             tracing::warn!(kind = l.kind, name = %l.name, error = %e, "space.migrate.clear.failed");
@@ -161,17 +202,25 @@ pub async fn migrate(s: &ApiState) {
     }
 }
 
-/// A team choice whose person has left the team goes. Keep-biased: a team the directory does not
-/// confirm is kept, because `teams_for` answers an outage with an empty list.
+/// A team choice whose person has left the team goes. Keep-biased: any directory error prunes
+/// nothing (`member_teams` errs where `teams_for` would answer an empty list), and a team the
+/// directory does not confirm is kept.
 pub async fn prune_departed(s: &ApiState) {
-    let (Some(c), Some(_)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
+    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::SpaceEnvironment> = Api::all(c.clone());
     let items = match api.list(&Default::default()).await {
         Ok(l) => l.items,
         Err(e) => return tracing::warn!(kind = "SpaceEnvironment", error = %e, "listing.failed"),
     };
     for x in items.iter().filter(|x| !x.spec.team.eq_ignore_ascii_case(&x.spec.owner)) {
-        if teams_for(s, &x.spec.owner).await.iter().any(|t| t.eq_ignore_ascii_case(&x.spec.team)) || !is_team(s, &x.spec.team).await {
+        let teams = match dir.member_teams(&x.spec.owner).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(owner = %x.spec.owner, error = %e, "space.departed.prune.skipped");
+                continue;
+            }
+        };
+        if teams.iter().any(|t| t.eq_ignore_ascii_case(&x.spec.team)) || !is_team(s, &x.spec.team).await {
             continue;
         }
         match api.delete(&x.name_any(), &Default::default()).await {
