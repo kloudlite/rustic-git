@@ -18,11 +18,18 @@ type RequestTiming = { reqId: string; upstreamMs: number; upstreamCalls: number 
  *  response itself. Patching the prototype rather than a server instance is what avoids a custom
  *  server: `next start` creates its listener after this has run.
  *
- *  ponytail: one process-wide patch, applied once and never removed. If the web tier ever needs
- *  traces as well as counts, this is the seam an OpenTelemetry Node SDK registration replaces
- *  wholesale — its http instrumentation does exactly this, correctly, for far more code.
+ *  ponytail: one process-wide patch, applied once and never removed. The OpenTelemetry
+ *  registration (`lib/tracing.ts`) now sits beside it; the patch stays because these metrics are
+ *  counts and a histogram, not spans, and the SDK here exports traces only.
  */
 export async function registerNode() {
+  // Tracing first, so its http instrumentation wraps the server before the metrics patch below.
+  const otlp = process.env.KLOUDLITE_OTLP_URL;
+  if (otlp) {
+    const { startTracing } = await import("./lib/tracing");
+    startTracing(process.env.OTEL_SERVICE_NAME ?? "kloudlite-web", otlp);
+    logger.info("web.tracing.installed");
+  }
   const http = await import("node:http");
   const proto = http.Server.prototype as unknown as {
     __webMetricsPatched?: boolean;
@@ -71,6 +78,8 @@ export async function registerNode() {
               upstream_ms: Math.round(store.upstreamMs),
               upstream_calls: store.upstreamCalls,
               req_id: store.reqId,
+              // `close` runs outside the span's context; the http instrumentation left the id here.
+              trace_id: (req as { klTraceId?: string }).klTraceId,
             });
           }
         } catch {

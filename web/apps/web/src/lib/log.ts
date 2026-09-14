@@ -16,8 +16,11 @@ type Fields = Record<string, unknown>;
 
 function emit(level: "INFO" | "WARN" | "ERROR", target: string, message: string, fields?: Fields) {
   let line: string;
+  // Set by `lib/tracing.ts` on the server when tracing is on: the active span's trace id, so the
+  // collector links this line to its trace. A global, so client bundles never import the SDK.
+  const trace_id = (globalThis as { __klTraceId?: () => string | undefined }).__klTraceId?.();
   try {
-    line = JSON.stringify({ timestamp: new Date().toISOString(), level, target, message, ...fields });
+    line = JSON.stringify({ timestamp: new Date().toISOString(), level, target, message, ...(trace_id && { trace_id }), ...fields });
   } catch {
     // A field that cannot be serialized (a cycle, a BigInt) must not lose the event itself.
     line = JSON.stringify({ timestamp: new Date().toISOString(), level, target, message });

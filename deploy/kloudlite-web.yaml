@@ -62,6 +62,11 @@ spec:
             # GC'ing. 384 leaves the rest of the 512Mi limit for buffers and stack.
             - name: NODE_OPTIONS
               value: "--max-old-space-size=384"
+            # Traces go to the node-local collector; unset means no tracing at all.
+            - name: KLOUDLITE_OTLP_URL
+              value: http://kloudlite-otel-agent-otlp.kloudlite.svc:4318
+            - name: OTEL_SERVICE_NAME
+              value: kloudlite-web
             - name: AUTH_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-web, key: auth-secret } }
             # Auth.js builds provider callback URLs from this; it must match the address
