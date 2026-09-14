@@ -108,7 +108,8 @@ pub(crate) const WS_OBJ: &str = "/apis/kloudlite.io/v1alpha1/workspaces/ws-1";
 pub(crate) const WEB_STS: &str = "/apis/apps/v1/namespaces/env-1/statefulsets/web";
 pub(crate) const WEB_SVC: &str = "/api/v1/namespaces/env-1/services/web";
 pub(crate) const WEB_SLICE: &str = "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/web-intercept";
-pub(crate) const ENV_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1";
+/// The environment side is per (workspace, SERVICE): one policy cannot select two proxy pods.
+pub(crate) const ENV_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1-web";
 pub(crate) const WS_POLICY: &str = "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/intercept-ws-1";
 
 /// A `StatefulSetList` as `read_services_back`'s ONE listing reads it back (2026-09-12: it used to
@@ -274,7 +275,9 @@ async fn an_intercept_in_force_stops_the_real_service_and_points_the_slice_at_th
     let sts = rec.sent("PATCH", WEB_STS);
     assert_eq!(sts.last().unwrap()["spec"]["replicas"], 0, "the real service is stopped: {:?}", sts.last());
     let svc = rec.sent("PATCH", WEB_SVC);
-    assert!(svc.last().unwrap()["spec"]["selector"].is_null(), "a selector can never name another namespace: {:?}", svc.last());
+    // The Service keeps a selector and it names the PROXY, which stands in for the service in this
+    // same namespace — a selector can never name another one.
+    assert_eq!(svc.last().unwrap()["spec"]["selector"]["kloudlite.io/kind"], "intercept", "{:?}", svc.last());
     let slice = rec.sent("PATCH", WEB_SLICE);
     assert_eq!(slice.last().unwrap()["endpoints"][0]["addresses"][0], "10.42.3.231");
     assert_eq!(slice.last().unwrap()["ports"][0]["name"], "p80", "matched to the Service port BY NAME");
@@ -314,6 +317,43 @@ async fn removing_the_wish_restores_the_real_service_and_deletes_the_slice() {
     let st = rec.sent("PATCH", ENV_STATUS_PATH);
     assert!(st.last().unwrap()["status"]["serviceStatus"][0]["interceptedBy"].is_null());
 }
+
+/// A workspace serving TWO of an environment's services that releases ONE of them: only that
+/// service's egress grant goes, and the workspace-side ingress stays, because the other service is
+/// still being served. The env side is per (workspace, service) and the ws side per workspace, so
+/// a skip keyed on the workspace alone leaked `intercept-ws-1-api` forever.
+#[tokio::test]
+async fn releasing_one_of_two_intercepts_deletes_only_that_services_grant() {
+    let tmp = env_tmp();
+    let api_policy = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1-api";
+    let routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/api".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/api".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        Route { method: "DELETE", path: "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/api-intercept".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: api_policy.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+    ]);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
+
+    // `web` is still wished and in force; `api`'s wish is gone and status is the only record of it.
+    let mut e = intercept_env(one_intercept(), Some("ws-1"));
+    let mut api = e.spec.services[0].clone();
+    api.name = "api".into();
+    api.ports = vec![8080];
+    e.spec.services.push(api);
+    e.status.as_mut().unwrap().service_status.push(serde_json::from_value(
+        serde_json::json!({"name": "api", "ready": true, "interceptedBy": "ws-1"}),
+    ).unwrap());
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    assert!(rec.calls().iter().any(|c| c == &format!("DELETE {api_policy}")), "the released service's grant goes: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {ENV_POLICY}")), "the served service's grant stays: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c == &format!("DELETE {WS_POLICY}")), "one ingress per workspace, and it is still serving: {:?}", rec.calls());
+}
+
 
 /// (c) THE CENTRAL RULE. The workspace is stopped, the wish is untouched, and the real service is
 /// back — a controller never writes spec, so the person's intercept survives the night.

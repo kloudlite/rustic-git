@@ -62,7 +62,7 @@ fn the_proxy_forwards_one_port_per_declared_service_port_with_the_remap() {
         c.args.as_ref().unwrap(),
         &vec![
             "--target".to_string(),
-            "intercept-target-ws-1.ws-alice.svc.cluster.local".to_string(),
+            "intercept-target-ws-1.ws-alice.svc.cluster.local.".to_string(),
             "--forward".to_string(),
             "8080:3000".to_string(),
             // Unmapped ports forward straight through — `workspace_port` is identity for them.
@@ -78,6 +78,28 @@ fn the_proxy_forwards_one_port_per_declared_service_port_with_the_remap() {
     let sc = c.security_context.as_ref().unwrap();
     assert_eq!(sc.run_as_user, Some(1000));
     assert_eq!(sc.read_only_root_filesystem, Some(true));
+
+    let spec = r.pod.spec.as_ref().unwrap();
+    assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
+    assert_eq!(spec.automount_service_account_token, Some(false), "it makes no API call");
+    let res = c.resources.as_ref().unwrap();
+    assert_eq!(res.requests.as_ref().unwrap()["cpu"].0, "10m");
+    assert_eq!(res.requests.as_ref().unwrap()["memory"].0, "32Mi");
+    assert_eq!(res.limits.as_ref().unwrap()["cpu"].0, "200m");
+    assert_eq!(res.limits.as_ref().unwrap()["memory"].0, "128Mi");
+    let probe = c.readiness_probe.as_ref().unwrap();
+    assert_eq!(probe.tcp_socket.as_ref().unwrap().port, IntOrString::Int(8080), "the first listener being up IS readiness");
+    assert_eq!((probe.period_seconds, probe.failure_threshold), (Some(2), Some(3)));
+}
+
+
+/// A portless service has no ClusterIP to dial and gives the forwarder no `--forward` at all: a
+/// pod that crash-loops where an error would have said why.
+#[test]
+fn a_portless_service_is_refused_rather_than_rendered() {
+    let svc = service("api", &[]);
+    let ic = intercept("api", "ws-1", &[]);
+    assert!(k8s::intercept_render(args(&svc, &ic, &env_ref(), &ws_ref(), &[])).is_err());
 }
 
 

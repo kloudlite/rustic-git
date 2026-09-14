@@ -73,6 +73,13 @@ pub fn intercept_render(a: RenderArgs<'_>) -> Result<ProxyRender, String> {
     if a.image.is_empty() {
         return Err("no intercept proxy image is configured on this region's agent".into());
     }
+    // A portless service has no ClusterIP either (`service_clusterip` returns `None`), so nothing
+    // could dial the proxy — and the forwarder refuses an empty `--forward` list, which without
+    // this would be a CrashLoopBackOff nobody can read the reason off. `/v1` does not refuse an
+    // intercept of one: its port-mapping loop is vacuous when the service declares none.
+    if a.svc.ports.is_empty() {
+        return Err(format!("{} declares no ports, so there is nothing to intercept", a.svc.name));
+    }
     Ok(ProxyRender {
         pod: proxy_pod(&a),
         target: target_service(&a),
@@ -105,7 +112,9 @@ fn proxy_pod(a: &RenderArgs<'_>) -> Pod {
 
     let mut args = vec![
         "--target".to_string(),
-        format!("{}.{}.svc.cluster.local", target_service_name(a.ws_id), a.ws_ns),
+        // Fully qualified, trailing dot included: the proxy re-resolves per connection, and an
+        // unrooted name walks the pod's whole `ndots: 5` search list first.
+        format!("{}.{}.svc.cluster.local.", target_service_name(a.ws_id), a.ws_ns),
     ];
     for p in &a.svc.ports {
         args.push("--forward".to_string());
@@ -142,6 +151,7 @@ fn proxy_pod(a: &RenderArgs<'_>) -> Pod {
                 // Readiness is the listener being up — Kubernetes' own check, no health endpoint
                 // and no probe port. It is also what keeps the Service's endpoint from appearing
                 // before the proxy can accept.
+                // `ports` is non-empty — refused above — so the first is the first listener.
                 readiness_probe: a.svc.ports.first().map(|p| Probe {
                     tcp_socket: Some(TCPSocketAction { port: IntOrString::Int(*p as i32), host: None }),
                     period_seconds: Some(2),

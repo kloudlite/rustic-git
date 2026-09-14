@@ -273,21 +273,24 @@ pub(crate) async fn intercept_policies(
     ctx: &Arc<Ctx>,
 ) -> Result<(), ReconcileErr> {
     let here: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
-    let mut in_force: std::collections::HashSet<String> = Default::default();
+    // Keyed by (workspace, SERVICE), because the environment-side grant is per service now: a
+    // workspace serving `a` and releasing `b` is in force for one pair and stale for the other, and
+    // a workspace-keyed set would have skipped the release and leaked `intercept-{ws}-b` forever.
+    let mut in_force: std::collections::HashSet<(String, String)> = Default::default();
     // A `Keep` renders what the last pass rendered — and that includes its grants: the workspace
     // the status names is still being served, so its policies are in force, not stale. Deleting
     // them on an API blip cut the intercepted traffic the rendering was keeping (2026-09-12).
     for (svc, d) in plan {
         if matches!(d, Intercepting::Keep { .. }) {
             if let Some(by) = prev.service_status.iter().find(|s| s.name == *svc).and_then(|s| s.intercepted_by.clone()) {
-                in_force.insert(by);
+                in_force.insert((by, (*svc).to_string()));
             }
         }
     }
     for (svc, d) in plan {
         let Intercepting::Force { ws, .. } = d else { continue };
         let ws_ns = crd::ws_namespace(&ws.spec.owner, &ws.spec.team);
-        in_force.insert(ws.name_any());
+        in_force.insert((ws.name_any(), (*svc).to_string()));
         // The environment half is per SERVICE now: its `podSelector` names one proxy pod, and one
         // policy cannot name two of them.
         ensure(&here, &k8s::intercept_egress(ns, &ws_ns, &ws.name_any(), svc, &e.spec.owner, owner_ref), ctx).await?;
@@ -317,8 +320,11 @@ pub(crate) async fn intercept_policies(
             stale.push((by.clone(), s.name.clone(), None));
         }
     }
+    // The workspace-side half is still ONE ingress per workspace (the union of its ports), so it
+    // may only be deleted once NO service of that workspace is in force.
+    let ws_in_force: std::collections::HashSet<&String> = in_force.iter().map(|(w, _)| w).collect();
     for (id, svc, ws) in stale {
-        if in_force.contains(&id) {
+        if in_force.contains(&(id.clone(), svc.clone())) {
             continue;
         }
         delete_ignoring_404(&here, &k8s::intercept_egress_name(&id, &svc)).await?;
@@ -341,7 +347,7 @@ pub(crate) async fn intercept_policies(
             },
         };
         // A workspace that is GONE takes its half with it: the policy is ownerReferenced.
-        if let Some(w) = ws {
+        if let Some(w) = ws.filter(|_| !ws_in_force.contains(&id)) {
             let ws_ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
             let in_ws: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ws_ns);
             delete_ignoring_404(&in_ws, &k8s::intercept_policy_name(&id)).await?;
