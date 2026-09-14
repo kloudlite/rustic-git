@@ -63,11 +63,15 @@ pub struct Ctx {
     pub space_writer: Mutex<Option<Writer<crd::SpaceEnvironment>>>,
     pub environment_store: Store<crd::Environment>,
     pub environment_writer: Mutex<Option<Writer<crd::Environment>>>,
-    /// Which environment each space named on its last rendered pass (space name → env id). The
-    /// ONLY thing that turns "the wish changed" into a bounded delete: without it a switch would
-    /// have to look for the old grant everywhere. A restarted process has no memory here, which is
-    /// what `reconcile_environment`'s prune is for.
-    pub last_choice: Mutex<HashMap<String, String>>,
+    /// What each space last rendered: space name → (its uid, the environment it named). The ONLY
+    /// thing that turns "the wish changed" into a bounded delete — without it a switch would have
+    /// to look for the old grant everywhere. A restarted process has no memory here, which is what
+    /// `reconcile_environment`'s prune is for.
+    ///
+    /// The UID is half the key because a delete-and-recreate under one name is a DIFFERENT space,
+    /// and entries for spaces that are gone are dropped by `space::forget_gone_spaces` — so this
+    /// map is bounded by the cluster's live spaces rather than by uptime.
+    pub last_choice: Mutex<HashMap<String, (String, String)>>,
 }
 
 /// How long `ensure` trusts its last apply — `bins/agent/src/controller/status.rs`'s rule,

@@ -49,7 +49,7 @@ pub enum Choice {
     Unknown,
     /// Nothing to grant: the environment is gone, or it is in another region.
     None,
-    Env(Arc<crd::Environment>, Arc<crd::SpaceEnvironment>),
+    Env(Arc<crd::Environment>),
 }
 
 /// The two halves a wish asks for, named. Pure — no cache, no API server.
@@ -70,8 +70,14 @@ pub fn desired(space: &crd::SpaceEnvironment, env: Option<&crd::Environment>, re
     }
 }
 
-/// The egress half is owned by the `SpaceEnvironment`, the ingress half by the `Environment`: an
-/// ownerReference cannot cross namespaces, and each half lives in its owner's.
+/// BOTH halves are owned by the `SpaceEnvironment`, which is cluster-scoped — the usual
+/// "an ownerReference cannot cross namespaces" rule is about a NAMESPACED owner and does not apply
+/// to it, so the ingress half in the environment's namespace is owned by the wish like the egress
+/// half is. Not by the `Environment`: `ownerReferences` is a server-side-apply associative list
+/// keyed by uid, so a forced apply naming a different owner would ADD a second `controller: true`
+/// reference to the object the agents wrote (`bins/agent/src/controller/space.rs`) and the API
+/// server refuses that with "only one reference can have Controller set to true" — forever, since
+/// nothing after Task 6 would ever rewrite it.
 fn owner_ref<K: Resource<DynamicType = ()>>(obj: &K) -> Result<OwnerReference, ReconcileErr> {
     obj.controller_owner_ref(&()).ok_or_else(|| ReconcileErr("object has no uid".into()))
 }
@@ -105,9 +111,12 @@ fn touched_namespaces(space: &crd::SpaceEnvironment, prev: Option<&str>) -> Vec<
 /// elected under. Anything else and we are not the writer any more, so we write nothing and demote
 /// — a write that discovers a newer term abandons itself, it never re-elects.
 ///
-/// ponytail: one read per pass, not literally per PATCH. A pass makes at most three writes back to
-/// back; the election beat is 5 s and the lease TTL 15 s, so a term lost mid-pass is caught by the
-/// object's own apply-conflict underneath. Per-write reads would be three GETs per space per beat.
+/// Once per pass for the APPLIES, again immediately before every DELETE. The asymmetry is the
+/// point: two processes applying the same content-identical object is a no-op, but a delete that
+/// lands after the term was lost leaves the NEW leader's apply-memory fresh for `APPLY_RESYNC` —
+/// F1 across two processes, and unrecreatable for ten minutes.
+/// ponytail: a delete is rare (a transition, or a confirmed orphan), so the extra GET is paid only
+/// there; per-apply reads would be a GET per space per beat for nothing.
 async fn may_write(ctx: &Ctx) -> bool {
     if !ctx.leading() {
         return false;
@@ -134,14 +143,35 @@ async fn may_write(ctx: &Ctx) -> bool {
 fn resolve(ctx: &Ctx, space: &crd::SpaceEnvironment) -> Choice {
     let Some(envs) = ctx.environments() else { return Choice::Unknown };
     match envs.get(&ObjectRef::new(&space.spec.environment)) {
-        Some(e) if e.spec.region == ctx.region => Choice::Env(e, Arc::new(space.clone())),
+        Some(e) if e.spec.region == ctx.region => Choice::Env(e),
         _ => Choice::None,
     }
+}
+
+/// Drop the remembered choice of every space that is GONE. Only from a ready cache — an unlisted
+/// one would forget the whole cluster's previous choices and strand each old ingress half until
+/// that environment's own sweep. Unbounded growth is the other half: a process that ran for months
+/// would otherwise remember every space ever deleted.
+fn forget_gone_spaces(ctx: &Ctx) {
+    let Some(store) = ctx.spaces() else { return };
+    let live: HashSet<String> = store.state().iter().map(|s| s.name_any()).collect();
+    ctx.last_choice.lock().unwrap_or_else(|p| p.into_inner()).retain(|k, _| live.contains(k));
+}
+
+/// Does the object exist? Asked only where a DELETE would otherwise be issued on every pass with
+/// nothing to go on — a GET that answers "no" is what ends the sweep, permanently.
+async fn exists(api: &Api<NetworkPolicy>, name: &str) -> Result<bool, ReconcileErr> {
+    Ok(api.get_opt(name).await?.is_some())
 }
 
 /// One space's whole grant, rendered from the wish alone.
 pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let name = space.name_any();
+    // The uid is half the memory key: a delete-and-recreate under the same name is a DIFFERENT
+    // space, and a transition computed against the dead one's choice would delete a grant the new
+    // one had just made.
+    let uid = space.uid().unwrap_or_default();
+    forget_gone_spaces(&ctx);
     let choice = resolve(&ctx, &space);
     if let Choice::Unknown = choice {
         tracing::debug!(space = %name, decision = "unknown", "reconcile.pass");
@@ -151,39 +181,53 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
         return Ok(Action::requeue(RESYNC));
     }
     let env = match &choice {
-        Choice::Env(e, _) => Some(e.as_ref()),
+        Choice::Env(e) => Some(e.as_ref()),
         _ => None,
     };
     let d = desired(&space, env, &ctx.region);
     let in_space: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &d.egress_ns);
+    let ingress_name = k8s::space_ingress_name(&d.egress_ns);
+    // Both halves, the ingress one included: see `owner_ref`.
+    let owner = owner_ref(space.as_ref())?;
+    let prev = {
+        let mem = ctx.last_choice.lock().unwrap_or_else(|p| p.into_inner());
+        mem.get(&name).filter(|(u, _)| *u == uid).map(|(_, e)| e.clone())
+    };
 
     match (&d.env_ns, env) {
-        (Some(env_ns), Some(e)) => {
-            let egress = k8s::space_egress(&d.egress_ns, env_ns, &space.spec.owner, &owner_ref(space.as_ref())?);
-            ensure(&in_space, &egress, &ctx).await?;
+        (Some(env_ns), Some(_)) => {
+            ensure(&in_space, &k8s::space_egress(&d.egress_ns, env_ns, &space.spec.owner, &owner), &ctx).await?;
             let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
-            let ingress = k8s::space_ingress(env_ns, &d.egress_ns, &space.spec.owner, &owner_ref(e)?);
-            ensure(&in_env, &ingress, &ctx).await?;
+            ensure(&in_env, &k8s::space_ingress(env_ns, &d.egress_ns, &space.spec.owner, &owner), &ctx).await?;
         }
         // Nothing to point at: an egress half granting reach to a namespace that is not there is a
-        // grant to whatever gets that name next, so it goes. Its ingress halves are the transition
-        // below's and the env-side sweep's.
-        _ => drop_object(&in_space, &ctx, &d.egress_ns, k8s::SPACE_EGRESS_POLICY).await?,
+        // grant to whatever gets that name next, so it goes — ONCE. Either this pass is the
+        // transition away from a real choice, or a GET confirms the object is actually there
+        // (which is how a restarted process, with no memory at all, still collects it). A cleared
+        // choice would otherwise issue a DELETE on every pass forever.
+        _ => {
+            let transition = prev.as_deref().is_some_and(|p| !p.is_empty());
+            if (transition || exists(&in_space, k8s::SPACE_EGRESS_POLICY).await?) && may_write(&ctx).await {
+                drop_object(&in_space, &ctx, &d.egress_ns, k8s::SPACE_EGRESS_POLICY).await?;
+            }
+        }
     }
 
     // The one DELETE this reconciler makes from MEMORY rather than from a list: the ingress half in
     // the environment this space named last pass. A pass that changes nothing takes this branch
     // never, which is what keeps a converged cluster free of steady-state deletes.
-    let prev = ctx.last_choice.lock().unwrap_or_else(|p| p.into_inner()).get(&name).cloned();
     if let Some(old) = prev.clone().filter(|p| !p.is_empty() && *p != space.spec.environment) {
         let old_ns = crd::env_namespace(&old);
         let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &old_ns);
-        drop_object(&api, &ctx, &old_ns, &k8s::space_ingress_name(&d.egress_ns)).await?;
+        if !may_write(&ctx).await {
+            return Ok(Action::requeue(RESYNC));
+        }
+        drop_object(&api, &ctx, &old_ns, &ingress_name).await?;
     }
     ctx.last_choice
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .insert(name.clone(), space.spec.environment.clone());
+        .insert(name.clone(), (uid, space.spec.environment.clone()));
 
     // What was rendered, and from what. The vet's 3am note was that `space.grant.pruned` never
     // said which value it had read.
@@ -202,6 +246,7 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
 /// caches — and with no cache at all it prunes nothing.
 pub async fn reconcile_environment(env: Arc<crd::Environment>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     let id = env.name_any();
+    forget_gone_spaces(&ctx);
     let Some(keep) = kept_here(&id, ctx.spaces().map(|s| s.state()).as_deref()) else {
         tracing::debug!(environment = %id, decision = "unknown", "reconcile.pass");
         return Ok(Action::requeue(Duration::from_secs(5)));
@@ -222,6 +267,8 @@ pub async fn reconcile_environment(env: Arc<crd::Environment>, ctx: Arc<Ctx>) ->
         if !name.starts_with("space-") || name == k8s::SPACE_EGRESS_POLICY || keep.contains(&name) || young(&p) {
             continue;
         }
+        // Re-read the lease before each delete, same rule as the space side: this sweep has no
+        // applies, so every write it makes is one of these.
         if !may_write(&ctx).await {
             return Ok(Action::requeue(RESYNC));
         }
@@ -391,6 +438,24 @@ mod tests {
         assert_eq!(ing.metadata.namespace.as_deref(), Some("env-1"));
     }
 
+    /// BOTH halves name the `SpaceEnvironment` as their controller — the agents name it too, so the
+    /// adopting apply updates that one reference instead of adding a second. `ownerReferences` is an
+    /// SSA associative list keyed by uid: a second `controller: true` entry is a 422 the object
+    /// never recovers from.
+    #[test]
+    fn both_halves_are_owned_by_the_space() {
+        let s = space("alice", "acme", "env-1");
+        let r = owner_ref(&s).unwrap();
+        let space_ns = ns("alice", "acme");
+        for p in [k8s::space_egress(&space_ns, "env-1", "alice", &r), k8s::space_ingress("env-1", &space_ns, "alice", &r)] {
+            let refs = p.metadata.owner_references.clone().unwrap_or_default();
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].uid, "uid-space");
+            assert_eq!(refs[0].kind, "SpaceEnvironment");
+            assert_eq!(refs[0].controller, Some(true));
+        }
+    }
+
     /// The env-side derived set: which `space-*` halves belong in THIS namespace, given the cache.
     /// A space pointing elsewhere is collected; a space pointing here is kept; and a cache that
     /// has not listed keeps EVERYTHING — read as empty it would strip every grant in the cluster
@@ -463,6 +528,35 @@ mod tests {
         assert!(reqs.contains(&policy_path("env-1", &k8s::space_ingress_name(&space_ns))), "{reqs}");
     }
 
+    /// Adoption, on the wire: the apply lands on an object the AGENT already wrote (same policy,
+    /// its own `controller: true` reference to the same `SpaceEnvironment` uid) and the body we
+    /// send carries exactly one ownerReference — so the associative list is updated in place and
+    /// never grows a second controller.
+    #[tokio::test]
+    async fn the_adopting_apply_sends_exactly_one_owner_reference() {
+        let space_ns = ns("alice", "acme");
+        let ingress = policy_path("env-1", &k8s::space_ingress_name(&space_ns));
+        let agent_written = serde_json::json!({
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": k8s::space_ingress_name(&space_ns), "namespace": "env-1",
+                "ownerReferences": [{"apiVersion": "kloudlite.io/v1alpha1", "kind": "SpaceEnvironment",
+                    "name": space_ns, "uid": "uid-space", "controller": true, "blockOwnerDeletion": true}],
+                "managedFields": [{"manager": "kloudlite-agent", "operation": "Apply"}]},
+        });
+        let (ctx, rec) = leading(vec![
+            kube_test::patch(policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY), serde_json::json!({})),
+            kube_test::patch(ingress.clone(), agent_written),
+        ]);
+        ctx.remember_environments(vec![env("env-1", "acme", "test")]);
+        reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
+        let sent = rec.sent("PATCH", &ingress);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an owner reference");
+        assert_eq!(refs.len(), 1, "{refs:?}");
+        assert_eq!(refs[0]["uid"], "uid-space");
+        assert_eq!(refs[0]["kind"], "SpaceEnvironment");
+    }
+
     /// An unlisted environment cache renders nothing and deletes nothing — the rule that, read the
     /// other way, strips every grant in the cluster on each restart. No route is canned, so any
     /// call at all would be a 404 and a failed pass.
@@ -509,7 +603,7 @@ mod tests {
             delete(policy_path("env-1", &ingress)),
         ]);
         ctx.remember_environments(vec![env("env-2", "acme", "test")]);
-        ctx.last_choice.lock().unwrap().insert(space_ns.clone(), "env-1".into());
+        ctx.last_choice.lock().unwrap().insert(space_ns.clone(), ("uid-space".into(), "env-1".into()));
         // Seed `ensure`'s memory as an earlier pass in the OLD environment would have left it.
         let key = format!("NetworkPolicy/{}/{ingress}", crd::env_namespace("env-1"));
         ctx.applied.lock().unwrap().insert(key.clone(), (0, std::time::Instant::now()));
@@ -518,7 +612,7 @@ mod tests {
         let applied = ctx.applied.lock().unwrap();
         assert!(!applied.contains_key(&key), "{:?}", applied.keys());
         // The new choice is remembered, so the NEXT pass deletes nothing.
-        assert_eq!(ctx.last_choice.lock().unwrap().get(&space_ns).map(String::as_str), Some("env-2"));
+        assert_eq!(ctx.last_choice.lock().unwrap().get(&space_ns).map(|(_, e)| e.as_str()), Some("env-2"));
     }
 
     /// A converged pass issues no DELETE at all: the old-choice branch is a transition, never a
@@ -531,21 +625,81 @@ mod tests {
             kube_test::patch(policy_path("env-1", &k8s::space_ingress_name(&space_ns)), serde_json::json!({})),
         ]);
         ctx.remember_environments(vec![env("env-1", "acme", "test")]);
-        ctx.last_choice.lock().unwrap().insert(space_ns, "env-1".into());
+        ctx.last_choice.lock().unwrap().insert(space_ns, ("uid-space".into(), "env-1".into()));
         reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
 
     /// A space whose environment is gone loses its egress half — a grant to a namespace that is
-    /// not there is a grant to whatever gets that name next.
+    /// not there is a grant to whatever gets that name next. With no memory of a previous choice
+    /// (a just-restarted process) the GET is what licenses the delete.
     #[tokio::test]
     async fn a_gone_environment_drops_the_egress_half() {
         let space_ns = ns("alice", "acme");
         let path = policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY);
-        let (ctx, rec) = leading(vec![delete(path.clone())]);
+        let (ctx, rec) = leading(vec![
+            kube_test::get(path.clone(), serde_json::json!({"metadata": {"name": k8s::SPACE_EGRESS_POLICY}})),
+            delete(path.clone()),
+        ]);
         ctx.remember_environments(vec![]);
         reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
         assert!(rec.calls().iter().any(|c| *c == format!("DELETE {path}")), "{:?}", rec.calls());
+    }
+
+    /// And it deletes it ONCE. A cleared choice is the steady state of a space with no environment:
+    /// the second pass finds the object gone and issues nothing, rather than a DELETE per pass
+    /// forever.
+    #[tokio::test]
+    async fn a_cleared_choice_deletes_the_egress_half_once() {
+        let space_ns = ns("alice", "acme");
+        let path = policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY);
+        let (ctx, rec) = leading(vec![
+            kube_test::get(path.clone(), serde_json::json!({"metadata": {"name": k8s::SPACE_EGRESS_POLICY}})),
+            // The mock walks a path's routes in order, so the second GET is the world after the
+            // delete: gone.
+            kube_test::not_found(path.clone()),
+            delete(path.clone()),
+        ]);
+        ctx.remember_environments(vec![]);
+        let s = Arc::new(space("alice", "acme", ""));
+        reconcile_space(s.clone(), ctx.clone()).await.unwrap();
+        reconcile_space(s, ctx.clone()).await.unwrap();
+        let deletes: Vec<_> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deletes.len(), 1, "{deletes:?}");
+    }
+
+    /// A space deleted and recreated under the same name is a DIFFERENT space: the dead one's
+    /// choice must not make the new one's pass a transition, or it would delete the grant this
+    /// very pass just applied.
+    #[tokio::test]
+    async fn a_recreated_space_does_not_inherit_the_dead_one_s_choice() {
+        let space_ns = ns("alice", "acme");
+        let (ctx, rec) = leading(vec![
+            kube_test::patch(policy_path(&space_ns, k8s::SPACE_EGRESS_POLICY), serde_json::json!({})),
+            kube_test::patch(policy_path("env-1", &k8s::space_ingress_name(&space_ns)), serde_json::json!({})),
+        ]);
+        ctx.remember_environments(vec![env("env-1", "acme", "test")]);
+        ctx.last_choice.lock().unwrap().insert(space_ns.clone(), ("uid-of-the-dead-one".into(), "env-9".into()));
+        reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
+        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
+        assert_eq!(
+            ctx.last_choice.lock().unwrap().get(&space_ns).map(|(u, e)| (u.as_str(), e.as_str())),
+            Some(("uid-space", "env-1"))
+        );
+    }
+
+    /// A space that is GONE from a ready cache is forgotten, so the map is bounded by the live
+    /// cluster rather than by uptime.
+    #[tokio::test]
+    async fn a_gone_space_is_forgotten() {
+        let (ctx, _rec) = leading(vec![kube_test::get(
+            "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies",
+            serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicyList", "metadata": {}, "items": []}),
+        )]);
+        ctx.last_choice.lock().unwrap().insert(ns("gone", "acme"), ("uid-gone".into(), "env-1".into()));
+        ctx.remember_spaces(vec![space("alice", "acme", "env-1")]);
+        reconcile_environment(Arc::new(env("env-1", "acme", "test")), ctx.clone()).await.unwrap();
+        assert!(ctx.last_choice.lock().unwrap().is_empty());
     }
 
     /// The env-side sweep with an UNLISTED space cache: it does not even list, and deletes nothing.
