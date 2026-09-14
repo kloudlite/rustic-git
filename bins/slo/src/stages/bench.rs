@@ -656,6 +656,13 @@ mod tests {
         // context — this is the wording that actually reached the fleet (2026-09-14 hourly run).
         let ws_refusal = "the prompt was refused: {\"id\":\"1\",\"type\":\"response\",\"success\":false,\"error\":\"No API key found for deepseek.\\n\\nUse /login...\"}";
         assert_eq!(pi_no_api_key_provider(ws_refusal).as_deref(), Some("deepseek"));
+        // The exact clipped detail from the 2026-09-14 12:02 UTC hourly run
+        // (kloudlite-slo-hourly-29823122), byte-for-byte including the `"command":"prompt"` field
+        // pi's RPC response envelope carries and the literal `\n\n` escapes as they arrive over the
+        // wire (never a real newline) — proves clip()'s 200-char cut lands after the provider name,
+        // and that the extra envelope field does not defeat the match.
+        let fleet_evidence = "the prompt was refused: {\"id\":\"1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"No API key found for deepseek.\\n\\nUse /login to log into a provider via OAuth or API key. See: /opt/harness/node_modules/@mar";
+        assert_eq!(pi_no_api_key_provider(fleet_evidence).as_deref(), Some("deepseek"));
         // ModelRegistry's quoted wording, still narrow.
         assert_eq!(pi_no_api_key_provider("No API key found for \"anthropic\"").as_deref(), Some("anthropic"));
         // A non-auth refusal (rate limit, tool error, ...) must still fail, never skip.
