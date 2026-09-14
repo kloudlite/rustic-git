@@ -182,6 +182,63 @@ async fn a_conversion_holds_the_legacy_slice_until_the_proxy_is_up() {
 }
 
 
+/// The target Service and the ingress grant are per WORKSPACE, so they are a union over every
+/// service that workspace serves — and a `Keep` is being served just as much as a `Force` is.
+/// Counting only the `Force` would let the sibling's pass rewrite the shared Service with its own
+/// ports alone and cut the kept service's live traffic until the next pass.
+#[tokio::test]
+async fn a_kept_sibling_keeps_its_port_on_the_shared_target_and_grant() {
+    let tmp = env_tmp();
+    let ws_pod = "/api/v1/namespaces/ws-alice/pods/ws-1-0";
+    let mut routes = intercept_routes(vec![
+        kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
+        // `api` is decided first and its pod GET fails — the transient unreadable answer that is
+        // `Keep`. `web`'s own GET, right after, succeeds: one `Keep`, one `Force`, one pass.
+        Route { method: "GET", path: ws_pod.into(), status: 500, body: serde_json::json!({"kind": "Status"}) },
+        kloudlite_workspaces::kube_test::get(ws_pod, ready_pod(600)),
+        kloudlite_workspaces::kube_test::get(PROXY_POD, proxy_pod(true)),
+    ]);
+    routes.extend([
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/api".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/api".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+    ]);
+    let (ctx, rec) = intercept_ctx(tmp.path(), routes);
+
+    let mut e = intercept_env(
+        serde_json::json!([
+            {"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3001}]},
+            {"service": "web", "workspace": "ws-1", "ports": [{"service": 80, "workspace": 3000}]},
+        ]),
+        Some("ws-1"),
+    );
+    let mut api = e.spec.services[0].clone();
+    api.name = "api".into();
+    api.ports = vec![8080];
+    e.spec.services.insert(0, api);
+    // Both were in force last pass; `api`'s record is the only thing that says so this pass.
+    e.status.as_mut().unwrap().service_status.insert(
+        0,
+        serde_json::from_value(serde_json::json!({"name": "api", "ready": true, "interceptedBy": "ws-1", "proxy": "ready"})).unwrap(),
+    );
+
+    kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();
+
+    let target = rec.sent("PATCH", TARGET_SVC);
+    let ports: Vec<u64> = target.last().expect("the target Service is written")["spec"]["ports"]
+        .as_array()
+        .expect("ports")
+        .iter()
+        .map(|p| p["port"].as_u64().expect("a port"))
+        .collect();
+    assert!(ports.contains(&3001), "the kept sibling's port is dropped from the shared target: {ports:?}");
+    assert!(ports.contains(&3000), "and the forced one's is still there: {ports:?}");
+    let grant = rec.sent("PATCH", WS_POLICY);
+    let text = grant.last().expect("the ingress grant is written").to_string();
+    assert!(text.contains("3001"), "the kept sibling's port is not admitted: {text}");
+    assert!(text.contains("3000"), "and the forced one's is: {text}");
+}
+
+
 /// A proxy that WAS serving and has gone NotReady is a restart, not a handover. Handing the
 /// service back costs a StatefulSet scale-up and then a re-take — two real gaps — for a pod that
 /// is back in seconds, so the selector stays on it for the grace.

@@ -313,8 +313,27 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert_eq!(intercepted_ports(&e, &plan, "ws-1"), vec![80, 3000, 9229]);
-        assert!(intercepted_ports(&e, &plan, "ws-2").is_empty(), "another workspace's grant is not this one's");
+        let prev = crd::EnvironmentStatus::default();
+        assert_eq!(intercepted_ports(&e, &prev, &plan, "ws-1"), vec![80, 3000, 9229]);
+        assert!(intercepted_ports(&e, &prev, &plan, "ws-2").is_empty(), "another workspace's grant is not this one's");
+
+        // A sibling that decided `Keep` is still being served: its port stays in the union, or the
+        // `Force` beside it would rewrite the shared target Service out from under its proxy.
+        let mut plan = plan;
+        plan.insert("web", Intercepting::Keep { since: None });
+        let prev = crd::EnvironmentStatus {
+            service_status: vec![serde_json::from_value(serde_json::json!({
+                "name": "web", "ready": true, "interceptedBy": "ws-1",
+            }))
+            .unwrap()],
+            ..Default::default()
+        };
+        assert_eq!(intercepted_ports(&e, &prev, &plan, "ws-1"), vec![80, 3000, 9229]);
+        assert_eq!(
+            intercepted_ports(&e, &crd::EnvironmentStatus::default(), &plan, "ws-1"),
+            vec![3000, 9229],
+            "a Keep with no record of who was serving it is not this workspace's"
+        );
     }
 
     /// The clock the grace measures against. The last case is the one that matters: a workspace

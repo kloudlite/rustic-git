@@ -264,14 +264,31 @@ pub async fn decide_intercept(ic: &crd::Intercept, env_name: &str, prev: &crd::E
 }
 
 
-/// The workspace-side ports of every service `ws_id` is serving in force this pass — the same
+/// The workspace-side ports of every service `ws_id` is serving this pass — the same
 /// `workspace_port` over the service's ports that each proxy pod forwards to, deduplicated.
-pub(crate) fn intercepted_ports(e: &crd::Environment, plan: &std::collections::HashMap<&str, Intercepting>, ws_id: &str) -> Vec<u16> {
+///
+/// A `Keep` counts exactly as a `Force` does, read off the same `intercepted_by` record
+/// `converge_intercepts` reads: the target Service and the ingress grant are per WORKSPACE, so a
+/// sibling service whose pass hit a transient error would otherwise have its port rewritten out
+/// from under a proxy that is still forwarding, and its live traffic dropped until the next pass.
+pub(crate) fn intercepted_ports(
+    e: &crd::Environment,
+    prev: &crd::EnvironmentStatus,
+    plan: &std::collections::HashMap<&str, Intercepting>,
+    ws_id: &str,
+) -> Vec<u16> {
+    let serving = |name: &str| match plan.get(name) {
+        Some(Intercepting::Force { ws, .. }) => ws.name_any() == ws_id,
+        Some(Intercepting::Keep { .. }) => {
+            prev.service_status.iter().find(|s| s.name == name).and_then(|s| s.intercepted_by.as_deref()) == Some(ws_id)
+        }
+        _ => false,
+    };
     let mut ports: Vec<u16> = e
         .spec
         .services
         .iter()
-        .filter(|s| matches!(plan.get(s.name.as_str()), Some(Intercepting::Force { ws, .. }) if ws.name_any() == ws_id))
+        .filter(|s| serving(&s.name))
         .filter_map(|s| e.spec.intercepts.iter().find(|ic| ic.service == s.name).map(|ic| (s, ic)))
         .flat_map(|(s, ic)| s.ports.iter().map(|p| ic.workspace_port(*p)))
         .collect();
@@ -296,6 +313,7 @@ pub(crate) async fn apply_intercept(
     svc: &model::Service,
     ic: &crd::Intercept,
     ws: &crd::Workspace,
+    prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
     ns: &str,
     owner_ref: &OwnerReference,
@@ -306,7 +324,7 @@ pub(crate) async fn apply_intercept(
     let ws_ref = owner_ref_of_kind(ws)?;
     // The union over every service this workspace serves here: there is ONE target Service per
     // workspace and one ingress policy per workspace, and a sibling proxy dials the same object.
-    let ports = intercepted_ports(e, plan, &ws_id);
+    let ports = intercepted_ports(e, prev, plan, &ws_id);
     let render = k8s::intercept_render(k8s::RenderArgs {
         svc,
         ic,

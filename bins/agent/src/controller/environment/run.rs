@@ -357,7 +357,7 @@ async fn apply_services(
         // down — an absent wish means there is nothing to render, not a crash (2026-09-12).
         let mut held = false;
         if let (Some(Intercepting::Force { ws, .. }), Some(ic)) = (decided, wishes.get(svc.name.as_str())) {
-            let proxy = apply_intercept(e, svc, ic, ws, plan, ns, owner_ref, ctx).await?;
+            let proxy = apply_intercept(e, svc, ic, ws, prev, plan, ns, owner_ref, ctx).await?;
             // Only a service the last pass really had behind a proxy may be held: on a FIRST take
             // there is nothing standing to leave alone, and holding would leave the real service
             // scaled down behind a proxy that has never served.
