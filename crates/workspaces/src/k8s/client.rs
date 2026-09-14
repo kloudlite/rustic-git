@@ -145,6 +145,9 @@ async fn attempt<R, E: Into<tower::BoxError>>(
             let (dials, dials_ok) = dials.since();
             let inflight = INFLIGHT.load(std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(%method, %path, layer, secs = after.as_secs_f32(), inflight, dials, dials_ok, "kube.timeout");
+            if layer == "inner" {
+                super::stall_dump::on_inner_timeout(method, path);
+            }
             Err(KubeTimeout { layer, method: method.clone(), path: path.to_string(), after }.into())
         }
     }

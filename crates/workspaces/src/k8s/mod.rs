@@ -44,6 +44,7 @@ use std::collections::BTreeMap;
 /// The bounded kube client — shared by `bins/api` and `bins/agent`, so it lives here rather than
 /// in either.
 pub mod client;
+pub mod stall_dump;
 mod namespace;
 mod secrets;
 mod workspace;

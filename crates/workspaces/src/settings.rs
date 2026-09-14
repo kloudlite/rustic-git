@@ -32,6 +32,7 @@ pub struct AgentSettings {
     pub trace_probe_burst: f64,
     pub trace_promote_rate: f64,
     pub trace_promote_burst: f64,
+    pub stall_dumps: bool,
 }
 
 impl Default for AgentSettings {
@@ -70,6 +71,7 @@ impl AgentSettings {
             trace_probe_burst: kloudlite_trace::PROBE_BURST,
             trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
             trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
+            stall_dumps: kloudlite_core::settings::env_parsed("WS_STALL_DUMPS", false),
         }
     }
 
@@ -106,6 +108,7 @@ impl AgentSettings {
         over!(trace_probe_burst);
         over!(trace_promote_rate);
         over!(trace_promote_burst);
+        over!(stall_dumps);
         self
     }
 }
@@ -137,7 +140,10 @@ mod tests {
         let mut spec: ClusterSettingsSpec =
             serde_json::from_value(serde_json::json!({})).expect("every field is Option, so an empty object parses");
         spec.replica_secs = Some(900);
+        assert!(!base.clone().merged_with(&spec).stall_dumps, "stall dumps are off unless someone turns them on");
+        spec.stall_dumps = Some(true);
         let merged = base.clone().merged_with(&spec);
+        assert!(merged.stall_dumps);
         assert_eq!(merged.replica_secs, 900, "an admin-set field in the stored spec must override env/default");
         assert_eq!(merged.sync_secs, 45, "a field the stored spec never touched (None) keeps env's value, not the CRD's own default");
         assert_eq!(

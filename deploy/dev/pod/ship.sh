@@ -16,6 +16,12 @@ export CARGO_TARGET_DIR=/work/target-ship
 # A one-shot gate never benefits from incremental artifacts; they cost ~40 GB per build and filled
 # the disk on the second ship of 2026-09-12 (linking failed at 98 %).
 export CARGO_INCREMENTAL=0
+# Tokio task dumps on a kube stall (crates/workspaces `stall-dump`, off until ClusterSettings
+# `stallDumps`). tokio_unstable must be global — cargo has no stable per-crate cfg — and is set for
+# the gate too so gate and build share one artifact set. It only unlocks APIs; nothing changes at
+# runtime unless one is called. CI's master images build without it.
+export RUSTFLAGS="--cfg tokio_unstable"
+FEATURES="--features kloudlite-agent-bin/stall-dump"
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
 # Any origin OR platform branch, not only master: a feature branch is verified on the fleet BEFORE
@@ -38,7 +44,7 @@ if [ "${1:-}" != "--no-gate" ]; then
   ulimit -c 0
   # Whole logs to files, filtered only on failure: a filter pipe under pipefail turns "grep found
   # nothing" into a silent exit.
-  cargo clippy --workspace --all-targets --locked -- -D warnings > /tmp/ship-clippy.log 2>&1 \
+  cargo clippy --workspace --all-targets --locked $FEATURES -- -D warnings > /tmp/ship-clippy.log 2>&1 \
     || { grep -E '^(warning|error)' -A6 /tmp/ship-clippy.log | head -40; exit 1; }
   # nextest, not `cargo test`: the same tests from the same binaries, but the 100-odd binaries
   # run in parallel instead of one after another — `cargo test` left 16 cores idle behind a
@@ -46,7 +52,7 @@ if [ "${1:-}" != "--no-gate" ]; then
   # A watcher beside the run: any test process alive past 90 s is dumped with gdb (the pod
   # carries SYS_PTRACE for exactly this), then killed so the gate fails with a stack rather
   # than sitting for hours. The dump is the whole evidence of a hang; keep it.
-  cargo nextest run --workspace --locked > /tmp/ship-test.log 2>&1 &
+  cargo nextest run --workspace --locked $FEATURES > /tmp/ship-test.log 2>&1 &
   NX=$!
   while kill -0 $NX 2>/dev/null; do
     sleep 5
@@ -74,7 +80,7 @@ fi
 # keep the full release profile (`image.yml`), so a production repin is never built here.
 PROFILE=dev-image
 echo "==> $PROFILE build"
-cargo build --profile $PROFILE --locked --bins 2>&1 | tail -1
+cargo build --profile $PROFILE --locked --bins $FEATURES 2>&1 | tail -1
 # The workspace CLI, for the Alpine workspace image: its own target, so it never lands in
 # target/$PROFILE beside the glibc binaries.
 cargo build --profile $PROFILE --locked -p kl --target x86_64-unknown-linux-musl 2>&1 | tail -1

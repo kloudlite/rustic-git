@@ -181,6 +181,7 @@ const CLUSTER_ENV_VARS: &[(&str, &str)] = &[
     ("defaultImage", "WS_DEFAULT_IMAGE"),
     ("gitInitImage", "WS_GIT_INIT_IMAGE"),
     ("runtimeClass", "WS_RUNTIME_CLASS"),
+    ("stallDumps", "WS_STALL_DUMPS"),
 ];
 
 fn cluster_default(name: &str) -> serde_json::Value {
@@ -207,6 +208,7 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "traceProbeBurst" => kloudlite_trace::PROBE_BURST.into(),
         "tracePromoteRate" => kloudlite_trace::PROMOTE_RATE.into(),
         "tracePromoteBurst" => kloudlite_trace::PROMOTE_BURST.into(),
+        "stallDumps" => false.into(),
         _ => serde_json::Value::Null,
     }
 }

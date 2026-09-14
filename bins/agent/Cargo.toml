@@ -47,6 +47,10 @@ kloudlite-trace = { workspace = true }
 # `kubeclient.rs`'s per-request bound is a tower `Layer` on kube's own client stack. Also a
 # dev-dependency below, where `peer.rs`'s router is driven with `oneshot`.
 
+[features]
+# See crates/workspaces' `stall-dump`: requires RUSTFLAGS="--cfg tokio_unstable".
+stall-dump = ["kloudlite-workspaces/stall-dump"]
+
 [dev-dependencies]
 # `tokio::time::pause`/`advance`, for the fake-clock beat-interval tests — production never
 # builds with this, so a beat can never accidentally rely on virtual time.

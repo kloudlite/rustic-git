@@ -337,6 +337,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
             (v.trace_promote_rate, v.trace_promote_burst)
         }
     });
+    kloudlite_workspaces::k8s::stall_dump::ENABLED.store(settings.load().stall_dumps, std::sync::atomic::Ordering::Relaxed);
     // The gauges the collector cannot get from the kubelet: the btrfs pool is this process's
     // filesystem to read, and "working copies running here" is this node's own view. Must run
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
@@ -435,7 +436,9 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
 /// from the boot-time `initial_settings` load — only a watch/refresh event that actually reached
 /// this node earns the write.
 async fn apply_settings(api: &kube::Api<crd::ClusterSettings>, settings: &LiveSettings<AgentSettings>, obj: crd::ClusterSettings) {
-    settings.store(AgentSettings::from_env().merged_with(&obj.spec));
+    let merged = AgentSettings::from_env().merged_with(&obj.spec);
+    kloudlite_workspaces::k8s::stall_dump::ENABLED.store(merged.stall_dumps, std::sync::atomic::Ordering::Relaxed);
+    settings.store(merged);
     let body = serde_json::json!({
         "apiVersion": format!("{}/{}", crd::GROUP, crd::VERSION),
         "kind": "ClusterSettings",
