@@ -64,6 +64,12 @@ if (!readOnly) {
   }
 }
 
+// After `--ping` (1 s budget, must not load the SDK) and before the server loads `node:http`.
+if (process.env.KLOUDLITE_OTLP_URL) {
+  const { startTracing } = await import("./tracing.ts");
+  startTracing(process.env.OTEL_SERVICE_NAME ?? "harness-bench", process.env.KLOUDLITE_OTLP_URL);
+}
+
 const [{ Bench }, { Idle }, { serve }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts")]);
 const bench = new Bench({ dir, readOnly, model: a.model });
 await bench.start();

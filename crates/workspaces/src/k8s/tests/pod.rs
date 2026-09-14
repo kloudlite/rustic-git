@@ -459,6 +459,8 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     assert!(line.contains(">> /home/kl/.local/state/kl-ide.log"), "{line}");
     // The bench dials the tool server on the pod IP (the bench spec's What runs where); the ssh tunnel still reaches it on loopback.
     assert!(line.contains("exec kl ide serve --bind 0.0.0.0:7788 "), "{line}");
+    // Traced to the node collector; on the serve line only, so a person's own shells never inherit `OTEL_SERVICE_NAME`.
+    assert!(line.contains("KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve"), "{line}");
 }
 
 /// `/etc/profile` sources every `/etc/profile.d/*.sh`: an `exit` in one ends the login shell itself,

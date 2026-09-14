@@ -1,7 +1,7 @@
 //! Every NetworkPolicy: the default deny with DNS, internet egress that excludes the cluster and
 //! the metadata service, the gateway's hole for port 22, the builder gate's two policies, and the
 //! pairs that open an attachment or an intercept between a workspace and an environment, and the
-//! bench's hole to its workspaces' tool port.
+//! bench's hole to its workspaces' tool port, and tenants' one hole to the node collector's OTLP port.
 
 use super::*;
 
@@ -84,8 +84,12 @@ pub(super) fn policy(name: &str, ns: &str, owner: &str, owner_ref: &OwnerReferen
 }
 
 
-/// The three policies every namespace gets: deny everything, allow DNS out, allow the namespace to
-/// talk to itself.
+/// The node-local collector's Service (`deploy/k3s/otel-agent.yaml`, `internalTrafficPolicy: Local`),
+/// handed to the tool server and the bench as `KLOUDLITE_OTLP_URL`. Plain HTTP: no TLS in `kl`.
+pub const OTLP_URL: &str = "http://kloudlite-otel-agent-otlp.kube-system.svc:4318";
+
+/// The policies every namespace gets: deny everything, allow DNS out, internet egress, OTLP to the
+/// node collector, and the namespace talking to itself.
 ///
 /// Generated rather than rendered from YAML so there is exactly one definition of the isolation
 /// rule. Order does not matter — NetworkPolicies are additive, and the default-deny is expressed by
@@ -126,6 +130,28 @@ pub fn default_policies(ns: &str, owner: &str, owner_ref: &OwnerReference) -> Ve
             }),
         ),
         allow_internet_egress(ns, owner, owner_ref),
+        policy(
+            "allow-otlp",
+            ns,
+            owner,
+            owner_ref,
+            // The tool server and the bench export spans to the collector on their own node;
+            // `allow-internet-egress` excludes the cluster, so without this every export drops
+            // and the bench -> tool server hop never reaches HyperDX. Only the collector's pods
+            // (namespace AND pod in ONE peer — two peers would OR into all of kube-system) and
+            // only OTLP/HTTP: nothing in a tenant pod speaks gRPC to it. No CIDR.
+            json!({
+                "podSelector": {},
+                "policyTypes": ["Egress"],
+                "egress": [{
+                    "to": [{
+                        "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": "kube-system" } },
+                        "podSelector": { "matchLabels": { "app": "kloudlite-otel-agent" } },
+                    }],
+                    "ports": [{ "protocol": "TCP", "port": 4318 }],
+                }],
+            }),
+        ),
         policy(
             "allow-same-namespace",
             ns,

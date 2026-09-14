@@ -55,6 +55,8 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
                 var("KL_MODEL", b.spec.model.clone()),
                 var("KL_REGISTRY_HOST", registry_host.to_string()),
                 var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
+                var("KLOUDLITE_OTLP_URL", OTLP_URL.to_string()),
+                var("OTEL_SERVICE_NAME", "harness-bench".to_string()),
                 EnvVar {
                     name: "NODE_NAME".into(),
                     value_from: Some(EnvVarSource {

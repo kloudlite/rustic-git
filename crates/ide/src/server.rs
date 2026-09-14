@@ -50,6 +50,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/stream/watch/{id}", get(crate::stream::watch))
         // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
         // themselves accept up to `MAX_BYTES` (2026-09-12).
+        // One server span per request, named by the route TEMPLATE (`/tools/{name}`, `/fs/file`),
+        // never a path or query; `/healthz` is untraced, and a stream is one span that ends at the
+        // upgrade, never one per message. Untrusted like a public door: a caller's sampled flag
+        // counts only for probe traffic, within the probe bucket (`kloudlite_trace::sampler`).
+        .layer(axum::middleware::from_fn(kloudlite_trace::traced))
         .layer(DefaultBodyLimit::max(crate::tools::files::MAX_BYTES as usize + (1 << 20)))
         .with_state(app)
 }
@@ -72,6 +77,64 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use tower::ServiceExt;
+
+    const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    fn traced_app() -> (tempfile::TempDir, Arc<App>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let root = home.join("workspaces/api");
+        std::fs::create_dir_all(root.join("secret-dir")).unwrap();
+        std::fs::write(root.join("secret-dir/a.txt"), "SECRET-CONTENT\n").unwrap();
+        (tmp, Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None })))
+    }
+
+    /// Probe-marked so the flag is obeyed: the tool server trusts nobody else's.
+    async fn send(app: &Arc<App>, req: axum::http::request::Builder, body: axum::body::Body) -> u16 {
+        let req = req.header("traceparent", PARENT).header(kloudlite_trace::PROBE_HEADER, "1").body(body).unwrap();
+        router(app.clone()).oneshot(req).await.unwrap().status().as_u16()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_tool_call_continues_the_bench_trace_and_carries_only_the_tool_name() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (_tmp, app) = traced_app();
+        let body = serde_json::json!({ "path": "secret-dir/a.txt" }).to_string();
+        assert_eq!(send(&app, axum::http::Request::post("/tools/read").header("content-type", "application/json"), body.into()).await, 200);
+        assert_eq!(send(&app, axum::http::Request::get("/fs/file?path=secret-dir/a.txt"), axum::body::Body::empty()).await, 200);
+        let got = spans.get_finished_spans().unwrap();
+        let names: Vec<_> = got.iter().map(|s| s.name.to_string()).collect();
+        assert_eq!(names, vec!["POST /tools/{name}", "GET /fs/file"]);
+        assert!(got.iter().all(|s| s.span_context.trace_id().to_string() == "4bf92f3577b34da6a3ce929d0e0e4736"));
+        assert!(got[0].attributes.iter().any(|kv| kv.key.as_str() == "kl.tool.name" && kv.value.as_str() == "read"), "{:?}", got[0].attributes);
+        let all = format!("{got:?}");
+        for leak in ["secret-dir", "SECRET-CONTENT", "a.txt", "workspaces/api"] {
+            assert!(!all.contains(leak), "{leak} reached exported span data: {all}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unknown_tool_name_is_not_recorded() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (_tmp, app) = traced_app();
+        assert_eq!(send(&app, axum::http::Request::post("/tools/made-up-secret"), axum::body::Body::empty()).await, 404);
+        assert!(!format!("{:?}", spans.get_finished_spans().unwrap()).contains("made-up-secret"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn healthz_is_untraced_and_a_stream_is_one_span() {
+        let (dispatch, spans) = kloudlite_trace::testing::subscriber();
+        let _g = tracing::dispatcher::set_default(&dispatch);
+        let (_tmp, app) = traced_app();
+        assert_eq!(send(&app, axum::http::Request::get("/healthz"), axum::body::Body::empty()).await, 200);
+        send(&app, axum::http::Request::get("/stream/process/p-123"), axum::body::Body::empty()).await;
+        let got = spans.get_finished_spans().unwrap();
+        let names: Vec<_> = got.iter().map(|s| s.name.to_string()).collect();
+        assert_eq!(names, vec!["GET /stream/process/{id}"]);
+        assert!(!format!("{got:?}").contains("p-123"));
+    }
 
     #[tokio::test]
     async fn healthz_names_the_root() {

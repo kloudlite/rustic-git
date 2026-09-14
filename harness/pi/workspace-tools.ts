@@ -97,7 +97,10 @@ export class ToolServer {
       }
       const at = this.address;
       try {
-        const r = await fetch(`http://${at}/tools/${c.tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(c.args), signal });
+        // The bench's trace, handed down at spawn: pi's RPC protocol has no field for it per call.
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (process.env.KL_TRACEPARENT) headers.traceparent = process.env.KL_TRACEPARENT;
+        const r = await fetch(`http://${at}/tools/${c.tool}`, { method: "POST", headers, body: JSON.stringify(c.args), signal });
         const body = await r.json().catch(() => ({ error: `the tool server answered ${r.status} without JSON` }));
         if (r.status === 409) {
           this.address = undefined;

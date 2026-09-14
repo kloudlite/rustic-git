@@ -10,6 +10,9 @@
 //! token bucket. The header is forgeable, so ingress (Task 7) should also strip it from outside
 //! traffic as defence in depth; the bucket is what holds when a path bypasses ingress (`/v1`).
 //!
+//! Feature `tls` (default) adds `inject_reqwest` and the rustls provider install; without it the
+//! exporter's reqwest has no TLS at all, which is what `kl ide serve` builds with.
+//!
 //! Module map: `sampler` (who is kept at the head, and whether a remote flag is trusted),
 //! `promote` (who is kept at the tail: errored or slow local roots, in-process), `http` (the
 //! in/out seams), `testing` (an in-memory subscriber for other crates' tests).
@@ -24,7 +27,9 @@ mod sampler;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, server_span_with, stamp, traced, traced_as, untraced, PROBE_HEADER, UNTRACED};
+#[cfg(feature = "tls")]
+pub use http::inject_reqwest;
+pub use http::{client_span, finish, inject, is_probe, server_span, server_span_with, set_attribute, stamp, traced, traced_as, untraced, PROBE_HEADER, UNTRACED};
 pub use promote::Promote;
 pub use sampler::{bind_probe_budget, bind_promote_budget, bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO, PROBE_BURST, PROBE_RATE, PROMOTE_BURST, PROMOTE_RATE};
 
@@ -48,6 +53,7 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn provider(url: &str, service: &str) -> Result<SdkTracerProvider, ExporterBuildError> {
     // The workspace's reqwest is `rustls-no-provider`, and `layer()` runs from `log::init` before
     // a binary's own install: without this the exporter's blocking client panics at build.
+    #[cfg(feature = "tls")]
     let _ = rustls::crypto::ring::default_provider().install_default();
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()

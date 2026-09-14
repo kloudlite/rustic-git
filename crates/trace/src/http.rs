@@ -108,12 +108,19 @@ pub fn inject(headers: &mut http::HeaderMap) {
     }
 }
 
+#[cfg(feature = "tls")]
 pub fn inject_reqwest(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     let mut h = http::HeaderMap::new();
     inject(&mut h);
     // `RequestBuilder::headers` REPLACES each name it is given (reqwest `util::replace_headers`),
     // so a caller's own `traceparent` is overwritten, never duplicated; the test holds that.
     req.headers(h)
+}
+
+/// One extra attribute on an already-open span, for a BOUNDED value only (a tool name the
+/// callee recognised, never an argument): fields must be declared at creation, this need not be.
+pub fn set_attribute(span: &tracing::Span, key: &'static str, value: String) {
+    span.set_attribute(key, value);
 }
 
 /// For listeners that do not mount `kloudlite_core::metrics::http_metrics` (agent peer, tool
@@ -209,6 +216,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn inject_reqwest_replaces_an_existing_traceparent() {
         let _ = rustls::crypto::ring::default_provider().install_default();

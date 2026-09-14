@@ -19,8 +19,13 @@ pub async fn list(State(app): State<Arc<App>>) -> Json<Value> {
 
 pub async fn call(State(app): State<Arc<App>>, Path(name): Path<String>, body: Option<Json<Value>>) -> (StatusCode, Json<Value>) {
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    match app.registry.call(&name, args).await {
-        Ok(v) => (StatusCode::OK, Json(v)),
-        Err(e) => (status_of(&e), Json(json!({ "error": e.to_string() }))),
+    let (status, body) = match app.registry.call(&name, args).await {
+        Ok(v) => (StatusCode::OK, v),
+        Err(e) => (status_of(&e), json!({ "error": e.to_string() })),
+    };
+    // Only a name the registry knew: a 404's name is whatever the caller typed.
+    if status != StatusCode::NOT_FOUND {
+        kloudlite_trace::set_attribute(&tracing::Span::current(), "kl.tool.name", name);
     }
+    (status, Json(body))
 }

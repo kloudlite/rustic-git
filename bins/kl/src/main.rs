@@ -148,10 +148,14 @@ fn serve_ide(bind: std::net::SocketAddr, graft_dir: Option<std::path::PathBuf>) 
     let home = std::path::PathBuf::from(env("HOME")?);
     let cfg = kloudlite_ide::Config { bind, root, home, graft_dir };
     kloudlite_ide::guard::preflight(&cfg)?;
-    tracing_subscriber::fmt()
-        .json()
-        .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    // Before the runtime: the exporter's blocking client must not be built inside one.
+    // `None` (no `KLOUDLITE_OTLP_URL`) is exactly the old subscriber.
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .with(kloudlite_trace::layer())
+        .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stderr))
         .init();
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(kloudlite_ide::serve(cfg)).map_err(|e| e.to_string())

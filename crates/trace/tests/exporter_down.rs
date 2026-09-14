@@ -17,13 +17,17 @@ async fn requests_stay_fast(collector: &str) {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    // Built after `layer_with`, which installed the ring provider this client needs too.
-    let http = reqwest::Client::new();
+    // A raw HTTP/1.1 client: a reqwest dev-dependency would switch its TLS feature back on and
+    // the `--no-default-features` run (what `kl` builds) would no longer test what ships.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let started = Instant::now();
     // More requests than the queue holds, so the full-queue drop path runs too.
     for _ in 0..3_000 {
-        let r = http.get(format!("http://{addr}/x")).header("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01").send().await.unwrap();
-        assert_eq!(r.status(), 200);
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"GET /x HTTP/1.1\r\nhost: x\r\nconnection: close\r\ntraceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\r\n\r\n").await.unwrap();
+        let mut got = Vec::new();
+        c.read_to_end(&mut got).await.unwrap();
+        assert!(got.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&got));
     }
     assert!(started.elapsed() < Duration::from_secs(10), "3000 loopback requests took {:?}", started.elapsed());
 }

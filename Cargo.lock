@@ -4100,6 +4100,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "kloudlite-ide",
+ "kloudlite-trace",
  "tempfile",
  "tokio",
  "tracing",
@@ -4320,6 +4321,7 @@ dependencies = [
  "gix-hash",
  "globset",
  "ignore",
+ "kloudlite-trace",
  "libc",
  "notify",
  "regex",

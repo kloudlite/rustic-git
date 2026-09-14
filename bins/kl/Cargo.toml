@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 kloudlite-ide = { path = "../../crates/ide" }
+# Plain-HTTP export only: no `tls`, so no rustls/ring in the musl binary.
+kloudlite-trace = { path = "../../crates/trace", default-features = false }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

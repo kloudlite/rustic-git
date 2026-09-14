@@ -23,7 +23,10 @@ regex = { workspace = true }
 gix = { version = "0.87", default-features = false, features = ["sha1", "status", "blob-diff", "dirwalk", "revision", "index", "worktree-mutation"] }
 # The hash kind lives in gix-hash's features; the workspace pin carries `sha1`.
 gix-hash = { workspace = true }
+# No `tls`: the collector is plain HTTP on the node, and `kl` is a musl binary with a size budget.
+kloudlite-trace = { path = "../trace", default-features = false }
 
 [dev-dependencies]
+kloudlite-trace = { path = "../trace", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 tower = { workspace = true }

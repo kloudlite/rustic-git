@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { traceparent } from "./tracing.ts";
 
 /**
  * One session's pi, in RPC mode: JSONL over stdio. Framing is strict LF; Node's
@@ -48,7 +49,10 @@ export class RpcChild {
     const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
     const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : [])];
     // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env: o.tools ? { ...process.env, KL_TOOLS_WORKSPACE: o.tools } : process.env, cwd: o.cwd ?? process.env.HOME });
+    // The trace of the request that started this child; every tool call of its life joins it.
+    const tp = traceparent();
+    const env = { ...process.env, ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...(tp ? { KL_TRACEPARENT: tp } : {}) };
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));
     let errTail = "";
