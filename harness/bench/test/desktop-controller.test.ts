@@ -117,15 +117,20 @@ test("a remembered team that lost its region says so", async () => {
   assert.deepEqual(h.auth.state(), { phase: "choose-team", teams: [FRESH, ACME], reason: "fresh has no region yet" });
 });
 
-test("switch team disconnects, forgets the team, and shows the picker", async () => {
-  const h = harness({}, [ACME, BETA]);
+test("choosing another team while ready closes this bench and connects that one", async () => {
+  const h = harness({}, [ACME, BETA, FRESH]);
   h.set(cred);
   h.choose("acme");
   await h.auth.launch();
-  await h.auth.switchTeam();
-  assert.deepEqual(h.log, ["connect acme", "disconnect"]);
-  assert.equal(h.chosen(), undefined);
-  assert.deepEqual(h.auth.state(), { phase: "choose-team", teams: [ACME, BETA] });
+  assert.deepEqual(h.auth.teams(), [ACME, BETA, FRESH]);
+  await h.auth.chooseTeam("acme");
+  await h.auth.chooseTeam("fresh");
+  await h.auth.chooseTeam("gone");
+  assert.deepEqual(h.log, ["connect acme"]);
+  await h.auth.chooseTeam("beta");
+  assert.deepEqual(h.log, ["connect acme", "disconnect", "connect beta"]);
+  assert.equal(h.chosen(), "beta");
+  assert.deepEqual(h.auth.state(), { phase: "ready", username: "karthik", team: "beta" });
 });
 
 test("a 401 listing teams signs out; an unreachable list is a retryable error", async () => {

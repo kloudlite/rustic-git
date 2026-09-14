@@ -40,6 +40,8 @@ export function createAuth(d: Deps) {
   let state: AuthState = { phase: "starting" };
   let pending: AbortController | undefined;
   let disconnect: (() => void) | undefined;
+  // The last team list read; the title bar's switcher offers exactly these.
+  let teams: Team[] = [];
   // Bumped by every connect, sign-out and expiry: a connect whose attempt moved on while it was
   // awaiting closes what it just built instead of flipping the state back to ready.
   let attempt = 0;
@@ -73,7 +75,6 @@ export function createAuth(d: Deps) {
   const pick = async (c: Credential) => {
     const mine = ++attempt;
     set({ phase: "connecting", step: "finding your teams" });
-    let teams: Team[];
     try {
       teams = await d.teams(c);
     } catch (e) {
@@ -136,24 +137,19 @@ export function createAuth(d: Deps) {
       if (!c) return set({ phase: "signed-out" });
       return pick(c);
     },
-    /** Only a team from the list on screen, and only one with a region: no bench is created elsewhere. */
+    teams: () => teams,
+    /** Only a team from the last list, and only one with a region: no bench is created elsewhere.
+        From the picker, or while ready (the title bar's switcher): the current bench closes first. */
     async chooseTeam(slug: string) {
-      if (state.phase !== "choose-team") return;
-      const t = state.teams.find((x) => x.slug === slug);
+      if (state.phase !== "choose-team" && state.phase !== "ready") return;
+      if (state.phase === "ready" && state.team === slug) return;
+      const t = teams.find((x) => x.slug === slug);
       if (!t?.region) return;
       const c = d.store.load();
       if (!c) return set({ phase: "signed-out" });
+      drop();
       d.team.save(slug);
       return connect(c, slug);
-    },
-    /** Disconnects and forgets the team, back to the picker. */
-    async switchTeam() {
-      attempt++;
-      drop();
-      d.team.clear();
-      const c = d.store.load();
-      if (!c) return set({ phase: "signed-out" });
-      return pick(c);
     },
     async signIn() {
       if (state.phase === "waiting" || state.phase === "connecting" || state.phase === "ready") return;

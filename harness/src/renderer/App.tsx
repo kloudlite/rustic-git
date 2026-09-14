@@ -9,7 +9,8 @@ import { Inspector } from "./components/inspector/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { makeTab, type TermTab } from "./components/terminal/tabs";
-import { ENVIRONMENTS, IMAGES, MACHINES, REPOS, SNAPSHOTS, TEAMS, threadOf, type Thread } from "./model";
+import { ENVIRONMENTS, IMAGES, MACHINE, REPOS, SNAPSHOTS, threadOf, type Thread } from "./model";
+import type { Team } from "../connect/bench";
 import { KEYS, threadIndex } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
@@ -20,11 +21,14 @@ import { cycleTheme } from "./theme";
 
 export function App() {
   // A developer has exactly one bench per team, so switching team is what
-  // switches machine; there is nothing to choose within a team.
-  // HARNESS_HASH=team:<id>/... opens on that team, for looking at an empty bench.
-  const teamHash = /^team:([^/]+)/.exec(location.hash.slice(1))?.[1];
-  const [teamId, setTeamId] = createSignal(TEAMS.find((t) => t.id === teamHash)?.id ?? TEAMS[0].id);
-  const machine = createMemo(() => MACHINES.find((m) => m.teamId === teamId()) ?? MACHINES[0]);
+  // switches machine: the real `auth.chooseTeam` reconnects, and leaving ready
+  // reloads this page, so nothing here resets state by hand.
+  const [teams, setTeams] = createSignal<Team[]>([]);
+  const [teamId, setTeamId] = createSignal("");
+  void window.harness.auth.status().then((s) => s.phase === "ready" && setTeamId(s.team));
+  void window.harness.auth.teams().then(setTeams);
+  const teamName = () => teams().find((t) => t.slug === teamId())?.name || teamId();
+  const machine = createMemo(() => MACHINE);
 
   // Environments belong to the team, not the machine: the machine is connected
   // to one of them at a time.
@@ -214,15 +218,7 @@ export function App() {
   const [taskId, setTaskId] = createSignal<string | undefined>();
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
-  const switchTeam = (id: string) => {
-    setTeamId(id);
-    const m = MACHINES.find((x) => x.teamId === id);
-    if (m) {
-      setConnected(m.environmentId);
-      setPanes(produce((ps) => void ps.splice(0, ps.length, { open: [m.id], sel: m.id })));
-      setActivePane(0);
-    }
-  };
+  const switchTeam = (slug: string) => void window.harness.auth.chooseTeam(slug);
 
   // Either side dock can be put away; the conversation takes the room.
   const [leftOpen, setLeftOpen] = createSignal(true);
@@ -383,7 +379,7 @@ export function App() {
         if (c) (c.value = `/${p.name} `, fit(c), c.focus());
       },
     })),
-    ...TEAMS.filter((t) => t.id !== teamId()).map((t) => ({ id: `team:${t.id}`, label: `Switch to ${t.name}`, run: () => switchTeam(t.id) })),
+    ...teams().filter((t) => t.slug !== teamId() && t.region).map((t) => ({ id: `team:${t.slug}`, label: `Switch to ${t.name || t.slug}`, run: () => switchTeam(t.slug) })),
     ...ENVIRONMENTS.filter((e) => e.id !== connected()).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => setConnected(e.id) })),
   ]);
 
@@ -567,7 +563,7 @@ export function App() {
 
   return (
     <div class="relative grid h-full grid-rows-[35px_minmax(0,1fr)_22px]">
-      <TitleBar machine={machine()} teams={TEAMS} teamId={teamId()} onSwitchTeam={switchTeam} onSearch={() => setPalette("go")} />
+      <TitleBar machine={machine()} teams={teams()} team={teamId()} onSwitchTeam={switchTeam} onSearch={() => setPalette("go")} />
       <Confirm
         open={!!confirm()}
         title={`Delete ${sessions.find((x) => x.id === confirm()?.id)?.name ?? "this session"}?`}
@@ -623,7 +619,7 @@ export function App() {
         <Show when={leftOpen() && view() === "workspaces"}>
           <MachinePanel
             machine={machine()}
-            team={TEAMS.find((t) => t.id === teamId())?.name ?? ""}
+            team={teamName()}
             sessions={live_()}
             busy={(id) => live.thread(id).busy()}
             onNewSession={newSession}
@@ -652,7 +648,7 @@ export function App() {
             <div class="grid min-h-0 min-w-0" data-pane={pi()} classList={{ "border-l border-line": pi() > 0 }} on:pointerdown={{ handleEvent: () => setActivePane(pi()), capture: true }}>
             <Chat
               machine={machine()}
-              team={TEAMS.find((t) => t.id === teamId())?.name ?? ""}
+              team={teamName()}
               env={isActive() && envTab() ? environment() : undefined}
               file={isActive() ? file() : undefined}
               onCloseFile={() => setFile(undefined)}

@@ -50,7 +50,6 @@ export function ActivityBar(props: {
           <MenuLabel>{team() ? `${who()} · ${team()}` : who()}</MenuLabel>
           <MenuItem icon="user" onSelect={pick(props.onProfile)}>Profile</MenuItem>
           <MenuItem icon="settings" hint="⌘," onSelect={pick(props.onSettings)}>Settings</MenuItem>
-          <MenuItem icon="users" onSelect={pick(() => void window.harness.auth.switchTeam())}>Switch team</MenuItem>
           <MenuSep />
           <MenuItem icon="lock" onSelect={pick(() => void window.harness.auth.signOut())}>Sign out</MenuItem>
         </Menu>

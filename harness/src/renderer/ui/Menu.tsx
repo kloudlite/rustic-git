@@ -70,11 +70,12 @@ export function MenuItem(props: {
   icon?: string;
   hint?: string;
   mono?: boolean;
+  disabled?: boolean;
   onSelect?: () => void;
   children: JSX.Element;
 }) {
   return (
-    <button role="menuitem" onClick={() => props.onSelect?.()} class={cx(ROW, "h-6 rounded-sm text-left text-sm hover:bg-hover")}>
+    <button role="menuitem" disabled={props.disabled} onClick={() => props.onSelect?.()} class={cx(ROW, "h-6 rounded-sm text-left text-sm hover:bg-hover disabled:text-subtle disabled:hover:bg-transparent")}>
       <span class="justify-self-center text-accent">
         <Show when={props.checked}>
           <Icon name="check" size={12} />

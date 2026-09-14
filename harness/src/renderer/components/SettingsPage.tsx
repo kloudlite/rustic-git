@@ -76,9 +76,8 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
               <Row name="signed in as" detail="a CLI login labelled with this computer's name and (desktop)">
                 <span class="font-mono text-sm text-fg">{who()}</span>
               </Row>
-              <Row name="team" detail="the team whose bench this app is connected to">
+              <Row name="team" detail="the team whose bench this app is connected to; switch it from the title bar">
                 <span class="font-mono text-sm text-fg">{team()}</span>
-                <Button onClick={() => void window.harness.auth.switchTeam()}>Switch team</Button>
               </Row>
               <Row name="address" detail="change it from the login screen, after signing out">
                 <span class="font-mono text-sm text-fg">{api()}</span>

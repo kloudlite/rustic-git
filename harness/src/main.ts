@@ -494,7 +494,8 @@ ipcMain.handle("auth:chooseTeam", (_e, slug: unknown) => {
   if (typeof slug !== "string") throw new Error("not a team");
   return auth.chooseTeam(slug);
 });
-ipcMain.handle("auth:switchTeam", () => auth.switchTeam());
+// Slug, name and region only: the list the controller last read, never a fresh fetch per call.
+ipcMain.handle("auth:teams", () => auth.teams());
 ipcMain.handle("auth:api", () => apiBase());
 ipcMain.handle("auth:setApi", (_e, url: unknown) => {
   if (auth.state().phase !== "signed-out") throw new Error("sign out before changing the Kloudlite address");

@@ -260,8 +260,6 @@ export type TodoState = "done" | "active" | "blocked" | "pending";
 // its children (done when all are, active when any is), never stored.
 export type Todo = { id: string; text: string; state?: TodoState; eph?: string; note?: string; children?: Todo[] };
 
-export type Team = { id: string; name: string };
-
 /** A repository the team has on the platform; a workspace is cut from one. */
 export type Repo = { id: string; teamId: string; name: string; branch: string; updated: string; private?: boolean };
 export const REPOS: Repo[] = [
@@ -376,11 +374,6 @@ export const SNAPSHOTS: Snapshot[] = [
   { id: "snap-9f21", name: "before the churn fix", environment: "kloudlite-dev", at: "12:01 today", by: "karthik", services: 7, note: "known good on d16ac7dc" },
   { id: "snap-7c04", name: "staging nightly", environment: "staging", at: "02:00 today", by: "automation", services: 7 },
   { id: "snap-4a88", name: "before the keys migration", environment: "staging", at: "Sep 11", by: "karthik", services: 7 },
-];
-
-export const TEAMS: Team[] = [
-  { id: "t-kloudlite", name: "kloudlite" },
-  { id: "t-labs", name: "kloudlite-labs" },
 ];
 
 export const MACHINE: Machine = {
@@ -572,19 +565,3 @@ export function threadOf(m: Machine, id: string): Thread | undefined {
   }
   return undefined;
 }
-
-/** One machine per developer per team, so this list is keyed by team. */
-export const MACHINES: Machine[] = [
-  MACHINE,
-  {
-    id: "wm-karthik-labs",
-    teamId: "t-labs",
-    owner: "karthik@kloudlite.io",
-    goal: "",
-    model: "claude-fable-5-1",
-    environmentId: "env-7c21a9",
-    todos: [],
-    workspaces: [],
-    plugins: [],
-  },
-];
