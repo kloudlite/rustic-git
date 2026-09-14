@@ -17,10 +17,10 @@
 mod http;
 mod promote;
 mod sampler;
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use http::{client_span, finish, inject, inject_reqwest, server_span, stamp, traced, untraced, UNTRACED};
+pub use http::{client_span, finish, inject, inject_reqwest, is_probe, server_span, stamp, traced, untraced, PROBE_HEADER, UNTRACED};
 pub use promote::Promote;
 pub use sampler::{bind_ratio, trust_remote_sampled, Sampler, DEFAULT_RATIO};
 
