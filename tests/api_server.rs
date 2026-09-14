@@ -52,7 +52,7 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let cache = Arc::new(kloudlite_storage::cache::Cache::connect(None).await);
     let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, None, false)
             .await
             .unwrap()
     });
@@ -69,7 +69,7 @@ async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirect
     let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(KEY).unwrap());
     let dir = d.dir.clone();
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, None, false)
             .await
             .unwrap()
     });
@@ -86,7 +86,7 @@ async fn api_with(
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, false)
+        kloudlite_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, None, false)
             .await
             .unwrap()
     });
@@ -1030,7 +1030,7 @@ async fn a_public_team_profile_is_readable_and_nothing_else_is() {
     assert_eq!(reqwest::get(format!("{base}/v1/teams/nosuchteam/profile")).await.unwrap().status(), 404);
 
     d.dir.upsert_user("boss@example.com", "Boss").await.unwrap();
-    d.dir.create("acme", "Acme", "boss@example.com").await.unwrap().unwrap();
+    d.dir.create("acme", "Acme", "boss@example.com", "").await.unwrap().unwrap();
     assert_eq!(
         reqwest::get(format!("{base}/v1/teams/acme/profile")).await.unwrap().status(),
         404,
@@ -1188,7 +1188,7 @@ async fn an_invitation_is_created_and_accepted_once() {
     let base = api_with_dir(&e, &up, &d).await;
     d.dir.upsert_user("boss@example.com", "Boss").await.unwrap();
     d.dir.upsert_user("newbie@example.com", "Newbie").await.unwrap();
-    d.dir.create("acme", "Acme", "boss@example.com").await.unwrap().unwrap();
+    d.dir.create("acme", "Acme", "boss@example.com", "").await.unwrap().unwrap();
     let c = reqwest::Client::new();
 
     let r = c
@@ -1293,4 +1293,40 @@ async fn the_repo_routes_answer_for_themselves_with_a_directory() {
         .unwrap();
     assert_eq!(r.status(), 201);
     assert_eq!(up.hits.load(Ordering::SeqCst), 1);
+}
+
+/// A team is placed when it is made: no region is a 422, a name that is not an active region is a
+/// 422 naming it, and a real one is stored on the team in the same insert.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_team_is_created_in_a_known_region() {
+    let Some(d) = common::mongo("a_team_is_created_in_a_known_region").await else { return };
+    let e = common::env().await;
+    let up = upstream(axum::http::StatusCode::OK).await;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
+    let cache = Arc::new(kloudlite_storage::cache::Cache::connect(None).await);
+    let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(KEY).unwrap());
+    let dir = d.dir.clone();
+    let check: kloudlite_api::RegionCheck = Arc::new(|r: String| Box::pin(async move { Ok(r == "r1") }));
+    tokio::spawn(async move {
+        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, Some(check), false)
+            .await
+            .unwrap()
+    });
+    d.dir.upsert_user("boss@example.com", "Boss").await.unwrap();
+    let token = kloudlite_core::jwt::Jwt::new(KEY).unwrap().mint("boss@example.com", "B", None).unwrap();
+    let c = reqwest::Client::new();
+    let post = |body: serde_json::Value| c.post(format!("{base}/v1/teams")).bearer_auth(&token).json(&body).send();
+
+    let r = post(serde_json::json!({ "slug": "acme", "name": "Acme" })).await.unwrap();
+    assert_eq!(r.status(), 422, "a team with no region is refused");
+    let r = post(serde_json::json!({ "slug": "acme", "name": "Acme", "region": "nowhere" })).await.unwrap();
+    assert_eq!(r.status(), 422);
+    assert!(r.text().await.unwrap().contains("nowhere"), "the refusal names the region");
+    assert!(d.dir.get("acme").await.unwrap().is_none(), "a refused create writes nothing");
+
+    let r = post(serde_json::json!({ "slug": "acme", "name": "Acme", "region": "r1" })).await.unwrap();
+    assert_eq!(r.status(), 201);
+    assert_eq!(d.dir.get("acme").await.unwrap().unwrap().region, "r1");
 }

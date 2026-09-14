@@ -101,6 +101,8 @@ pub struct Api {
     /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
     /// record, and every workspace picks the change up the next time its Secret is written.
     pub on_keys_changed: Option<KeysChanged>,
+    /// `None` without a cluster: team creation then refuses (503) rather than place a team nowhere.
+    pub region_check: Option<RegionCheck>,
     /// See `browse::Membership`: the browse path's answer to "may this person read under
     /// this owner", kept for a minute.
     pub membership: crate::browse::Membership,
@@ -110,6 +112,14 @@ pub struct Api {
     /// `/healthz` reports its version.
     pub central: kloudlite_core::settings::LiveSettings<kloudlite_core::settings::CentralSettings>,
 }
+
+/// Whether a region name is an ACTIVE `Region` — `Ok(false)` unknown, `Err` could not tell. Boxed
+/// for the same reason as `KeysChanged`: regions are CRDs, read through `kloudlite-workspaces`.
+pub type RegionCheck = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<bool, String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::expect_used)] // boot-time: the one HTTP client is built here, at process start
@@ -126,6 +136,7 @@ pub async fn serve(
     // merges whatever it is handed and never itself decides between a user and an admin surface.
     workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
+    region_check: Option<RegionCheck>,
     // Same `KLOUDLITE_API_ROLE` read that picks `workspaces`' router: the superadmin roster
     // routes are as admin-only as `/admin/*` is, so a user-role process must not compile them in
     // either, not just refuse them at auth time.
@@ -165,6 +176,7 @@ pub async fn serve(
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"), // boot-time
         on_keys_changed,
+        region_check,
         membership: crate::browse::Membership::default(),
         central,
     });
@@ -482,6 +494,7 @@ pub(crate) mod testing {
             secret: secret.to_string(),
             client: reqwest::Client::new(),
             on_keys_changed: None,
+            region_check: None,
             membership: crate::browse::Membership::default(),
             central: kloudlite_core::settings::LiveSettings::new(
                 kloudlite_core::settings::CentralSettings::from_env(),

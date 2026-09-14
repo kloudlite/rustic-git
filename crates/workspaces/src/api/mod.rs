@@ -459,6 +459,17 @@ pub(crate) fn phase<T: serde::de::DeserializeOwned>(p: Option<&str>, default: T)
 /// A region is an id the caller typed, and it becomes the OwnerBinding's name and the gateway
 /// hostname. Unknown: a workspace no controller ever claims. Chosen: a binding name squatted in
 /// someone else's region. Only what an admin registered and left active gets through.
+/// `check_region`'s question for a caller outside this crate (team creation on the directory tier):
+/// `Ok(false)` for a name that is not an active region, `Err` when the cluster could not say.
+pub async fn region_active(s: &ApiState, region: &str) -> Result<bool, String> {
+    if check_path_segment(region).is_err() {
+        return Ok(false);
+    }
+    let Some(client) = s.kube.as_ref() else { return Err("kubernetes not configured".into()) };
+    let api: Api<crd::Region> = Api::all(client.clone());
+    Ok(api.get_opt(region).await.map_err(|e| e.to_string())?.is_some_and(|r| r.spec.status == "active"))
+}
+
 pub(crate) async fn check_region(s: &ApiState, region: &str) -> Result<(), Response> {
     check_path_segment(region)?;
     let api: Api<crd::Region> = Api::all(kube(s)?.clone());

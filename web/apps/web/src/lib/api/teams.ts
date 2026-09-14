@@ -5,11 +5,11 @@ import type { ApiTeam } from "./client";
 /**
  * Teams: profile, members, roles, invitations.
  */
-export function createTeam(token: string, slug: string, name: string) {
+export function createTeam(token: string, slug: string, name: string, region: string) {
   return call<ApiTeam>("/v1/teams", {
     method: "POST",
     token,
-    body: JSON.stringify({ slug, name }),
+    body: JSON.stringify({ slug, name, region }),
   });
 }
 

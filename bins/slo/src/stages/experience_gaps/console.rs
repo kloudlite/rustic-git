@@ -251,11 +251,12 @@ pub(crate) async fn decide_kinds(c: &mut Ctx) {
     let slug = format!("{}-rq", c.prefix());
     c.step("req.decide.kinds", DECIDE_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
+        let region = c.cfg.region.clone();
         let other = c.other_jwt.clone();
         let admin_jwt = c.admin_jwt();
         let team = api(c, &format!("/v1/teams/{slug}"));
         async move {
-            post(c, &api(c, "/v1/teams"), &jwt, json!({ "slug": slug, "name": "slo probe requests" }))
+            post(c, &api(c, "/v1/teams"), &jwt, json!({ "slug": slug, "name": "slo probe requests", "region": region }))
                 .await
                 .context("could not create the team the access request is for")?;
             let drop_team = || async {

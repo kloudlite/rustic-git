@@ -497,6 +497,13 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as kloudlite_api::KeysChanged
     });
+    let region_check: Option<kloudlite_api::RegionCheck> = workspaces.clone().map(|ws| {
+        Arc::new(move |region: String| {
+            let ws = ws.clone();
+            Box::pin(async move { kloudlite_workspaces::api::region_active(&ws, &region).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<bool, String>> + Send>>
+        }) as kloudlite_api::RegionCheck
+    });
     // The hook is best effort and a cluster write can be lost; the beat is what makes a missed
     // projection at most `KEYS_RESYNC_SECS` old. Only on the user role, the one that mounts `/v1`
     // and owns the projection.
@@ -540,6 +547,7 @@ async fn run() -> Result<()> {
         l,
         workspaces_router,
         on_keys_changed,
+        region_check,
         role == "admin",
     )
     .await

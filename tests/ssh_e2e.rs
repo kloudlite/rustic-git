@@ -217,7 +217,7 @@ async fn ssh_admits_a_member_and_refuses_a_stranger() {
     let dir = std::sync::Arc::new(kloudlite_pulls::directory::Directory::in_memory());
     dir.upsert_user("alice@example.com", "Alice").await.unwrap();
     dir.claim_username("alice@example.com", "alice").await.unwrap();
-    dir.create("acme", "Acme", "alice@example.com").await.unwrap();
+    dir.create("acme", "Acme", "alice@example.com", "").await.unwrap();
     dir.upsert_user("bob@example.com", "Bob").await.unwrap();
     dir.claim_username("bob@example.com", "other").await.unwrap();
 

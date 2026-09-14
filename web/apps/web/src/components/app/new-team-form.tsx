@@ -17,7 +17,7 @@ function toHandle(name: string) {
     .slice(0, 39);
 }
 
-export function NewTeamForm() {
+export function NewTeamForm({ regions }: { regions: string[] }) {
   const [state, action, pending] = useActionState<NewTeamState, FormData>(create, null);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -70,6 +70,25 @@ export function NewTeamForm() {
           <p className="text-caption text-muted-foreground">
             3–39 characters, lowercase. Shared with everyone&rsquo;s handles, so it
             has to be unused. It cannot be changed later.
+          </p>
+        </div>
+
+        <div className="grid gap-2">
+          <FieldLabel htmlFor="region">Region</FieldLabel>
+          <select
+            id="region"
+            name="region"
+            required
+            defaultValue={regions.length === 1 ? regions[0] : ""}
+            className="h-10 border border-input bg-card px-3 text-sm2"
+          >
+            <option value="" disabled>Choose a region</option>
+            {regions.map((r) => (
+              <option key={r} value={r}>{r}</option>
+            ))}
+          </select>
+          <p className="text-caption text-muted-foreground">
+            Where the team&rsquo;s workspaces run. It cannot be changed later.
           </p>
         </div>
 

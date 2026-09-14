@@ -103,9 +103,11 @@ pub fn check_pins(pins: &[String], repos: &[String]) -> Result<Vec<String>> {
 impl Directory {
     // ── teams ───────────────────────────────────────────────────────────────
 
-    /// Create a team with `creator` as its owner. `Ok(None)` means the slug is taken —
-    /// enforced by the database, not by a prior read.
-    pub async fn create(&self, slug: &str, name: &str, creator: &str) -> Result<Option<Team>> {
+    /// Create a team with `creator` as its owner, bound to `region` in the same insert — a team
+    /// is placed once, when it is made, and stays there (empty only for callers predating that
+    /// rule, i.e. tests). `Ok(None)` means the slug is taken — enforced by the database, not by a
+    /// prior read.
+    pub async fn create(&self, slug: &str, name: &str, creator: &str, region: &str) -> Result<Option<Team>> {
         check_handle(slug)?;
         let name = name.trim();
         if name.is_empty() {
@@ -122,6 +124,7 @@ impl Directory {
         let team = Team {
             slug: slug.to_string(),
             name: name.to_string(),
+            region: region.to_string(),
             created_by: creator.to_string(),
             created_at: now,
             members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
@@ -722,13 +725,23 @@ mod tests {
         let d = Directory::in_memory();
         d.upsert_user("alice@x.io", "Alice").await.unwrap();
         d.claim_username("alice@x.io", "alice").await.unwrap().unwrap();
-        d.create("acme", "Acme", "alice@x.io").await.unwrap().unwrap();
+        d.create("acme", "Acme", "alice@x.io", "").await.unwrap().unwrap();
         assert_eq!(d.get("acme").await.unwrap().unwrap().region, "", "an existing team is unbound");
         assert_eq!(d.bind_region("acme", "r1").await.unwrap().as_deref(), Some("r1"));
         assert_eq!(d.bind_region("acme", "r2").await.unwrap().as_deref(), Some("r1"), "set once");
         assert_eq!(d.bind_region("alice", "r2").await.unwrap().as_deref(), Some("r2"), "a person's handle binds their own record");
         assert_eq!(d.user_by_handle("alice").await.unwrap().unwrap().region, "r2");
         assert_eq!(d.bind_region("nobody", "r1").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn create_stores_the_region_with_the_team() {
+        let d = Directory::in_memory();
+        d.upsert_user("alice@x.io", "Alice").await.unwrap();
+        let t = d.create("acme", "Acme", "alice@x.io", "r1").await.unwrap().unwrap();
+        assert_eq!(t.region, "r1");
+        assert_eq!(d.get("acme").await.unwrap().unwrap().region, "r1");
+        assert_eq!(d.bind_region("acme", "r2").await.unwrap().as_deref(), Some("r1"), "created bound stays bound");
     }
 
     #[test]

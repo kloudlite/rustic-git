@@ -956,6 +956,7 @@ mod tests {
             l,
             None,
             None,
+            None,
             false,
         ));
         let r = reqwest::Client::new()

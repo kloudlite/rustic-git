@@ -10,10 +10,10 @@ use super::*;
 /// writes, so a 201 whose team nobody can then open is exactly the failure worth catching.
 pub(crate) async fn create(c: &mut Ctx) {
     c.step("team.create", QUICK, |c| {
-        let (slug, jwt) = (team_slug(c), c.probe_jwt.clone());
+        let (slug, jwt, region) = (team_slug(c), c.probe_jwt.clone(), c.cfg.region.clone());
         let url = api(c, "/v1/teams");
         async move {
-            let body = serde_json::json!({ "slug": slug, "name": "kloudlite slo probe" });
+            let body = serde_json::json!({ "slug": slug, "name": "kloudlite slo probe", "region": region });
             post(c, &url, &jwt, body).await.context("could not create the team")?;
             let team = get(c, &api(c, &format!("/v1/teams/{slug}")), &jwt)
                 .await

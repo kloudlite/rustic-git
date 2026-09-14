@@ -11,11 +11,13 @@ export async function create(_prev: NewTeamState, formData: FormData): Promise<N
   const slug = String(formData.get("slug") ?? "").trim().toLowerCase();
   if (!name) return { error: "Give the team a name." };
   if (!slug) return { error: "Pick a handle for the team." };
+  const region = String(formData.get("region") ?? "").trim();
+  if (!region) return { error: "Pick a region for the team." };
 
   const token = await tokenOr();
   if (typeof token !== "string") return token;
 
-  const r = await createTeam(token, slug, name);
+  const r = await createTeam(token, slug, name, region);
   if (!r.ok) {
     // A taken handle is an ordinary answer, not a failure: the form stays up and
     // says so. Handles are shared with usernames, so it may be a person's.

@@ -10,6 +10,9 @@ use super::*;
 pub(crate) struct NewTeam {
     slug: String,
     name: String,
+    /// Required: a team is placed in a region when it is made and never moves.
+    #[serde(default)]
+    region: String,
 }
 
 
@@ -26,7 +29,22 @@ pub(crate) async fn create_team(
         Ok(t) => t,
         Err(r) => return r,
     };
-    match db.create(body.slug.trim(), &body.name, &user).await {
+    let region = body.region.trim();
+    if region.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "region required").into_response();
+    }
+    let Some(check) = api.region_check.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "regions unavailable").into_response();
+    };
+    match check(region.to_string()).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::UNPROCESSABLE_ENTITY, format!("unknown region: {region}")).into_response(),
+        Err(e) => {
+            tracing::error!(reason = "create-team", error = %e, "region.read.failed");
+            return (StatusCode::BAD_GATEWAY, "could not read regions").into_response();
+        }
+    }
+    match db.create(body.slug.trim(), &body.name, &user, region).await {
         Ok(Some(team)) => (StatusCode::CREATED, axum::Json(team)).into_response(),
         // Taken, not an error: the caller shows "that handle is in use" and the
         // form stays on screen.

@@ -777,7 +777,7 @@ async fn a_team_member_can_push_a_team_image_and_a_stranger_cannot() {
     dir.upsert_user("bob@x", "Bob").await.unwrap();
     dir.claim_username("bob@x", "bob").await.unwrap().expect("bob takes his handle");
     // The team's creator is seated as its Owner member, which is membership enough here.
-    dir.create("acme", "Acme", "alice@x").await.unwrap();
+    dir.create("acme", "Acme", "alice@x", "").await.unwrap();
     let app = common::app_with_directory(e.store.clone(), kloudlite_pulls::pulls::Source::Directory(Arc::new(dir))).await;
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());

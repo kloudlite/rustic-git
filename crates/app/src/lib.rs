@@ -520,7 +520,7 @@ mod tests {
         let dir = Arc::new(kloudlite_pulls::directory::Directory::in_memory());
         dir.upsert_user("alice@x", "Alice").await.unwrap();
         dir.claim_username("alice@x", "alice").await.unwrap().expect("handle");
-        dir.create("acme", "Acme", "alice@x").await.unwrap().expect("team");
+        dir.create("acme", "Acme", "alice@x", "").await.unwrap().expect("team");
         let a = App::new(
             store,
             Arc::new(OwnershipStore::open(os.clone())),
