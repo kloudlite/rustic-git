@@ -102,38 +102,52 @@ pub async fn elect(ctx: Arc<Ctx>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        // Re-read EVERY tick and pass that object to `write`: the CAS is the resourceVersion the
-        // read carried, so a `cur` held across ticks would be a write with no fence at all.
-        let cur = match lease::read(&api).await {
-            Ok(c) => c,
-            Err(e) => {
-                // Unreachable API server: we stop claiming to lead, because our term may have
-                // been taken while we could not look. Keep-biased in the only direction that is
-                // safe here — a follower writes nothing, and nothing it owns degrades.
-                ctx.demote("lease.unreadable");
-                tracing::warn!(error = %e, "leader.read.failed");
-                continue;
-            }
-        };
-        let view = cur.as_ref().and_then(lease::view);
-        let now = k8s_openapi::jiff::Timestamp::now();
-        let now_ms = now.as_millisecond().max(0) as u64;
-        match lease::decide(now_ms, &ctx.holder, view.as_ref()) {
-            lease::Step::Wait => ctx.demote("held elsewhere"),
-            step => match lease::write(&api, &ctx.holder, &step, cur.as_ref(), now).await {
-                Ok(Some(l)) => match lease::view(&l) {
-                    Some(v) if v.holder == ctx.holder => ctx.promote(v.transitions),
-                    _ => ctx.demote("lost the write"),
-                },
-                // A 409: another pod won this round. Next tick re-reads — never an immediate
-                // retry, which would race the winner with the stale object we already lost on.
-                Ok(None) => ctx.demote("lost the CAS"),
-                Err(e) => {
-                    ctx.demote("lease.unwritable");
-                    tracing::warn!(error = %e, "leader.write.failed");
-                }
-            },
+        tick_once(&ctx, &api).await;
+    }
+}
+
+/// One beat, lifted out of the loop so it can be scripted against a canned API server. At most ONE
+/// write per call: every branch that does not land the write leaves the next tick to re-read.
+async fn tick_once(ctx: &Ctx, api: &kube::Api<k8s_openapi::api::coordination::v1::Lease>) {
+    // Re-read EVERY tick and pass that object to `write`: the CAS is the resourceVersion the
+    // read carried, so a `cur` held across ticks would be a write with no fence at all.
+    let cur = match lease::read(api).await {
+        Ok(c) => c,
+        Err(e) => {
+            // Unreachable API server: we stop claiming to lead, because our term may have been
+            // taken while we could not look. Keep-biased in the only direction that is safe here —
+            // a follower writes nothing, and nothing it owns degrades.
+            ctx.demote("lease.unreadable");
+            tracing::warn!(error = %e, "leader.read.failed");
+            return;
         }
+    };
+    let view = cur.as_ref().and_then(lease::view);
+    let now = k8s_openapi::jiff::Timestamp::now();
+    let now_ms = now.as_millisecond().max(0) as u64;
+    match lease::decide(now_ms, &ctx.holder, view.as_ref()) {
+        lease::Step::Wait => ctx.demote("held elsewhere"),
+        step => match lease::write(api, &ctx.holder, &step, cur.as_ref(), now).await {
+            Ok(Some(l)) => match lease::view(&l) {
+                // Epoch 0 is the "never elected" sentinel `Ctx::leading` reads, so a lease that
+                // echoes our own identity at transitions 0 (an object written by hand, or by a
+                // client that omits the field) would leave us holding it and never writing.
+                // Refuse the term rather than lead invisibly; `decide` advances it next tick.
+                Some(v) if v.holder == ctx.holder && v.transitions == 0 => {
+                    ctx.demote("epoch zero");
+                    tracing::warn!(holder = %ctx.holder, "leader.epoch.zero");
+                }
+                Some(v) if v.holder == ctx.holder => ctx.promote(v.transitions),
+                _ => ctx.demote("lost the write"),
+            },
+            // A 409: another pod won this round. Next tick re-reads — never an immediate retry,
+            // which would race the winner with the stale object we already lost on.
+            Ok(None) => ctx.demote("lost the CAS"),
+            Err(e) => {
+                ctx.demote("lease.unwritable");
+                tracing::warn!(error = %e, "leader.write.failed");
+            }
+        },
     }
 }
 
@@ -205,4 +219,119 @@ fn spawn_settings_reflector(client: kube::Client, settings: LiveSettings<AgentSe
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kloudlite_workspaces::kube_test::{self, Route};
+
+    const PATH: &str =
+        "/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kloudlite-controller";
+    const ME: &str = "ctl-test";
+
+    /// `renewTime` now, so the lease reads as live; the tests that want an expired one pass a date
+    /// far enough back that no TTL covers it.
+    fn lease_json(holder: &str, transitions: i32, renewed: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "coordination.k8s.io/v1",
+            "kind": "Lease",
+            "metadata": { "name": lease::LEASE_NAME, "namespace": lease::LEASE_NAMESPACE, "resourceVersion": "7" },
+            "spec": {
+                "holderIdentity": holder,
+                "leaseTransitions": transitions,
+                "leaseDurationSeconds": 15,
+                "renewTime": renewed,
+            },
+        })
+    }
+
+    fn now_rfc3339() -> String {
+        k8s_openapi::jiff::Timestamp::now().to_string()
+    }
+
+    fn put(body: serde_json::Value) -> Route {
+        Route { method: "PUT", path: PATH.into(), status: 200, body }
+    }
+
+    async fn run_tick(routes: Vec<Route>, start_epoch: u32) -> (Ctx, Vec<String>) {
+        let (client, rec) = kube_test::mock_client(routes);
+        let ctx = Ctx::for_test_with(client.clone());
+        if start_epoch != 0 {
+            ctx.promote(start_epoch);
+        }
+        let api = lease_api(&ctx);
+        tick_once(&ctx, &api).await;
+        let calls = rec.calls();
+        (ctx, calls)
+    }
+
+    /// (a) We hold it, we renew, and somebody else got there first: a 409 demotes and the tick
+    /// ENDS. A retry inside the same tick would write our stale object over the winner's term.
+    #[tokio::test]
+    async fn a_renew_that_loses_the_cas_demotes_and_writes_once() {
+        let (ctx, calls) = run_tick(
+            vec![
+                kube_test::get(PATH, lease_json(ME, 4, &now_rfc3339())),
+                kube_test::conflict("PUT", PATH),
+            ],
+            4,
+        )
+        .await;
+        assert!(!ctx.leading());
+        assert_eq!(calls, vec![format!("GET {PATH}"), format!("PUT {PATH}")]);
+    }
+
+    /// (b) Held by a live peer: `Wait`. Not one byte is written — this is what the TTL means.
+    #[tokio::test]
+    async fn a_live_peers_lease_is_waited_on_without_a_write() {
+        let (ctx, calls) =
+            run_tick(vec![kube_test::get(PATH, lease_json("ctl-b", 4, &now_rfc3339()))], 4).await;
+        assert!(!ctx.leading());
+        assert_eq!(calls, vec![format!("GET {PATH}")]);
+    }
+
+    /// (c) A follower finds an expired lease, takes it, and adopts the epoch the API SERVER echoed
+    /// — never the one it asked for: the echo is the only term any other pod will see.
+    #[tokio::test]
+    async fn an_expired_lease_is_taken_and_the_echoed_epoch_is_adopted() {
+        let (ctx, calls) = run_tick(
+            vec![
+                kube_test::get(PATH, lease_json("ctl-b", 4, "2020-01-01T00:00:00.000000Z")),
+                put(lease_json(ME, 5, &now_rfc3339())),
+            ],
+            0,
+        )
+        .await;
+        assert!(ctx.leading());
+        assert_eq!(ctx.epoch(), 5);
+        assert_eq!(calls, vec![format!("GET {PATH}"), format!("PUT {PATH}")]);
+    }
+
+    /// (d) The API server is unreachable: demote and write nothing. Our term may have ended while
+    /// we could not look, and a follower that writes nothing degrades nothing.
+    #[tokio::test]
+    async fn an_unreadable_lease_demotes_without_writing() {
+        let route =
+            Route { method: "GET", path: PATH.into(), status: 500, body: serde_json::json!({}) };
+        let (ctx, calls) = run_tick(vec![route], 4).await;
+        assert!(!ctx.leading());
+        assert_eq!(calls, vec![format!("GET {PATH}")]);
+    }
+
+    /// An echo carrying transitions 0 is refused rather than promoted: epoch 0 IS "not the leader"
+    /// to every write path, so promoting it would leave this pod holding the lease and writing
+    /// nothing, forever.
+    #[tokio::test]
+    async fn an_echoed_epoch_of_zero_is_refused() {
+        let (ctx, _) = run_tick(
+            vec![
+                kube_test::get(PATH, lease_json(ME, 0, "2020-01-01T00:00:00.000000Z")),
+                put(lease_json(ME, 0, &now_rfc3339())),
+            ],
+            0,
+        )
+        .await;
+        assert!(!ctx.leading());
+    }
 }

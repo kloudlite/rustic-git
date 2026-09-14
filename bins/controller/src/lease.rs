@@ -101,10 +101,11 @@ pub async fn write(
     cur: Option<&Lease>,
     now: Timestamp,
 ) -> kube::Result<Option<Lease>> {
-    let epoch = match step {
-        Step::Wait => return Ok(cur.cloned()),
-        Step::Acquire { epoch } | Step::Renew { epoch } => *epoch,
-    };
+    // `Wait` never reaches here — `elect` decides it without writing — and answering `None` rather
+    // than echoing `cur` means a caller that ever did reach it demotes instead of being handed back
+    // a term it does not hold.
+    let (Step::Acquire { epoch } | Step::Renew { epoch }) = step else { return Ok(None) };
+    let epoch = *epoch;
     let spec = LeaseSpec {
         holder_identity: Some(me.to_string()),
         lease_duration_seconds: Some(TTL.as_secs() as i32),

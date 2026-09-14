@@ -70,11 +70,11 @@ impl Ctx {
 
 #[cfg(test)]
 impl Ctx {
-    /// A Ctx with a client that is never called: every test in this module exercises the epoch
-    /// guard, which touches no API server.
-    fn for_test() -> Ctx {
+    /// A Ctx over whatever client the test supplies — a canned one for the election beat, an
+    /// unrouted one for the epoch guard, which touches no API server.
+    pub(crate) fn for_test_with(client: kube::Client) -> Ctx {
         Ctx {
-            client: kloudlite_workspaces::kube_test::mock_client(vec![]).0,
+            client,
             holder: "ctl-test".into(),
             region: "test".into(),
             epoch: AtomicU32::new(0),
@@ -106,7 +106,7 @@ mod tests {
     /// reactor; nothing under test here touches it.
     #[tokio::test]
     async fn the_ctx_remembers_the_term_it_was_elected_under() {
-        let ctx = Ctx::for_test();
+        let ctx = Ctx::for_test_with(kloudlite_workspaces::kube_test::mock_client(vec![]).0);
         assert_eq!(ctx.epoch(), 0);
         assert!(!ctx.leading());
         ctx.promote(4);

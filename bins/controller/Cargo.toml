@@ -25,7 +25,9 @@ k8s-openapi = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
-serde_json = { workspace = true }
+
 
 [dev-dependencies]
 kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
+# Canned API-server bodies in the lease and election tests only.
+serde_json = { workspace = true }
