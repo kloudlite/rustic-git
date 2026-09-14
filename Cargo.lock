@@ -4366,6 +4366,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kloudlite-intercept-proxy"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kloudlite-pulls"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,25 @@
+[package]
+name = "kloudlite-intercept-proxy"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "kloudlite_intercept_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kloudlite-intercept-proxy"
+path = "src/main.rs"
+
+# Deliberately three dependencies. This binary is in the data path of every intercepted service;
+# every crate here is one more thing that can hold a connection open wrong.
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `tokio::time::pause`/`advance`, so the IDLE_SECS test does not spend ten minutes of CI proving
+# one assertion. Production never builds with this.
+tokio = { workspace = true, features = ["test-util"] }
