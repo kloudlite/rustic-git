@@ -293,7 +293,8 @@ async fn sessions(c: &mut Ctx) {
                 // Aborted on drop, so a timeout or an early `?` never leaks socket B.
                 let mut watch_b = AbortOnDrop(tokio::spawn(until_agent_end(b)));
                 a.send(Message::text(json!({"id": "1", "type": "prompt", "message": PROMPT}).to_string())).await?;
-                let (ea, eb) = (until_agent_end(a).await?, (&mut watch_b.0).await??);
+                let ea = mark_no_key(until_agent_end(a).await, &no_model_w)?;
+                let eb = mark_no_key((&mut watch_b.0).await?, &no_model_w)?;
                 *seen_w.lock().unwrap() = Some((ea, eb));
                 let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
                 if status != 200 {
@@ -427,8 +428,33 @@ enum Reply {
     NoCredential(String),
 }
 
-/// The transcript's last assistant message: text is an answer, an auth-shaped error is the tenant
-/// having no key, and any other error or an empty reply fails.
+/// pi's own wording for "the probe tenant has no key for this provider" — narrow on purpose, so a
+/// real model-turn failure (rate limit, timeout, a tool error) still fails the probe instead of
+/// silently skipping it. Both `AgentSession.getModel` (unquoted, `formatNoApiKeyFoundMessage`) and
+/// `ModelRegistry` (quoted) throw this shape in pi 0.73 and 0.85 alike. Returns the provider name
+/// only — never the surrounding message, which may echo other text but never a key.
+fn pi_no_api_key_provider(msg: &str) -> Option<String> {
+    let after = msg.split_once("No API key found for ")?.1;
+    let provider = after.trim_start_matches('"');
+    let end = provider.find(['"', '.', '\n']).unwrap_or(provider.len());
+    let provider = provider[..end].trim();
+    (!provider.is_empty()).then(|| provider.to_string())
+}
+
+/// Runs after a socket task that may have failed on a refused prompt: if the failure is pi
+/// reporting no provider key, records the provider in `no_model` before propagating the error, so
+/// the caller can demote the step (and its dependents) to skip instead of failing it.
+fn mark_no_key(res: Result<Vec<String>>, no_model: &Mutex<Option<String>>) -> Result<Vec<String>> {
+    if let Err(e) = &res {
+        if let Some(provider) = pi_no_api_key_provider(&e.to_string()) {
+            *no_model.lock().unwrap() = Some(format!("no API key for {provider}"));
+        }
+    }
+    res
+}
+
+/// The transcript's last assistant message: text is an answer, pi reporting no provider key is the
+/// tenant having no key, and any other error or an empty reply fails.
 fn judge_reply(body: &str) -> Result<Reply> {
     let doc: Value = serde_json::from_str(body).context("parsing messages")?;
     let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
@@ -438,8 +464,7 @@ fn judge_reply(body: &str) -> Result<Reply> {
     let last = msgs.iter().rev().find(|m| m["role"] == "assistant").context("no assistant message in the transcript")?;
     if last["stopReason"] == "error" || last["stopReason"] == "aborted" {
         let why = last["errorMessage"].as_str().unwrap_or_default().to_string();
-        let lower = why.to_lowercase();
-        if ["api key", "apikey", "auth", "credential", "unauthorized", "401"].iter().any(|k| lower.contains(k)) {
+        if pi_no_api_key_provider(&why).is_some() {
             return Ok(Reply::NoCredential(why));
         }
         bail!("the model turn failed: {}", super::clip(&why));
@@ -626,6 +651,38 @@ mod tests {
         let empty = json!({"messages": [user, {"role": "assistant", "content": [{"type": "text", "text": " "}], "stopReason": "stop"}]});
         assert!(judge_reply(&empty.to_string()).is_err());
         assert!(judge_reply(&json!({"messages": []}).to_string()).is_err());
+
+        // pi's WS refusal frame carries the message unquoted, wrapped by `until_agent_end`'s bail
+        // context — this is the wording that actually reached the fleet (2026-09-14 hourly run).
+        let ws_refusal = "the prompt was refused: {\"id\":\"1\",\"type\":\"response\",\"success\":false,\"error\":\"No API key found for deepseek.\\n\\nUse /login...\"}";
+        assert_eq!(pi_no_api_key_provider(ws_refusal).as_deref(), Some("deepseek"));
+        // ModelRegistry's quoted wording, still narrow.
+        assert_eq!(pi_no_api_key_provider("No API key found for \"anthropic\"").as_deref(), Some("anthropic"));
+        // A non-auth refusal (rate limit, tool error, ...) must still fail, never skip.
+        assert_eq!(pi_no_api_key_provider("the prompt was refused: rate limited, retry later"), None);
+        match judge_reply(&broke.to_string()) {
+            Err(e) => assert!(e.to_string().contains("the model turn failed")),
+            Ok(_) => panic!("a non-auth refusal must fail, not skip or pass"),
+        }
+
+        // mark_no_key: an auth-shaped socket failure records the provider and still propagates
+        // the error; a non-auth failure passes through untouched.
+        let no_model: Mutex<Option<String>> = Mutex::new(None);
+        assert!(mark_no_key(Err(anyhow!("{ws_refusal}")), &no_model).is_err());
+        assert_eq!(no_model.lock().unwrap().as_deref(), Some("no API key for deepseek"));
+        let no_model2: Mutex<Option<String>> = Mutex::new(None);
+        assert!(mark_no_key(Err(anyhow!("connection reset")), &no_model2).is_err());
+        assert!(no_model2.lock().unwrap().is_none());
+
+        // bench.two_clients' own skip reason: skipped (not "the round trip failed") whenever the
+        // round trip itself was a credential skip, and only reports the generic failure otherwise.
+        let dependent_reason = |no_model: Option<&str>, answered: bool| match no_model {
+            Some(_) => NO_MODEL,
+            None if answered => "no events were recorded",
+            None => "the round trip failed",
+        };
+        assert_eq!(dependent_reason(Some("no API key for deepseek"), false), NO_MODEL);
+        assert_eq!(dependent_reason(None, false), "the round trip failed");
 
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert!(same_events(&s(&["a", "b", "end"]), &s(&["a", "b", "end"])).is_ok());
