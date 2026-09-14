@@ -4277,6 +4277,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kloudlite-controller-bin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "k8s-openapi",
+ "kloudlite-core",
+ "kloudlite-workspaces",
+ "kube",
+ "metrics",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "kloudlite-core"
 version = "0.1.0"
 dependencies = [

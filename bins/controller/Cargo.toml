@@ -1,0 +1,30 @@
+[package]
+name = "kloudlite-controller-bin"
+version = "0.1.0"
+edition = "2021"
+license = "SSPL-1.0"
+
+[lib]
+name = "kloudlite_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kloudlite-controller"
+path = "src/main.rs"
+
+[dependencies]
+tracing = { workspace = true }
+metrics = { workspace = true }
+kloudlite-core = { path = "../../crates/core" }
+kloudlite-workspaces = { path = "../../crates/workspaces" }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+# One route, `/healthz`. No TLS, no ws, no object store: this process talks to the API server only.
+axum = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
