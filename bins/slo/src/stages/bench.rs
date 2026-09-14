@@ -13,7 +13,11 @@
 //! why `a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped` exists.
 
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures::FutureExt;
@@ -41,6 +45,8 @@ const WAKE_CEILING: Duration = Duration::from_secs(540);
 const IDLE_GRACE: Duration = Duration::from_secs(60);
 /// A start's wait, from `kl-connect bench`'s own `BENCH_START_WAIT`.
 const START_WAIT: Duration = Duration::from_secs(90);
+/// `bench.session.roundtrip`: target 60 s.
+const ROUNDTRIP_CEILING: Duration = Duration::from_secs(60);
 
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
@@ -101,7 +107,15 @@ async fn forward(c: &Ctx) -> Result<(Child, u16)> {
 /// (`5f\r\n...\r\n0\r\n\r\n`) landed inside what the probe parsed as JSON and `ok` was never seen.
 /// reqwest/hyper decode both chunked and Content-Length correctly, so let it own the response.
 async fn through(port: u16, path: &str) -> Result<(u16, String)> {
-    let resp = reqwest::Client::new().get(format!("http://127.0.0.1:{port}{path}")).header("host", "bench").send().await?;
+    through_with(port, reqwest::Method::GET, path, None).await
+}
+
+async fn through_with(port: u16, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(u16, String)> {
+    let mut req = reqwest::Client::new().request(method, format!("http://127.0.0.1:{port}{path}")).header("host", "bench");
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = req.send().await?;
     let status = resp.status().as_u16();
     let body = resp.text().await?;
     Ok((status, body))
@@ -250,9 +264,195 @@ pub async fn hourly(c: &mut Ctx) {
         None => return SESSION_IDS.iter().for_each(|id| c.skip(id, "the bench could not be reached before the sleep")),
         Some(false) => {}
     }
-    // ponytail: the four journeys need a harness-bench RPC WebSocket client the probe does not
-    // carry yet; skipped (never passed) until the real image ships and the client lands with it.
-    SESSION_IDS.iter().for_each(|id| c.skip(id, "the probe has no harness-bench RPC client yet"));
+    sessions(c).await;
+}
+
+/// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
+/// and judged from the transcript, and the two sockets that watched it are compared afterwards.
+async fn sessions(c: &mut Ctx) {
+    // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
+    type Seen = Option<(Vec<String>, Vec<String>)>;
+    let seen: Arc<Mutex<Seen>> = Default::default();
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let created: Arc<Mutex<Option<String>>> = Default::default();
+    let (seen_w, no_model_w, created_w) = (seen.clone(), no_model.clone(), created.clone());
+    let answered = c
+        .step("bench.session.roundtrip", ROUNDTRIP_CEILING, move |c| {
+            async move {
+                let (_child, port) = forward(c).await?;
+                let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+                if status != 201 {
+                    bail!("POST /sessions answered {status}: {}", super::clip(&row));
+                }
+                let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+                *created_w.lock().unwrap() = Some(sid.clone());
+                let url = format!("ws://127.0.0.1:{port}/sessions/{sid}/rpc");
+                let (mut a, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket A")?;
+                let (b, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket B")?;
+                // Both sockets are open before the prompt, so each must see the whole turn.
+                let watch_b = tokio::spawn(until_agent_end(b));
+                a.send(Message::text(json!({"id": "1", "type": "prompt", "message": PROMPT}).to_string())).await?;
+                let (ea, eb) = (until_agent_end(a).await?, watch_b.await??);
+                *seen_w.lock().unwrap() = Some((ea, eb));
+                let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
+                if status != 200 {
+                    bail!("GET messages answered {status}");
+                }
+                match judge_reply(&body)? {
+                    Reply::Answered => Ok(()),
+                    Reply::NoCredential(why) => {
+                        *no_model_w.lock().unwrap() = Some(why.clone());
+                        bail!("{why}")
+                    }
+                }
+            }
+            .boxed()
+        })
+        .await;
+    let no_model = no_model.lock().unwrap().clone();
+    if let Some(why) = &no_model {
+        // Not a sample: the probe tenant holds no provider key, so nothing about the bench was measured.
+        c.demote_to_skip("bench.session.roundtrip", &format!("{NO_MODEL}: {}", super::clip(why)));
+    }
+    let seen = seen.lock().unwrap().take();
+    match (no_model, seen) {
+        (Some(_), _) => c.skip("bench.two_clients", NO_MODEL),
+        (None, Some((a, b))) => {
+            c.step("bench.two_clients", Duration::from_secs(5), move |_| async move { same_events(&a, &b) }.boxed()).await;
+        }
+        (None, None) => c.skip("bench.two_clients", if answered { "no events were recorded" } else { "the round trip failed" }),
+    }
+    exchanges(c).await;
+    c.skip("bench.workspace.tool_roundtrip", "needs a running probe workspace and a model credential; neither is provisioned for the probe tenant");
+    // Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by.
+    let sid = created.lock().unwrap().take();
+    if let Some(sid) = sid {
+        let del = async {
+            let (_child, port) = forward(c).await?;
+            through_with(port, reqwest::Method::DELETE, &format!("/sessions/{sid}"), Some(json!({"stop": true}))).await
+        };
+        if let Err(e) = del.await {
+            tracing::warn!(error = %e, "slo.bench.session.teardown");
+        }
+    }
+}
+
+/// `bench.exchange.both_views`: every exchange a session lists must read back identically through
+/// its workspace's view. Nothing the probe does writes an exchange (only a model turn messaging a
+/// workspace does), so a bench with none is a skip, never a pass.
+async fn exchanges(c: &mut Ctx) {
+    let prep = async {
+        let (child, port) = forward(c).await?;
+        let (_, list) = through(port, "/sessions").await?;
+        let mut rows = Vec::new();
+        for s in serde_json::from_str::<Vec<Value>>(&list).context("parsing /sessions")? {
+            let id = s["id"].as_str().context("session row missing id")?;
+            let (_, body) = through(port, &format!("/exchanges?session={id}")).await?;
+            rows.extend(serde_json::from_str::<Vec<Value>>(&body).context("parsing ?session=")?);
+        }
+        anyhow::Ok((child, port, rows))
+    }
+    .await;
+    match prep {
+        Ok((_, _, rows)) if rows.is_empty() => c.skip("bench.exchange.both_views", "no exchange exists on the probe bench to read back"),
+        Err(e) => c.skip("bench.exchange.both_views", &format!("could not list exchanges: {}", super::clip(&e.to_string()))),
+        Ok((child, port, rows)) => {
+            c.step("bench.exchange.both_views", Duration::from_secs(30), move |_| {
+                async move {
+                    let _child = child;
+                    let mut by_ws = std::collections::BTreeMap::new();
+                    for r in &rows {
+                        let ws = r["workspace"].as_str().context("exchange row missing workspace")?.to_string();
+                        if !by_ws.contains_key(&ws) {
+                            let (_, body) = through(port, &format!("/exchanges?workspace={ws}")).await?;
+                            by_ws.insert(ws.clone(), serde_json::from_str::<Vec<Value>>(&body).context("parsing ?workspace=")?);
+                        }
+                    }
+                    views_agree(&rows, &by_ws)
+                }
+                .boxed()
+            })
+            .await;
+        }
+    }
+}
+
+const NO_MODEL: &str = "no model credential in the probe tenant";
+/// Asks for no tool, so the turn is one model reply and nothing runs on the bench.
+const PROMPT: &str = "Reply with exactly the word pong. Do not use any tools.";
+
+/// Every non-response frame a socket sees until this turn's `agent_end`, verbatim.
+async fn until_agent_end<S>(mut ws: tokio_tungstenite::WebSocketStream<S>) -> Result<Vec<String>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut out = Vec::new();
+    while let Some(msg) = ws.next().await {
+        let Message::Text(t) = msg? else { continue };
+        let v: Value = serde_json::from_str(&t).context("a frame that is not JSON")?;
+        match v["type"].as_str() {
+            Some("response") if v["success"] == Value::Bool(false) => bail!("the prompt was refused: {}", super::clip(&t)),
+            Some("response") => continue,
+            Some("agent_end") => {
+                out.push(t.to_string());
+                return Ok(out);
+            }
+            _ => out.push(t.to_string()),
+        }
+    }
+    bail!("the socket closed before agent_end")
+}
+
+enum Reply {
+    Answered,
+    NoCredential(String),
+}
+
+/// The transcript's last assistant message: text is an answer, an auth-shaped error is the tenant
+/// having no key, and any other error or an empty reply fails.
+fn judge_reply(body: &str) -> Result<Reply> {
+    let doc: Value = serde_json::from_str(body).context("parsing messages")?;
+    let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
+    if !msgs.iter().any(|m| m["role"] == "user") {
+        bail!("the prompt is not in the transcript");
+    }
+    let last = msgs.iter().rev().find(|m| m["role"] == "assistant").context("no assistant message in the transcript")?;
+    if last["stopReason"] == "error" || last["stopReason"] == "aborted" {
+        let why = last["errorMessage"].as_str().unwrap_or_default().to_string();
+        let lower = why.to_lowercase();
+        if ["api key", "apikey", "auth", "credential", "unauthorized", "401"].iter().any(|k| lower.contains(k)) {
+            return Ok(Reply::NoCredential(why));
+        }
+        bail!("the model turn failed: {}", super::clip(&why));
+    }
+    let text: String = last["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+    if text.trim().is_empty() {
+        bail!("the assistant reply is empty");
+    }
+    Ok(Reply::Answered)
+}
+
+fn same_events(a: &[String], b: &[String]) -> Result<()> {
+    if a.is_empty() {
+        bail!("socket A saw no events");
+    }
+    if let Some(i) = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i)) {
+        bail!("the sockets diverge at event {i} of {} vs {}", a.len(), b.len());
+    }
+    Ok(())
+}
+
+fn views_agree(by_session: &[Value], by_ws: &std::collections::BTreeMap<String, Vec<Value>>) -> Result<()> {
+    for r in by_session {
+        let ws = r["workspace"].as_str().unwrap_or_default();
+        let found = by_ws.get(ws).and_then(|rows| rows.iter().find(|w| w["id"] == r["id"]));
+        match found {
+            None => bail!("exchange {} is missing from its workspace view", r["id"]),
+            Some(w) if w != r => bail!("exchange {} differs between the two views", r["id"]),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Each session's id and message total, in list order — the stable projection compared across a
@@ -372,9 +572,38 @@ mod tests {
     }
 
     #[test]
+    fn replies_events_and_exchange_views_judge() {
+        let user = json!({"role": "user", "content": [{"type": "text", "text": PROMPT}]});
+        let ok = json!({"messages": [user, {"role": "assistant", "content": [{"type": "text", "text": "pong"}], "stopReason": "stop"}], "total": 2});
+        assert!(matches!(judge_reply(&ok.to_string()).unwrap(), Reply::Answered));
+        let nokey = json!({"messages": [user, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
+        assert!(matches!(judge_reply(&nokey.to_string()).unwrap(), Reply::NoCredential(_)));
+        let broke = json!({"messages": [user, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "socket hang up"}]});
+        assert!(judge_reply(&broke.to_string()).is_err());
+        let empty = json!({"messages": [user, {"role": "assistant", "content": [{"type": "text", "text": " "}], "stopReason": "stop"}]});
+        assert!(judge_reply(&empty.to_string()).is_err());
+        assert!(judge_reply(&json!({"messages": []}).to_string()).is_err());
+
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(same_events(&s(&["a", "b", "end"]), &s(&["a", "b", "end"])).is_ok());
+        assert!(same_events(&s(&["a", "b", "end"]), &s(&["b", "a", "end"])).unwrap_err().to_string().contains("event 0"));
+        assert!(same_events(&s(&["a", "end"]), &s(&["a"])).is_err());
+        assert!(same_events(&[], &[]).is_err());
+
+        let row = json!({"id": "x1", "session": "s", "workspace": "w", "dir": "out", "text": "hi", "state": "sent", "ts": 1});
+        let mut ws = std::collections::BTreeMap::new();
+        ws.insert("w".to_string(), vec![row.clone()]);
+        assert!(views_agree(std::slice::from_ref(&row), &ws).is_ok());
+        ws.insert("w".to_string(), vec![json!({"id": "x1", "session": "s", "workspace": "w", "dir": "out", "text": "hi", "state": "done", "ts": 1})]);
+        assert!(views_agree(std::slice::from_ref(&row), &ws).unwrap_err().to_string().contains("differs"));
+        ws.insert("w".to_string(), vec![]);
+        assert!(views_agree(&[row], &ws).unwrap_err().to_string().contains("missing"));
+    }
+
+    #[test]
     fn ceilings_are_at_least_their_targets() {
         use kloudlite_workspaces::slo::catalogue::find;
-        for (id, cap) in [("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
+        for (id, cap) in [("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
             assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
         }
     }
