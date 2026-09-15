@@ -395,12 +395,19 @@ async fn exchanges(c: &mut Ctx, sid: Option<String>) {
     c.step("bench.exchange.both_views", EXCHANGE_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
-            one_turn(port, &sid, &exchange_prompt(&target), &nm).await?;
-            answered(&through(port, &format!("/sessions/{sid}/messages")).await?.1, &nm)?;
-            let (_, body) = through(port, &format!("/exchanges?session={sid}")).await?;
-            let rows: Vec<Value> = serde_json::from_str(&body).context("parsing ?session=")?;
+            let mut rows: Vec<Value> = Vec::new();
+            // Two tries: a model may answer without calling the tool; a second miss is a failure.
+            for _ in 0..2 {
+                one_turn(port, &sid, &exchange_prompt(&target), &nm).await?;
+                answered(&through(port, &format!("/sessions/{sid}/messages")).await?.1, &nm)?;
+                let (_, body) = through(port, &format!("/exchanges?session={sid}")).await?;
+                rows = serde_json::from_str(&body).context("parsing ?session=")?;
+                if rows.iter().any(|r| r["workspace"] == target.as_str()) {
+                    break;
+                }
+            }
             if !rows.iter().any(|r| r["workspace"] == target.as_str()) {
-                bail!("the turn recorded no exchange naming {target} ({} rows)", rows.len());
+                bail!("two turns recorded no exchange naming {target} ({} rows)", rows.len());
             }
             let mut by_ws = std::collections::BTreeMap::new();
             for r in &rows {
@@ -422,16 +429,21 @@ async fn exchanges(c: &mut Ctx, sid: Option<String>) {
 
 /// `bench.workspace.tool_roundtrip`: a workspace thread on the bench runs `echo` through the tool
 /// server of the workspace `ws.packages.add` created — the one live pod this stage keeps. Returns
-/// the thread's session id for teardown once the bench has opened it.
+/// the thread's session id for teardown whenever the step ran: `w-{ws}` is the bench's own naming,
+/// so a thread opened but never parsed is still deleted.
 async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
-    let Some(ws) = c.state.ux_workspace.clone() else {
-        c.skip("bench.workspace.tool_roundtrip", "the stage's workspace was never created");
-        return None;
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => {
+            c.skip("bench.workspace.tool_roundtrip", why);
+            return None;
+        }
     };
+    let thread = format!("w-{ws}");
     let marker = format!("{}-tool", c.prefix());
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let opened: Arc<Mutex<Option<String>>> = Default::default();
-    let (nm, op) = (no_model.clone(), opened.clone());
+    let nm = no_model.clone();
+    let sid = thread.clone();
     c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
@@ -439,16 +451,22 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             if status != 200 {
                 bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&row));
             }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("thread row missing id")?.to_string();
-            *op.lock().unwrap() = Some(sid.clone());
-            one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
-            // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
-            let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
-            if status != 200 {
-                bail!("GET /workspaces/{ws}/messages answered {status}");
+            // Two tries: a model may answer without calling the tool; a second miss is a failure.
+            let mut last = Ok(());
+            for _ in 0..2 {
+                one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
+                // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
+                let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
+                if status != 200 {
+                    bail!("GET /workspaces/{ws}/messages answered {status}");
+                }
+                answered(&body, &nm)?;
+                last = tool_ran(&body, &marker);
+                if last.is_ok() {
+                    break;
+                }
             }
-            answered(&body, &nm)?;
-            tool_ran(&body, &marker)
+            last
         }
         .boxed()
     })
@@ -456,8 +474,17 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     if let Some(why) = no_model.lock().unwrap().clone() {
         c.demote_to_skip("bench.workspace.tool_roundtrip", &format!("{NO_MODEL}: {}", super::clip(&why)));
     }
-    let sid = opened.lock().unwrap().take();
-    sid
+    Some(thread)
+}
+
+/// The workspace the tool round trip runs in, or why it cannot: a workspace recorded but never
+/// ready already failed `ws.packages.add`, and must not fail a second id for the same fault.
+fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String, &'static str> {
+    match (ws, ready) {
+        (None, _) => Err("the stage's workspace was never created"),
+        (Some(_), false) => Err("the stage's workspace never became ready (ws.packages.add failed)"),
+        (Some(ws), true) => Ok(ws),
+    }
 }
 
 /// A successful tool result carrying the marker: the echo ran and its output came back. The call's
@@ -818,6 +845,9 @@ mod tests {
         assert!(tool_ran(&json!({"messages": [call]}).to_string(), m).is_err());
         let failed = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": true, "content": [{"type": "text", "text": format!("{m}\n[exit 1]")}]}]});
         assert!(tool_ran(&failed.to_string(), m).is_err());
+        assert!(tool_workspace(None, true).is_err());
+        assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
+        assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
         assert!(tool_prompt(m).contains(m) && exchange_prompt("run-abc-exchange").contains("kl_workspace_start"));
 
         let no_model = Mutex::new(None);

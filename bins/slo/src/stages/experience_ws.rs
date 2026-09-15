@@ -112,6 +112,7 @@ pub async fn packages(c: &mut Ctx) {
             .boxed()
         })
         .await;
+    c.state.ux_ready = added;
     let Some(id) = c.state.ux_workspace.clone() else {
         return c.skip("ws.packages.remove", "the workspace was never created");
     };

@@ -56,6 +56,10 @@ pub struct State {
     /// stage creates is named `run-{run_id}-…`, so teardown's prefix sweep finds them by name
     /// whether or not the stage got as far as deleting them itself.
     pub ux_workspace: Option<String>,
+    /// Set only when `ws.packages.add` passed: `ux_workspace` is recorded before the wait, so a
+    /// later step that needs a live pod reads this rather than failing again for the same fault.
+    #[serde(default)]
+    pub ux_ready: bool,
     /// The pinned workspace (`run-{id}-pin`) the four `ws.packages.pin*` ids walk. Held for the
     /// same reason as `ux_workspace`: the steps after the create need the id it answered.
     pub pin_workspace: Option<String>,
