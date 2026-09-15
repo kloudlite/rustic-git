@@ -295,7 +295,7 @@ pub(crate) async fn stop_bench(
 }
 
 /// Delete the bench's tool-token Secret; already gone counts as done.
-async fn delete_tool_secret(c: &kube::Client, owner: &str, team: &str) -> Result<(), kube::Error> {
+pub(crate) async fn delete_tool_secret(c: &kube::Client, owner: &str, team: &str) -> Result<(), kube::Error> {
     let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), &crd::ws_namespace(owner, team));
     match api.delete(crate::k8s::BENCH_TOOL_SECRET, &Default::default()).await {
         Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),

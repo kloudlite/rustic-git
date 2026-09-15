@@ -206,18 +206,24 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
                 write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
             }
         }
-        Verdict::Keep => {}
-        Verdict::Pause => {
-            for b in &full {
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
-            }
+        // A paused member's pair is re-converged on every beat, so a workspace started since the
+        // pause stops again; every write is skipped when its object is already there.
+        Verdict::Pause | Verdict::Keep if judged == Judged::Member(MemberState::Paused) => {
+            pause(c, &bapi, &benches, &workspaces, owner, team).await;
         }
+        Verdict::Keep => {}
+        Verdict::Pause => {}
+        // Starts nothing: the person starts what they want.
         Verdict::Unpause => {
             for b in &benches {
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "membership.bench.unpaused").await;
+                write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "member.unpause.applied").await;
             }
         }
         Verdict::Clear => {
+            // A member back from a removal gets their tools back too; nothing is started.
+            for b in benches.iter().filter(|b| b.spec.access != crd::BenchAccess::Full && judged == Judged::Member(MemberState::Active)) {
+                write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "member.unpause.applied").await;
+            }
             let p = json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null}}});
             let has = |m: &kube::core::ObjectMeta| ann(m, REMOVED_AT).is_some() || ann(m, DELETE_NOW).is_some();
             let mut ok = false;
@@ -336,6 +342,30 @@ async fn cleanup(s: &ApiState, dir: &dyn Directory, apis: Apis<'_>, owner: &str,
                 return tracing::warn!(%owner, %team, kind = t.kind, name = %t.name, error = %e, "membership.cleanup.conflict");
             }
             Err(error) => return tracing::warn!(%owner, %team, kind = t.kind, name = %t.name, %error, "membership.cleanup.failed"),
+        }
+    }
+}
+
+/// Bench access + desiredState, each team Workspace's desiredState, and the tool-token Secret —
+/// nothing else is written or deleted.
+async fn pause(c: &kube::Client, bapi: &Api<crd::Bench>, benches: &[&crd::Bench], workspaces: &[&crd::Workspace], owner: &str, team: &str) {
+    use crd::{BenchAccess, DesiredState};
+    let mut bench_written = false;
+    for b in benches.iter().filter(|b| b.spec.access != BenchAccess::Paused || b.spec.desired_state != DesiredState::Stopped) {
+        let p = json!({"spec": {"access": BenchAccess::Paused, "desiredState": DesiredState::Stopped}});
+        bench_written |= write(bapi, &b.name_any(), p, "member.pause.applied").await;
+    }
+    for w in workspaces.iter().filter(|w| w.spec.desired_state != DesiredState::Stopped) {
+        // The stop route's own path, so the agent cuts the stop sync point exactly as for a person's stop.
+        match super::workspaces::set_desired::<crd::Workspace>(c, &w.name_any(), DesiredState::Stopped).await {
+            Ok(()) => tracing::info!(%owner, %team, name = %w.name_any(), "member.pause.applied"),
+            Err(r) => tracing::warn!(%owner, %team, name = %w.name_any(), status = %r.status(), "membership.write.failed"),
+        }
+    }
+    // Already-minted tool tokens die now, not when their 15 minutes run out.
+    if bench_written {
+        if let Err(e) = super::bench::delete_tool_secret(c, owner, team).await {
+            tracing::warn!(%owner, %team, error = %e, "membership.tool_token.delete.failed");
         }
     }
 }
@@ -590,6 +620,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_attached_workspace_delete_also_drops_the_env_side_policy() {
+        let mut routes = removed("bob", 200);
+        let mut w1 = ws("w1", "bob", "acme");
+        w1["spec"]["attachedEnvironment"] = json!("env-7");
+        routes[1] = list_of("Workspace", "workspaces", vec![w1, ws("w2", "bob", "acme")]);
+        let policy = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}", crd::env_namespace("env-7"), crate::k8s::attach_policy_name("w1"));
+        routes.push(del(policy.clone(), 200));
+        let (s, rec, _) = setup(routes, &[]);
+        reconcile(&deleting(s)).await;
+        let d = deletes(&rec);
+        let at = |x: &str| d.iter().position(|c| c == x).unwrap_or_else(|| panic!("{x} missing: {d:?}"));
+        assert!(at(&format!("DELETE {API}/workspaces/w1")) < at(&format!("DELETE {policy}")), "the Workspace goes first");
+        assert_eq!(d.iter().filter(|c| c.contains("networkpolicies")).count(), 1, "an unattached workspace has none");
+    }
+
+    #[tokio::test]
     async fn no_snapshot_volume_or_environment_is_ever_deleted() {
         let (s, rec, _) = setup(removed("bob", 200), &[]);
         reconcile(&deleting(s)).await;
@@ -614,22 +660,6 @@ mod tests {
         let (s, rec, _) = setup(removed("bob", 409), &[]);
         reconcile(&deleting(s)).await;
         assert_eq!(deletes(&rec), vec![format!("DELETE {}", path("bob", "acme"))]);
-    }
-
-    #[tokio::test]
-    async fn an_attached_workspace_delete_also_drops_the_env_side_policy() {
-        let mut routes = removed("bob", 200);
-        let mut w1 = ws("w1", "bob", "acme");
-        w1["spec"]["attachedEnvironment"] = json!("env-7");
-        routes[1] = list_of("Workspace", "workspaces", vec![w1, ws("w2", "bob", "acme")]);
-        let policy = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}", crd::env_namespace("env-7"), crate::k8s::attach_policy_name("w1"));
-        routes.push(del(policy.clone(), 200));
-        let (s, rec, _) = setup(routes, &[]);
-        reconcile(&deleting(s)).await;
-        let d = deletes(&rec);
-        let at = |x: &str| d.iter().position(|c| c == x).unwrap_or_else(|| panic!("{x} missing: {d:?}"));
-        assert!(at(&format!("DELETE {API}/workspaces/w1")) < at(&format!("DELETE {policy}")), "the Workspace goes first");
-        assert_eq!(d.iter().filter(|c| c.contains("networkpolicies")).count(), 1, "an unattached workspace has none");
     }
 
     #[tokio::test]
@@ -729,6 +759,66 @@ mod tests {
     async fn a_paused_member_is_never_stamped() {
         let (s, rec, _) = setup(vec![benches(vec![bench("paula", "acme", "full", None)])], &[("paula", "acme")]);
         reconcile(&s).await;
-        assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused"}})]);
+        assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
+        assert!(rec.calls().iter().all(|c| !c.contains("removed-at")));
+    }
+
+    fn secret_path(owner: &str, team: &str) -> String {
+        format!("/api/v1/namespaces/{}/secrets/{}", crd::ws_namespace(owner, team), crate::k8s::BENCH_TOOL_SECRET)
+    }
+
+    fn paused_pair(bench_json: serde_json::Value, team_ws: serde_json::Value) -> Vec<crate::kube_test::Route> {
+        vec![
+            benches(vec![bench_json]),
+            list_of("Workspace", "workspaces", vec![team_ws, ws("w9", "paula", "")]),
+            patch(format!("{API}/workspaces/w1"), ws("w1", "paula", "acme")),
+            del(secret_path("paula", "acme"), 200),
+        ]
+    }
+
+    #[tokio::test]
+    async fn pause_stops_bench_and_team_workspaces_and_marks_access() {
+        let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
+        reconcile(&deleting(s)).await;
+        assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
+        assert_eq!(rec.sent("PATCH", &format!("{API}/workspaces/w1")), vec![json!({"spec": {"desiredState": "stopped"}})]);
+        assert_eq!(deletes(&rec), vec![format!("DELETE {}", secret_path("paula", "acme"))], "only the tool token is deleted");
+    }
+
+    #[tokio::test]
+    async fn pause_twice_writes_nothing() {
+        let mut b = bench("paula", "acme", "paused", None);
+        b["spec"]["desiredState"] = json!("stopped");
+        let mut w = ws("w1", "paula", "acme");
+        w["spec"]["desiredState"] = json!("stopped");
+        let (s, rec, _) = setup(paused_pair(b, w), &[]);
+        reconcile(&s).await;
+        assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
+    }
+
+    #[tokio::test]
+    async fn unpause_sets_full_and_starts_nothing() {
+        let mut b = bench("alice", "acme", "paused", None);
+        b["spec"]["desiredState"] = json!("stopped");
+        let mut w = ws("w1", "alice", "acme");
+        w["spec"]["desiredState"] = json!("stopped");
+        let (s, rec, _) = setup(vec![benches(vec![b]), list_of("Workspace", "workspaces", vec![w])], &[("alice", "acme")]);
+        reconcile(&s).await;
+        assert_eq!(writes(&rec), vec![format!("PATCH {}", path("alice", "acme"))]);
+        assert_eq!(rec.sent("PATCH", &path("alice", "acme")), vec![json!({"spec": {"access": "full"}})]);
+    }
+
+    #[tokio::test]
+    async fn a_readd_after_removal_gets_full_access_back() {
+        let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "paused", Some("2026-09-15T00:00:00Z"))])], &[("alice", "acme")]);
+        reconcile(&s).await;
+        assert!(rec.sent("PATCH", &path("alice", "acme")).contains(&json!({"spec": {"access": "full"}})));
+    }
+
+    #[tokio::test]
+    async fn a_personal_workspace_of_a_paused_member_is_untouched() {
+        let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
+        reconcile(&s).await;
+        assert!(!writes(&rec).iter().any(|c| c.contains("/workspaces/w9")), "{:?}", writes(&rec));
     }
 }

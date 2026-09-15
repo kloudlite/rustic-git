@@ -267,7 +267,7 @@ async fn a_departed_member_gets_404_on_their_old_bench() {
     assert!(p[0].get("spec").is_none(), "the stamp writes no spec");
     assert_eq!(p[1], json!({"spec": {"access": "paused"}}), "access is the only spec field written");
     assert!(t.rec.sent("PATCH", &bench_path("dave", "dave")).is_empty());
-    assert_eq!(t.rec.sent("PATCH", &bench_path("paula", "acme")), vec![json!({"spec": {"access": "paused"}})], "a paused member is paused, never stamped");
+    assert_eq!(t.rec.sent("PATCH", &bench_path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})], "a paused member is paused and stopped, never stamped");
 }
 
 #[tokio::test]
