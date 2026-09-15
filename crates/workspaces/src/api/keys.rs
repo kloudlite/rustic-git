@@ -197,19 +197,22 @@ async fn team_owners(s: &ApiState, keep: &BTreeSet<String>, seen: &[(String, i64
         .filter(|(name, age)| !keep.contains(name) && *age >= max_age)
         .filter_map(|(name, _)| name.strip_prefix("ws-").map(str::to_string))
         .collect();
-    prunable_owners(s, owners).await
+    // An answered TEAM only, never "gone": a `ws-` namespace holds a person's `user-key` Secret, and
+    // "no such person" can be a transient directory data problem — a binding is recreated on
+    // demand, a deleted Secret is not.
+    prunable_owners(s, owners, false).await
 }
 
-/// The owners a prune may treat as not a person: the directory ANSWERED, and named a team or
-/// nothing at all. A person, a failed read and a missing directory all keep.
-async fn prunable_owners(s: &ApiState, owners: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+/// The owners a prune may act on: the directory ANSWERED, and named a team — or, with
+/// `allow_gone`, nothing at all. A person, a failed read and a missing directory all keep.
+async fn prunable_owners(s: &ApiState, owners: impl IntoIterator<Item = String>, allow_gone: bool) -> BTreeSet<String> {
     let Some(dir) = s.directory.as_ref() else { return BTreeSet::new() };
     let owners: Vec<String> = owners.into_iter().collect();
     let answers = futures::future::join_all(owners.iter().map(|o| dir.owner_kind(o))).await;
     owners
         .into_iter()
         .zip(answers)
-        .filter(|(_, k)| matches!(k, Ok(super::OwnerKind::Team | super::OwnerKind::Gone)))
+        .filter(|(_, k)| matches!(k, Ok(super::OwnerKind::Team)) || (allow_gone && matches!(k, Ok(super::OwnerKind::Gone))))
         .map(|(o, _)| o)
         .collect()
 }
@@ -367,7 +370,7 @@ pub(crate) async fn prune_bindings(s: &ApiState) {
         .filter(|(_, o, age)| !keep.contains(&o.to_lowercase()) && *age >= max_age)
         .map(|(_, o, _)| o.to_lowercase())
         .collect();
-    let teams = prunable_owners(s, owners).await;
+    let teams = prunable_owners(s, owners, true).await;
     let api: Api<crd::OwnerBinding> = Api::all(c.clone());
     for name in stale_bindings(&keep, &seen, max_age, &teams) {
         match api.delete(&name, &Default::default()).await {
@@ -556,18 +559,17 @@ mod tests {
         }
     }
 
-    /// The same directory answer drives the `ws-` namespace arm: a gone team's is pruned, a
-    /// person's never.
+    /// A `ws-` namespace goes only for an answered TEAM: a gone owner's is kept (it holds Secrets,
+    /// and "gone" may be a directory data blip), and a person's never goes.
     #[tokio::test]
-    async fn a_gone_teams_ws_namespace_is_pruned_and_a_persons_is_not() {
+    async fn only_a_known_teams_ws_namespace_is_pruned_and_a_gone_owners_is_kept() {
         let list = |kind: &str, api: &str, items: serde_json::Value| serde_json::json!({"apiVersion": api, "kind": kind, "metadata": {}, "items": items});
         let ns = |name: &str| serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name, "creationTimestamp": "2020-01-01T00:00:00Z"}});
         let (client, rec) = crate::kube_test::mock_client(vec![
-            crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([ns("ws-gone"), ns("ws-bob")]))),
+            crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([ns("ws-gone"), ns("ws-bob"), ns("ws-acme")]))),
             crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
             crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
-            crate::kube_test::get("/api/v1/namespaces/ws-gone/pods", list("PodList", "v1", serde_json::json!([]))),
-            crate::kube_test::get("/api/v1/namespaces/ws-bob/pods", list("PodList", "v1", serde_json::json!([]))),
+            crate::kube_test::get("/api/v1/namespaces/ws-acme/pods", list("PodList", "v1", serde_json::json!([]))),
         ]);
         let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let mut s = ApiState::new(jwt);
@@ -575,11 +577,11 @@ mod tests {
         s.directory = Some(Arc::new(AllTeams(true)));
         prune_namespaces(&s).await;
         let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-        assert_eq!(deleted, vec!["DELETE /api/v1/namespaces/ws-gone".to_string()]);
+        assert_eq!(deleted, vec!["DELETE /api/v1/namespaces/ws-acme".to_string()]);
     }
 
     /// Mirrors production: `is_team` is false for a deleted team. `owner_kind` answers `bob` as a
-    /// person and anything else as gone — or, with `false`, fails every read.
+    /// person, `acme` as a live team and anything else as gone — or, with `false`, fails every read.
     struct AllTeams(bool);
     #[async_trait::async_trait]
     impl crate::api::Directory for AllTeams {
@@ -587,6 +589,7 @@ mod tests {
             match (self.0, slug) {
                 (false, _) => Err("unreadable".into()),
                 (true, "bob") => Ok(crate::api::OwnerKind::Person),
+                (true, "acme") => Ok(crate::api::OwnerKind::Team),
                 (true, _) => Ok(crate::api::OwnerKind::Gone),
             }
         }
