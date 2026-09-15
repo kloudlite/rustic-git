@@ -19,6 +19,7 @@ use super::events::{write_events, EventRow};
 use super::History;
 use crate::crd::{self, Phase, RequestState};
 use futures::StreamExt;
+use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::api::core::v1::Node;
 use kube::api::ResourceExt;
 use std::collections::HashMap;
@@ -257,7 +258,8 @@ pub fn workspace_events(
             &next.spec.owner,
             &next.name_any(),
             region,
-            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
+            prev.and_then(|p| p.status.as_ref())
+                .map(|s| s.conditions.as_slice()),
             &st.conditions,
         ));
     }
@@ -298,7 +300,8 @@ pub fn environment_events(
             &next.spec.owner,
             &next.name_any(),
             region,
-            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
+            prev.and_then(|p| p.status.as_ref())
+                .map(|s| s.conditions.as_slice()),
             &st.conditions,
         ));
     }
@@ -321,7 +324,8 @@ pub fn snapshot_events(
     let st = next.status.as_ref();
     // Same reason the builder's own rows are dropped: every build stop cuts one, and none of it
     // belongs in a feed whose owner page hides the parent.
-    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready || from_a_builder(&next.spec) {
+    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready || from_a_builder(&next.spec)
+    {
         return Vec::new();
     }
     // `readyAt` is the exact instant the cut landed, written by the node that took it — a better
@@ -661,6 +665,50 @@ pub fn node_events(prev: Option<&Node>, next: &Node, region: &str) -> Vec<EventR
     out
 }
 
+/// The in-cluster controller's Lease (`bins/controller/src/lease.rs`). Kept here as literals because
+/// the controller binary is not a dependency of this crate.
+const LEADER_LEASE: &str = "kloudlite-controller";
+const LEADER_LEASE_NAMESPACE: &str = "kube-system";
+
+/// A change of the controller Lease's HOLDER. Renews rewrite the object every 5 s and must say
+/// nothing; the first sighting is a row, because the holder went from unknown to known. `ts` is the
+/// new term's `acquireTime` (stable for the whole term), else its `renewTime` — both properties of
+/// the object, never the wall clock. `region` is filled in by the watch, which knows it.
+pub fn leader_events(prev: Option<&Lease>, next: &Lease) -> Vec<EventRow> {
+    let holder = |l: &Lease| {
+        l.spec
+            .as_ref()
+            .and_then(|s| s.holder_identity.clone())
+            .unwrap_or_default()
+    };
+    let name = holder(next);
+    if prev.map(holder).as_ref() == Some(&name) {
+        return Vec::new();
+    }
+    let spec = next.spec.as_ref();
+    let ts = spec
+        .and_then(|s| s.acquire_time.as_ref().or(s.renew_time.as_ref()))
+        .and_then(|t| chrono::DateTime::from_timestamp_millis(t.0.as_millisecond()))
+        .or_else(|| managed_at(next))
+        .unwrap_or_else(epoch);
+    let (uid, rv) = uid_rv(next);
+    vec![row(
+        ts,
+        &uid,
+        &rv,
+        "leader",
+        "controller.leader",
+        "",
+        "",
+        &name,
+        "",
+        serde_json::json!({
+            "previous": prev.map(holder),
+            "transitions": spec.and_then(|s| s.lease_transitions),
+        }),
+    )]
+}
+
 /// The row a disappearing object leaves behind. `ts` is the deletion stamp when the API server set
 /// one (a graceful delete goes through `deletionTimestamp` first), else the object's last write —
 /// still a property of the object, so a replayed delete is the same row.
@@ -735,13 +783,14 @@ fn no_delete<K>(_: &K, _: &str) -> Vec<EventRow> {
 // request and cannot stream a watch, so there is no harness for it. Every rule lives in the
 // mappers above, which ARE tested; add a streaming mock the day the loop grows a decision.
 async fn watch_kind<K>(
-    client: kube::Client,
+    api: kube::Api<K>,
+    cfg: kube::runtime::watcher::Config,
     region: String,
     history: Arc<History>,
     map: fn(Option<&K>, &K, &str) -> Vec<EventRow>,
     on_delete: fn(&K, &str) -> Vec<EventRow>,
 ) where
-    K: kube::Resource<Scope = kube::core::ClusterResourceScope, DynamicType = ()>
+    K: kube::Resource<DynamicType = ()>
         + Clone
         + std::fmt::Debug
         + serde::de::DeserializeOwned
@@ -749,14 +798,12 @@ async fn watch_kind<K>(
         + Sync
         + 'static,
 {
-    let api = kube::Api::<K>::all(client);
     let kind = K::kind(&()).to_string();
     let mut backoff = MIN_BACKOFF;
     let mut failures: u64 = 0;
     loop {
         let mut prev: HashMap<String, K> = HashMap::new();
-        let mut stream =
-            kube::runtime::watcher(api.clone(), kube::runtime::watcher::Config::default()).boxed();
+        let mut stream = kube::runtime::watcher(api.clone(), cfg.clone()).boxed();
         while let Some(ev) = stream.next().await {
             let rows = match ev {
                 Ok(kube::runtime::watcher::Event::Apply(o))
@@ -814,7 +861,8 @@ async fn watch_kind<K>(
 /// forever.
 pub async fn watch_central(client: kube::Client, history: Arc<History>) {
     watch_kind::<crd::Region>(
-        client,
+        kube::Api::all(client),
+        Default::default(),
         CENTRAL.to_string(),
         history,
         |p, n, _| region_events(p, n),
@@ -832,49 +880,71 @@ pub async fn watch_region(client: kube::Client, region: String, history: Arc<His
     }
     let tasks = vec![
         tokio::spawn(watch_kind::<crd::Workspace>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             workspace_events,
             workspace_deleted,
         )),
         tokio::spawn(watch_kind::<crd::Environment>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             environment_events,
             environment_deleted,
         )),
         tokio::spawn(watch_kind::<crd::Snapshot>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             snapshot_events,
             snapshot_deleted,
         )),
         tokio::spawn(watch_kind::<crd::Volume>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             volume_events,
             no_delete,
         )),
         tokio::spawn(watch_kind::<crd::QuotaRequest>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             quota_request_events,
             no_delete,
         )),
         tokio::spawn(watch_kind::<crd::Request>(
-            client.clone(),
+            kube::Api::all(client.clone()),
+            Default::default(),
             region.clone(),
             history.clone(),
             request_events,
             no_delete,
         )),
+        // One object per cluster: the field selector keeps this from streaming every Lease in
+        // kube-system (each node's kubelet heartbeat is one).
+        tokio::spawn(watch_kind::<Lease>(
+            kube::Api::namespaced(client.clone(), LEADER_LEASE_NAMESPACE),
+            kube::runtime::watcher::Config::default()
+                .fields(&format!("metadata.name={LEADER_LEASE}")),
+            region.clone(),
+            history.clone(),
+            |p, n, r| {
+                let mut rows = leader_events(p, n);
+                rows.iter_mut().for_each(|x| x.region = r.to_string());
+                rows
+            },
+            no_delete,
+        )),
         tokio::spawn(watch_kind::<Node>(
-            client,
+            kube::Api::all(client),
+            Default::default(),
             region,
             history,
             node_events,
@@ -908,6 +978,31 @@ mod condition_tests {
         w
     }
 
+    fn lease(holder: &str, transitions: i32, rv: &str) -> Lease {
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": LEADER_LEASE, "namespace": LEADER_LEASE_NAMESPACE, "uid": "l1", "resourceVersion": rv },
+            "spec": { "holderIdentity": holder, "leaseTransitions": transitions,
+                      "acquireTime": "2026-09-14T10:00:00.000000Z", "renewTime": "2026-09-14T10:00:05.000000Z" }
+        }))
+        .unwrap()
+    }
+
+    /// Only a change of HOLDER is an event. A Lease is rewritten every 5 s by the renew beat, and
+    /// a row per renew would be 17 k rows a day per cluster saying nothing happened.
+    #[test]
+    fn only_a_change_of_holder_is_a_leader_event() {
+        let a = lease("ctl-a", 3, "100");
+        let renewed = lease("ctl-a", 3, "101");
+        let b = lease("ctl-b", 4, "102");
+        assert!(leader_events(Some(&a), &renewed).is_empty());
+        let rows = leader_events(Some(&a), &b);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "controller.leader");
+        assert_eq!(rows[0].target, "ctl-b");
+        // The first sighting after a restart is an event: the holder went from unknown to known.
+        assert_eq!(leader_events(None, &a).len(), 1);
+    }
+
     /// A reason change is a row; the same reason written again is not; the message rides along.
     #[test]
     fn a_ready_reason_change_is_one_row_and_a_rewrite_is_none() {
@@ -915,9 +1010,15 @@ mod condition_tests {
         let b = ws("2", "False", "PodNotReady");
         let c = ws("3", "True", "Ready");
         let rows = workspace_events(Some(&a), &b, "r");
-        assert!(rows.iter().all(|r| r.kind != "workspace.condition"), "{rows:?}");
+        assert!(
+            rows.iter().all(|r| r.kind != "workspace.condition"),
+            "{rows:?}"
+        );
         let rows = workspace_events(Some(&b), &c, "r");
-        let cond = rows.iter().find(|r| r.kind == "workspace.condition").expect("a condition row");
+        let cond = rows
+            .iter()
+            .find(|r| r.kind == "workspace.condition")
+            .expect("a condition row");
         assert_eq!(cond.attrs["reason"], "Ready");
         assert_eq!(cond.attrs["status"], "True");
         assert_eq!(cond.attrs["message"], "m");
