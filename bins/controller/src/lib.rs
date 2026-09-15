@@ -13,6 +13,7 @@
 //! clusters); a second deployment shape would be a `WS_REGION`-scoped selector, nothing more.
 
 pub mod ctx;
+pub mod gc;
 pub mod health;
 pub mod lease;
 pub mod space;
@@ -56,6 +57,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         r = serving => r.map_err(|e| format!("serving: {e}")),
         _ = elect(ctx.clone()) => Err("election loop ended".into()),
         _ = space::run(ctx.clone()) => Err("reconcilers ended".into()),
+        _ = gc::run(ctx.clone()) => Err("removal gc ended".into()),
         // Hand the lease back rather than making the replacement wait out the TTL. Drop the epoch
         // FIRST, so nothing still in flight writes under a term we are about to blank.
         sig = shutdown_signal() => {

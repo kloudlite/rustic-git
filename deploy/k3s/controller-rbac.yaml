@@ -17,6 +17,10 @@
 #                                                                  region, its ownerReference
 #   workspaces, benches (kloudlite.io)     get,list,watch          space::render's owner lookup and
 #                                                                  the legacy `attach-*` collection
+#   benches, workspaces, spaceenvironments delete                  gc.rs: a departed member's object
+#     (kloudlite.io)                                               once its api-written
+#                                                                  `kloudlite.io/delete-after` is due,
+#                                                                  uid+resourceVersion preconditioned
 #   clustersettings (kloudlite.io)         get,list,watch          the settings reflector (lib.rs):
 #                                                                  the per-cluster tunables every
 #                                                                  reader resolves through
@@ -28,7 +32,8 @@
 #                                                                  half is still there to delete
 #                                          list                    the env-side derived-set render:
 #                                                                  which space-* halves exist here
-#                                          delete                  a switch removes the old half; a
+#                                          delete                  gc.rs: a GC'd workspace's env-side
+#                                                                  attach-{ws} half. Also: a switch removes the old half; a
 #                                                                  cleared choice removes both
 #   leases (coordination.k8s.io)           get,create,update       lease.rs: elect, renew, release.
 #                                                                  Namespaced to kube-system, by
@@ -51,6 +56,10 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["spaceenvironments", "environments", "workspaces", "benches", "clustersettings"]
     verbs: ["get", "list", "watch"]
+  # The removal GC. Never snapshots, volumes, environments: a pushed snapshot outlives its member.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["benches", "workspaces", "spaceenvironments"]
+    verbs: ["delete"]
   # NetworkPolicies are namespaced, and the namespaces are `ws-*`, `wt-*` and `env-*` — RBAC has
   # no globbing, so "only those namespaces" is not expressible as a rule. A Role per namespace
   # would need something to write it, in every namespace, before the first policy: that something

@@ -123,7 +123,7 @@ fn touched_namespaces(space: &crd::SpaceEnvironment, prev: Option<&str>) -> Vec<
 /// F1 across two processes, and unrecreatable for ten minutes.
 /// ponytail: a delete is rare (a transition, or a confirmed orphan), so the extra GET is paid only
 /// there; per-apply reads would be a GET per space per beat for nothing.
-async fn may_write(ctx: &Ctx) -> bool {
+pub(crate) async fn may_write(ctx: &Ctx) -> bool {
     if !ctx.leading() {
         return false;
     }
