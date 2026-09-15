@@ -68,7 +68,7 @@ export default async function ClusterDetailPage({ params }: { params: Promise<{ 
         </div>
         <div className="flex items-center gap-2">
           <RegionStatusToggle region={detail.region} status={detail.status} />
-          <Link href="/superadmin/configuration" className="inline-flex h-8 items-center border border-border px-3 text-sm2 font-medium hover:bg-muted">
+          <Link href={`/superadmin/configuration/${encodeURIComponent(detail.region)}`}className="inline-flex h-8 items-center border border-border px-3 text-sm2 font-medium hover:bg-muted">
             Edit settings
           </Link>
         </div>

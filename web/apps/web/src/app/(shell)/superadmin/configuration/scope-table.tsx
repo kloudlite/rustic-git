@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import type { SettingsSchemaRow } from "@/lib/api";
 import { effectiveValue, fmt } from "@/lib/settings";
@@ -18,6 +19,8 @@ export type Scope = {
   /** The stored document for this scope, keyed by the same names the schema rows use. */
   stored: Record<string, unknown>;
   error?: string | null;
+  /** This scope's editor. */
+  href: string;
 };
 
 /** One section per scope, and ONE search box above them all: a knob is looked up by name without
@@ -44,7 +47,14 @@ export function ScopeTables({ scopes }: { scopes: Scope[] }) {
             title={scope.title}
             count={`${rows.length} fields`}
             bare
-            toolbar={<span className="text-caption text-muted-foreground">{scope.readers}</span>}
+            toolbar={
+              <>
+                <span className="text-caption text-muted-foreground">{scope.readers}</span>
+                <Link href={scope.href} className="inline-flex h-8 items-center border border-border px-3 text-sm2 font-medium hover:bg-muted">
+                  Edit
+                </Link>
+              </>
+            }
           >
             {scope.error && <p className="px-4 py-2 text-caption text-destructive">{scope.error}</p>}
             {rows.length === 0 ? (
