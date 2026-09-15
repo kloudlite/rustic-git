@@ -228,10 +228,28 @@ async fn team_owners(s: &ApiState, keep: &BTreeSet<String>, seen: &[(String, i64
         .filter(|(name, age)| !keep.contains(name) && *age >= max_age)
         .filter_map(|(name, _)| name.strip_prefix("ws-").map(str::to_string))
         .collect();
-    // An answered TEAM only, never "gone": a `ws-` namespace holds a person's `user-key` Secret, and
+    // An answered TEAM, never "gone": a `ws-` namespace holds a person's `user-key` Secret, and
     // "no such person" can be a transient directory data problem — a binding is recreated on
-    // demand, a deleted Secret is not.
-    prunable_owners(s, owners, false).await
+    // demand, a deleted Secret is not. The one exception is a gone SLO probe run team (115 of them
+    // by 2026-09-16, since the probe deletes its teams): its slug is a shape no person's handle
+    // takes, so "gone" there cannot be a person's glitch. Pod and age guards still apply.
+    let (probe, rest): (Vec<String>, Vec<String>) = owners.into_iter().partition(|o| is_probe_run_team(o));
+    let mut out = prunable_owners(s, rest, false).await;
+    out.extend(prunable_owners(s, probe, true).await);
+    out
+}
+
+/// `run-{suite}-{unix}[-g{n}]-{suffix}` — the probe's run id (`bins/slo/src/ctx.rs`, suites from
+/// `slo::catalogue::Suite::as_str`) and a team suffix (`-team`, `-icept`, …). Equivalent regex:
+/// `^run-(fast|hourly|weekly|monthly)-[0-9]+(-g[0-9]+)?-[a-z0-9-]+$`.
+fn is_probe_run_team(owner: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let Some((suite, rest)) = owner.strip_prefix("run-").and_then(|r| r.split_once('-')) else { return false };
+    let Some((ts, suffix)) = rest.split_once('-') else { return false };
+    ["fast", "hourly", "weekly", "monthly"].contains(&suite)
+        && digits(ts)
+        && !suffix.is_empty()
+        && suffix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// The owners a prune may act on: the directory ANSWERED, and named a team — or, with
@@ -317,8 +335,12 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
         }
         match api.delete(&name, &Default::default()).await {
             Ok(_) => {
-                let owner_kind = if name.starts_with("ws-") { "team" } else { "member" };
-                tracing::info!(namespace = %name, %owner_kind, "keys.namespace.pruned");
+                let reason = match name.strip_prefix("ws-") {
+                    Some(o) if is_probe_run_team(o) => "probe_team",
+                    Some(_) => "team",
+                    None => "member",
+                };
+                tracing::info!(namespace = %name, %reason, "keys.namespace.pruned");
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {}
             Err(e) => tracing::warn!(namespace = %name, error = %e, "keys.namespace.prune.failed"),
@@ -609,6 +631,51 @@ mod tests {
         prune_namespaces(&s).await;
         let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
         assert_eq!(deleted, vec!["DELETE /api/v1/namespaces/ws-acme".to_string()]);
+    }
+
+    /// A GONE probe run team's `ws-` namespace goes when empty; one with a pod, one whose pods
+    /// cannot be read (unrouted = 404), a gone non-probe owner, a person, and every owner when the
+    /// directory cannot answer, are all kept.
+    #[tokio::test]
+    async fn a_gone_probe_teams_empty_ws_namespace_is_pruned() {
+        let list = |kind: &str, api: &str, items: serde_json::Value| serde_json::json!({"apiVersion": api, "kind": kind, "metadata": {}, "items": items});
+        let ns = |name: &str| serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name, "creationTimestamp": "2020-01-01T00:00:00Z"}});
+        let pod = serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p"}});
+        for answers in [true, false] {
+            let (client, rec) = crate::kube_test::mock_client(vec![
+                crate::kube_test::get(
+                    "/api/v1/namespaces",
+                    list("NamespaceList", "v1", serde_json::json!([
+                        ns("ws-run-hourly-1-g0-team"), ns("ws-run-hourly-2-team"), ns("ws-run-hourly-3-g1-icept"),
+                        ns("ws-gone"), ns("ws-bob"),
+                    ])),
+                ),
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
+                crate::kube_test::get("/api/v1/namespaces/ws-run-hourly-1-g0-team/pods", list("PodList", "v1", serde_json::json!([]))),
+                crate::kube_test::get("/api/v1/namespaces/ws-run-hourly-2-team/pods", list("PodList", "v1", serde_json::json!([pod.clone()]))),
+                crate::kube_test::get("/api/v1/namespaces/ws-gone/pods", list("PodList", "v1", serde_json::json!([]))),
+                crate::kube_test::get("/api/v1/namespaces/ws-bob/pods", list("PodList", "v1", serde_json::json!([]))),
+            ]);
+            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+            let mut s = ApiState::new(jwt);
+            s.kube = Some(client);
+            s.directory = Some(Arc::new(AllTeams(answers)));
+            prune_namespaces(&s).await;
+            let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+            let want = if answers { vec!["DELETE /api/v1/namespaces/ws-run-hourly-1-g0-team".to_string()] } else { vec![] };
+            assert_eq!(deleted, want, "answers={answers}");
+        }
+    }
+
+    #[test]
+    fn only_probe_run_team_slugs_match() {
+        for yes in ["run-hourly-1757971920-team", "run-hourly-1757971920-g0-team", "run-hourly-1757971920-g1-icept", "run-fast-1-x", "run-monthly-9-g2-team"] {
+            assert!(is_probe_run_team(yes), "{yes}");
+        }
+        for no in ["runner", "run-alice", "run-hourly", "run-hourly-", "run-hourly-12", "run-hourly-12-", "run-hourly-abc-team", "run-drill-1-team", "run-hourly-1-Team", "xrun-hourly-1-team", "alice"] {
+            assert!(!is_probe_run_team(no), "{no}");
+        }
     }
 
     /// Mirrors production: `is_team` is false for a deleted team. `owner_kind` answers `bob` as a

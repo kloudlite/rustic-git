@@ -535,8 +535,11 @@ touches `OwnerKeys`). The `user-key` Secret no longer carries `authorized_keys`.
 `OwnerKeys` no Workspace names any more is deleted, and so is a `wt-` team namespace no Workspace
 resolves to, is older than one beat, and holds no pod (`api::keys::prune_namespaces`). The
 namespace half is what stops a deleted team leaving one behind — nothing had ever deleted one, and
-a region held 101 empty ones by 2026-09-08, one per hourly probe run. A person's own `ws-`
-namespace is never a candidate. The same beat deletes an `OwnerBinding` no Workspace, Environment
+a region held 101 empty ones by 2026-09-08, one per hourly probe run. A `ws-` namespace is a
+candidate only when the directory answers its owner is a team — or is gone AND the slug has the SLO
+probe's run-team shape (`run-{fast|hourly|weekly|monthly}-{unix}[-g{n}]-{suffix}`,
+`keys::is_probe_run_team`; 115 leaked by 2026-09-16) — under the same keep, age and no-pod guards.
+A person's own `ws-` namespace is never a candidate, and neither is any other gone owner's. The same beat deletes an `OwnerBinding` no Workspace, Environment
 or Bench names, older than one beat, whose owner the directory positively answers is not a person
 (`Directory::owner_kind` → team or gone; a failed read keeps) — `api::keys::prune_bindings`; 109 of
 116 were dead probe teams on 2026-09-16, re-applied by every agent on every Quota event. A parent
