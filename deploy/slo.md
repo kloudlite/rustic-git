@@ -178,7 +178,7 @@ first destructive stage.
 | `team.repo.shared` | Teams | A member clones a team repo; a non-member is refused | 99.9 % | hourly | 14 · Experience |
 | `team.workspace` | Teams | A team workspace lands in the team namespace and starts | 95 % ≤ 90000 ms | hourly | 14 · Experience |
 | `team.member.remove` | Teams | A removed member loses access to the team repo | 99.9 % | hourly | 14 · Experience |
-| `team.member.paused` | Teams | A paused member's tool token, team `/v1` and bench tunnel are refused and their bench is stopped within one beat; after unpause and start the bench folder's canary is still there | 99.9 % ≤ 420000 ms | hourly | 14 · Experience |
+| `team.member.paused` | Teams | A paused member's tool token, team `/v1` and bench tunnel and bench session are refused and their bench is stopped within a minute; after unpause and start the bench folder's canary is still there | 99.9 % ≤ 240000 ms | hourly | 14 · Experience |
 | `team.delete` | Teams | Deleting the team removes its profile and refuses its slug | 99.9 % | hourly | 14 · Experience |
 | `team.namespace.reaped` | Workspaces | No team namespace outlives by more than two resync beats the workspaces that used it | 99.9 % | hourly | 14 · Experience |
 | `repo.protection` | Git hosting | A protected branch refuses a direct push and still merges via a PR | 99.9 % | hourly | 14 · Experience |

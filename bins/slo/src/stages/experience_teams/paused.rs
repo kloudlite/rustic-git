@@ -19,11 +19,12 @@ use kloudlite_workspaces::k8s;
 use crate::stages::call;
 
 pub(crate) const PAUSED_ID: &str = "team.member.paused";
-/// `bound(420_000)`: the 360 s refusal window, the unpause, the start and the canary read.
-const PAUSED_BODY: Duration = Duration::from_secs(420);
+/// `bound(240_000)`: the 60 s refusal window, the unpause, a cold bench start and the canary read.
+const PAUSED_BODY: Duration = Duration::from_secs(240);
 pub(super) const PAUSED_CEILING: Duration = Duration::from_secs(PAUSED_BODY.as_secs() + UNDO_SLACK);
-/// One keys beat (300 s) plus a minute.
-const PAUSE_WINDOW: Duration = Duration::from_secs(360);
+/// Pause reconciles the member's Bench at once (`on_member_state`); the rest is the api's
+/// `membership.forget` and the gate's cache — seconds, with room for a slow Bench patch.
+const PAUSE_WINDOW: Duration = Duration::from_secs(60);
 const READY_WAIT: Duration = Duration::from_secs(120);
 const EXEC: Duration = Duration::from_secs(20);
 const CANARY: &str = "/bench/.slo-canary";
@@ -106,7 +107,7 @@ async fn revoke(c: &Ctx, id: &str) {
     let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &c.other_jwt, None).await;
 }
 
-/// One pass over the four surfaces; `Err` names the first that still lets the member in.
+/// One pass over the five surfaces; `Err` names the first that still lets the member in.
 async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     let (status, body) = raw(c, reqwest::Method::GET, &api(c, "/v1/regions"), &p.tool, None, &[]).await?;
     if status != reqwest::StatusCode::UNAUTHORIZED {
@@ -115,6 +116,11 @@ async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/workspaces?team={team}")), &c.other_jwt, None, &[]).await?;
     if status != reqwest::StatusCode::FORBIDDEN || !body.contains(&paused_sentence(team)) {
         return Err(anyhow!("the team listing answered {status}: {}", clip(&body)));
+    }
+    // The refusal a desktop client actually meets, one hop before the gateway.
+    let (status, body) = raw(c, reqwest::Method::POST, &bench_url(c, "/session", team), &c.other_jwt, None, &[]).await?;
+    if status != reqwest::StatusCode::FORBIDDEN || !body.contains(&paused_sentence(team)) {
+        return Err(anyhow!("a bench session answered {status}: {}", clip(&body)));
     }
     let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
     let id = crd::bench_id(&c.other_user, team);
@@ -178,7 +184,8 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
                     }
                 }
                 call(c, reqwest::Method::POST, &unpause, &c.probe_jwt, None).await.context("could not unpause the member")?;
-                // Refused until the directory row is active again, which the unpause just wrote.
+                // Accepted either way, but parked on `access: paused` until the unpause's own
+                // reconcile writes `access: full`, which it has by the time the unpause answers.
                 call(c, reqwest::Method::POST, &bench_url(c, "/start", &t), &c.other_jwt, None).await.context("could not start the bench")?;
                 ready(c, &t, PAUSED_BODY.saturating_sub(start.elapsed())).await.context("the bench never came back")?;
                 let got = in_bench(c, &t, r#"process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))"#, CANARY).await?;
@@ -197,7 +204,9 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
     teardown(c, &team).await;
 }
 
-/// Best effort; the `run-` prefix sweep takes whatever this misses.
+/// Best effort; the `run-` prefix sweep takes whatever this misses. No drain before the team
+/// delete, unlike the intercept journey: this team holds only a bench, which never blocks
+/// `delete_team` the way a workspace does.
 async fn teardown(c: &Ctx, team: &str) {
     let _ = call(c, reqwest::Method::POST, &bench_url(c, "/stop", team), &c.other_jwt, None).await;
     if let Err(e) = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}")), &c.probe_jwt, None).await {

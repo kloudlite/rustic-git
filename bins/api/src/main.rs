@@ -522,6 +522,13 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as kloudlite_api::KeysChanged
     });
+    let on_member_state: Option<kloudlite_api::MemberStateChanged> = workspaces.clone().map(|ws| {
+        Arc::new(move |owner: String, team: String| {
+            let ws = ws.clone();
+            Box::pin(async move { kloudlite_workspaces::api::membership::reconcile_pair(&ws, &owner, &team).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        }) as kloudlite_api::MemberStateChanged
+    });
     let region_check: Option<kloudlite_api::RegionCheck> = workspaces.clone().map(|ws| {
         Arc::new(move |region: String| {
             let ws = ws.clone();
@@ -586,6 +593,7 @@ async fn run() -> Result<()> {
         l,
         workspaces_router,
         on_keys_changed,
+        on_member_state,
         region_check,
         active_regions,
         role == "admin",

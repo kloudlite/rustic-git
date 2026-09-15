@@ -78,6 +78,19 @@ async fn set_state(api: &Arc<Api>, headers: &axum::http::HeaderMap, slug: &str, 
             let email = email.trim().to_lowercase();
             api.membership.forget(&email, slug);
             crate::credentials::spawn_keys_changed(api, &email);
+            // Awaited, so the answer means the Bench already reads paused (or full) again: an
+            // unpaused person's start is otherwise parked on `access: paused` for up to a beat.
+            if let Some(hook) = api.on_member_state.clone() {
+                match db.user(&email).await {
+                    Ok(Some(u)) => {
+                        if let Some(handle) = u.username {
+                            hook(handle, slug.to_string()).await
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(team = %slug, member = %email, error = %e, "member.reconcile.skipped"),
+                }
+            }
             tracing::info!(team = %slug, member = %email, by = %user, "{event}");
             // After the write: a refused pause (last owner, not a member) is not an admin write.
             if let Err(r) = write_audit(api, &user, action, &format!("{slug}/{email}"), String::new(), "ok").await {
@@ -220,6 +233,24 @@ mod tests {
         assert!(crate::browse::may_read_under(&api, &db, "m@x", "acme").await.unwrap(), "cached yes");
         assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
         assert!(!crate::browse::may_read_under(&api, &db, "m@x", "acme").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn pause_and_unpause_reconcile_the_members_pair_at_once() {
+        let mut api = Arc::try_unwrap(fixture().await).ok().unwrap();
+        api.directory.as_ref().unwrap().claim_username("m@x", "mem").await.unwrap().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let rec = seen.clone();
+        api.on_member_state = Some(Arc::new(move |o: String, t: String| {
+            rec.lock().unwrap().push((o, t));
+            Box::pin(async {})
+        }));
+        let api = Arc::new(api);
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT, "a no-op");
+        assert_eq!(unpause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        let want = ("mem".to_string(), "acme".to_string());
+        assert_eq!(*seen.lock().unwrap(), vec![want.clone(), want]);
     }
 
     #[tokio::test]

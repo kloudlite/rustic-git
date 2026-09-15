@@ -84,6 +84,13 @@ pub type KeysChanged = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
+/// Called after a member is paused or unpaused, with the person's HANDLE and the team, so their
+/// Bench and Workspaces in that team are judged at once rather than on the next keys beat (300 s).
+/// The beat stays the backstop for a lost call. Same crate boundary reason as `KeysChanged`.
+pub type MemberStateChanged = Arc<
+    dyn Fn(String, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
 pub struct Api {
     pub store: Arc<Store>,
     pub cache: Arc<Cache>,
@@ -101,6 +108,8 @@ pub struct Api {
     /// `None` outside the api binary (and in dev without a cluster): the key rows are still the
     /// record, and every workspace picks the change up the next time its Secret is written.
     pub on_keys_changed: Option<KeysChanged>,
+    /// `None` without a cluster: a pause then reaches the member's objects on the next beat.
+    pub on_member_state: Option<MemberStateChanged>,
     /// `None` without a cluster: team creation then refuses (503) rather than place a team nowhere.
     pub region_check: Option<RegionCheck>,
     /// `None` without a cluster: a new person then simply starts with no region.
@@ -145,6 +154,7 @@ pub async fn serve(
     // merges whatever it is handed and never itself decides between a user and an admin surface.
     workspaces: Option<axum::Router>,
     on_keys_changed: Option<KeysChanged>,
+    on_member_state: Option<MemberStateChanged>,
     region_check: Option<RegionCheck>,
     active_regions: Option<ActiveRegions>,
     // Same `KLOUDLITE_API_ROLE` read that picks `workspaces`' router: the superadmin roster
@@ -186,6 +196,7 @@ pub async fn serve(
             // A default client has NO timeout, which silently undid `UPSTREAM_TIMEOUT`.
             .expect("building an HTTP client cannot fail with these options"), // boot-time
         on_keys_changed,
+        on_member_state,
         region_check,
         active_regions,
         membership: crate::browse::Membership::default(),
@@ -508,6 +519,7 @@ pub(crate) mod testing {
             secret: secret.to_string(),
             client: reqwest::Client::new(),
             on_keys_changed: None,
+            on_member_state: None,
             region_check: None,
             active_regions: None,
             membership: crate::browse::Membership::default(),
