@@ -534,9 +534,11 @@ minutes rather than never — and the api's resync beat runs only in its `user` 
 touches `OwnerKeys`). The `user-key` Secret no longer carries `authorized_keys`. That same beat also PRUNES: an
 `OwnerKeys` no Workspace names any more is deleted, and so is a `wt-` team namespace no Workspace
 resolves to, is older than one beat, and holds no pod (`api::keys::prune_namespaces`); just before
-that, every team Bench whose team the directory answers does not exist is deleted
-(`prune_team_benches` — `delete_team` lives in the directory binary with no kubeconfig), since a
-bench is what would otherwise spare a deleted team's namespace. The
+that, `api::membership::reconcile` judges every team pair (removed member or deleted team alike):
+stamp `removed-at` and pause, then after a 7-day grace — and only with the central
+`memberRemovalDeletes` on — delete the Bench, the team Workspaces and the SpaceEnvironment,
+never a Snapshot, Volume or Environment (`delete_team` lives in the directory binary with no
+kubeconfig, so it is a beat). The
 namespace half is what stops a deleted team leaving one behind — nothing had ever deleted one, and
 a region held 101 empty ones by 2026-09-08, one per hourly probe run. A person's own `ws-`
 namespace is never a candidate.

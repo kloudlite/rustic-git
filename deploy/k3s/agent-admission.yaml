@@ -207,3 +207,42 @@ metadata:
 spec:
   policyName: kloudlite-agent-tenant-namespaces-only
   validationActions: ["Deny"]
+---
+# 3. The removal stamps. `kloudlite.io/removed-at` starts a departed member's 7-day grace and
+#    `kloudlite.io/delete-now` skips it; the api's keys beat then DELETES that member's bench, team
+#    workspaces and space choice (`api::membership`). The beat already ignores a stamp it did not
+#    apply itself (`managedFields` manager `kloudlite-membership`), but the manager name is only a
+#    string, so this is what stops anyone else — the agent, the probe, a kubectl user — writing,
+#    changing or removing either annotation on the three kinds the beat reads. A CREATE carrying
+#    one is refused too, so a restore brings objects back unstamped (fresh grace), never with a
+#    stamp that would delete. Applied with the rest of this file; no ordering beyond it.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kloudlite-removal-stamps-are-the-apis
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kloudlite.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["benches", "workspaces", "spaceenvironments"]
+  matchConditions:
+    - name: not-the-api
+      expression: "request.userInfo.username != 'system:serviceaccount:kube-system:kloudlite-api'"
+  validations:
+    - expression: >-
+        ['kloudlite.io/removed-at', 'kloudlite.io/delete-now'].all(k,
+          (has(object.metadata.annotations) && k in object.metadata.annotations ? object.metadata.annotations[k] : '')
+          == (request.operation == 'CREATE' ? ''
+              : (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations ? oldObject.metadata.annotations[k] : '')))
+      message: "only kloudlite-api may write kloudlite.io/removed-at or kloudlite.io/delete-now"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kloudlite-removal-stamps-are-the-apis
+spec:
+  policyName: kloudlite-removal-stamps-are-the-apis
+  validationActions: ["Deny"]

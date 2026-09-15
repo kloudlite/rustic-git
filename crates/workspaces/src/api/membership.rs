@@ -30,6 +30,13 @@
 //! its folder would be stranded, so it is skipped and logged instead.
 //! One `member.removed.cleanup` audit row per deleted object; `CLEANUP_DELETES_PER_BEAT` bounds a beat.
 //!
+//! Provenance: only a `removed-at` this beat wrote counts — applied under the field manager
+//! `kloudlite-membership` and read back from `managedFields` — and `delete-now` counts only beside
+//! one. A restored, hand-written or agent-written stamp is no stamp: the pair is restamped now,
+//! with a fresh grace and its audit row. `deploy/k3s/agent-admission.yaml` refuses anyone but the
+//! api's account a change to either annotation. Team and owner are compared trimmed and
+//! lowercased, the directory's slug form, so `team: Acme` is never judged a gone team.
+//!
 //! A beat and not `remove_member`: that route lives in the directory binary, which holds no
 //! kubeconfig, and a beat also heals a removal or team delete that happened while this was down.
 
@@ -44,6 +51,7 @@ use std::time::Duration;
 pub const MEMBER_REMOVAL_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const REMOVED_AT: &str = "kloudlite.io/removed-at";
 pub const DELETE_NOW: &str = "kloudlite.io/delete-now";
+pub const MEMBERSHIP_FIELD_MANAGER: &str = "kloudlite-membership";
 pub const BENCH_FOLDER_FINALIZER: &str = "kloudlite.io/bench-folder";
 // ponytail: a fixed cap; a backlog after a big team delete drains at this rate per beat.
 pub const CLEANUP_DELETES_PER_BEAT: usize = 50;
@@ -98,16 +106,30 @@ async fn list_all(c: &kube::Client) -> Result<Objects, String> {
     Ok(Objects { benches: list(c).await?, workspaces: list(c).await?, spaces: list(c).await? })
 }
 
+fn norm(x: &str) -> String {
+    x.trim().to_ascii_lowercase()
+}
+
 /// A personal pair (team empty or the owner, in any case) is never a candidate.
 fn team_pair(owner: &str, team: &str) -> bool {
-    !team.is_empty() && !team.eq_ignore_ascii_case(owner)
+    let team = norm(team);
+    !team.is_empty() && team != norm(owner)
 }
 
 fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
     let b = o.benches.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let w = o.workspaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let s = o.spaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
-    b.chain(w).chain(s).filter(|(o, t)| team_pair(o, t)).map(|(o, t)| (o.clone(), t.clone())).collect()
+    b.chain(w).chain(s).filter(|(o, t)| team_pair(o, t)).map(|(o, t)| (norm(o), norm(t))).collect()
+}
+
+/// The annotation, only when `kloudlite-membership` owns it in `managedFields`.
+fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String> {
+    let pointer = format!("/f:metadata/f:annotations/f:{}", key.replace('~', "~0").replace('/', "~1"));
+    let owned = m.managed_fields.iter().flatten().any(|f| {
+        f.manager.as_deref() == Some(MEMBERSHIP_FIELD_MANAGER) && f.fields_v1.as_ref().is_some_and(|v| v.0.pointer(&pointer).is_some())
+    });
+    owned.then(|| m.annotations.as_ref().and_then(|a| a.get(key)).cloned()).flatten()
 }
 
 pub async fn reconcile(s: &ApiState) {
@@ -132,6 +154,7 @@ pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
     if !team_pair(owner, team) {
         return;
     }
+    let (owner, team) = (&norm(owner), &norm(team));
     match list_all(c).await {
         Ok(o) => {
             if let Err(error) = judge(s, c, dir.as_ref(), &o, owner, team, &mut CLEANUP_DELETES_PER_BEAT.clone()).await {
@@ -144,9 +167,10 @@ pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
 
 /// `Err` only for an unreadable directory, which writes nothing.
 async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str, budget: &mut usize) -> Result<(), String> {
-    let benches: Vec<_> = o.benches.iter().filter(|x| x.spec.owner == owner && x.spec.team == team).collect();
-    let workspaces: Vec<_> = o.workspaces.iter().filter(|x| x.spec.owner == owner && x.spec.team == team).collect();
-    let spaces: Vec<_> = o.spaces.iter().filter(|x| x.spec.owner == owner && x.spec.team == team).collect();
+    let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
+    let benches: Vec<_> = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
+    let workspaces: Vec<_> = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
+    let spaces: Vec<_> = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
     let metas: Vec<&kube::core::ObjectMeta> = benches
         .iter()
         .map(|x| &x.metadata)
@@ -154,17 +178,18 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
         .chain(spaces.iter().map(|x| &x.metadata))
         .collect();
     let ann = |m: &kube::core::ObjectMeta, k: &str| m.annotations.as_ref().and_then(|a| a.get(k)).cloned();
-    // Latest wins, and an unparsable stamp is no stamp: both only ever push a delete later.
+    // Latest wins, and an unparsable or foreign stamp is no stamp: all only ever push a delete later.
     let stamped_at = metas
         .iter()
-        .filter_map(|m| ann(m, REMOVED_AT))
+        .filter_map(|m| system_annotation(m, REMOVED_AT))
         .filter_map(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
         .map(|t| t.timestamp())
         .max();
-    let delete_now = metas.iter().any(|m| ann(m, DELETE_NOW).is_some());
+    let delete_now = stamped_at.is_some() && metas.iter().any(|m| system_annotation(m, DELETE_NOW).is_some());
     let full: Vec<_> = benches.iter().filter(|b| b.spec.access == crd::BenchAccess::Full).collect();
     let paused = !benches.is_empty() && full.is_empty();
 
+    // ponytail: one uncached directory call per pair per beat (plus one per delete); cache per beat if pairs reach thousands.
     let judged = dir.membership(team, owner).await;
     let now = chrono::Utc::now().timestamp();
     let verdict = decide(&judged, stamped_at, delete_now, now, paused);
@@ -175,6 +200,12 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
     let sapi: Api<crd::SpaceEnvironment> = Api::all(c.clone());
     let access = |a: crd::BenchAccess| json!({"spec": {"access": a}});
     match verdict {
+        // During the grace a bench someone set back to Full has no tools either.
+        Verdict::Keep if matches!(judged, Judged::NotMember | Judged::TeamGone) => {
+            for b in &full {
+                write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
+            }
+        }
         Verdict::Keep => {}
         Verdict::Pause => {
             for b in &full {
@@ -189,34 +220,42 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
         Verdict::Clear => {
             let p = json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null}}});
             let has = |m: &kube::core::ObjectMeta| ann(m, REMOVED_AT).is_some() || ann(m, DELETE_NOW).is_some();
+            let mut ok = false;
             for x in benches.iter().filter(|x| has(&x.metadata)) {
-                write(&bapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
+                ok |= write(&bapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
             }
             for x in workspaces.iter().filter(|x| has(&x.metadata)) {
-                write(&wapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
+                ok |= write(&wapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
             }
             for x in spaces.iter().filter(|x| has(&x.metadata)) {
-                write(&sapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
+                ok |= write(&sapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
+            }
+            if ok {
+                let detail = json!({"owner": owner, "team": team}).to_string();
+                super::admin::audit(s, "system:membership", "member.removed.cleared", &format!("{team}/{owner}"), Some(detail), "ok").await;
             }
         }
         Verdict::Stamp => {
             let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
-            let stamp = json!({"metadata": {"annotations": {REMOVED_AT: at.to_rfc3339()}}});
+            let mut ok = false;
             if !benches.is_empty() {
-                // One write per bench: the stamp and, during the grace, no tools.
-                let mut p = stamp.clone();
-                p["spec"] = json!({"access": crd::BenchAccess::Paused});
+                // The stamp, and during the grace no tools — the pause as its own merge patch so
+                // the membership manager never takes ownership of `spec.access`.
                 for b in &benches {
-                    write(&bapi, &b.name_any(), p.clone(), "membership.stamped").await;
+                    ok |= stamp(&bapi, &b.name_any(), &at.to_rfc3339()).await;
+                    write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
                 }
             } else if !workspaces.is_empty() {
                 for w in &workspaces {
-                    write(&wapi, &w.name_any(), stamp.clone(), "membership.stamped").await;
+                    ok |= stamp(&wapi, &w.name_any(), &at.to_rfc3339()).await;
                 }
             } else {
                 for x in &spaces {
-                    write(&sapi, &x.name_any(), stamp.clone(), "membership.stamped").await;
+                    ok |= stamp(&sapi, &x.name_any(), &at.to_rfc3339()).await;
                 }
+            }
+            if !ok {
+                return Ok(());
             }
             let reason = if judged == Judged::TeamGone { "team_deleted" } else { "left_or_removed" };
             let delete_at = (at + MEMBER_REMOVAL_GRACE).to_rfc3339();
@@ -290,14 +329,40 @@ async fn cleanup(s: &ApiState, dir: &dyn Directory, apis: Apis<'_>, owner: &str,
     }
 }
 
-async fn write<K>(api: &Api<K>, name: &str, patch: serde_json::Value, event: &'static str)
+/// `true` only when the write landed.
+async fn write<K>(api: &Api<K>, name: &str, patch: serde_json::Value, event: &'static str) -> bool
 where
     K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
 {
     match api.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await {
-        Ok(_) => tracing::info!(%name, event),
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(error) => tracing::warn!(%name, event, %error, "membership.write.failed"),
+        Ok(_) => {
+            tracing::info!(%name, event);
+            true
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => false,
+        Err(error) => {
+            tracing::warn!(%name, event, %error, "membership.write.failed");
+            false
+        }
+    }
+}
+
+/// The stamp by server-side apply, so `managedFields` records who wrote it (see module docs).
+async fn stamp<K>(api: &Api<K>, name: &str, at: &str) -> bool
+where
+    K: kube::Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+{
+    let body = json!({"apiVersion": K::api_version(&()), "kind": K::kind(&()), "metadata": {"name": name, "annotations": {REMOVED_AT: at}}});
+    match api.patch(name, &PatchParams::apply(MEMBERSHIP_FIELD_MANAGER).force(), &Patch::Apply(&body)).await {
+        Ok(_) => {
+            tracing::info!(%name, "membership.stamped");
+            true
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => false,
+        Err(error) => {
+            tracing::warn!(%name, %error, "membership.write.failed");
+            false
+        }
     }
 }
 
@@ -368,8 +433,14 @@ mod tests {
         });
         if let Some(t) = stamp {
             b["metadata"]["annotations"] = json!({REMOVED_AT: t});
+            b["metadata"]["managedFields"] = owned(&[REMOVED_AT]);
         }
         b
+    }
+
+    fn owned(keys: &[&str]) -> serde_json::Value {
+        let ann: serde_json::Map<_, _> = keys.iter().map(|k| (format!("f:{k}"), json!({}))).collect();
+        json!([{"manager": MEMBERSHIP_FIELD_MANAGER, "operation": "Apply", "apiVersion": "kloudlite.io/v1alpha1", "fieldsType": "FieldsV1", "fieldsV1": {"f:metadata": {"f:annotations": ann}}}])
     }
 
     fn benches(items: Vec<serde_json::Value>) -> crate::kube_test::Route {
@@ -400,6 +471,7 @@ mod tests {
         v["metadata"]["resourceVersion"] = json!("7");
         if let Some(t) = stamp {
             v["metadata"]["annotations"] = json!({REMOVED_AT: t});
+            v["metadata"]["managedFields"] = owned(&[REMOVED_AT]);
         }
         if finalizer {
             v["metadata"]["finalizers"] = json!([BENCH_FOLDER_FINALIZER]);
@@ -447,6 +519,48 @@ mod tests {
 
     fn deletes(rec: &Recorder) -> Vec<String> {
         rec.calls().into_iter().filter(|c| c.starts_with("DELETE ")).collect()
+    }
+
+    #[tokio::test]
+    async fn a_mixed_case_team_is_judged_by_its_slug() {
+        let (s, rec, dir) = setup(vec![benches(vec![bench("alice", " Acme", "full", None)])], &[]);
+        reconcile(&deleting(s)).await;
+        assert_eq!(dir.asked.load(Ordering::SeqCst), 1);
+        assert!(writes(&rec).is_empty(), "a live member of acme is kept: {:?}", writes(&rec));
+    }
+
+    #[tokio::test]
+    async fn a_stamp_this_system_did_not_write_restarts_the_grace() {
+        let mut routes = removed("bob", 200);
+        let mut b = bench("bob", "acme", "paused", None);
+        b["metadata"]["annotations"] = json!({REMOVED_AT: OLD, DELETE_NOW: "yes"});
+        b["metadata"]["finalizers"] = json!([BENCH_FOLDER_FINALIZER]);
+        routes[0] = benches(vec![b]);
+        routes[1] = list_of("Workspace", "workspaces", vec![]);
+        let (s, rec, _) = setup(routes, &[("bob", "acme")]);
+        reconcile(&deleting(s)).await;
+        assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
+        let sent = rec.sent("PATCH", &path("bob", "acme"));
+        assert_ne!(sent[0]["metadata"]["annotations"][REMOVED_AT], json!(OLD), "a fresh stamp");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_only_pair_is_stamped_on_its_workspaces() {
+        let routes = vec![list_of("Workspace", "workspaces", vec![ws("w1", "bob", "acme")]), patch(format!("{API}/workspaces/w1"), ws("w1", "bob", "acme"))];
+        let (s, rec, _) = setup(routes, &[]);
+        reconcile(&s).await;
+        let sent = rec.sent("PATCH", &format!("{API}/workspaces/w1"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["kind"], "Workspace");
+        assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_bench_set_back_to_full_during_the_grace_is_paused_again() {
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let (s, rec, _) = setup(vec![benches(vec![bench("bob", "acme", "full", Some(&fresh))])], &[("bob", "acme")]);
+        reconcile(&s).await;
+        assert_eq!(rec.sent("PATCH", &path("bob", "acme")), vec![json!({"spec": {"access": "paused"}})]);
     }
 
     #[tokio::test]
@@ -562,11 +676,12 @@ mod tests {
         let (s, rec, _) = setup(routes, &[("bob", "acme")]);
         reconcile(&s).await;
         let sent = rec.sent("PATCH", &path("bob", "acme"));
-        assert_eq!(sent.len(), 1);
+        assert_eq!(sent.len(), 2);
         assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string());
-        assert_eq!(sent[0]["spec"], json!({"access": "paused"}));
+        assert!(rec.requests().iter().any(|r| r.contains("fieldManager=kloudlite-membership")), "{:?}", rec.requests());
+        assert_eq!(sent[1], json!({"spec": {"access": "paused"}}));
         reconcile(&s).await;
-        assert_eq!(rec.sent("PATCH", &path("bob", "acme")).len(), 1, "the second beat writes nothing");
+        assert_eq!(rec.sent("PATCH", &path("bob", "acme")).len(), 2, "the second beat writes nothing");
     }
 
     #[tokio::test]

@@ -262,9 +262,10 @@ async fn a_departed_member_gets_404_on_their_old_bench() {
     );
     kloudlite_workspaces::api::membership::reconcile(&t.state).await;
     let p = t.rec.sent("PATCH", &bench_path("carol", "acme"));
-    assert_eq!(p.len(), 1);
-    assert_eq!(p[0]["spec"], json!({"access": "paused"}), "access is the only spec field written");
-    assert!(p[0]["metadata"]["annotations"][kloudlite_workspaces::api::membership::REMOVED_AT].is_string(), "and the grace starts");
+    assert_eq!(p.len(), 2, "the stamp by apply, then the pause by merge");
+    assert!(p[0]["metadata"]["annotations"][kloudlite_workspaces::api::membership::REMOVED_AT].is_string(), "the grace starts");
+    assert!(p[0].get("spec").is_none(), "the stamp writes no spec");
+    assert_eq!(p[1], json!({"spec": {"access": "paused"}}), "access is the only spec field written");
     assert!(t.rec.sent("PATCH", &bench_path("dave", "dave")).is_empty());
     assert_eq!(t.rec.sent("PATCH", &bench_path("paula", "acme")), vec![json!({"spec": {"access": "paused"}})], "a paused member is paused, never stamped");
 }
