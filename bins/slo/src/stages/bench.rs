@@ -477,14 +477,21 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             return None;
         }
     };
+    // Untimed: the kubelet's Secret sync is not the round trip. The login stays live through the step
+    // so the token keeps passing the gate; a sign-in answer after this is a failure, never a skip.
+    let login = match super::bench_tool::arm(c).await {
+        Ok(id) => id,
+        Err(why) => {
+            c.skip("bench.workspace.tool_roundtrip", &why);
+            return None;
+        }
+    };
     let thread = format!("w-{ws}");
     let marker = format!("{}-tool", c.prefix());
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let nm = no_model.clone();
-    let no_login: Arc<Mutex<bool>> = Default::default();
-    let nl = no_login.clone();
     let sid = thread.clone();
-    let ran = c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
+    c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
             let (status, row) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), None).await?;
@@ -493,7 +500,6 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             }
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
             let mut last = Ok(());
-            let mut all_login = true;
             for _ in 0..2 {
                 one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
                 // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
@@ -503,9 +509,6 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
                 }
                 answered(&body, &nm)?;
                 last = tool_ran(&body, &marker);
-                // Across EVERY attempt: one attempt that said anything else is a real failure.
-                all_login &= not_logged_in(&body);
-                *nl.lock().unwrap() = last.is_err() && all_login;
                 if last.is_ok() {
                     break;
                 }
@@ -517,8 +520,9 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     .await;
     if let Some(why) = no_model.lock().unwrap().clone() {
         c.demote_to_skip("bench.workspace.tool_roundtrip", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    } else if !ran && *no_login.lock().unwrap() {
-        c.demote_to_skip("bench.workspace.tool_roundtrip", NO_LOGIN);
+    }
+    if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
+        tracing::warn!(error = %format!("{e:#}"), "slo.bench.tool_login.revoke");
     }
     Some(thread)
 }
@@ -532,26 +536,6 @@ fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String
         (Some(ws), true) => Ok(ws),
     }
 }
-
-/// The bench holds no `kl` credential for workspace tools yet (docs/superpowers/specs/
-/// 2026-09-14-bench-tool-credential-design.md): a product gap, not a sample.
-const NO_LOGIN: &str = "the bench has no kl login for workspace tools (bench tool credential not built yet)";
-
-/// Every tool result is the harness's not-logged-in answer — and there is at least one.
-fn not_logged_in(body: &str) -> bool {
-    let Ok(doc) = serde_json::from_str::<Value>(body) else { return false };
-    let texts: Vec<String> = doc["messages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|m| m["role"] == "toolResult")
-        .map(|m| m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect())
-        .collect();
-    !texts.is_empty() && texts.iter().all(|t| t.trim() == BENCH_NOT_LOGGED_IN)
-}
-
-/// The harness's own answer, verbatim.
-const BENCH_NOT_LOGGED_IN: &str = "sign in on the Kloudlite desktop app";
 
 /// A successful tool result carrying the marker: the echo ran and its output came back. The call's
 /// own arguments hold the marker too, which is why only a `toolResult` counts.
@@ -928,15 +912,9 @@ mod tests {
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
         assert!(tool_prompt(m).contains(m) && exchange_prompt("run-abc-exchange").contains("kl_workspace_start"));
 
-        // Only an answer that is ALL not-logged-in is the credential gap; anything else still fails.
-        let result = |text: &str| json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": text}]});
-        let login = "sign in on the Kloudlite desktop app";
-        assert!(not_logged_in(&json!({"messages": [call, result(login), result(login)]}).to_string()));
-        assert!(!not_logged_in(&json!({"messages": [call, result(login), result("boom")]}).to_string()));
-        assert!(!not_logged_in(&json!({"messages": [call]}).to_string()));
-        assert!(!not_logged_in("not json"));
-        assert!(!not_logged_in(&json!({"messages": [call, result(&format!("{login} and more"))]}).to_string()), "exact text only");
-        assert!(not_logged_in(&json!({"messages": [call, result(&format!(" {login}\n"))]}).to_string()), "trimmed");
+        // The sign-in answer is an ordinary failed round trip now that the probe mints the token.
+        let login = json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": "sign in on the Kloudlite desktop app"}]});
+        assert!(tool_ran(&json!({"messages": [call, login]}).to_string(), m).is_err());
 
         let no_model = Mutex::new(None);
         let nokey = json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});

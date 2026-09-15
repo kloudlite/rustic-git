@@ -85,7 +85,35 @@ async fn mint(c: &Ctx, cli: &str) -> Result<()> {
     Ok(())
 }
 
-async fn revoke_login(c: &Ctx, id: &str) -> Result<()> {
+/// For group 0's tool round trip, after this group's restart: a fresh `run-{id}` login's tool token
+/// minted and seen in the pod. `Ok(login id)` to revoke after the step; `Err(why)` is a skip — the
+/// probe could not hand the bench a token, so the round trip would measure nothing.
+pub(crate) async fn arm(c: &Ctx) -> std::result::Result<String, String> {
+    if c.kube.is_none() {
+        return Err("no kubeconfig to see the tool token reach the bench pod".into());
+    }
+    if super::bench::wait_phase(c, "ready", Duration::from_secs(30)).await.is_err() {
+        return Err("the probe bench is not running (group 3's restart did not complete)".into());
+    }
+    let why = |what: &str, e: anyhow::Error| format!("{what}: {}", super::clip(&format!("{e:#}")));
+    let (cli, id) = super::experience_gaps::cli_login(c, &c.probe_jwt, &format!("{}-bench-roundtrip", c.prefix()))
+        .await
+        .map_err(|e| why("no CLI login for the probe", e))?;
+    let old = node(c, &[DIGEST_JS]).await.unwrap_or_default().trim().to_string();
+    let armed = async {
+        mint(c, &cli).await.map_err(|e| why("the tool token mint was refused", e))?;
+        wait_new_token(c, &old, TOKEN_CEILING).await.map_err(|e| why("the tool token never reached the pod", e))
+    };
+    match armed.await {
+        Ok(_) => Ok(id),
+        Err(e) => {
+            let _ = revoke_login(c, &id).await;
+            Err(e)
+        }
+    }
+}
+
+pub(crate) async fn revoke_login(c: &Ctx, id: &str) -> Result<()> {
     call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &c.probe_jwt, None).await.map(|_| ())
 }
 
