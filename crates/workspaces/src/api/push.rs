@@ -1,7 +1,7 @@
 //! `push` — the single mutating verb: a `Snapshot` CR, and the clone/restore machinery that grafts
 //! a new working copy onto one.
 
-use super::{caller, guard_alloc, kube, kube_err, not_found, not_ready, ApiState};
+use super::{caller_for, guard_alloc, kube, kube_err, not_found, not_ready, ApiState};
 use super::scope::{find_env, may_allocate_for, my_ws};
 use super::workspaces::ws_volume;
 use super::environments::env_volume;
@@ -184,10 +184,12 @@ fn optional_push_message(body: axum::body::Bytes) -> Result<Option<String>, Resp
 pub(crate) async fn push_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let msg = optional_push_message(body)?;
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
@@ -207,10 +209,12 @@ pub(crate) async fn push_ws(
 pub(crate) async fn push_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let msg = optional_push_message(body)?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;

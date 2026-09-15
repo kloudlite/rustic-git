@@ -115,8 +115,6 @@ pub const ENVIRONMENT_ID_ROUTES: &[&str] = &[
 /// (method, axum path pattern). The pod's audience; everything else refuses a bench-tool caller.
 /// Exactly what the bench's pi tools call — the test below holds it, with its complement, to the
 /// router, so a new route is refused to a bench tool until somebody decides otherwise.
-// Consumed by the bench-tool token gate in `caller`, which lands next; drop the allow with it.
-#[allow(dead_code)]
 pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/quota"),
     ("GET", "/v1/regions"),
@@ -160,7 +158,6 @@ pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
 /// Segment match against `BENCH_TOOL_ROUTES`: a `{x}` matches one non-empty segment, anything
 /// else matches itself. `/v1/workspaces/restore` also matching `{id}` is harmless: the router
 /// still sends it to the literal route, and both are bench-tool routes.
-#[allow(dead_code)]
 pub(crate) fn bench_tool_route(method: &axum::http::Method, path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').collect();
     BENCH_TOOL_ROUTES.iter().any(|(m, pat)| {
@@ -242,6 +239,23 @@ mod route_tests {
         assert!(!super::bench_tool_route(&Method::GET, "/v1/workspaces/a/b/c"));
         assert!(!super::bench_tool_route(&Method::PUT, "/v1/workspaces/w1"));
         assert!(!super::bench_tool_route(&Method::GET, "/v1/workspaces//tools"));
+        assert!(!super::BENCH_TOOL_ROUTES.iter().any(|(_, p)| *p == "/v1/bench/teams"), "a desktop picker");
+    }
+
+    #[test]
+    fn bench_admits_tool_checks_owner_team_state_access() {
+        let bench = |owner: &str, team: &str, desired: &str, access: &str| -> crate::crd::Bench {
+            serde_json::from_value(serde_json::json!({
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "b"},
+                "spec": {"owner": owner, "team": team, "image": "i", "desiredState": desired, "access": access}
+            }))
+            .unwrap()
+        };
+        assert!(super::bench_admits_tool(&bench("alice", "acme", "running", "full"), "alice", "acme"));
+        assert!(!super::bench_admits_tool(&bench("bob", "acme", "running", "full"), "alice", "acme"));
+        assert!(!super::bench_admits_tool(&bench("alice", "t2", "running", "full"), "alice", "acme"));
+        assert!(!super::bench_admits_tool(&bench("alice", "acme", "stopped", "full"), "alice", "acme"));
+        assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "readOnly"), "alice", "acme"));
     }
 
     #[test]
@@ -476,6 +490,59 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
 }
 
 
+/// `caller`, for a handler on a `BENCH_TOOL_ROUTES` route: a bench-tool token is admitted here
+/// and nowhere else, so a handler that still calls `caller` stays unreachable from a bench pod.
+/// `path` is the query-free `uri.path()` the table is matched against.
+pub(crate) async fn caller_for(
+    state: &ApiState,
+    headers: &axum::http::HeaderMap,
+    method: &axum::http::Method,
+    path: &str,
+) -> Result<Caller, Response> {
+    let Some(tok) = bearer_token(headers) else { return caller(state, headers).await };
+    let tok = tok.trim();
+    let claims = match state.jwt.verify_bench_tool(tok) {
+        Ok(c) => c,
+        Err(_) => {
+            if let Some(c) = state.jwt.expired_bench_tool(tok) {
+                return Err(bench_tool_refused(&c, "expired"));
+            }
+            return caller(state, headers).await;
+        }
+    };
+    if !bench_tool_route(method, path) {
+        return Err(bench_tool_refused(&claims, "audience"));
+    }
+    // The pod's credential dies with the login it was minted from, on the same 30 s cache.
+    if !cli_token_live(state, &claims.parent).await {
+        return Err(bench_tool_refused(&claims, "parent"));
+    }
+    let benches: Api<crd::Bench> = Api::all(kube(state)?.clone());
+    let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
+    if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
+        return Err(bench_tool_refused(&claims, "bench"));
+    }
+    kloudlite_core::metrics::mark_via("bench-tool");
+    Ok(Caller { name: claims.sub, superadmin: false, parent: None, scope: Some(claims.team) })
+}
+
+/// Whether a bench's tools may act now. One predicate so a new way to suspend a bench (pause) is
+/// one more arm here, never a second check somewhere else.
+pub(crate) fn bench_admits_tool(b: &crd::Bench, sub: &str, team: &str) -> bool {
+    b.spec.owner == sub
+        && b.spec.team == team
+        && b.spec.desired_state != crd::DesiredState::Stopped
+        && b.spec.access == crd::BenchAccess::Full
+}
+
+/// Eight hex characters of the jti: enough to join log lines, useless as a credential.
+fn bench_tool_refused(c: &kloudlite_core::jwt::BenchToolClaims, reason: &'static str) -> Response {
+    let jti8 = c.jti.get(..8).unwrap_or_default();
+    tracing::info!(owner = %c.sub, jti8, reason, "bench.tool.refused");
+    unauthorized()
+}
+
+
 /// How long a CLI `jti` the directory called live is trusted without asking again. Short on
 /// purpose: this is exactly how late a revocation can take effect, and `kl-connect` makes several
 /// `/v1` calls per command, each of which was its own directory round trip before (2026-09-12).
@@ -532,8 +599,10 @@ pub(super) fn region_doc(r: &crd::Region) -> RegionDoc {
 pub(super) async fn list_regions(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
 ) -> Result<Response, Response> {
-    caller(&s, &headers).await?;
+    caller_for(&s, &headers, &method, uri.path()).await?;
     let api: Api<crd::Region> = Api::all(kube(&s)?.clone());
     let rows: Vec<RegionDoc> =
         api.list(&ListParams::default()).await.map_err(kube_err)?.items.iter().map(region_doc).collect();

@@ -19,10 +19,12 @@ pub(crate) struct CloneBody {
 pub(crate) async fn clone_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     check_ws_name(&body.name)?;
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
@@ -118,9 +120,11 @@ pub(crate) struct RestoreBody {
 pub(crate) async fn restore_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Json(body): Json<RestoreBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
     // Restore-to-new IS a clone at a named snapshot: under the snapshot model there is no

@@ -906,7 +906,8 @@ async fn admin_list_ws(
     headers: axum::http::HeaderMap,
     Query(q): Query<OwnerQuery>,
 ) -> Result<Response, Response> {
-    super::workspaces::list_for_owner(&s, &headers, &q.owner).await
+    let c = caller(&s, &headers).await?;
+    super::workspaces::list_for_owner(&s, &c, &q.owner).await
 }
 
 async fn admin_stop_ws(
@@ -919,7 +920,7 @@ async fn admin_stop_ws(
         let c = caller(&s, &headers).await?;
         let note = require_note(&body.note)?;
         let out =
-            audited(&s, &c.name, "stop-workspace", &id, Some(note.clone()), super::workspaces::stop_as(&s, &headers, &id).await)
+            audited(&s, &c.name, "stop-workspace", &id, Some(note.clone()), super::workspaces::stop_as(&s, &c, &id).await)
                 .await?;
         audit(&s, &c.name, "stop-workspace", &id, Some(note), "ok").await;
         Ok(out)
@@ -936,7 +937,7 @@ async fn admin_delete_ws(
     let c = caller(&s, &headers).await?;
     let note = require_note(&body.note)?;
     let out =
-        audited(&s, &c.name, "delete-workspace", &id, Some(note.clone()), super::workspaces::delete_as(&s, &headers, &id).await)
+        audited(&s, &c.name, "delete-workspace", &id, Some(note.clone()), super::workspaces::delete_as(&s, &c, &id).await)
             .await?;
     audit(&s, &c.name, "delete-workspace", &id, Some(note), "ok").await;
     Ok(out)
@@ -950,7 +951,7 @@ async fn admin_stop_env(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let note = require_note(&body.note)?;
-    let r = super::environments::stop_env(State(s.clone()), headers.clone(), Path(id.clone())).await;
+    let r = super::environments::stop_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), Path(id.clone())).await;
     let out = audited(&s, &c.name, "stop-environment", &id, Some(note.clone()), r).await?;
     audit(&s, &c.name, "stop-environment", &id, Some(note), "ok").await;
     Ok(out)
@@ -964,7 +965,7 @@ async fn admin_delete_env(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let note = require_note(&body.note)?;
-    let r = super::environments::delete_env(State(s.clone()), headers.clone(), Path(id.clone())).await;
+    let r = super::environments::delete_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), Path(id.clone())).await;
     let out = audited(&s, &c.name, "delete-environment", &id, Some(note.clone()), r).await?;
     audit(&s, &c.name, "delete-environment", &id, Some(note), "ok").await;
     Ok(out)

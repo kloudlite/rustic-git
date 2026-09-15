@@ -555,4 +555,18 @@ mod tests {
         h.insert(kloudlite_core::peer::OWNER_HEADER, "alice".parse().unwrap());
         assert!(caller(&api, &h).is_err());
     }
+
+    /// `/v1/cli/*` and `/v1/keys*` authenticate through `identify`/`user_identity`: a bench's
+    /// tool token is refused there, never read as the person it acts for.
+    #[tokio::test]
+    async fn a_bench_tool_token_is_not_a_user_here() {
+        let mut api = test_api_with_secret("s").await;
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+        let (tok, _) = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap();
+        api.jwt = Some(jwt);
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        assert_eq!(identify(&api, &h).err().unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(user_identity(&api, &h).await.err().unwrap().status(), StatusCode::UNAUTHORIZED);
+    }
 }

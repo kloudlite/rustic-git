@@ -192,7 +192,9 @@ async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next
     // The server span of the distributed trace: the caller's `traceparent` is its parent (its
     // sampled flag obeyed only when `trusted` or probe-marked), `req_id` stays on it as before.
     let span = kloudlite_trace::server_span_with(&method, &path, req.headers(), &req_id, class, trusted);
-    let mut res = tracing::Instrument::instrument(next.run(req), span.clone()).await;
+    let via = std::sync::Arc::new(std::sync::OnceLock::new());
+    let mut res = VIA.scope(via.clone(), tracing::Instrument::instrument(next.run(req), span.clone())).await;
+    let via: &str = via.get().copied().unwrap_or("");
     abandoned.armed = false;
     if let Ok(v) = axum::http::HeaderValue::from_str(&req_id) {
         res.headers_mut().insert(REQUEST_ID, v);
@@ -213,9 +215,19 @@ async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next
     } else if ms > slow_ms(&path) {
         tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.slow");
     } else if write {
-        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, "http.write");
+        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, via, "http.write");
     }
     res
+}
+
+tokio::task_local! {
+    static VIA: std::sync::Arc<std::sync::OnceLock<&'static str>>;
+}
+
+/// Names the credential kind a request authenticated with (`bench-tool`) on its `http.write`
+/// line. A task-local because the handler that learns it never holds the request or response.
+pub fn mark_via(v: &'static str) {
+    let _ = VIA.try_with(|c| c.set(v));
 }
 
 /// A request slower than this is logged whatever its status: the histogram says the p99 moved,

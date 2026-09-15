@@ -16,10 +16,12 @@ pub(crate) struct PackagesBody {
 pub(crate) async fn patch_ws_packages(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     Json(body): Json<PackagesBody>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     let locks = lock_for(&s, &body.packages, &w.spec.locks, false).await?;
@@ -44,9 +46,11 @@ pub(crate) async fn patch_ws_packages(
 pub(crate) async fn update_ws_packages(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let locks = lock_for(&s, &w.spec.packages, &w.spec.locks, true).await?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());

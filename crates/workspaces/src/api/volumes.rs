@@ -8,7 +8,7 @@
 //! authorization one.
 
 use super::scope::{caller_owners, mine, owner_set_selector};
-use super::{caller, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState, Caller};
+use super::{caller_for, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState, Caller};
 use crate::crd::{self, VolumeSource};
 use kube::api::{Api, ListParams};
 use kube::ResourceExt;
@@ -233,9 +233,11 @@ fn is_builder_volume(name: &str, owner: &str) -> bool {
 pub(crate) async fn list_volumes(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Query(q): Query<ListVolQuery>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // `?owner=` NARROWS the caller's own owner set and can never widen it: every other volume
     // route — the listings, the delete rules, `volume_owner` — decides on `caller_owners`, and
     // authorizing this one with `may_act_on` instead admitted a superadmin claim, so the listing
@@ -337,9 +339,11 @@ pub(crate) async fn volumes_for(
 pub(crate) async fn delete_volume(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
     // caller may read is indistinguishable from one that does not exist.
     snapshots_for_caller(&s, &caller_id, &name).await?;
@@ -386,9 +390,11 @@ async fn delete_volume_cr(s: &ApiState, name: &str) -> Result<(), Response> {
 pub(crate) async fn delete_snapshot(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path((name, snapshot)): Path<(String, String)>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     check_path_segment(&snapshot)?;
     let items = snapshots_for_caller(&s, &caller_id, &name).await?;
     let Some(target) = items.iter().find(|sn| sn.name_any() == snapshot) else {
@@ -578,9 +584,11 @@ fn snapshot_rows(items: &[crd::Snapshot]) -> Vec<serde_json::Value> {
 pub(crate) async fn volume_history(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let items = snapshots_for_caller(&s, &caller_id, &name).await?;
     Ok(Json(snapshot_rows(&items)).into_response())
 }
@@ -590,9 +598,11 @@ pub(crate) async fn volume_history(
 pub(crate) async fn volume_refs(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // F6: never 404 here — a zero-snapshot volume is `{"main": null}`.
     let items = snapshots_for_caller_maybe_empty(&s, &caller_id, &name).await?;
     // Never a sync point: `main` is what a clone or a restore grafts onto, and retention deletes

@@ -282,6 +282,15 @@ impl Jwt {
         self.verify_typed(token, "bench-tool")
     }
 
+    /// The claims of a correctly signed bench-tool token that has expired, else None — so a
+    /// refusal can say `expired` without an expired session ever being logged as a bench tool.
+    pub fn expired_bench_tool(&self, token: &str) -> Option<BenchToolClaims> {
+        let mut v = Validation::new(Algorithm::HS256);
+        v.validate_exp = false;
+        let c: BenchToolClaims = decode(token, &self.decoding, &v).ok()?.claims;
+        (c.typ == "bench-tool" && c.exp <= now().ok()?).then_some(c)
+    }
+
     /// A revocable, month-long login for the CLI — a `jti` lets it be revoked without
     /// shortening the TTL for everyone.
     pub fn mint_cli(&self, email: &str, name: &str, username: Option<&str>) -> Result<(String, CliClaims)> {

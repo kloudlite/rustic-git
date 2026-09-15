@@ -20,9 +20,11 @@ pub(crate) struct QuotaQuery {
 pub(crate) async fn get_quota(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Query(q): Query<QuotaQuery>,
 ) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
+    let c = caller_for(&s, &headers, &method, uri.path()).await?;
     let owner = q.owner.unwrap_or_else(|| c.name.clone());
     if !scope::in_scope(&c, &owner) {
         return Err(scope::scope_refusal(&c));

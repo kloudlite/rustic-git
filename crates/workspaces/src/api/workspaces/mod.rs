@@ -2,7 +2,7 @@
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
 use super::scope::{may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
-use super::{caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
+use super::{caller, caller_for, Caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
 use crate::crd::{self, DesiredState, VolumeSource};
@@ -223,9 +223,11 @@ pub(crate) fn clamp_quota(s: &ApiState, gb: u64) -> u64 {
 pub(crate) async fn create_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Json(body): Json<NewWorkspace>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let c = kube(&s)?;
     check_ws_name(&body.name)?;
     check_region(&s, &body.region).await?;
@@ -342,14 +344,16 @@ pub(super) async fn create_workspace(c: &kube::Client, id: &str, spec: crd::Work
 pub(crate) async fn list_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     // `?team=` scopes the list to the caller's workspaces IN that team; absent means personal —
     // `list_for_owner` is exactly that default case, shared with `/admin`, whose ?owner= names an
     // exact owner and never a team-narrowed view of one.
     let team = match q.get("team").map(|t| t.trim()).filter(|t| !t.is_empty() && *t != owner.name) {
-        None => return list_for_owner(&s, &headers, &owner.name).await,
+        None => return list_for_owner(&s, &owner, &owner.name).await,
         // Same casing fix as `create_ws`: lowercase before the membership check, not after.
         Some(t) => {
             let t = t.to_lowercase();
@@ -386,11 +390,10 @@ pub(crate) async fn list_ws(
 /// nothing to keep uniform), and a superadmin passes for anyone, logged there.
 pub(crate) async fn list_for_owner(
     s: &ApiState,
-    headers: &axum::http::HeaderMap,
+    caller_id: &Caller,
     owner: &str,
 ) -> Result<Response, Response> {
-    let caller_id = caller(s, headers).await?;
-    if !may_act_on(s, &caller_id, owner).await {
+    if !may_act_on(s, caller_id, owner).await {
         return Err(not_found());
     }
     let list = ws_for_owner(s, owner).await?;
@@ -424,9 +427,11 @@ pub(crate) async fn ws_for_owner(s: &ApiState, owner: &str) -> Result<Vec<Worksp
 pub(crate) async fn get_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     let pushed = pushed_volumes(&s, kube(&s)?, &owner).await?;
     Ok(Json(ws_doc(&w, &pushed)).into_response())
@@ -452,10 +457,12 @@ fn ws_tools_err(msg: impl Into<String>) -> Response {
 pub(crate) async fn ws_tools(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ToolsQuery>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     if w.spec.owner != owner.name {
         return Err(not_found());
@@ -509,9 +516,11 @@ pub(crate) fn gateway_url(region: &str, id: &str) -> String {
 pub(crate) async fn delete_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    delete_as(&s, &headers, &id).await
+    delete_as(&s, &caller_for(&s, &headers, &method, uri.path()).await?, &id).await
 }
 
 
@@ -520,11 +529,10 @@ pub(crate) async fn delete_ws(
 /// way, `my_ws` is what decides whether this request may touch it at all.
 pub(crate) async fn delete_as(
     s: &ApiState,
-    headers: &axum::http::HeaderMap,
+    owner: &Caller,
     id: &str,
 ) -> Result<Response, Response> {
-    let owner = caller(s, headers).await?;
-    let w = my_ws(s, &owner, id).await?;
+    let w = my_ws(s, owner, id).await?;
     let c = kube(s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     // Nothing stamps a finalizer on a Workspace, so its deletion is pure garbage collection and the
@@ -552,9 +560,11 @@ pub(crate) async fn delete_as(
 pub(crate) async fn start_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let owner = caller(&s, &headers).await?;
+    let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
     if w.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("workspace"));
@@ -594,20 +604,21 @@ pub(crate) fn interrupted_409(kind: &str) -> Response {
 pub(crate) async fn stop_ws(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    stop_as(&s, &headers, &id).await
+    stop_as(&s, &caller_for(&s, &headers, &method, uri.path()).await?, &id).await
 }
 
 
 /// Shared by `/v1/workspaces/{id}/stop` and `/admin/workspaces/{id}/stop` — see `delete_as`.
 pub(crate) async fn stop_as(
     s: &ApiState,
-    headers: &axum::http::HeaderMap,
+    owner: &Caller,
     id: &str,
 ) -> Result<Response, Response> {
-    let owner = caller(s, headers).await?;
-    let w = my_ws(s, &owner, id).await?;
+    let w = my_ws(s, owner, id).await?;
     crate::api::admin::timing::step("kube.patch.workspace", set_desired::<crd::Workspace>(kube(s)?, id, DesiredState::Stopped)).await?;
     // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
     // a body-less 202 throws there, so this always emits an object, `warning` present only when

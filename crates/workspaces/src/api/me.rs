@@ -40,8 +40,10 @@ fn spaces(s: &ApiState) -> Result<Api<crd::SpaceEnvironment>, Response> {
 pub(crate) async fn list_my_environments(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
 ) -> Result<Response, Response> {
-    let caller = caller(&s, &headers).await?;
+    let caller = caller_for(&s, &headers, &method, uri.path()).await?;
     let c = kube(&s)?;
     let lp = ListParams::default().labels(&format!("{}={}", crate::k8s::OWNER_LABEL, caller.name.to_lowercase()));
     // The label is a view; `spec.owner` is the answer.
@@ -60,10 +62,12 @@ pub(crate) async fn list_my_environments(
 pub(crate) async fn set_my_environment(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(team): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Response, Response> {
-    let caller = caller(&s, &headers).await?;
+    let caller = caller_for(&s, &headers, &method, uri.path()).await?;
     if body.get("owner").is_some() {
         return Err((StatusCode::BAD_REQUEST, "a space is always the caller's own; the body carries no owner").into_response());
     }
@@ -97,9 +101,11 @@ pub(crate) async fn set_my_environment(
 pub(crate) async fn clear_my_environment(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(team): Path<String>,
 ) -> Result<Response, Response> {
-    let caller = caller(&s, &headers).await?;
+    let caller = caller_for(&s, &headers, &method, uri.path()).await?;
     match spaces(&s)?.delete(&crd::space_name(&caller.name, &team), &Default::default()).await {
         Ok(_) => {}
         Err(kube::Error::Api(ae)) if ae.code == 404 => {}

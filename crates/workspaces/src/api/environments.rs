@@ -7,7 +7,7 @@ use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
 };
-use super::{caller, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
+use super::{caller_for, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::labels;
 use crate::model::*;
@@ -107,9 +107,11 @@ async fn create_environment(
 pub(crate) async fn create_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Json(body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
     // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
     // formality — see `validate_mount`. Checked before anything is written, deliberately.
@@ -176,9 +178,11 @@ pub(crate) struct RestoreEnvBody {
 pub(crate) async fn restore_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Json(body): Json<RestoreEnvBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // A caller-authored list is refused before anything is read or written, as it always was; the
     // resolved list is checked again below, because it may instead come from the snapshot.
     if let Some(svcs) = &body.services {
@@ -285,9 +289,11 @@ pub(crate) struct ListEnvQuery {
 pub(crate) async fn list_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Query(q): Query<ListEnvQuery>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let owners: Vec<String> = match q.owner {
         Some(o) if !super::scope::in_scope(&caller_id, &o) => return Err(super::scope::scope_refusal(&caller_id)),
         Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
@@ -320,9 +326,11 @@ pub(crate) async fn envs_for(s: &ApiState, owners: &[String]) -> Result<Vec<Envi
 pub(crate) async fn get_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let pushed = pushed_volumes(&s, c, &e.spec.owner).await?;
@@ -343,9 +351,11 @@ pub(crate) async fn get_env(
 pub(crate) async fn start_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     if e.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("environment"));
@@ -358,9 +368,11 @@ pub(crate) async fn start_env(
 pub(crate) async fn stop_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
     let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
@@ -378,9 +390,11 @@ pub(crate) async fn stop_env(
 pub(crate) async fn delete_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let envs: Api<crd::Environment> = Api::all(c.clone());
@@ -428,10 +442,12 @@ pub(crate) async fn delete_env(
 pub(crate) async fn clone_env(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let src = find_env(&s, &caller_id, &id).await?;
     let c = kube(&s)?;
     let new_id = rid("env");
@@ -507,10 +523,12 @@ pub(crate) struct RestoreInPlaceBody {
 pub(crate) async fn restore_env_in_place(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     Json(body): Json<RestoreInPlaceBody>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
     let volume = env_volume(&e).ok_or_else(not_ready)?.to_string();
     // The wish names a `Snapshot` CR of this environment's OWN volume — validated Ready and
@@ -695,10 +713,12 @@ fn contended() -> Response {
 pub(crate) async fn set_intercept(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path(id): Path<String>,
     Json(body): Json<crd::Intercept>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     for _ in 0..INTERCEPT_ATTEMPTS {
         let e = find_env(&s, &caller_id, &id).await?;
         validate_intercept(&s, &caller_id, &e, &body).await?;
@@ -725,9 +745,11 @@ pub(crate) async fn set_intercept(
 pub(crate) async fn clear_intercept(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Path((id, service)): Path<(String, String)>,
 ) -> Result<Response, Response> {
-    let caller_id = caller(&s, &headers).await?;
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     for _ in 0..INTERCEPT_ATTEMPTS {
         let e = find_env(&s, &caller_id, &id).await?;
         if !e.spec.intercepts.iter().any(|i| i.service == service) {
@@ -918,9 +940,11 @@ pub(crate) struct BuilderQuery {
 pub(crate) async fn get_my_builder(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
     Query(q): Query<BuilderQuery>,
 ) -> Result<Response, Response> {
-    let c = caller(&s, &headers).await?;
+    let c = caller_for(&s, &headers, &method, uri.path()).await?;
     let team = q.team.unwrap_or_default();
     if !team.is_empty() && !super::scope::in_scope(&c, &team) {
         return Err(super::scope::scope_refusal(&c));
