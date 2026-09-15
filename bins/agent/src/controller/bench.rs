@@ -308,6 +308,18 @@ async fn apply_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, Reconc
     let pod_ref = Some(format!("{ns}/{}", k8s::BENCH_POD));
     match bench_state(&b, pod.as_ref()) {
         PodVerdict::Create => {
+            // The store can be one status write behind: the Idle pass deletes the pod, and that
+            // DELETE event can reconcile a cached Bench with no `idleSince` yet, which reads as
+            // "wants a pod", recreates it and overwrites Idle (a merge patch, no resourceVersion
+            // guard). Suspected on 2026-09-15 14:05-14:07 UTC: an idle exit, a restart nobody
+            // asked for, the phase back at ready. A create re-reads the object first; it is the
+            // one verdict that costs a pod.
+            if let Some(fresh) = Api::<crd::Bench>::all(ctx.client.clone()).get_opt(&b.name_any()).await? {
+                if !crd::bench_wants_pod(&fresh) {
+                    tracing::info!(bench = %b.name_any(), "bench.create.stale");
+                    return Ok(Action::await_change());
+                }
+            }
             let idle_secs = ctx.settings.load().bench_idle_secs;
             let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, &ctx.api_url, idle_secs).map_err(ReconcileErr)?;
             super::create_if_absent(&pods, &p).await?;
