@@ -112,18 +112,142 @@ pub const ENVIRONMENT_ID_ROUTES: &[&str] = &[
     "/v1/environments/{id}/intercepts/{service}",
 ];
 
+/// (method, axum path pattern). The pod's audience; everything else refuses a bench-tool caller.
+/// Exactly what the bench's pi tools call — the test below holds it, with its complement, to the
+/// router, so a new route is refused to a bench tool until somebody decides otherwise.
+// Consumed by the bench-tool token gate in `caller`, which lands next; drop the allow with it.
+#[allow(dead_code)]
+pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/quota"),
+    ("GET", "/v1/regions"),
+    ("GET", "/v1/workspaces"),
+    ("POST", "/v1/workspaces"),
+    ("POST", "/v1/workspaces/restore"),
+    ("GET", "/v1/workspaces/{id}"),
+    ("PATCH", "/v1/workspaces/{id}"),
+    ("DELETE", "/v1/workspaces/{id}"),
+    ("GET", "/v1/workspaces/{id}/tools"),
+    ("POST", "/v1/workspaces/{id}/packages/update"),
+    ("POST", "/v1/workspaces/{id}/clone"),
+    ("POST", "/v1/workspaces/{id}/push"),
+    ("POST", "/v1/workspaces/{id}/start"),
+    ("POST", "/v1/workspaces/{id}/stop"),
+    ("POST", "/v1/workspaces/{id}/attach"),
+    ("POST", "/v1/workspaces/{id}/detach"),
+    ("GET", "/v1/me/environments"),
+    ("PUT", "/v1/me/environments/{team}"),
+    ("DELETE", "/v1/me/environments/{team}"),
+    ("GET", "/v1/environments"),
+    ("POST", "/v1/environments"),
+    ("POST", "/v1/environments/restore"),
+    ("GET", "/v1/environments/{id}"),
+    ("DELETE", "/v1/environments/{id}"),
+    ("POST", "/v1/environments/{id}/start"),
+    ("POST", "/v1/environments/{id}/stop"),
+    ("POST", "/v1/environments/{id}/clone"),
+    ("POST", "/v1/environments/{id}/push"),
+    ("POST", "/v1/environments/{id}/restore-in-place"),
+    ("POST", "/v1/environments/{id}/intercepts"),
+    ("DELETE", "/v1/environments/{id}/intercepts/{service}"),
+    ("GET", "/v1/builders/me"),
+    ("GET", "/v1/volumes"),
+    ("GET", "/v1/volumes/{name}/history"),
+    ("GET", "/v1/volumes/{name}/refs"),
+    ("DELETE", "/v1/volumes/{name}"),
+    ("DELETE", "/v1/volumes/{name}/snapshots/{snapshot}"),
+];
+
+/// Segment match against `BENCH_TOOL_ROUTES`: a `{x}` matches one non-empty segment, anything
+/// else matches itself. `/v1/workspaces/restore` also matching `{id}` is harmless: the router
+/// still sends it to the literal route, and both are bench-tool routes.
+#[allow(dead_code)]
+pub(crate) fn bench_tool_route(method: &axum::http::Method, path: &str) -> bool {
+    let segs: Vec<&str> = path.split('/').collect();
+    BENCH_TOOL_ROUTES.iter().any(|(m, pat)| {
+        *m == method.as_str() && {
+            let pats: Vec<&str> = pat.split('/').collect();
+            pats.len() == segs.len()
+                && pats.iter().zip(&segs).all(|(p, s)| {
+                    if p.starts_with('{') { !s.is_empty() } else { p == s }
+                })
+        }
+    })
+}
 
 #[cfg(test)]
 mod route_tests {
     /// The router is the truth; this is the copy the builder's 404 test can iterate. Reading this
     /// file's own source is the only way to compare them — and it is a real check: adding
     /// `.route("/v1/environments/{id}/anything", ...)` above fails here until it is listed.
+    /// Every path this file hands to `.route(`, including one whose path sits on the next line.
+    fn registered_routes() -> Vec<String> {
+        let lines: Vec<&str> = include_str!("mod.rs").lines().map(str::trim).collect();
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| match l.strip_prefix(".route(") {
+                Some("") => lines.get(i + 1).copied(),
+                other => other,
+            })
+            .filter_map(|l| l.strip_prefix('"')?.split_once('"').map(|(p, _)| p.to_string()))
+            .filter(|p| p.starts_with("/v1"))
+            .collect()
+    }
+
+    /// Every `/v1` route a bench-tool token is refused on. Held with `BENCH_TOOL_ROUTES` to the
+    /// router, so a new route is a deliberate choice of audience rather than a silent default.
+    const NOT_BENCH_TOOL_ROUTES: &[&str] = &[
+        "/v1/quota-requests",
+        "/v1/requests",
+        "/v1/requests/{id}",
+        "/v1/workspaces/{id}/ssh-session",
+        "/v1/internal/builders",
+        "/v1/internal/builders/{slug}",
+        "/v1/internal/builders/{slug}/start",
+        "/v1/internal/builders/{slug}/stop",
+        "/v1/bench",
+        "/v1/bench/teams",
+        "/v1/bench/start",
+        "/v1/bench/stop",
+        "/v1/bench/session",
+        "/v1/bench/attach",
+        "/v1/bench/detach",
+    ];
+
+    #[test]
+    fn every_v1_route_is_classified_for_bench_tools() {
+        let mut found = registered_routes();
+        found.sort();
+        found.dedup();
+        let mut classified: Vec<String> = super::BENCH_TOOL_ROUTES
+            .iter()
+            .map(|(_, p)| (*p).to_string())
+            .chain(NOT_BENCH_TOOL_ROUTES.iter().map(|p| (*p).to_string()))
+            .collect();
+        classified.sort();
+        classified.dedup();
+        assert_eq!(found, classified, "a /v1 route is unclassified (or a table names a gone route)");
+        for p in NOT_BENCH_TOOL_ROUTES {
+            assert!(!super::BENCH_TOOL_ROUTES.iter().any(|(_, b)| b == p), "{p} is in both tables");
+        }
+    }
+
+    #[test]
+    fn bench_tool_route_matches_patterns() {
+        use axum::http::Method;
+        assert!(super::bench_tool_route(&Method::GET, "/v1/workspaces/w1"));
+        assert!(!super::bench_tool_route(&Method::POST, "/v1/workspaces/w1/ssh-session"));
+        assert!(!super::bench_tool_route(&Method::GET, "/v1/cli/tokens"));
+        assert!(!super::bench_tool_route(&Method::POST, "/v1/bench/tool-token"));
+        assert!(!super::bench_tool_route(&Method::GET, "/v1/workspaces/a/b/c"));
+        assert!(!super::bench_tool_route(&Method::PUT, "/v1/workspaces/w1"));
+        assert!(!super::bench_tool_route(&Method::GET, "/v1/workspaces//tools"));
+    }
+
     #[test]
     fn every_environment_id_route_is_listed() {
-        let mut found: Vec<String> = include_str!("mod.rs")
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix(".route(\""))
-            .filter_map(|l| l.split_once('"').map(|(p, _)| p.to_string()))
+        let mut found: Vec<String> = registered_routes()
+            .into_iter()
             .filter(|p| p.starts_with("/v1/environments/{id}"))
             .collect();
         found.sort();
