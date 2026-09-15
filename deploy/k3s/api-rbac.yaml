@@ -116,9 +116,13 @@ rules:
   # occupied, so this is the verb that lets a delete be refused rather than waved through. RBAC
   # cannot scope a list to a name prefix, so this IS cluster-wide pod read — every namespace,
   # `kube-system` included. Only pod metadata is used (does this namespace hold any), never a spec.
+  # `get`: `GET /v1/workspaces/{id}/tools` (api/workspaces/mod.rs `ws_tools`) reads the one pod its
+  # workspace names for `status.podIP`. Without it that route answered 500 to every caller from the
+  # day it shipped (e781c44a) — found 2026-09-15 when the bench tool round trip first reached it.
+  # `list` already reads every pod, so `get` adds no visibility.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["list"]
+    verbs: ["list", "get"]
 ---
 apiVersion: v1
 kind: ServiceAccount
