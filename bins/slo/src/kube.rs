@@ -38,11 +38,16 @@ pub async fn exec(
         // millisecond the hourly's `env.exec.ok` dialled it, 100 ms after the pod started, and
         // the step failed with 30 s of ceiling unspent. A transport failure — never the command's
         // own outcome — is retried until the ceiling, one second apart.
+        let began = std::time::Instant::now();
         loop {
             match attempt(&api, pod, argv, &params).await {
                 Ok(r) => return Ok(r),
                 Err(e) if transient(&format!("{e:#}")) => {
                     tracing::info!(pod, error = %format!("{e:#}"), "slo.exec.retry");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) if coming_up(&format!("{e:#}")) && began.elapsed() < COMING_UP => {
+                    tracing::info!(pod, error = %format!("{e:#}"), "slo.exec.waiting");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Err(e) => return Err(e),
@@ -77,6 +82,18 @@ async fn attempt(api: &Api<Pod>, pod: &str, argv: &[&str], params: &AttachParams
     }
     Ok((code(status), o, e))
 }
+/// How long an exec waits for a pod that is not there YET. Short and bounded on purpose: a pod
+/// that is genuinely gone must fail inside the step with its reason, never at the step's ceiling.
+const COMING_UP: Duration = Duration::from_secs(10);
+
+/// The api server's words for "there is no pod here to exec into" — the exec upgrade itself 404s
+/// while the pod is being (re)created. On 2026-09-16 `team.member.paused` met exactly this 0.3 s
+/// after asking for a start ("failed to switch protocol: 404 Not Found") and failed on the first
+/// attempt. Like `transient`, the request never reached the command, so a retry doubles nothing.
+fn coming_up(msg: &str) -> bool {
+    ["404 Not Found", "not found", "ContainerCreating", "is waiting to start"].iter().any(|k| msg.contains(k))
+}
+
 /// The api server's words for "the hop to the kubelet failed" — the request never reached the
 /// command, so running it again cannot double an effect. Anything else is the command's answer.
 fn transient(msg: &str) -> bool {
@@ -177,6 +194,21 @@ mod tests {
         }
         for m in ["command terminated with exit code 1", "cat: no such file", "permission denied", ""] {
             assert!(!transient(m), "{m}");
+        }
+    }
+
+    /// A pod that is not there yet is waited for; a command that ran and failed is not.
+    #[test]
+    fn a_pod_that_is_not_there_yet_is_waited_for() {
+        for m in [
+            "could not exec: failed to upgrade to a WebSocket connection: failed to switch protocol: 404 Not Found",
+            r#"pods "bench" not found"#,
+            "container is waiting to start: ContainerCreating",
+        ] {
+            assert!(coming_up(m), "{m}");
+        }
+        for m in ["command terminated with exit code 1", "permission denied", ""] {
+            assert!(!coming_up(m), "{m}");
         }
     }
 }

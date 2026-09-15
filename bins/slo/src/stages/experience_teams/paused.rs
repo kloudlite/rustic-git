@@ -64,6 +64,27 @@ async fn ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
     poll_json(c, &bench_url(c, "", team), &c.probe_jwt, cap, |v| v.get("phase").and_then(Value::as_str) == Some("ready")).await
 }
 
+/// Genuinely back up, not a `ready` left over from before the pause.
+///
+/// On 2026-09-16 (hourly-1789515300-g2) the unpause, the start and this check all landed inside
+/// 0.3 s, `ready()`'s first read answered with the phase from BEFORE the pause — the stop had not
+/// reached it yet — and the exec met a pod that no longer existed. Every clause is a fact the
+/// restart itself establishes: the spec carries the unpause and the start, and the status names a
+/// pod, which the stop cleared and only a new pod restores.
+fn back_up(b: Option<&crd::Bench>) -> bool {
+    let Some(b) = b else { return false };
+    b.spec.access == crd::BenchAccess::Full
+        && b.spec.desired_state == crd::DesiredState::Running
+        && b.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.pod_ref.is_some())
+}
+
+/// The Bench itself, through the same client the exec uses, so the check and the exec cannot be
+/// looking at two different objects.
+async fn back_up_within(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    crate::kube::wait_for::<crd::Bench>(k, &crd::bench_id(&c.probe_user, team), cap, back_up).await
+}
+
 /// The paused member's bench, charged to the probe tenant — the one with a Quota.
 async fn make_bench(c: &Ctx, team: &str) -> Result<Value> {
     post(c, &api(c, "/v1/bench"), &c.probe_jwt, serde_json::json!({ "team": team, "region": c.cfg.region }))
@@ -139,6 +160,13 @@ async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     if b.spec.access != crd::BenchAccess::Paused || b.spec.desired_state != crd::DesiredState::Stopped {
         return Err(anyhow!("the Bench is {:?}/{:?}, not paused and stopped", b.spec.access, b.spec.desired_state));
     }
+    // And the STATUS has caught up with the pause: the agent has torn the pod down and cleared
+    // `podRef`. Without this the pre-pause `ready` is still readable when the unpause runs, and
+    // the readiness check below cannot tell it from the one the restart earns.
+    let st = b.status.as_ref();
+    if st.is_none_or(|s| s.phase == crd::Phase::Ready || s.pod_ref.is_some()) {
+        return Err(anyhow!("the Bench still reads {:?}, with a pod", st.map(|s| s.phase)));
+    }
     let ticket = c.mint_bench_session(&c.probe_user, &id)?;
     // A real handshake, not reqwest with upgrade headers: the edge in front of the gateway
     // answered that imitation 400 before the handler could refuse it (hourly-1789496344-g2).
@@ -194,7 +222,7 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
                 // Accepted either way, but parked on `access: paused` until the unpause's own
                 // reconcile writes `access: full`, which it has by the time the unpause answers.
                 call(c, reqwest::Method::POST, &bench_url(c, "/start", &t), &c.probe_jwt, None).await.context("could not start the bench")?;
-                ready(c, &t, PAUSED_BODY.saturating_sub(start.elapsed())).await.context("the bench never came back")?;
+                back_up_within(c, &t, PAUSED_BODY.saturating_sub(start.elapsed())).await.context("the bench never came back")?;
                 let got = in_bench(c, &t, r#"process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))"#, CANARY).await?;
                 if got != CANARY {
                     return Err(anyhow!("the canary reads back as {:?}", clip(&got)));
@@ -260,6 +288,39 @@ mod tests {
         for (u, auth) in &calls {
             assert_eq!(auth, &c.bearer(&c.probe_jwt), "{u} ran as the wrong tenant");
         }
+    }
+
+    /// The 16 Sep failure as a predicate: the phase from before the pause must not pass for the
+    /// restart, and neither must a spec the unpause or the start has not reached.
+    #[test]
+    fn a_stale_ready_is_not_back_up() {
+        let bench = |access, desired, phase, pod: Option<&str>| {
+            let mut b = crd::Bench::new(
+                "b",
+                crd::BenchSpec {
+                    owner: "p".into(),
+                    team: "t".into(),
+                    image: "i".into(),
+                    model: "m".into(),
+                    desired_state: desired,
+                    access,
+                    wake_at: None,
+                    resources: Default::default(),
+                    attached_environment: None,
+                },
+            );
+            b.status = Some(crd::BenchStatus { phase, pod_ref: pod.map(Into::into), ..Default::default() });
+            b
+        };
+        use crd::{BenchAccess::*, DesiredState::*, Phase};
+        let up = bench(Full, Running, Phase::Ready, Some("ns/bench"));
+        assert!(back_up(Some(&up)));
+        // Ready, but the stop cleared the pod: the very read that passed on 16 Sep.
+        assert!(!back_up(Some(&bench(Full, Running, Phase::Ready, None))));
+        assert!(!back_up(Some(&bench(Paused, Running, Phase::Ready, Some("ns/bench")))));
+        assert!(!back_up(Some(&bench(Full, Stopped, Phase::Ready, Some("ns/bench")))));
+        assert!(!back_up(Some(&bench(Full, Running, Phase::Starting, Some("ns/bench")))));
+        assert!(!back_up(None));
     }
 
     #[tokio::test]
