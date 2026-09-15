@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useRef, useState } from "react";
-import { Loader2, MailX, Trash2, TriangleAlert } from "lucide-react";
+import { Loader2, MailX, Pause, Play, Trash2, TriangleAlert } from "lucide-react";
 import { Saved, SettingsSection as Section } from "@/components/app/settings-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,10 +11,11 @@ import { Badge } from "@/components/ui/badge";
 import { Initials } from "@/components/app/initials";
 import { DeleteForm } from "@/components/app/delete-form";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { ApiInvite, ApiRepo, ApiRole, ApiTeamDetail, ApiTeamMember } from "@/lib/api";
-import { when } from "@/lib/time";
+import type { ApiInvite, ApiRemoval, ApiRepo, ApiRole, ApiTeamDetail, ApiTeamMember } from "@/lib/api";
+import { stamp, when } from "@/lib/time";
+import { pauseConfirm, removalConfirm } from "@/lib/team-removal";
 import {
-  destroyTeam, invite, removeMember, revokeInvite, saveProfile, saveTeam, setRole,
+  deleteRemovalNow, destroyTeam, invite, pauseMember, removeMember, unpauseMember, revokeInvite, saveProfile, saveTeam, setRole,
   type InviteState, type ProfileState, type TeamState,
 } from "@/app/(shell)/[owner]/(org)/settings/actions";
 
@@ -23,7 +24,7 @@ import {
  *
  *  The model: a member does everything in the product and may edit the name here; an admin
  *  also invites and makes admins; an owner also makes owners and deletes the team. */
-export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: string; repos: ApiRepo[] }) {
+export function TeamSettings({ team, me, repos, removals }: { team: ApiTeamDetail; me: string; repos: ApiRepo[]; removals: ApiRemoval[] }) {
   const isOwner = team.yourRole === "owner";
   const canAdmin = isOwner || team.yourRole === "admin";
   return (
@@ -46,7 +47,7 @@ export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: str
 
         <Section
           title="Members"
-          description="Members work in everything the team owns. Admins can also invite people and make admins. Owners can also make owners and delete the team. Invitations go by email and last seven days."
+          description="Members work in everything the team owns. Admins can also invite people and make admins. Owners can also make owners and delete the team. Invitations go by email and last seven days. A pause or a removal takes effect within about 5 minutes."
         >
           {canAdmin && <Invite slug={team.slug} isOwner={isOwner} />}
           <ul className={`divide-y divide-border border border-border bg-card ${canAdmin ? "mt-6" : ""}`}>
@@ -55,6 +56,7 @@ export function TeamSettings({ team, me, repos }: { team: ApiTeamDetail; me: str
             ))}
           </ul>
           {canAdmin && team.invites.length > 0 && <Pending slug={team.slug} invites={team.invites} />}
+          {canAdmin && removals.length > 0 && <Removals slug={team.slug} removals={removals} />}
         </Section>
 
         {isOwner && (
@@ -258,6 +260,63 @@ function Pending({ slug, invites }: { slug: string; invites: ApiInvite[] }) {
   );
 }
 
+function Removals({ slug, removals }: { slug: string; removals: ApiRemoval[] }) {
+  return (
+    <div className="mt-6">
+      <p className="text-sm2 text-muted-foreground">
+        {removals.length} pending {removals.length === 1 ? "removal" : "removals"}
+      </p>
+      <ul className="mt-2 divide-y divide-border border border-dashed border-border bg-card">
+        {removals.map((r) => (
+          <RemovalRow key={r.owner} slug={slug} r={r} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Delete now is irreversible, so it asks for the handle typed out — the Danger zone's shape. */
+function RemovalRow({ slug, r }: { slug: string; r: ApiRemoval }) {
+  const [state, action, pending] = useActionState<TeamState, FormData>(deleteRemovalNow, null);
+  const [open, setOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+  const at = Date.parse(r.delete_at);
+  return (
+    <li className="grid gap-3 px-4 py-3">
+      <div className="flex items-center gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-mono text-sm2 font-medium">@{r.owner}</div>
+          <div className="truncate text-caption text-muted-foreground" title={stamp(at)}>
+            removing — data deleted {when(at)}
+          </div>
+        </div>
+        {!state?.ok && (
+          <Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" onClick={() => setOpen((o) => !o)}>
+            Delete now
+          </Button>
+        )}
+      </div>
+      {state?.ok && <p className="text-sm2 text-muted-foreground">Marked. Their data goes within about 5 minutes, once deletion is switched on for this platform.</p>}
+      {open && !state?.ok && (
+        <form action={action} className="grid gap-2">
+          <input type="hidden" name="slug" value={slug} />
+          <input type="hidden" name="owner" value={r.owner} />
+          <FieldLabel htmlFor={`confirm-${r.owner}`}>
+            Type <span className="font-mono font-semibold text-foreground">{r.owner}</span> to delete their bench, workspaces and space choice in <span className="font-mono font-semibold text-foreground">{slug}</span> now
+          </FieldLabel>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input id={`confirm-${r.owner}`} name="confirm" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" placeholder={r.owner} className="h-9 max-w-sm font-mono" />
+            <Button type="submit" variant="destructive" disabled={pending || typed !== r.owner}>
+              {pending && <Loader2 className="animate-spin" />}Delete now
+            </Button>
+          </div>
+          {state?.error && <p role="alert" className="text-sm2 font-medium text-destructive">{state.error}</p>}
+        </form>
+      )}
+    </li>
+  );
+}
+
 function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me: string }) {
   const self = m.email.toLowerCase() === me.toLowerCase();
   // The api's own rule, mirrored: an admin reaches members and admins; an owner reaches
@@ -265,6 +324,7 @@ function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me:
   const reach = (r: ApiRole) => team.yourRole === "owner" || (team.yourRole === "admin" && r !== "owner");
   const canEdit = reach(m.role);
   const canRemove = self || canEdit;
+  const paused = m.state === "paused";
   return (
     <li className="flex items-center gap-4 px-4 py-3">
       <Initials name={m.name} size={8} tone={self ? "primary" : "muted"} className="shrink-0" />
@@ -273,6 +333,7 @@ function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me:
           {m.name}
           {m.username && <span className="ml-2 font-mono text-caption font-normal text-muted-foreground">@{m.username}</span>}
           {self && <span className="ml-2 text-caption font-normal text-muted-foreground">you</span>}
+          {paused && <Badge variant="outline" className="ml-2 align-middle text-caption font-normal">paused</Badge>}
         </div>
         <div className="truncate text-caption text-muted-foreground">{m.email}</div>
       </div>
@@ -282,11 +343,23 @@ function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me:
       ) : (
         <Badge variant="outline" className="w-16 justify-center capitalize">{m.role}</Badge>
       )}
+      {/* Nobody pauses themself; the api refuses it too. */}
+      {canEdit && !self && (
+        <DeleteForm
+          action={paused ? unpauseMember : pauseMember}
+          fields={{ slug: team.slug, email: m.email }}
+          confirm={paused ? `Unpause ${m.name}? Access comes back; nothing is started for them.` : pauseConfirm(m.name)}
+        >
+          <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground" aria-label={paused ? `Unpause ${m.name}` : `Pause ${m.name}`} title={paused ? "Unpause" : "Pause"}>
+            {paused ? <Play /> : <Pause />}
+          </Button>
+        </DeleteForm>
+      )}
       {canRemove && (
         <DeleteForm
           action={removeMember}
           fields={{ slug: team.slug, email: m.email, self: self ? "1" : "0" }}
-          confirm={self ? `Leave ${team.name}?` : `Remove ${m.name} from ${team.name}?`}
+          confirm={self ? `Leave ${team.name}?` : () => removalConfirm(m.name, team.name, Date.now())}
         >
           <Button type="submit" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={self ? "Leave team" : `Remove ${m.name}`}>
             <Trash2 />

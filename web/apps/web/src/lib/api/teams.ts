@@ -27,6 +27,8 @@ export type ApiTeamMember = {
   username?: string;
   role: ApiRole;
   joinedAt: string;
+  /** Absent from an api older than pausing, which reads as active. */
+  state?: "active" | "paused";
 };
 
 /** One team as its settings page needs it: the members joined onto their directory
@@ -135,4 +137,30 @@ export function removeTeamMember(token: string, slug: string, email: string) {
 
 export function deleteTeam(token: string, slug: string) {
   return call<void>(teamPath(slug), { method: "DELETE", token });
+}
+
+const memberPath = (slug: string, who: string) => `${teamPath(slug)}/members/${encodeURIComponent(who)}`;
+
+export function pauseTeamMember(token: string, slug: string, email: string) {
+  return call<void>(`${memberPath(slug, email)}/pause`, { method: "POST", token });
+}
+
+export function unpauseTeamMember(token: string, slug: string, email: string) {
+  return call<void>(`${memberPath(slug, email)}/unpause`, { method: "POST", token });
+}
+
+/** A removed member whose bench and workspaces are still waiting out the grace period. */
+export type ApiRemoval = { owner: string; delete_at: string };
+
+export function listTeamRemovals(token: string, slug: string) {
+  return call<ApiRemoval[]>(`${teamPath(slug)}/removals`, { method: "GET", token });
+}
+
+/** `owner` is the person's handle; the body names both again, which is the api's confirmation. */
+export function deleteRemovalNow(token: string, slug: string, owner: string) {
+  return call<{ deletes_enabled: boolean }>(`${memberPath(slug, owner)}/delete-now`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ person: owner, team: slug }),
+  });
 }

@@ -320,6 +320,8 @@ pub(crate) struct MemberDoc {
     username: Option<String>,
     role: Role,
     joined_at: String,
+    /// So the members table can badge a paused member.
+    state: kloudlite_pulls::directory::MemberState,
 }
 
 #[derive(serde::Serialize)]
@@ -448,6 +450,7 @@ pub(crate) async fn get_team(
                 username: u.and_then(|u| u.username.clone()),
                 role: m.role,
                 joined_at: m.joined_at.try_to_rfc3339_string().unwrap_or_default(),
+                state: m.state,
             }
         })
         .collect();

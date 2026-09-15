@@ -118,6 +118,41 @@ export async function removeMember(_prev: TeamState, formData: FormData): Promis
   return null;
 }
 
+async function memberState(formData: FormData, pause: boolean): Promise<TeamState> {
+  const slug = slugOf(formData);
+  if (!slug) return { error: "That team is not valid." };
+  const email = String(formData.get("email") ?? "");
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+  const r = pause ? await api.pauseTeamMember(token, slug, email) : await api.unpauseTeamMember(token, slug, email);
+  if (!r.ok) return { error: r.message || (pause ? "Could not pause them." : "Could not unpause them.") };
+  revalidatePath(`/${slug}/settings`);
+  return null;
+}
+
+export async function pauseMember(_prev: TeamState, formData: FormData): Promise<TeamState> {
+  return memberState(formData, true);
+}
+
+export async function unpauseMember(_prev: TeamState, formData: FormData): Promise<TeamState> {
+  return memberState(formData, false);
+}
+
+/** The admin types the handle; the api checks it again against the path, so a mistyped one is
+ *  refused here rather than sent. */
+export async function deleteRemovalNow(_prev: TeamState, formData: FormData): Promise<TeamState> {
+  const slug = slugOf(formData);
+  if (!slug) return { error: "That team is not valid." };
+  const owner = String(formData.get("owner") ?? "");
+  if (!owner || String(formData.get("confirm") ?? "") !== owner) return { error: "Type their handle to confirm." };
+  const token = await tokenOr();
+  if (typeof token !== "string") return token;
+  const r = await api.deleteRemovalNow(token, slug, owner);
+  if (!r.ok) return { error: r.message || "Could not delete their data." };
+  revalidatePath(`/${slug}/settings`);
+  return { ok: true };
+}
+
 export async function destroyTeam(_prev: TeamState, formData: FormData): Promise<TeamState> {
   const slug = slugOf(formData);
   if (!slug) return { error: "That team is not valid." };

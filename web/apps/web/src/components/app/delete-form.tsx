@@ -20,7 +20,8 @@ export function DeleteForm({
   action: (prev: DeleteState, formData: FormData) => Promise<DeleteState>;
   /** Hidden inputs: what the action is about has to travel with the request. */
   fields: Record<string, string>;
-  confirm?: string;
+  /** A function when the question reads the clock, which a render may not. */
+  confirm?: string | (() => string);
   className?: string;
   children: React.ReactNode;
 }) {
@@ -29,7 +30,7 @@ export function DeleteForm({
     <form
       action={act}
       onSubmit={(e) => {
-        if (confirm && !window.confirm(confirm)) e.preventDefault();
+        if (confirm && !window.confirm(typeof confirm === "function" ? confirm() : confirm)) e.preventDefault();
       }}
       className={className}
     >
