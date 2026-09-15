@@ -493,6 +493,7 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             }
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
             let mut last = Ok(());
+            let mut all_login = true;
             for _ in 0..2 {
                 one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
                 // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
@@ -502,7 +503,9 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
                 }
                 answered(&body, &nm)?;
                 last = tool_ran(&body, &marker);
-                *nl.lock().unwrap() = last.is_err() && not_logged_in(&body);
+                // Across EVERY attempt: one attempt that said anything else is a real failure.
+                all_login &= not_logged_in(&body);
+                *nl.lock().unwrap() = last.is_err() && all_login;
                 if last.is_ok() {
                     break;
                 }
@@ -544,8 +547,11 @@ fn not_logged_in(body: &str) -> bool {
         .filter(|m| m["role"] == "toolResult")
         .map(|m| m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect())
         .collect();
-    !texts.is_empty() && texts.iter().all(|t| t.contains("not logged in") && t.contains("/kl-login"))
+    !texts.is_empty() && texts.iter().all(|t| t.trim() == BENCH_NOT_LOGGED_IN)
 }
+
+/// The harness's own answer, verbatim.
+const BENCH_NOT_LOGGED_IN: &str = "not logged in — run /kl-login in the bench";
 
 /// A successful tool result carrying the marker: the echo ran and its output came back. The call's
 /// own arguments hold the marker too, which is why only a `toolResult` counts.
@@ -929,6 +935,8 @@ mod tests {
         assert!(!not_logged_in(&json!({"messages": [call, result(login), result("boom")]}).to_string()));
         assert!(!not_logged_in(&json!({"messages": [call]}).to_string()));
         assert!(!not_logged_in("not json"));
+        assert!(!not_logged_in(&json!({"messages": [call, result(&format!("{login} and more"))]}).to_string()), "exact text only");
+        assert!(not_logged_in(&json!({"messages": [call, result(&format!(" {login}\n"))]}).to_string()), "trimmed");
 
         let no_model = Mutex::new(None);
         let nokey = json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
