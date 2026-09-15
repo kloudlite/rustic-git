@@ -120,6 +120,10 @@ pub struct CentralSettings {
     pub trace_promote_rate: f64,
     /// The promotion bucket's burst allowance. 1.0..=10000.0.
     pub trace_promote_burst: f64,
+    /// Whether the keys beat really deletes a removed team member's bench, team workspaces and
+    /// space choice once the grace is over (`api::membership`). `false` — the default — only logs
+    /// `membership.cleanup.would_delete`, because the delete is irreversible.
+    pub member_removal_deletes: bool,
 }
 
 impl Default for CentralSettings {
@@ -157,6 +161,7 @@ impl CentralSettings {
             trace_probe_burst: kloudlite_trace::PROBE_BURST,
             trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
             trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
+            member_removal_deletes: false,
         }
     }
 
@@ -210,6 +215,7 @@ impl CentralSettings {
         over!(trace_probe_burst);
         over!(trace_promote_rate);
         over!(trace_promote_burst);
+        over!(member_removal_deletes);
         self
     }
 }
@@ -258,6 +264,8 @@ pub struct StoredCentralSettings {
     pub trace_probe_burst: Option<f64>,
     pub trace_promote_rate: Option<f64>,
     pub trace_promote_burst: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_removal_deletes: Option<bool>,
     /// Last ten versions, newest first, kept inline rather than as ten separate object-store
     /// keys — one small object either way, and one GET beats eleven.
     #[serde(default)]
@@ -310,6 +318,8 @@ pub struct StoredCentralSettingsSnapshot {
     pub trace_probe_burst: Option<f64>,
     pub trace_promote_rate: Option<f64>,
     pub trace_promote_burst: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_removal_deletes: Option<bool>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub updated_by: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -342,6 +352,7 @@ impl From<&StoredCentralSettingsSnapshot> for StoredCentralSettings {
             trace_probe_burst: snap.trace_probe_burst,
             trace_promote_rate: snap.trace_promote_rate,
             trace_promote_burst: snap.trace_promote_burst,
+            member_removal_deletes: snap.member_removal_deletes,
             history: Vec::new(),
             updated_by: String::new(),
             updated_at: String::new(),
@@ -383,6 +394,7 @@ pub const CENTRAL_SETTING_META: &[(&str, Mark)] = &[
     ("traceProbeBurst", Mark::Live),
     ("tracePromoteRate", Mark::Live),
     ("tracePromoteBurst", Mark::Live),
+    ("memberRemovalDeletes", Mark::Live),
 ];
 
 /// One violation, in `quota::refuse`'s sentence shape: `"{field} must be between {lo} and {hi},
@@ -458,6 +470,7 @@ fn push_history(old: &StoredCentralSettings, new: &mut StoredCentralSettings) {
         trace_probe_burst: old.trace_probe_burst,
         trace_promote_rate: old.trace_promote_rate,
         trace_promote_burst: old.trace_promote_burst,
+        member_removal_deletes: old.member_removal_deletes,
         updated_by: old.updated_by.clone(),
         updated_at: old.updated_at.clone(),
     };
@@ -520,6 +533,7 @@ pub fn apply_patch(
     over!(trace_probe_burst);
     over!(trace_promote_rate);
     over!(trace_promote_burst);
+    over!(member_removal_deletes);
     push_history(current, &mut next);
     next.updated_by = updated_by.to_string();
     next.updated_at = updated_at.to_string();

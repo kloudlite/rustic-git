@@ -199,32 +199,6 @@ pub async fn migrate(s: &ApiState) {
     }
 }
 
-/// A team choice whose person has left the team goes. Keep-biased: only a strict `NotMember`
-/// prunes — a paused member, a team the directory does not confirm, and any error all keep.
-pub async fn prune_departed(s: &ApiState) {
-    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
-    let api: Api<crd::SpaceEnvironment> = Api::all(c.clone());
-    let items = match api.list(&Default::default()).await {
-        Ok(l) => l.items,
-        Err(e) => return tracing::warn!(kind = "SpaceEnvironment", error = %e, "listing.failed"),
-    };
-    for x in items.iter().filter(|x| !x.spec.team.eq_ignore_ascii_case(&x.spec.owner)) {
-        match dir.membership(&x.spec.team, &x.spec.owner).await {
-            Ok(Judged::NotMember) => {}
-            Ok(_) => continue,
-            Err(e) => {
-                tracing::warn!(owner = %x.spec.owner, error = %e, "space.departed.prune.skipped");
-                continue;
-            }
-        }
-        match api.delete(&x.name_any(), &Default::default()).await {
-            Ok(_) => tracing::info!(owner = %x.spec.owner, team = %x.spec.team, "space.departed.pruned"),
-            Err(kube::Error::Api(e)) if e.code == 404 => {}
-            Err(e) => tracing::warn!(owner = %x.spec.owner, team = %x.spec.team, error = %e, "space.departed.prune.failed"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

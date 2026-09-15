@@ -149,7 +149,6 @@ pub async fn run_beat(s: Arc<ApiState>) {
         prune_namespaces(&s).await;
         prune_builders(&s).await;
         super::spaces::migrate(&s).await;
-        super::spaces::prune_departed(&s).await;
     }
 }
 

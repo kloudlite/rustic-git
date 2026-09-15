@@ -332,20 +332,3 @@ async fn migration_never_overwrites_a_choice_made_meanwhile() {
     assert!(!rec.calls().iter().any(|c| (c.starts_with("PATCH") || c.starts_with("PUT")) && c.contains("spaceenvironments")), "{:?}", rec.calls());
     assert_eq!(ws_patch(&rec, "ws-1").len(), 1, "the space is settled, so the field goes");
 }
-
-#[tokio::test]
-async fn a_departed_members_choice_goes_and_any_directory_error_prunes_nothing() {
-    let choice = |owner: &str| serde_json::to_value(crd::space_environment(owner, "acme", "env-1")).unwrap();
-    let routes = || vec![
-        get(format!("{API}/spaceenvironments"), list("SpaceEnvironment", vec![choice("karthik"), choice("paula"), choice("bob"), serde_json::to_value(crd::space_environment("bob", "bob", "env-9")).unwrap()])),
-        Route { method: "DELETE", path: space_path("bob", "acme"), status: 200, body: choice("bob") },
-    ];
-    let (s, rec) = state(routes(), false);
-    kloudlite_workspaces::api::spaces::prune_departed(&s).await;
-    let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-    assert_eq!(deletes, vec![format!("DELETE {}", space_path("bob", "acme"))], "only bob left acme; a paused member's choice and personal spaces are never pruned");
-
-    let (s, rec) = state(routes(), true);
-    kloudlite_workspaces::api::spaces::prune_departed(&s).await;
-    assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
-}
