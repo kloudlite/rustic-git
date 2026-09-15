@@ -502,3 +502,20 @@ async fn a_failing_build_backs_off_from_a_minute_towards_an_hour() {
         "ten minutes in: {ten_minutes:?}"
     );
 }
+
+/// A fresh namespace refuses the host-key read until the agent's secret RoleBinding lands: that is
+/// a two-second wait, not the error policy's 60 s, and no pod is started without its Secret.
+#[tokio::test]
+async fn a_host_key_read_refused_before_the_binding_requeues_quickly_and_starts_no_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let forbidden = Route {
+        method: "GET",
+        path: WS_SSH_SECRET.into(),
+        status: 403,
+        body: serde_json::json!({"kind": "Status", "code": 403, "reason": "Forbidden", "message": "secrets \"ws-ssh-ws-1\" is forbidden"}),
+    };
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), vec![forbidden]);
+    let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)));
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
+}

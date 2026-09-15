@@ -374,7 +374,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // Same rule: the host key is this WORKSPACE's identity (pinned in the user's known_hosts),
         // and the pod mounts `ws-ssh-{workspace}`. Keying it by the shared volume would give every
         // clone of one volume the same host key AND leave the pod's secret mount unresolvable.
-        ensure_ssh(w, &w.name_any(), &ns, &owner_ref, &mut prev, ctx).await?;
+        if let Some(action) = ensure_ssh(w, &w.name_any(), &ns, &owner_ref, &mut prev, ctx).await? {
+            return Ok(action);
+        }
     }
 
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
