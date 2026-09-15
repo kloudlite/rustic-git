@@ -591,8 +591,10 @@ async fn delete_members_now(c: &Ctx, team: &str) {
     let admin = c.admin_jwt();
     for who in [c.probe_user.clone(), c.other_user.clone()] {
         let url = api(c, &format!("/v1/teams/{team}/members/{who}/delete-now"));
-        if let Err(e) = post(c, &url, &admin, serde_json::json!({ "person": who, "team": team })).await {
-            tracing::warn!(kind = "team", op = "delete_now", name = %team, error = %format!("{e:#}"), "slo.teardown.failed");
+        match post(c, &url, &admin, serde_json::json!({ "person": who, "team": team })).await {
+            Ok(v) if v["deletes_enabled"] == false => tracing::info!(kind = "team", name = %team, "slo.teardown.marked_only"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(kind = "team", op = "delete_now", name = %team, error = %format!("{e:#}"), "slo.teardown.failed"),
         }
     }
 }

@@ -10,7 +10,7 @@
 //! answers 409. Deletion still obeys `member_removal_deletes` and every keep rule.
 
 use super::membership::{self, list_all, norm, stamp, system_annotation, team_pair, DELETE_NOW, REMOVED_AT};
-use super::{caller, ApiState, Caller, TeamRole};
+use super::{caller, ApiState, Caller, Judged, TeamRole};
 use crate::crd;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -40,10 +40,20 @@ async fn may_manage(s: &ApiState, c: &Caller, team: &str) -> Result<(), Response
     }
 }
 
-pub(crate) async fn delete_now_route(State(s): State<Arc<ApiState>>, Path((team, owner)): Path<(String, String)>, headers: HeaderMap, Json(body): Json<Confirm>) -> Response {
-    match caller(&s, &headers).await {
-        Ok(c) => delete_now(&s, &c, &team, &owner, &body).await,
-        Err(r) => r,
+pub(crate) async fn delete_now_route(
+    State(s): State<Arc<ApiState>>,
+    Path((team, owner)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<Confirm>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    // Authenticate before the body is judged, so an anonymous caller gets 401, not a 4xx on its JSON.
+    let c = match caller(&s, &headers).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match body {
+        Ok(Json(body)) => delete_now(&s, &c, &team, &owner, &body).await,
+        Err(e) => e.into_response(),
     }
 }
 
@@ -54,8 +64,15 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     if let Err(r) = may_manage(s, c, team).await {
         return r;
     }
-    let (Some(k), Some(_)) = (s.kube.as_ref(), s.directory.as_ref()) else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    let (Some(k), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
     let (owner, team) = (norm(owner), norm(team));
+    // Irreversible, so judged directly and fail CLOSED: a stale stamp on a re-added member must
+    // never be marked, and an unreadable directory marks nothing.
+    match dir.membership(&team, &owner).await {
+        Ok(Judged::Member(_)) => return (StatusCode::CONFLICT, "still a member of the team").into_response(),
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "team membership could not be checked").into_response(),
+        Ok(Judged::NotMember | Judged::TeamGone) => {}
+    }
     membership::reconcile_pair(s, &owner, &team).await;
     let o = match list_all(k).await {
         Ok(o) => o,

@@ -883,6 +883,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_now_refuses_a_readded_member_with_a_stale_stamp() {
+        let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", Some(OLD))])], &[]);
+        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
+        assert_eq!(r.status(), 409);
+        assert!(rec.calls().is_empty(), "judged before any read or write: {:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn delete_now_on_an_unreadable_directory_is_503_and_writes_nothing() {
+        let (s, rec, _) = setup(vec![benches(vec![bench("bob", "down", "paused", Some(OLD))])], &[]);
+        let admin = crate::api::Caller { superadmin: true, ..who("root") };
+        let r = crate::api::removals::delete_now(&deleting(s), &admin, "down", "bob", &confirm("bob", "down")).await;
+        assert_eq!(r.status(), 503);
+        assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
     async fn delete_now_runs_the_delete_without_waiting_the_grace() {
         let fresh = chrono::Utc::now().to_rfc3339();
         let name = crd::bench_id("bob", "acme");
