@@ -514,8 +514,42 @@ async fn a_host_key_read_refused_before_the_binding_requeues_quickly_and_starts_
         status: 403,
         body: serde_json::json!({"kind": "Status", "code": 403, "reason": "Forbidden", "message": "secrets \"ws-ssh-ws-1\" is forbidden"}),
     };
-    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), vec![forbidden]);
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), std::iter::once(forbidden).chain(std::iter::repeat_with(|| ns_aged(5)).take(8)).collect());
     let action = apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
     assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)));
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")), "{:?}", rec.calls());
+}
+
+/// Repeated by callers: same-path routes are walked in order, and `ready_namespace` (undated) sits
+/// behind them for the binding gate's own read.
+fn ns_aged(secs: i64) -> Route {
+    let at = k8s_openapi::jiff::Timestamp::from_second(k8s_openapi::jiff::Timestamp::now().as_second() - secs).unwrap();
+    kloudlite_workspaces::kube_test::get(
+        "/api/v1/namespaces/ws-alice",
+        serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "ws-alice", "creationTimestamp": at.to_string()}}),
+    )
+}
+
+/// The same refusal in a namespace an hour old is no binding on its way: it is an error, handed to
+/// the error policy (warned, 60 s), never a quiet two-second loop.
+#[tokio::test]
+async fn a_host_key_read_refused_in_an_old_namespace_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let forbidden = Route {
+        method: "GET",
+        path: WS_SSH_SECRET.into(),
+        status: 403,
+        body: serde_json::json!({"kind": "Status", "code": 403, "reason": "Forbidden", "message": "secrets \"ws-ssh-ws-1\" is forbidden"}),
+    };
+    let (ctx, rec, _fake) = ws_ctx_with_ssh(tmp.path(), std::iter::once(forbidden).chain(std::iter::repeat_with(|| ns_aged(3600)).take(8)).collect());
+    let w = ready_workspace("ws-1", vec![]);
+    let mut failed = false;
+    for _ in 0..4 {
+        match kloudlite_agent::controller::apply_workspace(&w, &ctx).await {
+            Err(_) => { failed = true; break; }
+            Ok(_) => wait_idle(&ctx).await,
+        }
+    }
+    assert!(failed, "an old namespace's refusal is surfaced: {:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")));
 }

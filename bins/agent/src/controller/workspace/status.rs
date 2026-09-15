@@ -48,7 +48,9 @@ pub(crate) async fn ensure_ssh(
         Ok(f) => f,
         // A fresh namespace whose `agent_secret_binding` has not landed yet: the grant is seconds
         // away, and the error policy's 60 s retry made it the whole first start's latency.
-        Err(kube::Error::Api(st)) if st.code == 403 => {
+        // Only while the namespace is young: an old one still refusing is a real fault, and goes to
+        // the error policy (warned, 60 s) rather than a quiet two-second loop forever.
+        Err(kube::Error::Api(st)) if st.code == 403 && namespace_young(ctx, ns).await => {
             tracing::info!(workspace = %id, namespace = %ns, "workspace.hostkey.binding_pending");
             return Ok(Some(Action::requeue(BINDING_PENDING_RETRY)));
         }
@@ -99,6 +101,16 @@ pub(crate) async fn ensure_ssh(
         write_ws_status_tracking(w, st, prev, ctx).await?;
     }
     Ok(None)
+}
+
+/// Created less than one `RETRY` ago. An unreadable or undated namespace is not young: the caller
+/// then warns, which is the keep-quiet-only-when-sure direction.
+async fn namespace_young(ctx: &Arc<Ctx>, ns: &str) -> bool {
+    let api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(ctx.client.clone());
+    let Ok(Some(n)) = api.get_opt(ns).await else { return false };
+    n.metadata.creation_timestamp.is_some_and(|t| {
+        k8s_openapi::jiff::Timestamp::now().as_second() - t.0.as_second() < super::RETRY.as_secs() as i64
+    })
 }
 
 /// How soon a host-key read refused for want of the namespace's secret grant looks again.
