@@ -150,6 +150,9 @@ pub async fn reconcile(s: &ApiState) {
 }
 
 pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
+    // A pause or unpause lands here first on the replica that answered it: drop that pair's cached
+    // `team_access` verdict so its own team-workspace verbs do not wait out the 30 s TTL.
+    s.member_verdicts.lock().unwrap_or_else(|p| p.into_inner()).remove(&(norm(team), norm(owner)));
     let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     if !team_pair(owner, team) {
         return;
@@ -632,6 +635,17 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["kind"], "Workspace");
         assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+    }
+
+    #[tokio::test]
+    async fn reconciling_a_pair_forgets_its_cached_verdict() {
+        let (s, _, _) = setup(vec![], &[]);
+        let put = |o: &str| s.member_verdicts.lock().unwrap().insert(("acme".into(), o.into()), (std::time::Instant::now(), Judged::NotMember));
+        put("bob");
+        put("alice");
+        reconcile_pair(&s, "Bob", "ACME").await;
+        let left: Vec<_> = s.member_verdicts.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left, vec![("acme".to_string(), "alice".to_string())]);
     }
 
     #[tokio::test]
