@@ -11,6 +11,10 @@ pub(crate) fn max_decompressed() -> u64 {
 }
 
 pub(crate) fn internal(e: crate::Error) -> Response {
+    // A key routed to no owner: nothing exists there, so a read that skipped its probe is a 404.
+    if kloudlite_storage::pool::is_unowned_err(&e) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
     tracing::error!(error = %e, "request.failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }
@@ -41,4 +45,21 @@ pub(crate) fn fenced_elsewhere() -> Response {
         "repository is owned by another node; retry",
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read that skipped its probe and hit the pool's refusal for a key routed to no owner is a
+    /// 404, not a 500: browse and git callers see "no such repo", which is what routing decided.
+    /// Without the mapping this is the generic 500.
+    #[test]
+    fn an_unowned_key_is_not_found_not_an_internal_error() {
+        let e: crate::Error =
+            kloudlite_storage::pool::UnownedError { repo: "alice/web".into() }.into();
+        assert_eq!(internal(e).status(), StatusCode::NOT_FOUND);
+        // A genuine failure still reports as one.
+        assert_eq!(internal(kloudlite_core::err("boom")).status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

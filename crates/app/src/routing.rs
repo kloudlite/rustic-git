@@ -83,14 +83,11 @@ impl App {
                     // What it buys, exactly: the prefix probe and the map read are not one atomic
                     // look, and a creator elsewhere can claim the key and flush its first objects
                     // between them — after which falling through to a handler HERE opens the
-                    // database unleased and fences the owner. The leader read narrows that window
-                    // to the gap between its "nobody" and the handler's own `exists` probe; the
-                    // creator's flush has to land inside THAT gap to hurt, which is far smaller
-                    // than the whole request. It is not zero.
-                    // ponytail: residual unleased-open window between the leader's "nobody" and
-                    // the handler's probe; an atomic claim-or-read on the leader (answer the owner
-                    // if there is one, claim only if the prefix is non-empty, all under the
-                    // leader's lock) is the upgrade if it ever bites.
+                    // database unleased and fences the owner. The leader read narrows that window;
+                    // `pool::unowned`, which the middleware wraps a `Missing` request in, closes the
+                    // rest — the handler cannot re-probe or open this key, so a flush after the
+                    // leader's "nobody" is answered "absent" rather than fenced. It bit: every new
+                    // image's first HEAD, hourly, until 2026-09-16.
                     //
                     // A leader that cannot be reached is treated exactly like "nobody", on
                     // purpose: the alternative is 503 on a path an anonymous client reaches, and

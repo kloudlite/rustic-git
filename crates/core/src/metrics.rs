@@ -210,7 +210,11 @@ async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next
     // every write on the api listener (a `/v1` write is the moment an object changed, and the
     // agent's `event.seen` measures from it). The path carries ids, never bodies or tokens.
     let write = listener == "api" && !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
-    if status >= 500 {
+    if status == 503 && path == "/healthz" {
+        // Readiness answering "not now" (draining, an election settling) is the probe working,
+        // not a failure; a leaderless spell that outlasts the TTL warns from `healthz` itself.
+        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, "http.unready");
+    } else if status >= 500 {
         tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.failed");
     } else if ms > slow_ms(&path) {
         tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.slow");

@@ -693,7 +693,22 @@ async fn team_push(c: &mut Ctx) {
             let reference = format!("{h}/{slug}/slo-team:latest");
             let member = authed(c);
             member.login(&h, &probe, &probe_secret).await.context("the member could not log in")?;
-            let member_ok = member.push(&dir_member, &reference).await;
+            // Layer checks on the brand-new image, racing the push that creates it: the exact shape
+            // that answered 503/500 once an hour while crane's own retry hid it (2026-09-16).
+            let bearer = bearer(c, Some(&probe_secret), &format!("repository:{slug}/slo-team:pull,push"))
+                .await
+                .context("no registry token for the team image")?;
+            let head = format!("{}/v2/{slug}/slo-team/blobs/{}", base(c), sha256(&layer));
+            let heads = futures::future::join_all(
+                (0..4).map(|_| super::raw(c, reqwest::Method::HEAD, &head, &bearer, None, &[])),
+            );
+            let (member_ok, heads) = futures::join!(member.push(&dir_member, &reference), heads);
+            for r in heads {
+                let (status, _) = r.context("a first layer check did not answer")?;
+                if status.is_server_error() {
+                    return Err(anyhow!("a first request to the new team image answered {status}"));
+                }
+            }
 
             write_layout(&dir_denied, &layer, "slo-team").context("could not build the second copy")?;
             let denied = Crane::new(&c.programs.crane, cfg_denied);

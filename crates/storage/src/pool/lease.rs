@@ -41,6 +41,10 @@ impl Pool {
         if self.closed.load(Ordering::SeqCst) {
             return Err(crate::err(format!("{owner}/{name}: pool is closed")));
         }
+        // Opening creates. A request routed to no owner must never be the one that does it.
+        if super::is_unowned(owner, name) {
+            return Err(super::UnownedError { repo: format!("{owner}/{name}") }.into());
+        }
         let key = format!("{owner}/{name}");
         let entry = {
             let mut map = self.entries.lock_or_recover();

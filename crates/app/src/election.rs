@@ -37,6 +37,16 @@ impl App {
             && now < self.lease_expires_ms.load(Relaxed)
     }
 
+    /// No live leader for longer than an election takes to settle (2 × `LEADER_TTL` past the last
+    /// lease this node saw expire). False before the first lease read: a pod still booting is
+    /// un-ready, not leaderless.
+    pub fn leaderless_too_long(&self) -> bool {
+        let expired = self.lease_expires_ms.load(std::sync::atomic::Ordering::Relaxed);
+        !self.leader_live()
+            && expired != 0
+            && self.now_ms().saturating_sub(expired) > 2 * LEADER_TTL.as_millis() as u64
+    }
+
     pub(super) fn note_live(&self, l: &Lease) {
         use std::sync::atomic::Ordering::Relaxed;
         self.set_leader(Some(&l.node));
@@ -281,7 +291,9 @@ impl App {
             // its turn, which is the right answer too.
             other => {
                 match other {
-                    Ok(g) => tracing::warn!(repo = %repo, peer = %target, grant = ?g, "ownership.handover.refused"),
+                    // A refusal is a handled outcome (the peer is draining too, or a third node
+                    // already holds it) and the re-claim below covers it; only a failed ask warns.
+                    Ok(g) => tracing::info!(repo = %repo, peer = %target, grant = ?g, "ownership.handover.refused"),
                     Err(e) => tracing::warn!(repo = %repo, peer = %target, error = %e, "ownership.handover.failed"),
                 }
                 if let Err(e) = self.claim_for(repo, &self.self_name.clone()).await {
@@ -359,7 +371,14 @@ impl App {
         if !self.is_leader() {
             return;
         }
-        tracing::warn!(epoch = self.leader_epoch(), reason = why, "lease.demoted");
+        // A shutdown or a successor's lease is a planned handover (every roll); a fenced or stalled
+        // map write, or a store that refuses the renewal, is not. `ownership_demotions_total` and
+        // NoLeader still count both.
+        if why == "shutdown" || why.contains(" holds the lease at epoch ") {
+            tracing::info!(epoch = self.leader_epoch(), reason = why, "lease.demoted");
+        } else {
+            tracing::warn!(epoch = self.leader_epoch(), reason = why, "lease.demoted");
+        }
         self.leader_epoch.store(0, std::sync::atomic::Ordering::Relaxed);
         self.held_expires_ms.store(0, std::sync::atomic::Ordering::Relaxed);
         self.set_leader(None);
