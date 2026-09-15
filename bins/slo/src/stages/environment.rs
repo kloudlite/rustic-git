@@ -57,13 +57,20 @@ pub(super) fn my_space(c: &Ctx) -> String {
 }
 
 pub async fn run(c: &mut Ctx) {
-    fast(c).await;
+    // Each half only where this pod walks it: the intercept journey is its own hourly group.
+    if c.walks("env.create.p95") {
+        fast(c).await;
+    }
     // Its OWN environment and workspace, so it neither depends on the fast journey's having
     // worked nor leaves the one stage 7 stops and starts in a state stage 7 did not ask for.
-    super::env_intercept::run(c).await;
+    if c.walks("env.intercept") {
+        super::env_intercept::run(c).await;
+    }
     // Stands nothing up of its own — it only asks about whatever the owner's builder already
     // is, which is why it costs nothing to also gate hourly-only alongside the intercepts.
-    builder_hidden(c).await;
+    if c.walks("builder.hidden") {
+        builder_hidden(c).await;
+    }
 }
 
 async fn fast(c: &mut Ctx) {

@@ -23,7 +23,9 @@ spec:
   # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
   # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
   # deleted inside its own step but alive beside the fast journey's four and Experience's three.
-  workspaces: 10
+  # Twelve / 64 / 128 since the hourly suite runs its groups concurrently (bins/slo/src/suite.rs
+  # `group_of`): the seed-failure workspace is alive beside the journey, not after it.
+  workspaces: 12
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
@@ -54,8 +56,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 56
-  memoryGb: 112
+  cpu: 64
+  memoryGb: 128
 ---
 # The second tenant. It exists ONLY to be refused: `sec.cross.owner` proves one owner cannot read
 # another's repo, and `quota.refused` proves an over-quota create is a 409. All zero, so if any
@@ -93,7 +95,9 @@ spec:
   # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
   # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
   # deleted inside its own step but alive beside the fast journey's four and Experience's three.
-  workspaces: 10
+  # Twelve / 64 / 128 since the hourly suite runs its groups concurrently (bins/slo/src/suite.rs
+  # `group_of`): the seed-failure workspace is alive beside the journey, not after it.
+  workspaces: 12
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
@@ -124,8 +128,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 56
-  memoryGb: 112
+  cpu: 64
+  memoryGb: 128
 
 ---
 # The hourly suite's second tenant, all zero for the same reason as `slo-other`.
@@ -159,7 +163,9 @@ spec:
   # Ten, not eight: the 2026-09-05 coverage batch adds two more working copies the hourly suite
   # holds at once — `env.attach.pair`'s attached workspace and `admin.delete.workload`'s, each
   # deleted inside its own step but alive beside the fast journey's four and Experience's three.
-  workspaces: 10
+  # Twelve / 64 / 128 since the hourly suite runs its groups concurrently (bins/slo/src/suite.rs
+  # `group_of`): the seed-failure workspace is alive beside the journey, not after it.
+  workspaces: 12
   # Four, not three: the fast run now walks the environment through the same lifecycle as the
   # workspace, so it holds the environment, its clone (`env.clone.p95`) and a restore
   # (`env.restore`) at once — plus one for a crashed run's leftovers, which the next run's boot
@@ -190,8 +196,8 @@ spec:
   # of them is 40 and 80 exactly — these carry the environments' 2/4 on top, with headroom.
   # Plus the builder itself while it runs: `PodResources::default()`, 4 vCPU / 8 GiB, charged to
   # this owner like every other environment of theirs.
-  cpu: 56
-  memoryGb: 112
+  cpu: 64
+  memoryGb: 128
 
 ---
 # The drills' second tenant, all zero for the same reason as `slo-other`.

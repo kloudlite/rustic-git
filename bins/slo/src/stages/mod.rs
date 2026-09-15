@@ -391,7 +391,13 @@ pub async fn boot(c: &mut Ctx) {
 /// lose the report that says why the run failed in the first place.
 pub async fn teardown(c: &mut Ctx) {
     undo_drills(c).await;
-    undo_grants(c).await;
+    // The owner-wide undos — grants, requests, the personal space choice — carry no run prefix, so
+    // only the hourly group that makes them runs them: a sibling group's teardown would pull them
+    // out from under that group mid-step (`suite::group_of`). Every other run owns them all.
+    let owner_wide = c.walks("request.approve");
+    if owner_wide {
+        undo_grants(c).await;
+    }
     hide(c).await;
     unprotect(c).await;
     let prefix = c.prefix();
@@ -399,13 +405,15 @@ pub async fn teardown(c: &mut Ctx) {
     swept += drop_env_volume(c).await;
     swept += drop_extra_volumes(c).await;
     // After the deny sweep above: a request is denied through the API and then the object goes.
-    swept += sweep_requests(c).await;
-    // The probe owner's space choice: named by the owner, not the run, so the prefix sweep cannot
-    // see it, and a run killed between a choice and its clear leaves it pointing at a deleted
-    // environment. Idempotent.
-    let space = api(c, &format!("/v1/me/environments/{}", c.probe_user));
-    if let Err(e) = call(c, reqwest::Method::DELETE, &space, &c.probe_jwt, None).await {
-        tracing::warn!(kind = "space", op = "clear", error = %format!("{e:#}"), "slo.teardown.failed");
+    if owner_wide {
+        swept += sweep_requests(c).await;
+        // The probe owner's space choice: named by the owner, not the run, so the prefix sweep
+        // cannot see it, and a run killed between a choice and its clear leaves it pointing at a
+        // deleted environment. Idempotent.
+        let space = api(c, &format!("/v1/me/environments/{}", c.probe_user));
+        if let Err(e) = call(c, reqwest::Method::DELETE, &space, &c.probe_jwt, None).await {
+            tracing::warn!(kind = "space", op = "clear", error = %format!("{e:#}"), "slo.teardown.failed");
+        }
     }
     tracing::info!(count = swept, "slo.teardown.completed");
 }
@@ -1118,6 +1126,11 @@ mod tests {
         // walking separate journeys, and the monthly deadline is twice `STALE_SECS`.
         assert!(!stale("run-hourly-1000-repo", fast, now));
         assert!(!stale("run-fast-1000-repo", Suite::Hourly, now));
+        // A concurrent GROUP of the same hourly Job: inside the window for as long as the Job's
+        // 3540 s deadline lets it live, so the boot sweep never takes it — and its prefix never
+        // starts with this group's, so teardown's prefix sweep never does either.
+        assert!(!stale("run-hourly-1000-g1-ws", Suite::Hourly, 1000 + 3540));
+        assert!(!"run-hourly-1000-g1-ws".starts_with("run-hourly-1000-g0"));
     }
 
     /// The drill sweep's rule, on the three shapes a mark comes in.

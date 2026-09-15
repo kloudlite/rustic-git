@@ -200,7 +200,7 @@ pub async fn fast(c: &mut Ctx) {
 pub async fn hourly(c: &mut Ctx) {
     let Some(k) = c.kube.clone() else {
         c.skip("bench.idle.wake", "no kubeconfig");
-        return SESSION_IDS.iter().for_each(|id| c.skip(id, "no kubeconfig"));
+        return skip_sessions(c, "no kubeconfig");
     };
     // Untimed: this suite's owner is not the fast suite's, so its bench is created here (idempotent,
     // and the first call binds the personal region); then the first connection — which may itself
@@ -259,12 +259,40 @@ pub async fn hourly(c: &mut Ctx) {
             if woke {
                 c.demote_to_skip("bench.idle.wake", STUB);
             }
-            return SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
+            return skip_sessions(c, STUB);
         }
-        None => return SESSION_IDS.iter().for_each(|id| c.skip(id, "the bench could not be reached before the sleep")),
+        None => return skip_sessions(c, "the bench could not be reached before the sleep"),
         Some(false) => {}
     }
     sessions(c).await;
+}
+
+const TOOL: &str = "bench.workspace.tool_roundtrip";
+
+/// The session ids this pod walks: a grouped hourly run leaves `TOOL` to group 0.
+fn skip_sessions(c: &mut Ctx, why: &str) {
+    for id in SESSION_IDS {
+        if c.walks(id) {
+            c.skip(id, why);
+        }
+    }
+}
+
+/// `TOOL` alone, for group 0 of a grouped hourly run, after the bench journey's group is done.
+pub async fn tool_only(c: &mut Ctx) {
+    let health = async {
+        let (_child, port) = forward(c).await?;
+        anyhow::Ok(through(port, "/healthz").await?.1)
+    }
+    .await;
+    match health {
+        Ok(h) if is_stub(&h) => c.skip(TOOL, STUB),
+        Ok(_) => {
+            let thread = tool_roundtrip(c).await;
+            drop_sessions(c, thread).await;
+        }
+        Err(e) => c.skip(TOOL, &format!("the bench could not be reached: {e:#}")),
+    }
 }
 
 /// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
@@ -322,17 +350,27 @@ async fn sessions(c: &mut Ctx) {
     let thread = match &no_model {
         Some(_) => {
             c.skip("bench.exchange.both_views", NO_MODEL);
-            c.skip("bench.workspace.tool_roundtrip", NO_MODEL);
+            if c.walks(TOOL) {
+                c.skip(TOOL, NO_MODEL);
+            }
             None
         }
         None => {
             exchanges(c, sid.clone()).await;
-            tool_roundtrip(c).await
+            if c.walks(TOOL) {
+                tool_roundtrip(c).await
+            } else {
+                None
+            }
         }
     };
-    // Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
-    // workspace thread's id is `w-{ws}`, deleted the same way.
-    for sid in sid.into_iter().chain(thread) {
+    drop_sessions(c, sid.into_iter().chain(thread)).await;
+}
+
+/// Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
+/// workspace thread's id is `w-{ws}`, deleted the same way.
+async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
+    for sid in ids {
         let del = async {
             let (_child, port) = forward(c).await?;
             delete_session(port, &sid, TEARDOWN_BOUND).await

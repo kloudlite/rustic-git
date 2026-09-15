@@ -73,6 +73,9 @@ pub async fn run(c: &mut Ctx) {
     // Whatever path `grants` left by, later stages see the space as a fast run leaves it: clear.
     clear(c).await;
     if hourly {
+        // `ctl.failover` deletes the controller leader, and a grouped run's intercept journey
+        // (group 1) runs against that controller at the same time: wait it out, bounded.
+        crate::suite::wait_for_group(c, 1, std::time::Duration::from_secs(600)).await;
         match granted {
             Some((ws, env)) => failover(c, &ws, &env).await,
             None => c.skip("ctl.failover", "ctl.grant.set did not pass, so a converged choice has nothing to be compared with"),

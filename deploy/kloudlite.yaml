@@ -2080,10 +2080,18 @@ spec:
   jobTemplate:
     spec:
       activeDeadlineSeconds: 3540
-      # No retry. A failed journey is a SAMPLE, already reported and already counted against the
-      # budget; running it again would file a second run under a second id and quietly halve the
-      # measured failure rate.
-      backoffLimit: 0
+      # Four pods at once, one group of the journey each (`bins/slo/src/suite.rs` `group_of`,
+      # read from the injected JOB_COMPLETION_INDEX): the sequential walk took ~16 min, most of it
+      # the bench's idle wait and one seed failure, which share no state with the rest. Each pod is
+      # its own run (`hourly-{ts}-g{n}`) filing only its group's ids.
+      completionMode: Indexed
+      completions: 4
+      parallelism: 4
+      # No retry, per index. A failed journey is a SAMPLE, already reported and already counted
+      # against the budget; running it again would file a second run under a second id and quietly
+      # halve the measured failure rate. Per index (GA in 1.33), never `backoffLimit: 0`, which
+      # would fail the whole Job on the first failed group and kill its three siblings mid-run.
+      backoffLimitPerIndex: 0
       template:
         metadata:
           labels: { app: kloudlite-slo, suite: hourly }

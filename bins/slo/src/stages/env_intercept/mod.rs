@@ -40,7 +40,7 @@ mod refusals;
 
 /// Every id this journey owns. It is the skip list a run that cannot get here files, and a missing
 /// id reads as passed — so it must name all of them, not only the ones a given path reaches.
-const INTERCEPT_IDS: [&str; 13] = [
+pub(crate) const INTERCEPT_IDS: [&str; 13] = [
     "env.space.bench",
     "env.intercept",
     "env.intercept.proxy.up",

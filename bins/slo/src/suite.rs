@@ -103,6 +103,89 @@ pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
 /// that WAITED for its twin would only hold the tenant longer.
 pub const SAME_SUITE_IN_FLIGHT: &str = "another run of this suite is in flight";
 
+/// The hourly suite is an Indexed Job of this many pods, each walking one GROUP of the journey as
+/// its own run (`hourly-{ts}-g{n}`), filing only that group's ids.
+///
+/// The partition is by id, and state decides it rather than the stage list: Experience reads stage
+/// 2's repo and key and revokes that key, stage 15 grants between stage 5's workspace and stage
+/// 6's environment, and stage 7 stops that environment — so all of that stays in one pod (0). What
+/// moves out shares nothing with it: the intercept journey stands up its own team (1), the seed
+/// failure its own workspace (2), and every step on the owner's bench (3), because
+/// `bench.idle.wake` needs every client gone for `benchIdleSecs` and stage 5's stop/start of that
+/// same bench would reset it. A pod with no index (a hand run) walks everything, as before.
+pub const HOURLY_GROUPS: u8 = 4;
+
+/// Group 3. Not `bench.workspace.tool_roundtrip`: it runs in group 0's workspace, so group 0 walks
+/// it after waiting for this group to finish (`wait_for_group`).
+const BENCH_IDS: [&str; 7] = [
+    "bench.create",
+    "bench.start.p95",
+    "bench.tunnel",
+    "bench.idle.wake",
+    "bench.session.roundtrip",
+    "bench.exchange.both_views",
+    "bench.two_clients",
+];
+
+pub fn group_of(id: &str) -> u8 {
+    if BENCH_IDS.contains(&id) {
+        3
+    } else if id == "ws.seed.failed" {
+        2
+    } else if stages::env_intercept::INTERCEPT_IDS.contains(&id) {
+        1
+    } else {
+        0
+    }
+}
+
+impl Ctx {
+    /// Whether this pod walks `id`: always, unless it is one group of a grouped hourly run.
+    pub fn walks(&self, id: &str) -> bool {
+        self.group.is_none_or(|g| group_of(id) == g)
+    }
+}
+
+/// Boot for every group (it signs in and sweeps); any other stage only where one of its ids is ours.
+fn walks_stage(c: &Ctx, kind: Suite, name: &str) -> bool {
+    c.group.is_none()
+        || name == "0 · Boot"
+        || journey(kind).iter().any(|(n, ids)| *n == name && ids.iter().any(|id| c.walks(id)))
+}
+
+/// `(ts, group)` of one grouped hourly run's id.
+fn hourly_group(id: &str) -> Option<(i64, u8)> {
+    let (ts, g) = id.strip_prefix("hourly-")?.split_once("-g")?;
+    Some((ts.parse().ok()?, g.parse().ok()?))
+}
+
+/// The pods of one Job start within seconds of each other; the next scheduled Job is an hour on.
+const SIBLING_WINDOW_SECS: i64 = 900;
+
+/// The group `other` walks, when it is ANOTHER group of this run's own hourly Job.
+///
+/// ponytail: siblings are told apart by start time, not by Job name, so a hand-created Job whose
+/// pods start within 15 minutes of the scheduled one reads as siblings rather than a twin; the
+/// Job name through the downward API is the upgrade if that ever happens.
+pub fn sibling(mine: &str, other: &str) -> Option<u8> {
+    let ((a, ga), (b, gb)) = (hourly_group(mine)?, hourly_group(other)?);
+    (ga != gb && (a - b).abs() < SIBLING_WINDOW_SECS).then_some(gb)
+}
+
+/// Wait, bounded, while group `g` of this run's hourly Job is still running. For the few steps that
+/// touch what a sibling is standing inside: a bounded wait costs this pod minutes, where running
+/// through would file a failure for the sibling's reason. No-op for an ungrouped run.
+pub async fn wait_for_group(c: &Ctx, g: u8, cap: Duration) {
+    if c.group.is_none_or(|mine| mine == g) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < cap && in_flight_where(c, Suite::Hourly, |id| sibling(&c.run_id, id) == Some(g)).await {
+        tracing::info!(group = g, waited_secs = started.elapsed().as_secs(), "slo.group.waiting");
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
 /// The namespace every `KNOWN_CENTRAL` workload lives in on AKS.
 const CENTRAL_NS: &str = "kloudlite";
 
@@ -131,7 +214,9 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
     for stage in remaining {
         c.stage = stage.name.to_string();
         let ids = catalogue.iter().find(|(name, _)| *name == stage.name).map(|(_, ids)| ids.clone());
-        for id in ids.unwrap_or_default() {
+        // Only this group's: a sibling group's id skipped here would read as that id's sample.
+        let ids: Vec<&'static str> = ids.unwrap_or_default().into_iter().filter(|id| c.walks(id)).collect();
+        for id in ids {
             c.skip_because(id, why, reason);
             skipped += 1;
         }
@@ -143,7 +228,16 @@ pub fn skip_remaining_because(c: &mut Ctx, kind: Suite, remaining: &[Stage], why
 /// older than the suite's own deadline is a crash the parent never closed, and does not count;
 /// the answer is `false` on any error, because a probe that cannot ask must still probe.
 pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
-    let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=3", suite.as_str()));
+    // Never THIS run: the parent files a `running` row before the child walks, so a run asking "is
+    // my suite busy?" would always find itself and yield forever. Nor a sibling group of this
+    // hourly Job, which runs beside it on purpose.
+    in_flight_where(c, suite, |id| id != c.run_id && sibling(&c.run_id, id).is_none()).await
+}
+
+/// The same question about the runs of `suite` whose id `matches`.
+async fn in_flight_where(c: &Ctx, suite: Suite, matches: impl Fn(&str) -> bool) -> bool {
+    // Eight rows, not three: the four groups of one hourly Job are four rows.
+    let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=8", suite.as_str()));
     let v = match stages::get(c, &url, &c.admin_jwt()).await {
         Ok(v) => v,
         Err(e) => {
@@ -168,9 +262,7 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
         _ => chrono::Duration::minutes(10),
     };
     rows.iter().any(|r| {
-        // Never THIS run: the parent files a `running` row before the child walks, so a run
-        // asking "is my suite busy?" would always find itself and yield forever.
-        if r.get("run_id").and_then(|s| s.as_str()) == Some(c.run_id.as_str()) {
+        if !r.get("run_id").and_then(|s| s.as_str()).is_some_and(&matches) {
             return false;
         }
         let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
@@ -332,7 +424,7 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
 /// Here rather than in `main` so it can be watched under a budget that is already spent, which is
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
-    let stages = suite(kind);
+    let stages: Vec<Stage> = suite(kind).into_iter().filter(|s| walks_stage(c, kind, s.name)).collect();
     // Its own suite FIRST, and for every suite: a twin is the one collision no ladder covers.
     let mut yield_to = suite_in_flight(c, kind).await.then_some(SAME_SUITE_IN_FLIGHT);
     for (longer, why) in yields_to(kind) {
@@ -458,6 +550,37 @@ mod tests {
         }
         assert_eq!(c.steps.len(), expected.len(), "an id nobody asked for was reported");
         assert_eq!(c.failed(), 0, "a skip is not a failure");
+    }
+
+    /// The four hourly groups together file every hourly id exactly once, and each files only its
+    /// own: a missing id reads as passed, and a sibling's id skipped here would overwrite its sample.
+    #[tokio::test]
+    async fn the_hourly_groups_partition_the_journey() {
+        let mut want: Vec<String> =
+            journey(Suite::Hourly).into_iter().flat_map(|(_, ids)| ids).map(str::to_string).collect();
+        want.sort();
+        let mut seen: Vec<String> = vec![];
+        for g in 0..HOURLY_GROUPS {
+            let mut c = crate::testkit::ctx().await;
+            (c.suite, c.group, c.run_id) = (Suite::Hourly, Some(g), format!("hourly-1-g{g}"));
+            c.retry_delay = Duration::from_millis(1);
+            walk(&mut c, Suite::Hourly, Duration::ZERO).await;
+            assert!(!c.steps.is_empty(), "group {g} walks nothing");
+            assert!(c.steps.iter().all(|s| group_of(&s.slo_id) == g), "group {g} filed a sibling's id");
+            seen.extend(c.steps.iter().map(|s| s.slo_id.clone()));
+        }
+        seen.sort();
+        assert_eq!(seen, want, "the groups do not cover the hourly catalogue exactly once");
+    }
+
+    #[test]
+    fn only_another_group_of_the_same_job_is_a_sibling() {
+        assert_eq!(sibling("hourly-1000-g0", "hourly-1030-g3"), Some(3));
+        assert_eq!(sibling("hourly-1030-g3", "hourly-1000-g0"), Some(0));
+        assert_eq!(sibling("hourly-1000-g0", "hourly-1001-g0"), None, "a twin is not a sibling");
+        assert_eq!(sibling("hourly-1000-g0", "hourly-4600-g1"), None, "last hour's Job");
+        assert_eq!(sibling("hourly-1000", "hourly-1000-g1"), None, "an ungrouped run");
+        assert_eq!(sibling("fast-1000", "hourly-1000-g1"), None);
     }
 
     /// And the ordinary path still walks: a budget nobody has spent runs the stages. Asserted on

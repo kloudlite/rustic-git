@@ -85,6 +85,10 @@ pub struct Ctx {
     /// every object this run creates is named with.
     pub run_id: String,
     pub suite: Suite,
+    /// The hourly group this pod walks (`JOB_COMPLETION_INDEX` of the Indexed Job), `None` for
+    /// every other suite and for a hand run with no index — which walks the whole journey. The
+    /// run id carries it as `-g{n}` (`suite::group_of`).
+    pub group: Option<u8>,
     pub http: reqwest::Client,
     pub probe_jwt: String,
     /// Who this run IS. From the CronJob's env — see `SUITE_TENANTS`.
@@ -178,7 +182,7 @@ impl Ctx {
         // rather than stamping a second, later `started` on the same run.
         let started = run_id
             .as_deref()
-            .and_then(|id| id.rsplit('-').next())
+            .and_then(|id| id.split('-').nth(1))
             .and_then(|ts| ts.parse::<i64>().ok())
             .and_then(|ts| DateTime::from_timestamp(ts, 0))
             .unwrap_or_else(Utc::now);
@@ -186,9 +190,17 @@ impl Ctx {
         // context afterwards: it is what mints the superadmin session on first use.
         let probe_jwt = mint(&email_of(&cfg.probe_user), &cfg.probe_user)?;
         let other_jwt = mint(&email_of(&cfg.other_user), &cfg.other_user)?;
+        let group = match suite {
+            Suite::Hourly => std::env::var("JOB_COMPLETION_INDEX").ok().and_then(|i| i.parse::<u8>().ok()),
+            _ => None,
+        };
         Ok(Ctx {
             jwt,
-            run_id: run_id.unwrap_or_else(|| format!("{}-{}", suite.as_str(), started.timestamp())),
+            run_id: run_id.unwrap_or_else(|| match group {
+                Some(g) => format!("{}-{}-g{g}", suite.as_str(), started.timestamp()),
+                None => format!("{}-{}", suite.as_str(), started.timestamp()),
+            }),
+            group,
             probe_jwt,
             other_jwt,
             admin_jwt: std::sync::OnceLock::new(),

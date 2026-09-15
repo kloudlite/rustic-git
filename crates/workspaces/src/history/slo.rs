@@ -222,13 +222,19 @@ pub fn validate(r: &RunReport) -> Result<(), String> {
         s @ ("fast" | "hourly" | "weekly" | "monthly") => s,
         other => return Err(format!("unknown suite {other:?}")),
     };
-    // `{suite}-{digits}` and nothing else: `run_id` is the ReplacingMergeTree key AND is
-    // interpolated into every read, so its shape is the whole safety argument for that.
+    // `{suite}-{digits}`, plus `-g{digit}` for one pod of the hourly Indexed Job, and nothing else:
+    // `run_id` is the ReplacingMergeTree key AND is interpolated into every read, so its shape is
+    // the whole safety argument for that.
     let digits = r
         .run_id
         .strip_prefix(suite)
         .and_then(|rest| rest.strip_prefix('-'))
         .ok_or_else(|| format!("run id {:?} is not {suite}-{{digits}}", r.run_id))?;
+    let digits = match digits.split_once("-g") {
+        Some((ts, g)) if g.len() == 1 && g.chars().all(|c| c.is_ascii_digit()) => ts,
+        Some(_) => return Err(format!("run id {:?} is not {suite}-{{digits}}", r.run_id)),
+        None => digits,
+    };
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return Err(format!("run id {:?} is not {suite}-{{digits}}", r.run_id));
     }
@@ -711,6 +717,10 @@ mod tests {
         assert!(validate(&report("fast-1", "fast", vec![step("git.push.ok")])).is_ok());
         assert!(validate(&report("fast-abc", "fast", vec![])).is_err());
         assert!(validate(&report("hourly-1", "hourly", vec![])).is_ok());
+        assert!(validate(&report("hourly-1-g3", "hourly", vec![])).is_ok());
+        assert!(validate(&report("hourly-1-g", "hourly", vec![])).is_err());
+        assert!(validate(&report("hourly-1-g12", "hourly", vec![])).is_err());
+        assert!(validate(&report("hourly-1-gx", "hourly", vec![])).is_err());
         assert!(validate(&report("nightly-1", "nightly", vec![])).is_err());
         assert!(validate(&report("fast-1", "fast", vec![step("nope")])).is_err());
         let many = (0..201).map(|_| step("git.push.ok")).collect();

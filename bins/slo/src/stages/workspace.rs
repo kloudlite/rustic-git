@@ -72,8 +72,14 @@ const AFTER_CREATE: [&str; 10] = [
 const REFUSAL_TAIL: &str = "in use; request more under Quota";
 
 pub async fn run(c: &mut Ctx) {
-    // The bench is independent of the workspace, so it runs whether or not the create lands.
-    super::bench::fast(c).await;
+    // The bench is independent of the workspace, so it runs whether or not the create lands —
+    // and in its own hourly group (`suite::group_of`), which walks nothing else here.
+    if c.walks("bench.create") {
+        super::bench::fast(c).await;
+    }
+    if !c.walks("ws.create.p95") {
+        return;
+    }
     let created = create(c).await;
     // The one moment a Workspace of ours certainly exists: the admission-policy probe runs here
     // (under the security stage's id), because the security stage itself comes after teardown.

@@ -105,6 +105,9 @@ pub const IDS: &[&str] = &[
 /// skip with a reason is a truthful sample where a missing one is a hole nobody can see.
 pub async fn run(c: &mut Ctx) {
     for id in IDS {
+        if !c.walks(id) {
+            continue;
+        }
         match *id {
             // Owned by `experience_ws`. `ws.packages.add` creates the workspace the pair runs
             // against and `ws.packages.remove` follows it, so one call covers both ids.
@@ -184,6 +187,12 @@ pub async fn run(c: &mut Ctx) {
             "admin.reads" => super::experience_gaps2::reads(c).await,
             // One call: the wake runs first, with every client gone, then the four session ids.
             "bench.idle.wake" => super::bench::hourly(c).await,
+            // A grouped run walks the bench journey in group 3; this dial would reset its idle
+            // wait, so it waits for that group to finish first.
+            "bench.workspace.tool_roundtrip" if c.group.is_some() => {
+                crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
+                super::bench::tool_only(c).await
+            }
             "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             _ => c.skip(id, "not implemented yet"),
         }

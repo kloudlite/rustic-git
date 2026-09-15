@@ -59,6 +59,12 @@ impl Ctx {
     where
         F: for<'a> FnOnce(&'a mut Ctx) -> BoxFuture<'a, anyhow::Result<()>>,
     {
+        // Another hourly group's id is never run nor filed here: two pods filing one id is two
+        // samples, and a skip filed for a sibling's id overwrites its real one (`suite::group_of`).
+        if !self.walks(id) {
+            tracing::error!(slo_id = id, run_id = %self.run_id, "slo.step.foreign");
+            return false;
+        }
         let ts = Utc::now();
         let start = Instant::now();
         // The span tags every `slo.http.*` line inside the step with the id it was measuring.
@@ -152,6 +158,10 @@ impl Ctx {
     /// The same, with the machine-readable reason. `run_state` decides whether the whole run
     /// measured anything from THIS, never from the English in `detail`.
     pub fn skip_because(&mut self, id: &'static str, why: &str, reason: SkipReason) {
+        if !self.walks(id) {
+            tracing::error!(slo_id = id, run_id = %self.run_id, "slo.step.foreign");
+            return;
+        }
         tracing::info!(slo_id = id, reason = why, "slo.step.skipped");
         self.steps.push(StepReport {
             slo_id: id.to_string(),
