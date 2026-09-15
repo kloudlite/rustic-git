@@ -230,7 +230,14 @@ pub async fn hourly(c: &mut Ctx) {
                 let pods: Api<Pod> = Api::namespaced(k.clone(), &crd::ws_namespace(&owner, &owner));
                 // One budget for both waits: idle, then the pod gone.
                 let deadline = Instant::now() + Duration::from_secs(idle) + IDLE_GRACE;
-                wait_phase(c, "idle", deadline.saturating_duration_since(Instant::now())).await?;
+                if let Err(e) = wait_phase(c, "idle", deadline.saturating_duration_since(Instant::now())).await {
+                    // What decides the next one: `clients > 0` is a socket something left open (a
+                    // sibling group's dial), `busy` a turn or process still running, and an old
+                    // `idleSince` a bench that should have exited. Plain HTTP resets no clock.
+                    let health = async { anyhow::Ok(through(forward(c).await?.1, "/healthz").await?.1) }.await;
+                    let health = health.unwrap_or_else(|e| format!("unreadable: {e:#}"));
+                    bail!("{e:#}; /healthz {}", super::clip(&health));
+                }
                 tracing::info!(check = "phase.idle", "slo.bench.idle");
                 while pods.get_opt(kloudlite_workspaces::k8s::BENCH_POD).await?.is_some() {
                     if Instant::now() >= deadline {

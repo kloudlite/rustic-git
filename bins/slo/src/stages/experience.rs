@@ -198,8 +198,14 @@ pub async fn run(c: &mut Ctx) {
             // A grouped run walks the bench journey in group 3; this dial would reset its idle
             // wait, so it waits for that group to finish first.
             "bench.workspace.tool_roundtrip" if c.group.is_some() => {
-                crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
-                super::bench::tool_only(c).await
+                // "cap reached" means group 3 is still walking, possibly inside `bench.idle.wake`'s
+                // wait, where this round trip's `/rpc` socket resets the idle clock and files that
+                // id as "ready, never idle". Skip rather than walk in. The cap clears group 3's own
+                // worst case (540 s wake + sessions + the tool token's journey); 900 s did not.
+                match crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(1500)).await {
+                    "cap reached" => c.skip("bench.workspace.tool_roundtrip", "group 3 was still walking the bench journey"),
+                    _ => super::bench::tool_only(c).await,
+                }
             }
             "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             _ => c.skip(id, "not implemented yet"),

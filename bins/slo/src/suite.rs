@@ -177,17 +177,19 @@ pub fn sibling(mine: &str, other: &str) -> Option<u8> {
 
 /// Wait, bounded, while group `g` of this run's hourly Job is still running. For the few steps that
 /// touch what a sibling is standing inside: a bounded wait costs this pod minutes, where running
-/// through would file a failure for the sibling's reason. No-op for an ungrouped run.
-pub async fn wait_for_group(c: &Ctx, g: u8, cap: Duration) {
+/// through would file a failure for the sibling's reason. No-op for an ungrouped run. Answers why
+/// the wait ended, so a caller whose step would break the sibling can refuse to walk in on
+/// "cap reached": the sibling is still standing inside.
+pub async fn wait_for_group(c: &Ctx, g: u8, cap: Duration) -> &'static str {
     if c.group.is_none_or(|mine| mine == g) {
-        return;
+        return "ungrouped";
     }
     let started = std::time::Instant::now();
     loop {
         let read = runs_matching(c, Suite::Hourly, |id| sibling(&c.run_id, id) == Some(g)).await;
         if let Some(why) = wait_verdict(read, started.elapsed(), cap) {
             tracing::info!(group = g, waited_secs = started.elapsed().as_secs(), reason = why, "slo.group.wait.ended");
-            return;
+            return why;
         }
         tracing::info!(group = g, waited_secs = started.elapsed().as_secs(), "slo.group.waiting");
         tokio::time::sleep(Duration::from_secs(15)).await;
