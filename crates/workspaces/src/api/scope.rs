@@ -159,6 +159,19 @@ pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Wor
     if !super::admin::timing::step("directory.may_act_on", may_act_on(s, c, &w.spec.owner)).await {
         return Err(denial(s, c, &w.spec.owner, not_found()).await);
     }
+    // `owner == caller` admits a person to their own TEAM workspace too, so a paused membership
+    // must be checked here, or start/push/tools stay open until the beat re-stops it. Every
+    // workspace verb resolves through this function; the claim path is untouched.
+    if w.spec.owner == c.name && !c.superadmin && super::membership::team_pair(&w.spec.owner, &w.spec.team) {
+        if let Some(d) = &s.directory {
+            let team = super::membership::norm(&w.spec.team);
+            match d.membership(&team, &c.name).await {
+                Ok(super::Judged::Member(super::MemberState::Paused)) => return Err(denial(s, c, &team, not_found()).await),
+                Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, "team membership could not be checked").into_response()),
+                Ok(_) => {}
+            }
+        }
+    }
     Ok(w)
 }
 
@@ -323,5 +336,67 @@ mod tests {
         assert!(!may_act_on(&s, &c, "t2").await);
         assert!(!may_act_on(&s, &c, "someone-else").await);
         assert!(!may_allocate_for(&s, &c, "t2").await);
+    }
+
+    struct Paused;
+    #[async_trait::async_trait]
+    impl Directory for Paused {
+        async fn teams_for(&self, _u: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn is_live(&self, _j: &str) -> bool {
+            true
+        }
+        async fn for_owner(&self, _o: &str) -> Option<OwnerMaterial> {
+            None
+        }
+        async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+            None
+        }
+        async fn owners_of(&self, _e: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
+            None
+        }
+        async fn is_team(&self, _s: &str) -> bool {
+            true
+        }
+        async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn membership(&self, team: &str, user: &str) -> Result<crate::api::Judged, String> {
+            use crate::api::{Judged, MemberState};
+            match (team, user) {
+                ("down", _) => Err("unreachable".into()),
+                (_, "paula") => Ok(Judged::Member(MemberState::Paused)),
+                _ => Ok(Judged::Member(MemberState::Active)),
+            }
+        }
+    }
+
+    async fn ws_status(owner: &str, team: &str, superadmin: bool) -> u16 {
+        let spec = serde_json::json!({"owner": owner, "team": team, "name": "w1", "region": "r", "image": "i", "desiredState": "running"});
+        let body = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "w1"}, "spec": spec});
+        let (client, _) = crate::kube_test::mock_client(vec![crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces/w1", body)]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt).with_kube(client).with_directory(Arc::new(Paused));
+        let c = Caller { name: owner.into(), superadmin, parent: None, scope: None, jti8: None };
+        match my_ws(&s, &c, "w1").await {
+            Ok(_) => 200,
+            Err(r) => r.status().as_u16(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_member_is_refused_their_own_team_workspace() {
+        assert_eq!(ws_status("paula", "acme", false).await, 403);
+        assert_eq!(ws_status("paula", "", false).await, 200, "a personal workspace is unaffected");
+        assert_eq!(ws_status("paula", "paula", false).await, 200, "team == owner is personal");
+        assert_eq!(ws_status("alice", "acme", false).await, 200, "an active member is unaffected");
+        assert_eq!(ws_status("alice", "down", false).await, 503, "an unreadable directory refuses");
     }
 }
