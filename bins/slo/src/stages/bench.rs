@@ -443,8 +443,10 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     let marker = format!("{}-tool", c.prefix());
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let nm = no_model.clone();
+    let no_login: Arc<Mutex<bool>> = Default::default();
+    let nl = no_login.clone();
     let sid = thread.clone();
-    c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
+    let ran = c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
             let (status, row) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), None).await?;
@@ -462,6 +464,7 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
                 }
                 answered(&body, &nm)?;
                 last = tool_ran(&body, &marker);
+                *nl.lock().unwrap() = last.is_err() && not_logged_in(&body);
                 if last.is_ok() {
                     break;
                 }
@@ -473,6 +476,8 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     .await;
     if let Some(why) = no_model.lock().unwrap().clone() {
         c.demote_to_skip("bench.workspace.tool_roundtrip", &format!("{NO_MODEL}: {}", super::clip(&why)));
+    } else if !ran && *no_login.lock().unwrap() {
+        c.demote_to_skip("bench.workspace.tool_roundtrip", NO_LOGIN);
     }
     Some(thread)
 }
@@ -485,6 +490,23 @@ fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String
         (Some(_), false) => Err("the stage's workspace never became ready (ws.packages.add failed)"),
         (Some(ws), true) => Ok(ws),
     }
+}
+
+/// The bench holds no `kl` credential for workspace tools yet (docs/superpowers/specs/
+/// 2026-09-14-bench-tool-credential-design.md): a product gap, not a sample.
+const NO_LOGIN: &str = "the bench has no kl login for workspace tools (bench tool credential not built yet)";
+
+/// Every tool result is the harness's not-logged-in answer — and there is at least one.
+fn not_logged_in(body: &str) -> bool {
+    let Ok(doc) = serde_json::from_str::<Value>(body) else { return false };
+    let texts: Vec<String> = doc["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "toolResult")
+        .map(|m| m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect())
+        .collect();
+    !texts.is_empty() && texts.iter().all(|t| t.contains("not logged in") && t.contains("/kl-login"))
 }
 
 /// A successful tool result carrying the marker: the echo ran and its output came back. The call's
@@ -861,6 +883,14 @@ mod tests {
         assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
         assert!(tool_prompt(m).contains(m) && exchange_prompt("run-abc-exchange").contains("kl_workspace_start"));
+
+        // Only an answer that is ALL not-logged-in is the credential gap; anything else still fails.
+        let result = |text: &str| json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": text}]});
+        let login = "not logged in — run /kl-login in the bench";
+        assert!(not_logged_in(&json!({"messages": [call, result(login), result(login)]}).to_string()));
+        assert!(!not_logged_in(&json!({"messages": [call, result(login), result("boom")]}).to_string()));
+        assert!(!not_logged_in(&json!({"messages": [call]}).to_string()));
+        assert!(!not_logged_in("not json"));
 
         let no_model = Mutex::new(None);
         let nokey = json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
