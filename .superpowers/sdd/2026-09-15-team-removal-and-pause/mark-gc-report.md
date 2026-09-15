@@ -83,3 +83,14 @@ api-bin, slo-bin all pass; `cargo test -p kloudlite-tests --no-run` builds; web 
   (owner call): admit kloudlite-admin in the policy + RBAC, or have the admin approve call the user-role api.
 - Gates: clippy --workspace --all-targets clean; kloudlite-api, workspaces, api-bin tests pass;
   kloudlite-tests --no-run builds; web lint/typecheck/test pass.
+
+## Fix round: GC slack past delete-after — 3ec38a51
+- `bins/controller/src/gc.rs`: `DELETE_SLACK_SECS` = `KEYS_RESYNC_SECS` (300) + 60; an object is due only
+  once delete-after + slack <= now, so any re-add (immediate accept clear, superadmin grant, timed-out
+  reconcile) is cleared by the keys beat before the GC may act. Admin RBAC/policy untouched (ruling).
+  Test `a_mark_due_but_within_the_slack_waits_and_past_it_goes`.
+- Delete-now notices (team settings + superadmin actions + test): "about 7 minutes". removals.rs states no time.
+- Probe `GC_BOUND` 540 s; SLI "Within 9 minutes of delete-now" in catalogue.rs, deploy/slo.md, fixture row.
+- CLAUDE.md sentence names the slack and why.
+- Gates: clippy --workspace --all-targets clean; controller, workspaces, slo tests pass; kloudlite-tests
+  --no-run builds; web lint/typecheck/test pass.
