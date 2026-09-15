@@ -497,7 +497,17 @@ fn tool_ran(body: &str, marker: &str) -> Result<()> {
             && m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).any(|t| t.contains(marker))
     });
     if !ran {
-        bail!("no successful tool result carries {marker} ({} tool results)", results.len());
+        // What each result actually said, so the next fleet failure names its cause: the thread is
+        // deleted at teardown and cannot be read afterwards. Only `isError` and the text parts —
+        // never the whole message, whose other fields are not ours to vouch for.
+        let seen: Vec<String> = results
+            .iter()
+            .map(|m| {
+                let text: String = m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+                format!("isError={} {:?}", m["isError"], text.chars().take(300).collect::<String>())
+            })
+            .collect();
+        bail!("no successful tool result carries {marker} ({} tool results: {})", results.len(), seen.join("; "));
     }
     Ok(())
 }
@@ -844,7 +854,9 @@ mod tests {
         // The marker only in the call: the tool never answered.
         assert!(tool_ran(&json!({"messages": [call]}).to_string(), m).is_err());
         let failed = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": true, "content": [{"type": "text", "text": format!("{m}\n[exit 1]")}]}]});
-        assert!(tool_ran(&failed.to_string(), m).is_err());
+        let why = tool_ran(&failed.to_string(), m).unwrap_err().to_string();
+        // The failure carries what the tool said, so a fleet run names its cause.
+        assert!(why.contains("isError=true") && why.contains("[exit 1]"), "{why}");
         assert!(tool_workspace(None, true).is_err());
         assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
