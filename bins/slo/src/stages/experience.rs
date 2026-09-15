@@ -51,6 +51,7 @@ pub const IDS: &[&str] = &[
     "team.repo.shared",
     "team.workspace",
     "team.member.remove",
+    "team.member.paused",
     "team.invite.revoke",
     "team.environment",
     "team.delete",
@@ -189,6 +190,7 @@ pub async fn run(c: &mut Ctx) {
             "kl.commands" => super::experience_gaps2::kl_commands(c).await,
             "admin.reads" => super::experience_gaps2::reads(c).await,
             // One call: the wake runs first, with every client gone, then the four session ids.
+            "team.member.paused" => super::experience_teams::member_paused(c).await,
             "bench.idle.wake" => super::bench::hourly(c).await,
             // One call: the pod's token, its audience, then its revocation and the stop.
             "bench.tool.token" => super::bench_tool::run(c).await,

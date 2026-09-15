@@ -587,7 +587,7 @@ async fn teardown(c: &mut Ctx, j: &Journey, peer_ws: Option<String>) {
 /// Both probe owners' pairs in the run's now-deleted team, cleaned now rather than after the seven-day
 /// grace — hourly run teams would otherwise pile up benches and namespaces. Only this run's owners
 /// and team. Deletion still needs `memberRemovalDeletes` on the fleet; without it this only marks.
-async fn delete_members_now(c: &Ctx, team: &str) {
+pub(crate) async fn delete_members_now(c: &Ctx, team: &str) {
     let admin = c.admin_jwt();
     for who in [c.probe_user.clone(), c.other_user.clone()] {
         let url = api(c, &format!("/v1/teams/{team}/members/{who}/delete-now"));

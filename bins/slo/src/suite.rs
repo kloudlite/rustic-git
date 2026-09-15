@@ -133,7 +133,7 @@ const BENCH_IDS: [&str; 10] = [
 pub fn group_of(id: &str) -> u8 {
     if BENCH_IDS.contains(&id) {
         3
-    } else if id == "ws.seed.failed" {
+    } else if id == "ws.seed.failed" || id == "team.member.paused" {
         2
     } else if stages::env_intercept::INTERCEPT_IDS.contains(&id) {
         1
@@ -656,6 +656,8 @@ mod tests {
         }
         assert_eq!(group_of("bench.workspace.tool_roundtrip"), 0);
         assert_eq!(group_of("ws.seed.failed"), 2);
+        // Its own team, never group 0's `-team` or group 1's `-icept`, which pause the same member.
+        assert_eq!(group_of("team.member.paused"), 2);
     }
 
     #[test]

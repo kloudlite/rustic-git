@@ -42,6 +42,8 @@ mod membership;
 pub(crate) use membership::*;
 mod repos;
 pub(crate) use repos::*;
+mod paused;
+pub(crate) use paused::member_paused;
 
 
 // Per-step ceilings. Each is at least its catalogue target, for the reason stage 5 states: a slow
