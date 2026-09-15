@@ -13,7 +13,7 @@ import { DeleteForm } from "@/components/app/delete-form";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { ApiInvite, ApiRemoval, ApiRepo, ApiRole, ApiTeamDetail, ApiTeamMember } from "@/lib/api";
 import { stamp, when } from "@/lib/time";
-import { pauseConfirm, removalConfirm } from "@/lib/team-removal";
+import { deleteNowConfirm, pauseConfirm, removalConfirm } from "@/lib/team-removal";
 import {
   deleteRemovalNow, destroyTeam, invite, pauseMember, removeMember, unpauseMember, revokeInvite, saveProfile, saveTeam, setRole,
   type InviteState, type ProfileState, type TeamState,
@@ -301,9 +301,7 @@ function RemovalRow({ slug, r }: { slug: string; r: ApiRemoval }) {
         <form action={action} className="grid gap-2">
           <input type="hidden" name="slug" value={slug} />
           <input type="hidden" name="owner" value={r.owner} />
-          <FieldLabel htmlFor={`confirm-${r.owner}`}>
-            Type <span className="font-mono font-semibold text-foreground">{r.owner}</span> to delete their bench, workspaces and space choice in <span className="font-mono font-semibold text-foreground">{slug}</span> now
-          </FieldLabel>
+          <FieldLabel htmlFor={`confirm-${r.owner}`}>{deleteNowConfirm(r.owner, slug)}</FieldLabel>
           <div className="flex flex-wrap items-center gap-2">
             <Input id={`confirm-${r.owner}`} name="confirm" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" placeholder={r.owner} className="h-9 max-w-sm font-mono" />
             <Button type="submit" variant="destructive" disabled={pending || typed !== r.owner}>

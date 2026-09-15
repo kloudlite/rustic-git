@@ -80,9 +80,11 @@ const OWNERS: OwnerRow[] = [
 
 /** `GET /admin/owners/removals` — one row waiting out the grace, one already past it and
  *  overdue only because `member_removal_deletes` is off (matches `removalConfirm`'s wording, the
- *  team settings page's own confirm text). */
+ *  team settings page's own confirm text), and `devraj` pending from BOTH teams at once — the
+ *  case `removalKey`/`deleteNowConfirm` exist for, so the screenshot script exercises it too. */
 const PENDING_REMOVALS: (ApiRemoval & { team: string })[] = [
   { owner: "devraj", team: "ops-lab", delete_at: new Date(now + 5 * 86_400_000).toISOString() },
+  { owner: "devraj", team: "acme", delete_at: new Date(now + 3 * 86_400_000).toISOString() },
   { owner: "sana", team: "acme", delete_at: ago(-48) },
 ];
 
