@@ -533,15 +533,38 @@ sweeps stale key directories on its own 600 s tick — so a missed delete is cau
 minutes rather than never — and the api's resync beat runs only in its `user` role (`admin` never
 touches `OwnerKeys`). The `user-key` Secret no longer carries `authorized_keys`. That same beat also PRUNES: an
 `OwnerKeys` no Workspace names any more is deleted, and so is a `wt-` team namespace no Workspace
-resolves to, is older than one beat, and holds no pod (`api::keys::prune_namespaces`); just before
-that, `api::membership::reconcile` judges every team pair (removed member or deleted team alike):
-stamp `removed-at` and pause, then after a 7-day grace — and only with the central
-`memberRemovalDeletes` on — delete the Bench, the team Workspaces and the SpaceEnvironment,
-never a Snapshot, Volume or Environment (`delete_team` lives in the directory binary with no
-kubeconfig, so it is a beat). The
+resolves to, is older than one beat, and holds no pod (`api::keys::prune_namespaces`). The
 namespace half is what stops a deleted team leaving one behind — nothing had ever deleted one, and
 a region held 101 empty ones by 2026-09-08, one per hourly probe run. A person's own `ws-`
 namespace is never a candidate.
+
+**Membership is `active`/`paused`, not just in/out** (`MemberState` in
+`crates/pulls/src/directory/members.rs`); `crates/api/src/teams/pause.rs`'s pause/unpause routes
+reconcile the member's row on both sides of the pair at once through `membership::reconcile_pair`,
+and the keys beat's own judge (`crates/workspaces/src/api/membership.rs::judge`, `Judged::Member`
+Active/Paused, `NotMember`, `TeamGone`) is the backstop that converges a pair the routes missed —
+keep-biased, so a directory error judges nothing rather than acting on a guess. A paused member's
+Bench goes `access: paused` and stops, their team Workspaces stop, and `/v1` answers a paused
+caller 403 `"your access to {team} is paused"` (`scope::team_access`) while a removed one gets 403
+`"you are no longer a member of {team}"` and a stranger a 404; the gateway refuses a tunnel to a
+paused Bench the same way with no directory of its own
+(`bins/gateway/src/resolve.rs`), and a bench tool token off a paused or wrong-team Bench is refused
+by `bench_admits_tool`. Pause never deletes and unpause restores access without starting anything;
+a paused member cannot leave their own team, but an admin can still remove them. A removed member
+or a deleted team instead gets `kloudlite.io/removed-at` stamped (via SSA under field manager
+`kloudlite-membership`, and only that process's ServiceAccount may write it or the admin's
+`kloudlite.io/delete-now` — enforced by the admission policy
+`kloudlite-removal-stamps-are-the-apis`) and a 7-day grace before anything is deleted; an admin's
+confirmed "delete now" (naming the person and the team, `crates/workspaces/src/api/removals.rs`)
+skips the wait. Deletion is gated on the central `memberRemovalDeletes` setting (default false,
+else it only logs `membership.cleanup.would_delete`) and takes the Bench and its on-disk folder
+(held open by the agent's own `kloudlite.io/bench-folder` finalizer, which lstats each path
+component before it deletes `.benches/{team}/{owner}`), the member's team Workspaces, their
+SpaceEnvironment choice and their key projections — never a pushed Snapshot, a repo, a container
+image, or a team Environment. The web surfaces this on the team settings page and superadmin
+Owners' "Pending removals"; `team.member.paused` (hourly) and the monthly drills
+`team.member.removed.cleanup`/`.dir_down` (skipped while deletes are off, since nothing can be
+made to disappear without the source build the design forbids) hold it on the fleet.
 
 **A bench pod's `/v1` credential is a `bench-tool` JWT, not a person's own token.** 15-minute TTL,
 `parent` = the desktop CLI login's own `jti`, scope = the bench's team plus the minting person's own
