@@ -66,3 +66,20 @@ api-bin, slo-bin all pass; `cargo test -p kloudlite-tests --no-run` builds; web 
   `removed-at` without `delete-after` gets marked by the beat once due. Stored central `memberRemovalDeletes`
   is now ignored; turn it on per region in `ClusterSettings`.
 - Web fixture comment (superadmin.ts:82) still names `member_removal_deletes`; comment only, left.
+
+## Fix round: immediate clear on re-join — 593bd655
+- `crates/api/src/teams/pause.rs`: the on_member_state call moved into `reconcile_member` (same 20 s
+  `RECONCILE_WAIT`); pause/unpause use it unchanged.
+- `crates/api/src/teams.rs::accept_invite`: on `Joined`, awaits `reconcile_member` before answering, so
+  `membership::reconcile_pair` clears removed-at/delete-now/delete-after before the 200 (not the 300 s beat).
+- Invite accept is the ONLY path in crates/api that makes someone a member (no direct admin-add route;
+  set_role needs an existing member).
+- Test: `accepting_an_invite_reconciles_the_pair_once` (hook called exactly once with (handle, team)).
+- Fixture comment superadmin.ts:82 now names the regional `memberRemovalDeletes`.
+- NOT done: superadmin `Directory::grant_access` (access Request approve, `crates/workspaces/src/api/admin.rs`)
+  runs in the ADMIN process, which reaches the cluster as `kloudlite-admin`; the stamp admission policy
+  admits only `kloudlite-api` and that SA has no Bench patch, so an immediate reconcile there would be refused.
+  That path still clears on the keys beat (≤300 s) and can race the GC for a pair already due. Fix options
+  (owner call): admit kloudlite-admin in the policy + RBAC, or have the admin approve call the user-role api.
+- Gates: clippy --workspace --all-targets clean; kloudlite-api, workspaces, api-bin tests pass;
+  kloudlite-tests --no-run builds; web lint/typecheck/test pass.
