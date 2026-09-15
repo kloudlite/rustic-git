@@ -184,8 +184,11 @@ async fn record_post_cut_generation(ctx: &Arc<Ctx>, api: &Api<crd::Snapshot>, na
         }
     };
     let body = serde_json::json!({"metadata": {"annotations": {crate::sync::SYNCED_GENERATION: gen.to_string()}}});
-    if let Err(e) = api.patch(name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&body)).await {
-        tracing::warn!(snapshot = %name, reason = "record", error = %e, "snapshot.generation.failed");
+    match api.patch(name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&body)).await {
+        Ok(_) => {}
+        // The record was deleted under the cut (its worktree went): nothing left to annotate.
+        Err(kube::Error::Api(st)) if st.code == 404 => tracing::debug!(snapshot = %name, "snapshot.generation.gone"),
+        Err(e) => tracing::warn!(snapshot = %name, reason = "record", error = %e, "snapshot.generation.failed"),
     }
 }
 
@@ -379,8 +382,11 @@ async fn retain(ctx: &Arc<Ctx>, volume: &str, head: &str) {
                 tracing::info!(%volume, snapshot = %name, reason = "peer-parent", "snapshot.prune.kept");
                 continue;
             }
-            if let Err(e) = snap_api.delete(name, &Default::default()).await {
-                tracing::warn!(%volume, snapshot = %name, error = %e, "snapshot.prune.failed");
+            match snap_api.delete(name, &Default::default()).await {
+                Ok(_) => {}
+                // A stale listing names a record already deleted: gone is what the prune wanted.
+                Err(kube::Error::Api(st)) if st.code == 404 => {}
+                Err(e) => tracing::warn!(%volume, snapshot = %name, error = %e, "snapshot.prune.failed"),
             }
         }
     }
