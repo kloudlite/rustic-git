@@ -102,7 +102,7 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
         };
         let session = post(c, &bench_url(c, "/session", team), &c.probe_jwt, Value::Null).await.context("no bench session")?;
         let gateway = session.get("gateway").and_then(Value::as_str).ok_or_else(|| anyhow!("the session named no gateway"))?;
-        anyhow::Ok((tool, gateway.replacen("wss://", "https://", 1)))
+        anyhow::Ok((tool, gateway.to_string()))
     }
     .await;
     match prep {
@@ -140,20 +140,16 @@ async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
         return Err(anyhow!("the Bench is {:?}/{:?}, not paused and stopped", b.spec.access, b.spec.desired_state));
     }
     let ticket = c.mint_bench_session(&c.probe_user, &id)?;
-    let status = c
-        .http
-        .get(&p.gateway)
-        .header("authorization", c.bearer(&ticket))
-        .header("connection", "Upgrade")
-        .header("upgrade", "websocket")
-        .header("sec-websocket-version", "13")
-        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .send()
-        .await
-        .context("the gateway did not answer")?
-        .status();
-    if status != reqwest::StatusCode::FORBIDDEN {
-        return Err(anyhow!("the gateway tunnel answered {status}, not 403"));
+    // A real handshake, not reqwest with upgrade headers: the edge in front of the gateway
+    // answered that imitation 400 before the handler could refuse it (hourly-1789496344-g2).
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError};
+    let mut req = p.gateway.as_str().into_client_request().context("the session's gateway URL")?;
+    req.headers_mut().insert("authorization", c.bearer(&ticket).parse().context("ticket header")?);
+    match tokio_tungstenite::connect_async(req).await {
+        Err(WsError::Http(resp)) if resp.status() == 403 => {}
+        Err(WsError::Http(resp)) => return Err(anyhow!("the gateway tunnel answered {}, not 403", resp.status())),
+        Err(e) => return Err(anyhow!("the gateway did not answer: {e}")),
+        Ok(_) => return Err(anyhow!("the gateway tunnel opened for a paused member, not 403")),
     }
     Ok(())
 }
