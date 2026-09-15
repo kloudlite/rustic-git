@@ -41,6 +41,61 @@ export function fmt(v: unknown): string {
   return String(v);
 }
 
+/** What the editor holds per field: a boolean for a `bool` row, the typed text for the rest. */
+export type Draft = Record<string, string | boolean>;
+
+type EditRow = { name: string; unit: string; env: string | null; default: unknown };
+
+/** The control's starting value. A bool starts at the value in force (a checkbox has no "unset");
+ *  anything else starts at the STORED value or empty, since an empty box means "leave it". */
+export function initialDraft(row: EditRow, stored: unknown): string | boolean {
+  if (row.unit === "bool") {
+    const v = effectiveValue(stored, row.env, row.default).value;
+    return v === true || v === "true";
+  }
+  return stored === null || stored === undefined ? "" : String(stored);
+}
+
+/** Only the fields the person actually moved. The PUT merges (a field it is not sent keeps its
+ *  stored value), so sending an untouched one would re-stamp it as stored and hide its default.
+ *  Unparsable number text is sent as-is so the api's own 422 names the field, never swallowed. */
+export function changedFields(rows: EditRow[], stored: Record<string, unknown>, draft: Draft): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const row of rows) {
+    const d = draft[row.name];
+    if (d === undefined || d === initialDraft(row, stored[row.name])) continue;
+    if (typeof d === "boolean") out[row.name] = d;
+    else if (d.trim() === "") continue;
+    else if (row.unit === "string") out[row.name] = d;
+    else out[row.name] = Number.isFinite(Number(d)) ? Number(d) : d;
+  }
+  return out;
+}
+
+/** The flat body both PUT routes take: the fields beside a required `note`. */
+export function saveBody(changes: Record<string, unknown>, note: string): Record<string, unknown> {
+  return { ...changes, note: note.trim() };
+}
+
+export function canSave(changes: Record<string, unknown>, note: string): boolean {
+  return Object.keys(changes).length > 0 && note.trim() !== "";
+}
+
+/** A failed write's sentence: a 422 is shown verbatim (it names the field), a 409 in words. */
+export function writeError(r: { kind: string; message: string }): string {
+  return r.kind === "conflict" ? conflictMessage(r.message) : r.message;
+}
+
+/** Central keeps history inline; a region keeps it in the CR's annotation as a JSON string. */
+export function historyOf(doc: { history?: unknown; metadata?: { annotations?: Record<string, string> } }): Record<string, unknown>[] {
+  if (Array.isArray(doc.history)) return doc.history as Record<string, unknown>[];
+  try {
+    return JSON.parse(doc.metadata?.annotations?.["kloudlite.io/settings-history"] ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
 /** The Configuration page's whole point: `stored ?? env ?? default`, restated in the web tier
  *  the same order the reader itself resolves a knob (per `CLAUDE.md`'s "Live settings"), so the
  *  page can label which of the three actually won without asking the backend to say so. */

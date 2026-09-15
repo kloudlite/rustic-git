@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { tokenOr } from "@/lib/api-token";
 import * as api from "@/lib/api";
 import { DIMS, type QuotaDim } from "@/lib/quota";
-import { conflictMessage } from "@/lib/settings";
+import { conflictMessage, saveBody, writeError } from "@/lib/settings";
 import type { AuditFilter, AuditPage } from "@/lib/audit";
 
 export type DecideResult = { ok: true } | { ok: false; message: string };
@@ -148,6 +148,26 @@ export async function rollWorkloadAction(scope: string, name: string, reason: st
   const r = await api.rollWorkload(scope, name, reason, token);
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath(scope === "central" ? "/superadmin/monitoring" : "/superadmin/clusters");
+  return { ok: true };
+}
+
+/** The settings editor's Save. `scope` is `"central"` or a region id; the api 422s an empty note
+ *  or an out-of-range field, and 409s a Boot field whose readers are mid-rollout. */
+export async function saveSettingsAction(scope: string, changes: Record<string, unknown>, note: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminPutSettings(scope, saveBody(changes, note), token);
+  if (!r.ok) return { ok: false, message: writeError(r) };
+  revalidatePath(`/superadmin/configuration/${encodeURIComponent(scope)}`);
+  return { ok: true };
+}
+
+export async function revertSettingsAction(scope: string, n: number, note: string): Promise<SaveResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminRevertSettings(scope, n, note, token);
+  if (!r.ok) return { ok: false, message: writeError(r) };
+  revalidatePath(`/superadmin/configuration/${encodeURIComponent(scope)}`);
   return { ok: true };
 }
 

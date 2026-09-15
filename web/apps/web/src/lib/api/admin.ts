@@ -115,10 +115,25 @@ export function adminCentralSettings(token: string) {
 /** `GET /admin/settings/clusters/{region}` returns the whole `ClusterSettings` CR; only `.spec`
  *  (same `stored ?? env ?? default` fields as the central document) matters for display. */
 export function adminClusterSettings(region: string, token: string) {
-  return adminCall<{ spec: Record<string, unknown> }>(`/admin/settings/clusters/${encodeURIComponent(region)}`, {
-    method: "GET",
-    token,
-  });
+  return adminCall<{ spec: Record<string, unknown>; metadata?: { annotations?: Record<string, string> } }>(
+    `/admin/settings/clusters/${encodeURIComponent(region)}`,
+    { method: "GET", token },
+  );
+}
+
+/** `scope` is `"central"` or a region id. The body is flat: changed fields beside `note`. */
+export function adminPutSettings(scope: string, body: Record<string, unknown>, token: string) {
+  const path = scope === "central" ? "/admin/settings/central" : `/admin/settings/clusters/${encodeURIComponent(scope)}`;
+  return adminCall<unknown>(path, { method: "PUT", token, body: JSON.stringify(body) });
+}
+
+/** Central names no index — it always undoes the last write (`history[0]`); a region takes any. */
+export function adminRevertSettings(scope: string, n: number, note: string, token: string) {
+  const path =
+    scope === "central"
+      ? "/admin/settings/central/revert"
+      : `/admin/settings/clusters/${encodeURIComponent(scope)}/revert/${n}`;
+  return adminCall<unknown>(path, { method: "POST", token, body: JSON.stringify({ note }) });
 }
 
 export function createRegion(body: { id: string; name: string; note: string }, token: string) {

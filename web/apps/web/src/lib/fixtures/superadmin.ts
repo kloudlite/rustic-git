@@ -248,8 +248,14 @@ const CLUSTERS: AdminClusterRow[] = [
 
 const CLUSTER_SETTINGS: Record<string, Record<string, unknown>> = {
   "centralindia-k3s": { syncSecs: 300, nodeDeadSecs: 180, decommissionSecs: 30, retainSyncPoints: 1, workspaceImage: "ghcr.io/kloudlite/kl-base:2026-08-21" },
-  "westeurope-k3s": { syncSecs: 600, nodeDeadSecs: 180, decommissionSecs: 30, retainSyncPoints: 1, workspaceImage: "ghcr.io/kloudlite/kl-base:2026-08-21" },
+  "westeurope-k3s": { syncSecs: 600, nodeDeadSecs: 180, decommissionSecs: 30, retainSyncPoints: 1, workspaceImage: "ghcr.io/kloudlite/kl-base:2026-08-21", memberRemovalDeletes: true },
 };
+
+/** Newest first, as the `kloudlite.io/settings-history` annotation holds them. */
+const CLUSTER_HISTORY = [
+  { syncSecs: 300, nodeDeadSecs: 180, decommissionSecs: 30, retainSyncPoints: 1 },
+  { syncSecs: 300, nodeDeadSecs: 240 },
+];
 
 const CLUSTER_DETAIL: Record<string, AdminClusterDetail> = {
   "centralindia-k3s": {
@@ -379,6 +385,7 @@ const SCHEMA: SettingsSchema = {
     { name: "decommissionSecs", description: "Drain beat on a node that is leaving.", unit: "seconds", range: { min: 10, max: 300 }, mark: "live", readers: ["kloudlite-agent"], default: 30, env: "WS_DECOMMISSION_SECS" },
     { name: "retainSyncPoints", description: "Ready sync points kept per worktree.", unit: "cuts", range: { min: 1, max: 5 }, mark: "live", readers: ["kloudlite-agent"], default: 1, env: null },
     { name: "workspaceImage", description: "Image a workspace runs unless it names its own.", unit: "", range: null, mark: "boot", readers: ["kloudlite-agent"], default: "ghcr.io/kloudlite/kl-base:2026-08-21", env: "WS_IMAGE" },
+    { name: "memberRemovalDeletes", description: "Delete a removed member's bench and team workspaces once their removal is due. Off only logs what would be deleted.", unit: "bool", range: null, mark: "live", readers: ["kloudlite-agent"], default: false, env: null },
   ],
 };
 
@@ -388,6 +395,10 @@ const CENTRAL_SETTINGS: Record<string, unknown> = {
   mergeConcurrency: 6,
   maxTunnels: null,
   cloneHost: "git.kloudlite.io",
+  history: [
+    { maxBody: 2_147_483_648, mergeConcurrency: 4 },
+    { maxBody: 1_073_741_824 },
+  ],
 };
 
 const SUPERADMINS: SuperAdmin[] = [
@@ -941,7 +952,9 @@ export function fixtureFor(path: string): unknown | undefined {
   if (bare.startsWith("/admin/clusters/")) return CLUSTER_DETAIL[decodeURIComponent(bare.slice("/admin/clusters/".length))];
   if (bare.startsWith("/admin/settings/clusters/")) {
     const spec = CLUSTER_SETTINGS[decodeURIComponent(bare.slice("/admin/settings/clusters/".length))];
-    return spec ? { spec } : undefined;
+    return spec
+      ? { spec, metadata: { annotations: { "kloudlite.io/settings-history": JSON.stringify(CLUSTER_HISTORY) } } }
+      : undefined;
   }
   if (bare === "/v1/quota") return DEFAULT_QUOTA[new URLSearchParams(query).get("owner") ?? ""];
 

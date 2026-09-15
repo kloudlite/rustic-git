@@ -30,6 +30,7 @@ export default async function ConfigurationPage() {
       readers: "Read by server, api, worker, gateway · refreshed on a 30 s beat",
       rows: schema.central,
       stored: central,
+      href: "/superadmin/configuration/central",
     },
     ...regions.map((rg, i) => {
       const res = clusterSettled[i];
@@ -39,6 +40,7 @@ export default async function ConfigurationPage() {
         rows: schema.cluster,
         stored: res?.ok ? res.value.spec : {},
         error: res && !res.ok ? res.message : null,
+        href: `/superadmin/configuration/${encodeURIComponent(rg.id)}`,
       };
     }),
   ];
@@ -48,7 +50,7 @@ export default async function ConfigurationPage() {
       <AutoRefresh intervalMs={10_000} />
       <PageHeader
         title="Configuration"
-        purpose="Every knob, where its current value comes from, and what changing it would cost. Read-only here."
+        purpose="Every knob, where its current value comes from, and what changing it would cost. Edit a scope to change it."
       />
       {firstError && !firstError.ok && (
         <p className="border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm2 text-destructive">
