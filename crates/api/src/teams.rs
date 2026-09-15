@@ -1187,7 +1187,7 @@ mod role_tests {
             created_at: DateTime::now(),
             members: members
                 .iter()
-                .map(|(u, r)| Member { user: (*u).into(), role: *r, joined_at: DateTime::now() })
+                .map(|(u, r)| Member { user: (*u).into(), role: *r, joined_at: DateTime::now(), state: Default::default(), paused_at: None, paused_by: None })
                 .collect(),
             ..Default::default()
         }

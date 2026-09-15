@@ -2,7 +2,7 @@
 //! impl-block boundary — everything else about the directory (people, repos, credentials,
 //! passkeys) lives there.
 
-use super::{check_handle, is_duplicate_key, Backend, Directory, HandleKind, Member, Role, User};
+use super::{check_handle, is_duplicate_key, Backend, Directory, HandleKind, Member, MemberState, Role, User};
 use mongodb::bson::{doc, to_bson, DateTime};
 use kloudlite_core::{err, Result};
 use serde::{Deserialize, Serialize};
@@ -127,7 +127,7 @@ impl Directory {
             region: region.to_string(),
             created_by: creator.to_string(),
             created_at: now,
-            members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now }],
+            members: vec![Member { user: creator.to_string(), role: Role::Owner, joined_at: now, state: MemberState::Active, paused_at: None, paused_by: None }],
             ..Default::default()
         };
         match &self.backend {
@@ -226,7 +226,7 @@ impl Directory {
             Backend::Mongo(m) => m
                 .teams
                 .clone_with_type::<Id>()
-                .find(doc! { "members.user": user })
+                .find(doc! { "members": { "$elemMatch": { "user": user, "state": { "$ne": "paused" } } } })
                 .projection(doc! { "_id": 1 })
                 .limit(super::LISTING_LIMIT)
                 .max_time(super::QUERY_MAX_TIME)
@@ -241,7 +241,7 @@ impl Directory {
                 .unwrap()
                 .teams
                 .values()
-                .filter(|t| t.members.iter().any(|m| m.user == user))
+                .filter(|t| t.members.iter().any(|m| m.user == user && m.state != MemberState::Paused))
                 .map(|t| t.slug.clone())
                 .collect()),
         }
@@ -358,7 +358,7 @@ impl Directory {
         }
         // The filter carries the duplicate check, so two concurrent adds of the same person
         // cannot both push: the second finds no document whose members lack them.
-        let member = Member { user: email.clone(), role, joined_at: DateTime::now() };
+        let member = Member { user: email.clone(), role, joined_at: DateTime::now(), state: MemberState::Active, paused_at: None, paused_by: None };
         let matched = match &self.backend {
             Backend::Mongo(m) => {
                 let r = m
@@ -436,6 +436,77 @@ impl Directory {
             }
         };
         Ok(if matched { Membership::Done } else { Membership::LastOwner })
+    }
+
+    /// Pause or resume a member. Pausing keeps the row and role; it only drops the team from
+    /// `slugs_for`. A team must keep an ACTIVE owner — a paused one cannot administer it — so
+    /// pausing the last one is refused, in the filter as well as the snapshot, like `set_role`.
+    pub async fn set_member_state(&self, slug: &str, email: &str, state: MemberState, by: &str) -> Result<Membership> {
+        let email = email.trim().to_lowercase();
+        let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
+        let Some(current) = team.members.iter().find(|m| m.user == email) else { return Ok(Membership::NotAMember) };
+        let active_owner = |m: &Member| m.role == Role::Owner && m.state == MemberState::Active;
+        let guarded = state == MemberState::Paused && active_owner(current);
+        if guarded && team.members.iter().filter(|m| active_owner(m)).count() == 1 {
+            return Ok(Membership::LastOwner);
+        }
+        let now = DateTime::now();
+        let matched = match &self.backend {
+            Backend::Mongo(m) => {
+                let mut filter = doc! { "_id": slug, "members.user": &email };
+                if guarded {
+                    filter.insert(
+                        "members",
+                        doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email }, "state": { "$ne": "paused" } } },
+                    );
+                }
+                // arrayFilters, not the positional `$`: with an $elemMatch in the filter `$` would
+                // point at the OTHER owner, not the member being paused.
+                let update = match state {
+                    MemberState::Paused => doc! { "$set": {
+                        "members.$[m].state": "paused", "members.$[m].pausedAt": now, "members.$[m].pausedBy": by,
+                    } },
+                    MemberState::Active => doc! {
+                        "$set": { "members.$[m].state": "active" },
+                        "$unset": { "members.$[m].pausedAt": "", "members.$[m].pausedBy": "" },
+                    },
+                };
+                let r = m
+                    .teams
+                    .update_one(filter, update)
+                    .array_filters(vec![doc! { "m.user": &email }])
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                r.matched_count == 1
+            }
+            Backend::Memory(s) => {
+                let mut s = s.lock().unwrap();
+                match s.teams.get_mut(slug) {
+                    Some(t)
+                        if t.members.iter().any(|m| m.user == email)
+                            && (!guarded || t.members.iter().any(|m| active_owner(m) && m.user != email)) =>
+                    {
+                        for m in t.members.iter_mut().filter(|m| m.user == email) {
+                            m.state = state;
+                            (m.paused_at, m.paused_by) = match state {
+                                MemberState::Paused => (Some(now), Some(by.to_string())),
+                                MemberState::Active => (None, None),
+                            };
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        Ok(if matched { Membership::Done } else { Membership::LastOwner })
+    }
+
+    /// Strict: `Ok(None)` means the team exists and the person is not in it; a failed read is an
+    /// error, never "not a member", so a caller deciding to delete data cannot act on an outage.
+    pub async fn membership(&self, slug: &str, email: &str) -> std::result::Result<Option<MemberState>, MembershipErr> {
+        let team = self.get(slug).await.map_err(|e| MembershipErr::Read(e.to_string()))?.ok_or(MembershipErr::NoSuchTeam)?;
+        Ok(team.members.iter().find(|m| m.user.eq_ignore_ascii_case(email.trim())).map(|m| m.state))
     }
 
     /// Remove a member. Same last-owner rule as `set_role`, for the same reason.
@@ -717,6 +788,12 @@ pub enum Membership {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub enum MembershipErr {
+    NoSuchTeam,
+    Read(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum DeleteTeam {
     Deleted,
     StillOwns { repos: u64 },
@@ -791,5 +868,73 @@ mod tests {
         assert!(!t.public);
         assert!(t.pins.is_empty());
         assert_eq!(t.tagline, "");
+    }
+
+    #[test]
+    fn a_member_row_without_state_reads_active() {
+        let old = r#"{"user":"a@x.io","role":"owner","joinedAt":{"$date":{"$numberLong":"0"}}}"#;
+        let m: Member = serde_json::from_str(old).unwrap();
+        assert_eq!((m.state, m.paused_at, m.paused_by), (MemberState::Active, None, None));
+    }
+
+    async fn team_of_two() -> Directory {
+        let d = Directory::in_memory();
+        d.upsert_user("alice@x.io", "Alice").await.unwrap();
+        d.upsert_user("bob@x.io", "Bob").await.unwrap();
+        d.create("acme", "Acme", "alice@x.io", "").await.unwrap().unwrap();
+        assert_eq!(d.add_member("acme", "bob@x.io", Role::Member).await.unwrap(), AddMember::Added);
+        d
+    }
+
+    fn member(d: &Team, email: &str) -> Member {
+        d.members.iter().find(|m| m.user == email).cloned().unwrap()
+    }
+
+    #[tokio::test]
+    async fn set_member_state_round_trips_and_stamps_paused_at_and_by() {
+        let d = team_of_two().await;
+        assert_eq!(d.set_member_state("acme", "Bob@x.io", MemberState::Paused, "alice@x.io").await.unwrap(), Membership::Done);
+        let b = member(&d.get("acme").await.unwrap().unwrap(), "bob@x.io");
+        assert_eq!(b.state, MemberState::Paused);
+        assert!(b.paused_at.is_some());
+        assert_eq!(b.paused_by.as_deref(), Some("alice@x.io"));
+        assert_eq!(b.role, Role::Member, "the role is kept");
+        assert_eq!(d.set_member_state("acme", "bob@x.io", MemberState::Active, "alice@x.io").await.unwrap(), Membership::Done);
+        let b = member(&d.get("acme").await.unwrap().unwrap(), "bob@x.io");
+        assert_eq!((b.state, b.paused_at, b.paused_by), (MemberState::Active, None, None));
+        assert_eq!(d.set_member_state("acme", "ghost@x.io", MemberState::Paused, "a").await.unwrap(), Membership::NotAMember);
+        assert_eq!(d.set_member_state("nope", "bob@x.io", MemberState::Paused, "a").await.unwrap(), Membership::NoSuchTeam);
+    }
+
+    #[tokio::test]
+    async fn the_last_active_owner_cannot_be_paused() {
+        let d = team_of_two().await;
+        assert_eq!(d.set_member_state("acme", "alice@x.io", MemberState::Paused, "x").await.unwrap(), Membership::LastOwner);
+        assert_eq!(d.set_role("acme", "bob@x.io", Role::Owner).await.unwrap(), Membership::Done);
+        assert_eq!(d.set_member_state("acme", "bob@x.io", MemberState::Paused, "x").await.unwrap(), Membership::Done);
+        assert_eq!(
+            d.set_member_state("acme", "alice@x.io", MemberState::Paused, "x").await.unwrap(),
+            Membership::LastOwner,
+            "a paused owner does not count"
+        );
+    }
+
+    #[tokio::test]
+    async fn slugs_for_omits_a_paused_team() {
+        let d = team_of_two().await;
+        assert_eq!(d.slugs_for("bob@x.io").await.unwrap(), vec!["acme".to_string()]);
+        d.set_member_state("acme", "bob@x.io", MemberState::Paused, "alice@x.io").await.unwrap();
+        assert!(d.slugs_for("bob@x.io").await.unwrap().is_empty());
+        assert_eq!(d.slugs_for("alice@x.io").await.unwrap(), vec!["acme".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn membership_distinguishes_no_team_not_member_and_paused() {
+        let d = team_of_two().await;
+        assert_eq!(d.membership("nope", "bob@x.io").await, Err(MembershipErr::NoSuchTeam));
+        assert_eq!(d.membership("acme", "ghost@x.io").await, Ok(None));
+        assert_eq!(d.membership("acme", "bob@x.io").await, Ok(Some(MemberState::Active)));
+        d.set_member_state("acme", "bob@x.io", MemberState::Paused, "alice@x.io").await.unwrap();
+        assert_eq!(d.membership("acme", "bob@x.io").await, Ok(Some(MemberState::Paused)));
     }
 }

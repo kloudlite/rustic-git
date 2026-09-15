@@ -19,7 +19,7 @@
 
 mod teams;
 pub use teams::{
-    check_pins, AcceptInvite, AddMember, DeleteTeam, Invite, Membership, Team, TeamProfile,
+    check_pins, AcceptInvite, AddMember, DeleteTeam, Invite, Membership, MembershipErr, Team, TeamProfile,
     MAX_PINS,
 };
 
@@ -36,6 +36,23 @@ pub struct Member {
     pub user: String,
     pub role: Role,
     pub joined_at: DateTime,
+    /// A row written before pausing existed has no state, and reads as `Active`.
+    #[serde(default)]
+    pub state: MemberState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<DateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_by: Option<String>,
+}
+
+/// A paused member keeps their row and role, but every team listing that grants access
+/// (`slugs_for`) leaves the team out — access is blocked, nothing is deleted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberState {
+    #[default]
+    Active,
+    Paused,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
