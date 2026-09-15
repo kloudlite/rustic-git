@@ -206,7 +206,13 @@ pub(super) async fn proxy_restart(c: &mut Ctx, j: &Journey, held: bool) {
             // An exec straight after the delete lands in the OLD, terminating pod ("cannot exec in
             // a stopped state", 2026-09-15): wait for the replacement by uid, Running and Ready.
             let start = std::time::Instant::now();
-            while !restarted(pods.get_opt(&w).await?.as_ref(), old.as_deref()) {
+            loop {
+                // A transient read error is one more poll, never the step's verdict.
+                match pods.get_opt(&w).await {
+                    Ok(p) if restarted(p.as_ref(), old.as_deref()) => break,
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "slo.intercept.restart.read"),
+                }
                 if start.elapsed() + SLACK >= RESTART_CEILING - SLACK {
                     return Err(anyhow!("the intercepting workspace's pod never came back Running and Ready"));
                 }
@@ -214,7 +220,8 @@ pub(super) async fn proxy_restart(c: &mut Ctx, j: &Journey, held: bool) {
             }
             // The pod comes back empty: the listener is a process, not a file.
             listen(c, &ns, &w).await.context("the listener never came back in the restarted pod")?;
-            answers(c, &e, &workspace_dial(), MARKER, RESTART_CEILING - SLACK).await?;
+            // Only what the restart wait left of the ceiling, so a breach names this half.
+            answers(c, &e, &workspace_dial(), MARKER, (RESTART_CEILING - SLACK).saturating_sub(start.elapsed())).await?;
             let after = proxy_uid(c, &e).await.context("the proxy pod is gone after the restart")?;
             if after != before {
                 return Err(anyhow!("the proxy pod was recreated ({before} -> {after}), so something addressed the workspace pod directly"));
