@@ -84,10 +84,10 @@ pub fn decide(judged: &Result<Judged, String>, stamped_at: Option<i64>, delete_n
     }
 }
 
-struct Objects {
-    benches: Vec<crd::Bench>,
-    workspaces: Vec<crd::Workspace>,
-    spaces: Vec<crd::SpaceEnvironment>,
+pub(super) struct Objects {
+    pub(super) benches: Vec<crd::Bench>,
+    pub(super) workspaces: Vec<crd::Workspace>,
+    pub(super) spaces: Vec<crd::SpaceEnvironment>,
 }
 
 async fn list<K>(c: &kube::Client) -> Result<Vec<K>, String>
@@ -102,21 +102,21 @@ where
     }
 }
 
-async fn list_all(c: &kube::Client) -> Result<Objects, String> {
+pub(super) async fn list_all(c: &kube::Client) -> Result<Objects, String> {
     Ok(Objects { benches: list(c).await?, workspaces: list(c).await?, spaces: list(c).await? })
 }
 
-fn norm(x: &str) -> String {
+pub(super) fn norm(x: &str) -> String {
     x.trim().to_ascii_lowercase()
 }
 
 /// A personal pair (team empty or the owner, in any case) is never a candidate.
-fn team_pair(owner: &str, team: &str) -> bool {
+pub(super) fn team_pair(owner: &str, team: &str) -> bool {
     let team = norm(team);
     !team.is_empty() && team != norm(owner)
 }
 
-fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
+pub(super) fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
     let b = o.benches.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let w = o.workspaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let s = o.spaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
@@ -124,7 +124,7 @@ fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
 }
 
 /// The annotation, only when `kloudlite-membership` owns it in `managedFields`.
-fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String> {
+pub(super) fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String> {
     let pointer = format!("/f:metadata/f:annotations/f:{}", key.replace('~', "~0").replace('/', "~1"));
     let owned = m.managed_fields.iter().flatten().any(|f| {
         f.manager.as_deref() == Some(MEMBERSHIP_FIELD_MANAGER) && f.fields_v1.as_ref().is_some_and(|v| v.0.pointer(&pointer).is_some())
@@ -165,26 +165,55 @@ pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
     }
 }
 
-/// `Err` only for an unreadable directory, which writes nothing.
-async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str, budget: &mut usize) -> Result<(), String> {
+/// Every object of one normalised pair.
+pub(super) fn metas_of<'a>(o: &'a Objects, owner: &str, team: &str) -> Vec<&'a kube::core::ObjectMeta> {
     let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
-    let benches: Vec<_> = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
-    let workspaces: Vec<_> = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
-    let spaces: Vec<_> = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
-    let metas: Vec<&kube::core::ObjectMeta> = benches
-        .iter()
-        .map(|x| &x.metadata)
-        .chain(workspaces.iter().map(|x| &x.metadata))
-        .chain(spaces.iter().map(|x| &x.metadata))
-        .collect();
-    let ann = |m: &kube::core::ObjectMeta, k: &str| m.annotations.as_ref().and_then(|a| a.get(k)).cloned();
-    // Latest wins, and an unparsable or foreign stamp is no stamp: all only ever push a delete later.
-    let stamped_at = metas
+    let b = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
+    let w = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
+    let s = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
+    b.chain(w).chain(s).collect()
+}
+
+/// Latest wins, and an unparsable or foreign stamp is no stamp: all only ever push a delete later.
+pub(super) fn latest_stamp(metas: &[&kube::core::ObjectMeta]) -> Option<i64> {
+    metas
         .iter()
         .filter_map(|m| system_annotation(m, REMOVED_AT))
         .filter_map(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
         .map(|t| t.timestamp())
-        .max();
+        .max()
+}
+
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Removal {
+    pub owner: String,
+    pub team: String,
+    pub removed_at: String,
+    pub delete_at: String,
+}
+
+/// Pairs carrying a system-written stamp — the same provenance rule the beat decides from, so a
+/// listing never shows a date the beat would not act on.
+pub(super) fn removals(o: &Objects) -> Vec<Removal> {
+    let at = |t: i64| chrono::DateTime::from_timestamp(t, 0).unwrap_or_default();
+    pairs(o)
+        .into_iter()
+        .filter_map(|(owner, team)| {
+            let t = latest_stamp(&metas_of(o, &owner, &team))?;
+            Some(Removal { removed_at: at(t).to_rfc3339(), delete_at: (at(t) + MEMBER_REMOVAL_GRACE).to_rfc3339(), owner, team })
+        })
+        .collect()
+}
+
+/// `Err` only for an unreadable directory, which writes nothing.
+async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str, budget: &mut usize) -> Result<(), String> {
+    let metas = metas_of(o, owner, team);
+    let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
+    let benches: Vec<_> = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
+    let workspaces: Vec<_> = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
+    let spaces: Vec<_> = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
+    let ann = |m: &kube::core::ObjectMeta, k: &str| m.annotations.as_ref().and_then(|a| a.get(k)).cloned();
+    let stamped_at = latest_stamp(&metas);
     let delete_now = stamped_at.is_some() && metas.iter().any(|m| system_annotation(m, DELETE_NOW).is_some());
     let full: Vec<_> = benches.iter().filter(|b| b.spec.access == crd::BenchAccess::Full).collect();
     let paused = !benches.is_empty() && full.is_empty();
@@ -248,16 +277,16 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
                 // The stamp, and during the grace no tools — the pause as its own merge patch so
                 // the membership manager never takes ownership of `spec.access`.
                 for b in &benches {
-                    ok |= stamp(&bapi, &b.name_any(), &at.to_rfc3339()).await;
+                    ok |= stamp(&bapi, &b.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
                     write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
                 }
             } else if !workspaces.is_empty() {
                 for w in &workspaces {
-                    ok |= stamp(&wapi, &w.name_any(), &at.to_rfc3339()).await;
+                    ok |= stamp(&wapi, &w.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
                 }
             } else {
                 for x in &spaces {
-                    ok |= stamp(&sapi, &x.name_any(), &at.to_rfc3339()).await;
+                    ok |= stamp(&sapi, &x.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
                 }
             }
             if !ok {
@@ -389,11 +418,11 @@ where
 }
 
 /// The stamp by server-side apply, so `managedFields` records who wrote it (see module docs).
-async fn stamp<K>(api: &Api<K>, name: &str, at: &str) -> bool
+pub(super) async fn stamp<K>(api: &Api<K>, name: &str, annotations: serde_json::Value) -> bool
 where
     K: kube::Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
 {
-    let body = json!({"apiVersion": K::api_version(&()), "kind": K::kind(&()), "metadata": {"name": name, "annotations": {REMOVED_AT: at}}});
+    let body = json!({"apiVersion": K::api_version(&()), "kind": K::kind(&()), "metadata": {"name": name, "annotations": annotations}});
     match api.patch(name, &PatchParams::apply(MEMBERSHIP_FIELD_MANAGER).force(), &Patch::Apply(&body)).await {
         Ok(_) => {
             tracing::info!(%name, "membership.stamped");
@@ -439,8 +468,12 @@ mod tests {
         async fn owners_of(&self, _e: &str) -> Vec<String> {
             Vec::new()
         }
-        async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
-            None
+        async fn team_role(&self, u: &str, t: &str) -> Option<TeamRole> {
+            match (u, t) {
+                ("ann", "acme") => Some(TeamRole::Admin),
+                ("mem", "acme") => Some(TeamRole::Member),
+                _ => None,
+            }
         }
         async fn is_team(&self, _s: &str) -> bool {
             false
@@ -820,5 +853,66 @@ mod tests {
         let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
         reconcile(&s).await;
         assert!(!writes(&rec).iter().any(|c| c.contains("/workspaces/w9")), "{:?}", writes(&rec));
+    }
+
+    fn who(name: &str) -> crate::api::Caller {
+        crate::api::Caller { name: name.into(), superadmin: false, parent: None, scope: None, jti8: None }
+    }
+
+    fn confirm(person: &str, team: &str) -> crate::api::removals::Confirm {
+        crate::api::removals::Confirm { person: person.into(), team: team.into() }
+    }
+
+    #[tokio::test]
+    async fn delete_now_requires_admin_and_both_names() {
+        use crate::api::removals::delete_now;
+        let (s, rec, _) = setup(vec![], &[]);
+        assert_eq!(delete_now(&s, &who("ann"), "acme", "bob", &confirm("bob", "other")).await.status(), 400);
+        assert_eq!(delete_now(&s, &who("ann"), "acme", "bob", &confirm("bo", "acme")).await.status(), 400);
+        assert_eq!(delete_now(&s, &who("mem"), "acme", "bob", &confirm("bob", "acme")).await.status(), 403);
+        assert_eq!(delete_now(&s, &who("eve"), "acme", "bob", &confirm("bob", "acme")).await.status(), 404);
+        assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn delete_now_refuses_an_unstamped_pair() {
+        let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", None)])], &[]);
+        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
+        assert_eq!(r.status(), 409);
+        assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
+    }
+
+    #[tokio::test]
+    async fn delete_now_runs_the_delete_without_waiting_the_grace() {
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let name = crd::bench_id("bob", "acme");
+        let b = with_meta(bench("bob", "acme", "paused", None), &name, Some(&fresh), true);
+        let mut marked = b.clone();
+        marked["metadata"]["annotations"] = json!({REMOVED_AT: fresh, DELETE_NOW: "true"});
+        marked["metadata"]["managedFields"] = owned(&[REMOVED_AT, DELETE_NOW]);
+        let routes = vec![benches(vec![b.clone()]), benches(vec![b]), benches(vec![marked.clone()]), patch(path("bob", "acme"), marked), del(path("bob", "acme"), 200)];
+        let (s, rec, _) = setup(routes, &[]);
+        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "Acme", "bob", &confirm("bob", "acme")).await;
+        assert_eq!(r.status(), 202);
+        let sent = rec.sent("PATCH", &path("bob", "acme"));
+        assert_eq!(sent[0]["metadata"]["annotations"], json!({REMOVED_AT: fresh, DELETE_NOW: "true"}), "removed-at is kept");
+        assert!(rec.requests().iter().any(|r| r.contains("fieldManager=kloudlite-membership")));
+        assert_eq!(deletes(&rec), vec![format!("DELETE {}", path("bob", "acme"))]);
+    }
+
+    #[test]
+    fn removals_lists_stamped_pairs_only() {
+        let parse = |v: serde_json::Value| serde_json::from_value::<crd::Bench>(v).unwrap();
+        let mut foreign = bench("carl", "acme", "paused", None);
+        foreign["metadata"]["annotations"] = json!({REMOVED_AT: OLD});
+        let o = Objects {
+            benches: vec![parse(bench("bob", "acme", "paused", Some(OLD))), parse(bench("alice", "acme", "full", None)), parse(foreign)],
+            workspaces: vec![],
+            spaces: vec![],
+        };
+        let r = removals(&o);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert_eq!((r[0].owner.as_str(), r[0].team.as_str()), ("bob", "acme"));
+        assert_eq!(r[0].delete_at, "2020-01-08T00:00:00+00:00");
     }
 }

@@ -67,6 +67,7 @@ pub(crate) mod scope;
 mod bench;
 mod me;
 pub mod membership;
+pub mod removals;
 pub mod spaces;
 mod volumes;
 // `pub`: the SLO probe reads `KNOWN_CENTRAL` so its rollout yield asks about exactly the
@@ -203,6 +204,9 @@ mod route_tests {
         "/v1/internal/builders/{slug}",
         "/v1/internal/builders/{slug}/start",
         "/v1/internal/builders/{slug}/stop",
+        "/v1/internal/membership/{team}/{owner}",
+        "/v1/teams/{slug}/members/{email}/delete-now",
+        "/v1/teams/{slug}/removals",
         "/v1/bench",
         "/v1/bench/teams",
         "/v1/bench/start",
@@ -313,6 +317,7 @@ pub(super) fn internal_router(state: Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/internal/builders/{slug}", get(get_builder))
         .route("/v1/internal/builders/{slug}/start", post(start_builder))
         .route("/v1/internal/builders/{slug}/stop", post(stop_builder))
+        .route("/v1/internal/membership/{team}/{owner}", post(removals::reconcile_one))
         .route_layer(axum::middleware::from_fn_with_state(state, require_builder_secret))
 }
 
@@ -350,6 +355,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments/{id}/intercepts", post(set_intercept))
         .route("/v1/environments/{id}/intercepts/{service}", axum::routing::delete(clear_intercept))
         .route("/v1/builders/me", get(get_my_builder))
+        // Param names match the directory's `/v1/teams/{slug}/members/{email}/*`: both routers merge into one app.
+        .route("/v1/teams/{slug}/members/{email}/delete-now", post(removals::delete_now_route))
+        .route("/v1/teams/{slug}/removals", get(removals::team_removals))
         .merge(internal_router(state.clone()))
         .route("/v1/volumes", get(list_volumes))
         .route("/v1/volumes/{name}/history", get(volume_history))

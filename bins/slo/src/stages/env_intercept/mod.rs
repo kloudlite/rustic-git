@@ -547,8 +547,8 @@ async fn proxy_uid(c: &Ctx, env: &str) -> Result<String> {
 /// is DELETED FIRST, because a release is what takes the proxy down and an environment delete that
 /// raced one has left a proxy pod running on the fleet before; and the team goes LAST, because
 /// `delete_team` is refused while it still holds a workspace. The team's bench has no route of its
-/// own to go by: the api's keys beat deletes a gone team's benches (`membership::reconcile`, after its seven-day grace), and
-/// its namespace follows on a later beat.
+/// own to go by: `delete_members_now` asks the api to delete both owners' pairs now instead of after the
+/// seven-day grace, and the namespace follows on a later keys beat.
 ///
 /// Nothing is deleted by a name that is not `run-{id}`-prefixed, so a crashed run is swept by the
 /// next one and a run can never delete another's live objects.
@@ -575,10 +575,26 @@ async fn teardown(c: &mut Ctx, j: &Journey, peer_ws: Option<String>) {
         Err(e) => Err(e),
     };
     match drained {
-        Ok(()) => warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{}", j.team)), &jwt).await,
+        Ok(()) => {
+            warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{}", j.team)), &jwt).await;
+            delete_members_now(c, &j.team).await;
+        }
         Err(e) => tracing::warn!(kind = "team", op = "drain", name = %j.team, error = %format!("{e:#}"), "slo.teardown.failed"),
     }
     no_proxy_left(c, j).await;
+}
+
+/// Both probe owners' pairs in the run's now-deleted team, cleaned now rather than after the seven-day
+/// grace — hourly run teams would otherwise pile up benches and namespaces. Only this run's owners
+/// and team. Deletion still needs `memberRemovalDeletes` on the fleet; without it this only marks.
+async fn delete_members_now(c: &Ctx, team: &str) {
+    let admin = c.admin_jwt();
+    for who in [c.probe_user.clone(), c.other_user.clone()] {
+        let url = api(c, &format!("/v1/teams/{team}/members/{who}/delete-now"));
+        if let Err(e) = post(c, &url, &admin, serde_json::json!({ "person": who, "team": team })).await {
+            tracing::warn!(kind = "team", op = "delete_now", name = %team, error = %format!("{e:#}"), "slo.teardown.failed");
+        }
+    }
 }
 
 /// The follower's workspace is GONE, read as its own owner. `drain_team` lists

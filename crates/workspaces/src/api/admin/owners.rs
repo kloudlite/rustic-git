@@ -320,3 +320,9 @@ pub(crate) async fn bind_owner_region(
     audit(&s, &c.name, "owner.region.bind", &slug, Some(bound.clone()), "ok").await;
     Ok(Json(serde_json::json!({"slug": slug, "region": bound})).into_response())
 }
+
+/// `GET /admin/owners/removals`: every pair pending removal. Delete-now itself is the `/v1` route —
+/// the admission policy admits only the user-role process to the mark.
+pub(crate) async fn removals_list(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    Ok(Json(crate::api::removals::all(&s).await?).into_response())
+}

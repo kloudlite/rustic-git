@@ -175,6 +175,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/quota-requests/{id}/approve", post(approve_quota_request))
         .route("/admin/quota-requests/{id}/deny", post(deny_quota_request))
         .route("/admin/owners", get(owners::owners_list))
+        .route("/admin/owners/removals", get(owners::removals_list))
         .route("/admin/owners/{slug}", get(owners::owner_detail))
         .route("/admin/owners/{slug}/region", axum::routing::put(owners::bind_owner_region))
         .route("/admin/nodes", get(list_nodes))
