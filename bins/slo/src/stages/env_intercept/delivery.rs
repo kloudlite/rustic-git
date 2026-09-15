@@ -149,9 +149,9 @@ pub(super) async fn peer(c: &mut Ctx, j: &Journey, held: bool) -> Option<String>
 /// `env.intercept.bench`: the probe owner's bench in this team — a pod of the same space, one layer
 /// further from a workspace — reaches the intercepted service, through the bench's own exec path.
 ///
-/// Three clients tried in turn because the bench image is the HARNESS's, not the workspace's, and
-/// which of them it ships has changed under us before; the answer is judged on the marker either
-/// way, so a bench with none of them fails loudly rather than passing on an exit code.
+/// `node`, because the bench image is the HARNESS's, not the workspace's: it ships no curl, wget
+/// or nc (the three this used to try, all absent on the fleet 2026-09-15). The answer is judged on
+/// the marker, so a bench that loses node too fails loudly rather than passing on an exit code.
 pub(super) async fn bench_reaches(c: &mut Ctx, j: &Journey, held: bool) {
     if !held {
         return c.skip("env.intercept.bench", NOT_HELD);
@@ -163,13 +163,10 @@ pub(super) async fn bench_reaches(c: &mut Ctx, j: &Journey, held: bool) {
     let ns = j.ws_ns(&c.probe_user);
     c.step("env.intercept.bench", BENCH_DIAL_CEILING, move |c| {
         async move {
-            let script = format!(
-                "curl -s -m 5 http://{host}:{TARGET_PORT}/ || wget -qO- -T 5 http://{host}:{TARGET_PORT}/ || {}",
-                http_get(&host, TARGET_PORT)
-            );
+            let script = super::node_get(&format!("http://{host}:{TARGET_PORT}/"));
             let start = std::time::Instant::now();
             loop {
-                let out = bench_exec(c, &ns, &script).await.unwrap_or_default();
+                let out = bench_exec(c, &ns, &["node", "-e", &script]).await.unwrap_or_default();
                 if out.contains(MARKER) {
                     return Ok(());
                 }

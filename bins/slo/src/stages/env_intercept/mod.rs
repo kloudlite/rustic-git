@@ -360,6 +360,15 @@ fn http_get(host: &str, port: u16) -> String {
     format!(r"printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 {host} {port}")
 }
 
+/// A GET the BENCH can run: its image ships `node` and no curl, wget or nc (fleet, 2026-09-15).
+/// Passed to `node -e` as one argv element, so no shell quoting is involved; the body goes to
+/// stdout and anything else — refusal, timeout — prints nothing, which the marker check fails on.
+fn node_get(url: &str) -> String {
+    format!(
+        "const r=require('http').get('{url}',{{timeout:5000}},s=>s.pipe(process.stdout));r.on('timeout',()=>r.destroy());r.on('error',e=>console.error(e.message))"
+    )
+}
+
 /// An HTTP GET at `TARGET`'s own name and port — the address callers dial, unchanged by the
 /// intercept. Only the workspace answers this with `MARKER`; the real redis answers an error.
 fn workspace_dial() -> String {
@@ -420,7 +429,7 @@ async fn space_bench(c: &mut Ctx, j: &Journey) {
             bench_ready(c, &team, Duration::from_secs(90)).await?;
             let start = std::time::Instant::now();
             loop {
-                let out = bench_exec(c, &ns, "cat /etc/resolv.conf").await.unwrap_or_default();
+                let out = bench_exec(c, &ns, &["cat", "/etc/resolv.conf"]).await.unwrap_or_default();
                 if out.contains(&want) {
                     return Ok(());
                 }
@@ -454,10 +463,10 @@ async fn bench_ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
 
 /// One exec in the bench pod of `ns` — the bench's own path, the one `env.space.bench` reads its
 /// `resolv.conf` through.
-async fn bench_exec(c: &Ctx, ns: &str, script: &str) -> Result<String> {
+/// An argv, not a script: the bench image is the harness's, and a shell there is not a promise.
+async fn bench_exec(c: &Ctx, ns: &str, argv: &[&str]) -> Result<String> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    let (_, out, _) =
-        crate::kube::exec(k, ns, k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), &["sh", "-c", script], EXEC_CEILING).await?;
+    let (_, out, _) = crate::kube::exec(k, ns, k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), argv, EXEC_CEILING).await?;
     Ok(out)
 }
 
@@ -632,6 +641,16 @@ mod tests {
     /// The listener script and the constants the intercept is written against are one statement:
     /// a remapped port that the listener does not actually listen on would make every run fail
     /// with "never answered", pointing at the intercept rather than at this file.
+    #[test]
+    fn the_bench_dial_is_node_with_a_timeout_and_no_shell_client() {
+        let js = node_get("http://svc.ns.svc.cluster.local:8080/");
+        assert!(js.starts_with("const r=require('http').get('http://svc.ns.svc.cluster.local:8080/',"), "{js}");
+        assert!(js.contains("timeout:5000") && js.contains("r.destroy()"), "{js}");
+        for absent in ["curl", "wget", "nc ", "\"", "{{"] {
+            assert!(!js.contains(absent), "{js}");
+        }
+    }
+
     #[test]
     fn the_listener_listens_on_the_port_the_intercept_maps_to() {
         assert!(LISTENER.contains(&format!("nc -l -p {WS_PORT}")), "{LISTENER}");
