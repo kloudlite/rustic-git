@@ -161,8 +161,14 @@ pub async fn collect_bench_folders(pool: &str, export: &str) -> Result<Vec<Strin
         api.list(&Default::default()).await.map_err(|e| e.to_string())?.items.into_iter().map(|b| (b.spec.team, b.spec.owner)).collect();
     let root = crate::homes_root(pool).join(".benches");
     let mut candidates = Vec::new();
-    for team in std::fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
-        let team = team.file_name().to_string_lossy().into_owned();
+    for team in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let team = match team {
+            Ok(t) => t.file_name().to_string_lossy().into_owned(),
+            Err(e) => {
+                tracing::warn!(error = %e, "bench.folder.collect.skipped");
+                continue;
+            }
+        };
         let Ok(owners) = std::fs::read_dir(root.join(&team)) else {
             tracing::warn!(%team, "bench.folder.collect.skipped");
             continue;
