@@ -74,7 +74,7 @@ pub fn on_stall(method: &http::Method, path: &str, elapsed_ms: u64, newest_conn:
         // An OS thread, never a task: the bound and the log line must not need a runtime worker,
         // since a wedged worker is exactly what this is looking for.
         std::thread::spawn(move || match dump(handle, MAX_BYTES) {
-            Some(d) => tracing::warn!(%method, %resource, elapsed_ms, newest_conn, conn_serial = "unknown", tasks = d.tasks, matched = d.matched, distinct = d.distinct, dump_ms = d.ms, truncated = d.truncated, dump = %d.text, "kube.stall.dump"),
+            Some(d) => tracing::warn!(%method, %resource, elapsed_ms, newest_conn, conn_serial = "unknown", tasks = d.tasks, distinct = d.distinct, dump_ms = d.ms, truncated = d.truncated, dump = %d.text, "kube.stall.dump"),
             None => tracing::warn!(%method, %resource, elapsed_ms, newest_conn, timeout_ms = DUMP_TIMEOUT.as_millis() as u64, "kube.stall.dump.timeout"),
         });
     }
@@ -166,9 +166,12 @@ fn generic(inner: &str) -> String {
     }
 }
 
-/// `(task id, formatted trace)` in, one block per distinct trace out: callers (kube/tower/our
-/// own frames) first, connection tasks after, each `count x tasks [ids]`. Returns (text, distinct).
-pub fn render(tasks: &[(String, String)]) -> (String, usize) {
+/// `(task id, formatted trace)` in, one block per distinct trace out, at most `max` bytes: callers
+/// (kube/tower/our own frames) first, then hyper tasks, then every other task, each
+/// `count x tasks [ids]`. EVERY task is a candidate: the 15 Sep dumps filtered to HTTP keywords
+/// and the connection task actually holding the stalled request never printed. What does not fit
+/// is counted in a closing line, never silently lost. Returns (text, distinct, truncated).
+pub fn render(tasks: &[(String, String)], max: usize) -> (String, usize, bool) {
     use std::fmt::Write as _;
     let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
     for (id, t) in tasks {
@@ -177,20 +180,50 @@ pub fn render(tasks: &[(String, String)]) -> (String, usize) {
             None => groups.push((t.clone(), vec![id])),
         }
     }
-    let caller = |t: &str| ["kube", "tower", "kloudlite"].iter().any(|k| t.contains(k));
-    groups.sort_by_key(|g| !caller(&g.0));
+    let rank = |t: &str| match () {
+        _ if ["kube", "tower", "kloudlite"].iter().any(|k| t.contains(k)) => 0,
+        _ if t.contains("hyper") => 1,
+        _ => 2,
+    };
+    groups.sort_by_key(|g| rank(&g.0));
+    // Room for the closing count line, so it always fits.
+    let budget = max.saturating_sub(64);
     let mut text = String::new();
+    let mut shown = 0;
     for (t, ids) in &groups {
-        let shown: Vec<&str> = ids.iter().take(8).copied().collect();
-        let _ = writeln!(text, "{}x tasks [{}]:\n{t}", ids.len(), shown.join(","));
+        let shown_ids: Vec<&str> = ids.iter().take(8).copied().collect();
+        let block = format!("{}x tasks [{}]:\n{t}\n", ids.len(), shown_ids.join(","));
+        if text.len() + block.len() > budget {
+            if shown == 0 {
+                let mut cut = budget;
+                while !block.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                text.push_str(&block[..cut]);
+            }
+            break;
+        }
+        text.push_str(&block);
+        shown += 1;
     }
-    (text, groups.len())
+    let truncated = shown < groups.len();
+    if truncated {
+        let rest: usize = groups[shown..].iter().map(|g| g.1.len()).sum();
+        let _ = writeln!(text, "... {rest} more tasks in {} traces not shown", groups.len() - shown);
+        if text.len() > max {
+            let mut cut = max;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+    }
+    (text, groups.len(), truncated)
 }
 
 #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
 pub struct Dump {
     pub tasks: usize,
-    pub matched: usize,
     pub distinct: usize,
     pub ms: u64,
     pub truncated: bool,
@@ -210,7 +243,7 @@ static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// timer driver never turns and a `tokio::time::timeout` around the dump never fires. On timeout
 /// the dump thread is abandoned: it owns only its own current-thread runtime and a oneshot, so
 /// dropping our receiver cancels nothing tokio relies on; whatever wedged stays wedged either way.
-/// Tasks whose trace touches the HTTP stack only; the rest of the runtime is counted, not printed.
+/// Every task is rendered; `render` bounds the text.
 #[cfg(all(tokio_unstable, feature = "stall-dump", target_os = "linux"))]
 pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
     if IN_FLIGHT.swap(true, Ordering::Relaxed) {
@@ -226,10 +259,8 @@ pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
     });
     let snap = rx.recv_timeout(DUMP_TIMEOUT).ok()?;
     let ms = start.elapsed().as_millis() as u64;
-    let mut tasks = 0;
-    let mut hits = Vec::new();
+    let mut all = Vec::new();
     for t in snap.tasks().iter() {
-        tasks += 1;
         let trace = t
             .trace()
             .resolve_backtraces()
@@ -246,21 +277,10 @@ pub fn dump(handle: tokio::runtime::Handle, max: usize) -> Option<Dump> {
             })
             .collect::<Vec<_>>()
             .join("\n--\n");
-        if ["hyper", "kube", "tower"].iter().any(|k| trace.contains(k)) {
-            hits.push((t.id().to_string(), trace));
-        }
+        all.push((t.id().to_string(), trace));
     }
-    let matched = hits.len();
-    let (mut text, distinct) = render(&hits);
-    let truncated = text.len() > max;
-    if truncated {
-        let mut cut = max;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
-    }
-    Some(Dump { tasks, matched, distinct, ms, truncated, text })
+    let (text, distinct, truncated) = render(&all, max);
+    Some(Dump { tasks: all.len(), distinct, ms, truncated, text })
 }
 
 #[cfg(test)]
@@ -305,10 +325,27 @@ mod tests {
             ("3".into(), "kube_client::Client::send<W>\n  tower::buffer::Buffer::call".into()),
             ("4".into(), conn),
         ];
-        let (text, distinct) = render(&tasks);
+        let (text, distinct, truncated) = render(&tasks, MAX_BYTES);
         assert_eq!(distinct, 2);
+        assert!(!truncated);
         assert!(text.starts_with("1x tasks [3]:\nkube_client::Client::send<W>\n"), "{text}");
         assert!(text.contains("3x tasks [1,2,4]:\nhyper_util::client::legacy::Client<A>::connect_to\n"), "{text}");
+    }
+
+    #[test]
+    fn every_task_is_rendered_and_the_rest_counted_within_max() {
+        let tasks: Vec<(String, String)> = (0..50).map(|i| (i.to_string(), format!("some_task_{i}\n  tokio::sync::Notify::notified"))).collect();
+        let mut with_conn = tasks.clone();
+        with_conn.push(("99".into(), "hyper::proto::h1::dispatch::Dispatcher::poll_read".into()));
+        let (all, distinct, truncated) = render(&with_conn, MAX_BYTES);
+        assert_eq!(distinct, 51);
+        assert!(!truncated && all.contains("some_task_49") && all.contains("hyper::proto"), "{all}");
+        let (text, _, truncated) = render(&with_conn, 400);
+        assert!(truncated && text.len() <= 400, "{}", text.len());
+        assert!(text.starts_with("1x tasks [99]:\nhyper::proto"), "hyper outranks unmatched tasks: {text}");
+        assert!(text.contains("more tasks in") && text.contains("traces not shown"), "{text}");
+        let (tiny, _, truncated) = render(&with_conn, 16);
+        assert!(truncated && tiny.len() <= 16);
     }
 
     #[test]
@@ -338,7 +375,7 @@ mod tests {
         n.notify_one();
         rt.shutdown_timeout(Duration::from_secs(1));
         let d = d.expect("no worker is blocked, so the dump must finish inside DUMP_TIMEOUT");
-        eprintln!("dump_ms={} tasks={} matched={}", d.ms, d.tasks, d.matched);
+        eprintln!("dump_ms={} tasks={}", d.ms, d.tasks);
         assert!(d.text.contains("hyper_parked_marker"), "{}", d.text);
         let tiny = tiny.expect("a second dump after a finished one");
         assert!(tiny.truncated && tiny.text.len() <= 16);
