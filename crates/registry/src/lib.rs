@@ -199,6 +199,26 @@ pub fn paginate(
 mod tests {
     use super::*;
 
+    /// The pool refuses to open a key routed to no owner (`pool::unowned`). Every `/v2` read that
+    /// skipped its `exists` probe lands in `oci_internal`, and the honest answer is the OCI
+    /// not-found — a mistyped pull and buildx's pre-push tag checks depend on it. Without the
+    /// mapping this is a 500 UNKNOWN.
+    #[tokio::test]
+    async fn an_unowned_key_is_name_unknown_not_a_500() {
+        let e: crate::Error =
+            crate::pool::UnownedError { repo: "img/alice/web".into() }.into();
+        let r = oci_internal(e);
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("NAME_UNKNOWN"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        // A genuine failure still reports as one.
+        assert_eq!(oci_internal(kloudlite_core::err("boom")).status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     /// `?n=` that is not a number means "no page size", the same as an absent `n` — pinned so a
     /// change here is a decision, not an accident.
     #[test]
