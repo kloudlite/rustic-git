@@ -300,13 +300,7 @@ async fn sessions(c: &mut Ctx) {
                 if status != 200 {
                     bail!("GET messages answered {status}");
                 }
-                match judge_reply(&body)? {
-                    Reply::Answered => Ok(()),
-                    Reply::NoCredential(why) => {
-                        *no_model_w.lock().unwrap() = Some(why.clone());
-                        bail!("{why}")
-                    }
-                }
+                answered(&body, &no_model_w)
             }
             .boxed()
         })
@@ -317,18 +311,28 @@ async fn sessions(c: &mut Ctx) {
         c.demote_to_skip("bench.session.roundtrip", &format!("{NO_MODEL}: {}", super::clip(why)));
     }
     let seen = seen.lock().unwrap().take();
-    match (no_model, seen) {
-        (Some(_), _) => c.skip("bench.two_clients", NO_MODEL),
-        (None, Some((a, b))) => {
+    match (no_model.is_some(), seen) {
+        (true, _) => c.skip("bench.two_clients", NO_MODEL),
+        (false, Some((a, b))) => {
             c.step("bench.two_clients", Duration::from_secs(5), move |_| async move { same_events(&a, &b) }.boxed()).await;
         }
-        (None, None) => c.skip("bench.two_clients", if answered { "no events were recorded" } else { "the round trip failed" }),
+        (false, None) => c.skip("bench.two_clients", if answered { "no events were recorded" } else { "the round trip failed" }),
     }
-    exchanges(c).await;
-    c.skip("bench.workspace.tool_roundtrip", "needs a running probe workspace and a model credential; neither is provisioned for the probe tenant");
-    // Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by.
     let sid = created.lock().unwrap().take();
-    if let Some(sid) = sid {
+    let thread = match &no_model {
+        Some(_) => {
+            c.skip("bench.exchange.both_views", NO_MODEL);
+            c.skip("bench.workspace.tool_roundtrip", NO_MODEL);
+            None
+        }
+        None => {
+            exchanges(c, sid.clone()).await;
+            tool_roundtrip(c).await
+        }
+    };
+    // Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
+    // workspace thread's id is `w-{ws}`, deleted the same way.
+    for sid in sid.into_iter().chain(thread) {
         let del = async {
             let (_child, port) = forward(c).await?;
             delete_session(port, &sid, TEARDOWN_BOUND).await
@@ -342,44 +346,133 @@ async fn sessions(c: &mut Ctx) {
     }
 }
 
-/// `bench.exchange.both_views`: every exchange a session lists must read back identically through
-/// its workspace's view. Nothing the probe does writes an exchange (only a model turn messaging a
-/// workspace does), so a bench with none is a skip, never a pass.
-async fn exchanges(c: &mut Ctx) {
-    let prep = async {
-        let (child, port) = forward(c).await?;
-        let (_, list) = through(port, "/sessions").await?;
-        let mut rows = Vec::new();
-        for s in serde_json::from_str::<Vec<Value>>(&list).context("parsing /sessions")? {
-            let id = s["id"].as_str().context("session row missing id")?;
-            let (_, body) = through(port, &format!("/exchanges?session={id}")).await?;
-            rows.extend(serde_json::from_str::<Vec<Value>>(&body).context("parsing ?session=")?);
+/// `bench.exchange.both_views` has no bound (availability only), so this caps one tool call plus a
+/// one-word reply: the round trip's own 60 s target, doubled for the extra model step.
+const EXCHANGE_CEILING: Duration = Duration::from_secs(120);
+/// `bench.workspace.tool_roundtrip`: target 180 s.
+const TOOL_CEILING: Duration = Duration::from_secs(180);
+
+/// Only a `kl_workspace_*`/`kl_environment_*` call writes an exchange (harness/pi/kloudlite.ts), and
+/// all of them mutate — so the call names a workspace that does not exist: the 404 is recorded as a
+/// `failed` exchange with nothing created anywhere, and no teardown is owed for it.
+fn exchange_prompt(target: &str) -> String {
+    format!("Call the tool kl_workspace_start exactly once with id \"{target}\". Whatever it answers, then reply with exactly the word done.")
+}
+
+fn tool_prompt(marker: &str) -> String {
+    format!("Use the bash tool exactly once to run: echo {marker}. Then reply with exactly the word done.")
+}
+
+/// One prompt on one socket, to this turn's end. A refusal that is pi reporting no provider key
+/// lands in `no_model`, so the caller demotes instead of failing.
+async fn one_turn(port: u16, sid: &str, prompt: &str, no_model: &Mutex<Option<String>>) -> Result<()> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/sessions/{sid}/rpc")).await.context("socket")?;
+    ws.send(Message::text(json!({"id": "1", "type": "prompt", "message": prompt}).to_string())).await?;
+    mark_no_key(until_agent_end(ws).await, no_model).map(|_| ())
+}
+
+/// The transcript answered and holds no-key or a real reply; `NoCredential` is written to `no_model`
+/// and still fails the step, which the caller then demotes.
+fn answered(body: &str, no_model: &Mutex<Option<String>>) -> Result<()> {
+    match judge_reply(body)? {
+        Reply::Answered => Ok(()),
+        Reply::NoCredential(why) => {
+            *no_model.lock().unwrap() = Some(why.clone());
+            bail!("{why}")
         }
-        anyhow::Ok((child, port, rows))
     }
-    .await;
-    match prep {
-        Ok((_, _, rows)) if rows.is_empty() => c.skip("bench.exchange.both_views", "no exchange exists on the probe bench to read back"),
-        Err(e) => c.skip("bench.exchange.both_views", &format!("could not list exchanges: {}", super::clip(&e.to_string()))),
-        Ok((child, port, rows)) => {
-            c.step("bench.exchange.both_views", Duration::from_secs(30), move |_| {
-                async move {
-                    let _child = child;
-                    let mut by_ws = std::collections::BTreeMap::new();
-                    for r in &rows {
-                        let ws = r["workspace"].as_str().context("exchange row missing workspace")?.to_string();
-                        if !by_ws.contains_key(&ws) {
-                            let (_, body) = through(port, &format!("/exchanges?workspace={ws}")).await?;
-                            by_ws.insert(ws.clone(), serde_json::from_str::<Vec<Value>>(&body).context("parsing ?workspace=")?);
-                        }
-                    }
-                    views_agree(&rows, &by_ws)
+}
+
+/// `bench.exchange.both_views`: the probe's own turn writes an exchange on the round trip's session,
+/// and every exchange that session lists must read back identically through its workspace's view.
+async fn exchanges(c: &mut Ctx, sid: Option<String>) {
+    let Some(sid) = sid else {
+        return c.skip("bench.exchange.both_views", "the round trip created no session");
+    };
+    let target = format!("{}-exchange", c.prefix());
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let nm = no_model.clone();
+    c.step("bench.exchange.both_views", EXCHANGE_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            one_turn(port, &sid, &exchange_prompt(&target), &nm).await?;
+            answered(&through(port, &format!("/sessions/{sid}/messages")).await?.1, &nm)?;
+            let (_, body) = through(port, &format!("/exchanges?session={sid}")).await?;
+            let rows: Vec<Value> = serde_json::from_str(&body).context("parsing ?session=")?;
+            if !rows.iter().any(|r| r["workspace"] == target.as_str()) {
+                bail!("the turn recorded no exchange naming {target} ({} rows)", rows.len());
+            }
+            let mut by_ws = std::collections::BTreeMap::new();
+            for r in &rows {
+                let ws = r["workspace"].as_str().context("exchange row missing workspace")?.to_string();
+                if !by_ws.contains_key(&ws) {
+                    let (_, body) = through(port, &format!("/exchanges?workspace={ws}")).await?;
+                    by_ws.insert(ws.clone(), serde_json::from_str::<Vec<Value>>(&body).context("parsing ?workspace=")?);
                 }
-                .boxed()
-            })
-            .await;
+            }
+            views_agree(&rows, &by_ws)
         }
+        .boxed()
+    })
+    .await;
+    if let Some(why) = no_model.lock().unwrap().clone() {
+        c.demote_to_skip("bench.exchange.both_views", &format!("{NO_MODEL}: {}", super::clip(&why)));
+    };
+}
+
+/// `bench.workspace.tool_roundtrip`: a workspace thread on the bench runs `echo` through the tool
+/// server of the workspace `ws.packages.add` created — the one live pod this stage keeps. Returns
+/// the thread's session id for teardown once the bench has opened it.
+async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
+    let Some(ws) = c.state.ux_workspace.clone() else {
+        c.skip("bench.workspace.tool_roundtrip", "the stage's workspace was never created");
+        return None;
+    };
+    let marker = format!("{}-tool", c.prefix());
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let opened: Arc<Mutex<Option<String>>> = Default::default();
+    let (nm, op) = (no_model.clone(), opened.clone());
+    c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), None).await?;
+            if status != 200 {
+                bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("thread row missing id")?.to_string();
+            *op.lock().unwrap() = Some(sid.clone());
+            one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
+            // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
+            let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
+            if status != 200 {
+                bail!("GET /workspaces/{ws}/messages answered {status}");
+            }
+            answered(&body, &nm)?;
+            tool_ran(&body, &marker)
+        }
+        .boxed()
+    })
+    .await;
+    if let Some(why) = no_model.lock().unwrap().clone() {
+        c.demote_to_skip("bench.workspace.tool_roundtrip", &format!("{NO_MODEL}: {}", super::clip(&why)));
     }
+    let sid = opened.lock().unwrap().take();
+    sid
+}
+
+/// A successful tool result carrying the marker: the echo ran and its output came back. The call's
+/// own arguments hold the marker too, which is why only a `toolResult` counts.
+fn tool_ran(body: &str, marker: &str) -> Result<()> {
+    let doc: Value = serde_json::from_str(body).context("parsing messages")?;
+    let results: Vec<&Value> = doc["messages"].as_array().into_iter().flatten().filter(|m| m["role"] == "toolResult").collect();
+    let ran = results.iter().any(|m| {
+        m["isError"] != Value::Bool(true)
+            && m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).any(|t| t.contains(marker))
+    });
+    if !ran {
+        bail!("no successful tool result carries {marker} ({} tool results)", results.len());
+    }
+    Ok(())
 }
 
 const TEARDOWN_BOUND: Duration = Duration::from_secs(10);
@@ -710,9 +803,27 @@ mod tests {
     #[test]
     fn ceilings_are_at_least_their_targets() {
         use kloudlite_workspaces::slo::catalogue::find;
-        for (id, cap) in [("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
+        for (id, cap) in [("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
             assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
         }
+    }
+
+    #[test]
+    fn a_tool_turn_is_judged_from_its_result_not_its_call() {
+        let m = "run-abc-tool";
+        let call = json!({"role": "assistant", "content": [{"type": "toolCall", "id": "t1", "name": "bash", "arguments": {"command": format!("echo {m}")}}]});
+        let ok = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": m}]}]});
+        assert!(tool_ran(&ok.to_string(), m).is_ok());
+        // The marker only in the call: the tool never answered.
+        assert!(tool_ran(&json!({"messages": [call]}).to_string(), m).is_err());
+        let failed = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": true, "content": [{"type": "text", "text": format!("{m}\n[exit 1]")}]}]});
+        assert!(tool_ran(&failed.to_string(), m).is_err());
+        assert!(tool_prompt(m).contains(m) && exchange_prompt("run-abc-exchange").contains("kl_workspace_start"));
+
+        let no_model = Mutex::new(None);
+        let nokey = json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
+        assert!(answered(&nokey.to_string(), &no_model).is_err());
+        assert!(no_model.lock().unwrap().is_some(), "a missing key must be recorded for the demote");
     }
 
     #[tokio::test]
