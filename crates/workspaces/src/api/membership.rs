@@ -273,21 +273,19 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
         Verdict::Stamp => {
             let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
             let mut ok = false;
-            if !benches.is_empty() {
-                // The stamp, and during the grace no tools — the pause as its own merge patch so
-                // the membership manager never takes ownership of `spec.access`.
-                for b in &benches {
-                    ok |= stamp(&bapi, &b.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
-                    write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
-                }
-            } else if !workspaces.is_empty() {
-                for w in &workspaces {
-                    ok |= stamp(&wapi, &w.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
-                }
-            } else {
-                for x in &spaces {
-                    ok |= stamp(&sapi, &x.name_any(), json!({REMOVED_AT: at.to_rfc3339()})).await;
-                }
+            // Every object of the pair carries the stamp, so whichever goes first (a spent budget,
+            // a 409, the person deleting their own bench) never restarts the grace or drops delete-now.
+            let v = json!({REMOVED_AT: at.to_rfc3339()});
+            for b in &benches {
+                ok |= stamp(&bapi, &b.name_any(), v.clone()).await;
+                // The pause as its own merge patch so the membership manager never owns `spec.access`.
+                write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
+            }
+            for w in &workspaces {
+                ok |= stamp(&wapi, &w.name_any(), v.clone()).await;
+            }
+            for x in &spaces {
+                ok |= stamp(&sapi, &x.name_any(), v.clone()).await;
             }
             if !ok {
                 return Ok(());
@@ -634,6 +632,22 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["kind"], "Workspace");
         assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+    }
+
+    #[tokio::test]
+    async fn every_object_of_the_pair_is_stamped_so_a_deleted_bench_keeps_the_clock() {
+        let routes = vec![
+            benches(vec![bench("bob", "acme", "full", None)]),
+            list_of("Workspace", "workspaces", vec![ws("w1", "bob", "acme")]),
+            patch(format!("{API}/workspaces/w1"), ws("w1", "bob", "acme")),
+        ];
+        let (s, rec, _) = setup(routes, &[("bob", "acme")]);
+        reconcile(&s).await;
+        assert!(rec.sent("PATCH", &path("bob", "acme"))[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+        let w = rec.sent("PATCH", &format!("{API}/workspaces/w1"));
+        assert_eq!(w.len(), 1);
+        assert!(w[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+        assert!(rec.requests().iter().filter(|r| r.contains("/workspaces/w1")).all(|r| r.contains("fieldManager=kloudlite-membership")), "{:?}", rec.requests());
     }
 
     #[tokio::test]
