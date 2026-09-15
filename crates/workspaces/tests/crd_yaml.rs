@@ -473,3 +473,18 @@ fn both_otel_stacks_collect_the_ingress_access_log() {
         );
     }
 }
+
+/// Every removal annotation the api marks and the controller's GC deletes on is fenced to the api's
+/// ServiceAccount: an unfenced `delete-after` would let any writer schedule a delete.
+#[test]
+fn the_removal_stamp_policy_fences_every_mark() {
+    use kloudlite_workspaces::api::membership::{DELETE_AFTER, DELETE_NOW, REMOVED_AT};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/agent-admission.yaml");
+    let policy = std::fs::read_to_string(path).unwrap();
+    let start = policy.find("name: kloudlite-removal-stamps-are-the-apis").expect("the stamp policy");
+    let body = &policy[start..policy[start..].find("---").map_or(policy.len(), |e| start + e)];
+    assert!(body.contains("system:serviceaccount:kube-system:kloudlite-api"));
+    for k in [REMOVED_AT, DELETE_NOW, DELETE_AFTER] {
+        assert!(body.contains(&format!("'{k}'")), "{k} is not in the fenced list");
+    }
+}

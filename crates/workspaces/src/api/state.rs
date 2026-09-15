@@ -231,9 +231,6 @@ pub struct ApiState {
     /// here in this task), but the field exists so `clamp_quota` has a live ceiling to read
     /// instead of a compiled-in number.
     pub settings: LiveSettings<AgentSettings>,
-    /// The central `cluster/settings` document. The user role refreshes it on its own beat;
-    /// elsewhere it stays at `env ?? default`. Read by `membership` for `member_removal_deletes`.
-    pub central: LiveSettings<kloudlite_core::settings::CentralSettings>,
     /// The server tier's peer listener + peer secret — the ONE call this admin process makes
     /// outbound to the git tier, forwarding a validated central-settings write (`PUT
     /// /api/admin/settings`, Task 4). `None` in dev/tests: `GET /admin/settings/central` still
@@ -287,7 +284,6 @@ impl ApiState {
             aks: None,
             keys: None,
             settings: LiveSettings::new(AgentSettings::from_env()),
-            central: LiveSettings::new(kloudlite_core::settings::CentralSettings::from_env()),
             peer: None,
             history: None,
             cache: None,

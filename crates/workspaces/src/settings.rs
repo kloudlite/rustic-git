@@ -35,6 +35,7 @@ pub struct AgentSettings {
     pub trace_promote_rate: f64,
     pub trace_promote_burst: f64,
     pub stall_dumps: bool,
+    pub member_removal_deletes: bool,
 }
 
 impl Default for AgentSettings {
@@ -75,6 +76,7 @@ impl AgentSettings {
             trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
             trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
             stall_dumps: kloudlite_core::settings::env_parsed("WS_STALL_DUMPS", false),
+            member_removal_deletes: kloudlite_core::settings::env_parsed("WS_MEMBER_REMOVAL_DELETES", false),
         }
     }
 
@@ -113,6 +115,7 @@ impl AgentSettings {
         over!(trace_promote_rate);
         over!(trace_promote_burst);
         over!(stall_dumps);
+        over!(member_removal_deletes);
         self
     }
 }

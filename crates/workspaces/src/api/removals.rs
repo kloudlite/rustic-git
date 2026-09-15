@@ -1,15 +1,15 @@
 //! A removed member's pending cleanup, on demand: the listing and the admin "delete now".
-//! Everything decides through `membership::judge` — this module only
-//! writes the `delete-now` mark and asks for one pair to be judged now instead of on the beat.
+//! Everything decides through `membership::judge` — this module only writes the `delete-now` mark
+//! and a `delete-after` of NOW, which the cluster controller's GC acts on within a tick.
 //!
 //! The mark is written HERE, by the user-role process, because the admission policy
 //! `kloudlite-removal-stamps-are-the-apis` admits only that process's account to either annotation;
 //! a superadmin therefore uses this `/v1` route with their claim, and the admin process only lists.
 //! The pair is judged once BEFORE the mark, so a removal the beat has not stamped yet is stamped now
 //! (with its audit row) and a member who is back is cleared — a paused or active member always
-//! answers 409. Deletion still obeys `member_removal_deletes` and every keep rule.
+//! answers 409. Deletion still obeys the region's `memberRemovalDeletes` (`ClusterSettings`).
 
-use super::membership::{self, list_all, norm, stamp, system_annotation, team_pair, DELETE_NOW, REMOVED_AT};
+use super::membership::{self, list_all, norm, stamp, system_annotation, team_pair, DELETE_AFTER, DELETE_NOW, REMOVED_AT};
 use super::{caller, ApiState, Caller, Judged, TeamRole};
 use crate::crd;
 use axum::extract::{Path, State};
@@ -85,7 +85,8 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     };
     let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
     // SSA under the membership manager: the body must repeat `removed-at`, or the apply drops it.
-    let mark = |m: &kube::core::ObjectMeta| system_annotation(m, REMOVED_AT).map(|at| json!({REMOVED_AT: at, DELETE_NOW: "true"}));
+    let now = chrono::Utc::now().to_rfc3339();
+    let mark = |m: &kube::core::ObjectMeta| system_annotation(m, REMOVED_AT).map(|at| json!({REMOVED_AT: at, DELETE_NOW: "true", DELETE_AFTER: now}));
     let mut marked = false;
     for x in o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)) {
         if let Some(a) = mark(&x.metadata) {
@@ -107,9 +108,15 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     }
     let detail = json!({"owner": owner, "team": team, "by": c.name}).to_string();
     super::admin::audit(s, &c.name, "member.removed.delete_now", &format!("{team}/{owner}"), Some(detail), "ok").await;
-    membership::reconcile_pair(s, &owner, &team).await;
-    // Off means the mark stands and the next beat with deletes on acts on it.
-    (StatusCode::ACCEPTED, Json(json!({"deletes_enabled": s.central.load().member_removal_deletes}))).into_response()
+    // Off means the mark stands and the controller's GC acts on it once the region turns deletes on.
+    (StatusCode::ACCEPTED, Json(json!({"deletes_enabled": deletes_enabled(k).await}))).into_response()
+}
+
+/// The region's switch as the controller resolves it (`stored ?? env ?? default`); unreadable
+/// answers off, which only changes what the response says, never what is deleted.
+async fn deletes_enabled(k: &kube::Client) -> bool {
+    let stored = Api::<crd::ClusterSettings>::all(k.clone()).get_opt("default").await.ok().flatten().map(|c| c.spec).unwrap_or_default();
+    crate::settings::AgentSettings::from_env().merged_with(&stored).member_removal_deletes
 }
 
 /// `GET /v1/teams/{slug}/removals`: handles and dates only, for the members table.

@@ -2394,6 +2394,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "memberRemovalDeletes": {
+                        "description": "Whether the cluster controller really deletes a removed team member's bench, team\nworkspaces and space choice once their `kloudlite.io/delete-after` is due. Off only logs\n`gc.would_delete`: the delete is irreversible, and regional because the objects are.",
+                        "nullable": true,
+                        "type": "boolean"
+                      },
                       "nixTimeoutSecs": {
                         "description": "Nix build timeout. 60..=7200 seconds.",
                         "format": "uint64",

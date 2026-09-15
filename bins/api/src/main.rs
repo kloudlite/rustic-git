@@ -378,11 +378,6 @@ async fn run() -> Result<()> {
             // an api that came up without it would answer 401 to every build in the region, and
             // finding that out at boot beats finding it out from a user.
             if role != "admin" {
-                // The keys beat's membership cleanup reads `member_removal_deletes` from here.
-                tokio::spawn(kloudlite_core::settings::refresh_central_beat(
-                    kloudlite_storage::config::central_fetch(store.os.clone()),
-                    state.central.clone(),
-                ));
                 let secret = kloudlite_core::secret::read("KLOUDLITE_BUILDER_SECRET")
                     .filter(|s| !s.trim().is_empty())
                     .ok_or_else(|| err("KLOUDLITE_BUILDER_SECRET required"))?;

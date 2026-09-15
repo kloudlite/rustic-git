@@ -20,16 +20,15 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  # A Bench, like a workspace, is spec the API writes and status the agent writes. A member leaving
-  # is a pause, then — 7 days on, and only with `memberRemovalDeletes` on — `delete` by the keys
-  # beat's `membership::reconcile`, the one decider for a departed member's bench, workspaces and
-  # space choice.
+  # A Bench, like a workspace, is spec the API writes and status the agent writes. No `delete`: a
+  # member leaving is a pause, then a `kloudlite.io/delete-after` mark the keys beat writes, and the
+  # cluster controller's GC (controller-rbac.yaml) is what deletes a due bench.
   - apiGroups: ["kloudlite.io"]
     resources: ["benches"]
-    verbs: ["get", "list", "create", "patch", "delete"]
+    verbs: ["get", "list", "create", "patch"]
   # A person's space environment (`/v1/me/environments`): spec the api writes by server-side apply
-  # (`create` + `patch`); `delete` is the person's DELETE, `delete_env`'s by-label sweep, and the
-  # keys beat dropping a departed member's choice.
+  # (`create` + `patch`); `delete` is the person's DELETE and `delete_env`'s by-label sweep (a
+  # departed member's choice is the controller's GC, not this).
   - apiGroups: ["kloudlite.io"]
     resources: ["spaceenvironments"]
     verbs: ["get", "list", "create", "patch", "delete"]

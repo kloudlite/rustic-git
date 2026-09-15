@@ -7,42 +7,39 @@
 //! | directory says            | stamp        | verdict                          |
 //! |---------------------------|--------------|----------------------------------|
 //! | error / unreachable       | any          | Keep — write nothing, stamp nothing |
-//! | member (active or paused) | present      | Clear both annotations           |
+//! | member (active or paused) | present      | Clear every removal annotation   |
 //! | active member             | none, paused | Unpause the bench                |
 //! | paused member             | none         | Pause the bench, NEVER stamp     |
-//! | not a member / team gone  | none         | Stamp `removed-at`, pause the bench |
+//! | not a member / team gone  | none         | Stamp `removed-at` + `delete-after`, pause the bench |
 //! | not a member / team gone  | < grace      | Keep                             |
-//! | not a member / team gone  | ≥ grace, or `delete-now` | Delete                |
+//! | not a member / team gone  | ≥ grace, or `delete-now` | Due — mark any object still lacking `delete-after` |
 //!
-//! Keep-biased because Delete is irreversible: only a directory that ANSWERS "not a member" or "no
-//! such team" moves a pair toward it, and the grace restarts from a fresh stamp whenever the stamp
-//! cannot be read. The stamp lives on the Bench, or on the pair's Workspaces when there is none,
-//! or on its SpaceEnvironment when there is neither; the latest parseable one counts.
+//! This module DELETES NOTHING. It only marks: `kloudlite.io/delete-after` (removed-at + grace, or
+//! now for an admin's delete-now) is the whole hand-off, and the cluster controller's GC
+//! (`bins/controller/src/gc.rs`, elected leader only, gated on the regional `memberRemovalDeletes`)
+//! is the one thing that deletes a due Bench, team Workspace or SpaceEnvironment. The split keeps
+//! the irreversible step in the process that holds the region's lease, and lets a re-add undo a
+//! removal by clearing an annotation rather than racing a delete.
 //!
-//! Delete (gated on central `member_removal_deletes`, default off = log
-//! `membership.cleanup.would_delete`): the Bench, then every team Workspace (`WORKTREE_FINALIZER`
-//! takes sync points and detaches a Volume that keeps pushed snapshots), then the SpaceEnvironment.
-//! Keys need no write — `project_all` drops the team's slug and `prune_namespaces` the empty `wt-`.
-//! NOTHING here deletes a Snapshot, Volume, Environment, repo or image. Each object is re-judged
-//! right before its DELETE and carries a uid + resourceVersion precondition; 404 and an accepted
-//! delete are done, 409 or any other error stops the pair until the next beat. A Bench goes only
-//! when it carries `kloudlite.io/bench-folder` (the agent's folder finalizer): until that exists
-//! its folder would be stranded, so it is skipped and logged instead.
-//! One `member.removed.cleanup` audit row per deleted object; `CLEANUP_DELETES_PER_BEAT` bounds a beat.
+//! Keep-biased: only a directory that ANSWERS "not a member" or "no such team" moves a pair toward a
+//! mark, and the grace restarts from a fresh stamp whenever the stamp cannot be read. The latest
+//! parseable stamp on any object of the pair counts. An existing `delete-after` is never moved later
+//! or earlier by the beat; only delete-now (`removals.rs`) rewrites it, to now.
 //!
-//! Provenance: only a `removed-at` this beat wrote counts — applied under the field manager
+//! Provenance: only annotations this beat wrote count — applied under the field manager
 //! `kloudlite-membership` and read back from `managedFields` — and `delete-now` counts only beside
-//! one. A restored, hand-written or agent-written stamp is no stamp: the pair is restamped now,
-//! with a fresh grace and its audit row. `deploy/k3s/agent-admission.yaml` refuses anyone but the
-//! api's account a change to either annotation. Team and owner are compared trimmed and
-//! lowercased, the directory's slug form, so `team: Acme` is never judged a gone team.
+//! a `removed-at`. A restored, hand-written or agent-written stamp is no stamp: the pair is
+//! restamped now, with a fresh grace and its audit row. `deploy/k3s/agent-admission.yaml` refuses
+//! anyone but the api's account a change to any of the three annotations. Team and owner are
+//! compared trimmed and lowercased, the directory's slug form, so `team: Acme` is never judged a
+//! gone team.
 //!
 //! A beat and not `remove_member`: that route lives in the directory binary, which holds no
 //! kubeconfig, and a beat also heals a removal or team delete that happened while this was down.
 
 use super::{ApiState, Directory, Judged, MemberState};
 use crate::crd;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, Preconditions};
+use kube::api::{Api, Patch, PatchParams};
 use kube::ResourceExt;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -51,10 +48,10 @@ use std::time::Duration;
 pub const MEMBER_REMOVAL_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const REMOVED_AT: &str = "kloudlite.io/removed-at";
 pub const DELETE_NOW: &str = "kloudlite.io/delete-now";
+/// RFC 3339; the controller's GC deletes the object once this is past (and only if the membership
+/// manager wrote it).
+pub const DELETE_AFTER: &str = "kloudlite.io/delete-after";
 pub const MEMBERSHIP_FIELD_MANAGER: &str = "kloudlite-membership";
-pub use crate::crd::BENCH_FOLDER_FINALIZER;
-// ponytail: a fixed cap; a backlog after a big team delete drains at this rate per beat.
-pub const CLEANUP_DELETES_PER_BEAT: usize = 50;
 
 #[derive(Debug, PartialEq)]
 pub enum Verdict {
@@ -63,7 +60,7 @@ pub enum Verdict {
     Unpause,
     Stamp,
     Clear,
-    Delete,
+    Due,
 }
 
 /// Pure: the decision for one (owner, team) pair.
@@ -76,13 +73,14 @@ pub fn decide(judged: &Result<Judged, String>, stamped_at: Option<i64>, delete_n
         Ok(Judged::Member(MemberState::Paused)) if !currently_paused => Verdict::Pause,
         Ok(Judged::Member(_)) => Verdict::Keep,
         Ok(Judged::NotMember | Judged::TeamGone) => match stamped_at {
-            _ if delete_now => Verdict::Delete,
+            _ if delete_now => Verdict::Due,
             None => Verdict::Stamp,
-            Some(t) if now.saturating_sub(t) >= MEMBER_REMOVAL_GRACE.as_secs() as i64 => Verdict::Delete,
+            Some(t) if now.saturating_sub(t) >= MEMBER_REMOVAL_GRACE.as_secs() as i64 => Verdict::Due,
             Some(_) => Verdict::Keep,
         },
     }
 }
+
 
 pub(super) struct Objects {
     pub(super) benches: Vec<crd::Bench>,
@@ -138,9 +136,9 @@ pub async fn reconcile(s: &ApiState) {
         Ok(o) => o,
         Err(error) => return tracing::warn!(%error, "membership.reconcile.listing.failed"),
     };
-    let (mut failed, mut last, mut budget) = (0usize, String::new(), CLEANUP_DELETES_PER_BEAT);
+    let (mut failed, mut last) = (0usize, String::new());
     for (owner, team) in pairs(&o) {
-        if let Err(e) = judge(s, c, dir.as_ref(), &o, &owner, &team, &mut budget).await {
+        if let Err(e) = judge(s, c, dir.as_ref(), &o, &owner, &team).await {
             (failed, last) = (failed + 1, e);
         }
     }
@@ -160,7 +158,7 @@ pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
     let (owner, team) = (&norm(owner), &norm(team));
     match list_all(c).await {
         Ok(o) => {
-            if let Err(error) = judge(s, c, dir.as_ref(), &o, owner, team, &mut CLEANUP_DELETES_PER_BEAT.clone()).await {
+            if let Err(error) = judge(s, c, dir.as_ref(), &o, owner, team).await {
                 tracing::warn!(%owner, %team, %error, "membership.reconcile.skipped");
             }
         }
@@ -209,7 +207,7 @@ pub(super) fn removals(o: &Objects) -> Vec<Removal> {
 }
 
 /// `Err` only for an unreadable directory, which writes nothing.
-async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str, budget: &mut usize) -> Result<(), String> {
+async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str) -> Result<(), String> {
     let metas = metas_of(o, owner, team);
     let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
     let benches: Vec<_> = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
@@ -256,8 +254,8 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
             for b in benches.iter().filter(|b| b.spec.access != crd::BenchAccess::Full && judged == Judged::Member(MemberState::Active)) {
                 write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "member.unpause.applied").await;
             }
-            let p = json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null}}});
-            let has = |m: &kube::core::ObjectMeta| ann(m, REMOVED_AT).is_some() || ann(m, DELETE_NOW).is_some();
+            let p = json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null, DELETE_AFTER: null}}});
+            let has = |m: &kube::core::ObjectMeta| [REMOVED_AT, DELETE_NOW, DELETE_AFTER].iter().any(|k| ann(m, k).is_some());
             let mut ok = false;
             for x in benches.iter().filter(|x| has(&x.metadata)) {
                 ok |= write(&bapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
@@ -276,9 +274,9 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
         Verdict::Stamp => {
             let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
             let mut ok = false;
-            // Every object of the pair carries the stamp, so whichever goes first (a spent budget,
+            // Every object of the pair carries the stamp, so whichever goes first (the controller's GC,
             // a 409, the person deleting their own bench) never restarts the grace or drops delete-now.
-            let v = json!({REMOVED_AT: at.to_rfc3339()});
+            let v = json!({REMOVED_AT: at.to_rfc3339(), DELETE_AFTER: (at + MEMBER_REMOVAL_GRACE).to_rfc3339()});
             for b in &benches {
                 ok |= stamp(&bapi, &b.name_any(), v.clone()).await;
                 // The pause as its own merge patch so the membership manager never owns `spec.access`.
@@ -298,82 +296,30 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
             let detail = json!({"owner": owner, "team": team, "reason": reason, "delete_at": delete_at}).to_string();
             super::admin::audit(s, "system:membership", "member.removed.judged", &format!("{team}/{owner}"), Some(detail), "ok").await;
         }
-        Verdict::Delete if !s.central.load().member_removal_deletes => tracing::info!(%owner, %team, delete_now, "membership.cleanup.would_delete"),
-        Verdict::Delete => {
-            let mut steps: Vec<Target> = Vec::new();
-            for b in &benches {
-                if b.finalizers().iter().any(|f| f == BENCH_FOLDER_FINALIZER) {
-                    steps.push(Target::of(*b, "Bench"));
-                } else {
-                    tracing::warn!(%owner, %team, name = %b.name_any(), "membership.cleanup.bench_waits_finalizer");
-                }
+        // Past the grace (or delete-now): every object carries a due `delete-after` for the
+        // controller's GC. Only an object still lacking one is written, so a due pair costs nothing
+        // per beat and a delete-now's "now" is never pushed back to removed-at + grace.
+        Verdict::Due => {
+            let Some(t) = stamped_at else { return Ok(()) };
+            let at = chrono::DateTime::from_timestamp(t, 0).unwrap_or_default();
+            let after = if delete_now { chrono::DateTime::from_timestamp(now, 0).unwrap_or_default() } else { at + MEMBER_REMOVAL_GRACE };
+            let mut v = json!({REMOVED_AT: at.to_rfc3339(), DELETE_AFTER: after.to_rfc3339()});
+            if delete_now {
+                v[DELETE_NOW] = json!("true");
             }
-            steps.extend(workspaces.iter().map(|w| Target { env: crd::attached_environment(w), ..Target::of(*w, "Workspace") }));
-            steps.extend(spaces.iter().map(|x| Target::of(*x, "SpaceEnvironment")));
-            cleanup(s, dir, (&bapi, &wapi, &sapi), owner, team, steps, budget).await;
+            let unmarked = |m: &kube::core::ObjectMeta| system_annotation(m, DELETE_AFTER).is_none();
+            for x in benches.iter().filter(|x| unmarked(&x.metadata)) {
+                stamp(&bapi, &x.name_any(), v.clone()).await;
+            }
+            for x in workspaces.iter().filter(|x| unmarked(&x.metadata)) {
+                stamp(&wapi, &x.name_any(), v.clone()).await;
+            }
+            for x in spaces.iter().filter(|x| unmarked(&x.metadata)) {
+                stamp(&sapi, &x.name_any(), v.clone()).await;
+            }
         }
     }
     Ok(())
-}
-
-struct Target {
-    kind: &'static str,
-    name: String,
-    uid: Option<String>,
-    rv: Option<String>,
-    deleting: bool,
-    env: Option<String>,
-}
-
-impl Target {
-    fn of<K: kube::Resource>(x: &K, kind: &'static str) -> Self {
-        Target { kind, name: x.name_any(), uid: x.uid(), rv: x.resource_version(), deleting: x.meta().deletion_timestamp.is_some(), env: None }
-    }
-}
-
-type Apis<'a> = (&'a Api<crd::Bench>, &'a Api<crd::Workspace>, &'a Api<crd::SpaceEnvironment>);
-
-async fn cleanup(s: &ApiState, dir: &dyn Directory, apis: Apis<'_>, owner: &str, team: &str, steps: Vec<Target>, budget: &mut usize) {
-    for t in steps.into_iter().filter(|t| !t.deleting) {
-        if *budget == 0 {
-            return tracing::info!(%owner, %team, "membership.cleanup.deferred");
-        }
-        // A member re-added since the list must never lose data: ask again, right before this DELETE.
-        let reason = match dir.membership(team, owner).await {
-            Ok(Judged::TeamGone) => "team_deleted",
-            Ok(Judged::NotMember) => "left_or_removed",
-            other => return tracing::info!(%owner, %team, answer = ?other, "membership.cleanup.rejudged_keep"),
-        };
-        let dp = DeleteParams { preconditions: Some(Preconditions { uid: t.uid.clone(), resource_version: t.rv.clone() }), ..Default::default() };
-        let res = match t.kind {
-            "Bench" => apis.0.delete(&t.name, &dp).await.map(|_| ()),
-            "Workspace" => apis.1.delete(&t.name, &dp).await.map(|_| ()),
-            _ => apis.2.delete(&t.name, &dp).await.map(|_| ()),
-        };
-        // The env-side attach policy lives in another namespace, so no ownerReference collects it:
-        // drop it after the Workspace, exactly as `delete_as` does (best effort, logged there).
-        let gone = match &res {
-            Ok(()) => true,
-            Err(kube::Error::Api(e)) => e.code == 404,
-            Err(_) => false,
-        };
-        if t.kind == "Workspace" && gone {
-            super::workspaces::drop_attach_policy(&apis.1.clone().into_client(), &t.name, t.env.as_deref()).await;
-        }
-        match res {
-            Ok(()) => {
-                *budget -= 1;
-                tracing::info!(%owner, %team, kind = t.kind, name = %t.name, "membership.cleanup.deleted");
-                let detail = json!({"owner": owner, "team": team, "kind": t.kind, "name": t.name, "reason": reason}).to_string();
-                super::admin::audit(s, "system:membership", "member.removed.cleanup", &format!("{team}/{owner}"), Some(detail), "ok").await;
-            }
-            Err(kube::Error::Api(e)) if e.code == 404 => {}
-            Err(kube::Error::Api(e)) if e.code == 409 => {
-                return tracing::warn!(%owner, %team, kind = t.kind, name = %t.name, error = %e, "membership.cleanup.conflict");
-            }
-            Err(error) => return tracing::warn!(%owner, %team, kind = t.kind, name = %t.name, %error, "membership.cleanup.failed"),
-        }
-    }
 }
 
 /// Bench access + desiredState, each team Workspace's desiredState, and the tool-token Secret —
@@ -556,7 +502,7 @@ mod tests {
             v["metadata"]["managedFields"] = owned(&[REMOVED_AT]);
         }
         if finalizer {
-            v["metadata"]["finalizers"] = json!([BENCH_FOLDER_FINALIZER]);
+            v["metadata"]["finalizers"] = json!([crd::BENCH_FOLDER_FINALIZER]);
         }
         v
     }
@@ -581,22 +527,13 @@ mod tests {
     }
 
     /// A removed `(owner, acme)` past the grace: a finalized bench, two workspaces, a space choice.
-    fn removed(owner: &str, bench_status: u16) -> Vec<crate::kube_test::Route> {
+    fn removed(owner: &str) -> Vec<crate::kube_test::Route> {
         let b = with_meta(bench(owner, "acme", "paused", None), &crd::bench_id(owner, "acme"), Some(OLD), true);
         vec![
             benches(vec![b]),
             list_of("Workspace", "workspaces", vec![ws("w1", owner, "acme"), ws("w2", owner, "acme"), ws("w9", owner, "")]),
             list_of("SpaceEnvironment", "spaceenvironments", vec![space(owner, "acme")]),
-            del(path(owner, "acme"), bench_status),
-            del(format!("{API}/workspaces/w1"), 200),
-            del(format!("{API}/workspaces/w2"), 200),
-            del(format!("{API}/spaceenvironments/{}", crd::space_name(owner, "acme")), 200),
         ]
-    }
-
-    fn deleting(s: ApiState) -> ApiState {
-        s.central.store(kloudlite_core::settings::CentralSettings { member_removal_deletes: true, ..kloudlite_core::settings::CentralSettings::built_in_defaults() });
-        s
     }
 
     fn deletes(rec: &Recorder) -> Vec<String> {
@@ -606,21 +543,21 @@ mod tests {
     #[tokio::test]
     async fn a_mixed_case_team_is_judged_by_its_slug() {
         let (s, rec, dir) = setup(vec![benches(vec![bench("alice", " Acme", "full", None)])], &[]);
-        reconcile(&deleting(s)).await;
+        reconcile(&s).await;
         assert_eq!(dir.asked.load(Ordering::SeqCst), 1);
         assert!(writes(&rec).is_empty(), "a live member of acme is kept: {:?}", writes(&rec));
     }
 
     #[tokio::test]
     async fn a_stamp_this_system_did_not_write_restarts_the_grace() {
-        let mut routes = removed("bob", 200);
+        let mut routes = removed("bob");
         let mut b = bench("bob", "acme", "paused", None);
         b["metadata"]["annotations"] = json!({REMOVED_AT: OLD, DELETE_NOW: "yes"});
-        b["metadata"]["finalizers"] = json!([BENCH_FOLDER_FINALIZER]);
+        b["metadata"]["finalizers"] = json!([crd::BENCH_FOLDER_FINALIZER]);
         routes[0] = benches(vec![b]);
         routes[1] = list_of("Workspace", "workspaces", vec![]);
         let (s, rec, _) = setup(routes, &[("bob", "acme")]);
-        reconcile(&deleting(s)).await;
+        reconcile(&s).await;
         assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
         let sent = rec.sent("PATCH", &path("bob", "acme"));
         assert_ne!(sent[0]["metadata"]["annotations"][REMOVED_AT], json!(OLD), "a fresh stamp");
@@ -673,88 +610,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deletes_run_bench_then_workspaces_then_space_choice() {
-        let (s, rec, _) = setup(removed("bob", 200), &[]);
-        reconcile(&deleting(s)).await;
-        let want = vec![
-            format!("DELETE {}", path("bob", "acme")),
-            format!("DELETE {API}/workspaces/w1"),
-            format!("DELETE {API}/workspaces/w2"),
-            format!("DELETE {API}/spaceenvironments/{}", crd::space_name("bob", "acme")),
-        ];
-        assert_eq!(deletes(&rec), want);
-        let pre = &rec.sent("DELETE", &format!("{API}/workspaces/w1"))[0]["preconditions"];
-        assert_eq!((pre["uid"].as_str(), pre["resourceVersion"].as_str()), (Some("uid-w1"), Some("7")));
-    }
-
-    #[tokio::test]
-    async fn an_attached_workspace_delete_also_drops_the_env_side_policy() {
-        let mut routes = removed("bob", 200);
-        let mut w1 = ws("w1", "bob", "acme");
-        w1["spec"]["attachedEnvironment"] = json!("env-7");
-        routes[1] = list_of("Workspace", "workspaces", vec![w1, ws("w2", "bob", "acme")]);
-        let policy = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}", crd::env_namespace("env-7"), crate::k8s::attach_policy_name("w1"));
-        routes.push(del(policy.clone(), 200));
-        let (s, rec, _) = setup(routes, &[]);
-        reconcile(&deleting(s)).await;
-        let d = deletes(&rec);
-        let at = |x: &str| d.iter().position(|c| c == x).unwrap_or_else(|| panic!("{x} missing: {d:?}"));
-        assert!(at(&format!("DELETE {API}/workspaces/w1")) < at(&format!("DELETE {policy}")), "the Workspace goes first");
-        assert_eq!(d.iter().filter(|c| c.contains("networkpolicies")).count(), 1, "an unattached workspace has none");
-    }
-
-    #[tokio::test]
-    async fn no_snapshot_volume_or_environment_is_ever_deleted() {
-        let (s, rec, _) = setup(removed("bob", 200), &[]);
-        reconcile(&deleting(s)).await;
-        for c in deletes(&rec) {
-            assert!(!["/snapshots", "/volumes", "/environments/"].iter().any(|k| c.contains(k)), "{c}");
+    async fn a_due_pair_is_marked_on_every_object_and_nothing_is_deleted() {
+        let (s, rec, _) = setup(removed("bob"), &[]);
+        reconcile(&s).await;
+        assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
+        let paths = [path("bob", "acme"), format!("{API}/workspaces/w1"), format!("{API}/workspaces/w2"), format!("{API}/spaceenvironments/{}", crd::space_name("bob", "acme"))];
+        for p in &paths {
+            let sent = rec.sent("PATCH", p);
+            assert_eq!(sent.len(), 1, "{p}: {:?}", rec.calls());
+            assert_eq!(sent[0]["metadata"]["annotations"], json!({REMOVED_AT: "2020-01-01T00:00:00+00:00", DELETE_AFTER: "2020-01-08T00:00:00+00:00"}), "{p}");
         }
-        assert_eq!(deletes(&rec).len(), 4);
+        assert!(!writes(&rec).iter().any(|c| c.contains("/workspaces/w9")), "a personal workspace is never marked");
     }
 
     #[tokio::test]
-    async fn a_bench_without_the_folder_finalizer_is_left_for_its_folder() {
-        let mut routes = removed("bob", 200);
-        routes[0] = benches(vec![with_meta(bench("bob", "acme", "paused", None), &crd::bench_id("bob", "acme"), Some(OLD), false)]);
-        let (s, rec, _) = setup(routes, &[]);
-        reconcile(&deleting(s)).await;
-        assert!(!deletes(&rec).contains(&format!("DELETE {}", path("bob", "acme"))));
-        assert_eq!(deletes(&rec).len(), 3, "the workspaces and the space choice still go");
-    }
-
-    #[tokio::test]
-    async fn a_409_stops_the_pair_and_is_not_forced() {
-        let (s, rec, _) = setup(removed("bob", 409), &[]);
-        reconcile(&deleting(s)).await;
-        assert_eq!(deletes(&rec), vec![format!("DELETE {}", path("bob", "acme"))]);
-    }
-
-    #[tokio::test]
-    async fn with_deletes_off_nothing_is_deleted() {
-        let (s, rec, _) = setup(removed("bob", 200), &[]);
+    async fn a_due_pair_already_marked_writes_nothing() {
+        let mut b = with_meta(bench("bob", "acme", "paused", None), &crd::bench_id("bob", "acme"), None, true);
+        b["metadata"]["annotations"] = json!({REMOVED_AT: OLD, DELETE_AFTER: "2020-01-08T00:00:00Z"});
+        b["metadata"]["managedFields"] = owned(&[REMOVED_AT, DELETE_AFTER]);
+        let (s, rec, _) = setup(vec![benches(vec![b])], &[]);
         reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
-    #[tokio::test]
-    async fn a_rejudge_that_finds_the_member_back_deletes_nothing() {
-        let (s, rec, _) = setup(removed("rex", 200), &[]);
-        reconcile(&deleting(s)).await;
-        assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
-    }
-
-    #[tokio::test]
-    async fn the_beat_after_a_full_cleanup_writes_nothing() {
-        let mut routes = removed("bob", 200);
-        routes.extend([benches(vec![]), list_of("Workspace", "workspaces", vec![]), list_of("SpaceEnvironment", "spaceenvironments", vec![])]);
-        let (s, rec, _) = setup(routes, &[]);
-        let s = deleting(s);
-        reconcile(&s).await;
-        let first = writes(&rec).len();
-        reconcile(&s).await;
-        assert_eq!(writes(&rec).len(), first, "{:?}", writes(&rec));
-    }
 
     #[test]
     fn decide_covers_every_row() {
@@ -774,16 +652,16 @@ mod tests {
         for j in [NotMember, TeamGone] {
             assert_eq!(decide(&Ok(j), None, false, now, false), Verdict::Stamp);
             assert_eq!(decide(&Ok(j), Some(now - g + 1), false, now, true), Verdict::Keep);
-            assert_eq!(decide(&Ok(j), Some(now - g), false, now, true), Verdict::Delete);
-            assert_eq!(decide(&Ok(j), Some(now), true, now, true), Verdict::Delete);
-            assert_eq!(decide(&Ok(j), None, true, now, false), Verdict::Delete);
+            assert_eq!(decide(&Ok(j), Some(now - g), false, now, true), Verdict::Due);
+            assert_eq!(decide(&Ok(j), Some(now), true, now, true), Verdict::Due);
+            assert_eq!(decide(&Ok(j), None, true, now, false), Verdict::Due);
         }
     }
 
     #[tokio::test]
     async fn a_directory_error_changes_nothing() {
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "down", "full", Some("2020-01-01T00:00:00Z"))])], &[("bob", "down")]);
-        reconcile(&deleting(s)).await;
+        reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
@@ -802,7 +680,9 @@ mod tests {
         reconcile(&s).await;
         let sent = rec.sent("PATCH", &path("bob", "acme"));
         assert_eq!(sent.len(), 2);
-        assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string());
+        let a = &sent[0]["metadata"]["annotations"];
+        let at = chrono::DateTime::parse_from_rfc3339(a[REMOVED_AT].as_str().unwrap()).unwrap();
+        assert_eq!(a[DELETE_AFTER], json!((at + MEMBER_REMOVAL_GRACE).to_rfc3339()), "grace starts with the stamp");
         assert!(rec.requests().iter().any(|r| r.contains("fieldManager=kloudlite-membership")), "{:?}", rec.requests());
         assert_eq!(sent[1], json!({"spec": {"access": "paused"}}));
         reconcile(&s).await;
@@ -820,7 +700,7 @@ mod tests {
     async fn a_readd_during_the_grace_clears_the_stamp() {
         let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", Some("2026-09-15T00:00:00Z"))])], &[("alice", "acme")]);
         reconcile(&s).await;
-        assert_eq!(rec.sent("PATCH", &path("alice", "acme")), vec![json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null}}})]);
+        assert_eq!(rec.sent("PATCH", &path("alice", "acme")), vec![json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null, DELETE_AFTER: null}}})]);
     }
 
     #[tokio::test]
@@ -847,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn pause_stops_bench_and_team_workspaces_and_marks_access() {
         let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
-        reconcile(&deleting(s)).await;
+        reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
         assert_eq!(rec.sent("PATCH", &format!("{API}/workspaces/w1")), vec![json!({"spec": {"desiredState": "stopped"}})]);
         assert_eq!(deletes(&rec), vec![format!("DELETE {}", secret_path("paula", "acme"))], "only the tool token is deleted");
@@ -922,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn delete_now_refuses_an_unstamped_pair() {
         let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", None)])], &[]);
-        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
+        let r = crate::api::removals::delete_now(&s, &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
         assert_eq!(r.status(), 409);
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
@@ -930,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn delete_now_refuses_a_readded_member_with_a_stale_stamp() {
         let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", Some(OLD))])], &[]);
-        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
+        let r = crate::api::removals::delete_now(&s, &who("ann"), "acme", "alice", &confirm("alice", "acme")).await;
         assert_eq!(r.status(), 409);
         assert!(rec.calls().is_empty(), "judged before any read or write: {:?}", rec.calls());
     }
@@ -939,28 +819,30 @@ mod tests {
     async fn delete_now_on_an_unreadable_directory_is_503_and_writes_nothing() {
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "down", "paused", Some(OLD))])], &[]);
         let admin = crate::api::Caller { superadmin: true, ..who("root") };
-        let r = crate::api::removals::delete_now(&deleting(s), &admin, "down", "bob", &confirm("bob", "down")).await;
+        let r = crate::api::removals::delete_now(&s, &admin, "down", "bob", &confirm("bob", "down")).await;
         assert_eq!(r.status(), 503);
         assert!(rec.calls().is_empty(), "{:?}", rec.calls());
     }
 
     #[tokio::test]
-    async fn delete_now_runs_the_delete_without_waiting_the_grace() {
+    async fn delete_now_marks_delete_after_now_and_deletes_nothing() {
         let fresh = chrono::Utc::now().to_rfc3339();
         let name = crd::bench_id("bob", "acme");
         let b = with_meta(bench("bob", "acme", "paused", None), &name, Some(&fresh), true);
-        let mut marked = b.clone();
-        marked["metadata"]["annotations"] = json!({REMOVED_AT: fresh, DELETE_NOW: "true"});
-        marked["metadata"]["managedFields"] = owned(&[REMOVED_AT, DELETE_NOW]);
-        let routes = vec![benches(vec![b.clone()]), benches(vec![b]), benches(vec![marked.clone()]), patch(path("bob", "acme"), marked), del(path("bob", "acme"), 200)];
+        let routes = vec![benches(vec![b]), patch(path("bob", "acme"), bench("bob", "acme", "paused", None))];
         let (s, rec, _) = setup(routes, &[]);
-        let r = crate::api::removals::delete_now(&deleting(s), &who("ann"), "Acme", "bob", &confirm("bob", "acme")).await;
+        let before = chrono::Utc::now().timestamp();
+        let r = crate::api::removals::delete_now(&s, &who("ann"), "Acme", "bob", &confirm("bob", "acme")).await;
         assert_eq!(r.status(), 202);
         let sent = rec.sent("PATCH", &path("bob", "acme"));
-        assert_eq!(sent[0]["metadata"]["annotations"], json!({REMOVED_AT: fresh, DELETE_NOW: "true"}), "removed-at is kept");
+        let a = &sent[0]["metadata"]["annotations"];
+        assert_eq!((&a[REMOVED_AT], &a[DELETE_NOW]), (&json!(fresh), &json!("true")), "removed-at is kept");
+        let after = chrono::DateTime::parse_from_rfc3339(a[DELETE_AFTER].as_str().unwrap()).unwrap().timestamp();
+        assert!((before..=chrono::Utc::now().timestamp()).contains(&after), "due now, not after the grace");
         assert!(rec.requests().iter().any(|r| r.contains("fieldManager=kloudlite-membership")));
-        assert_eq!(deletes(&rec), vec![format!("DELETE {}", path("bob", "acme"))]);
+        assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
     }
+
 
     #[test]
     fn removals_lists_stamped_pairs_only() {

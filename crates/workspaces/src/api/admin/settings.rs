@@ -362,6 +362,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(git_init_image);
     over!(runtime_class);
     over!(stall_dumps);
+    over!(member_removal_deletes);
     current
 }
 
@@ -588,7 +589,7 @@ mod tests {
                         "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => {
                             serde_json::json!(format!("test-{wire}-{tag}"))
                         }
-                        "stallDumps" => serde_json::json!(tag.is_multiple_of(2)),
+                        "stallDumps" | "memberRemovalDeletes" => serde_json::json!(tag.is_multiple_of(2)),
                         _ => serde_json::json!(1000 + tag),
                     };
                     (wire.to_string(), v)
@@ -639,7 +640,7 @@ mod cluster_tests {
                     let x = match *name {
                         n if n.starts_with("trace") => serde_json::json!(if bump { 0.25 } else { 0.5 }),
                         "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => serde_json::json!(if bump { "b" } else { "a" }),
-                        "stallDumps" => serde_json::json!(bump),
+                        "stallDumps" | "memberRemovalDeletes" => serde_json::json!(bump),
                         _ => serde_json::json!(if bump { 61 } else { 62 }),
                     };
                     (name.to_string(), x)

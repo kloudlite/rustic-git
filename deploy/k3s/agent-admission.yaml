@@ -208,12 +208,13 @@ spec:
   policyName: kloudlite-agent-tenant-namespaces-only
   validationActions: ["Deny"]
 ---
-# 3. The removal stamps. `kloudlite.io/removed-at` starts a departed member's 7-day grace and
-#    `kloudlite.io/delete-now` skips it; the api's keys beat then DELETES that member's bench, team
-#    workspaces and space choice (`api::membership`). The beat already ignores a stamp it did not
-#    apply itself (`managedFields` manager `kloudlite-membership`), but the manager name is only a
-#    string, so this is what stops anyone else — the agent, the probe, a kubectl user — writing,
-#    changing or removing either annotation on the three kinds the beat reads. A CREATE carrying
+# 3. The removal stamps. `kloudlite.io/removed-at` starts a departed member's 7-day grace,
+#    `kloudlite.io/delete-now` skips it, and `kloudlite.io/delete-after` is the due time the cluster
+#    controller's GC DELETES that member's bench, team workspaces and space choice at
+#    (`api::membership` marks, `bins/controller/src/gc.rs` deletes). Both ignore an annotation the
+#    api did not apply itself (`managedFields` manager `kloudlite-membership`), but the manager name
+#    is only a string, so this is what stops anyone else — the agent, the controller, the probe, a
+#    kubectl user — writing, changing or removing any of the three on the kinds they are read from. A CREATE carrying
 #    one is refused too, so a restore brings objects back unstamped (fresh grace), never with a
 #    stamp that would delete. Applied with the rest of this file; no ordering beyond it.
 apiVersion: admissionregistration.k8s.io/v1
@@ -233,11 +234,11 @@ spec:
       expression: "request.userInfo.username != 'system:serviceaccount:kube-system:kloudlite-api'"
   validations:
     - expression: >-
-        ['kloudlite.io/removed-at', 'kloudlite.io/delete-now'].all(k,
+        ['kloudlite.io/removed-at', 'kloudlite.io/delete-now', 'kloudlite.io/delete-after'].all(k,
           (has(object.metadata.annotations) && k in object.metadata.annotations ? object.metadata.annotations[k] : '')
           == (request.operation == 'CREATE' ? ''
               : (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations ? oldObject.metadata.annotations[k] : '')))
-      message: "only kloudlite-api may write kloudlite.io/removed-at or kloudlite.io/delete-now"
+      message: "only kloudlite-api may write kloudlite.io/removed-at, kloudlite.io/delete-now or kloudlite.io/delete-after"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

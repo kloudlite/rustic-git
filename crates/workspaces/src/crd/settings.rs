@@ -153,6 +153,11 @@ pub struct ClusterSettingsSpec {
     /// 10 min per agent). Diagnostic only; leave off unless investigating a kube stall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_dumps: Option<bool>,
+    /// Whether the cluster controller really deletes a removed team member's bench, team
+    /// workspaces and space choice once their `kloudlite.io/delete-after` is due. Off only logs
+    /// `gc.would_delete`: the delete is irreversible, and regional because the objects are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_removal_deletes: Option<bool>,
 }
 
 
@@ -174,6 +179,7 @@ pub struct ClusterSettingsStatus {
 pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str])] = &[
     ("syncSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("stallDumps", kloudlite_core::settings::Mark::Live, &[]),
+    ("memberRemovalDeletes", kloudlite_core::settings::Mark::Live, &[]),
     ("benchIdleSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("replicaSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("decommissionSecs", kloudlite_core::settings::Mark::Live, &[]),
