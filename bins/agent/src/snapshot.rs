@@ -90,6 +90,13 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     }
 
     let name = s.name_any();
+    // A placement view that still names this node for a worktree whose live subvolume has left it
+    // (moved, retired, a builder torn down) failed `statfs` every tick for hours. Nothing to cut
+    // here is not an error: cut nothing, and requeue so a later pass re-reads placement.
+    if !ctx.engine.pool.worktree(&s.spec.volume, &s.spec.worktree).is_dir() {
+        tracing::info!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, "snapshot.cut.not_here");
+        return Ok(Action::requeue(crate::controller::RETRY));
+    }
     let (engine, volume, worktree) = (ctx.engine.clone(), s.spec.volume.clone(), s.spec.worktree.clone());
     let cut_name = name.clone();
     let result = tokio::task::spawn_blocking(move || engine.snapshot_worktree(&volume, &worktree, &cut_name))

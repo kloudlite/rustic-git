@@ -136,6 +136,12 @@ async fn sync_one(ctx: &Arc<Ctx>, live: &crate::listing::Parent, snapshots: &[cr
         None => (String::new(), None, None),
     };
 
+    // The listing can still name this node for a worktree whose subvolume has left it; reading its
+    // generation would warn every beat until the view catches up. Nothing here is nothing to sync.
+    if !ctx.engine.pool.worktree(&live.volume, &live.name).is_dir() {
+        tracing::info!(name = %live.name, volume = %live.volume, reason = "not-here", "sync.skipped");
+        return;
+    }
     let (engine, volume, worktree) = (ctx.engine.clone(), live.volume.clone(), live.name.clone());
     let gen = match tokio::task::spawn_blocking(move || engine.generation(&volume, &worktree)).await {
         Ok(Ok(g)) => g,
