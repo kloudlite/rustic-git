@@ -72,6 +72,43 @@ pub(crate) async fn denial(s: &ApiState, c: &Caller, owner: &str, otherwise: Res
     }
 }
 
+/// A caller's OWN object in a team (`owner` is theirs, `team` a real team): refused only on a
+/// KNOWN non-active verdict — paused, or (when `owns` says the caller has an object there, so a
+/// stranger learns nothing) no longer a member. A directory error serves the object as before:
+/// it is the caller's own, and the membership beat stops or pauses the pair within one beat, so a
+/// directory blip must not lock every active owner out of their own workspace.
+pub(crate) async fn team_access(s: &ApiState, c: &Caller, owner: &str, team: &str, owns: bool) -> Result<(), (StatusCode, String)> {
+    use super::{Judged, MemberState};
+    let Some(d) = &s.directory else { return Ok(()) };
+    if !super::membership::team_pair(owner, team) {
+        return Ok(());
+    }
+    let team = super::membership::norm(team);
+    let key = (team.clone(), super::membership::norm(&c.name));
+    // ponytail: 30 s per-state cache, invalidated nowhere — a pause or removal takes effect within
+    // TTL + one beat; move to a directory-pushed invalidation if that window ever matters.
+    let cache = &s.member_verdicts;
+    let hit = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(30)).map(|(_, j)| *j);
+    let judged = match hit {
+        Some(j) => j,
+        None => match d.membership(&team, &c.name).await {
+            Ok(j) => {
+                cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (std::time::Instant::now(), j));
+                j
+            }
+            Err(e) => {
+                tracing::warn!(owner = %c.name, %team, error = %e, "scope.membership.unavailable");
+                return Ok(());
+            }
+        },
+    };
+    match judged {
+        Judged::Member(MemberState::Paused) => Err((StatusCode::FORBIDDEN, format!("your access to {team} is paused"))),
+        Judged::NotMember | Judged::TeamGone if owns => Err((StatusCode::FORBIDDEN, format!("you are no longer a member of {team}"))),
+        _ => Ok(()),
+    }
+}
+
 /// A bench-tool caller acts only for its own handle and the bench's team, even for another team
 /// the person really belongs to: the token lives in a pod, and a leak must not reach every team.
 pub(crate) fn in_scope(c: &Caller, owner: &str) -> bool {
@@ -159,18 +196,11 @@ pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Wor
     if !super::admin::timing::step("directory.may_act_on", may_act_on(s, c, &w.spec.owner)).await {
         return Err(denial(s, c, &w.spec.owner, not_found()).await);
     }
-    // `owner == caller` admits a person to their own TEAM workspace too, so a paused membership
-    // must be checked here, or start/push/tools stay open until the beat re-stops it. Every
-    // workspace verb resolves through this function; the claim path is untouched.
-    if w.spec.owner == c.name && !c.superadmin && super::membership::team_pair(&w.spec.owner, &w.spec.team) {
-        if let Some(d) = &s.directory {
-            let team = super::membership::norm(&w.spec.team);
-            match d.membership(&team, &c.name).await {
-                Ok(super::Judged::Member(super::MemberState::Paused)) => return Err(denial(s, c, &team, not_found()).await),
-                Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, "team membership could not be checked").into_response()),
-                Ok(_) => {}
-            }
-        }
+    // `owner == caller` admits a person to their own TEAM workspace too, so a paused or removed
+    // membership must be checked here, or start/push/tools stay open until the beat re-stops it.
+    // Every workspace verb resolves through this function; the claim path is untouched.
+    if w.spec.owner == c.name && !c.superadmin {
+        team_access(s, c, &w.spec.owner, &w.spec.team, true).await.map_err(IntoResponse::into_response)?;
     }
     Ok(w)
 }
@@ -372,7 +402,9 @@ mod tests {
             use crate::api::{Judged, MemberState};
             match (team, user) {
                 ("down", _) => Err("unreachable".into()),
+                ("gone", _) => Ok(Judged::TeamGone),
                 (_, "paula") => Ok(Judged::Member(MemberState::Paused)),
+                (_, "rex") => Ok(Judged::NotMember),
                 _ => Ok(Judged::Member(MemberState::Active)),
             }
         }
@@ -397,6 +429,13 @@ mod tests {
         assert_eq!(ws_status("paula", "", false).await, 200, "a personal workspace is unaffected");
         assert_eq!(ws_status("paula", "paula", false).await, 200, "team == owner is personal");
         assert_eq!(ws_status("alice", "acme", false).await, 200, "an active member is unaffected");
-        assert_eq!(ws_status("alice", "down", false).await, 503, "an unreadable directory refuses");
+        assert_eq!(ws_status("alice", "down", false).await, 200, "an unreadable directory serves the owner's own");
+    }
+
+    #[tokio::test]
+    async fn a_removed_member_is_refused_their_own_team_workspace() {
+        assert_eq!(ws_status("rex", "acme", false).await, 403);
+        assert_eq!(ws_status("rex", "gone", false).await, 403, "a deleted team too");
+        assert_eq!(ws_status("rex", "", false).await, 200, "a personal workspace is unaffected");
     }
 }

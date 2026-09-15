@@ -19,7 +19,6 @@ use super::scope::may_allocate_for;
 use super::workspaces::{gateway_url, install_user_key_when, set_desired};
 use super::{bench_cost, caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
 use crate::crd::{self, BenchAccess, DesiredState, Phase};
-use super::{Judged, MemberState};
 use crate::k8s::{labels, TEAM_LABEL};
 use axum::{
     extract::{Query, State},
@@ -124,10 +123,11 @@ async fn my_bench(
         .map_err(kube_err)?
         .filter(|b| b.spec.owner == caller.name);
     if !may_allocate_for(s, &caller, &team).await {
-        let dir = s.directory.as_ref();
-        return Err(match dir {
-            Some(d) if d.membership(&team, &caller.name).await == Ok(Judged::Member(MemberState::Paused)) => paused(&team),
-            _ => no_team(),
+        // A paused member, or a removed one who still has a bench here, is told so; anyone else
+        // gets the stranger's 404.
+        return Err(match super::scope::team_access(s, &caller, &caller.name, &team, bench.is_some()).await {
+            Err((st, msg)) => err(st, msg),
+            Ok(()) => no_team(),
         });
     }
     let region = team_region(s, &caller, &team, first).await?;

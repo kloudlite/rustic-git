@@ -265,6 +265,9 @@ pub struct ApiState {
     /// A revocation is therefore honoured within one TTL rather than instantly — the deliberate
     /// price named in `caller`'s own ponytail marker — while a token the directory has never
     /// blessed is refused on every request, since nothing negative is ever remembered.
+    /// `scope::team_access`'s 30 s membership verdicts, keyed (team, handle). Per state, not a
+    /// process global, so two states (two tests) never read each other's directory.
+    pub(crate) member_verdicts: std::sync::Mutex<std::collections::HashMap<(String, String), (std::time::Instant, Judged)>>,
     pub(crate) cli_live: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
@@ -287,6 +290,7 @@ impl ApiState {
             resolver: None,
             fleet: None,
             cli_live: std::sync::Mutex::new(std::collections::HashMap::new()),
+            member_verdicts: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

@@ -228,7 +228,7 @@ async fn a_non_member_without_a_bench_cannot_see_create_or_tunnel_to_a_teams_ben
 }
 
 #[tokio::test]
-async fn a_departed_member_gets_404_on_their_old_bench() {
+async fn a_departed_member_gets_403_on_their_old_bench() {
     let path = bench_path("alice", "acme");
     let idle = bench_obj("alice", "acme", "running", Some("idle"), "full");
     let t = setup(
@@ -243,8 +243,9 @@ async fn a_departed_member_gets_404_on_their_old_bench() {
         ("POST", "/v1/bench/stop?team=acme", None),
         ("POST", "/v1/bench/session?team=acme", None),
     ] {
-        let (st, _) = t.call(m, uri, &tok, body).await;
-        assert_eq!(st, 404, "{m} {uri}");
+        // Removed, not a stranger: their bench is still here during the grace, so they are told why.
+        let (st, body) = t.call(m, uri, &tok, body).await;
+        assert_eq!((st, body["error"].clone()), (StatusCode::FORBIDDEN, json!("you are no longer a member of acme")), "{m} {uri}");
     }
     assert!(t.bench_writes().is_empty(), "{:?}", t.bench_writes());
 
@@ -687,7 +688,7 @@ async fn tool_token_refuses_a_stopped_bench() {
 async fn tool_token_refuses_a_departed_member() {
     let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[], vec![]);
     let (st, _) = t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
-    assert_eq!(st, 404);
+    assert_eq!(st, 403);
     assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
 }
 
