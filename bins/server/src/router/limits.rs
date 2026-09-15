@@ -11,6 +11,10 @@ pub(crate) fn max_decompressed() -> u64 {
 }
 
 pub(crate) fn internal(e: crate::Error) -> Response {
+    // A key routed to no owner: nothing exists there, so a read that skipped its probe is a 404.
+    if kloudlite_storage::pool::is_unowned_err(&e) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
     tracing::error!(error = %e, "request.failed");
     (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
 }

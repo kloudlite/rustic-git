@@ -43,7 +43,7 @@ impl Pool {
         }
         // Opening creates. A request routed to no owner must never be the one that does it.
         if super::is_unowned(owner, name) {
-            return Err(crate::err(format!("{owner}/{name}: not owned by this node")));
+            return Err(super::UnownedError { repo: format!("{owner}/{name}") }.into());
         }
         let key = format!("{owner}/{name}");
         let entry = {

@@ -120,9 +120,28 @@ pub fn is_fenced(e: &crate::Error) -> bool {
                 matches!(e.kind(), slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced))
                     // Two openers racing to write the SAME new manifest: the loser's open fails
                     // with this rather than a fence, but it is the same fact — another node holds
-                    // the database — and must re-route, never surface as a 500.
+                    // the database — and must re-route, never surface as a 500. A string match:
+                    // slatedb 0.15 maps TransactionalObjectVersionExists to a bare ErrorKind::Data
+                    // (error.rs), shared with corruption errors, so there is no typed kind to test.
                     || e.to_string().contains("version already exists")
             })
+}
+
+/// `get` refused a key the request was routed to no owner for (see `unowned`). Routing already
+/// established nothing exists there, so every converter answers the resource's not-found.
+#[derive(Debug)]
+pub struct UnownedError {
+    pub repo: String,
+}
+impl std::fmt::Display for UnownedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: no owner, not opened here", self.repo)
+    }
+}
+impl std::error::Error for UnownedError {}
+
+pub fn is_unowned_err(e: &crate::Error) -> bool {
+    e.downcast_ref::<UnownedError>().is_some()
 }
 
 tokio::task_local! {

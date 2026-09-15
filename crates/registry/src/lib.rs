@@ -60,6 +60,11 @@ pub fn oci_err(status: StatusCode, code: &str, message: &str) -> Response {
 /// gives git handlers. Detail stays server-side (matches `internal`'s convention) — only the code
 /// and a generic message cross the wire.
 pub fn oci_internal(e: crate::Error) -> Response {
+    // A key routed to no owner (`pool::unowned`): the image was never created, whatever read
+    // skipped its probe to get here.
+    if pool::is_unowned_err(&e) {
+        return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
+    }
     tracing::error!(error = %e, "request.failed");
     oci_err(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN", "internal error")
 }

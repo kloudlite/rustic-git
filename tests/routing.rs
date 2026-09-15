@@ -1527,6 +1527,32 @@ async fn a_forward_to_a_departed_owner_recovers() {
     assert_eq!(b.store.pool.warm_count(), 1, "B took it over");
 }
 
+/// Reads of a never-created image or repo under a `Missing` route answer 404, never the pool's
+/// refusal as a 500: a mistyped pull, and crane/buildx's pre-push tag checks, depend on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_of_a_missing_image_or_repo_under_no_owner_are_404() {
+    let e = common::env().await;
+    let token = e.store.create_token("alice").await.unwrap();
+    let f = fleet(2);
+    let _a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    for (method, path) in [
+        (reqwest::Method::HEAD, "/v2/alice/newimg/manifests/latest"),
+        (reqwest::Method::GET, "/v2/alice/newimg/manifests/latest"),
+        (reqwest::Method::GET, "/v2/alice/newimg/tags/list"),
+    ] {
+        let res = client().await.request(method.clone(), format!("http://{}{path}", b.public))
+            .basic_auth("alice", Some(&token)).send().await.unwrap();
+        assert_eq!(res.status(), 404, "{method} {path}");
+    }
+    let res = client().await.get(format!("http://{}/api/alice/nope/refs", b.peer))
+        .header(kloudlite_core::peer::PEER_HEADER, SECRET)
+        .header(kloudlite_core::peer::OWNER_HEADER, "alice")
+        .send().await.unwrap();
+    assert_eq!(res.status(), 404, "browse of a missing repo");
+    assert_eq!(b.store.pool.warm_count(), 0, "and nothing was opened");
+}
+
 /// A browse request must be routed by the repo the BROWSE HANDLER will open, and by nothing else.
 ///
 /// `/api/alice/info/refs` is the browse route of `alice/info` — that is what axum's matchit
