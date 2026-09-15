@@ -12,6 +12,30 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub const KEYS_RESYNC_SECS: u64 = 300;
+/// A Lease in `kube-system` this beat renews after every membership reconcile. The controller's
+/// removal GC reads it and deletes nothing while it is older than two beats: a re-add that only
+/// the beat clears (a superadmin grant) is protected by the GC's slack only while the beat runs.
+pub const KEYS_BEAT_LEASE: &str = "kloudlite-keys-beat";
+pub const KEYS_BEAT_NAMESPACE: &str = "kube-system";
+
+pub fn beat_lease(now: k8s_openapi::jiff::Timestamp) -> k8s_openapi::api::coordination::v1::Lease {
+    use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+    Lease {
+        metadata: kube::core::ObjectMeta { name: Some(KEYS_BEAT_LEASE.into()), namespace: Some(KEYS_BEAT_NAMESPACE.into()), ..Default::default() },
+        spec: Some(LeaseSpec { holder_identity: Some("kloudlite-api".into()), renew_time: Some(MicroTime(now)), ..Default::default() }),
+    }
+}
+
+/// Best effort: a lost write only makes the GC hold, which is the safe direction.
+async fn renew_beat(s: &ApiState) {
+    let Some(k) = s.kube.as_ref() else { return };
+    let api: Api<k8s_openapi::api::coordination::v1::Lease> = Api::namespaced(k.clone(), KEYS_BEAT_NAMESPACE);
+    let lease = beat_lease(k8s_openapi::jiff::Timestamp::now());
+    if let Err(e) = api.patch(KEYS_BEAT_LEASE, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&lease)).await {
+        tracing::warn!(error = %e, "keys.beat_lease.failed");
+    }
+}
 
 pub fn owner_keys(owner: &str, generation: i64, authorized_keys: String) -> crd::OwnerKeys {
     crd::OwnerKeys::new(owner, crd::OwnerKeysSpec { generation, authorized_keys })
@@ -146,6 +170,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
         tick.tick().await;
         project_all(&s).await;
         super::membership::reconcile(&s).await;
+        renew_beat(&s).await;
         prune_namespaces(&s).await;
         prune_builders(&s).await;
         super::spaces::migrate(&s).await;
@@ -377,6 +402,14 @@ mod builder_prune_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_beat_lease_names_itself_and_stamps_renew_time() {
+        let now = k8s_openapi::jiff::Timestamp::from_second(1_000).unwrap();
+        let v = serde_json::to_value(beat_lease(now)).unwrap();
+        assert_eq!((v["metadata"]["name"].as_str(), v["metadata"]["namespace"].as_str()), (Some(KEYS_BEAT_LEASE), Some("kube-system")));
+        assert_eq!(v["spec"]["renewTime"], serde_json::to_value(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now)).unwrap());
+    }
 
     /// The whole rule, and every way a namespace earns its keep. The `wt-bob-dead` case is the
     /// 2026-09-08 leak; every other row is one that must survive it.

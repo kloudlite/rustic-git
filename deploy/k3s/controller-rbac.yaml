@@ -38,6 +38,9 @@
 #   leases (coordination.k8s.io)           get,create,update       lease.rs: elect, renew, release.
 #                                                                  Namespaced to kube-system, by
 #                                                                  NAME — see the Role below
+#   leases (coordination.k8s.io)           get                     gc.rs: the api's `kloudlite-keys-beat`
+#                                                                  heartbeat; stale or missing holds
+#                                                                  every delete. Same Role, by name
 #
 # What the controller deliberately does NOT get in stage 1: namespaces, limitranges,
 # resourcequotas, rolebindings, services, statefulsets, pods, and any `/status` subresource. Those
@@ -102,6 +105,11 @@ rules:
     # No `patch`: lease.rs reads then `replace`s, and the resourceVersion carried on that PUT is
     # the CAS two controllers depend on. A patch is exactly the write that skips it.
     verbs: ["get", "update"]
+  # Read only: the api's keys beat writes it (api-rbac.yaml).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["kloudlite-keys-beat"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

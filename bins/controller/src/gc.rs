@@ -13,6 +13,8 @@
 //!   manager (the admission policy `kloudlite-removal-stamps-are-the-apis` is the real fence) and
 //!   parses to a time already past; a Bench also waits for the agent's `kloudlite.io/bench-folder`
 //!   finalizer, without which its on-disk folder would be stranded;
+//! - the api's keys beat Lease (`kloudlite-keys-beat`) older than two beats, missing or unreadable
+//!   holds every delete (`gc.held_beat_stale`): the slack assumes that beat is clearing re-adds;
 //! - the regional `ClusterSettings.memberRemovalDeletes` off (the default) logs `gc.would_delete`
 //!   and deletes nothing; on, each due object is deleted under a uid + resourceVersion
 //!   precondition, re-checking the lease first, and a 404 or 409 is a skip for the next tick.
@@ -21,7 +23,9 @@
 //! snapshots outlive it through its Volume (`WORKTREE_FINALIZER`).
 
 use crate::Ctx;
+use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use kloudlite_workspaces::api::keys::{KEYS_BEAT_LEASE, KEYS_BEAT_NAMESPACE, KEYS_RESYNC_SECS};
 use k8s_openapi::jiff::Timestamp;
 use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, GC_DELETE_SLACK_SECS, GC_TICK_SECS};
 use kloudlite_workspaces::{crd, k8s};
@@ -87,6 +91,24 @@ where
     }
 }
 
+/// Whether the api's keys beat renewed `KEYS_BEAT_LEASE` within two beats. Missing, unreadable or
+/// unstamped all answer no: the slack only protects a re-add while that beat is clearing marks.
+pub fn beat_fresh(lease: Option<&Lease>, now: i64) -> bool {
+    let max = 2 * KEYS_RESYNC_SECS as i64;
+    lease.and_then(|l| l.spec.as_ref()?.renew_time.as_ref()).is_some_and(|t| now - t.0.as_second() <= max)
+}
+
+async fn beat_alive(ctx: &Ctx, now: i64) -> bool {
+    let api: Api<Lease> = Api::namespaced(ctx.client.clone(), KEYS_BEAT_NAMESPACE);
+    match api.get_opt(KEYS_BEAT_LEASE).await {
+        Ok(l) => beat_fresh(l.as_ref(), now),
+        Err(error) => {
+            tracing::warn!(%error, "gc.beat_lease.unreadable");
+            false
+        }
+    }
+}
+
 pub async fn pass(ctx: &Ctx, now: i64) {
     let c = &ctx.client;
     let listed = async { Ok::<_, kube::Error>((list::<crd::Bench>(c).await?, list::<crd::Workspace>(c).await?, list::<crd::SpaceEnvironment>(c).await?)) };
@@ -107,6 +129,9 @@ pub async fn pass(ctx: &Ctx, now: i64) {
     todo.extend(spaces.iter().filter_map(|s| due(s, "SpaceEnvironment", &s.spec.owner, &s.spec.team, now)));
 
     let on = ctx.settings.load().member_removal_deletes;
+    if on && !todo.is_empty() && !beat_alive(ctx, now).await {
+        return tracing::warn!(due = todo.len(), "gc.held_beat_stale");
+    }
     for d in todo {
         if !on {
             tracing::info!(kind = d.kind, name = %d.name, owner = %d.owner, team = %d.team, due = %d.due, "gc.would_delete");
@@ -198,6 +223,12 @@ mod tests {
         Route { method: "DELETE", path, status: 200, body: json!({"kind": "Status", "apiVersion": "v1", "status": "Success", "code": 200}) }
     }
 
+    const BEAT: &str = "/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kloudlite-keys-beat";
+
+    fn beat(renewed: i64) -> Route {
+        get(BEAT, serde_json::to_value(kloudlite_workspaces::api::keys::beat_lease(Timestamp::from_second(renewed).unwrap())).unwrap())
+    }
+
     fn cluster() -> Vec<Route> {
         vec![
             list("Bench", "benches", vec![bench("b-due", Some(PAST), true), bench("b-later", Some(FUTURE), true), bench("b-nofin", Some(PAST), false), bench("b-plain", None, true)]),
@@ -205,6 +236,7 @@ mod tests {
             list("SpaceEnvironment", "spaceenvironments", vec![space(Some(PAST))]),
             get(LEASE, json!({"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": {"name": "kloudlite-controller", "namespace": "kube-system", "resourceVersion": "1"},
                               "spec": {"holderIdentity": "ctl-test", "leaseTransitions": 4}})),
+            beat(Timestamp::now().as_second()),
             ok_delete(format!("{API}/benches/b-due")),
             ok_delete(format!("{API}/workspaces/w-due")),
             ok_delete(format!("{API}/spaceenvironments/{}", crd::space_name("bob", "acme"))),
@@ -290,9 +322,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stale_or_missing_keys_beat_holds_every_delete() {
+        let now = Timestamp::now().as_second();
+        let mut routes = cluster();
+        routes[4] = beat(now - 2 * KEYS_RESYNC_SECS as i64 - 30);
+        let rec = run_pass(routes, true, true).await;
+        assert!(deletes(&rec).is_empty(), "stale: {:?}", rec.calls());
+        let mut routes = cluster();
+        routes.remove(4);
+        let rec = run_pass(routes, true, true).await;
+        assert!(deletes(&rec).is_empty(), "missing: {:?}", rec.calls());
+    }
+
+    #[test]
+    fn a_beat_within_two_resyncs_is_fresh() {
+        let lease = |at: i64| kloudlite_workspaces::api::keys::beat_lease(Timestamp::from_second(at).unwrap());
+        let (now, max) = (10_000, 2 * KEYS_RESYNC_SECS as i64);
+        assert!(beat_fresh(Some(&lease(now - max)), now));
+        assert!(!beat_fresh(Some(&lease(now - max - 1)), now));
+        assert!(!beat_fresh(None, now));
+    }
+
+    #[tokio::test]
     async fn a_conflict_is_skipped_and_the_rest_still_run() {
         let mut routes = cluster();
-        routes[4] = kube_test::conflict("DELETE", format!("{API}/benches/b-due"));
+        routes[5] = kube_test::conflict("DELETE", format!("{API}/benches/b-due"));
         let rec = run_pass(routes, true, true).await;
         assert_eq!(deletes(&rec).len(), 4, "{:?}", rec.calls());
     }
