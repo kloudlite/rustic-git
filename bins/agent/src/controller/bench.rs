@@ -12,7 +12,7 @@ use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::runtime::controller::Action;
 use kube::api::DeleteParams;
 use kube::{Api, Resource, ResourceExt};
-use kloudlite_workspaces::crd::{self, BenchAccess, Condition, DesiredState, Phase};
+use kloudlite_workspaces::crd::{self, Condition, DesiredState, Phase};
 use kloudlite_workspaces::k8s;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,6 @@ use std::time::Duration;
 #[derive(Debug)]
 pub(crate) enum PodVerdict {
     Create,
-    Replace,
     Starting,
     Ready,
     Locked(String),
@@ -69,16 +68,6 @@ pub(crate) fn bench_state(b: &crd::Bench, pod: Option<&Pod>) -> PodVerdict {
     }
     if !wants {
         return PodVerdict::Remove;
-    }
-    // A container's command is immutable, so an access change is a new pod.
-    let read_only = pod
-        .spec
-        .as_ref()
-        .and_then(|s| s.containers.iter().find(|c| c.name == k8s::BENCH_CONTAINER))
-        .and_then(|c| c.command.as_ref())
-        .is_some_and(|cmd| cmd.iter().any(|a| a == "--read-only"));
-    if read_only != (b.spec.access == BenchAccess::ReadOnly) {
-        return PodVerdict::Replace;
     }
     let ready = pod.status.as_ref().and_then(|s| s.conditions.as_ref()).is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
     if ready {
@@ -225,7 +214,7 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
             write(&b, st, &ctx).await?;
             Ok(Action::await_change())
         }
-        PodVerdict::Remove | PodVerdict::Replace => {
+        PodVerdict::Remove => {
             delete_ignoring_404(&pods, k8s::BENCH_POD).await?;
             Ok(Action::requeue(SHORT))
         }
@@ -235,8 +224,7 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
             Ok(Action::requeue(TICK))
         }
         PodVerdict::Ready => {
-            let reason = if b.spec.access == BenchAccess::ReadOnly { "ReadOnly" } else { "Running" };
-            let c = cond("Ready", true, reason, "the bench is serving");
+            let c = cond("Ready", true, "Running", "the bench is serving");
             write(&b, crd::BenchStatus { phase: Phase::Ready, pod_ref, conditions: with(&prev, c), ..prev }, &ctx).await?;
             Ok(Action::await_change())
         }
@@ -294,7 +282,6 @@ mod tests {
     fn the_pod_decides_create_replace_ready_locked_idle_and_absent() {
         let running = fixture_bench(DesiredState::Running);
         assert!(matches!(bench_state(&running, None), PodVerdict::Create));
-        assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench", "--read-only"], None, true))), PodVerdict::Replace), "a member's bench running the reader");
         assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Ready));
         assert!(matches!(bench_state(&running, Some(&pod_with(&["harness-bench"], None, false))), PodVerdict::Starting));
         match bench_state(&running, Some(&pod_with(&["harness-bench"], Some((75, "node-b")), false))) {
@@ -315,9 +302,10 @@ mod tests {
         let stopped = fixture_bench(DesiredState::Stopped);
         assert!(matches!(bench_state(&stopped, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Remove));
         assert!(matches!(bench_state(&stopped, None), PodVerdict::Absent));
-        let mut departed = fixture_bench(DesiredState::Running);
-        departed.spec.access = crd::BenchAccess::ReadOnly;
-        assert!(matches!(bench_state(&departed, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Replace), "tools stop when the owner leaves");
+        let mut paused = fixture_bench(DesiredState::Running);
+        paused.spec.access = crd::BenchAccess::Paused;
+        assert!(matches!(bench_state(&paused, Some(&pod_with(&["harness-bench"], None, true))), PodVerdict::Remove), "a paused bench loses its pod");
+        assert!(matches!(bench_state(&paused, None), PodVerdict::Absent));
     }
 
     #[test]

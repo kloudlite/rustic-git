@@ -2574,10 +2574,10 @@
                     "properties": {
                       "access": {
                         "default": "full",
-                        "description": "`Full` for a member; `ReadOnly` once the owner has left `team`. Written only by /v1.",
+                        "description": "`Full` for a member; `Paused` while the owner may not use it (no pod). Written only by the\napi's reconcile beat.",
                         "enum": [
                           "full",
-                          "readOnly"
+                          "paused"
                         ],
                         "type": "string"
                       },

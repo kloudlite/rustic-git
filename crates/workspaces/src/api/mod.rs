@@ -257,6 +257,7 @@ mod route_tests {
         assert!(!super::bench_admits_tool(&bench("alice", "t2", "running", "full"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "stopped", "full"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "readOnly"), "alice", "acme"));
+        assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "paused"), "alice", "acme"));
     }
 
     #[test]
@@ -913,7 +914,8 @@ mod bench_tool_check_tests {
         assert_eq!(reason(&claims("revoked"), Method::GET, "/v1/workspaces", good()).await.err(), Some("parent"));
         for (sp, why) in [
             (spec("alice", "acme", "stopped", "full"), "stopped"),
-            (spec("alice", "acme", "running", "readOnly"), "read-only"),
+            (spec("alice", "acme", "running", "readOnly"), "stored read-only"),
+            (spec("alice", "acme", "running", "paused"), "paused"),
             (spec("bob", "acme", "running", "full"), "wrong owner"),
             (spec("alice", "t2", "running", "full"), "wrong team"),
             (None, "missing"),

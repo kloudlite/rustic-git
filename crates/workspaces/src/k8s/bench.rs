@@ -5,7 +5,7 @@
 //! itself owns the model runtime and the idle clock; this module only shapes the pod around it.
 
 use super::*;
-use crate::crd::{Bench, BenchAccess};
+use crate::crd::Bench;
 use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 
 pub const BENCH_PORT: u16 = 7789;
@@ -38,10 +38,7 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
     let folder = bench_folder(pool, team, owner)?;
     let ns = crate::crd::ws_namespace(owner, team);
 
-    let command = match b.spec.access {
-        BenchAccess::Full => vec!["harness-bench".to_string()],
-        BenchAccess::ReadOnly => vec!["harness-bench".to_string(), "--read-only".to_string()],
-    };
+    let command = vec!["harness-bench".to_string()];
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
 
     let mut env = vec![

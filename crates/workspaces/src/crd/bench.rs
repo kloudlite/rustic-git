@@ -27,7 +27,8 @@ pub struct BenchSpec {
     #[serde(default)]
     pub model: String,
     pub desired_state: DesiredState,
-    /// `Full` for a member; `ReadOnly` once the owner has left `team`. Written only by /v1.
+    /// `Full` for a member; `Paused` while the owner may not use it (no pod). Written only by the
+    /// api's reconcile beat.
     #[serde(default)]
     pub access: BenchAccess,
     /// RFC 3339, written by /v1 when a client asks for a tunnel to an idle bench. A pod is wanted
@@ -47,7 +48,9 @@ pub struct BenchSpec {
 pub enum BenchAccess {
     #[default]
     Full,
-    ReadOnly,
+    /// `readOnly` is the retired departed state; stored objects still carry it and parse as this.
+    #[serde(alias = "readOnly")]
+    Paused,
 }
 
 
@@ -75,7 +78,7 @@ pub const BENCH_IDLE: &str = "Idle";
 
 /// Whether a pod should exist now: Running, and not asleep unless a wake came after it slept.
 pub fn bench_wants_pod(b: &Bench) -> bool {
-    if b.spec.desired_state != DesiredState::Running {
+    if b.spec.desired_state != DesiredState::Running || b.spec.access == BenchAccess::Paused {
         return false;
     }
     let Some(idle_since) = b.status.as_ref().and_then(|s| s.idle_since.as_deref()) else {
@@ -126,5 +129,24 @@ mod tests {
         assert!(bench_wants_pod(&b));
         b.spec.desired_state = DesiredState::Stopped;
         assert!(!bench_wants_pod(&b), "stopped refuses a wake");
+    }
+
+    #[test]
+    fn a_stored_readonly_bench_parses_as_paused() {
+        let v = serde_json::json!({"owner":"alice","team":"acme","image":"i","desiredState":"running","access":"readOnly"});
+        let s: BenchSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(s.access, BenchAccess::Paused);
+        assert_eq!(serde_json::to_value(s.access).unwrap(), "paused");
+    }
+
+    #[test]
+    fn a_paused_bench_wants_no_pod() {
+        let mut b = Bench::new(
+            "bench-1",
+            serde_json::from_value(serde_json::json!({"owner":"alice","team":"acme","image":"i","desiredState":"running"})).unwrap(),
+        );
+        b.spec.access = BenchAccess::Paused;
+        b.spec.wake_at = Some("2099-01-01T00:00:00Z".into());
+        assert!(!bench_wants_pod(&b), "a wake never starts a paused bench");
     }
 }

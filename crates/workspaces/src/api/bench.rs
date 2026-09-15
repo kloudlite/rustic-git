@@ -3,8 +3,8 @@
 //! here and no admin route anywhere reads a bench, because a bench is a person's transcripts.
 //!
 //! Every rule lives in `my_bench`, so no handler can forget one: the team is the caller's handle
-//! when absent (decision 4); membership decides `Full` or `ReadOnly` (decision 10) and a
-//! non-member with no bench gets the same 404 as a stranger; the region is read from the
+//! when absent (decision 4); a non-member gets the same 404 as a stranger, a paused
+//! member a 403 naming the pause, and `spec.access` is written only by the keys beat; the region is read from the
 //! directory on every call and never stored on the Bench (decision 1). Waking is a `wakeAt`
 //! patch — `/v1` is spec's only writer, and the agent compares it to `status.idleSince`
 //! (decision 6).
@@ -12,13 +12,14 @@
 //! Image upgrades: `spec.image` tracks `KLOUDLITE_BENCH_IMAGE` (pinned per release). Every patch
 //! that starts or wakes a bench (`wake_patch`) re-stamps it when it differs, so a stopped or idle
 //! bench starts on the new image. A RUNNING pod is never replaced for an image change — the agent
-//! compares only access — so a session is never killed mid-turn; the pod exits on its own idle
+//! never compares images — so a session is never killed mid-turn; the pod exits on its own idle
 //! clock and the next wake creates it from the new `spec.image`.
 
 use super::scope::may_allocate_for;
 use super::workspaces::{gateway_url, install_user_key_when, set_desired};
 use super::{bench_cost, caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
 use crate::crd::{self, BenchAccess, DesiredState, Phase};
+use super::{Judged, MemberState};
 use crate::k8s::{labels, TEAM_LABEL};
 use axum::{
     extract::{Query, State},
@@ -43,13 +44,6 @@ pub(crate) struct NewBench {
     region: Option<String>,
     #[serde(default)]
     model: Option<String>,
-}
-
-/// What the caller may do with this bench.
-#[derive(Clone, Copy, PartialEq)]
-enum Standing {
-    Member,
-    Departed,
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -110,14 +104,14 @@ async fn team_region(s: &ApiState, caller: &Caller, team: &str, first: Option<&s
     }
 }
 
-/// caller, normalized team, region, standing, and the caller's own bench — or the 404 every other
-/// case gets. `first` is only a create's body region (a person's first bind).
+/// caller, normalized team, region, and the caller's own bench — a paused member's 403, or the
+/// 404 every other non-member gets. `first` is only a create's body region (a person's first bind).
 async fn my_bench(
     s: &ApiState,
     headers: &HeaderMap,
     team: Option<&str>,
     first: Option<&str>,
-) -> Result<(Caller, String, String, Standing, Option<crd::Bench>), Response> {
+) -> Result<(Caller, String, String, Option<crd::Bench>), Response> {
     let caller = caller(s, headers).await?;
     let team = team.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| caller.name.clone());
     if !super::scope::in_scope(&caller, &team) {
@@ -129,28 +123,19 @@ async fn my_bench(
         .await
         .map_err(kube_err)?
         .filter(|b| b.spec.owner == caller.name);
-    let standing = if may_allocate_for(s, &caller, &team).await {
-        Standing::Member
-    } else if bench.is_some() {
-        Standing::Departed
-    } else {
-        return Err(no_team());
-    };
+    if !may_allocate_for(s, &caller, &team).await {
+        let dir = s.directory.as_ref();
+        return Err(match dir {
+            Some(d) if d.membership(&team, &caller.name).await == Ok(Judged::Member(MemberState::Paused)) => paused(&team),
+            _ => no_team(),
+        });
+    }
     let region = team_region(s, &caller, &team, first).await?;
-    Ok((caller, team, region, standing, bench))
+    Ok((caller, team, region, bench))
 }
 
-/// The one writer of `spec.access` on the person's side: Full for a member, ReadOnly once departed.
-async fn ensure_access(api: &Api<crd::Bench>, b: &mut crd::Bench, standing: Standing) -> Result<(), Response> {
-    let want = if standing == Standing::Member { BenchAccess::Full } else { BenchAccess::ReadOnly };
-    if b.spec.access != want {
-        let name = b.metadata.name.clone().unwrap_or_default();
-        api.patch(&name, &PatchParams::default(), &Patch::Merge(&json!({"spec": {"access": want}})))
-            .await
-            .map_err(kube_err)?;
-        b.spec.access = want;
-    }
-    Ok(())
+fn paused(team: &str) -> Response {
+    err(StatusCode::FORBIDDEN, format!("your access to {team} is paused"))
 }
 
 fn configured_image() -> String {
@@ -219,9 +204,8 @@ pub(crate) async fn get_bench(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (_, _, region, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let mut b = found(b)?;
-    ensure_access(&bench_api(&s)?, &mut b, standing).await?;
+    let (_, _, region, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let b = found(b)?;
     Ok(Json(bench_doc(&b, &region)).into_response())
 }
 
@@ -230,14 +214,10 @@ pub(crate) async fn create_bench(
     headers: HeaderMap,
     Json(body): Json<NewBench>,
 ) -> Result<Response, Response> {
-    let (caller, team, region, standing, existing) =
+    let (caller, team, region, existing) =
         my_bench(&s, &headers, body.team.as_deref(), body.region.as_deref()).await?;
-    if standing == Standing::Departed {
-        return Err(no_team());
-    }
     let api = bench_api(&s)?;
-    if let Some(mut b) = existing {
-        ensure_access(&api, &mut b, standing).await?;
+    if let Some(b) = existing {
         // Re-POSTing a stopped or idle bench starts a pod: an allocation, exactly as `start_bench`.
         if !crd::bench_wants_pod(&b) {
             guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
@@ -285,10 +265,9 @@ pub(crate) async fn start_bench(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, _, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let mut b = found(b)?;
+    let (caller, _, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let b = found(b)?;
     let api = bench_api(&s)?;
-    ensure_access(&api, &mut b, standing).await?;
     if !crd::bench_wants_pod(&b) {
         guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
     }
@@ -304,9 +283,8 @@ pub(crate) async fn stop_bench(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, team, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let mut b = found(b)?;
-    ensure_access(&bench_api(&s)?, &mut b, standing).await?;
+    let (caller, team, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let b = found(b)?;
     set_desired::<crd::Bench>(kube(&s)?, &b.metadata.name.clone().unwrap_or_default(), DesiredState::Stopped).await?;
     // Best effort: `caller` already refuses a stopped bench's tool token, so a leftover Secret
     // holds a dead credential until its 15 minutes run out.
@@ -341,13 +319,14 @@ pub(crate) async fn mint_tool_token(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, team, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let (caller, team, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     let Some(parent) = caller.parent.clone() else {
         return Err(err(StatusCode::FORBIDDEN, "sign in on the Kloudlite desktop app"));
     };
     let b = found(b)?;
-    if standing != Standing::Member {
-        return Err(err(StatusCode::FORBIDDEN, "you are no longer a member of this team"));
+    // A member whose beat has not caught up still holds a Paused bench: no tools either way.
+    if b.spec.access == BenchAccess::Paused {
+        return Err(paused(&team));
     }
     if b.spec.desired_state == DesiredState::Stopped {
         return Err(err(StatusCode::CONFLICT, "bench is stopped; start it"));
@@ -377,7 +356,7 @@ pub(crate) async fn revoke_tool_token(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, team, _, _, _) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let (caller, team, _, _) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     delete_tool_secret(kube(&s)?, &caller.name, &team).await.map_err(|e| {
         tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
         err(StatusCode::SERVICE_UNAVAILABLE, "could not delete the bench tool token")
@@ -391,10 +370,12 @@ pub(crate) async fn bench_session(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, _, region, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let mut b = found(b)?;
+    let (caller, team, region, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let b = found(b)?;
     let api = bench_api(&s)?;
-    ensure_access(&api, &mut b, standing).await?;
+    if b.spec.access == BenchAccess::Paused {
+        return Err(paused(&team));
+    }
     if b.spec.desired_state == DesiredState::Stopped {
         return Err(err(StatusCode::CONFLICT, "bench is stopped; start it"));
     }
@@ -411,11 +392,8 @@ pub(crate) async fn bench_session(
     if phase != Phase::Ready {
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": phase.as_str()}))).into_response());
     }
-    // `ensure_access` may just have demoted a departed member to ReadOnly while the phase still
-    // describes the old Full pod. Only a Ready reason written for THIS access proves the pod being
-    // dialled is the right one; the reconciler writes exactly `ReadOnly` or `Running`.
-    let want = if b.spec.access == BenchAccess::ReadOnly { "ReadOnly" } else { "Running" };
-    let serving = b.status.as_ref().is_some_and(|st| st.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True" && c.reason == want));
+    // Only a Ready condition the reconciler wrote (`Running`) proves the pod being dialled serves.
+    let serving = b.status.as_ref().is_some_and(|st| st.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True" && c.reason == "Running"));
     if !serving {
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": Phase::Starting.as_str()}))).into_response());
     }

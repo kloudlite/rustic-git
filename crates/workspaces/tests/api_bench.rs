@@ -145,8 +145,7 @@ fn bench_obj(owner: &str, team: &str, desired: &str, phase: Option<&str>, access
     if let Some(p) = phase {
         b["status"] = json!({"phase": p, "nodeName": "node-a", "idleSince": "2026-09-13T10:00:00Z"});
         if p == "ready" {
-            let reason = if access == "readOnly" { "ReadOnly" } else { "Running" };
-            b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": reason, "message": "",
+            b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": "Running", "message": "",
                                                "lastTransitionTime": "2026-09-13T10:00:00Z"}]);
         }
     }
@@ -229,29 +228,25 @@ async fn a_non_member_without_a_bench_cannot_see_create_or_tunnel_to_a_teams_ben
 }
 
 #[tokio::test]
-async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
+async fn a_departed_member_gets_404_on_their_old_bench() {
     let path = bench_path("alice", "acme");
     let idle = bench_obj("alice", "acme", "running", Some("idle"), "full");
     let t = setup(
-        with(vec![get(path.clone(), idle.clone()), patch(path.clone(), idle.clone()), region("r1")], alloc("alice", vec![])),
+        with(vec![get(path.clone(), idle.clone()), patch(path.clone(), idle), region("r1")], alloc("alice", vec![])),
         Stub::new(&[], &[("acme", "r1")]),
     );
     let tok = t.tok("alice");
-    let (st, _) = t.call("GET", "/v1/bench?team=acme", &tok, None).await;
-    assert_eq!(st, 200);
-    assert_eq!(t.rec.sent("PATCH", &path)[0]["spec"]["access"], "readOnly");
-    let (st, body) = t.call("POST", "/v1/bench/session?team=acme", &tok, None).await;
-    assert_eq!((st, body), (StatusCode::ACCEPTED, json!({"state": "waking"})));
-    assert!(t.rec.sent("PATCH", &path).iter().any(|p| p["spec"]["wakeAt"].is_string()));
-    let (st, _) = t.call("POST", "/v1/bench", &tok, Some(json!({"team": "acme"}))).await;
-    assert_eq!(st, 404);
-    let (st, _) = t.call("POST", "/v1/bench/attach?team=acme", &tok, Some(json!({"environment": "env-1"}))).await;
-    assert_eq!(st, 410, "attach is chosen per space now");
-
-    let ready = bench_obj("alice", "acme", "running", Some("ready"), "readOnly");
-    let t = setup(vec![get(path.clone(), ready), region("r1")], Stub::new(&[], &[("acme", "r1")]));
-    let (st, _) = t.call("POST", "/v1/bench/session?team=acme", &t.tok("alice"), None).await;
-    assert_eq!(st, 201);
+    for (m, uri, body) in [
+        ("GET", "/v1/bench?team=acme", None),
+        ("POST", "/v1/bench", Some(json!({"team": "acme"}))),
+        ("POST", "/v1/bench/start?team=acme", None),
+        ("POST", "/v1/bench/stop?team=acme", None),
+        ("POST", "/v1/bench/session?team=acme", None),
+    ] {
+        let (st, _) = t.call(m, uri, &tok, body).await;
+        assert_eq!(st, 404, "{m} {uri}");
+    }
+    assert!(t.bench_writes().is_empty(), "{:?}", t.bench_writes());
 
     let carol = bench_obj("carol", "acme", "running", Some("ready"), "full");
     let dave = bench_obj("dave", "dave", "running", Some("ready"), "full");
@@ -268,9 +263,43 @@ async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
     kloudlite_workspaces::api::keys::readonly_departed_benches(&t.state).await;
     let p = t.rec.sent("PATCH", &bench_path("carol", "acme"));
     assert_eq!(p.len(), 1);
-    assert_eq!(p[0]["spec"]["access"], "readOnly");
+    assert_eq!(p[0], json!({"spec": {"access": "paused"}}), "access is the only field written");
     assert!(t.rec.sent("PATCH", &bench_path("dave", "dave")).is_empty());
     assert!(t.rec.sent("PATCH", &bench_path("paula", "acme")).is_empty(), "pausing never rewrites a bench");
+}
+
+#[tokio::test]
+async fn a_paused_member_gets_403_on_bench_routes() {
+    let path = bench_path("paula", "acme");
+    let b = bench_obj("paula", "acme", "running", Some("ready"), "full");
+    let t = setup(
+        with(vec![get(path.clone(), b.clone()), patch(path, b), region("r1")], alloc("paula", vec![])),
+        Stub::new(&[], &[("acme", "r1")]),
+    );
+    let tok = t.tok("paula");
+    for (m, uri, body) in [
+        ("GET", "/v1/bench?team=acme", None),
+        ("POST", "/v1/bench", Some(json!({"team": "acme"}))),
+        ("POST", "/v1/bench/start?team=acme", None),
+        ("POST", "/v1/bench/stop?team=acme", None),
+        ("POST", "/v1/bench/session?team=acme", None),
+        ("POST", "/v1/bench/tool-token?team=acme", None),
+    ] {
+        let (st, body) = t.call(m, uri, &tok, body).await;
+        assert_eq!((st, body["error"].clone()), (StatusCode::FORBIDDEN, json!("your access to acme is paused")), "{m} {uri}");
+    }
+    assert!(t.bench_writes().is_empty(), "{:?}", t.bench_writes());
+}
+
+#[tokio::test]
+async fn a_paused_bench_gets_no_session_or_tool_token() {
+    let b = bench_obj("alice", "acme", "running", Some("ready"), "paused");
+    let t = mint_setup(b, &[("alice", "acme")], vec![]);
+    for uri in ["/v1/bench/session?team=acme", "/v1/bench/tool-token?team=acme"] {
+        let (st, _) = t.call("POST", uri, &cli_tok(&t), None).await;
+        assert_eq!(st, 403, "{uri}");
+    }
+    assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
 }
 
 #[tokio::test]
@@ -407,18 +436,6 @@ fn the_admin_router_has_no_bench_route() {
     }
 }
 
-/// I2: a departed member's Ready bench still serving the old Full pod gets no token until the
-/// reconciler has written a Ready reason for ReadOnly.
-#[tokio::test]
-async fn a_departed_member_gets_no_token_while_the_full_pod_still_serves() {
-    let path = bench_path("alice", "acme");
-    let full = bench_obj("alice", "acme", "running", Some("ready"), "full");
-    let t = setup(vec![get(path.clone(), full.clone()), patch(path.clone(), full), region("r1")], Stub::new(&[], &[("acme", "r1")]));
-    let (st, body) = t.call("POST", "/v1/bench/session?team=acme", &t.tok("alice"), None).await;
-    assert_eq!((st, body), (StatusCode::ACCEPTED, json!({"state": "starting"})));
-    assert_eq!(t.rec.sent("PATCH", &path)[0]["spec"]["access"], "readOnly");
-}
-
 /// I3: re-POSTing a stopped bench is a start, and a start at the cpu ceiling is refused.
 #[tokio::test]
 async fn re_posting_a_stopped_bench_at_the_cpu_limit_is_refused() {
@@ -513,8 +530,11 @@ async fn a_bench_tool_token_dies_when_the_bench_stops() {
 }
 
 #[tokio::test]
-async fn a_bench_tool_token_is_refused_for_a_readonly_bench() {
+async fn a_bench_tool_token_is_refused_for_a_paused_bench() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "readOnly"));
+    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
+    assert_eq!(st, 401, "a stored readOnly bench is paused");
+    let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "paused"));
     let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
     assert_eq!(st, 401);
 }
@@ -665,7 +685,7 @@ async fn tool_token_refuses_a_stopped_bench() {
 async fn tool_token_refuses_a_departed_member() {
     let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[], vec![]);
     let (st, _) = t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
-    assert_eq!(st, 403);
+    assert_eq!(st, 404);
     assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
 }
 

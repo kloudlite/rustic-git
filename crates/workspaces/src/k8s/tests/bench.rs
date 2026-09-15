@@ -42,12 +42,11 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
 }
 
 #[test]
-fn a_departed_members_bench_runs_the_reader_and_every_bench_may_exit_idle() {
-    let mut b = fixture_bench("alice", "acme", DesiredState::Running);
-    b.spec.access = crate::crd::BenchAccess::ReadOnly;
+fn every_bench_runs_the_harness_and_may_exit_idle() {
+    let b = fixture_bench("alice", "acme", DesiredState::Running);
     let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", "", 420).unwrap().spec.unwrap();
     let c = &spec.containers[0];
-    assert_eq!(c.command.as_ref().unwrap().last().map(String::as_str), Some("--read-only"));
+    assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
     assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"), "exit 0 is idle and must not restart");
     let idle = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_BENCH_IDLE_SECS").unwrap();
     assert_eq!(idle.value.as_deref(), Some("420"));

@@ -155,9 +155,9 @@ pub async fn run_beat(s: Arc<ApiState>) {
     }
 }
 
-/// Decision 10's beat half: a Full bench whose owner has left its team goes ReadOnly within one
-/// beat. It never sets Full — a person's own next `/v1/bench` call does that — so a directory that
-/// cannot answer (`teams_for` fails closed to empty) only ever takes tools away.
+/// The one writer of `spec.access`: a Full bench whose owner has left its team goes Paused (no pod,
+/// no tools) within one beat. It never sets Full, so a directory that cannot answer only ever
+/// takes tools away.
 pub async fn readonly_departed_benches(s: &ApiState) {
     let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::Bench> = Api::all(c.clone());
@@ -177,15 +177,14 @@ pub async fn readonly_departed_benches(s: &ApiState) {
         if team.eq_ignore_ascii_case(owner) || b.spec.access != crd::BenchAccess::Full {
             continue;
         }
-        // Strict: a paused member's bench is left exactly as it is (task 4 gives it its own
-        // state), and an unreadable directory demotes nobody.
+        // Strict: an unreadable directory demotes nobody.
         if !matches!(dir.membership(team, owner).await, Ok(super::Judged::NotMember | super::Judged::TeamGone)) {
             continue;
         }
-        let patch = serde_json::json!({"spec": {"access": crd::BenchAccess::ReadOnly}});
+        let patch = serde_json::json!({"spec": {"access": crd::BenchAccess::Paused}});
         match api.patch(&b.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await {
-            Ok(_) => tracing::info!(%owner, %team, "bench.access.readonly"),
-            Err(e) => tracing::warn!(%owner, %team, error = %e, "bench.access.readonly.failed"),
+            Ok(_) => tracing::info!(%owner, %team, "bench.access.paused"),
+            Err(e) => tracing::warn!(%owner, %team, error = %e, "bench.access.paused.failed"),
         }
     }
 }
