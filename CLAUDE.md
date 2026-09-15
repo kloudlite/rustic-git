@@ -554,20 +554,24 @@ directory and the beat behind it — an SSH tunnel already open ends only when t
 stops the pod, and a bench tool token off a paused or wrong-team Bench is refused
 by `bench_admits_tool`. Pause never deletes and unpause restores access without starting anything;
 a paused member cannot leave their own team, but an admin can still remove them. A removed member
-or a deleted team instead gets `kloudlite.io/removed-at` stamped (via SSA under field manager
-`kloudlite-membership`, and only that process's ServiceAccount may write it or the admin's
-`kloudlite.io/delete-now` — enforced by the admission policy
-`kloudlite-removal-stamps-are-the-apis`) and a 7-day grace before anything is deleted; an admin's
+or a deleted team instead gets `kloudlite.io/removed-at` and `kloudlite.io/delete-after` (removed-at
+plus a 7-day grace) stamped by the api's keys beat, which MARKS and never deletes; an admin's
 confirmed "delete now" (naming the person and the team, `crates/workspaces/src/api/removals.rs`)
-skips the wait. Deletion is gated on the central `memberRemovalDeletes` setting (default false,
-else it only logs `membership.cleanup.would_delete`) and takes the Bench and its on-disk folder
-(held open by the agent's own `kloudlite.io/bench-folder` finalizer, which lstats each path
-component before it deletes `.benches/{team}/{owner}`), the member's team Workspaces, their
-SpaceEnvironment choice and their key projections — never a pushed Snapshot, a repo, a container
-image, or a team Environment. The web surfaces this on the team settings page and superadmin
-Owners' "Pending removals"; `team.member.paused` (hourly) and the monthly drills
-`team.member.removed.cleanup`/`.dir_down` (skipped while deletes are off, since nothing can be
-made to disappear without the source build the design forbids) hold it on the fleet.
+rewrites `delete-after` to now, and a re-add clears all three. The DELETE is the cluster
+controller's (`bins/controller/src/gc.rs`, elected leader only, every 60 s): so the irreversible
+step runs in the one process holding the region's lease, and undoing a removal is clearing an
+annotation rather than racing a delete. Both sides read only marks applied under SSA field manager
+`kloudlite-membership`, and the admission policy `kloudlite-removal-stamps-are-the-apis` lets only
+the api's ServiceAccount write any of the three. The GC is gated on the REGIONAL
+`ClusterSettings.memberRemovalDeletes` (default false — logs `gc.would_delete`), deletes under
+uid + resourceVersion preconditions, skips a whole pass on any listing failure, and takes only the
+Bench (its folder via the agent's `kloudlite.io/bench-folder` finalizer, which lstats each path
+component before it deletes `.benches/{team}/{owner}`), the member's team Workspaces and their
+SpaceEnvironment choice — key projections follow on the keys beat, and never a pushed Snapshot, a
+Volume, a repo, a container image, or a team Environment. The web surfaces this on the team
+settings page and superadmin Owners' "Pending removals"; `team.member.paused` (hourly) and the
+monthly drills `team.member.removed.cleanup` (judges the deleted half or the marked half by the
+switch) and `.dir_down` (skipped: no directory fault hook) hold it on the fleet.
 
 **A bench pod's `/v1` credential is a `bench-tool` JWT, not a person's own token.** 15-minute TTL,
 `parent` = the desktop CLI login's own `jti`, scope = the bench's team plus the minting person's own
