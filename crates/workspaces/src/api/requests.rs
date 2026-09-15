@@ -24,6 +24,9 @@ pub(crate) async fn get_quota(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let owner = q.owner.unwrap_or_else(|| c.name.clone());
+    if !scope::in_scope(&c, &owner) {
+        return Err(scope::scope_refusal(&c));
+    }
     if !scope::may_act_on(&s, &c, &owner).await {
         return Err(not_found());
     }
@@ -163,6 +166,9 @@ pub(crate) async fn list_quota_requests(
     let mut rows = Vec::new();
     match q.owner {
         Some(owner) => {
+            if !scope::in_scope(&caller, &owner) {
+                return Err(scope::scope_refusal(&caller));
+            }
             if !scope::may_act_on(&s, &caller, &owner).await {
                 return Err(not_found());
             }
@@ -329,6 +335,9 @@ pub(crate) async fn list_requests(
     let mut rows = Vec::new();
     match q.owner {
         Some(owner) => {
+            if !scope::in_scope(&c, &owner) {
+                return Err(scope::scope_refusal(&c));
+            }
             if !scope::may_act_on(&s, &c, &owner).await {
                 return Err(not_found());
             }

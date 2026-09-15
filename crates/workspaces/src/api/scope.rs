@@ -31,6 +31,10 @@ pub(crate) async fn is_team(s: &ApiState, slug: &str) -> bool {
 /// passes; a team's passes for a member; and a platform administrator passes for anyone — so
 /// support can clean up without impersonating the person.
 pub(crate) async fn may_act_on(s: &ApiState, c: &Caller, owner: &str) -> bool {
+    // First, before the superadmin arm: a scope is a ceiling nothing else may lift.
+    if !in_scope(c, owner) {
+        return false;
+    }
     if c.name == owner {
         return true;
     }
@@ -53,7 +57,19 @@ pub(crate) async fn may_act_on(s: &ApiState, c: &Caller, owner: &str) -> bool {
 /// delete/get only (CLAUDE.md), and `may_act_on`'s superadmin arm let a claim spend an arbitrary
 /// owner's — even a non-team slug's — quota.
 pub(crate) async fn may_allocate_for(s: &ApiState, caller: &Caller, owner: &str) -> bool {
-    caller.name == owner || teams_for(s, &caller.name).await.iter().any(|t| t == owner)
+    in_scope(caller, owner) && (caller.name == owner || teams_for(s, &caller.name).await.iter().any(|t| t == owner))
+}
+
+/// A bench-tool caller acts only for its own handle and the bench's team, even for another team
+/// the person really belongs to: the token lives in a pod, and a leak must not reach every team.
+pub(crate) fn in_scope(c: &Caller, owner: &str) -> bool {
+    c.scope.as_deref().is_none_or(|team| owner == c.name || owner == team)
+}
+
+/// The one sentence a listing answers when `?owner=`/`?team=` leaves a scoped caller's scope.
+pub(crate) fn scope_refusal(c: &Caller) -> Response {
+    let team = c.scope.as_deref().unwrap_or_default();
+    (StatusCode::FORBIDDEN, format!("bench tools act only for {} and {team}", c.name)).into_response()
 }
 
 /// A label selector is the list filter, not a field selector: `metadata.labels` is indexed for
@@ -173,7 +189,7 @@ pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id: &str) -> Result<
 /// this tier names in `OWNER_HEADER`, so an unverified value would be a data leak.
 pub(crate) async fn caller_owners(s: &ApiState, caller: &Caller) -> Vec<String> {
     let mut v = vec![caller.name.clone()];
-    v.extend(teams_for(s, &caller.name).await);
+    v.extend(teams_for(s, &caller.name).await.into_iter().filter(|t| in_scope(caller, t)));
     v
 }
 
@@ -189,4 +205,82 @@ pub fn owner_set_selector(owners: &[String]) -> String {
     let safe: Vec<&str> =
         owners.iter().filter(|o| kloudlite_storage::store::valid_owner(o)).map(String::as_str).collect();
     format!("{OWNER_LABEL} in ({})", safe.join(","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Directory, OwnerMaterial, TeamRole};
+    use std::sync::Arc;
+
+    struct Member;
+    #[async_trait::async_trait]
+    impl Directory for Member {
+        async fn teams_for(&self, _u: &str) -> Vec<String> {
+            vec!["t1".into(), "t2".into()]
+        }
+        async fn is_live(&self, _j: &str) -> bool {
+            true
+        }
+        async fn for_owner(&self, _o: &str) -> Option<OwnerMaterial> {
+            None
+        }
+        async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+            None
+        }
+        async fn owners_of(&self, _e: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
+            None
+        }
+        async fn is_team(&self, _s: &str) -> bool {
+            true
+        }
+        async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+    }
+
+    fn state() -> ApiState {
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.directory = Some(Arc::new(Member));
+        s
+    }
+
+    fn scoped(team: &str, superadmin: bool) -> Caller {
+        Caller { name: "meera".into(), superadmin, parent: None, scope: Some(team.into()) }
+    }
+
+    #[test]
+    fn in_scope_is_own_handle_and_team_only() {
+        let c = scoped("t1", false);
+        assert!(in_scope(&c, "meera") && in_scope(&c, "t1"));
+        assert!(!in_scope(&c, "t2") && !in_scope(&c, "bob"));
+        let open = Caller { scope: None, ..c };
+        assert!(in_scope(&open, "t2") && in_scope(&open, "bob"));
+    }
+
+    #[tokio::test]
+    async fn a_scoped_caller_is_refused_another_team_it_belongs_to() {
+        let s = state();
+        let c = scoped("t1", false);
+        assert!(may_allocate_for(&s, &c, "t1").await && may_act_on(&s, &c, "t1").await);
+        assert!(!may_allocate_for(&s, &c, "t2").await);
+        assert!(!may_act_on(&s, &c, "t2").await);
+        assert_eq!(caller_owners(&s, &c).await, vec!["meera".to_string(), "t1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_superadmin_flag_never_widens_a_scoped_caller() {
+        let s = state();
+        let c = scoped("t1", true);
+        assert!(!may_act_on(&s, &c, "t2").await);
+        assert!(!may_act_on(&s, &c, "someone-else").await);
+        assert!(!may_allocate_for(&s, &c, "t2").await);
+    }
 }

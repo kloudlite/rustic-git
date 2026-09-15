@@ -120,6 +120,9 @@ async fn my_bench(
 ) -> Result<(Caller, String, String, Standing, Option<crd::Bench>), Response> {
     let caller = caller(s, headers).await?;
     let team = team.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| caller.name.clone());
+    if !super::scope::in_scope(&caller, &team) {
+        return Err(super::scope::scope_refusal(&caller));
+    }
     let api: Api<crd::Bench> = Api::all(kube(s)?.clone());
     let bench = api
         .get_opt(&crd::bench_id(&caller.name, &team))

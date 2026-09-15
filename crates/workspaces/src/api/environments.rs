@@ -1,7 +1,7 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
-use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, teams_for};
+use super::scope::{find_env, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
@@ -289,13 +289,10 @@ pub(crate) async fn list_env(
 ) -> Result<Response, Response> {
     let caller_id = caller(&s, &headers).await?;
     let owners: Vec<String> = match q.owner {
+        Some(o) if !super::scope::in_scope(&caller_id, &o) => return Err(super::scope::scope_refusal(&caller_id)),
         Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
         Some(_) => return Err(not_found()),
-        None => {
-            let mut owners = vec![caller_id.name.clone()];
-            owners.extend(teams_for(&s, &caller_id.name).await);
-            owners
-        }
+        None => super::scope::caller_owners(&s, &caller_id).await,
     };
     Ok(Json(envs_for(&s, &owners).await?).into_response())
 }
@@ -925,6 +922,9 @@ pub(crate) async fn get_my_builder(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let team = q.team.unwrap_or_default();
+    if !team.is_empty() && !super::scope::in_scope(&c, &team) {
+        return Err(super::scope::scope_refusal(&c));
+    }
     if !team.is_empty() && !may_act_on(&s, &c, &team).await {
         return Err(not_found());
     }

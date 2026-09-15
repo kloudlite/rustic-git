@@ -463,8 +463,8 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     let (c, jti) = state.jwt.verify_any_user(tok.trim()).map_err(|_| unauthorized())?;
     // Only a CLI token carries a `jti`, and only a CLI token is revocable: a session's lifetime
     // IS its expiry. Without a directory to ask, a CLI token authenticates nothing here.
-    if let Some(jti) = jti {
-        if !admin::timing::step("directory.token_live", cli_token_live(state, &jti)).await {
+    if let Some(jti) = &jti {
+        if !admin::timing::step("directory.token_live", cli_token_live(state, jti)).await {
             return Err(unauthorized());
         }
     }
@@ -472,7 +472,7 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     let name = c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
         (StatusCode::FORBIDDEN, "pick a username before using workspaces").into_response()
     })?;
-    Ok(Caller { name, superadmin })
+    Ok(Caller { name, superadmin, parent: jti, scope: None })
 }
 
 

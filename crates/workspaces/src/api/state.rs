@@ -16,6 +16,10 @@ pub struct Caller {
     /// A CLAIM from the session token, minted at sign-in from the directory's list. Never an
     /// ownership: it decides who may act, never who owns anything, and it never widens a quota.
     pub superadmin: bool,
+    /// The CLI `jti` this request authenticated with; None for a session cookie or bench-tool.
+    pub parent: Option<String>,
+    /// Some(team) for a bench-tool caller: acts only for `name` and this team.
+    pub scope: Option<String>,
 }
 
 

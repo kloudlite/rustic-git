@@ -242,6 +242,7 @@ pub(crate) async fn list_volumes(
     // saw volumes the same caller's delete could not (2026-09-12).
     let owners = caller_owners(&s, &caller_id).await;
     let owners = match &q.owner {
+        Some(o) if !super::scope::in_scope(&caller_id, o) => return Err(super::scope::scope_refusal(&caller_id)),
         Some(o) if owners.iter().any(|mine| mine == o) => vec![o.clone()],
         Some(_) => return Err(not_found()),
         None => owners,
