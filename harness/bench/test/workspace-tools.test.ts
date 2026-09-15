@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { toIde, fromIde, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
   assert.deepEqual(toIde("edit", { path: "a.rs", edits: [{ oldText: "x", newText: "y" }] }), { tool: "edit", args: { path: "a.rs", edits: [{ old: "x", new: "y" }] } });
@@ -125,11 +126,9 @@ test("a 409 from /v1 is re-asked once against a fake api, then the workspace's t
   const apiUrl = `http://127.0.0.1:${(api.address() as { port: number }).port}`;
 
   const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-cfg-"));
-  fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify({ api: apiUrl, token: "t", expires_at: "2999-01-01", username: "u" }));
-  const savedCfg = process.env.KL_CONFIG_DIR;
+  const restore = withToken(path.join(cfgDir, "token"), "t", apiUrl);
   const savedTeam = process.env.KL_TEAM;
   const savedAddr = process.env.KL_TOOLS_ADDRESS;
-  process.env.KL_CONFIG_DIR = cfgDir;
   process.env.KL_TEAM = "acme";
   delete process.env.KL_TOOLS_ADDRESS;
   try {
@@ -138,13 +137,97 @@ test("a 409 from /v1 is re-asked once against a fake api, then the workspace's t
     assert.equal(r.status, 200);
     assert.equal(getCalls, 2);
   } finally {
-    if (savedCfg === undefined) delete process.env.KL_CONFIG_DIR;
-    else process.env.KL_CONFIG_DIR = savedCfg;
+    restore();
     if (savedTeam === undefined) delete process.env.KL_TEAM;
     else process.env.KL_TEAM = savedTeam;
     if (savedAddr !== undefined) process.env.KL_TOOLS_ADDRESS = savedAddr;
     toolSrv.close();
     api.close();
     fs.rmSync(cfgDir, { recursive: true, force: true });
+  }
+});
+
+/** Points kloudlite.ts at a token file and an api; returns the undo. */
+function withToken(file: string | undefined, tok: string | undefined, api: string) {
+  const saved = { f: process.env.KL_TOOL_TOKEN_FILE, a: process.env.KL_API_URL };
+  if (file && tok !== undefined) fs.writeFileSync(file, tok);
+  if (file) process.env.KL_TOOL_TOKEN_FILE = file;
+  else delete process.env.KL_TOOL_TOKEN_FILE;
+  process.env.KL_API_URL = api;
+  return () => {
+    for (const [k, v] of [["KL_TOOL_TOKEN_FILE", saved.f], ["KL_API_URL", saved.a]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
+async function fakeApi(handler: http.RequestListener) {
+  const srv = http.createServer(handler);
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  return { srv, url: `http://127.0.0.1:${(srv.address() as { port: number }).port}` };
+}
+
+test("call re-reads the token file between calls", async () => {
+  const seen: string[] = [];
+  const { srv, url } = await fakeApi((req, res) => (seen.push(String(req.headers.authorization)), res.end("{}")));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
+  const file = path.join(dir, "token");
+  const restore = withToken(file, "one", url);
+  try {
+    await call("GET", "/v1/quota");
+    fs.writeFileSync(file, "two\n");
+    await call("GET", "/v1/quota");
+    assert.deepEqual(seen, ["Bearer one", "Bearer two"]);
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing token file throws the sign-in sentence without a request", async () => {
+  let asked = 0;
+  const { srv, url } = await fakeApi((_req, res) => (asked++, res.end("{}")));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
+  for (const restore of [withToken(path.join(dir, "absent"), undefined, url), withToken(path.join(dir, "empty"), "", url), withToken(undefined, undefined, url)]) {
+    try {
+      await assert.rejects(call("GET", "/v1/quota"), { message: "sign in on the Kloudlite desktop app" });
+    } finally {
+      restore();
+    }
+  }
+  assert.equal(asked, 0);
+  srv.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a 401 maps to the sign-in sentence", async () => {
+  const { srv, url } = await fakeApi((_req, res) => (res.writeHead(401), res.end("expired")));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
+  const restore = withToken(path.join(dir, "token"), "t", url);
+  try {
+    assert.deepEqual(await call("GET", "/v1/quota"), { status: 401, data: "sign in on the Kloudlite desktop app (your desktop session ended or the bench was stopped)" });
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("whoami never returns the token", async () => {
+  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const tok = `${b64({ alg: "HS256" })}.${b64({ sub: "ada", team: "acme", exp: 4102444800 })}.sig`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
+  const restore = withToken(path.join(dir, "token"), tok, "http://127.0.0.1:1");
+  const tools: Record<string, { execute: (...a: unknown[]) => Promise<{ content: { text: string }[] }> }> = {};
+  kloudlite({ registerTool: (t: { name: string }) => (tools[t.name] = t as never) } as never);
+  try {
+    const out = (await tools.kl_whoami.execute("c1", {}, undefined, undefined, undefined)).content[0].text;
+    assert.deepEqual(JSON.parse(out), { username: "ada", team: "acme", expires_at: "2100-01-01T00:00:00.000Z" });
+    assert.ok(!out.includes(tok) && !out.includes("sig"));
+  } finally {
+    restore();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

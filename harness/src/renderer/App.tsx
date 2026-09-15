@@ -500,7 +500,7 @@ export function App() {
     void bench<Record<string, unknown>[]>("GET", "/tasks").then((rows) => rows.forEach((row) => live.onEvent({ type: "task", row })), fail);
   });
   // Slash commands the harness answers itself, before anything reaches pi;
-  // what is not listed here (/bg, /kl-login, /cancel, /skill:…) goes through.
+  // what is not listed here (/bg, /cancel, /skill:…) goes through.
   // `local` entries never reach the bench, so they run offline; the rest are refused first, not echoed.
   const SLASH: Record<string, { help: string; local?: true; run: (arg: string) => void }> = {
     "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void pi({ type: "new_session" })?.then((r) => r && L().replay([])) },
@@ -539,7 +539,7 @@ export function App() {
         );
       },
     },
-    "/help": { help: "this list", local: true, run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)\n/kl-login  log in to Kloudlite") },
+    "/help": { help: "this list", local: true, run: () => L().note(Object.entries(SLASH).map(([k, v]) => `${k.padEnd(10)} ${v.help}`).join("\n") + "\n/bg        send the running command to the background (^B)") },
   };
 
   /** Everything a `/` can start: the harness's own, pi's, and each enabled skill. */
@@ -547,7 +547,6 @@ export function App() {
     ...Object.entries(SLASH).map(([name, v]) => ({ name, help: v.help })),
     { name: "/bg", help: "send the running command to the background (^B)" },
     { name: "/cancel", help: "kill a running or backgrounded command: /cancel #N" },
-    { name: "/kl-login", help: "log in to Kloudlite in your browser" },
     ...machine().plugins.filter((p) => p.kind === "skill" && p.enabled).map((p) => ({ name: `/${p.name}`, help: (p as { summary: string }).summary })),
   ]);
 

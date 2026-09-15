@@ -1,58 +1,49 @@
 import fs from "node:fs";
-import { spawn } from "node:child_process";
-import os from "node:os";
-import path from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { TOOLS } from "./catalog.ts";
 
 /**
  * The bench's hands on the platform: `/v1` as tools. Authentication is the
- * person's own — the same 30-day CLI token `kl-connect login` stores at
- * `~/.config/kl-connect/config.json`, obtained the same way (`/kl-login`
- * prints a code, the person confirms it in a browser they are signed in to).
- * Nothing here holds a credential of its own, and every write and delete is
- * named as such in the catalogue so a person can decide what the model may do.
- *
- * ponytail: one token, one user; per-machine identity is the platform's next step.
+ * person's own: a short-lived platform token the desktop app mints and the
+ * platform projects into this pod at `KL_TOOL_TOKEN_FILE`, re-read on every
+ * call so a refresh lands without a restart and a revoked session stops at the
+ * next call. Nothing here holds a credential of its own, and every write and
+ * delete is named as such in the catalogue so a person can decide what the model may do.
  */
-type Config = { api: string; token: string; expires_at: string; username: string };
+const SIGN_IN = "sign in on the Kloudlite desktop app";
 
-const dir = () => process.env.KL_CONFIG_DIR ?? (process.env.XDG_CONFIG_HOME ? path.join(process.env.XDG_CONFIG_HOME, "kl-connect") : path.join(os.homedir(), ".config", "kl-connect"));
-const file = () => path.join(dir(), "config.json");
-const DEFAULT_API = "https://dev.kloudlite.io";
-
-function load(): Config | undefined {
+function token(): { api: string; token: string } {
+  const f = process.env.KL_TOOL_TOKEN_FILE;
+  const api = process.env.KL_API_URL;
+  let t = "";
   try {
-    return JSON.parse(fs.readFileSync(file(), "utf8")) as Config;
+    t = f ? fs.readFileSync(f, "utf8").trim() : "";
   } catch {
-    return undefined;
+    /* unreadable is the same as absent */
   }
-}
-function save(c: Config) {
-  fs.mkdirSync(dir(), { recursive: true, mode: 0o700 });
-  const tmp = `${file()}.${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify(c, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file());
+  if (!t || !api) throw new Error(SIGN_IN);
+  return { api: api.replace(/\/$/, ""), token: t };
 }
 
 export async function call(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
-  const c = load();
-  if (!c) throw new Error("not logged in — run /kl-login in the bench");
+  const c = token();
   const r = await fetch(`${c.api}${p}`, {
     method,
+    redirect: "error",
     headers: { authorization: `Bearer ${c.token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await r.text();
+  if (r.status === 401) return { status: 401, data: `${SIGN_IN} (your desktop session ended or the bench was stopped)` };
   // The api answers JSON; a page of HTML means the request never reached it
   // (an unpublished route, a redirect to sign in) — say that, not the page.
-  if (/^\s*<!doctype html|^\s*<html/i.test(text)) return { status: r.status >= 400 ? r.status : 502, data: `not an api answer for ${p} — the route is not published on ${c.api} (got a web page${r.redirected ? `, redirected to ${r.url}` : ""})` };
+  if (/^\s*<!doctype html|^\s*<html/i.test(text)) return { status: r.status >= 400 ? r.status : 502, data: `not an api answer for ${p} — the route is not published on ${c.api} (got a web page)` };
   let data: unknown = text;
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
-    /* not json: the text is the answer */
+    /* not json: the text is the answer (a 403's sentence among them) */
   }
   return { status: r.status, data };
 }
@@ -158,43 +149,9 @@ export default function (pi: ExtensionAPI) {
   reg("kl_quota", {}, () => answer("GET", "/v1/quota"));
   reg("kl_volumes", { name: O(S("a volume name, for its history")) }, (a) => answer("GET", a.name ? `/v1/volumes/${a.name}/history` : "/v1/volumes"));
   reg("kl_builder", {}, () => answer("GET", "/v1/builders/me"));
+  // Claims only, unverified: the api is what verifies; the token itself never reaches the model.
   reg("kl_whoami", {}, async () => {
-    const c = load();
-    return text(c ? { username: c.username, api: c.api, expires_at: c.expires_at } : "not logged in — run /kl-login");
-  });
-
-  // The device-code login, exactly as kl-connect does it: a code to confirm in
-  // the browser, the token polled for, saved where kl-connect keeps its own.
-  pi.registerCommand("kl-login", {
-    description: "Log in to Kloudlite with your browser; the token is kept where kl-connect keeps it",
-    handler: async (args, ctx) => {
-      const api = (args?.trim() || load()?.api || DEFAULT_API).replace(/\/$/, "");
-      const dc = (await (await fetch(`${api}/v1/cli/code`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: `${os.hostname()} (bench)` }) })).json()) as { code: string; poll: string };
-      const url = `${api}/cli/authorize?code=${dc.code}`;
-      // The person's own browser is where they are signed in, so that is where
-      // the code is confirmed — exactly what kl-connect does with `open`.
-      const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-      try {
-        spawn(opener, [url], { detached: true, stdio: "ignore" }).unref();
-      } catch {
-        /* no browser here: the URL is in the thread to copy */
-      }
-      pi.sendMessage({ customType: "kl-login", content: `Confirm code **${dc.code}** in your browser (opened for you): ${url}`, display: true }, { deliverAs: "nextTurn" });
-      ctx.ui.notify(`Confirm ${dc.code} at ${url}`, "info");
-      const deadline = Date.now() + 600_000;
-      while (Date.now() < deadline) {
-        const r = await fetch(`${api}/v1/cli/token?poll=${encodeURIComponent(dc.poll)}`);
-        if (r.status === 200) {
-          const t = (await r.json()) as { token: string; expiresAt: string };
-          const claims = JSON.parse(Buffer.from(t.token.split(".")[1], "base64url").toString()) as { username?: string; sub?: string };
-          save({ api, token: t.token, expires_at: t.expiresAt, username: claims.username ?? claims.sub ?? "" });
-          pi.sendMessage({ customType: "kl-login", content: `Logged in to ${api} as ${claims.username ?? claims.sub}`, display: true }, { deliverAs: "nextTurn" });
-          return void ctx.ui.notify("Logged in", "info");
-        }
-        if (r.status !== 202) return void ctx.ui.notify(`Login failed: ${r.status}`, "error");
-        await new Promise((res) => setTimeout(res, 2000));
-      }
-      ctx.ui.notify("Login timed out", "warning");
-    },
+    const claims = JSON.parse(Buffer.from(token().token.split(".")[1] ?? "", "base64url").toString() || "{}") as { sub?: string; team?: string; exp?: number };
+    return text({ username: claims.sub, team: claims.team, expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : undefined });
   });
 }

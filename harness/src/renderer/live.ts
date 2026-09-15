@@ -216,9 +216,6 @@ function makeThread(id: string) {
         // A background task reporting in: shown as a note, the way the terminal
         // prints a job finishing.
         const m = ev.message as { role?: string; customType?: string; content?: string } | undefined;
-        if (m?.role === "custom" && m.customType === "kl-login" && typeof m.content === "string") {
-          push({ role: "action", kind: "note", target: "Kloudlite", text: m.content, at: now(), ok: true });
-        }
         if (m?.role === "custom" && m.customType === "background-task" && typeof m.content === "string") {
           const [head, ...rest] = m.content.split("\n");
           const ok = !/exit [1-9]/.test(head);

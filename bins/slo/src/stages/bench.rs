@@ -551,7 +551,7 @@ fn not_logged_in(body: &str) -> bool {
 }
 
 /// The harness's own answer, verbatim.
-const BENCH_NOT_LOGGED_IN: &str = "not logged in — run /kl-login in the bench";
+const BENCH_NOT_LOGGED_IN: &str = "sign in on the Kloudlite desktop app";
 
 /// A successful tool result carrying the marker: the echo ran and its output came back. The call's
 /// own arguments hold the marker too, which is why only a `toolResult` counts.
@@ -930,7 +930,7 @@ mod tests {
 
         // Only an answer that is ALL not-logged-in is the credential gap; anything else still fails.
         let result = |text: &str| json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": text}]});
-        let login = "not logged in — run /kl-login in the bench";
+        let login = "sign in on the Kloudlite desktop app";
         assert!(not_logged_in(&json!({"messages": [call, result(login), result(login)]}).to_string()));
         assert!(!not_logged_in(&json!({"messages": [call, result(login), result("boom")]}).to_string()));
         assert!(!not_logged_in(&json!({"messages": [call]}).to_string()));
