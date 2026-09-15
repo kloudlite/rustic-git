@@ -1,5 +1,5 @@
-//! A removed member's pending cleanup, on demand: the listing, the admin "delete now" and the
-//! internal per-pair reconcile. Everything decides through `membership::judge` — this module only
+//! A removed member's pending cleanup, on demand: the listing and the admin "delete now".
+//! Everything decides through `membership::judge` — this module only
 //! writes the `delete-now` mark and asks for one pair to be judged now instead of on the beat.
 //!
 //! The mark is written HERE, by the user-role process, because the admission policy
@@ -134,10 +134,4 @@ pub(crate) async fn all(s: &ApiState) -> Result<Vec<membership::Removal>, Respon
     let k = s.kube.as_ref().ok_or_else(|| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
     let o = list_all(k).await.map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e).into_response())?;
     Ok(membership::removals(&o))
-}
-
-/// `POST /v1/internal/membership/{team}/{owner}`: judge one pair now; the beat stays the backstop.
-pub(crate) async fn reconcile_one(State(s): State<Arc<ApiState>>, Path((team, owner)): Path<(String, String)>) -> StatusCode {
-    membership::reconcile_pair(&s, &owner, &team).await;
-    StatusCode::NO_CONTENT
 }

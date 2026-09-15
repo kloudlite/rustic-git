@@ -204,7 +204,6 @@ mod route_tests {
         "/v1/internal/builders/{slug}",
         "/v1/internal/builders/{slug}/start",
         "/v1/internal/builders/{slug}/stop",
-        "/v1/internal/membership/{team}/{owner}",
         "/v1/teams/{slug}/members/{email}/delete-now",
         "/v1/teams/{slug}/removals",
         "/v1/bench",
@@ -317,7 +316,6 @@ pub(super) fn internal_router(state: Arc<ApiState>) -> Router<Arc<ApiState>> {
         .route("/v1/internal/builders/{slug}", get(get_builder))
         .route("/v1/internal/builders/{slug}/start", post(start_builder))
         .route("/v1/internal/builders/{slug}/stop", post(stop_builder))
-        .route("/v1/internal/membership/{team}/{owner}", post(removals::reconcile_one))
         .route_layer(axum::middleware::from_fn_with_state(state, require_builder_secret))
 }
 
