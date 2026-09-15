@@ -153,8 +153,8 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
             _ => 0,
         };
         if matches!(code, 403 | 404) {
-            let ns_obj = Api::<k8s_openapi::api::core::v1::Namespace>::all(c.clone()).get_opt(ns).await.ok().flatten();
-            if install_refusal_expected(ns_obj.as_ref(), k8s_openapi::jiff::Timestamp::now().as_second()) {
+            let read = Api::<k8s_openapi::api::core::v1::Namespace>::all(c.clone()).get_opt(ns).await;
+            if install_refusal_expected(read.as_ref().map(Option::as_ref).ok(), k8s_openapi::jiff::Timestamp::now().as_second()) {
                 tracing::info!(%owner, namespace = %ns, code, "key.install.deferred");
                 return;
             }
@@ -164,10 +164,12 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
 }
 
 /// Whether a 403/404 on the `user-key` write is the namespace's lifecycle rather than a fault: gone,
-/// terminating, or younger than one keys beat (its RoleBinding is still on the way). An
-/// unreadable namespace (`None` from a failed read too) is gone as far as this write can tell.
-fn install_refusal_expected(ns: Option<&k8s_openapi::api::core::v1::Namespace>, now_secs: i64) -> bool {
-    let Some(ns) = ns else { return true };
+/// terminating, or younger than one keys beat (its RoleBinding is still on the way). `read` is the
+/// namespace GET: `None` when that read FAILED, which explains nothing and so still warns;
+/// `Some(None)` is a 404, gone.
+fn install_refusal_expected(read: Option<Option<&k8s_openapi::api::core::v1::Namespace>>, now_secs: i64) -> bool {
+    let Some(read) = read else { return false };
+    let Some(ns) = read else { return true };
     if ns.metadata.deletion_timestamp.is_some() {
         return true;
     }
@@ -194,9 +196,10 @@ mod tests {
     #[test]
     fn only_a_settled_live_namespace_makes_a_refused_install_a_fault() {
         let now = 2_000_000_000;
-        assert!(install_refusal_expected(None, now), "gone");
-        assert!(install_refusal_expected(Some(&ns(3600, now, true)), now), "terminating");
-        assert!(install_refusal_expected(Some(&ns(10, now, false)), now), "binding still on the way");
-        assert!(!install_refusal_expected(Some(&ns(3600, now, false)), now), "an old live namespace refusing is real");
+        assert!(!install_refusal_expected(None, now), "a failed namespace read explains nothing");
+        assert!(install_refusal_expected(Some(None), now), "gone");
+        assert!(install_refusal_expected(Some(Some(&ns(3600, now, true))), now), "terminating");
+        assert!(install_refusal_expected(Some(Some(&ns(10, now, false))), now), "binding still on the way");
+        assert!(!install_refusal_expected(Some(Some(&ns(3600, now, false))), now), "an old live namespace refusing is real");
     }
 }
