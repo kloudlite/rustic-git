@@ -172,7 +172,7 @@ with a stamp older than the grace, or `delete_now` → Delete; otherwise Keep.
 Stamp writes `REMOVED_AT` (RFC 3339) on the Bench, or on each of the pair's Workspaces when there
 is no Bench, plus audit `member.removed.judged {owner, team, reason ∈ {left_or_removed, team_deleted}, delete_at}`.
 Clear removes both annotations. In this task Delete only logs `membership.cleanup.would_delete`.
-Wire into `keys::run_beat` in place of `readonly_departed_benches` and `prune_team_benches`;
+Wire into `keys::run_beat` in place of `pause_departed_benches` and `prune_team_benches`;
 `spaces::prune_departed` stays until Task 7.
 Audit: `crate::audit::record(os, &AuditEntry{..})` needs the object store; if `ApiState` in the
 `user` role holds none, the judged rows go through the history/audit path the admin process owns
@@ -186,7 +186,7 @@ uses):
 - `a_removed_pair_is_stamped_once_and_the_second_beat_writes_nothing`.
 - `a_readd_during_the_grace_clears_the_stamp`.
 - `a_paused_member_is_never_stamped`.
-- Delete `readonly_departed_benches`, `prune_team_benches`, `orphan_benches`, `gone_teams` and move
+- Delete `pause_departed_benches`, `prune_team_benches`, `orphan_benches`, `gone_teams` and move
   their still-meaningful tests (`a_personal_bench_is_never_pruned`, keep-on-error) here.
 
 Run: `cargo test -p kloudlite-workspaces membership`.

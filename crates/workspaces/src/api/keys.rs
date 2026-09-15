@@ -149,7 +149,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
         prune_team_benches(&s).await;
         prune_namespaces(&s).await;
         prune_builders(&s).await;
-        readonly_departed_benches(&s).await;
+        pause_departed_benches(&s).await;
         super::spaces::migrate(&s).await;
         super::spaces::prune_departed(&s).await;
     }
@@ -158,7 +158,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
 /// The one writer of `spec.access`: a Full bench whose owner has left its team goes Paused (no pod,
 /// no tools) within one beat. It never sets Full, so a directory that cannot answer only ever
 /// takes tools away.
-pub async fn readonly_departed_benches(s: &ApiState) {
+pub async fn pause_departed_benches(s: &ApiState) {
     let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::Bench> = Api::all(c.clone());
     // ponytail: every Bench LISTed and `membership` asked per bench on every beat; one `teams_for`

@@ -48,16 +48,17 @@ async fn set_state(api: &Arc<Api>, headers: &axum::http::HeaderMap, slug: &str, 
         Ok(a) => a,
         Err(e) => return db_err("check admin", slug, e),
     };
+    // Same 404 as `team_for` for a non-member, BEFORE the self-check: a stranger pausing themself
+    // on a real slug must not learn it exists from a 403.
+    if !superadmin && kloudlite_pulls::directory::Directory::role_of(&team, &user).is_none() {
+        return (StatusCode::NOT_FOUND, "no such team").into_response();
+    }
     if user.eq_ignore_ascii_case(email.trim()) {
         let verb = if state == MemberState::Paused { "pause" } else { "unpause" };
         return (StatusCode::FORBIDDEN, format!("you cannot {verb} yourself")).into_response();
     }
     let active = |who: &str| team.members.iter().find(|m| m.user.eq_ignore_ascii_case(who)).filter(|m| m.state == MemberState::Active);
     if !superadmin {
-        // Same 404 as `team_for` for a non-member, so the route cannot probe which slugs exist.
-        if kloudlite_pulls::directory::Directory::role_of(&team, &user).is_none() {
-            return (StatusCode::NOT_FOUND, "no such team").into_response();
-        }
         let target = kloudlite_pulls::directory::Directory::role_of(&team, email);
         let reach = active(&user).is_some_and(|me| target.is_some_and(|t| may_grant(me.role, t)));
         if !reach {
@@ -167,6 +168,7 @@ mod tests {
         assert_eq!(pause(&api, "a@x", "o@x").await.0, StatusCode::FORBIDDEN, "an admin does not reach an owner");
         assert_eq!(pause(&api, "o@x", "o@x").await, (StatusCode::FORBIDDEN, "you cannot pause yourself".into()));
         assert_eq!(pause(&api, "a@x", "A@x").await, (StatusCode::FORBIDDEN, "you cannot pause yourself".into()));
+        assert_eq!(pause(&api, "stranger@x", "stranger@x").await.0, StatusCode::NOT_FOUND, "a non-member cannot probe slugs");
         assert_eq!(pause(&api, "root@x", "m@x").await.0, StatusCode::NO_CONTENT);
         assert_eq!(pause(&api, "o@x", "a@x").await.0, StatusCode::NO_CONTENT);
         assert_eq!(pause(&api, "a@x", "n@x").await.0, StatusCode::FORBIDDEN, "a paused admin reaches nobody");

@@ -260,7 +260,7 @@ async fn a_departed_member_gets_404_on_their_old_bench() {
         ],
         Stub::new(&[], &[]),
     );
-    kloudlite_workspaces::api::keys::readonly_departed_benches(&t.state).await;
+    kloudlite_workspaces::api::keys::pause_departed_benches(&t.state).await;
     let p = t.rec.sent("PATCH", &bench_path("carol", "acme"));
     assert_eq!(p.len(), 1);
     assert_eq!(p[0], json!({"spec": {"access": "paused"}}), "access is the only field written");
