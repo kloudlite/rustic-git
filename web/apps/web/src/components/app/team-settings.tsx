@@ -296,7 +296,7 @@ function RemovalRow({ slug, r }: { slug: string; r: ApiRemoval }) {
           </Button>
         )}
       </div>
-      {state?.ok && <p className="text-sm2 text-muted-foreground">Marked. Their data goes within about 5 minutes, once deletion is switched on for this platform.</p>}
+      {state?.ok && <p className="text-sm2 text-muted-foreground">{state.notice}</p>}
       {open && !state?.ok && (
         <form action={action} className="grid gap-2">
           <input type="hidden" name="slug" value={slug} />
@@ -323,8 +323,9 @@ function MemberRow({ team, m, me }: { team: ApiTeamDetail; m: ApiTeamMember; me:
   // anyone. An owner may lower their own role, and the api refuses it only for the last one.
   const reach = (r: ApiRole) => team.yourRole === "owner" || (team.yourRole === "admin" && r !== "owner");
   const canEdit = reach(m.role);
-  const canRemove = self || canEdit;
   const paused = m.state === "paused";
+  // A paused member cannot leave on their own; the api refuses them on every team route.
+  const canRemove = (self && !paused) || (!self && canEdit);
   return (
     <li className="flex items-center gap-4 px-4 py-3">
       <Initials name={m.name} size={8} tone={self ? "primary" : "muted"} className="shrink-0" />

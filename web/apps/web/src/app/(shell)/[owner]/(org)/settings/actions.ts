@@ -15,7 +15,7 @@ import { safeWebsite } from "@/lib/website";
 
 /** `values` rides along with a refusal: React 19 resets a form's uncontrolled fields once its
  *  action settles, success or not, so the forms feed them back as `defaultValue`. */
-export type TeamState = { ok?: true; error?: string; values?: Record<string, string> } | null;
+export type TeamState = { ok?: true; error?: string; notice?: string; values?: Record<string, string> } | null;
 
 /** An invitation's outcome carries the link when the email could NOT be sent, so the inviter
  *  can pass it on themselves. Never when it was sent — a token on screen is a token in a
@@ -150,7 +150,9 @@ export async function deleteRemovalNow(_prev: TeamState, formData: FormData): Pr
   const r = await api.deleteRemovalNow(token, slug, owner);
   if (!r.ok) return { error: r.message || "Could not delete their data." };
   revalidatePath(`/${slug}/settings`);
-  return { ok: true };
+  return r.value.deletes_enabled
+    ? { ok: true, notice: "Their data goes within about 5 minutes." }
+    : { ok: true, notice: "Marked. Their data will be deleted once deletion is switched on for this platform." };
 }
 
 export async function destroyTeam(_prev: TeamState, formData: FormData): Promise<TeamState> {
