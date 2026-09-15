@@ -411,6 +411,12 @@ pub fn bounded_client(config: kube::Config) -> kube::Result<kube::Client> {
 
     let hyper = hyper_util::client::legacy::Builder::new(TokioExecutor::new())
         .pool_idle_timeout(KUBE_POOL_IDLE)
+        // Every inner-layer stall of 14-15 Sep sat on a POOLED connection (dials=0) and answered
+        // in ms on a fresh one, so no request reuses an idle connection any more. Cost: a new
+        // TCP+TLS handshake to the API server per non-watch request.
+        // ponytail: no idle pool; re-enable a small one (e.g. 2 per host) once the stall's root
+        // cause is fixed.
+        .pool_max_idle_per_host(0)
         .build::<_, kube::client::Body>(connector);
 
     let service = tower::ServiceBuilder::new()
