@@ -85,12 +85,16 @@ const MARKER: &str = "slo-intercept";
 /// Idempotent by design: `env.intercept.proxy.restart` kills the pod and runs it again, and a
 /// second copy of the loop would fight the first for the port rather than fail visibly.
 ///
-/// The `[n]` in the pkill pattern is load-bearing: this whole script is the `sh -c` argument, so a
-/// plain `nc -l -p 3000` pattern matches the shell running it, and the pkill killed its own exec
-/// (exit 143) before the listener ever started — every intercept id skipped on 2026-09-15.
+/// The previous loop is stopped by its saved pid and `pkill -x nc` (process NAME), never `pkill -f`:
+/// this whole script is the `sh -c` argument, so ANY command-line pattern for the listener matches
+/// the shell running it — `[n]c` included, because the nohup line below spells `nc -l -p` out
+/// literally — and the exec killed itself (exit 143) before the listener started. Every intercept
+/// id skipped on 2026-09-15, twice.
 const LISTENER: &str = r#"body='HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nslo-intercept\n'
-pkill -f "[n]c -l -p 3000" 2>/dev/null
+[ -f /tmp/slo-intercept.pid ] && kill "$(cat /tmp/slo-intercept.pid)" 2>/dev/null
+pkill -x nc 2>/dev/null
 nohup sh -c "while true; do printf '$body' | nc -l -p 3000; done" > /tmp/slo-intercept.log 2>&1 &
+echo $! > /tmp/slo-intercept.pid
 i=0
 while [ $i -lt 20 ]; do
   if printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 127.0.0.1 3000 2>/dev/null | grep -q slo-intercept; then
@@ -641,8 +645,9 @@ mod tests {
         // Run again after the pod is killed, so it must not stack a second copy on the port.
         assert!(LISTENER.contains("pkill"), "{LISTENER}");
         // A pattern that matches its own `sh -c` argv kills the exec running it.
-        let pattern = LISTENER.lines().find(|l| l.starts_with("pkill")).unwrap();
-        assert!(pattern.contains("\"[n]c -l -p"), "{pattern}");
+        assert!(!LISTENER.contains("pkill -f"), "{LISTENER}");
+        assert!(LISTENER.contains("pkill -x nc"), "{LISTENER}");
+        assert!(LISTENER.contains("echo $! > /tmp/slo-intercept.pid"), "{LISTENER}");
         // The whole point of the id: the environment dials the service's port, never the
         // workspace's.
         assert_ne!(WS_PORT, TARGET_PORT);
