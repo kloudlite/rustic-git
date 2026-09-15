@@ -22,6 +22,14 @@ Rollout (spec "Rollout order" 1, 2, 3, 4, 7): Tasks 1–3 directory (inert until
 Tasks 4–9 api, reconcile in dry-run. Task 10 gateway. Task 11 agent. Tasks 12–13 web. Tasks 14–15
 SLO. Task 16 turns deletes on after the owner reads a week of `member.removed.judged` rows.
 
+Roll order (ship gate, from the final review): apply `deploy/k3s/crds.yaml` first, then roll the
+agents and the gateway, then the api. Nobody pauses anyone while versions are mixed: an old agent
+cannot parse `access: paused`, and one such Bench fails its whole Bench LIST/watch. Rolling the
+agents back leaves every deleted Bench `Terminating` on `kloudlite.io/bench-folder`, since no old
+code removes it; the remedy is stripping the finalizer by hand, and only after confirming that
+Bench's folder was handled. Once the agents carry the finalizer backfill, run
+`kloudlite-agent collect-bench-folders` once, then delete the subcommand in a follow-up.
+
 Owner decision (15 Sep): the bench folder is deleted by a mark the cluster controller owns, not by
 an agent inferring orphans. Task 11 uses a finalizer on the Bench itself
 (`kloudlite.io/bench-folder`, added at Bench create): the Bench stays in `Terminating` after its
