@@ -452,18 +452,35 @@ async fn a_bench_tool_token_is_refused_off_its_routes() {
         ("GET", "/v1/bench?team=acme"),
         ("POST", "/v1/workspaces/w1/ssh-session"),
         ("GET", "/v1/requests"),
-        ("PUT", "/v1/workspaces/w1"),
         ("POST", "/v1/bench/tool-token?team=acme"),
         ("DELETE", "/v1/bench/tool-token?team=acme"),
     ] {
         let (st, _) = t.call(m, uri, &tok, None).await;
-        assert!(st == 401 || st == 405, "{m} {uri}: {st}");
+        assert_eq!(st, 401, "{m} {uri}: the gate, not the router");
     }
     for (m, uri) in [("GET", "/v1/keys"), ("GET", "/v1/cli/tokens")] {
         let (st, _) = t.call(m, uri, &tok, None).await;
         assert_eq!(st, 404, "{m} {uri}: not served by this router at all");
     }
     assert!(t.bench_writes().is_empty());
+}
+
+#[tokio::test]
+async fn an_expired_bench_tool_token_is_refused_as_expired() {
+    let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
+    let (_, mut c) = t.jwt.mint_bench_tool("alice", "acme", &bench_id("alice", "acme"), LIVE_PARENT).unwrap();
+    c.iat = 1;
+    c.exp = 2;
+    let tok = jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &c,
+        &jsonwebtoken::EncodingKey::from_secret(b"test-secret-at-least-32-bytes-long!!"),
+    )
+    .unwrap();
+    let ((st, _), logs) = logged(t.call("GET", "/v1/workspaces", &tok, None)).await;
+    assert_eq!(st, 401);
+    assert!(logs.contains("bench.tool.refused") && logs.contains("expired") && logs.contains(&c.jti[..8]), "{logs}");
+    assert!(!logs.contains(&c.jti), "{logs}");
 }
 
 #[tokio::test]

@@ -488,7 +488,7 @@ pub(crate) async fn caller(state: &ApiState, headers: &axum::http::HeaderMap) ->
     let name = c.username.filter(|u| !u.is_empty()).ok_or_else(|| {
         (StatusCode::FORBIDDEN, "pick a username before using workspaces").into_response()
     })?;
-    Ok(Caller { name, superadmin, parent: jti, scope: None })
+    Ok(Caller { name, superadmin, parent: jti, scope: None, jti8: None })
 }
 
 
@@ -512,20 +512,42 @@ pub(crate) async fn caller_for(
             return caller(state, headers).await;
         }
     };
+    match bench_tool_check(state, &claims, method, path).await? {
+        Ok(c) => {
+            kloudlite_core::metrics::mark_via("bench-tool");
+            Ok(c)
+        }
+        Err(reason) => Err(bench_tool_refused(&claims, reason)),
+    }
+}
+
+/// The bench-tool gate: the caller, or the refusal reason. The outer `Err` is a kube outage (500),
+/// never a refusal, so an unreadable Bench is not logged as a bad token.
+pub(crate) async fn bench_tool_check(
+    state: &ApiState,
+    claims: &kloudlite_core::jwt::BenchToolClaims,
+    method: &axum::http::Method,
+    path: &str,
+) -> Result<Result<Caller, &'static str>, Response> {
     if !bench_tool_route(method, path) {
-        return Err(bench_tool_refused(&claims, "audience"));
+        return Ok(Err("audience"));
     }
     // The pod's credential dies with the login it was minted from, on the same 30 s cache.
     if !cli_token_live(state, &claims.parent).await {
-        return Err(bench_tool_refused(&claims, "parent"));
+        return Ok(Err("parent"));
     }
     let benches: Api<crd::Bench> = Api::all(kube(state)?.clone());
     let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
     if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
-        return Err(bench_tool_refused(&claims, "bench"));
+        return Ok(Err("bench"));
     }
-    kloudlite_core::metrics::mark_via("bench-tool");
-    Ok(Caller { name: claims.sub, superadmin: false, parent: None, scope: Some(claims.team) })
+    Ok(Ok(Caller {
+        name: claims.sub.clone(),
+        superadmin: false,
+        parent: None,
+        scope: Some(claims.team.clone()),
+        jti8: Some(claims.jti.chars().take(8).collect()),
+    }))
 }
 
 /// Whether a bench's tools may act now. One predicate so a new way to suspend a bench (pause) is
@@ -804,5 +826,99 @@ mod tests {
             Bare.grant_access("acme", "meera", super::TeamRole::Admin).await,
             super::GrantAccess::Unsupported
         );
+    }
+}
+
+#[cfg(test)]
+mod bench_tool_check_tests {
+    use super::*;
+    use axum::http::Method;
+    use kloudlite_core::jwt::{BenchToolClaims, Jwt};
+    use std::sync::Arc;
+
+    /// Only `revoked` is a dead login.
+    struct Live;
+    #[async_trait::async_trait]
+    impl Directory for Live {
+        async fn teams_for(&self, _u: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn is_live(&self, j: &str) -> bool {
+            j != "revoked"
+        }
+        async fn for_owner(&self, _o: &str) -> Option<OwnerMaterial> {
+            None
+        }
+        async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+            None
+        }
+        async fn owners_of(&self, _e: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
+            None
+        }
+        async fn is_team(&self, _s: &str) -> bool {
+            true
+        }
+        async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+    }
+
+    fn claims(parent: &str) -> BenchToolClaims {
+        BenchToolClaims {
+            sub: "alice".into(),
+            team: "acme".into(),
+            bench: "b1".into(),
+            parent: parent.into(),
+            jti: "0123456789abcdef".into(),
+            iat: 0,
+            exp: u64::MAX,
+            typ: "bench-tool".into(),
+        }
+    }
+
+    /// The reason for one check, against a Bench with this spec (None = no Bench).
+    async fn reason(c: &BenchToolClaims, method: Method, path: &str, spec: Option<serde_json::Value>) -> Result<Caller, &'static str> {
+        let routes = spec
+            .map(|sp| {
+                vec![crate::kube_test::get(
+                    "/apis/kloudlite.io/v1alpha1/benches/b1",
+                    serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "b1"}, "spec": sp}),
+                )]
+            })
+            .unwrap_or_default();
+        let (client, _) = crate::kube_test::mock_client(routes);
+        let jwt = Arc::new(Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt).with_kube(client).with_directory(Arc::new(Live));
+        bench_tool_check(&s, c, &method, path).await.unwrap_or_else(|_| panic!("kube outage"))
+    }
+
+    fn spec(owner: &str, team: &str, desired: &str, access: &str) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"owner": owner, "team": team, "image": "i", "desiredState": desired, "access": access}))
+    }
+
+    #[tokio::test]
+    async fn each_gate_refuses_with_its_own_reason() {
+        let good = || spec("alice", "acme", "running", "full");
+        let ok = reason(&claims("live"), Method::GET, "/v1/workspaces", good()).await.unwrap();
+        assert_eq!((ok.name.as_str(), ok.scope.as_deref(), ok.jti8.as_deref()), ("alice", Some("acme"), Some("01234567")));
+        assert!(ok.parent.is_none());
+
+        assert_eq!(reason(&claims("live"), Method::POST, "/v1/workspaces/w1/ssh-session", good()).await.err(), Some("audience"));
+        assert_eq!(reason(&claims("revoked"), Method::GET, "/v1/workspaces", good()).await.err(), Some("parent"));
+        for (sp, why) in [
+            (spec("alice", "acme", "stopped", "full"), "stopped"),
+            (spec("alice", "acme", "running", "readOnly"), "read-only"),
+            (spec("bob", "acme", "running", "full"), "wrong owner"),
+            (spec("alice", "t2", "running", "full"), "wrong team"),
+            (None, "missing"),
+        ] {
+            assert_eq!(reason(&claims("live"), Method::GET, "/v1/workspaces", sp).await.err(), Some("bench"), "{why}");
+        }
     }
 }

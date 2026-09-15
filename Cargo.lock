@@ -4634,6 +4634,7 @@ dependencies = [
  "hyper-timeout",
  "hyper-util",
  "json-patch",
+ "jsonwebtoken",
  "k8s-openapi",
  "kloudlite-core",
  "kloudlite-server",

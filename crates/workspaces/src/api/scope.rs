@@ -70,6 +70,9 @@ pub(crate) fn in_scope(c: &Caller, owner: &str) -> bool {
 /// The one sentence a listing answers when `?owner=`/`?team=` leaves a scoped caller's scope.
 pub(crate) fn scope_refusal(c: &Caller) -> Response {
     let team = c.scope.as_deref().unwrap_or_default();
+    if c.scope.is_some() {
+        tracing::info!(owner = %c.name, jti8 = c.jti8.as_deref().unwrap_or_default(), reason = "scope", "bench.tool.refused");
+    }
     (StatusCode::FORBIDDEN, format!("bench tools act only for {} and {team}", c.name)).into_response()
 }
 
@@ -254,7 +257,32 @@ mod tests {
     }
 
     fn scoped(team: &str, superadmin: bool) -> Caller {
-        Caller { name: "meera".into(), superadmin, parent: None, scope: Some(team.into()) }
+        Caller { name: "meera".into(), superadmin, parent: None, scope: Some(team.into()), jti8: Some("abcd1234".into()) }
+    }
+
+    #[test]
+    fn a_scope_refusal_logs_the_bench_tool_refusal() {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();
+        {
+            let _g = tracing::subscriber::set_default(sub);
+            assert_eq!(scope_refusal(&scoped("t1", false)).status(), StatusCode::FORBIDDEN);
+        }
+        let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("bench.tool.refused") && logs.contains("scope") && logs.contains("abcd1234"), "{logs}");
+        assert!(logs.contains("meera") && !logs.contains("t1"), "owner and jti8 only: {logs}");
     }
 
     #[test]

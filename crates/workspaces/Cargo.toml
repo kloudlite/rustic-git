@@ -65,6 +65,7 @@ tempfile = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }
 tracing-subscriber = { workspace = true }
+jsonwebtoken = { workspace = true }
 futures = { workspace = true }
 # Cyclic dev-dependency (bins/server depends on this crate normally) — fine in Cargo, dev-deps
 # aren't part of the graph used to build the library itself. Lets engine_ops.rs boot the real

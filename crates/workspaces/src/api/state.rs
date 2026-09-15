@@ -20,6 +20,8 @@ pub struct Caller {
     pub parent: Option<String>,
     /// Some(team) for a bench-tool caller: acts only for `name` and this team.
     pub scope: Option<String>,
+    /// First 8 chars of a bench-tool token's jti, for refusal logs; None otherwise.
+    pub jti8: Option<String>,
 }
 
 
