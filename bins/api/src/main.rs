@@ -157,6 +157,11 @@ impl kloudlite_workspaces::api::Directory for Dir {
         self.0.bind_region(slug, region).await.map_err(|e| e.to_string())
     }
 
+    async fn is_superadmin(&self, user: &str) -> std::result::Result<bool, String> {
+        let email = self.email_or_closed(user).await.ok_or("no email for handle")?;
+        self.0.is_superadmin(&email).await.map_err(|e| e.to_string())
+    }
+
     async fn add_superadmin(&self, email: &str, by: &str) -> std::result::Result<(), String> {
         self.0.add_superadmin(email, by).await.map_err(|e| e.to_string())
     }

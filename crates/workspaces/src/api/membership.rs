@@ -484,6 +484,13 @@ mod tests {
         async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
             Err("no".into())
         }
+        async fn is_superadmin(&self, u: &str) -> Result<bool, String> {
+            match u {
+                "root" => Ok(true),
+                "flaky" => Err("directory unreachable".into()),
+                _ => Ok(false),
+            }
+        }
         async fn membership(&self, team: &str, user: &str) -> Result<Judged, String> {
             self.asked.fetch_add(1, Ordering::SeqCst);
             match (team, user) {
@@ -871,6 +878,16 @@ mod tests {
         assert_eq!(delete_now(&s, &who("ann"), "acme", "bob", &confirm("bo", "acme")).await.status(), 400);
         assert_eq!(delete_now(&s, &who("mem"), "acme", "bob", &confirm("bob", "acme")).await.status(), 403);
         assert_eq!(delete_now(&s, &who("eve"), "acme", "bob", &confirm("bob", "acme")).await.status(), 404);
+        assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn delete_now_trusts_the_superadmin_row_not_the_claim() {
+        use crate::api::removals::delete_now;
+        let (s, rec, _) = setup(vec![], &[]);
+        let claim = |n: &str| crate::api::Caller { superadmin: true, ..who(n) };
+        assert_eq!(delete_now(&s, &claim("eve"), "acme", "bob", &confirm("bob", "acme")).await.status(), 404, "a claim with no row");
+        assert_eq!(delete_now(&s, &claim("flaky"), "acme", "bob", &confirm("bob", "acme")).await.status(), 503, "fails closed");
         assert!(rec.calls().is_empty(), "{:?}", rec.calls());
     }
 

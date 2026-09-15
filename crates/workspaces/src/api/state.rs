@@ -148,6 +148,12 @@ pub trait Directory: Send + Sync {
         Err("unsupported".into())
     }
 
+    /// Is `user` (a handle) on the superadmin roster ROW, not merely carrying the token claim? A
+    /// revoked superadmin keeps the claim for the token's life. `Err` refuses; so does the default.
+    async fn is_superadmin(&self, _user: &str) -> Result<bool, String> {
+        Err("unsupported".into())
+    }
+
     /// The region a person's own space is bound to ("" = unbound), by handle; `Err` = unreadable,
     /// which `/v1/bench/teams` turns into its 503. Defaulted to refuse.
     async fn personal_region(&self, _handle: &str) -> Result<String, String> {

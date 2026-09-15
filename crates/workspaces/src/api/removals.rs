@@ -29,10 +29,15 @@ pub struct Confirm {
 
 /// A team admin of `team`, or a superadmin; a non-member learns nothing about the team.
 async fn may_manage(s: &ApiState, c: &Caller, team: &str) -> Result<(), Response> {
-    if c.superadmin {
-        return Ok(());
-    }
     let Some(dir) = &s.directory else { return Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured").into_response()) };
+    // The roster row, not the token claim: a revoked superadmin must not keep an irreversible reach.
+    if c.superadmin {
+        match dir.is_superadmin(&c.name).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(_) => return Err((StatusCode::SERVICE_UNAVAILABLE, "superadmin could not be checked").into_response()),
+        }
+    }
     match dir.team_role(&c.name, &norm(team)).await {
         Some(r) if r >= TeamRole::Admin => Ok(()),
         Some(_) => Err((StatusCode::FORBIDDEN, "only a team admin can do this").into_response()),
