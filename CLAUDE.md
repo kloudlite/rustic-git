@@ -276,13 +276,14 @@ DNS is a `/etc/resolv.conf` the agent renders per pod into `{pool}/attach/{id}/r
 every pod mounts read-only through a hostPath volume of `type: File` — the volume IS that file, so
 there is no `subPath` — `dnsConfig` is immutable on a running pod, so the mount is what makes a
 choice take effect without a restart. That file is written IN PLACE and never renamed: the pod
-holds the inode, so a rename would leave it reading the old file forever. Two NetworkPolicies open
-the path for the whole namespace, `space-env` in the space and `space-{ns}` in the environment,
-both owned by the `SpaceEnvironment` (a cluster-scoped owner may own namespaced objects), so
-clearing the choice collects both; a switch leaves the old environment's half, which that
-environment's reconciler prunes. The builder is not in any space. The retired per-workspace
+holds the inode, so a rename would leave it reading the old file forever. The agent renders that
+file and writes the `Attached` condition; the two NetworkPolicies that open the path for the whole
+namespace, `space-env` in the space and `space-{ns}` in the environment, are written by the CLUSTER
+CONTROLLER (below), never an agent. Both are owned by the `SpaceEnvironment` (a cluster-scoped
+owner may own namespaced objects), so clearing the choice collects both; a switch deletes the old
+environment's half, and that environment's own sweep prunes whatever a restart forgot. The builder is not in any space. The retired per-workspace
 `attachedEnvironment` is read only as a fallback while a space has no choice, managing that pod's
-old `attach-{id}` pair alone; the api's keys beat migrates it into a choice and clears it only
+old `attach-{id}` pair alone — that legacy pair stays agent-written for one release; the api's keys beat migrates it into a choice and clears it only
 once the agent DaemonSet has fully rolled a template marked `kloudlite.io/space-env`. The agent's
 janitor sweeps orphaned `{pool}/attach/{id}` directories left behind by a pod that is simply gone.
 
@@ -567,6 +568,46 @@ miss is `PackagesReady=False/NotCached` and waits for a spec edit, and a `@` ent
 reached the CR without a lock is `Unresolved` the same way. Four hourly probe ids
 (`ws.packages.pin*`, `ws.packages.update`) hold it on the fleet; `NotCached` is deliberately not
 probed, since no version can be made uncached without the source build the design forbids.
+
+## Cluster controller
+
+`bins/controller` (`kloudlite-controller`) is a second control-plane process, ONE per k3s cluster
+(a Region may hold several clusters) — one Deployment, one replica, `Recreate`, in `kube-system` —
+and the one writer of objects shared across nodes or derived purely from spec; AKS runs none,
+since it has no `SpaceEnvironment`s and no agents. Leadership is a `coordination.k8s.io/v1` `Lease`
+`kloudlite-controller` in `kube-system` (`bins/controller/src/lease.rs`): `holderIdentity` is the
+pod name, `leaseTransitions` the EPOCH, `renewTime + 15 s` the expiry, renewed every 5 s, and
+acquire, renew and `release` (which blanks holder and `renewTime` so a replacement is elected at
+once) are all a resourceVersion-CAS `replace` of the object just read. Not `ownership/lease.rs` —
+that needs an `ObjectStore`, and this process holds no disk, object store or cloud credential by
+design. The fence (`may_write`, a fresh lease GET against the elected epoch) runs once per pass
+before the applies — two leaders applying identical bytes is a no-op — and again immediately
+before EVERY delete, because a delete that lands after the term was lost leaves the new leader's
+apply memory believing the object exists for ten minutes; a fenced delete demotes and requeues
+without recording, so it is retried rather than forgotten, and each object's forced SSA under
+field manager `kloudlite-controller` is the backstop. Failover is ~15 s and costs nothing: every
+object is level-triggered and already applied. Stage 1 owns exactly the space grants
+(`bins/controller/src/space.rs`) — `space-env` and `space-{ns}`, BOTH owned by the
+`SpaceEnvironment` with `controller: true`, as the agents wrote them, which is what lets the first
+forced apply adopt the agents' objects rather than 422 on a second controller reference — and the
+agents' writes of them are gone (`agent_writes_no_space_policies`). Fan-out is bounded: one event
+re-renders the space's egress half and the ingress half in at most two environments. Deletes are
+TRANSITIONS, decided from the remembered RENDERED choice keyed by (uid, space) — never the wish,
+or an orphaned wish would delete the same absent policy every resync — with one confirming GET
+after a restart, so a settled space costs zero API calls; the environment-side prune runs only
+from a READY space cache and never touches a grant younger than 60 s. An unlisted reflector is
+UNKNOWN and the pass decides nothing, which matters more here than in an agent because this
+process decides for the whole cluster. Rollout order (`deploy/k3s/README.md`): agents to the build
+that stops writing space policies FIRST, then `controller-rbac.yaml` + `controller.yaml` — a
+controller running beside a still-writing agent can miss its re-creation of a policy it settled as
+gone. `agent-rbac.yaml` keeps its `networkpolicies` verbs: agents still write the intercept
+objects, the legacy `attach-{id}` pair and `bench-{id}`. The api may ship first — `/admin/workloads`
+reads an unapplied roll target's 404 as a skipped row — and the admin role reads the Lease through
+the namespaced Role `kloudlite-admin-leader` to write `controller.leader` history rows keyed on the
+term (uid:`leaseTransitions`), so a renew is no row. Moving the intercept objects, namespaces,
+quotas and `OwnerKeys`/`OwnerBinding` status, and the sweeps are later stages; placement stays in
+the agents deliberately, because the claiming node is the authority on the bytes it holds. Spec:
+`docs/superpowers/specs/2026-09-14-cluster-controller-design.md`.
 
 ## Live settings
 
