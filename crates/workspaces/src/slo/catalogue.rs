@@ -518,8 +518,8 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.exchange.both_views", feature: "Benches", sli: "An exchange reads back by `?session=` and by `?workspace=`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.two_clients", feature: "Benches", sli: "Two WebSockets on one session see the same events in the same order", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.token", feature: "Benches", sli: "The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.tool.audience", feature: "Benches", sli: "The pod's token is refused on `/v1/bench/session` and `/v1/keys`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.tool.revoked", feature: "Benches", sli: "After a stop the next pod call is 401 at once; after the parent login is revoked a pod call is 401 within 60 s", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.tool.audience", feature: "Benches", sli: "The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.tool.revoked", feature: "Benches", sli: "After a stop the next call with the pod's token is 401 at once; after the parent login is revoked a pod call is 401 within 60 s", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
     // thread file.
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },

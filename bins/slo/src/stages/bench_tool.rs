@@ -164,7 +164,7 @@ pub async fn run(c: &mut Ctx) {
     }
     c.step("bench.tool.audience", AUDIENCE_CEILING, |c| {
         async move {
-            for (m, p) in [("POST", "/v1/bench/session"), ("GET", "/v1/keys")] {
+            for (m, p) in [("POST", "/v1/bench/session"), ("GET", "/v1/cli/tokens"), ("GET", "/v1/keys")] {
                 let (status, body) = pod_call(c, m, p).await?;
                 if !refused(status) {
                     bail!("{m} {p} from the pod answered {status}: {}", super::clip(&body));
@@ -193,19 +193,27 @@ async fn revoked(c: &mut Ctx, prefix: &str) {
     // Untimed prep: the kubelet's Secret sync is not the revocation's latency. The first token is
     // read BEFORE the throwaway one overwrites the Secret: its parent stays alive, so only the stop
     // can kill it.
+    // An api refusal here is a platform fault and fails the id; only the kubelet being slow skips it.
     let prep = async {
         let live = node(c, &[READ_JS]).await?;
         let before = node(c, &[DIGEST_JS]).await?.trim().to_string();
         let (doomed, doomed_id) = super::experience_gaps::cli_login(c, &c.probe_jwt, &format!("{prefix}-bench-tool-rev")).await?;
         mint(c, &doomed).await?;
-        wait_new_token(c, &before, TOKEN_CEILING).await?;
-        anyhow::Ok((live, doomed_id))
+        anyhow::Ok((live, before, doomed_id))
     }
     .await;
-    let (live, doomed_id) = match prep {
+    let (live, before, doomed_id) = match prep {
         Ok(p) => p,
-        Err(e) => return c.skip("bench.tool.revoked", &format!("before the revocation: {}", super::clip(&format!("{e:#}")))),
+        Err(e) => {
+            let why = format!("before the revocation: {e:#}");
+            c.step("bench.tool.revoked", REVOKED_CEILING, move |_| async move { bail!("{why}") }.boxed()).await;
+            return;
+        }
     };
+    if let Err(e) = wait_new_token(c, &before, TOKEN_CEILING).await {
+        let _ = revoke_login(c, &doomed_id).await;
+        return c.skip("bench.tool.revoked", &format!("before the revocation: {}", super::clip(&format!("{e:#}"))));
+    }
     c.step("bench.tool.revoked", REVOKED_CEILING, move |c| {
         async move {
             revoke_login(c, &doomed_id).await.context("could not revoke the throwaway login")?;
