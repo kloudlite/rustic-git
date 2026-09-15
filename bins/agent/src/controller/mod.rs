@@ -99,7 +99,7 @@ pub(crate) fn clone_commit(storage: &Option<kloudlite_workspaces::crd::Workspace
 pub(crate) const TICK: Duration = Duration::from_secs(15);
 /// After a failure. The reconcile that observes it does not stamp `observedGeneration`, so the next
 /// pass starts the work again — backoff, never give up.
-const RETRY: Duration = Duration::from_secs(60);
+pub(crate) const RETRY: Duration = Duration::from_secs(60);
 
 /// What the CLUSTER says about THIS node — one GET on our own Node, per reconcile.
 ///

@@ -556,3 +556,27 @@ async fn the_pass_that_first_sees_no_clock_records_one_and_holds() {
         "dated now, not borrowed from an older object: {svc}"
     );
 }
+
+/// Placement still says this node, but the live worktree is not on its disk (moved, retired, a
+/// builder torn down): cut nothing, write nothing, and look again on the slow retry — never a
+/// `statfs` failure every tick.
+#[tokio::test]
+async fn a_snapshot_whose_worktree_is_not_on_this_disk_cuts_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": "ws-1"},
+        "spec": {"owner": "alice", "team": "", "name": "one", "region": "r1", "image": "img",
+                 "storage": {"quotaGb": 1}, "desiredState": "running"},
+        "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "vol-1"},
+    });
+    let (ctx, rec) = ctx(tmp.path(), vec![kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces/ws-1", ws)]);
+    ctx.remember_volume(volume(1));
+
+    let action = kloudlite_agent::snapshot::reconcile_snapshot(snapshot_working("sync-ws-1-ab", "vol-1", "ws-1"), ctx.clone())
+        .await
+        .expect("not an error");
+
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(60)));
+    assert!(rec.calls().iter().all(|c| c.starts_with("GET")), "no write for a cut that cannot happen: {:?}", rec.calls());
+}

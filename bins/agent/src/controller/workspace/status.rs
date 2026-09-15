@@ -40,11 +40,21 @@ pub(crate) async fn ensure_ssh(
     owner_ref: &OwnerReference,
     prev: &mut crd::WorkspaceStatus,
     ctx: &Arc<Ctx>,
-) -> Result<(), ReconcileErr> {
+) -> Result<Option<Action>, ReconcileErr> {
     use k8s_openapi::api::core::v1::Secret;
     let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
     let name = k8s::ws_ssh_secret_name(id);
-    let public = match secrets.get_opt(&name).await? {
+    let found = match secrets.get_opt(&name).await {
+        Ok(f) => f,
+        // A fresh namespace whose `agent_secret_binding` has not landed yet: the grant is seconds
+        // away, and the error policy's 60 s retry made it the whole first start's latency.
+        Err(kube::Error::Api(st)) if st.code == 403 => {
+            tracing::info!(workspace = %id, namespace = %ns, "workspace.hostkey.binding_pending");
+            return Ok(Some(Action::requeue(BINDING_PENDING_RETRY)));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let public = match found {
         Some(s) => s
             .data
             .as_ref()
@@ -80,7 +90,7 @@ pub(crate) async fn ensure_ssh(
     // ssh into with no other trace.
     if public.is_empty() {
         tracing::warn!(workspace = %id, name = %name, "workspace.hostkey.missing");
-        return Ok(());
+        return Ok(None);
     }
     if prev.ssh_host_key.as_deref() != Some(public.as_str()) {
         // `observedGeneration` stays unset: this pass has not converged yet — the pod is still
@@ -88,8 +98,11 @@ pub(crate) async fn ensure_ssh(
         let st = crd::WorkspaceStatus { ssh_host_key: Some(public), observed_generation: None, ..prev.clone() };
         write_ws_status_tracking(w, st, prev, ctx).await?;
     }
-    Ok(())
+    Ok(None)
 }
+
+/// How soon a host-key read refused for want of the namespace's secret grant looks again.
+pub(crate) const BINDING_PENDING_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 
 /// `write_ws_status`, remembering what was written: later steps of the same pass build their status

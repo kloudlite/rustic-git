@@ -145,6 +145,58 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
         )
         .await
     {
+        // Refused in a namespace being torn down, or one so new the controller has not bound
+        // `api-secrets` in it yet: expected, and the next beat or claim writes it. Only a refusal
+        // the namespace cannot explain is worth a warning.
+        let code = match &e {
+            kube::Error::Api(st) => st.code,
+            _ => 0,
+        };
+        if matches!(code, 403 | 404) {
+            let ns_obj = Api::<k8s_openapi::api::core::v1::Namespace>::all(c.clone()).get_opt(ns).await.ok().flatten();
+            if install_refusal_expected(ns_obj.as_ref(), k8s_openapi::jiff::Timestamp::now().as_second()) {
+                tracing::info!(%owner, namespace = %ns, code, "key.install.deferred");
+                return;
+            }
+        }
         tracing::warn!(%owner, error = %e, "key.install.failed");
+    }
+}
+
+/// Whether a 403/404 on the `user-key` write is the namespace's lifecycle rather than a fault: gone,
+/// terminating, or younger than one keys beat (its RoleBinding is still on the way). An
+/// unreadable namespace (`None` from a failed read too) is gone as far as this write can tell.
+fn install_refusal_expected(ns: Option<&k8s_openapi::api::core::v1::Namespace>, now_secs: i64) -> bool {
+    let Some(ns) = ns else { return true };
+    if ns.metadata.deletion_timestamp.is_some() {
+        return true;
+    }
+    ns.metadata
+        .creation_timestamp
+        .as_ref()
+        .is_some_and(|t| now_secs - t.0.as_second() < crate::api::keys::KEYS_RESYNC_SECS as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_refusal_expected;
+    use k8s_openapi::api::core::v1::Namespace;
+
+    fn ns(age: i64, now: i64, terminating: bool) -> Namespace {
+        let mut v = serde_json::json!({"metadata": {"name": "wt-a-1",
+            "creationTimestamp": k8s_openapi::jiff::Timestamp::from_second(now - age).unwrap().to_string()}});
+        if terminating {
+            v["metadata"]["deletionTimestamp"] = v["metadata"]["creationTimestamp"].clone();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn only_a_settled_live_namespace_makes_a_refused_install_a_fault() {
+        let now = 2_000_000_000;
+        assert!(install_refusal_expected(None, now), "gone");
+        assert!(install_refusal_expected(Some(&ns(3600, now, true)), now), "terminating");
+        assert!(install_refusal_expected(Some(&ns(10, now, false)), now), "binding still on the way");
+        assert!(!install_refusal_expected(Some(&ns(3600, now, false)), now), "an old live namespace refusing is real");
     }
 }
