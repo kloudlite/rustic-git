@@ -117,7 +117,7 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip`: it runs in group 0's workspace, so group 0 walks
 /// it after waiting for this group to finish (`wait_for_group`).
-const BENCH_IDS: [&str; 7] = [
+const BENCH_IDS: [&str; 10] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -125,6 +125,9 @@ const BENCH_IDS: [&str; 7] = [
     "bench.session.roundtrip",
     "bench.exchange.both_views",
     "bench.two_clients",
+    "bench.tool.token",
+    "bench.tool.audience",
+    "bench.tool.revoked",
 ];
 
 pub fn group_of(id: &str) -> u8 {
@@ -634,7 +637,7 @@ mod tests {
     #[test]
     fn every_gate_names_a_catalogued_id_of_its_group() {
         use kloudlite_workspaces::slo::catalogue::find;
-        let gates: [(&str, u8, &[&str]); 7] = [
+        let gates: [(&str, u8, &[&str]); 8] = [
             ("bench.create", 3, &["bench.start.p95", "bench.tunnel"]),
             ("ws.create.p95", 0, &["ws.exec.ok", "ws.push.p95", "quota.refused"]),
             ("env.create.p95", 0, &["env.exec.ok", "env.clone.p95"]),
@@ -642,6 +645,7 @@ mod tests {
             ("builder.hidden", 0, &[]),
             ("request.approve", 0, &["superadmin.grant"]),
             ("bench.idle.wake", 3, &["bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients"]),
+            ("bench.tool.token", 3, &["bench.tool.audience", "bench.tool.revoked"]),
         ];
         for (gate, g, block) in gates {
             assert!(find(gate).is_some(), "{gate} is not catalogued");

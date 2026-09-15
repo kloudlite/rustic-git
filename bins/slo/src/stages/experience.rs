@@ -95,6 +95,9 @@ pub const IDS: &[&str] = &[
     "bench.session.roundtrip",
     "bench.exchange.both_views",
     "bench.two_clients",
+    "bench.tool.token",
+    "bench.tool.audience",
+    "bench.tool.revoked",
     "bench.workspace.tool_roundtrip",
     "feed.experience",
     "home.persists",
@@ -187,6 +190,9 @@ pub async fn run(c: &mut Ctx) {
             "admin.reads" => super::experience_gaps2::reads(c).await,
             // One call: the wake runs first, with every client gone, then the four session ids.
             "bench.idle.wake" => super::bench::hourly(c).await,
+            // One call: the pod's token, its audience, then its revocation and the stop.
+            "bench.tool.token" => super::bench_tool::run(c).await,
+            "bench.tool.audience" | "bench.tool.revoked" => {}
             // A grouped run walks the bench journey in group 3; this dial would reset its idle
             // wait, so it waits for that group to finish first.
             "bench.workspace.tool_roundtrip" if c.group.is_some() => {
