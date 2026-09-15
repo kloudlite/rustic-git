@@ -369,18 +369,18 @@ export function getPublicCentralSettings() {
   return call<PublicCentralSettings>("/v1/settings/central", { method: "GET" });
 }
 
-// ── superadmins (server tier, not the admin host — crates/api/src/teams.rs) ─
+// ── superadmins (admin host — crates/api/src/lib.rs mounts these only in the admin role) ─
 
 export type SuperAdmin = { _id: string; addedAt: string; addedBy: string };
 
 export function listSuperadmins(token: string) {
-  return call<SuperAdmin[]>("/api/admin/superadmins", { method: "GET", token });
+  return adminCall<SuperAdmin[]>("/api/admin/superadmins", { method: "GET", token });
 }
 
 // A required note (Global Constraint: reason on every write except approve) — the api 422s an
 // empty one, and that message surfaces to the form rather than being swallowed.
 export function addSuperadmin(user: string, token: string, note: string) {
-  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
+  return adminCall<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
     method: "POST",
     token,
     body: JSON.stringify({ note }),
@@ -388,7 +388,7 @@ export function addSuperadmin(user: string, token: string, note: string) {
 }
 
 export function removeSuperadmin(user: string, token: string, note: string) {
-  return call<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
+  return adminCall<undefined>(`/api/admin/superadmins/${encodeURIComponent(user)}`, {
     method: "DELETE",
     token,
     body: JSON.stringify({ note }),
