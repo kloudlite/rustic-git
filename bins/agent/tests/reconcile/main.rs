@@ -32,6 +32,7 @@ mod filter_foreign_snapshots_against_the_nod;
 mod intercept_proxy;
 mod the_agent_decides_from_stores;
 mod bench;
+mod agent_writes_no_space_policies;
 #[allow(unused_imports)]
 use attachment::*;
 #[allow(unused_imports)]
