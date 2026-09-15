@@ -76,6 +76,20 @@ pub struct BenchSessionClaims {
     pub typ: String,
 }
 
+pub const BENCH_TOOL_TTL_SECS: u64 = 900;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BenchToolClaims {
+    pub sub: String,
+    pub team: String,
+    pub bench: String,
+    pub parent: String,
+    pub jti: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub typ: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CliClaims {
     pub sub: String,
@@ -244,6 +258,30 @@ impl Jwt {
         self.verify_typed(token, "bench-session")
     }
 
+    /// A 15 min token a bench's tools act under for one team — short so a leaked copy dies
+    /// fast, `parent` names the credential it was minted from.
+    /// Its own `typ`, so neither `verify` nor `verify_any_user` ever takes it for a person.
+    pub fn mint_bench_tool(&self, handle: &str, team: &str, bench: &str, parent: &str) -> Result<(String, BenchToolClaims)> {
+        let now = now()?;
+        let claims = BenchToolClaims {
+            sub: handle.to_string(),
+            team: team.to_string(),
+            bench: bench.to_string(),
+            parent: parent.to_string(),
+            jti: new_jti(),
+            iat: now,
+            exp: now + BENCH_TOOL_TTL_SECS,
+            typ: "bench-tool".into(),
+        };
+        let tok = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| err(format!("minting bench tool token: {e}")))?;
+        Ok((tok, claims))
+    }
+
+    pub fn verify_bench_tool(&self, token: &str) -> Result<BenchToolClaims> {
+        self.verify_typed(token, "bench-tool")
+    }
+
     /// A revocable, month-long login for the CLI — a `jti` lets it be revoked without
     /// shortening the TTL for everyone.
     pub fn mint_cli(&self, email: &str, name: &str, username: Option<&str>) -> Result<(String, CliClaims)> {
@@ -403,6 +441,37 @@ mod tests {
         let (ws, _) = j.mint_ssh_session("alice", "bench-1", "r1").unwrap();
         assert!(j.verify_bench_session(&ws).is_err(), "a workspace token is not a bench token");
         assert!(j.verify(&tok).is_err(), "a session token is not a login");
+    }
+
+    #[test]
+    fn a_bench_tool_token_round_trips_and_lives_fifteen_minutes() {
+        let j = jwt();
+        let (tok, c) = j.mint_bench_tool("alice", "acme", "bench-1", "parent-jti").unwrap();
+        assert_eq!(c.exp - c.iat, 900);
+        let back = j.verify_bench_tool(&tok).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(
+            (back.sub.as_str(), back.team.as_str(), back.bench.as_str(), back.parent.as_str(), back.typ.as_str()),
+            ("alice", "acme", "bench-1", "parent-jti", "bench-tool")
+        );
+        assert_eq!(back.jti.len(), 32);
+    }
+
+    #[test]
+    fn a_bench_tool_token_is_not_a_user() {
+        let j = jwt();
+        let (tok, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p").unwrap();
+        assert!(j.verify(&tok).is_err());
+        assert!(j.verify_any_user(&tok).is_err());
+    }
+
+    #[test]
+    fn verify_bench_tool_refuses_bench_session_and_cli() {
+        let j = jwt();
+        let (bench, _) = j.mint_bench_session("alice", "bench-1", "r1").unwrap();
+        let (cli, _) = j.mint_cli("a@b.c", "A", Some("a")).unwrap();
+        assert!(j.verify_bench_tool(&bench).is_err());
+        assert!(j.verify_bench_tool(&cli).is_err());
     }
 
     #[test]
