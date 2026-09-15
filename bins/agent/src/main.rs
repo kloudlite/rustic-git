@@ -46,7 +46,10 @@ async fn main() {
     ]);
     if std::env::args().nth(1).as_deref() == Some("collect-bench-folders") {
         let c = Config::from_env();
-        let export = c.homes_export.clone().unwrap_or_default();
+        let Some(export) = c.homes_export.clone() else {
+            tracing::error!("bench.folder.collect.failed: WS_HOMES_EXPORT is unset");
+            std::process::exit(1);
+        };
         match kloudlite_agent::controller::collect_bench_folders(&c.pool, &export).await {
             Ok(removed) => println!("{}", removed.join("\n")),
             Err(e) => {

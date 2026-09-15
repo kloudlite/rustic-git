@@ -522,6 +522,12 @@ pub(crate) fn finalized<E: std::error::Error + 'static>(
         Err(kube::runtime::finalizer::Error::RemoveFinalizer(kube::Error::Api(ae))) if ae.code == 404 => {
             Ok(kube::runtime::controller::Action::await_change())
         }
+        // A 409 is only ever another agent's write landing first. A failed JSON-patch `test` is a
+        // 422 with reason `Invalid`, exactly like an admission denial, so 422 stays an Err (warned).
+        Err(kube::runtime::finalizer::Error::RemoveFinalizer(kube::Error::Api(ae))) if ae.code == 409 => {
+            tracing::debug!(message = %ae.message, "finalizer.remove.conflict");
+            Ok(kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(2)))
+        }
         Err(e) => Err(ReconcileErr(e.to_string())),
     }
 }
