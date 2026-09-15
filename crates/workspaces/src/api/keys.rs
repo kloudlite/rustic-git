@@ -214,29 +214,98 @@ pub(crate) async fn prune_team_benches(s: &ApiState) {
     };
     let seen: Vec<(String, String, String)> =
         benches.iter().map(|b| (b.name_any(), b.spec.owner.clone(), b.spec.team.clone())).collect();
-    let teams: BTreeSet<&str> = seen.iter().map(|(_, _, t)| t.as_str()).filter(|t| !t.is_empty()).collect();
-    let mut gone = BTreeSet::new();
-    for t in teams {
-        if let Ok(None) = dir.bench_team(t).await {
-            gone.insert(t.to_string());
-        }
-    }
-    for name in orphan_benches(&seen, &gone) {
-        match api.delete(&name, &Default::default()).await {
+    let gone = gone_teams(dir.as_ref(), seen.iter().map(|(_, _, t)| t.as_str())).await;
+    for (name, b) in orphan_benches(&seen, &gone).into_iter().filter_map(|n| benches.iter().find(|b| b.name_any() == n).map(|b| (n, b))) {
+        // Pinned to the object we judged: a team deleted and recreated under the same slug between
+        // the lookup and here may have a member's recreated or patched bench, which must survive.
+        let dp = kube::api::DeleteParams {
+            preconditions: Some(kube::api::Preconditions { uid: b.uid(), resource_version: b.resource_version() }),
+            ..Default::default()
+        };
+        match api.delete(&name, &dp).await {
             Ok(_) => tracing::info!(bench = %name, "keys.bench.pruned"),
             Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(kube::Error::Api(e)) if e.code == 409 => tracing::info!(bench = %name, "keys.bench.prune.changed"),
             Err(e) => tracing::warn!(bench = %name, error = %e, "keys.bench.prune.failed"),
         }
     }
 }
 
+/// The teams the directory ANSWERS do not exist. An unreadable lookup keeps its team, and the
+/// errors are logged once per beat rather than once per team.
+async fn gone_teams<'a>(dir: &dyn super::Directory, teams: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+    let teams: BTreeSet<&str> = teams.filter(|t| !t.is_empty()).collect();
+    let (mut gone, mut failed, mut last) = (BTreeSet::new(), 0usize, String::new());
+    for t in teams {
+        match dir.bench_team(t).await {
+            Ok(None) => {
+                gone.insert(t.to_string());
+            }
+            Ok(Some(_)) => {}
+            Err(e) => (failed, last) = (failed + 1, e),
+        }
+    }
+    if failed > 0 {
+        tracing::warn!(failed, error = %last, "keys.bench.prune.skipped");
+    }
+    gone
+}
+
 #[cfg(test)]
 mod bench_prune_tests {
-    use super::orphan_benches;
+    use super::{gone_teams, orphan_benches};
+    use crate::api::{Directory, OwnerMaterial, TeamRole};
     use std::collections::BTreeSet;
 
     fn b(name: &str, owner: &str, team: &str) -> (String, String, String) {
         (name.into(), owner.into(), team.into())
+    }
+
+    /// `down` is unreadable, `acme` is gone, anything else exists.
+    struct Fake;
+    #[async_trait::async_trait]
+    impl Directory for Fake {
+        async fn teams_for(&self, _u: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn is_live(&self, _j: &str) -> bool {
+            false
+        }
+        async fn for_owner(&self, _o: &str) -> Option<OwnerMaterial> {
+            None
+        }
+        async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+            None
+        }
+        async fn owners_of(&self, _e: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
+            None
+        }
+        async fn is_team(&self, _s: &str) -> bool {
+            false
+        }
+        async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn bench_team(&self, slug: &str) -> Result<Option<(String, String)>, String> {
+            match slug {
+                "down" => Err("directory unreachable".into()),
+                "acme" => Ok(None),
+                _ => Ok(Some((slug.into(), String::new()))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_team_keeps_its_benches() {
+        let seen = vec![b("a-acme", "a", "acme"), b("a-down", "a", "down"), b("a-live", "a", "live")];
+        let gone = gone_teams(&Fake, seen.iter().map(|(_, _, t)| t.as_str())).await;
+        assert_eq!(orphan_benches(&seen, &gone), vec!["a-acme".to_string()]);
     }
 
     #[test]
