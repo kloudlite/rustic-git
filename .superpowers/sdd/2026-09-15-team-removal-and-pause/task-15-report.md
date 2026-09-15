@@ -46,3 +46,18 @@
 - **Concerns.**
   - `sweep_detached_volumes(c, &slug, …)` lists `/v1/volumes?owner={team}`. A team workspace's Volume may be owned by the PERSON rather than the team, and then this finds nothing. The per-owner sweep over the member still catches it, because the history messages carry the prefix.
   - `probe_jwt` deleting another member's team workspace and snapshot assumes the team owner is allowed to. If the api refuses, the next run's sweep collects them.
+
+## Fix round 2
+
+- **(b) Teardown.** The member's workspace and snapshot are deleted as `other_jwt`, before the member is removed. The workspace goes first; then teardown polls `GET /v1/workspaces/{id}` until 404 (at most 60 s, `WS_GONE`). The snapshot delete follows, and a failure (409) is logged as `slo.teardown.failed` and left to the sweep. The team member removal, team delete and `delete_members_now` stay as the probe owner.
+- **(c)** Removed the `sweep_detached_volumes(c, &slug, …)` call in `sweep_teams` and its comment.
+- **Crash case.** `/v1/workspaces?owner=` lists only a person's PERSONAL namespace (`list_for_owner`), so the existing per-member sweep never saw a team workspace. New `sweep_team_workspaces` in `bins/slo/src/stages/mod.rs`, called from `sweep` for each tenant (the second member runs as `other_jwt`):
+  - lists the caller's teams and keeps those `matches` claims;
+  - lists `/v1/workspaces?team={slug}` for each of those teams;
+  - deletes the workspaces whose name `matches`.
+  It uses the same predicate every other kind uses: at boot `stale` (another run of this suite, older than `STALE_SECS`, never the current run), and at teardown this run's prefix. It runs before the volume sweep, so a workspace that goes lets its volume detach for the next pass.
+- **Verification.** `cargo test -p kloudlite-workspaces slo` 11 passed; `cargo test -p kloudlite-slo-bin` 153 passed; clippy `-D warnings` clean.
+- **Concerns.**
+  - If a crashed run's team was already deleted, the member no longer lists it, and its workspaces are out of reach of this sweep. That is the same limit `sweep_teams`' drain has.
+  - The snapshot left behind after a 409 is collected only once its volume is detached and every history message matches the prefix (`sweep_detached_volumes` over the member).
+  - No unit test for the new sweep: it is HTTP against a live api with no seam.

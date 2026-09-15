@@ -27,6 +27,8 @@ pub(crate) const NO_DIR_HOOK: &str =
 /// Two membership beats (the keys beat, 300 s).
 const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
+/// How long teardown waits for the workspace before deleting the snapshot it was based on.
+const WS_GONE: Duration = Duration::from_secs(60);
 const CLEANUP_CEILING: Duration = Duration::from_secs(TWO_BEATS.as_secs() + 120);
 
 fn team(c: &Ctx) -> String {
@@ -219,13 +221,24 @@ async fn cleanup(c: &mut Ctx) {
     teardown(c, &team, Some(&prep)).await;
 }
 
-/// Best effort; the `run-` prefix sweep takes what this misses (`sweep_teams` collects the team's
-/// workspaces and detached volumes first). Every delete is the probe owner's: the member may have
-/// been removed already, and a removed member's token is refused on the team's objects.
+/// Best effort; the `run-` prefix sweep takes what this misses (the per-member team-workspace sweep
+/// in `stages::sweep`). The member's own objects go as the member, BEFORE the removal, while their
+/// token still reaches the team; the snapshot waits for the workspace, whose base it is.
 async fn teardown(c: &Ctx, team: &str, p: Option<&Prep>) {
     if let Some(p) = p {
-        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{}", p.ws)), &c.probe_jwt, None).await;
-        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/volumes/{}/snapshots/{}", p.volume, p.snap)), &c.probe_jwt, None).await;
+        let ws = api(c, &format!("/v1/workspaces/{}", p.ws));
+        let _ = call(c, reqwest::Method::DELETE, &ws, &c.other_jwt, None).await;
+        let start = Instant::now();
+        while start.elapsed() < WS_GONE {
+            match raw(c, reqwest::Method::GET, &ws, &c.other_jwt, None, &[]).await {
+                Ok((status, _)) if status == reqwest::StatusCode::NOT_FOUND => break,
+                _ => tokio::time::sleep(Duration::from_secs(3)).await,
+            }
+        }
+        let snap = api(c, &format!("/v1/volumes/{}/snapshots/{}", p.volume, p.snap));
+        if let Err(e) = call(c, reqwest::Method::DELETE, &snap, &c.other_jwt, None).await {
+            tracing::warn!(kind = "snapshot", op = "delete", name = %p.snap, error = %format!("{e:#}"), "slo.teardown.failed");
+        }
     }
     let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}/members/{}", c.other_email)), &c.probe_jwt, None).await;
     if let Err(e) = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}")), &c.probe_jwt, None).await {

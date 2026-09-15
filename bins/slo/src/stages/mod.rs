@@ -656,6 +656,7 @@ async fn sweep<M: Fn(&str) -> bool>(c: &mut Ctx, owner: &str, jwt: String, match
             }
         }
     }
+    gone += sweep_team_workspaces(c, &jwt, matches).await;
     gone += sweep_detached_volumes(c, owner, &jwt, matches).await;
     gone += deny_requests(c, owner, &jwt, matches).await;
     gone += sweep_images(c, owner, &jwt, matches).await;
@@ -692,6 +693,31 @@ async fn sweep_detached_volumes<M: Fn(&str) -> bool>(c: &Ctx, owner: &str, jwt: 
             && history.iter().all(|h| h.get("message").and_then(Value::as_str).is_some_and(|m| !m.is_empty() && matches(m)));
         if ours {
             gone += del(c, "volume", name, &api(c, &format!("/v1/volumes/{name}")), jwt).await as usize;
+        }
+    }
+    gone
+}
+
+/// The caller's workspaces in every team `matches` claims. `/v1/workspaces?owner=` lists only the
+/// PERSONAL namespace, so a team workspace a crashed run left (the removal drill's, made by the
+/// second member) was invisible to `sweep`. Same predicate as every other kind: never the current
+/// run's objects at boot, only them at teardown.
+async fn sweep_team_workspaces<M: Fn(&str) -> bool>(c: &Ctx, jwt: &str, matches: &M) -> usize {
+    let teams = list(c, &Kind { kind: "team", list: "/v1/teams", name_field: "_id", id_field: "_id", del: |_, _| String::new() }, "", jwt).await;
+    let mut gone = 0;
+    for (slug, _) in teams.into_iter().filter(|(s, _)| matches(s)) {
+        let rows = match get(c, &api(c, &format!("/v1/workspaces?team={slug}")), jwt).await {
+            Ok(v) => v.as_array().cloned().unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(kind = "workspace", op = "list", name = %slug, error = %format!("{e:#}"), "slo.teardown.failed");
+                continue;
+            }
+        };
+        for row in rows {
+            let (Some(name), Some(id)) = (row.get("name").and_then(Value::as_str), row.get("id").and_then(Value::as_str)) else { continue };
+            if matches(name) {
+                gone += del(c, "workspace", name, &api(c, &format!("/v1/workspaces/{id}")), jwt).await as usize;
+            }
         }
     }
     gone
@@ -740,9 +766,6 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
         // A team with an orphaned workspace is worse than a leaked team: the workspace is billed
         // to an owner that no longer exists and no listing anywhere shows it. So the team is
         // deleted only once its workspaces are gone, and the sweep gives up on it otherwise.
-        // A crashed removal drill leaves a detached volume under the team; collect it with the
-        // team's workspaces (the drain below) so the delete is not stranded behind them.
-        gone += sweep_detached_volumes(c, &slug, jwt, matches).await;
         if let Err(e) = drain_team(c, &slug, jwt).await {
             tracing::warn!(kind = "team", op = "drain", name = %slug, error = %format!("{e:#}"), "slo.teardown.failed");
             continue;
