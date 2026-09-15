@@ -39,6 +39,8 @@ const RESYNC: Duration = Duration::from_secs(300);
 /// lands here, and a 300 s wait turned a ~15 s failover into minutes (`ctl.failover`). Cheap for a
 /// follower: `may_write` answers from `ctx.leading()` without a lease GET.
 const NOT_LEADER_RETRY: Duration = Duration::from_secs(5);
+/// A write into a pruned namespace: slower than a fault, quick enough that a recreated one converges.
+const NAMESPACE_GONE_RETRY: Duration = Duration::from_secs(60);
 
 /// A grant younger than this is never pruned by the env-side sweep.
 ///
@@ -307,10 +309,10 @@ fn young(p: &NetworkPolicy) -> bool {
 fn error_policy<K>(_obj: Arc<K>, err: &ReconcileErr, _ctx: Arc<Ctx>) -> Action {
     // The api's prune deletes an emptied team namespace while its wish still exists (every SLO
     // teardown): a write into it is refused until something recreates it, which retrying every
-    // 10 s cannot hasten. Looked at again on the resync, never dropped — the namespace may return.
+    // 10 s cannot hasten. Looked at again in a minute, never dropped — the namespace may return.
     if namespace_gone(err) {
         tracing::info!(error = %err, "reconcile.namespace_gone");
-        return Action::requeue(RESYNC);
+        return Action::requeue(NAMESPACE_GONE_RETRY);
     }
     tracing::warn!(error = %err, "reconcile.failed");
     Action::requeue(Duration::from_secs(10))
@@ -393,16 +395,16 @@ mod tests {
     use super::*;
     use kloudlite_workspaces::kube_test;
 
-    /// A write into a pruned namespace waits for the resync; any other failure — the object's own
+    /// A write into a pruned namespace waits a minute; any other failure — the object's own
     /// 404 included — keeps the short retry.
     #[tokio::test]
-    async fn only_a_missing_namespace_waits_for_the_resync() {
+    async fn only_a_missing_namespace_waits_a_minute() {
         let gone = ReconcileErr(r#"ApiError: namespaces "wt-a-1" not found: NotFound"#.into());
         let own = ReconcileErr(r#"ApiError: networkpolicies.networking.k8s.io "space-env" not found: NotFound"#.into());
         assert!(namespace_gone(&gone));
         assert!(!namespace_gone(&own));
         let ctx = Arc::new(Ctx::for_test_with(kube_test::mock_client(vec![]).0));
-        assert_eq!(error_policy::<()>(Arc::new(()), &gone, ctx.clone()), Action::requeue(RESYNC));
+        assert_eq!(error_policy::<()>(Arc::new(()), &gone, ctx.clone()), Action::requeue(NAMESPACE_GONE_RETRY));
         assert_eq!(error_policy::<()>(Arc::new(()), &own, ctx), Action::requeue(Duration::from_secs(10)));
     }
 
