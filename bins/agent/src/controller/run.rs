@@ -81,6 +81,41 @@ where
     store.state().iter().map(|o| kube::runtime::reflector::ObjectRef::from_obj(o.as_ref())).collect()
 }
 
+/// The bindings a change to the `Quota` named `quota` can re-stamp. A binding projects its owner's
+/// quota into the personal namespace and each TEAM's quota into that team's namespace, so a quota
+/// reaches the binding it names plus every binding whose owner has a workspace in that team.
+///
+/// Everything, when the answer is not knowable: a `default-*` quota is the fallback for any owner
+/// without their own (rare admin edits, so the fan-out is paid seldom), and a workspace cache that
+/// has not finished its first list is unknown, never empty. The SLO probe raising and restoring its
+/// own quotas every run was re-applying every binding on every node — 116 of them by 2026-09-16.
+/// ponytail: a member whose only object in a team is a BENCH is not in the workspace cache, so a
+/// team quota edit reaches their team namespace on the binding's next event; add a bench cache if
+/// that delay ever matters.
+fn bindings_for_quota(
+    quota: &str,
+    bindings: &[Arc<crd::OwnerBinding>],
+    workspaces: Option<&[Arc<crd::Workspace>]>,
+) -> Vec<kube::runtime::reflector::ObjectRef<crd::OwnerBinding>> {
+    let every = quota == crd::DEFAULT_USER_QUOTA || quota == crd::DEFAULT_TEAM_QUOTA;
+    let members: Vec<&str> = workspaces
+        .unwrap_or_default()
+        .iter()
+        .filter(|w| w.spec.team.eq_ignore_ascii_case(quota))
+        .map(|w| w.spec.owner.as_str())
+        .collect();
+    bindings
+        .iter()
+        .filter(|b| {
+            every
+                || workspaces.is_none()
+                || b.spec.owner.eq_ignore_ascii_case(quota)
+                || members.iter().any(|m| b.spec.owner.eq_ignore_ascii_case(m))
+        })
+        .map(|b| kube::runtime::reflector::ObjectRef::from_obj(b.as_ref()))
+        .collect()
+}
+
 /// `r`, only if this controller's own store holds it. Every child watch below is cluster-wide (a
 /// Pod, a StatefulSet, a Snapshot, a Workspace) while the parents are `placed` — this node's alone
 /// — so on a three-node region two thirds of every child event named a parent that lives
@@ -497,17 +532,16 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             },
         );
     // A raised or lowered `Quota` must re-stamp the `ResourceQuota` promptly, not wait out the
-    // next unrelated event. `Quota.metadata.name` is the owner slug but `OwnerBinding.metadata.name`
-    // is `binding_name(region, owner)` — a hash of the pair — so there is no cheap ObjectRef to
-    // derive without a region, and a binding can exist in more than one region for the same owner.
-    // Filtering the local store by `spec.owner` would be a few more lines; `all_in_store` is the
-    // pattern this file already uses for exactly this shape of "something cluster-wide changed"
-    // wake (the Node watch below), and there are at most a few dozen OwnerBindings in any real
-    // cluster — cheap enough that the precision is not worth the extra code.
+    // next unrelated event. `OwnerBinding.metadata.name` is a hash of (region, owner), so the wake
+    // filters the local store by `spec.owner` instead — see `bindings_for_quota`. Waking every
+    // binding was cheap at a few dozen; at 116, with the SLO probe editing quotas every run, it was
+    // ~140 binding passes a minute cluster-wide at a 14.7 s p95.
     let bindings_store = bindings.store();
+    let quota_ctx = ctx.clone();
     let bindings = bindings
-        .watches(Api::<crd::Quota>::all(ctx.client.clone()), crate::controller::watch_config(), move |_: crd::Quota| {
-            all_in_store(&bindings_store)
+        .watches(Api::<crd::Quota>::all(ctx.client.clone()), crate::controller::watch_config(), move |q: crd::Quota| {
+            let ws = quota_ctx.workspaces().map(|s| s.state());
+            bindings_for_quota(&q.name_any(), &bindings_store.state(), ws.as_deref())
         })
         .shutdown_on_signal()
         .run(|b, c| async move { observed("binding", &*b, &c, binding::apply_binding(&b, &c)).await }, error_policy, ctx.clone())
@@ -881,6 +915,33 @@ mod tests {
         let mut got: Vec<String> = working_snapshots_of(&reader, "v1").into_iter().map(|r| r.name).collect();
         got.sort();
         assert_eq!(got, vec!["a", "b"], "status-less counts as Working; Ready and another volume do not");
+    }
+
+    /// A named quota wakes its own binding and its team members'; a default or an unlisted
+    /// workspace cache wakes everything.
+    #[test]
+    fn a_quota_wakes_only_the_bindings_it_can_restamp() {
+        let b = |owner: &str| Arc::new(crd::OwnerBinding::new(&crd::binding_name("r1", owner), crd::OwnerBindingSpec { owner: owner.into(), region: "r1".into() }));
+        let w = |owner: &str, team: &str| {
+            Arc::new(serde_json::from_value::<crd::Workspace>(serde_json::json!({
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": format!("{owner}-{team}")},
+                "spec": {"owner": owner, "team": team, "name": "dev", "region": "r1", "image": "", "packages": [], "desiredState": "running"}
+            })).unwrap())
+        };
+        let bindings = vec![b("alice"), b("bob"), b("acme"), b("slo-probe")];
+        let ws = vec![w("alice", "acme"), w("bob", "")];
+        let names = |q: &str, ws: Option<&[Arc<crd::Workspace>]>| {
+            let mut n: Vec<String> = bindings_for_quota(q, &bindings, ws).into_iter().map(|r| r.name).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names("slo-probe", Some(&ws)), vec![crd::binding_name("r1", "slo-probe")]);
+        let mut acme = vec![crd::binding_name("r1", "acme"), crd::binding_name("r1", "alice")];
+        acme.sort();
+        assert_eq!(names("Acme", Some(&ws)), acme, "the team's own binding and its member's");
+        assert!(names("nobody", Some(&ws)).is_empty());
+        assert_eq!(names(crd::DEFAULT_TEAM_QUOTA, Some(&ws)).len(), 4);
+        assert_eq!(names("slo-probe", None).len(), 4, "an unlisted cache is unknown, never empty");
     }
     use super::*;
     use crate::testsupport::test_ctx;
