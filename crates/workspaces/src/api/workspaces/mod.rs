@@ -649,8 +649,11 @@ pub(crate) async fn drop_attach_policy(c: &kube::Client, id: &str, env: Option<&
     let Some(env) = env else { return };
     let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
         Api::namespaced(c.clone(), &crd::env_namespace(env));
-    if let Err(e) = policies.delete(&crate::k8s::attach_policy_name(id), &DeleteParams::default()).await {
-        tracing::warn!(workspace = %id, environment = %env, error = %e, "attach.policy.delete.failed");
+    match policies.delete(&crate::k8s::attach_policy_name(id), &DeleteParams::default()).await {
+        Ok(_) => {}
+        // Already gone is the outcome this call wants: most workspaces never had the grant.
+        Err(kube::Error::Api(e)) if e.code == 404 => {}
+        Err(e) => tracing::warn!(workspace = %id, environment = %env, error = %e, "attach.policy.delete.failed"),
     }
 }
 
