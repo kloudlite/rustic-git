@@ -21,13 +21,15 @@
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
 # | bench.idle.wake reads the region's idle secs  | clustersettings: get                               |
 # | ctl.leader reads the controller's Lease       | leases: get, kube-system, that one name only       |
-# | ctl.failover deletes the leader pod           | pods: delete, kube-system, admission-fenced to     |
-# |                                               | `app: kloudlite-controller` pods only              |
+# | ctl.failover deletes the leader pod;          | pods: delete, cluster-wide, admission-fenced to    |
+# | env.intercept.proxy.restart kills the         | `app: kloudlite-controller` in kube-system and to  |
+# | intercepting workspace's pod                  | the probe owners' workspace pods elsewhere          |
 #
-# The failover grant (owner, 2026-09-15) is `pods: delete` in kube-system — RBAC cannot select by
-# label, and the controller's pod name is generated — so `kloudlite-slo-deletes-only-the-controller`
-# below refuses the probe any delete of a pod not labelled `app: kloudlite-controller`. Without that
-# policy this Role would reach the agent DaemonSet's pods too; apply both or neither.
+# The delete grants (owner, 2026-09-15) are `pods: delete` cluster-wide — RBAC cannot select by
+# label, the controller's pod name is generated, and the intercept journey's `wt-` team namespace
+# exists for one run — so `kloudlite-slo-pod-deletes` below refuses every other pod delete, the
+# agent DaemonSet's and every real person's workspace first of all. Without that policy the role
+# reaches every pod in the cluster; apply both or neither.
 #
 # There is no general `pods: delete`: the monthly dead-node drill is a hard skip
 # (`bins/slo/src/stages/monthly/nodes.rs`, `c.skip("drill.dead.node", …)`), so the
@@ -88,6 +90,10 @@ rules:
     # no `delete` on one — the api's resync beat is what reaps them.
     resources: ["pods", "resourcequotas", "namespaces"]
     verbs: ["get", "list"]
+  # Fenced by `kloudlite-slo-pod-deletes`, never on its own: see the header.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
   # An environment's service is a StatefulSet; `env.create.p95` is done when its replica is ready,
   # which the probe reads from the StatefulSet's status rather than guessing from the pod.
   # `daemonsets`: the fast suite's rollout yield reads `kloudlite-agent`'s
@@ -147,8 +153,8 @@ subjects:
     name: kloudlite-slo
     namespace: kube-system
 ---
-# `ctl.leader` asserts the lease IS held, so it reads the one Lease by name. No `pods: delete`
-# here: `ctl.failover` skips on the 403 until the owner decides to grant it.
+# `ctl.leader` asserts the lease IS held, so it reads the one Lease by name. `pods: delete` lives
+# on the ClusterRole now, behind the admission fence.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -159,9 +165,6 @@ rules:
     resources: ["leases"]
     verbs: ["get"]
     resourceNames: ["kloudlite-controller"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -177,18 +180,24 @@ subjects:
     name: kloudlite-slo
     namespace: kube-system
 ---
-# The fence on the grant above. A DELETE carries the pod as `oldObject`; anything the probe deletes in
-# kube-system that is not the controller's own pod is refused, the agent DaemonSet's first of all.
+# The fence on the pod-delete grant. ONE policy on purpose: bound policies AND, so a second one
+# matching the same request would have to allow the other's case too. A DELETE carries the pod as
+# `oldObject`. In kube-system only the controller's pod passes. Anywhere else only a pod the agent
+# rendered as a WORKSPACE (`kloudlite.io/kind`) for one of the six probe owners
+# (`kloudlite.io/owner`, the PERSON even in a team namespace — `ctx::SUITE_TENANTS`) and inside a
+# workspace namespace passes; the labels alone are not trusted, since anyone who can create a pod
+# can write them, so the namespace prefix is what keeps an `env-` or system pod out.
+# `kloudlite-slo-deletes-only-the-controller` is its kube-system-only predecessor; if it is still
+# applied it ANDs harmlessly (it allows the same kube-system case and never matches elsewhere),
+# but delete it: `kubectl delete validatingadmissionpolicy,validatingadmissionpolicybinding
+# kloudlite-slo-deletes-only-the-controller`.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: kloudlite-slo-deletes-only-the-controller
+  name: kloudlite-slo-pod-deletes
 spec:
   failurePolicy: Fail
   matchConstraints:
-    namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: kube-system
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
@@ -197,16 +206,25 @@ spec:
   matchConditions:
     - name: from-the-probe
       expression: request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-slo'
+  variables:
+    - name: labels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
   validations:
     - expression: >-
-        has(oldObject.metadata.labels) && 'app' in oldObject.metadata.labels
-          && oldObject.metadata.labels['app'] == 'kloudlite-controller'
-      message: "kloudlite-slo may delete only kloudlite-controller pods in kube-system"
+        request.namespace == 'kube-system'
+          ? ('app' in variables.labels && variables.labels['app'] == 'kloudlite-controller')
+          : ((request.namespace.startsWith('ws-slo-') || request.namespace.startsWith('wt-slo-'))
+             && 'kloudlite.io/kind' in variables.labels
+             && variables.labels['kloudlite.io/kind'] == 'workspace'
+             && 'kloudlite.io/owner' in variables.labels
+             && variables.labels['kloudlite.io/owner'] in
+                ['slo-probe', 'slo-other', 'slo-hourly', 'slo-hourly-other', 'slo-drill', 'slo-drill-other'])
+      message: "kloudlite-slo may delete only kloudlite-controller pods in kube-system and the probe owners' workspace pods"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: kloudlite-slo-deletes-only-the-controller
+  name: kloudlite-slo-pod-deletes
 spec:
-  policyName: kloudlite-slo-deletes-only-the-controller
+  policyName: kloudlite-slo-pod-deletes
   validationActions: ["Deny"]
