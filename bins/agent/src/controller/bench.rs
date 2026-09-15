@@ -148,78 +148,6 @@ async fn delete_folder(b: &crd::Bench, ctx: &Arc<Ctx>) -> Result<Action, Reconci
     }
 }
 
-/// ONE-OFF (`kloudlite-agent collect-bench-folders`, run once by hand in one agent pod): removes
-/// folders left by benches deleted before `BENCH_FOLDER_FINALIZER` existed. Delete after use.
-/// A fresh LIST picks candidates; each is then re-GOT by id right before its delete and kept unless
-/// that GET is a confirmed 404, and a folder touched within `COLLECT_MARGIN` of the LIST is kept —
-/// a bench created after the LIST may already have its fresh folder mounted.
-pub async fn collect_bench_folders(pool: &str, export: &str) -> Result<Vec<String>, String> {
-    let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
-    let api = Api::<crd::Bench>::all(client);
-    let started = std::time::SystemTime::now();
-    let live: std::collections::HashSet<(String, String)> =
-        api.list(&Default::default()).await.map_err(|e| e.to_string())?.items.into_iter().map(|b| (b.spec.team, b.spec.owner)).collect();
-    let root = crate::homes_root(pool).join(".benches");
-    let mut candidates = Vec::new();
-    for team in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
-        let team = match team {
-            Ok(t) => t.file_name().to_string_lossy().into_owned(),
-            Err(e) => {
-                tracing::warn!(error = %e, "bench.folder.collect.skipped");
-                continue;
-            }
-        };
-        let Ok(owners) = std::fs::read_dir(root.join(&team)) else {
-            tracing::warn!(%team, "bench.folder.collect.skipped");
-            continue;
-        };
-        for owner in owners {
-            let entry = match owner {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(%team, error = %e, "bench.folder.collect.skipped");
-                    continue;
-                }
-            };
-            let owner = entry.file_name().to_string_lossy().into_owned();
-            let mtime = entry.metadata().and_then(|m| m.modified()).ok();
-            if !live.contains(&(team.clone(), owner.clone())) {
-                candidates.push((team.clone(), owner, mtime));
-            }
-        }
-    }
-    let mut removed = Vec::new();
-    for (team, owner, mtime) in candidates {
-        let gone = match api.get_opt(&crd::bench_id(&owner, &team)).await {
-            Ok(None) => Some(true),
-            Ok(Some(_)) => Some(false),
-            Err(e) => {
-                tracing::warn!(%team, %owner, error = %e, "bench.folder.collect.skipped");
-                None
-            }
-        };
-        if !collectable(gone, mtime, started) {
-            continue;
-        }
-        let (p, x, t, o) = (pool.to_string(), export.to_string(), team.clone(), owner.clone());
-        match tokio::task::spawn_blocking(move || super::workspace::delete_bench_folder(&p, &x, &t, &o)).await {
-            Ok(Ok(true)) => {
-                tracing::info!(%team, %owner, "bench.folder.collected");
-                removed.push(format!("{team}/{owner}"));
-            }
-            r => tracing::warn!(%team, %owner, result = ?r, "bench.folder.collect.skipped"),
-        }
-    }
-    Ok(removed)
-}
-
-const COLLECT_MARGIN: Duration = Duration::from_secs(600);
-
-/// `gone`: `Some(true)` only for a confirmed 404 on the re-GET. An unreadable mtime keeps.
-pub(crate) fn collectable(gone: Option<bool>, mtime: Option<std::time::SystemTime>, listed_at: std::time::SystemTime) -> bool {
-    gone == Some(true) && mtime.is_some_and(|m| m + COLLECT_MARGIN < listed_at)
-}
-
 async fn apply_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     if b.meta().deletion_timestamp.is_some() {
         return Ok(Action::await_change());
@@ -359,19 +287,6 @@ mod tests {
     use k8s_openapi::api::core::v1::{Container, ContainerState, ContainerStatus, PodCondition, PodSpec, PodStatus};
 
     const FINISHED_AT: &str = "2026-09-13T10:00:00Z";
-
-    #[test]
-    fn the_collector_deletes_only_a_confirmed_gone_bench_with_an_old_folder() {
-        let now = std::time::SystemTime::now();
-        let old = Some(now - Duration::from_secs(3600));
-        assert!(collectable(Some(true), old, now));
-        assert!(!collectable(Some(false), old, now), "the bench exists again");
-        assert!(!collectable(None, old, now), "the GET failed");
-        assert!(!collectable(Some(true), Some(now - Duration::from_secs(60)), now), "a fresh folder");
-        assert!(!collectable(Some(true), Some(now + Duration::from_secs(60)), now), "made after the LIST");
-        assert!(!collectable(Some(true), None, now), "unreadable mtime");
-    }
-
     fn fixture_bench(desired: DesiredState) -> crd::Bench {
         let mut b = crd::Bench::new(
             "bench-1",

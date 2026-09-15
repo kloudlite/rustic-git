@@ -44,21 +44,6 @@ async fn main() {
         ("snapshot_cut_failures_total", Counter, &[("kind", "workspace")]),
         ("snapshot_cut_failures_total", Counter, &[("kind", "environment")]),
     ]);
-    if std::env::args().nth(1).as_deref() == Some("collect-bench-folders") {
-        let c = Config::from_env();
-        let Some(export) = c.homes_export.clone() else {
-            tracing::error!("bench.folder.collect.failed: WS_HOMES_EXPORT is unset");
-            std::process::exit(1);
-        };
-        match kloudlite_agent::controller::collect_bench_folders(&c.pool, &export).await {
-            Ok(removed) => println!("{}", removed.join("\n")),
-            Err(e) => {
-                tracing::error!(error = %e, "bench.folder.collect.failed");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
     if let Err(e) = run(Config::from_env()).await {
         tracing::error!(error = %e, "process.exiting");
         std::process::exit(1);
