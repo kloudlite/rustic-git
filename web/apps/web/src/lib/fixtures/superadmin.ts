@@ -573,6 +573,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["team.repo.shared", "Teams", "A member clones a team repo; a non-member is refused", "99.9 %", "hourly", "14 · Experience"],
   ["team.workspace", "Teams", "A team workspace lands in the team namespace and starts", "95 % ≤ 90000 ms", "hourly", "14 · Experience"],
   ["team.member.remove", "Teams", "A removed member loses access to the team repo", "99.9 %", "hourly", "14 · Experience"],
+  ["team.member.paused", "Teams", "A paused member's tool token, team `/v1` and bench tunnel and bench session are refused and their bench is stopped within a minute; after unpause and start the bench folder's canary is still there", "99.9 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["team.delete", "Teams", "Deleting the team removes its profile and refuses its slug", "99.9 %", "hourly", "14 · Experience"],
   ["team.namespace.reaped", "Workspaces", "No team namespace outlives by more than two resync beats the workspaces that used it", "99.9 %", "hourly", "14 · Experience"],
   ["repo.protection", "Git hosting", "A protected branch refuses a direct push and still merges via a PR", "99.9 %", "hourly", "14 · Experience"],
@@ -664,6 +665,8 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["drill.clickhouse.down", "Resilience drills", "With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500", "99.9 %", "monthly", "13 · Monthly"],
   ["ws.interrupted", "Workspace lifecycle", "Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill", "99.9 %", "monthly", "13 · Monthly"],
   ["env.clone.interrupted", "Environments", "Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy", "99.9 %", "monthly", "13 · Monthly"],
+  ["team.member.removed.cleanup", "Teams", "A removed member's bench, team workspace, sync points and space choice are deleted within two beats of delete-now, the pushed snapshot and its volume are kept, the removal is audited, and a re-added person finds no bench", "99.9 %", "monthly", "13 · Monthly"],
+  ["team.member.removed.dir_down", "Teams", "With the directory unreachable for one beat, a removed pair's objects all survive and the reconcile logs that it skipped", "99.9 %", "monthly", "13 · Monthly"],
 ];
 
 /** The journey in order. Boot and teardown report no SLO and are stages all the same: they take
