@@ -34,6 +34,11 @@ pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Resul
     // may never have made one; an unreadable one refuses the tunnel (409, retryable), never data.
     let team = ws.spec.team.trim().to_ascii_lowercase();
     if !team.is_empty() && team != ws.spec.owner.to_ascii_lowercase() {
+        // A removed member with no Bench is stamped on the Workspace itself; only a stamp the
+        // membership manager wrote counts, the same provenance the api's beat decides from.
+        if kloudlite_workspaces::api::membership::system_annotation(&ws.metadata, kloudlite_workspaces::api::membership::REMOVED_AT).is_some() {
+            return Err((StatusCode::FORBIDDEN, "access removed"));
+        }
         match Api::<Bench>::all(client.clone()).get_opt(&crd::bench_id(&ws.spec.owner, &team)).await {
             Ok(Some(b)) if b.spec.access == BenchAccess::Paused => return Err((StatusCode::FORBIDDEN, "access paused")),
             Ok(_) => {}
@@ -163,6 +168,28 @@ mod paused_tests {
         assert_eq!(resolve(&c, "w1", 22).await.err().map(|e| e.0), Some(StatusCode::FORBIDDEN));
         let (c, _) = mock_client(routes_for_ws(Some(get(format!("{B}{id}"), bench(&id, "full")))));
         assert!(resolve(&c, "w1", 22).await.is_ok(), "an active member's bench admits");
+    }
+
+    #[tokio::test]
+    async fn a_removed_members_stamped_workspace_is_403_without_a_bench() {
+        use kloudlite_workspaces::api::membership::{MEMBERSHIP_FIELD_MANAGER, REMOVED_AT};
+        let id = crd::bench_id("paula", "acme");
+        let mut routes = routes_for_ws(Some(not_found(format!("{B}{id}"))));
+        let mut ws = json!({"apiVersion":"kloudlite.io/v1alpha1","kind":"Workspace","metadata":{"name":"w1",
+                "annotations":{REMOVED_AT:"2026-09-15T00:00:00Z"},
+                "managedFields":[{"manager":MEMBERSHIP_FIELD_MANAGER,"operation":"Apply","apiVersion":"kloudlite.io/v1alpha1","fieldsType":"FieldsV1",
+                    "fieldsV1":{"f:metadata":{"f:annotations":{format!("f:{REMOVED_AT}"):{}}}}}]},
+            "spec":{"owner":"paula","team":"acme","name":"w1","region":"r","image":"i","desiredState":"running"},
+            "status":{"phase":"ready","podRef":"ns/p"}});
+        routes[0] = get("/apis/kloudlite.io/v1alpha1/workspaces/w1", ws.clone());
+        let (c, _) = mock_client(routes);
+        assert_eq!(resolve(&c, "w1", 22).await.err().map(|e| e.0), Some(StatusCode::FORBIDDEN));
+        // A stamp anyone else wrote is no stamp.
+        ws["metadata"]["managedFields"][0]["manager"] = json!("kubectl");
+        let mut routes = routes_for_ws(Some(not_found(format!("{B}{id}"))));
+        routes[0] = get("/apis/kloudlite.io/v1alpha1/workspaces/w1", ws);
+        let (c, _) = mock_client(routes);
+        assert!(resolve(&c, "w1", 22).await.is_ok());
     }
 
     #[tokio::test]

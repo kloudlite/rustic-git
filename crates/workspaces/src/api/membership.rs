@@ -124,7 +124,7 @@ pub(super) fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
 }
 
 /// The annotation, only when `kloudlite-membership` owns it in `managedFields`.
-pub(super) fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String> {
+pub fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String> {
     let pointer = format!("/f:metadata/f:annotations/f:{}", key.replace('~', "~0").replace('/', "~1"));
     let owned = m.managed_fields.iter().flatten().any(|f| {
         f.manager.as_deref() == Some(MEMBERSHIP_FIELD_MANAGER) && f.fields_v1.as_ref().is_some_and(|v| v.0.pointer(&pointer).is_some())
