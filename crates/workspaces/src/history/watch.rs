@@ -258,8 +258,7 @@ pub fn workspace_events(
             &next.spec.owner,
             &next.name_any(),
             region,
-            prev.and_then(|p| p.status.as_ref())
-                .map(|s| s.conditions.as_slice()),
+            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
             &st.conditions,
         ));
     }
@@ -300,8 +299,7 @@ pub fn environment_events(
             &next.spec.owner,
             &next.name_any(),
             region,
-            prev.and_then(|p| p.status.as_ref())
-                .map(|s| s.conditions.as_slice()),
+            prev.and_then(|p| p.status.as_ref()).map(|s| s.conditions.as_slice()),
             &st.conditions,
         ));
     }
@@ -324,8 +322,7 @@ pub fn snapshot_events(
     let st = next.status.as_ref();
     // Same reason the builder's own rows are dropped: every build stop cuts one, and none of it
     // belongs in a feed whose owner page hides the parent.
-    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready || from_a_builder(&next.spec)
-    {
+    if !matches!(st.map(|s| s.phase), Some(Phase::Ready)) || was_ready || from_a_builder(&next.spec) {
         return Vec::new();
     }
     // `readyAt` is the exact instant the cut landed, written by the node that took it — a better
@@ -670,42 +667,41 @@ pub fn node_events(prev: Option<&Node>, next: &Node, region: &str) -> Vec<EventR
 const LEADER_LEASE: &str = "kloudlite-controller";
 const LEADER_LEASE_NAMESPACE: &str = "kube-system";
 
-/// A change of the controller Lease's HOLDER. Renews rewrite the object every 5 s and must say
-/// nothing; the first sighting is a row, because the holder went from unknown to known. `ts` is the
-/// new term's `acquireTime` (stable for the whole term), else its `renewTime` — both properties of
-/// the object, never the wall clock. `region` is filled in by the watch, which knows it.
-pub fn leader_events(prev: Option<&Lease>, next: &Lease) -> Vec<EventRow> {
-    let holder = |l: &Lease| {
-        l.spec
-            .as_ref()
-            .and_then(|s| s.holder_identity.clone())
-            .unwrap_or_default()
+/// A new TERM of the controller Lease: a change of `(holder, leaseTransitions)`, so a same-holder
+/// re-acquire after the TTL (epoch + 1) is a row and a renew every 5 s is not. A release (empty
+/// holder) is no leader, so no row. Keyed on the term, never the resourceVersion, and dated from
+/// the term's `acquireTime`: an admin restart or a watch reconnect re-lists the same term with
+/// `prev` empty at a newer rv, and must write the byte-identical row the live change wrote.
+pub fn leader_events(prev: Option<&Lease>, next: &Lease, region: &str) -> Vec<EventRow> {
+    let term = |l: &Lease| {
+        let s = l.spec.as_ref();
+        (
+            s.and_then(|s| s.holder_identity.clone()).unwrap_or_default(),
+            s.and_then(|s| s.lease_transitions).unwrap_or(0),
+        )
     };
-    let name = holder(next);
-    if prev.map(holder).as_ref() == Some(&name) {
+    let (holder, transitions) = term(next);
+    if holder.is_empty() || prev.map(term) == Some((holder.clone(), transitions)) {
         return Vec::new();
     }
-    let spec = next.spec.as_ref();
-    let ts = spec
-        .and_then(|s| s.acquire_time.as_ref().or(s.renew_time.as_ref()))
+    let ts = next
+        .spec
+        .as_ref()
+        .and_then(|s| s.acquire_time.as_ref())
         .and_then(|t| chrono::DateTime::from_timestamp_millis(t.0.as_millisecond()))
         .or_else(|| managed_at(next))
         .unwrap_or_else(epoch);
-    let (uid, rv) = uid_rv(next);
     vec![row(
         ts,
-        &uid,
-        &rv,
+        &next.uid().unwrap_or_default(),
+        &transitions.to_string(),
         "leader",
         "controller.leader",
         "",
         "",
-        &name,
-        "",
-        serde_json::json!({
-            "previous": prev.map(holder),
-            "transitions": spec.and_then(|s| s.lease_transitions),
-        }),
+        &holder,
+        region,
+        serde_json::json!({ "transitions": transitions }),
     )]
 }
 
@@ -935,11 +931,7 @@ pub async fn watch_region(client: kube::Client, region: String, history: Arc<His
                 .fields(&format!("metadata.name={LEADER_LEASE}")),
             region.clone(),
             history.clone(),
-            |p, n, r| {
-                let mut rows = leader_events(p, n);
-                rows.iter_mut().for_each(|x| x.region = r.to_string());
-                rows
-            },
+            leader_events,
             no_delete,
         )),
         tokio::spawn(watch_kind::<Node>(
@@ -987,20 +979,30 @@ mod condition_tests {
         .unwrap()
     }
 
-    /// Only a change of HOLDER is an event. A Lease is rewritten every 5 s by the renew beat, and
-    /// a row per renew would be 17 k rows a day per cluster saying nothing happened.
+    /// Only a new TERM is an event. A Lease is rewritten every 5 s by the renew beat, and a row per
+    /// renew would be 17 k rows a day per cluster saying nothing happened.
     #[test]
     fn only_a_change_of_holder_is_a_leader_event() {
         let a = lease("ctl-a", 3, "100");
         let renewed = lease("ctl-a", 3, "101");
         let b = lease("ctl-b", 4, "102");
-        assert!(leader_events(Some(&a), &renewed).is_empty());
-        let rows = leader_events(Some(&a), &b);
+        assert!(leader_events(Some(&a), &renewed, "r").is_empty());
+        let rows = leader_events(Some(&a), &b, "r");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "controller.leader");
         assert_eq!(rows[0].target, "ctl-b");
-        // The first sighting after a restart is an event: the holder went from unknown to known.
-        assert_eq!(leader_events(None, &a).len(), 1);
+        assert_eq!(rows[0].id, event_id("l1", "4", "leader"));
+        assert_eq!(rows[0].region, "r");
+        assert_eq!(rows[0].ts.to_rfc3339(), "2026-09-14T10:00:00+00:00");
+        // An admin restart re-lists the same term at a newer rv with nothing before it: the SAME
+        // row, so ReplacingMergeTree collapses it instead of recording a phantom election.
+        let relisted = leader_events(None, &lease("ctl-b", 4, "999"), "r");
+        assert_eq!(relisted.len(), 1);
+        assert_eq!((&relisted[0].id, relisted[0].ts, &relisted[0].attrs), (&rows[0].id, rows[0].ts, &rows[0].attrs));
+        // Same holder re-acquiring after the TTL is a new term.
+        assert_eq!(leader_events(Some(&b), &lease("ctl-b", 5, "103"), "r").len(), 1);
+        // A release names no leader.
+        assert!(leader_events(Some(&b), &lease("", 4, "104"), "r").is_empty());
     }
 
     /// A reason change is a row; the same reason written again is not; the message rides along.
@@ -1010,15 +1012,9 @@ mod condition_tests {
         let b = ws("2", "False", "PodNotReady");
         let c = ws("3", "True", "Ready");
         let rows = workspace_events(Some(&a), &b, "r");
-        assert!(
-            rows.iter().all(|r| r.kind != "workspace.condition"),
-            "{rows:?}"
-        );
+        assert!(rows.iter().all(|r| r.kind != "workspace.condition"), "{rows:?}");
         let rows = workspace_events(Some(&b), &c, "r");
-        let cond = rows
-            .iter()
-            .find(|r| r.kind == "workspace.condition")
-            .expect("a condition row");
+        let cond = rows.iter().find(|r| r.kind == "workspace.condition").expect("a condition row");
         assert_eq!(cond.attrs["reason"], "Ready");
         assert_eq!(cond.attrs["status"], "True");
         assert_eq!(cond.attrs["message"], "m");

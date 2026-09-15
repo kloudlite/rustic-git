@@ -275,3 +275,33 @@ subjects:
   - kind: ServiceAccount
     name: kloudlite-api
     namespace: kube-system
+---
+# `history::watch`'s leader rows (`controller.leader`): one watch per region cluster on the
+# controller's own Lease. A Role in kube-system, not a ClusterRole rule, and named: the admin process
+# reads exactly one Lease, never the kubelet heartbeats beside it. `resourceNames` holds for
+# `list`/`watch` only because the watch sets the `metadata.name` field selector. No write verb —
+# the controller alone renews it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-admin-leader
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["kloudlite-controller"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-admin-leader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-admin-leader
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-admin
+    namespace: kube-system
