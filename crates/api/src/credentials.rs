@@ -827,16 +827,17 @@ pub(crate) async fn revoke_bench_logins(
         for c in &found {
             let digest = jti_digest(&c.id);
             let target = format!("{} jti8={}", c.owner, &digest[..8]);
-            // Audit first, as every superadmin write does: a revoke with no row is the outcome
-            // the append-only log exists to prevent. A failed row stops the sweep; re-running is
-            // safe, since a revoked login is no longer found.
-            if let Err(r) = crate::teams::write_audit(&api, &by, "bench.login.revoked", &target, "bench login sweep".into(), "ok").await {
-                return r;
-            }
             // Same store call `revoke` makes for a CLI token: the row is the whole credential.
+            // The revoke lands BEFORE its audit row, so an "ok" row never covers a revoke that
+            // did not happen; a failure is recorded as "failed" instead. A re-run cannot write a
+            // second "ok" row, because a revoked login is no longer found.
             if let Err(e) = db.forget_credential(&c.id).await {
                 tracing::error!(owner = %c.owner, jti8 = &digest[..8], error = %e, "bench.login.revoke.failed");
+                let _ = crate::teams::write_audit(&api, &by, "bench.login.revoked", &target, "bench login sweep".into(), "failed").await;
                 return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
+            }
+            if let Err(r) = crate::teams::write_audit(&api, &by, "bench.login.revoked", &target, "bench login sweep".into(), "ok").await {
+                return r;
             }
             tracing::info!(owner = %c.owner, jti8 = &digest[..8], "bench.login.revoked");
             revoked.push(digest);

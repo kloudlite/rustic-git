@@ -99,9 +99,9 @@ fn sweep_bench_login_files(homes: &std::path::Path, revoked: &std::collections::
     let mut deleted = 0;
     for owner in owners.flatten() {
         let path = owner.path().join(".config/kl-connect/config.json");
-        let jti = std::fs::read_to_string(&path)
+        let Some(body) = read_home_config(&owner.path()) else { continue };
+        let jti = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v["token"].as_str().and_then(|t| t.split('.').nth(1)).map(str::to_string))
             .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p.trim_end_matches('=')).ok())
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
@@ -121,6 +121,55 @@ fn sweep_bench_login_files(homes: &std::path::Path, revoked: &std::collections::
         }
     }
     deleted
+}
+
+/// The largest config the sweep reads. A real one is a few hundred bytes.
+const BENCH_CONFIG_MAX: u64 = 64 * 1024;
+
+/// `{owner_dir}/.config/kl-connect/config.json`, read only if nothing on the way is a symlink.
+///
+/// The agent is root and a home is the OWNER's to shape: a `.config` symlinked into somebody else's
+/// home, or a `config.json` symlinked at a file the owner cannot read, would otherwise have root
+/// read (and then delete) through it. So every component below the home root is `lstat`ed and a
+/// symlink refused, the file must be a regular file (a FIFO would block the beat forever), the open
+/// is `O_NOFOLLOW` against a swap after the check, and the read stops past 64 KiB. Any refusal is
+/// `None`, which the sweep keeps, logged by owner only.
+fn read_home_config(owner_dir: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let owner = owner_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let refuse = |why: &str| {
+        tracing::warn!(%owner, reason = why, "bench.login.file.kept");
+        None
+    };
+    let mut p = owner_dir.to_path_buf();
+    for (i, part) in [".config", "kl-connect", "config.json"].iter().enumerate() {
+        p.push(part);
+        let meta = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => return refuse("unreadable"),
+        };
+        let last = i == 2;
+        if meta.file_type().is_symlink() {
+            return refuse("symlink");
+        }
+        if (last && !meta.is_file()) || (!last && !meta.is_dir()) {
+            return refuse("not-a-regular-path");
+        }
+    }
+    let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&p) {
+        Ok(f) => f,
+        Err(_) => return refuse("open"),
+    };
+    let mut body = String::new();
+    if file.take(BENCH_CONFIG_MAX + 1).read_to_string(&mut body).is_err() {
+        return refuse("read");
+    }
+    if body.len() as u64 > BENCH_CONFIG_MAX {
+        return refuse("oversize");
+    }
+    Some(body)
 }
 
 /// Reclaims `by-inputs/{hash}` index entries (Task 2) that no `{id}/current` link points at.
@@ -644,6 +693,43 @@ mod janitor_tests {
         assert_eq!(sweep_bench_login_files(homes, &revoked), 1);
         assert!(!bench.exists() && laptop.exists() && bad.exists());
         assert_eq!(sweep_bench_login_files(homes, &revoked), 0, "idempotent");
+    }
+
+    /// Root must never read or delete through an owner's symlink, a FIFO, or an oversize file —
+    /// every one is kept, and the file a symlink points at survives too.
+    #[test]
+    fn the_bench_login_sweep_refuses_symlinks_fifos_and_oversize_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let homes = tmp.path().join("homes");
+        let victim = kl_config(&homes, "victim", &token_with_jti("bench-jti"));
+        let revoked: std::collections::HashSet<String> = [digest("bench-jti")].into();
+
+        // config.json symlinked at another home's listed config.
+        let d = homes.join("a/.config/kl-connect");
+        std::fs::create_dir_all(&d).unwrap();
+        std::os::unix::fs::symlink(&victim, d.join("config.json")).unwrap();
+        // .config symlinked into another home.
+        std::fs::create_dir_all(homes.join("b")).unwrap();
+        std::os::unix::fs::symlink(homes.join("victim/.config"), homes.join("b/.config")).unwrap();
+        // A FIFO where the file should be.
+        let d = homes.join("c/.config/kl-connect");
+        std::fs::create_dir_all(&d).unwrap();
+        let fifo = std::ffi::CString::new(d.join("config.json").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // A listed token padded past the cap.
+        let big = token_with_jti("bench-jti").replacen("\"api\":\"https://x\"", &format!("\"api\":\"{}\"", "x".repeat(70_000)), 1);
+        let oversize = kl_config(&homes, "d", &big);
+
+        for owner in ["a", "b", "c", "d"] {
+            assert!(read_home_config(&homes.join(owner)).is_none(), "{owner} must be refused");
+        }
+        std::fs::remove_file(&victim).unwrap_or(());
+        // With the victim itself gone from the sweep's reach, nothing else may be deleted.
+        std::fs::write(&victim, token_with_jti("other")).unwrap();
+        assert_eq!(sweep_bench_login_files(&homes, &revoked), 0);
+        assert!(victim.exists() && oversize.exists());
+        assert!(homes.join("a/.config/kl-connect/config.json").symlink_metadata().is_ok());
+        assert!(homes.join("c/.config/kl-connect/config.json").exists());
     }
 
     /// An entry no workspace's `current` resolves to, older than the bound, is reclaimable.
