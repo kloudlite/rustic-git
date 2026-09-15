@@ -366,6 +366,7 @@ pub async fn serve(
             "/api/admin/superadmins/{user}",
             axum::routing::post(add_superadmin).delete(remove_superadmin),
         )
+        .route("/api/admin/bench-logins/revoke", axum::routing::post(revoke_bench_logins))
     } else {
         app
     };

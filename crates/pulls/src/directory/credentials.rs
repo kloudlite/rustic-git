@@ -124,6 +124,37 @@ impl Directory {
         }
     }
 
+    /// Every CLI login whose device label ends in `suffix`, across all owners — the one-time
+    /// `(bench)` sweep's selector. Unbounded on purpose: a sweep that silently stops at a page
+    /// limit reports "0 left" while logins survive.
+    pub async fn cli_tokens_with_device_suffix(&self, suffix: &str) -> Result<Vec<Credential>> {
+        use futures::TryStreamExt;
+        match &self.backend {
+            Backend::Mongo(m) => {
+                let kind = mongodb::bson::to_bson(&CredentialKind::CliToken).map_err(|e| err(format!("bson: {e}")))?;
+                let escaped: String = suffix
+                    .chars()
+                    .flat_map(|c| if c.is_ascii_alphanumeric() || c == ' ' { vec![c] } else { vec!['\\', c] })
+                    .collect();
+                let cursor = m
+                    .credentials
+                    .find(doc! { "kind": kind, "name": { "$regex": format!("{escaped}$") } })
+                    .max_time(super::QUERY_MAX_TIME)
+                    .await
+                    .map_err(|e| err(format!("mongo: {e}")))?;
+                cursor.try_collect().await.map_err(|e| err(format!("mongo: {e}")))
+            }
+            Backend::Memory(s) => Ok(s
+                .lock()
+                .unwrap()
+                .credentials
+                .values()
+                .filter(|c| c.kind == CredentialKind::CliToken && c.name.ends_with(suffix))
+                .cloned()
+                .collect()),
+        }
+    }
+
     pub async fn forget_credential(&self, id: &str) -> Result<()> {
         match &self.backend {
             Backend::Mongo(m) => m
@@ -242,4 +273,36 @@ impl Directory {
     }
 
     // ── passkeys ────────────────────────────────────────────────────────────
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(id: &str, owner: &str, name: &str) -> Credential {
+        Credential {
+            id: id.into(),
+            kind: CredentialKind::CliToken,
+            owner: owner.into(),
+            created_by: format!("{owner}@x.test"),
+            name: name.into(),
+            material: String::new(),
+            fingerprints: Vec::new(),
+            created_at: DateTime::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bench_selector_matches_the_label_suffix_and_only_cli_tokens() {
+        let d = Directory::in_memory();
+        d.add_credential(&cli("j1", "x", "x (bench)")).await.unwrap();
+        d.add_credential(&cli("j2", "x", "x (desktop)")).await.unwrap();
+        d.add_credential(&cli("j3", "y", "y (bench)")).await.unwrap();
+        let mut key = cli("k1", "x", "laptop (bench)");
+        key.kind = CredentialKind::SshKey;
+        d.add_credential(&key).await.unwrap();
+        let mut ids: Vec<_> = d.cli_tokens_with_device_suffix("(bench)").await.unwrap().into_iter().map(|c| c.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["j1", "j3"]);
+    }
 }

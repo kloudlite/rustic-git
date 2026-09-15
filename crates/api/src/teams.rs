@@ -1013,7 +1013,7 @@ pub(crate) async fn redeem_signin_link(
 /// Superadmin-only, and it reads the CALLER's row rather than their token: this is the one surface
 /// where a 12-hour-old claim is not good enough, because a revoked administrator holding a valid
 /// token must not be able to grant themselves back.
-async fn require_superadmin(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
+pub(crate) async fn require_superadmin(api: &Api, headers: &axum::http::HeaderMap) -> std::result::Result<String, Response> {
     let caller = caller(api, headers)?;
     let db = directory(api)?;
     match db.is_superadmin(&caller).await {
@@ -1036,7 +1036,7 @@ fn is_last_superadmin(admins: &[kloudlite_pulls::directory::SuperAdmin], target:
     matches!(admins, [only] if is_same_user(&only.user, target))
 }
 
-async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) -> std::result::Result<(), Response> {
+pub(crate) async fn write_audit(api: &Api, actor: &str, action: &'static str, target: &str, reason: String, result: &'static str) -> std::result::Result<(), Response> {
     let entry = kloudlite_workspaces::audit::AuditEntry {
         ts: chrono::Utc::now().to_rfc3339(),
         actor: actor.to_string(),

@@ -788,6 +788,63 @@ pub(crate) async fn revoke_cli_token(
     revoke(api, headers, id, CredentialKind::CliToken).await
 }
 
+/// sha256 of a jti, lowercase hex — the only form a swept token id ever leaves this process in.
+fn jti_digest(jti: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(jti.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// One-time sweep of logins the old bench `/kl-login` made: every CLI token whose device label
+/// ends in `(bench)`. Superadmin only, admin process only. `?dry_run` defaults to TRUE — a sweep
+/// run by accident must count, not revoke.
+///
+/// Answers `{ found, revoked, revokedSha256 }`: digests, never the ids, because the operator
+/// copies that list into a ConfigMap the agent matches bench home configs against, and a jti in
+/// a ConfigMap is a login anyone with `get configmaps` could present.
+pub(crate) async fn revoke_bench_logins(
+    State(api): State<Arc<Api>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let by = match crate::teams::require_superadmin(&api, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let dry_run = q.get("dry_run").map(|v| v != "false").unwrap_or(true);
+    let db = match directory(&api) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let found = match db.cli_tokens_with_device_suffix("(bench)").await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(reason = "bench-login-sweep", error = %e, "credential.read.failed");
+            return (StatusCode::BAD_GATEWAY, "could not list logins").into_response();
+        }
+    };
+    let mut revoked = Vec::new();
+    if !dry_run {
+        for c in &found {
+            let digest = jti_digest(&c.id);
+            let target = format!("{} jti8={}", c.owner, &digest[..8]);
+            // Audit first, as every superadmin write does: a revoke with no row is the outcome
+            // the append-only log exists to prevent. A failed row stops the sweep; re-running is
+            // safe, since a revoked login is no longer found.
+            if let Err(r) = crate::teams::write_audit(&api, &by, "bench.login.revoked", &target, "bench login sweep".into(), "ok").await {
+                return r;
+            }
+            // Same store call `revoke` makes for a CLI token: the row is the whole credential.
+            if let Err(e) = db.forget_credential(&c.id).await {
+                tracing::error!(owner = %c.owner, jti8 = &digest[..8], error = %e, "bench.login.revoke.failed");
+                return (StatusCode::BAD_GATEWAY, "could not revoke").into_response();
+            }
+            tracing::info!(owner = %c.owner, jti8 = &digest[..8], "bench.login.revoked");
+            revoked.push(digest);
+        }
+    }
+    axum::Json(serde_json::json!({ "found": found.len(), "revoked": revoked.len(), "revokedSha256": revoked })).into_response()
+}
+
 
 // ── the platform-issued key ──────────────────────────────────────────────
 //
@@ -1075,6 +1132,57 @@ mod tests {
         assert_eq!(code.len(), 9, "{code}");
         assert_eq!(&code[4..5], "-");
         assert!(code.bytes().filter(|b| *b != b'-').all(|b| CODE_ALPHABET.contains(&b)), "{code}");
+    }
+
+    #[tokio::test]
+    async fn the_bench_login_sweep_counts_revokes_once_and_is_superadmin_only() {
+        use kloudlite_pulls::directory::{Credential, Directory};
+        let db = Directory::in_memory();
+        db.add_superadmin("alice@example.com", "boot").await.unwrap();
+        for (id, owner, name) in [("j1", "x", "x (bench)"), ("j2", "x", "x (desktop)"), ("j3", "y", "y (bench)")] {
+            let row = Credential {
+                id: id.into(),
+                kind: CredentialKind::CliToken,
+                owner: owner.into(),
+                created_by: format!("{owner}@x.test"),
+                name: name.into(),
+                material: String::new(),
+                fingerprints: Vec::new(),
+                created_at: mongodb::bson::DateTime::now(),
+            };
+            db.add_credential(&row).await.unwrap();
+        }
+        let mut api = crate::testing::test_api_with_secret("peer").await;
+        api.jwt = Some(Arc::new(kloudlite_core::jwt::Jwt::new("0123456789012345678901234567890123456789").unwrap()));
+        api.directory = Some(Arc::new(db));
+        let api = Arc::new(api);
+        let q = |d: &str| axum::extract::Query(std::collections::HashMap::from([("dry_run".into(), d.to_string())]));
+        let body = |r: Response| async move {
+            let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&b).unwrap()
+        };
+
+        let dry = body(revoke_bench_logins(State(api.clone()), session(&api), q("true")).await).await;
+        assert_eq!((dry["found"].as_u64(), dry["revoked"].as_u64()), (Some(2), Some(0)));
+
+        let live = body(revoke_bench_logins(State(api.clone()), session(&api), q("false")).await).await;
+        assert_eq!((live["found"].as_u64(), live["revoked"].as_u64()), (Some(2), Some(2)));
+        let mut digests: Vec<String> =
+            live["revokedSha256"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        digests.sort();
+        let mut want = vec![jti_digest("j1"), jti_digest("j3")];
+        want.sort();
+        assert_eq!(digests, want, "digests, never ids");
+        let db = api.directory.as_ref().unwrap();
+        assert!(db.credential("j2").await.unwrap().is_some(), "a desktop login survives");
+
+        let again = body(revoke_bench_logins(State(api.clone()), session(&api), q("false")).await).await;
+        assert_eq!(again["found"].as_u64(), Some(0));
+
+        let tok = api.jwt.as_ref().unwrap().mint("bob@example.com", "Bob", Some("bob")).unwrap();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, format!("Bearer {tok}").parse().unwrap());
+        assert_eq!(revoke_bench_logins(State(api.clone()), h, q("true")).await.status(), StatusCode::FORBIDDEN);
     }
 
     /// A CLI login has to be able to revoke ITSELF — otherwise `kl logout` needs a browser.
