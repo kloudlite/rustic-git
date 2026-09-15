@@ -158,7 +158,7 @@ person is a member. A member can be in one of three states:
 |---|---|---|
 | Active | full | kept |
 | Paused | none | kept |
-| Removed (removed, left, or team deleted) | none | deleted, all of it |
+| Removed (removed, left, or team deleted) | none | member's bench, workspaces and choices deleted after a 7-day grace; team-owned data kept |
 
 ### What exists today
 
@@ -207,7 +207,7 @@ SpaceEnvironment and the bench folders on the share:
 2. **Grace.** The first beat that judges a pair removed stamps `kloudlite.io/removed-at` on the
    Bench (or, if there is no Bench, on each of that pair's Workspaces). Deletion starts only on a
    beat at least `MEMBER_REMOVAL_GRACE` after that stamp, and it re-judges first. A re-add during
-   the grace clears the stamp and nothing is lost. See open question 1.
+   the grace clears the stamp and nothing is lost. Decided: see decision 8.
 3. **Delete, in this order.** Access goes first and bytes go last, so a failure partway leaves
    data behind rather than access:
    1. The Bench, with a uid/resourceVersion precondition as `prune_team_benches` already does.
@@ -216,10 +216,10 @@ SpaceEnvironment and the bench folders on the share:
    2. Every Workspace with `spec.owner == owner` and `spec.team == team`. This runs the existing
       `WORKTREE_FINALIZER` (`cleanup_parent`), which drops the worktree and sync points and detaches
       the Volume only if a snapshot remains.
-   3. Pushed snapshots of those volumes. Removal means ALL data, so the reconcile deletes each
-      such `Snapshot` (the explicit delete verb's path) once its Workspace is gone. The Volume then
-      has no owner entry and no snapshot, and `retire_pass` collects it along with its replicas on
-      every node.
+   3. Pushed snapshots are TEAM-OWNED and never deleted (decision 11). `cleanup_parent` already
+      detaches the Volume when a non-transient `Snapshot` remains, so the volume survives detached
+      with its snapshots for the team to restore from; with none left, Kubernetes GC and
+      `retire_pass` collect it. Transient sync points go with the Workspace as they always do.
    4. The `SpaceEnvironment` for (owner, team).
    5. Keys projection: `project_all` stops listing the person's keys for that team's namespace on
       its next write. `prune_namespaces` removes the `wt-` namespace (and `user-key`) once it holds
@@ -232,7 +232,7 @@ SpaceEnvironment and the bench folders on the share:
       `rm -rf`. The janitor also collects folders no Bench has named for longer than the grace,
       which clears the `ponytail:` note in `ensure_bench_folder`.
    Environments are owned by the team (`spec.owner` = team) and are NOT deleted. No creator is
-   recorded on them. See open question 3.
+   recorded on them. Decided: see decision 10.
 4. **Idempotent.** Every step is "delete if present". A 404 counts as done and a 409 (precondition)
    means the object changed, so it is re-judged next beat. A pair whose objects are all gone is no
    longer listed. A second beat therefore writes nothing.
@@ -243,8 +243,8 @@ SpaceEnvironment and the bench folders on the share:
    `membership.reconcile.skipped`.
 6. **What people see.**
    - The person, in the desktop and web: the team leaves their list, and `/v1/bench` for it 404s.
-     While the grace runs, the team page's remove dialog says "their bench, workspaces and
-     snapshots in this team will be deleted in {grace}".
+     While the grace runs, the team page's remove dialog says "their bench and workspaces in this team
+     will be deleted on {date}; pushed snapshots stay with the team".
    - The admin: the members table shows "removing — data deleted at {time}". Superadmin Owners
      lists pending removals. The Audit area shows the rows above.
 
@@ -277,7 +277,7 @@ cannot be paused (the same rule as `LastOwner`).
 **Running pods.** Recommended: pause STOPS them. The reconcile sets `desiredState: Stopped` on the
 member's Bench and team Workspaces in that team, which cuts the usual stop sync point, so nothing
 keeps running (or spending quota) on behalf of someone who has no access. Unpause restores access
-only and starts nothing; the person starts things again. See open question 2.
+only and starts nothing; the person starts things again. Decided: see decision 9.
 
 **Propagation.** Pause takes effect in these stages:
 - immediately on the pause route itself;
@@ -360,7 +360,7 @@ the same schedule.
 - `membership::reconcile` with a fake directory:
   - a directory error deletes nothing;
   - a removed pair inside the grace is only stamped;
-  - after the grace, the delete runs in order (Bench before Workspaces before Snapshots before
+  - after the grace, the delete runs in order (Bench before Workspaces before
     SpaceEnvironment);
   - a re-add during the grace clears the stamp;
   - a paused member is never judged removed;
@@ -394,8 +394,8 @@ the same schedule.
   - Unpause, then start: access returns and the bench folder's canary file is still there.
 - `team.member.removed.cleanup` (drills suite, with the grace overridden short for the probe team):
   remove the member.
-  - After grace plus two beats, these are all gone: the Bench, the team Workspaces, the Snapshots,
-    the Volumes, the SpaceEnvironment and the bench folder.
+  - After grace plus two beats, these are all gone: the Bench, the team Workspaces, the transient
+    sync points, the SpaceEnvironment and the bench folder.
   - The audit rows exist, and a re-add of the same person finds nothing.
 - `team.member.removed.dir_down` (drills suite): with the directory unreachable, a removed pair's
   objects all survive the beat.
@@ -438,19 +438,18 @@ the same schedule.
    has reviewed the week's `member.removed.judged` rows. The ReadOnly bench code is removed in the
    same release.
 
-## New open questions
+## Decisions (owner, 2026-09-15 15:33 IST)
 
-1. **Deletion grace period.** Recommended: a 7-day grace after removal, with the admin able to
-   "delete now" (explicit confirmation naming the person and team) and the removal dialog stating
-   the date. The alternative is immediate deletion behind a typed confirmation in the remove dialog.
-   A self-leave or a team delete has no admin in the loop, which is why a grace is recommended over
-   confirmation only.
-2. **Does pause stop running pods?** Recommended: yes, it stops the Bench and the team Workspaces,
-   and unpause starts nothing. The alternative leaves them running without access, which keeps
-   spending quota with nobody able to reach them.
-3. **Team environments a removed member created.** Environments are team-owned and record no
-   creator, so removal cannot tell which ones were "theirs". Recommended: keep them (they are the
-   team's) and only detach the member's intercepts and attachments, which go with their
-   Workspaces. Say so if a creator field and deletion are wanted.
-4. **Pushed snapshots on removal.** "Entire data" is read as including snapshots that would
-   otherwise survive detached. Confirm, or keep snapshots for the team to restore from.
+These replace the open questions that stood here.
+
+8. **Deletion grace.** 7 days after a removal, a leave or a team delete. An admin can "delete now"
+   with a confirmation that names the person and the team. The removal dialog states the date.
+9. **Pause stops pods.** Pause sets `desiredState: Stopped` on the member's running Bench and team
+   Workspaces in that team. Unpause restores access and starts nothing.
+10. **Team environments are kept.** They are team-owned. Only the member's intercepts and
+    attachments go, with their Workspaces.
+11. **Team-owned data is never deleted on member removal**: pushed (non-transient) Snapshots, git
+    repos and container images. Removal deletes only the member's Bench and its region-share folder,
+    their team Workspaces (with their sync points, transient snapshots and unpushed working data),
+    their `SpaceEnvironment` choice, and their per-team key projections. The Volume
+    reference-counting rules keep a volume alive and detached while a pushed snapshot remains.
