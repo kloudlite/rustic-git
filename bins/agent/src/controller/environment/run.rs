@@ -223,6 +223,11 @@ async fn ensure_fabric(
     let team = match crate::binding::get_binding(ctx, &e.spec.region, &e.spec.owner).await? {
         Some(b) => b.status.map(|s| s.team).unwrap_or(false),
         None => {
+            // Pruned under a live environment (see `binding::namespace_ready`): bring it back. Best
+            // effort — sizing the quota must not fail on it, and the next pass retries.
+            if let Err(err) = crate::claim::ensure_binding(ctx, &e.spec.region, &e.spec.owner).await {
+                tracing::warn!(owner = %e.spec.owner, error = %err.0, "binding.ensure.failed");
+            }
             tracing::info!(owner = %e.spec.owner, reason = "no-ownerbinding", "quota.defaulted");
             false
         }

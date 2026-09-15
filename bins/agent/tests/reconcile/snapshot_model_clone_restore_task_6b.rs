@@ -645,7 +645,11 @@ async fn the_namespace_gate_asks_about_this_workspace_s_own_namespace() {
                                    "message": "", "lastTransitionTime": "2000-01-01T00:00:00Z"}]},
     });
     let routes = vec![
-        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings/r1-alice", binding),
+        // The real name: `r1-alice` 404'd, so this passed on "no binding" without reaching the namespace.
+        kloudlite_workspaces::kube_test::get(
+            format!("/apis/kloudlite.io/v1alpha1/ownerbindings/{}", kloudlite_workspaces::crd::binding_name("r1", "alice")),
+            binding,
+        ),
         kloudlite_workspaces::kube_test::not_found(format!(
             "/api/v1/namespaces/{}",
             kloudlite_workspaces::crd::ws_namespace("alice", "eng")

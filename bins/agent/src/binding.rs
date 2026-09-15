@@ -192,7 +192,13 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
 /// all, the namespace says it ran for THIS team. A missing binding or namespace is "not ready",
 /// never an error: it is the ordinary gap between a claim and the binding reconcile.
 pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str, team: &str) -> Result<bool, ReconcileErr> {
-    let Some(b) = get_binding(ctx, region, owner).await? else { return Ok(false) };
+    let Some(b) = get_binding(ctx, region, owner).await? else {
+        // The api's keys beat may delete a binding in the seconds between this owner's claim
+        // (which found it and did nothing) and the prune; recreating it here brings the namespace
+        // policies and grants back on the binding's next reconcile instead of at the next claim.
+        crate::claim::ensure_binding(ctx, region, owner).await?;
+        return Ok(false);
+    };
     if !b.status.is_some_and(|s| s.conditions.iter().any(|c| c.type_ == NAMESPACE_READY && c.status == "True")) {
         return Ok(false);
     }
@@ -205,4 +211,24 @@ pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str, team: &s
 pub async fn get_binding(ctx: &Arc<Ctx>, region: &str, owner: &str) -> Result<Option<crd::OwnerBinding>, ReconcileErr> {
     let api: Api<crd::OwnerBinding> = Api::all(ctx.client.clone());
     Ok(api.get_opt(&binding_name(region, owner)).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kloudlite_workspaces::kube_test::{not_found, post};
+
+    /// A binding pruned under a live parent is recreated by the parent's next pass, which waits.
+    #[tokio::test]
+    async fn a_missing_binding_is_recreated_while_the_parent_waits() {
+        let name = binding_name("r1", "acme");
+        let body = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding", "metadata": {"name": name}, "spec": {"owner": "acme", "region": "r1"}});
+        let (ctx, rec) = crate::testsupport::test_ctx(
+            std::path::Path::new("/tmp/binding-test"),
+            "node-a",
+            vec![not_found(format!("/apis/kloudlite.io/v1alpha1/ownerbindings/{name}")), post("/apis/kloudlite.io/v1alpha1/ownerbindings", body)],
+        );
+        assert!(!namespace_ready(&ctx, "r1", "acme", "").await.unwrap());
+        assert!(rec.calls().contains(&"POST /apis/kloudlite.io/v1alpha1/ownerbindings".to_string()), "{:?}", rec.calls());
+    }
 }
