@@ -325,6 +325,11 @@ spec:
             - name: secrets
               mountPath: /var/run/secrets/kloudlite
               readOnly: true
+            # One-time sweep of old bench `/kl-login` configs (janitor.rs). Optional: absent is the
+            # normal state and sweeps nothing; the operator creates it, waits a beat, deletes it.
+            - name: bench-login-sweep
+              mountPath: /etc/kloudlite/bench-login-sweep
+              readOnly: true
           livenessProbe:
             # The controller touches this file on every reconcile tick. A watch that silently
             # stopped delivering looks exactly like an idle cluster from outside — this is what
@@ -402,6 +407,10 @@ spec:
         - name: nix-conf
           configMap:
             name: kloudlite-nix
+        - name: bench-login-sweep
+          configMap:
+            name: bench-login-sweep
+            optional: true
         # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
         # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
         # reason it mattered here, it is inherited by every child, and this fleet spawns plenty
