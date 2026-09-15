@@ -24,6 +24,8 @@
 #                                                                  admin process is the writer
 #   networkpolicies (networking.k8s.io)    create,patch            space_egress / space_ingress via
 #                                                                  server-side apply
+#                                          get                     space::exists: whether a stale
+#                                                                  half is still there to delete
 #                                          list                    the env-side derived-set render:
 #                                                                  which space-* halves exist here
 #                                          delete                  a switch removes the old half; a
@@ -58,7 +60,7 @@ rules:
   # owns namespace creation) makes writing them free.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "patch", "list", "delete"]
+    verbs: ["create", "patch", "get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
