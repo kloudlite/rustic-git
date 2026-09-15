@@ -86,7 +86,7 @@ use environments::{
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
     restore_env_in_place, set_intercept, start_env, stop_env,
 };
-use bench::{bench_session, bench_teams, create_bench, get_bench, start_bench, stop_bench};
+use bench::{bench_session, bench_teams, create_bench, get_bench, mint_tool_token, revoke_tool_token, start_bench, stop_bench};
 use me::{attach_gone, clear_my_environment, list_my_environments, set_my_environment};
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
@@ -207,6 +207,7 @@ mod route_tests {
         "/v1/bench/start",
         "/v1/bench/stop",
         "/v1/bench/session",
+        "/v1/bench/tool-token",
         "/v1/bench/attach",
         "/v1/bench/detach",
     ];
@@ -361,6 +362,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/bench/start", post(start_bench))
         .route("/v1/bench/stop", post(stop_bench))
         .route("/v1/bench/session", post(bench_session))
+        .route("/v1/bench/tool-token", post(mint_tool_token).delete(revoke_tool_token))
         .route("/v1/bench/attach", post(attach_gone))
         .route("/v1/bench/detach", post(attach_gone))
         .with_state(state)

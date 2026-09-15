@@ -70,3 +70,17 @@ fn only_the_gateway_may_reach_the_bench_port() {
     assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(BENCH_PORT as i32)));
     assert_eq!(rule.from.as_ref().unwrap().len(), 1);
 }
+
+#[test]
+fn bench_tool_secret_carries_token_and_exp_only() {
+    let s = crate::k8s::bench_tool_secret("wt-alice-acme", "tok", 42);
+    assert_eq!(s.metadata.name.as_deref(), Some(crate::k8s::BENCH_TOOL_SECRET));
+    assert_eq!(s.metadata.namespace.as_deref(), Some("wt-alice-acme"));
+    let data = s.string_data.unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data["token"], "tok");
+    let ann = s.metadata.annotations.unwrap();
+    assert_eq!(ann.len(), 1);
+    assert_eq!(ann["kloudlite.io/exp"], "42");
+    assert!(s.metadata.labels.is_none() && s.metadata.owner_references.is_none());
+}

@@ -304,11 +304,85 @@ pub(crate) async fn stop_bench(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (_, _, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let (caller, team, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     let mut b = found(b)?;
     ensure_access(&bench_api(&s)?, &mut b, standing).await?;
     set_desired::<crd::Bench>(kube(&s)?, &b.metadata.name.clone().unwrap_or_default(), DesiredState::Stopped).await?;
+    // Best effort: `caller` already refuses a stopped bench's tool token, so a leftover Secret
+    // holds a dead credential until its 15 minutes run out.
+    if let Err(e) = delete_tool_secret(kube(&s)?, &caller.name, &team).await {
+        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
+    }
     Ok(StatusCode::ACCEPTED.into_response())
+}
+
+/// Delete the bench's tool-token Secret; already gone counts as done.
+async fn delete_tool_secret(c: &kube::Client, owner: &str, team: &str) -> Result<(), kube::Error> {
+    let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), &crd::ws_namespace(owner, team));
+    match api.delete(crate::k8s::BENCH_TOOL_SECRET, &Default::default()).await {
+        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+        r => r.map(|_| ()),
+    }
+}
+
+/// The error's kind, never its text: an apply error can quote the request body, which holds the token.
+fn kube_kind(e: &kube::Error) -> String {
+    match e {
+        kube::Error::Api(ae) => format!("api {}", ae.code),
+        _ => "transport".into(),
+    }
+}
+
+/// The desktop app mints the bench pod a 15-minute platform token, written where only that pod
+/// reads it. A CLI login only: a session cookie has no parent to die with (403), and a bench-tool
+/// token never reaches here (`caller` 401s it), so a pod cannot extend itself.
+pub(crate) async fn mint_tool_token(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<TeamQuery>,
+) -> Result<Response, Response> {
+    let (caller, team, _, standing, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    let Some(parent) = caller.parent.clone() else {
+        return Err(err(StatusCode::FORBIDDEN, "sign in on the Kloudlite desktop app"));
+    };
+    let b = found(b)?;
+    if standing != Standing::Member {
+        return Err(err(StatusCode::FORBIDDEN, "you are no longer a member of this team"));
+    }
+    if b.spec.desired_state == DesiredState::Stopped {
+        return Err(err(StatusCode::CONFLICT, "bench is stopped; start it"));
+    }
+    let id = b.metadata.name.clone().unwrap_or_default();
+    let (token, claims) = s.jwt.mint_bench_tool(&caller.name, &team, &id, &parent).map_err(|e| {
+        tracing::error!(error = %e, "bench.tool_token.mint.failed");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "could not mint a tool token")
+    })?;
+    let ns = crd::ws_namespace(&caller.name, &team);
+    let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(kube(&s)?.clone(), &ns);
+    let secret = crate::k8s::bench_tool_secret(&ns, &token, claims.exp);
+    if let Err(e) = api
+        .patch(crate::k8s::BENCH_TOOL_SECRET, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&secret))
+        .await
+    {
+        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.write.failed");
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "could not write the bench tool token"));
+    }
+    let short = |x: &str| x.chars().take(8).collect::<String>();
+    tracing::info!(owner = %caller.name, %team, jti8 = %short(&claims.jti), parent8 = %short(&parent), exp = claims.exp, "bench.tool_token.written");
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub(crate) async fn revoke_tool_token(
+    State(s): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<TeamQuery>,
+) -> Result<Response, Response> {
+    let (caller, team, _, _, _) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    delete_tool_secret(kube(&s)?, &caller.name, &team).await.map_err(|e| {
+        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
+        err(StatusCode::SERVICE_UNAVAILABLE, "could not delete the bench tool token")
+    })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// Every tunnel connection asks here; an idle bench is woken and the client re-asks until 201.

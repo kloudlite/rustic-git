@@ -237,6 +237,11 @@ subjects:
 # So it is bound per namespace instead: the controller creates a RoleBinding to this ClusterRole in
 # each workspace namespace it makes (see `k8s::api_secret_binding`). The API can therefore write a
 # Secret in a namespace the controller has vouched for, and nowhere else.
+#
+#   Secret       verbs                      written by
+#   user-key     get update patch           keys beat, workspace/bench create
+#   bench-tool   get patch delete           /v1/bench/tool-token, stop_bench
+#   (any name)   create                     first apply of either
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -257,6 +262,14 @@ rules:
     # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
     # reclaimed with its namespace.
     verbs: ["get", "update", "patch"]
+  # `bench-tool`: the bench pod's 15-minute platform token (`k8s::BENCH_TOOL_SECRET`), applied by
+  # `POST /v1/bench/tool-token` and deleted by its DELETE and by `stop_bench`. Named for the same
+  # host-key reason as above; `delete` is here and not on `user-key` because a stopped bench must
+  # not keep a token lying in its namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["bench-tool"]
+    verbs: ["get", "patch", "delete"]
   # `create` is a SEPARATE rule with no `resourceNames`, because a name-restricted rule can never
   # authorize a create (the object's name does not exist yet at authorization time) — folding it in
   # above silently removed `create`, so a new owner's very first `user-key` apply 403'd.

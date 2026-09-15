@@ -72,6 +72,28 @@ pub(super) fn gitconfig(name: &str, email: &str) -> String {
 }
 
 
+/// The bench pod's short-lived platform token, minted by `POST /v1/bench/tool-token` into the
+/// bench's namespace and deleted when the bench stops.
+pub const BENCH_TOOL_SECRET: &str = "bench-tool";
+
+
+/// The token and its expiry (unix seconds) and nothing else: the pod reads `token`, and the
+/// annotation lets an operator see when it dies without decoding a credential.
+pub fn bench_tool_secret(ns: &str, token: &str, exp: u64) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(BENCH_TOOL_SECRET.to_string()),
+            namespace: Some(ns.to_string()),
+            annotations: Some(BTreeMap::from([("kloudlite.io/exp".to_string(), exp.to_string())])),
+            ..Default::default()
+        },
+        string_data: Some(BTreeMap::from([("token".to_string(), token.to_string())])),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+
 /// The per-workspace host key Secret's name.
 pub fn ws_ssh_secret_name(id: &str) -> String {
     format!("ws-ssh-{id}")

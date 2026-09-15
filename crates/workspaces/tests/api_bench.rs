@@ -18,6 +18,8 @@ use tower::ServiceExt;
 const API: &str = "/apis/kloudlite.io/v1alpha1";
 /// The one CLI jti the stub directory calls live.
 const LIVE_PARENT: &str = "parent-live";
+/// The one the stub calls revoked; every other jti (a real `mint_cli`'s) is live.
+const REVOKED_PARENT: &str = "parent-revoked";
 
 #[derive(Default)]
 struct Stub {
@@ -44,7 +46,7 @@ impl Directory for Stub {
         self.members.iter().filter(|(u, _)| *u == user).map(|(_, t)| t.to_string()).collect()
     }
     async fn is_live(&self, jti: &str) -> bool {
-        jti == LIVE_PARENT
+        jti != REVOKED_PARENT
     }
     async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
@@ -451,11 +453,13 @@ async fn a_bench_tool_token_is_refused_off_its_routes() {
         ("POST", "/v1/workspaces/w1/ssh-session"),
         ("GET", "/v1/requests"),
         ("PUT", "/v1/workspaces/w1"),
+        ("POST", "/v1/bench/tool-token?team=acme"),
+        ("DELETE", "/v1/bench/tool-token?team=acme"),
     ] {
         let (st, _) = t.call(m, uri, &tok, None).await;
         assert!(st == 401 || st == 405, "{m} {uri}: {st}");
     }
-    for (m, uri) in [("POST", "/v1/bench/tool-token"), ("GET", "/v1/keys"), ("GET", "/v1/cli/tokens")] {
+    for (m, uri) in [("GET", "/v1/keys"), ("GET", "/v1/cli/tokens")] {
         let (st, _) = t.call(m, uri, &tok, None).await;
         assert_eq!(st, 404, "{m} {uri}: not served by this router at all");
     }
@@ -465,7 +469,7 @@ async fn a_bench_tool_token_is_refused_off_its_routes() {
 #[tokio::test]
 async fn a_bench_tool_token_dies_with_its_parent() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
-    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, "parent-revoked"), None).await;
+    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, REVOKED_PARENT), None).await;
     assert_eq!(st, 401);
 }
 
@@ -529,4 +533,148 @@ async fn a_bench_tool_token_chooses_environments_only_in_its_own_spaces() {
     assert_eq!(body.as_array().unwrap().len(), 3, "{body}");
     let (st, _) = t.call("DELETE", "/v1/me/environments/t2", &t.tok("alice"), None).await;
     assert_ne!(st, 403);
+}
+
+
+// ── /v1/bench/tool-token ─────────────────────────────────────────────────
+
+fn secret_path(owner: &str, team: &str) -> String {
+    format!("/api/v1/namespaces/{}/secrets/bench-tool", kloudlite_workspaces::crd::ws_namespace(owner, team))
+}
+
+fn cli_tok(t: &T) -> String {
+    t.jwt.mint_cli("alice@example.com", "Alice", Some("alice")).unwrap().0
+}
+
+fn secret_obj() -> Value {
+    json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "bench-tool"}})
+}
+
+fn deleted() -> Value {
+    json!({"kind": "Status", "apiVersion": "v1", "status": "Success", "code": 200})
+}
+
+fn route(method: &'static str, path: String, status: u16, body: Value) -> Route {
+    Route { method, path, status, body }
+}
+
+/// Every log line written while `f` runs, as text.
+async fn logged<F: std::future::Future<Output = R>, R>(f: F) -> (R, String) {
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buf = Buf::default();
+    let w = buf.clone();
+    let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();
+    let _g = tracing::subscriber::set_default(sub);
+    let r = f.await;
+    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    (r, text)
+}
+
+fn mint_setup(bench: Value, members: &[(&'static str, &'static str)], extra: Vec<Route>) -> T {
+    setup(with(vec![get(bench_path("alice", "acme"), bench), region("r1")], extra), Stub::new(members, &[("acme", "r1")]))
+}
+
+#[tokio::test]
+async fn tool_token_writes_the_secret_in_the_bench_namespace() {
+    let sp = secret_path("alice", "acme");
+    let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[("alice", "acme")], vec![patch(sp.clone(), secret_obj())]);
+    let ((st, body), logs) = logged(t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None)).await;
+    assert_eq!(st, 204);
+    assert_eq!(body, Value::String(String::new()));
+    let sent = t.rec.sent("PATCH", &sp);
+    assert_eq!(sent.len(), 1);
+    assert!(t.rec.requests().iter().any(|r| r.starts_with(&format!("PATCH {sp}?")) && r.contains("fieldManager=kloudlite-api")));
+    let token = sent[0]["stringData"]["token"].as_str().unwrap();
+    let claims = t.jwt.verify_bench_tool(token).unwrap();
+    assert_eq!((claims.sub.as_str(), claims.team.as_str()), ("alice", "acme"));
+    assert_eq!(sent[0]["metadata"]["annotations"]["kloudlite.io/exp"], claims.exp.to_string());
+    assert!(logs.contains("bench.tool_token.written"), "{logs}");
+    assert!(logs.contains(&claims.jti[..8]) && !logs.contains(&claims.jti) && !logs.contains(&claims.parent), "{logs}");
+    assert!(!logs.contains(token), "{logs}");
+}
+
+#[tokio::test]
+async fn tool_token_refuses_a_session_cookie() {
+    let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[("alice", "acme")], vec![]);
+    let (st, body) = t.call("POST", "/v1/bench/tool-token?team=acme", &t.tok("alice"), None).await;
+    assert_eq!(st, 403);
+    assert_eq!(body["error"], "sign in on the Kloudlite desktop app");
+    assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
+}
+
+#[tokio::test]
+async fn tool_token_refuses_a_bench_tool_caller() {
+    let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[("alice", "acme")], vec![]);
+    let (st, _) = t.call("POST", "/v1/bench/tool-token?team=acme", &tool_tok(&t, LIVE_PARENT), None).await;
+    assert_eq!(st, 401);
+    assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
+}
+
+#[tokio::test]
+async fn tool_token_refuses_a_stopped_bench() {
+    let t = mint_setup(bench_obj("alice", "acme", "stopped", Some("idle"), "full"), &[("alice", "acme")], vec![]);
+    let (st, body) = t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
+    assert_eq!(st, 409);
+    assert_eq!(body["error"], "bench is stopped; start it");
+    assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
+}
+
+#[tokio::test]
+async fn tool_token_refuses_a_departed_member() {
+    let t = mint_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"), &[], vec![]);
+    let (st, _) = t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
+    assert_eq!(st, 403);
+    assert!(t.rec.sent("PATCH", &secret_path("alice", "acme")).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_secret_write_does_not_echo_the_body() {
+    const ECHO: &str = "ECHOED-REQUEST-BODY eyJhbGciOiJIUzI1NiJ9";
+    let fail = serde_json::to_value(kube::core::Status::failure(ECHO, "InternalError").with_code(500)).unwrap();
+    let t = mint_setup(
+        bench_obj("alice", "acme", "running", Some("ready"), "full"),
+        &[("alice", "acme")],
+        vec![route("PATCH", secret_path("alice", "acme"), 500, fail)],
+    );
+    let ((st, body), logs) = logged(t.call("POST", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None)).await;
+    assert_eq!(st, 503);
+    let token = t.rec.sent("PATCH", &secret_path("alice", "acme"))[0]["stringData"]["token"].as_str().unwrap().to_string();
+    for text in [body.to_string(), logs.clone()] {
+        assert!(!text.contains("ECHOED") && !text.contains("eyJ") && !text.contains(&token), "{text}");
+    }
+    assert!(logs.contains("bench.tool_token.write.failed"), "{logs}");
+}
+
+#[tokio::test]
+async fn stopping_a_bench_deletes_its_tool_secret() {
+    let path = bench_path("alice", "acme");
+    let b = bench_obj("alice", "acme", "running", Some("ready"), "full");
+    let sp = secret_path("alice", "acme");
+    let t = mint_setup(b.clone(), &[("alice", "acme")], vec![patch(path, b), route("DELETE", sp.clone(), 200, deleted())]);
+    let (st, _) = t.call("POST", "/v1/bench/stop?team=acme", &t.tok("alice"), None).await;
+    assert_eq!(st, 202);
+    assert!(t.rec.calls().contains(&format!("DELETE {sp}")), "{:?}", t.rec.calls());
+}
+
+#[tokio::test]
+async fn deleting_the_tool_token_deletes_the_secret_and_tolerates_404() {
+    let sp = secret_path("alice", "acme");
+    let b = bench_obj("alice", "acme", "running", Some("ready"), "full");
+    for status in [200, 404] {
+        let body = if status == 200 { deleted() } else { serde_json::to_value(kube::core::Status::failure("nf", "NotFound").with_code(404)).unwrap() };
+        let t = mint_setup(b.clone(), &[("alice", "acme")], vec![route("DELETE", sp.clone(), status, body)]);
+        let (st, _) = t.call("DELETE", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
+        assert_eq!(st, 204, "kube {status}");
+        assert!(t.rec.calls().contains(&format!("DELETE {sp}")));
+    }
 }
