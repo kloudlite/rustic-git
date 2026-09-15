@@ -558,7 +558,9 @@ or a deleted team instead gets `kloudlite.io/removed-at` and `kloudlite.io/delet
 plus a 7-day grace) stamped by the api's keys beat, which MARKS and never deletes; an admin's
 confirmed "delete now" (naming the person and the team, `crates/workspaces/src/api/removals.rs`)
 rewrites `delete-after` to now, and a re-add clears all three. The DELETE is the cluster
-controller's (`bins/controller/src/gc.rs`, elected leader only, every 60 s): so the irreversible
+controller's (`bins/controller/src/gc.rs`, elected leader only, every 60 s, and only once `delete-after`
+is `DELETE_SLACK_SECS` — one keys beat plus 60 s — past, so a re-add that clears only on the beat, a
+superadmin grant or a timed-out accept, always wins): so the irreversible
 step runs in the one process holding the region's lease, and undoing a removal is clearing an
 annotation rather than racing a delete. Both sides read only marks applied under SSA field manager
 `kloudlite-membership`, and the admission policy `kloudlite-removal-stamps-are-the-apis` lets only

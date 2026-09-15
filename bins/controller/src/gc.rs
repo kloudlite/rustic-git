@@ -31,6 +31,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const TICK: Duration = Duration::from_secs(60);
+/// How far past `delete-after` an object must be before it goes: one keys beat plus a margin.
+/// Every re-add clears the mark, but some paths (a superadmin grant from the admin process, an
+/// accept whose immediate reconcile timed out) only clear on the api's keys beat — without this
+/// slack the GC could delete a person who was re-added a moment after their mark fell due.
+pub const DELETE_SLACK_SECS: i64 = kloudlite_workspaces::api::keys::KEYS_RESYNC_SECS as i64 + 60;
 
 pub async fn run(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
@@ -61,7 +66,7 @@ fn due<K: Resource>(x: &K, kind: &'static str, owner: &str, team: &str, now: i64
     }
     let at = system_annotation(m, DELETE_AFTER)?;
     // Unparsable is not due: only ever pushes a delete later.
-    (at.parse::<Timestamp>().ok()?.as_second() <= now).then(|| Due {
+    (at.parse::<Timestamp>().ok()?.as_second() + DELETE_SLACK_SECS <= now).then(|| Due {
         kind,
         name: m.name.clone().unwrap_or_default(),
         uid: m.uid.clone(),
@@ -268,6 +273,23 @@ mod tests {
     async fn a_follower_deletes_nothing() {
         let rec = run_pass(cluster(), true, false).await;
         assert!(deletes(&rec).is_empty(), "{:?}", rec.calls());
+    }
+
+    #[tokio::test]
+    async fn a_mark_due_but_within_the_slack_waits_and_past_it_goes() {
+        let now = Timestamp::now().as_second();
+        let at = |secs: i64| Timestamp::from_second(now - secs).unwrap().to_string();
+        let routes = |secs: i64| {
+            let mut r = cluster();
+            r[0] = list("Bench", "benches", vec![]);
+            r[1] = list("Workspace", "workspaces", vec![ws("w-due", Some(&at(secs)), true)]);
+            r[2] = list("SpaceEnvironment", "spaceenvironments", vec![]);
+            r
+        };
+        let rec = run_pass(routes(DELETE_SLACK_SECS - 30), true, true).await;
+        assert!(deletes(&rec).is_empty(), "a re-add's beat may still clear it: {:?}", rec.calls());
+        let rec = run_pass(routes(DELETE_SLACK_SECS + 30), true, true).await;
+        assert!(deletes(&rec).contains(&format!("DELETE {API}/workspaces/w-due")), "{:?}", rec.calls());
     }
 
     #[tokio::test]

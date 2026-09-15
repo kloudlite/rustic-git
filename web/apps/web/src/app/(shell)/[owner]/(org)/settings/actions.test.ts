@@ -31,7 +31,7 @@ describe("member actions", () => {
   test("delete now is refused unless the handle is typed", async () => {
     expect(await deleteRemovalNow(null, form({ slug: "acme", owner: "ana", confirm: "an" }))).toEqual({ error: "Type their handle to confirm." });
     expect(calls).toEqual([]);
-    expect(await deleteRemovalNow(null, form({ slug: "acme", owner: "ana", confirm: "ana" }))).toEqual({ ok: true, notice: "Their data goes within about 5 minutes." });
+    expect(await deleteRemovalNow(null, form({ slug: "acme", owner: "ana", confirm: "ana" }))).toEqual({ ok: true, notice: "Their data goes within about 7 minutes." });
     expect(calls.splice(0)).toEqual(["delete acme ana"]);
   });
 

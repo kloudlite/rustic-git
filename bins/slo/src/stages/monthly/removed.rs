@@ -30,8 +30,9 @@ const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
 /// How long teardown waits for the workspace before deleting the snapshot it was based on.
 const WS_GONE: Duration = Duration::from_secs(60);
-/// Two GC ticks (60 s) plus the agent's bench-folder finalizer and the workspace's own.
-const GC_BOUND: Duration = Duration::from_secs(180);
+/// The GC's slack past delete-after (`DELETE_SLACK_SECS`, 360 s), two 60 s ticks, and the agent's
+/// bench-folder finalizer and the workspace's own.
+const GC_BOUND: Duration = Duration::from_secs(540);
 const CLEANUP_CEILING: Duration = Duration::from_secs(GC_BOUND.as_secs() + 120);
 
 fn team(c: &Ctx) -> String {

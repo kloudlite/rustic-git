@@ -241,6 +241,6 @@ export async function deleteRemovalNowAction(team: string, owner: string): Promi
   if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
   revalidatePath("/superadmin/owners");
   return r.value.deletes_enabled
-    ? { ok: true, notice: "Their data goes within about 5 minutes." }
+    ? { ok: true, notice: "Their data goes within about 7 minutes." }
     : { ok: true, notice: "Marked. Their data will be deleted once deletion is switched on for this platform." };
 }

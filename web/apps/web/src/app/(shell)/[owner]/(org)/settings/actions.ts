@@ -151,7 +151,7 @@ export async function deleteRemovalNow(_prev: TeamState, formData: FormData): Pr
   if (!r.ok) return { error: r.message || "Could not delete their data." };
   revalidatePath(`/${slug}/settings`);
   return r.value.deletes_enabled
-    ? { ok: true, notice: "Their data goes within about 5 minutes." }
+    ? { ok: true, notice: "Their data goes within about 7 minutes." }
     : { ok: true, notice: "Marked. Their data will be deleted once deletion is switched on for this platform." };
 }
 
