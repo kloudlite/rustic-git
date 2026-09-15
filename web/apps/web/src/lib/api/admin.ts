@@ -3,6 +3,7 @@ import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } f
 import { FLAT, type HistoryEvent, type HistorySeries, type SeriesName } from "@/lib/history";
 import { ADMIN_BASE, adminCall, call } from "./client";
 import type { ApiEnvironment, ApiVolumeSummary, ApiWorkspace, QuotaRequestDoc } from "./workspaces";
+import type { ApiRemoval } from "./teams";
 
 /**
  * The /superadmin console's reads and writes, against the admin host only.
@@ -37,6 +38,15 @@ export type OwnerDetail = OwnerRow & {
 
 export function adminOwnerDetail(slug: string, token: string) {
   return adminCall<OwnerDetail>(`/admin/owners/${encodeURIComponent(slug)}`, { method: "GET", token });
+}
+
+/** `GET /admin/owners/removals` — every pair still waiting out the removal grace, fleet-wide.
+ *  Delete-now itself stays the `/v1` route (`crates/workspaces/src/api/removals.rs`'s own doc
+ *  comment: only that process's service account may write the stamp), so the confirm form below
+ *  calls `deleteRemovalNow` from `./teams` against the ordinary host with the superadmin's own
+ *  token, which `may_manage` already admits via the `superadmin` claim. */
+export function adminOwnerRemovals(token: string) {
+  return adminCall<(ApiRemoval & { team: string })[]>("/admin/owners/removals", { method: "GET", token });
 }
 
 // `/admin/workspaces/{id}` and `/admin/environments/{id}` reuse the SAME handlers `/v1` calls for

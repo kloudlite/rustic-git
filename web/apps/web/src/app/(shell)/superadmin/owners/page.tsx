@@ -7,6 +7,7 @@ import { PageHeader } from "../page-header";
 import { KpiStrip, KpiTile } from "../ui/kpi";
 import { DefaultsTable } from "./defaults-table";
 import { OwnersTable } from "./owners-table";
+import { PendingRemovals } from "./pending-removals";
 
 export const metadata: Metadata = { title: "Owners" };
 
@@ -19,16 +20,18 @@ export default async function Page() {
   // `default-team` are ordinary owner names to that route.
   // ponytail: the pending count reads the quota-request queue, the only request kind that exists
   // today; swap to the generic requests list when that lands, same shape.
-  const [owners, personDefault, teamDefault, pendingR, over80] = await Promise.all([
+  const [owners, personDefault, teamDefault, pendingR, over80, removalsR] = await Promise.all([
     api.adminOwners(token),
     api.getQuota("default-user", token),
     api.getQuota("default-team", token),
     api.adminListQuotaRequests(token, { state: "pending" }),
     api.adminSeries("owners_over_80", { range: "7d", step: "1d" }, token),
+    api.adminOwnerRemovals(token),
   ]);
   if (!owners.ok) throw new Error(owners.message);
   const rows = owners.value;
   const pending = pendingR.ok ? pendingR.value : [];
+  const removals = removalsR.ok ? removalsR.value : [];
   const teams = rows.filter((o) => o.isTeam).length;
   const atLimit = rows.filter((r) => DIMS.some((d) => r.limit[d] > 0 && r.used[d] >= r.limit[d])).length;
   const disk = rows.reduce((n, o) => n + (o.used.diskGb ?? 0), 0);
@@ -71,6 +74,7 @@ export default async function Page() {
         fleetMax={fleetMax}
       />
       <OwnersTable rows={rows} pending={pending} />
+      <PendingRemovals rows={removals} />
     </div>
   );
 }

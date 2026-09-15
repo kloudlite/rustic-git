@@ -226,3 +226,21 @@ export async function removeSuperadminAction(email: string, note: string): Promi
   revalidatePath("/superadmin/access");
   return { ok: true };
 }
+
+export type DeleteRemovalNowResult = { ok: true; notice: string } | { ok: false; message: string };
+
+/** Owners page's Delete now — reuses the same `/v1` route and confirmation shape a team admin's
+ *  own settings page uses (`(shell)/[owner]/(org)/settings/actions.ts::deleteRemovalNow`), just
+ *  with the superadmin's own token: `may_manage` in `removals.rs` already admits the `superadmin`
+ *  claim, and delete-now stays a `/v1` write on purpose (only that process's service account may
+ *  stamp `delete-now`), so this never goes through the admin host. */
+export async function deleteRemovalNowAction(team: string, owner: string): Promise<DeleteRemovalNowResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.deleteRemovalNow(token, team, owner);
+  if (!r.ok) return { ok: false, message: r.kind === "conflict" ? conflictMessage(r.message) : r.message };
+  revalidatePath("/superadmin/owners");
+  return r.value.deletes_enabled
+    ? { ok: true, notice: "Their data goes within about 5 minutes." }
+    : { ok: true, notice: "Marked. Their data will be deleted once deletion is switched on for this platform." };
+}

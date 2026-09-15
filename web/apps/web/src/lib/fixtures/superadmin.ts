@@ -3,6 +3,7 @@ import type {
   AdminClusterRow,
   ApiEnvironment,
   ApiRegion,
+  ApiRemoval,
   ApiVolumeSummary,
   ApiWorkspace,
   OwnerDetail,
@@ -75,6 +76,14 @@ const OWNERS: OwnerRow[] = [
   // ops-lab sits in the warn band, near its cpu ceiling but not at it.
   { owner: "ops-lab", isTeam: true, limit: TEAM_LIMIT, used: quota([17, 4, 38, 180, 28, 74]), source: "own", pending: true },
   { owner: "priya", isTeam: false, limit: USER_LIMIT, used: quota([1, 0, 12, 52, 5, 9]), source: "default", pending: false },
+];
+
+/** `GET /admin/owners/removals` — one row waiting out the grace, one already past it and
+ *  overdue only because `member_removal_deletes` is off (matches `removalConfirm`'s wording, the
+ *  team settings page's own confirm text). */
+const PENDING_REMOVALS: (ApiRemoval & { team: string })[] = [
+  { owner: "devraj", team: "ops-lab", delete_at: new Date(now + 5 * 86_400_000).toISOString() },
+  { owner: "sana", team: "acme", delete_at: ago(-48) },
 ];
 
 const REQUESTS: QuotaRequestDoc[] = [
@@ -921,6 +930,8 @@ export function fixtureFor(path: string): unknown | undefined {
     return SLO_DETAILS[id] ?? SLO_DETAILS[FAILED_RUN.run_id];
   }
   if (bare === "/admin/audit") return auditPage(query);
+  // Before the `startsWith` owner-detail branch below, or "removals" reads as a slug.
+  if (bare === "/admin/owners/removals") return PENDING_REMOVALS;
   if (bare.startsWith("/admin/owners/")) return ownerDetail(decodeURIComponent(bare.slice("/admin/owners/".length)));
   if (bare.startsWith("/admin/clusters/")) return CLUSTER_DETAIL[decodeURIComponent(bare.slice("/admin/clusters/".length))];
   if (bare.startsWith("/admin/settings/clusters/")) {
