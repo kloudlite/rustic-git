@@ -835,6 +835,8 @@ pub(crate) async fn accept_invite(
             // A new member's keys belong in the team's namespace from now on, and a removed one's
             // must stop being admitted there — the same projection an ssh key add nudges.
             crate::credentials::spawn_keys_changed(&api, &user);
+            // A re-join clears a removal's `delete-after` before the answer, not a beat later.
+            pause::reconcile_member(&api, db, &user, &team).await;
             axum::Json(serde_json::json!({ "team": team })).into_response()
         }
         // Signed in as someone else. Said plainly, because the fix is on their side: sign in

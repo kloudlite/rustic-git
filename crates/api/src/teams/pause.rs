@@ -15,6 +15,26 @@ use kloudlite_pulls::directory::MemberState;
 
 const RECONCILE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// Converge the member's `(handle, team)` pair now through `on_member_state`. Every path that
+/// changes membership in THIS process calls it before answering: a pause or unpause, and a
+/// re-join, which must clear a removal's `delete-after` before the controller's GC can act on it.
+/// Bounded: the directory write already landed, so a hung apiserver costs the caller at most
+/// this and the keys beat converges the pair.
+pub(crate) async fn reconcile_member(api: &Api, db: &kloudlite_pulls::directory::Directory, email: &str, slug: &str) {
+    let Some(hook) = api.on_member_state.clone() else { return };
+    match db.user(email).await {
+        Ok(Some(u)) => {
+            if let Some(handle) = u.username {
+                if tokio::time::timeout(RECONCILE_WAIT, hook(handle, slug.to_string())).await.is_err() {
+                    tracing::warn!(team = %slug, member = %email, "member.reconcile.timeout");
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(team = %slug, member = %email, error = %e, "member.reconcile.skipped"),
+    }
+}
+
 pub(crate) async fn pause_member(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -82,21 +102,7 @@ async fn set_state(api: &Arc<Api>, headers: &axum::http::HeaderMap, slug: &str, 
             crate::credentials::spawn_keys_changed(api, &email);
             // Awaited, so the answer means the Bench already reads paused (or full) again: an
             // unpaused person's start is otherwise parked on `access: paused` for up to a beat.
-            if let Some(hook) = api.on_member_state.clone() {
-                match db.user(&email).await {
-                    Ok(Some(u)) => {
-                        // Bounded: the directory write already landed, so a hung apiserver costs
-                        // the caller at most this and the keys beat converges the pair.
-                        if let Some(handle) = u.username {
-                            if tokio::time::timeout(RECONCILE_WAIT, hook(handle, slug.to_string())).await.is_err() {
-                                tracing::warn!(team = %slug, member = %email, "member.reconcile.timeout");
-                            }
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(team = %slug, member = %email, error = %e, "member.reconcile.skipped"),
-                }
-            }
+            reconcile_member(api, db, &email, slug).await;
             tracing::info!(team = %slug, member = %email, by = %user, "{event}");
             // After the write: a refused pause (last owner, not a member) is not an admin write.
             if let Err(r) = write_audit(api, &user, action, &format!("{slug}/{email}"), String::new(), "ok").await {
@@ -257,6 +263,28 @@ mod tests {
         assert_eq!(unpause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
         let want = ("mem".to_string(), "acme".to_string());
         assert_eq!(*seen.lock().unwrap(), vec![want.clone(), want]);
+    }
+
+    #[tokio::test]
+    async fn accepting_an_invite_reconciles_the_pair_once() {
+        let mut api = Arc::try_unwrap(fixture().await).ok().unwrap();
+        let db = api.directory.clone().unwrap();
+        db.upsert_user("r@x", "r@x").await.unwrap();
+        db.claim_username("r@x", "rex").await.unwrap().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let rec = seen.clone();
+        api.on_member_state = Some(Arc::new(move |o: String, t: String| {
+            rec.lock().unwrap().push((o, t));
+            Box::pin(async {})
+        }));
+        let api = Arc::new(api);
+        let invite = axum::Json(serde_json::from_value(serde_json::json!({"email": "r@x", "role": "member"})).unwrap());
+        let (st, b) = body(crate::teams::create_invite(State(api.clone()), as_user(&api, "a@x"), axum::extract::Path("acme".to_string()), invite).await).await;
+        assert!(st.is_success(), "{st} {b}");
+        let token = serde_json::from_str::<serde_json::Value>(&b).unwrap()["token"].as_str().unwrap().to_string();
+        let (st, _) = body(crate::teams::accept_invite(State(api.clone()), as_user(&api, "r@x"), axum::extract::Path(token)).await).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(*seen.lock().unwrap(), vec![("rex".to_string(), "acme".to_string())]);
     }
 
     #[tokio::test]
