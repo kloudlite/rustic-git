@@ -25,7 +25,12 @@ struct SeriesResponse {
     summary: Summary,
 }
 
-fn bad_gateway(e: crate::history::HistoryError) -> Response {
+/// Logged here because the body goes to the browser and nowhere else: until 2026-09-16 a series
+/// that 502'd on every Overview load left no line in the admin's own log. The series name, never
+/// the statement: the catalogue is fixed, and the statement carries caller-supplied filters.
+fn bad_gateway(series: &str, e: crate::history::HistoryError) -> Response {
+    let text = e.to_string();
+    tracing::warn!(series, error = %crate::history::alerts::truncate(&text), "history.query.failed");
     // A ClickHouse that answered an error is upstream trouble, distinct from the 503 that means
     // "no ClickHouse configured" — an operator must be able to tell those apart from the status.
     (StatusCode::BAD_GATEWAY, format!("history: {e}")).into_response()
@@ -62,7 +67,7 @@ pub(crate) async fn series(
     let h = history_or_503(&s)?;
     let sql =
         sql_for(&name, &q).ok_or_else(|| (StatusCode::NOT_FOUND, "no such series").into_response())?;
-    let rows = h.query(&sql).await.map_err(bad_gateway)?;
+    let rows = h.query(&sql).await.map_err(|e| bad_gateway(&name, e))?;
     let points: Vec<(String, f64)> = rows
         .iter()
         .map(|r| {
@@ -122,6 +127,7 @@ struct EventsPage {
 
 const PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
+const DEFAULT_DAYS: u32 = 7;
 
 /// Every filter is a literal in the statement, so each one is validated the same way the series
 /// module validates an owner: a value that is not an identifier (or, for a timestamp, not made of
@@ -158,6 +164,46 @@ pub(crate) async fn events(
     Query(q): Query<EventsQuery>,
 ) -> Result<Response, Response> {
     let h = history_or_503(&s)?;
+    let (sql, limit) = events_sql(&q)?;
+    let rows = h.query(&sql).await.map_err(|e| bad_gateway("events", e))?;
+    let out: Vec<EventOut> = rows
+        .iter()
+        .map(|r| {
+            let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let opt = |v: String| (!v.is_empty()).then_some(v);
+            EventOut {
+                id: s(0),
+                ts: rfc3339(&s(1)),
+                kind: s(2),
+                actor: s(3),
+                owner: opt(s(4)),
+                target: opt(s(5)),
+                region: opt(s(6)),
+                // Stored as text; handed back parsed so the web does not have to parse it twice.
+                // An unparsable or non-object value becomes `{}` rather than null, because the
+                // console reads fields off it directly.
+                attrs: serde_json::from_str(&s(7))
+                    .ok()
+                    .filter(serde_json::Value::is_object)
+                    .unwrap_or_else(|| serde_json::json!({})),
+            }
+        })
+        .collect();
+    let cursor = (out.len() == limit)
+        .then(|| out.last().map(|r| format!("{}|{}", r.ts, r.id)))
+        .flatten();
+    Ok(Json(EventsPage {
+        events: out,
+        cursor,
+    })
+    .into_response())
+}
+
+/// Without a lower bound the statement reads the whole table under FINAL, which hit the server's
+/// memory cap (code 241) on 2026-09-16. A caller that names no `from` gets the last seven days —
+/// counted back from `to` when it gave one, so an old `to` still has rows — and a cursor keeps
+/// paging inside that window.
+fn events_sql(q: &EventsQuery) -> Result<(String, usize), Response> {
     let mut wheres = Vec::new();
     if let Some(v) = q.kind.as_deref() {
         wheres.push(format!("kind = '{}'", literal(v, false)?));
@@ -194,6 +240,13 @@ pub(crate) async fn events(
             cursor_id(id)?
         ));
     }
+    if q.from.is_none() {
+        let anchor = match q.to.as_deref() {
+            Some(v) => format!("parseDateTime64BestEffort('{}', 3)", literal(v, true)?),
+            None => "now64(3)".into(),
+        };
+        wheres.push(format!("ts >= {anchor} - INTERVAL {DEFAULT_DAYS} DAY"));
+    }
     let filter = if wheres.is_empty() {
         String::new()
     } else {
@@ -204,36 +257,31 @@ pub(crate) async fn events(
         "SELECT id, toString(ts, 'UTC'), kind, actor, owner, target, region, attrs \
          FROM kloudlite.events FINAL {filter} ORDER BY ts DESC, id DESC LIMIT {limit}"
     );
-    let rows = h.query(&sql).await.map_err(bad_gateway)?;
-    let out: Vec<EventOut> = rows
-        .iter()
-        .map(|r| {
-            let s = |i: usize| r.get(i).and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let opt = |v: String| (!v.is_empty()).then_some(v);
-            EventOut {
-                id: s(0),
-                ts: rfc3339(&s(1)),
-                kind: s(2),
-                actor: s(3),
-                owner: opt(s(4)),
-                target: opt(s(5)),
-                region: opt(s(6)),
-                // Stored as text; handed back parsed so the web does not have to parse it twice.
-                // An unparsable or non-object value becomes `{}` rather than null, because the
-                // console reads fields off it directly.
-                attrs: serde_json::from_str(&s(7))
-                    .ok()
-                    .filter(serde_json::Value::is_object)
-                    .unwrap_or_else(|| serde_json::json!({})),
-            }
-        })
-        .collect();
-    let cursor = (out.len() == limit)
-        .then(|| out.last().map(|r| format!("{}|{}", r.ts, r.id)))
-        .flatten();
-    Ok(Json(EventsPage {
-        events: out,
-        cursor,
-    })
-    .into_response())
+    Ok((sql, limit))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sql(q: EventsQuery) -> String {
+        events_sql(&q).map(|(s, _)| s).unwrap_or_else(|_| panic!("refused"))
+    }
+
+    #[test]
+    fn an_unfiltered_page_is_bounded_to_a_recent_window() {
+        let s = sql(EventsQuery::default());
+        assert!(s.contains("WHERE ts >= now64(3) - INTERVAL 7 DAY"), "{s}");
+        let s = sql(EventsQuery { cursor: Some("2026-09-16T10:00:00.000Z|a:1".into()), ..Default::default() });
+        assert!(s.contains("ts >= now64(3) - INTERVAL 7 DAY") && s.contains("(ts, id) <"), "{s}");
+    }
+
+    #[test]
+    fn an_explicit_range_overrides_the_window() {
+        let s = sql(EventsQuery { from: Some("2026-01-01".into()), ..Default::default() });
+        assert!(!s.contains("INTERVAL"), "{s}");
+        let s = sql(EventsQuery { to: Some("2026-01-08".into()), ..Default::default() });
+        assert!(s.contains("ts >= parseDateTime64BestEffort('2026-01-08', 3) - INTERVAL 7 DAY"), "{s}");
+    }
 }

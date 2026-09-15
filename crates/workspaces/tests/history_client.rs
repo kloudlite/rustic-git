@@ -161,6 +161,14 @@ async fn migrations_apply_against_a_real_clickhouse() {
         .await
         .unwrap();
     assert_eq!(rows[0][0], serde_json::json!(1));
+    // The one series that generates its own rows; a wrong column name there is a code 47.
+    let q = kloudlite_workspaces::history::series::SeriesQuery {
+        range: "7d".into(),
+        step: "1d".into(),
+        ..Default::default()
+    };
+    let sql = kloudlite_workspaces::history::series::sql_for("firing_signals", &q).unwrap();
+    h.query(&sql).await.expect("firing_signals");
 }
 
 /// DDL answers 200 with an empty body, and `migrate` runs every CREATE through `query` — an empty

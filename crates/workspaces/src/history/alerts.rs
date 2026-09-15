@@ -26,6 +26,15 @@ const STEP_SECS: u64 = 30;
 /// How often the loop runs. Faster than the shortest `for` window (2 m) so a transition is recorded
 /// within a bucket of when it happened, and slow enough that ten queries are nothing.
 const EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+const LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// ClickHouse errors can quote the whole statement back; the head of the message names the cause.
+pub(crate) fn truncate(e: &str) -> &str {
+    match e.char_indices().nth(300) {
+        Some((i, _)) => &e[..i],
+        None => e,
+    }
+}
 
 /// Which fleet a rule's metrics come from. `central` is the AKS tier (server, worker, gateway,
 /// api); every `Region` CR is a k3s cluster with an agent on each node. A rule evaluated in the
@@ -858,6 +867,9 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
     const MAX_PENDING: usize = 10_000;
 
     let mut last: HashMap<(String, String), String> = HashMap::new();
+    // Once per (region, rule) per five minutes: the failure is already recorded as `unknown`, and
+    // a line every thirty seconds would bury the first one.
+    let mut logged: HashMap<(String, &'static str), std::time::Instant> = HashMap::new();
     let mut pending: Vec<serde_json::Value> = Vec::new();
     let mut iv = tokio::time::interval(EVERY);
     iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -892,7 +904,15 @@ pub async fn evaluate_forever(state: Arc<crate::api::ApiState>) {
                     tracing::warn!(%region, reason = "region-not-an-identifier", "alerts.skipped");
                     break;
                 };
-                results.push((rule.name, h.query(&sql).await.map_err(|e| e.to_string())));
+                let res = h.query(&sql).await.map_err(|e| e.to_string());
+                if let Err(e) = &res {
+                    let key = (region.clone(), rule.name);
+                    if logged.get(&key).is_none_or(|t| t.elapsed() >= LOG_EVERY) {
+                        logged.insert(key, std::time::Instant::now());
+                        tracing::warn!(%region, rule = rule.name, error = %truncate(e), "history.alert.query.failed");
+                    }
+                }
+                results.push((rule.name, res));
             }
             let new = evaluate_once(region, now, &results, &mut last);
             // Only the TRANSITION into firing, which is what `evaluate_once` returns at all — a

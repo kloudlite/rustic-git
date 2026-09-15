@@ -47,6 +47,8 @@ struct SignalsResponse {
 pub(crate) async fn signals(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
     let h = history_or_503(&s)?;
     let recorded = current_signals(h).await.map_err(|e| {
+        let e = e.to_string();
+        tracing::warn!(series = "signals", error = %crate::history::alerts::truncate(&e), "history.query.failed");
         (axum::http::StatusCode::BAD_GATEWAY, format!("history: {e}")).into_response()
     })?;
     let source = if recorded.is_empty() { "none" } else { "history" };
