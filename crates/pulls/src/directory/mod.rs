@@ -17,11 +17,10 @@
 //! creator an owner is one atomic write — no transaction, and no window where a
 //! team exists with nobody able to administer it.
 
+mod members;
 mod teams;
-pub use teams::{
-    check_pins, AcceptInvite, AddMember, DeleteTeam, Invite, Membership, MembershipErr, Team, TeamProfile,
-    MAX_PINS,
-};
+pub use members::{AddMember, Membership, MembershipErr};
+pub use teams::{check_pins, AcceptInvite, DeleteTeam, Invite, Team, TeamProfile, MAX_PINS};
 
 use mongodb::bson::{doc, DateTime};
 use mongodb::options::ClientOptions;

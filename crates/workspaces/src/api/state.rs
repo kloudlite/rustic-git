@@ -141,6 +141,13 @@ pub trait Directory: Send + Sync {
         Err("no directory".into())
     }
 
+    /// Strictly, is `user` (a handle) in `team`, and paused? `Err` = unreadable or unsupported —
+    /// every caller that DELETES or REWRITES data on the answer treats `Err` as keep. Defaulted to
+    /// refuse so a stub stays keep-biased.
+    async fn membership(&self, _team: &str, _user: &str) -> Result<Judged, String> {
+        Err("unsupported".into())
+    }
+
     /// The region a person's own space is bound to ("" = unbound), by handle; `Err` = unreadable,
     /// which `/v1/bench/teams` turns into its 503. Defaulted to refuse.
     async fn personal_region(&self, _handle: &str) -> Result<String, String> {
@@ -159,6 +166,21 @@ pub trait Directory: Send + Sync {
     }
 }
 
+
+/// A strict membership answer. A paused member is not a member for access (`teams_for` omits the
+/// team) but IS one for data: nothing of theirs is pruned or rewritten while paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Judged {
+    TeamGone,
+    NotMember,
+    Member(MemberState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberState {
+    Active,
+    Paused,
+}
 
 /// What a membership write did. Not a `Result`: "no such user" and "no such team" are answers a
 /// decider needs to read back verbatim, not errors to log.

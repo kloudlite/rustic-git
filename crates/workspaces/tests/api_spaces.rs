@@ -49,6 +49,16 @@ impl Directory for Stub {
     async fn is_team(&self, slug: &str) -> bool {
         slug == "acme"
     }
+    async fn membership(&self, team: &str, user: &str) -> Result<kloudlite_workspaces::api::Judged, String> {
+        use kloudlite_workspaces::api::{Judged, MemberState};
+        Ok(match (self.fail, team, user) {
+            (true, ..) => return Err("users unreadable".into()),
+            (_, t, _) if t != "acme" => Judged::TeamGone,
+            (_, _, "karthik") => Judged::Member(MemberState::Active),
+            (_, _, "paula") => Judged::Member(MemberState::Paused),
+            _ => Judged::NotMember,
+        })
+    }
     async fn member_teams(&self, user: &str) -> Result<Vec<String>, String> {
         if self.fail { Err("users unreadable".into()) } else { Ok(self.teams_for(user).await) }
     }
@@ -327,13 +337,13 @@ async fn migration_never_overwrites_a_choice_made_meanwhile() {
 async fn a_departed_members_choice_goes_and_any_directory_error_prunes_nothing() {
     let choice = |owner: &str| serde_json::to_value(crd::space_environment(owner, "acme", "env-1")).unwrap();
     let routes = || vec![
-        get(format!("{API}/spaceenvironments"), list("SpaceEnvironment", vec![choice("karthik"), choice("bob"), serde_json::to_value(crd::space_environment("bob", "bob", "env-9")).unwrap()])),
+        get(format!("{API}/spaceenvironments"), list("SpaceEnvironment", vec![choice("karthik"), choice("paula"), choice("bob"), serde_json::to_value(crd::space_environment("bob", "bob", "env-9")).unwrap()])),
         Route { method: "DELETE", path: space_path("bob", "acme"), status: 200, body: choice("bob") },
     ];
     let (s, rec) = state(routes(), false);
     kloudlite_workspaces::api::spaces::prune_departed(&s).await;
     let deletes: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-    assert_eq!(deletes, vec![format!("DELETE {}", space_path("bob", "acme"))], "only bob left acme; personal spaces are never pruned");
+    assert_eq!(deletes, vec![format!("DELETE {}", space_path("bob", "acme"))], "only bob left acme; a paused member's choice and personal spaces are never pruned");
 
     let (s, rec) = state(routes(), true);
     kloudlite_workspaces::api::spaces::prune_departed(&s).await;

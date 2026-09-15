@@ -106,7 +106,7 @@ impl kloudlite_workspaces::api::Directory for Dir {
         // The same value `slugs_for` matches on, through the same members array — one identity,
         // so membership and role can never disagree.
         let email = self.email_or_closed(user).await?;
-        match kloudlite_pulls::directory::Directory::role_of(&t, &email)? {
+        match kloudlite_pulls::directory::Directory::active_role_of(&t, &email)? {
             Role::Owner => Some(TeamRole::Owner),
             Role::Admin => Some(TeamRole::Admin),
             Role::Member => Some(TeamRole::Member),
@@ -118,6 +118,20 @@ impl kloudlite_workspaces::api::Directory for Dir {
     }
 
     // Straight from the directory, no cache: a removed member's next call no longer lists the team.
+    async fn membership(&self, team: &str, user: &str) -> std::result::Result<kloudlite_workspaces::api::Judged, String> {
+        use kloudlite_pulls::directory::{MemberState as S, MembershipErr};
+        use kloudlite_workspaces::api::{Judged, MemberState};
+        // `email_of`, not `email_or_closed`: an unknown handle is an error, never "not a member".
+        let email = self.email_of(user).await.map_err(|e| e.to_string())?.ok_or_else(|| format!("no person {user}"))?;
+        match self.0.membership(team, &email).await {
+            Ok(Some(S::Active)) => Ok(Judged::Member(MemberState::Active)),
+            Ok(Some(S::Paused)) => Ok(Judged::Member(MemberState::Paused)),
+            Ok(None) => Ok(Judged::NotMember),
+            Err(MembershipErr::NoSuchTeam) => Ok(Judged::TeamGone),
+            Err(MembershipErr::Read(e)) => Err(e),
+        }
+    }
+
     async fn member_teams(&self, user: &str) -> std::result::Result<Vec<String>, String> {
         let Some(email) = self.email_of(user).await.map_err(|e| e.to_string())? else { return Ok(vec![]) };
         self.0.slugs_for(&email).await.map_err(|e| e.to_string())
@@ -609,5 +623,28 @@ mod tests {
         // The admin route exists on the admin surface and refuses without a claim, never 404s.
         assert_ne!(status(workspaces_router("admin", state()), "/admin/regions").await, StatusCode::NOT_FOUND);
         assert_ne!(status(workspaces_router("user", state()), "/v1/quota").await, StatusCode::NOT_FOUND);
+    }
+
+    /// Strict membership by handle: gone team, non-member, paused, active — and an unknown handle
+    /// is an error, never `NotMember`, so no data path prunes on it.
+    #[tokio::test]
+    async fn membership_is_strict_and_sees_a_pause() {
+        use kloudlite_pulls::directory::{Directory, MemberState as S, Role};
+        use kloudlite_workspaces::api::{Directory as _, Judged, MemberState};
+        let d = Directory::in_memory();
+        for (e, h) in [("alice@x.io", "alice"), ("bob@x.io", "bob"), ("carol@x.io", "carol")] {
+            d.upsert_user(e, e).await.unwrap();
+            d.claim_username(e, h).await.unwrap().unwrap();
+        }
+        d.create("acme", "Acme", "alice@x.io", "").await.unwrap().unwrap();
+        d.add_member("acme", "bob@x.io", Role::Member).await.unwrap();
+        let dir = Dir(Arc::new(d));
+        assert_eq!(dir.membership("nope", "bob").await, Ok(Judged::TeamGone));
+        assert_eq!(dir.membership("acme", "carol").await, Ok(Judged::NotMember));
+        assert_eq!(dir.membership("acme", "bob").await, Ok(Judged::Member(MemberState::Active)));
+        dir.0.set_member_state("acme", "bob@x.io", S::Paused, "alice@x.io").await.unwrap();
+        assert_eq!(dir.membership("acme", "bob").await, Ok(Judged::Member(MemberState::Paused)));
+        assert!(dir.team_role("bob", "acme").await.is_none(), "a paused member holds no role for access");
+        assert!(dir.membership("acme", "ghost").await.is_err());
     }
 }

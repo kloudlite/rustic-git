@@ -63,6 +63,18 @@ impl Directory for Stub {
     async fn is_team(&self, slug: &str) -> bool {
         slug == "acme"
     }
+    async fn membership(&self, team: &str, user: &str) -> Result<kloudlite_workspaces::api::Judged, String> {
+        use kloudlite_workspaces::api::{Judged, MemberState};
+        Ok(if !self.is_team(team).await {
+            Judged::TeamGone
+        } else if user == "paula" {
+            Judged::Member(MemberState::Paused)
+        } else if self.members.contains(&(user, team)) {
+            Judged::Member(MemberState::Active)
+        } else {
+            Judged::NotMember
+        })
+    }
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
     }
@@ -243,9 +255,11 @@ async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
 
     let carol = bench_obj("carol", "acme", "running", Some("ready"), "full");
     let dave = bench_obj("dave", "dave", "running", Some("ready"), "full");
+    let paula = bench_obj("paula", "acme", "running", Some("ready"), "full");
     let t = setup(
         vec![
-            get(format!("{API}/benches"), list("Bench", vec![carol.clone(), dave.clone()])),
+            get(format!("{API}/benches"), list("Bench", vec![carol.clone(), dave.clone(), paula.clone()])),
+            patch(bench_path("paula", "acme"), paula),
             patch(bench_path("carol", "acme"), carol),
             patch(bench_path("dave", "dave"), dave),
         ],
@@ -256,6 +270,7 @@ async fn a_departed_member_reads_their_own_bench_and_nothing_more() {
     assert_eq!(p.len(), 1);
     assert_eq!(p[0]["spec"]["access"], "readOnly");
     assert!(t.rec.sent("PATCH", &bench_path("dave", "dave")).is_empty());
+    assert!(t.rec.sent("PATCH", &bench_path("paula", "acme")).is_empty(), "pausing never rewrites a bench");
 }
 
 #[tokio::test]

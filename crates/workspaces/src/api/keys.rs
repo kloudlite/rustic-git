@@ -159,9 +159,9 @@ pub async fn run_beat(s: Arc<ApiState>) {
 /// beat. It never sets Full — a person's own next `/v1/bench` call does that — so a directory that
 /// cannot answer (`teams_for` fails closed to empty) only ever takes tools away.
 pub async fn readonly_departed_benches(s: &ApiState) {
-    let (Some(c), Some(_)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
+    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::Bench> = Api::all(c.clone());
-    // ponytail: every Bench LISTed and `teams_for` asked per bench on every beat; one `teams_for`
+    // ponytail: every Bench LISTed and `membership` asked per bench on every beat; one `teams_for`
     // per owner, or a Bench reflector, once benches number more than a few hundred.
     let benches = match api.list(&Default::default()).await {
         Ok(l) => l.items,
@@ -177,7 +177,9 @@ pub async fn readonly_departed_benches(s: &ApiState) {
         if team.eq_ignore_ascii_case(owner) || b.spec.access != crd::BenchAccess::Full {
             continue;
         }
-        if super::scope::teams_for(s, owner).await.iter().any(|t| t == team) {
+        // Strict: a paused member's bench is left exactly as it is (task 4 gives it its own
+        // state), and an unreadable directory demotes nobody.
+        if !matches!(dir.membership(team, owner).await, Ok(super::Judged::NotMember | super::Judged::TeamGone)) {
             continue;
         }
         let patch = serde_json::json!({"spec": {"access": crd::BenchAccess::ReadOnly}});

@@ -11,8 +11,7 @@
 //!   (`KEYS_RESYNC_SECS`) late, accepted by the owner: every access goes through `/v1`, which reads
 //!   membership fresh on each call.
 
-use super::scope::{is_team, teams_for};
-use super::ApiState;
+use super::{ApiState, Judged};
 use crate::crd;
 use crate::k8s;
 use kube::api::{Api, Patch, PatchParams};
@@ -77,15 +76,13 @@ async fn allowed(s: &ApiState, envs: &Api<crd::Environment>, l: &Legacy) -> Resu
     if l.team.eq_ignore_ascii_case(&l.owner) {
         return Ok(true);
     }
-    if s.directory.is_none() {
-        return Err(());
+    let Some(dir) = s.directory.as_ref() else { return Err(()) };
+    // Strict: a paused member keeps the choice (data), and only a confirmed non-member loses it.
+    match dir.membership(&l.team, &l.owner).await {
+        Ok(Judged::Member(_)) => Ok(true),
+        Ok(Judged::NotMember) => Ok(false),
+        Ok(Judged::TeamGone) | Err(_) => Err(()),
     }
-    if teams_for(s, &l.owner).await.iter().any(|t| t.eq_ignore_ascii_case(&l.team)) {
-        return Ok(true);
-    }
-    // `teams_for` fails closed to empty, so "not a member" is definitive only for a team the
-    // directory confirms exists.
-    if is_team(s, &l.team).await { Ok(false) } else { Err(()) }
 }
 
 /// Whether every agent reads space choices: the agent DaemonSet has fully rolled (updated ==
@@ -202,9 +199,8 @@ pub async fn migrate(s: &ApiState) {
     }
 }
 
-/// A team choice whose person has left the team goes. Keep-biased: any directory error prunes
-/// nothing (`member_teams` errs where `teams_for` would answer an empty list), and a team the
-/// directory does not confirm is kept.
+/// A team choice whose person has left the team goes. Keep-biased: only a strict `NotMember`
+/// prunes — a paused member, a team the directory does not confirm, and any error all keep.
 pub async fn prune_departed(s: &ApiState) {
     let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
     let api: Api<crd::SpaceEnvironment> = Api::all(c.clone());
@@ -213,15 +209,13 @@ pub async fn prune_departed(s: &ApiState) {
         Err(e) => return tracing::warn!(kind = "SpaceEnvironment", error = %e, "listing.failed"),
     };
     for x in items.iter().filter(|x| !x.spec.team.eq_ignore_ascii_case(&x.spec.owner)) {
-        let teams = match dir.member_teams(&x.spec.owner).await {
-            Ok(t) => t,
+        match dir.membership(&x.spec.team, &x.spec.owner).await {
+            Ok(Judged::NotMember) => {}
+            Ok(_) => continue,
             Err(e) => {
                 tracing::warn!(owner = %x.spec.owner, error = %e, "space.departed.prune.skipped");
                 continue;
             }
-        };
-        if teams.iter().any(|t| t.eq_ignore_ascii_case(&x.spec.team)) || !is_team(s, &x.spec.team).await {
-            continue;
         }
         match api.delete(&x.name_any(), &Default::default()).await {
             Ok(_) => tracing::info!(owner = %x.spec.owner, team = %x.spec.team, "space.departed.pruned"),

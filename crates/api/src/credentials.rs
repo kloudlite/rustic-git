@@ -313,7 +313,8 @@ pub async fn authorized_keys_for(db: &kloudlite_pulls::directory::Directory, own
     }
     let Some(team) = db.get(owner).await? else { return Ok(String::new()) };
     let mut sets = Vec::with_capacity(team.members.len());
-    for m in &team.members {
+    // A paused member's keys stay out until unpaused, matching `owners_of` (`slugs_for`).
+    for m in team.members.iter().filter(|m| m.state == kloudlite_pulls::directory::MemberState::Active) {
         sets.push(db.credentials_for(&m.user, CredentialKind::SshKey).await?);
     }
     let refs: Vec<&[Credential]> = sets.iter().map(Vec::as_slice).collect();

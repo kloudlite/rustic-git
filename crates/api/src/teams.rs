@@ -362,7 +362,8 @@ async fn team_for<'a>(
             return Err((StatusCode::BAD_GATEWAY, "could not read team").into_response());
         }
     };
-    let Some(role) = kloudlite_pulls::directory::Directory::role_of(&team, &user) else {
+    // A paused member administers nothing and reads the team as a stranger would.
+    let Some(role) = kloudlite_pulls::directory::Directory::active_role_of(&team, &user) else {
         return Err((StatusCode::NOT_FOUND, "no such team").into_response());
     };
     if let Some(min) = min {
