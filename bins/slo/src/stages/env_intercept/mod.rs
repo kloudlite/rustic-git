@@ -640,6 +640,27 @@ mod tests {
     use crate::testkit;
     use std::sync::{Arc, Mutex};
 
+    /// The restart wait answers only for a replacement: the old uid, or a new pod not yet Running
+    /// and Ready, keeps it waiting.
+    #[test]
+    fn only_a_new_ready_pod_is_restarted() {
+        use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
+        let pod = |uid: &str, phase: &str, ready: &str| Pod {
+            metadata: kube::api::ObjectMeta { uid: Some(uid.into()), ..Default::default() },
+            status: Some(PodStatus {
+                phase: Some(phase.into()),
+                conditions: Some(vec![PodCondition { type_: "Ready".into(), status: ready.into(), ..Default::default() }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!delivery::restarted(None, Some("a")));
+        assert!(!delivery::restarted(Some(&pod("a", "Running", "True")), Some("a")));
+        assert!(!delivery::restarted(Some(&pod("b", "Pending", "False")), Some("a")));
+        assert!(!delivery::restarted(Some(&pod("b", "Running", "False")), Some("a")));
+        assert!(delivery::restarted(Some(&pod("b", "Running", "True")), Some("a")));
+    }
+
     /// The listener script and the constants the intercept is written against are one statement:
     /// a remapped port that the listener does not actually listen on would make every run fail
     /// with "never answered", pointing at the intercept rather than at this file.

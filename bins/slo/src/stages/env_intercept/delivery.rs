@@ -201,7 +201,17 @@ pub(super) async fn proxy_restart(c: &mut Ctx, j: &Journey, held: bool) {
         async move {
             let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
             let pods: kube::Api<Pod> = kube::Api::namespaced(k, &ns);
+            let old = pods.get(&w).await.context("could not read the intercepting workspace's pod")?.metadata.uid;
             pods.delete(&w, &Default::default()).await.context("could not delete the intercepting workspace's pod")?;
+            // An exec straight after the delete lands in the OLD, terminating pod ("cannot exec in
+            // a stopped state", 2026-09-15): wait for the replacement by uid, Running and Ready.
+            let start = std::time::Instant::now();
+            while !restarted(pods.get_opt(&w).await?.as_ref(), old.as_deref()) {
+                if start.elapsed() + SLACK >= RESTART_CEILING - SLACK {
+                    return Err(anyhow!("the intercepting workspace's pod never came back Running and Ready"));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
             // The pod comes back empty: the listener is a process, not a file.
             listen(c, &ns, &w).await.context("the listener never came back in the restarted pod")?;
             answers(c, &e, &workspace_dial(), MARKER, RESTART_CEILING - SLACK).await?;
@@ -214,6 +224,16 @@ pub(super) async fn proxy_restart(c: &mut Ctx, j: &Journey, held: bool) {
         .boxed()
     })
     .await;
+}
+
+/// The pod by that name is a NEW one (a different uid from `old`), Running, and Ready.
+pub(super) fn restarted(pod: Option<&Pod>, old: Option<&str>) -> bool {
+    let Some(p) = pod else { return false };
+    let st = p.status.as_ref();
+    p.metadata.uid.as_deref() != old
+        && p.metadata.deletion_timestamp.is_none()
+        && st.and_then(|s| s.phase.as_deref()) == Some("Running")
+        && st.and_then(|s| s.conditions.as_ref()).is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
 }
 
 /// `env.intercept.release`: the wish is deleted, and all four things a release owes are true —
