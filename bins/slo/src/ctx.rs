@@ -148,6 +148,9 @@ pub struct Ctx {
     /// Set when a mid-run report could not be filed. The run does NOT stop for it — teardown and
     /// the final report are what make a broken run visible — but the process must still exit 3.
     pub report_failed: bool,
+    /// The newest report this run could file, for the heartbeat task (`report::heartbeat`) to
+    /// re-PUT between stages so a live pod's row never reads as stale.
+    pub beat: std::sync::Arc<std::sync::Mutex<Option<kloudlite_workspaces::history::slo::RunReport>>>,
 }
 
 /// How long the run's single downgrade window stays open. One srv roll is minutes; this is
@@ -242,6 +245,7 @@ impl Ctx {
             programs: crate::tools::Programs::default(),
             run_failed: false,
             report_failed: false,
+            beat: Default::default(),
             rollout_cache: None,
             roll_check: true,
             roll_window: None,

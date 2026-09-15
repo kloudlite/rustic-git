@@ -49,7 +49,66 @@ pub fn run_state(finished: bool, failed: bool, steps: &[kloudlite_workspaces::hi
     }
 }
 
+/// How often a live run re-files its newest report between stages. A report otherwise lands only
+/// per stage, and one stage (the intercept journey, Experience plus a sibling wait) can outlast the
+/// 10 min window after which `suite::suite_in_flight` reads a row as a dead pod — so a sibling's
+/// wait and the fast suite's yield would both walk into a run that is still going.
+pub const HEARTBEAT_EVERY: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Aborts the heartbeat when the walk that started it ends, whichever way it ends.
+pub struct Heartbeat(tokio::task::JoinHandle<()>);
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl Ctx {
+    /// The run as it stands, never finished — the heartbeat's copy.
+    fn snapshot(&self) -> RunReport {
+        RunReport {
+            run_id: self.run_id.clone(),
+            suite: self.suite.as_str().to_string(),
+            region: self.cfg.region.clone(),
+            started: self.started,
+            finished: None,
+            state: run_state(false, self.failed() > 0 || self.run_failed, &self.steps),
+            stage: self.stage.clone(),
+            steps: self.steps.clone(),
+        }
+    }
+
+    /// Refresh what the heartbeat re-files. After every step, so its PUT never carries fewer steps
+    /// than the row already holds (the row's counts come from the report's own steps).
+    pub fn refresh_beat(&self) {
+        let snap = self.snapshot();
+        if let Ok(mut b) = self.beat.lock() {
+            *b = Some(snap);
+        }
+    }
+
+    /// Re-PUT the newest snapshot every `HEARTBEAT_EVERY` until the returned guard drops. One try
+    /// per beat, never the report's backoff: the next beat is the retry.
+    pub fn heartbeat(&self) -> Heartbeat {
+        let (http, beat, url, auth) = (
+            self.http.clone(),
+            self.beat.clone(),
+            format!("{}/admin/slo/runs/{}", self.cfg.admin_url.trim_end_matches('/'), self.run_id),
+            self.bearer(&self.admin_jwt()),
+        );
+        Heartbeat(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(HEARTBEAT_EVERY).await;
+                let Some(r) = beat.lock().ok().and_then(|b| b.clone()) else { continue };
+                match http.put(&url).header("authorization", &auth).json(&r).send().await {
+                    Ok(resp) if resp.status().is_success() => tracing::debug!("slo.heartbeat"),
+                    Ok(resp) => tracing::warn!(error = %resp.status(), "slo.heartbeat.failed"),
+                    Err(e) => tracing::warn!(error = %e.without_url(), "slo.heartbeat.failed"),
+                }
+            }
+        }))
+    }
+
     pub async fn report(&mut self, stage: &str, finished: bool) -> anyhow::Result<()> {
         let report = RunReport {
             run_id: self.run_id.clone(),
@@ -61,6 +120,11 @@ impl Ctx {
             stage: stage.to_string(),
             steps: self.steps.clone(),
         };
+        if !finished {
+            if let Ok(mut b) = self.beat.lock() {
+                *b = Some(report.clone());
+            }
+        }
         let url = format!("{}/admin/slo/runs/{}", self.cfg.admin_url.trim_end_matches('/'), self.run_id);
         let mut last = String::new();
         let attempts = BACKOFF.len() as u32 + 1;

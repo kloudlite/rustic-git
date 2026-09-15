@@ -180,9 +180,33 @@ pub async fn wait_for_group(c: &Ctx, g: u8, cap: Duration) {
         return;
     }
     let started = std::time::Instant::now();
-    while started.elapsed() < cap && in_flight_where(c, Suite::Hourly, |id| sibling(&c.run_id, id) == Some(g)).await {
+    loop {
+        let read = runs_matching(c, Suite::Hourly, |id| sibling(&c.run_id, id) == Some(g)).await;
+        if let Some(why) = wait_verdict(read, started.elapsed(), cap) {
+            tracing::info!(group = g, waited_secs = started.elapsed().as_secs(), reason = why, "slo.group.wait.ended");
+            return;
+        }
         tracing::info!(group = g, waited_secs = started.elapsed().as_secs(), "slo.group.waiting");
         tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
+/// How long a pod waits for a sibling group's FIRST row: the Job's pods start together, but one
+/// that is still pulling or scheduling has filed nothing yet.
+const SIBLING_GRACE: Duration = Duration::from_secs(120);
+
+/// Why a wait for a sibling ends, or `None` to keep waiting. Keep-biased: an unreadable admin
+/// process is a reason to wait (up to `cap`), never to walk into what the sibling is doing.
+/// `read` is `(running, seen)` for the sibling's rows.
+fn wait_verdict(read: Option<(bool, bool)>, elapsed: Duration, cap: Duration) -> Option<&'static str> {
+    if elapsed >= cap {
+        return Some("cap reached");
+    }
+    match read {
+        None | Some((true, _)) => None,
+        Some((false, true)) => Some("sibling done"),
+        Some((false, false)) if elapsed < SIBLING_GRACE => None,
+        Some((false, false)) => Some("no sibling found"),
     }
 }
 
@@ -236,13 +260,19 @@ pub async fn suite_in_flight(c: &Ctx, suite: Suite) -> bool {
 
 /// The same question about the runs of `suite` whose id `matches`.
 async fn in_flight_where(c: &Ctx, suite: Suite, matches: impl Fn(&str) -> bool) -> bool {
+    runs_matching(c, suite, matches).await.is_some_and(|(running, _)| running)
+}
+
+/// `(any matching row is a live run, any matching row exists at all)`, or `None` when the admin
+/// process could not be read — which each caller decides for itself.
+async fn runs_matching(c: &Ctx, suite: Suite, matches: impl Fn(&str) -> bool) -> Option<(bool, bool)> {
     // Eight rows, not three: the four groups of one hourly Job are four rows.
     let url = stages::admin(c, &format!("/admin/slo/runs?suite={}&limit=8", suite.as_str()));
     let v = match stages::get(c, &url, &c.admin_jwt()).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(suite = suite.as_str(), error = %format!("{e:#}"), "slo.inflight.check.failed");
-            return false;
+            return None;
         }
     };
     let rows = v.get("runs").and_then(|r| r.as_array()).cloned().or_else(|| v.as_array().cloned()).unwrap_or_default();
@@ -253,18 +283,18 @@ async fn in_flight_where(c: &Ctx, suite: Suite, matches: impl Fn(&str) -> bool) 
         Suite::Hourly | Suite::Weekly => 3_600,
         Suite::Monthly => 7_200,
     };
-    // The longest a live run may go without reporting. A report lands after every STAGE, and the
-    // longest stage is the hourly Experience walk; a killed run's row would otherwise sit
-    // `running` until `started` fell out of the deadline window above, and every run of that suite
-    // yielded for the whole hour — which is what a hand-deleted Job did on 2026-09-06.
+    // The longest a live run may go without reporting. A report lands after every stage and, in
+    // between, on the run's own heartbeat (`crate::report::HEARTBEAT_EVERY`); a killed run's row
+    // would otherwise sit `running` until `started` fell out of the deadline window above, and
+    // every run of that suite yielded for the whole hour — what a hand-deleted Job did on 2026-09-06.
     let heartbeat = match suite {
-        Suite::Fast => chrono::Duration::minutes(5),
-        _ => chrono::Duration::minutes(10),
+        Suite::Fast => STALE_FAST,
+        _ => STALE_OTHER,
     };
-    rows.iter().any(|r| {
-        if !r.get("run_id").and_then(|s| s.as_str()).is_some_and(&matches) {
-            return false;
-        }
+    let heartbeat = chrono::Duration::from_std(heartbeat).unwrap_or(chrono::Duration::minutes(10));
+    let rows: Vec<_> = rows.into_iter().filter(|r| r.get("run_id").and_then(|s| s.as_str()).is_some_and(&matches)).collect();
+    let seen = !rows.is_empty();
+    let running = rows.iter().any(|r| {
         let running = r.get("state").and_then(|s| s.as_str()) == Some("running");
         let fresh = r
             .get("started")
@@ -287,8 +317,13 @@ async fn in_flight_where(c: &Ctx, suite: Suite, matches: impl Fn(&str) -> bool) 
             })
             .unwrap_or(true);
         running && fresh && beating
-    })
+    });
+    Some((running, seen))
 }
+
+/// A row not written for this long belongs to a pod that is gone.
+const STALE_FAST: Duration = Duration::from_secs(300);
+const STALE_OTHER: Duration = Duration::from_secs(600);
 
 /// The suites `kind` must not run beside, longest first, and the detail every skipped id carries.
 ///
@@ -425,6 +460,8 @@ async fn rollout_check(c: &Ctx) -> anyhow::Result<bool> {
 /// the one path a deployment cannot be asked to reproduce.
 pub async fn walk(c: &mut Ctx, kind: Suite, budget: Duration) {
     let stages: Vec<Stage> = suite(kind).into_iter().filter(|s| walks_stage(c, kind, s.name)).collect();
+    // For the whole walk, including a yield or a sibling wait: the row must stay fresh.
+    let _beat = c.heartbeat();
     // Its own suite FIRST, and for every suite: a twin is the one collision no ladder covers.
     let mut yield_to = suite_in_flight(c, kind).await.then_some(SAME_SUITE_IN_FLIGHT);
     for (longer, why) in yields_to(kind) {
@@ -571,6 +608,50 @@ mod tests {
         }
         seen.sort();
         assert_eq!(seen, want, "the groups do not cover the hourly catalogue exactly once");
+    }
+
+    /// Keep-biased: an unreadable admin process or a live sibling keeps the wait going; a sibling
+    /// with no row gets a grace for its first one; the cap always ends it.
+    #[test]
+    fn a_sibling_wait_ends_only_for_a_reason() {
+        let (s, cap) = (Duration::from_secs(10), Duration::from_secs(900));
+        assert_eq!(wait_verdict(None, s, cap), None, "unreadable is not done");
+        assert_eq!(wait_verdict(Some((true, true)), s, cap), None);
+        assert_eq!(wait_verdict(Some((false, true)), s, cap), Some("sibling done"));
+        assert_eq!(wait_verdict(Some((false, false)), s, cap), None, "its first row may be coming");
+        assert_eq!(wait_verdict(Some((false, false)), SIBLING_GRACE, cap), Some("no sibling found"));
+        assert_eq!(wait_verdict(None, cap, cap), Some("cap reached"));
+    }
+
+    /// A live pod's row must never read as stale: the heartbeat beats well inside every window.
+    #[test]
+    fn the_heartbeat_is_well_inside_the_staleness_window() {
+        assert!(crate::report::HEARTBEAT_EVERY * 2 < STALE_FAST.min(STALE_OTHER));
+    }
+
+    /// Every id a stage entry gates on is catalogued and in the group whose block it guards — a
+    /// typo would silently land in group 0 and drop the block from its own group.
+    #[test]
+    fn every_gate_names_a_catalogued_id_of_its_group() {
+        use kloudlite_workspaces::slo::catalogue::find;
+        let gates: [(&str, u8, &[&str]); 7] = [
+            ("bench.create", 3, &["bench.start.p95", "bench.tunnel"]),
+            ("ws.create.p95", 0, &["ws.exec.ok", "ws.push.p95", "quota.refused"]),
+            ("env.create.p95", 0, &["env.exec.ok", "env.clone.p95"]),
+            ("env.intercept", 1, &stages::env_intercept::INTERCEPT_IDS),
+            ("builder.hidden", 0, &[]),
+            ("request.approve", 0, &["superadmin.grant"]),
+            ("bench.idle.wake", 3, &["bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients"]),
+        ];
+        for (gate, g, block) in gates {
+            assert!(find(gate).is_some(), "{gate} is not catalogued");
+            for id in std::iter::once(&gate).chain(block) {
+                assert!(find(id).is_some(), "{id} is not catalogued");
+                assert_eq!(group_of(id), g, "{id}");
+            }
+        }
+        assert_eq!(group_of("bench.workspace.tool_roundtrip"), 0);
+        assert_eq!(group_of("ws.seed.failed"), 2);
     }
 
     #[test]
