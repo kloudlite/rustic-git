@@ -253,8 +253,6 @@ pub async fn serve(
             "/v1/teams/{slug}/members/{email}",
             axum::routing::patch(set_role).delete(remove_member),
         )
-        .route("/v1/teams/{slug}/members/{email}/pause", axum::routing::post(pause_member))
-        .route("/v1/teams/{slug}/members/{email}/unpause", axum::routing::post(unpause_member))
         // Joining is by invitation only. The raw token travels in the email and the accept
         // URL; the api stores its hash, so `/v1/invites/{token}` is the only place it is
         // ever presented back.
@@ -381,7 +379,9 @@ pub async fn serve(
         )
         .route("/api/admin/bench-logins/revoke", axum::routing::post(revoke_bench_logins))
     } else {
-        app
+        // Pause reconciles the pair's Benches, which only the user role's ServiceAccount may write.
+        app.route("/v1/teams/{slug}/members/{email}/pause", axum::routing::post(pause_member))
+            .route("/v1/teams/{slug}/members/{email}/unpause", axum::routing::post(unpause_member))
     };
     let app = app.with_state(api);
     // Workspaces/environments/regions: a separate crate, a separate `MetaStore`, a separate

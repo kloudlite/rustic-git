@@ -527,7 +527,8 @@ async fn run() -> Result<()> {
                 as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         }) as kloudlite_api::KeysChanged
     });
-    let on_member_state: Option<kloudlite_api::MemberStateChanged> = workspaces.clone().map(|ws| {
+    // User role only: the admin ServiceAccount has no Bench write and the stamp policy refuses it.
+    let on_member_state: Option<kloudlite_api::MemberStateChanged> = workspaces.clone().filter(|_| role != "admin").map(|ws| {
         Arc::new(move |owner: String, team: String| {
             let ws = ws.clone();
             Box::pin(async move { kloudlite_workspaces::api::membership::reconcile_pair(&ws, &owner, &team).await })
