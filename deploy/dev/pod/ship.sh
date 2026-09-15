@@ -72,6 +72,8 @@ if [ "${1:-}" != "--no-gate" ]; then
     && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \
     && bun run typecheck >> /tmp/ship-web.log 2>&1 && bun run lint >> /tmp/ship-web.log 2>&1 && bun run test >> /tmp/ship-web.log 2>&1 ) \
     || { tail -30 /tmp/ship-web.log; exit 1; }
+  # A retried-then-passed test (.config/nextest.toml) must not vanish into the log.
+  grep -E '^\s*FLAKY' /tmp/ship-test.log || true
   echo "gate passed: $(grep -oE 'Summary.*' /tmp/ship-test.log | tail -1)"
 fi
 
