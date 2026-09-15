@@ -12,6 +12,7 @@ pub const BENCH_PORT: u16 = 7789;
 pub const BENCH_DIR: &str = "/bench";
 pub const BENCH_CONTAINER: &str = "bench";
 pub const BENCH_POD: &str = "bench";
+pub const BENCH_TOOL_PATH: &str = "/etc/kloudlite/bench-tool";
 
 
 /// `{pool}/homes/.benches/{team}/{owner}` — under the region-shared home export, never on a
@@ -31,7 +32,7 @@ pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, Strin
 /// The bench's one pod. `idle_secs` is the region's `benchIdleSecs`, stamped in at create so a
 /// live setting change never reaches a running pod mid-session — the same `Mark::Live`-vs-`Boot`
 /// split as everywhere else in `k8s`: this value takes effect only on the pod's next create.
-pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64) -> Result<Pod, String> {
+pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, api_url: &str, idle_secs: u64) -> Result<Pod, String> {
     let owner = &b.spec.owner;
     let team = &b.spec.team;
     let folder = bench_folder(pool, team, owner)?;
@@ -43,35 +44,45 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
     };
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
 
+    let mut env = vec![
+        var("KL_OWNER", owner.clone()),
+        var("KL_TEAM", team.clone()),
+        var("KL_BENCH", id.to_string()),
+        var("KL_MODEL", b.spec.model.clone()),
+        var("KL_REGISTRY_HOST", registry_host.to_string()),
+        var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
+        // The PATH to the tool token, never the token: env shows up in `ps e`, crash dumps and
+        // child processes, and a file the api refreshes in place stays current without a restart.
+        var("KL_TOOL_TOKEN_FILE", format!("{BENCH_TOOL_PATH}/token")),
+        var("KLOUDLITE_OTLP_URL", OTLP_URL.to_string()),
+        var("OTEL_SERVICE_NAME", "harness-bench".to_string()),
+        EnvVar {
+            name: "NODE_NAME".into(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector { field_path: "spec.nodeName".into(), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        var("HOME", HOME_DIR.to_string()),
+        var("LANG", "C.UTF-8".to_string()),
+    ];
+    // Unset rather than empty when the agent has no `WS_API_URL`: the tools then fail closed.
+    if !api_url.is_empty() {
+        env.push(var("KL_API_URL", api_url.to_string()));
+    }
+
     let mut pod_spec = PodSpec {
         containers: vec![Container {
             name: BENCH_CONTAINER.to_string(),
             image: Some(b.spec.image.clone()),
             command: Some(command),
-            env: Some(vec![
-                var("KL_OWNER", owner.clone()),
-                var("KL_TEAM", team.clone()),
-                var("KL_BENCH", id.to_string()),
-                var("KL_MODEL", b.spec.model.clone()),
-                var("KL_REGISTRY_HOST", registry_host.to_string()),
-                var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
-                var("KLOUDLITE_OTLP_URL", OTLP_URL.to_string()),
-                var("OTEL_SERVICE_NAME", "harness-bench".to_string()),
-                EnvVar {
-                    name: "NODE_NAME".into(),
-                    value_from: Some(EnvVarSource {
-                        field_ref: Some(ObjectFieldSelector { field_path: "spec.nodeName".into(), ..Default::default() }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                var("HOME", HOME_DIR.to_string()),
-                var("LANG", "C.UTF-8".to_string()),
-            ]),
+            env: Some(env),
             volume_mounts: Some(vec![
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
                 VolumeMount { name: "bench-folder".to_string(), mount_path: BENCH_DIR.to_string(), ..Default::default() },
                 VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
+                VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "attach".into(), mount_path: "/etc/resolv.conf".into(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
             ]),
@@ -93,6 +104,13 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             home_volume(pool, owner),
             Volume { name: "bench-folder".to_string(), host_path: Some(HostPathVolumeSource { path: folder, type_: Some("Directory".into()) }), ..Default::default() },
             user_key_volume(true),
+            // A Secret of its own, never a key in `user-key`: a workspace pod mounts `user-key`
+            // and must never see this token. Optional because /v1 mints it after the namespace.
+            Volume {
+                name: "bench-tool".to_string(),
+                secret: Some(SecretVolumeSource { secret_name: Some(BENCH_TOOL_SECRET.to_string()), optional: Some(true), default_mode: Some(0o444), ..Default::default() }),
+                ..Default::default()
+            },
             attach_volume(pool, id),
             Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
         ]),

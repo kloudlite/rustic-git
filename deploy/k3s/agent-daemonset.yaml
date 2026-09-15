@@ -178,6 +178,10 @@ spec:
             # `KL_REGISTRY_HOST`, the docker credential helper's `credHelpers` key.
             - name: WS_REGISTRY_HOST
               value: cr.khost.dev
+            # The public api base, fed into every bench pod as `KL_API_URL` for its tools (the
+            # same host `builder-gate.yaml`'s `KLOUDLITE_API_URL` names). Unset = tools fail closed.
+            - name: WS_API_URL
+              value: https://dev.kloudlite.io
             # `WS_RUNTIME_CLASS` is absent from this file on purpose, and absent is NOT the same
             # as unset: the fleet RUNS gvisor, set in the `kloudlite-agent` Secret next to
             # WS_REGION, because an inline env here would override `envFrom` and force every

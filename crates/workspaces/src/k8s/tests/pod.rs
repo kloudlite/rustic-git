@@ -769,3 +769,11 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
     let mounts = pod.spec.unwrap().containers[0].volume_mounts.clone().unwrap();
     assert!(mounts.iter().any(|m| m.mount_path == workspace_dir("my-ws")));
 }
+
+
+#[test]
+pub(crate) fn a_workspace_pod_never_mounts_the_bench_tool_secret() {
+    let spec = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None).unwrap().spec.unwrap();
+    assert!(!spec.volumes.unwrap().iter().any(|v| v.name == "bench-tool" || v.secret.as_ref().and_then(|s| s.secret_name.as_deref()) == Some(crate::k8s::BENCH_TOOL_SECRET)));
+    assert!(!spec.containers.iter().flat_map(|c| c.env.clone().unwrap_or_default()).any(|e| e.name == "KL_TOOL_TOKEN_FILE"));
+}

@@ -51,6 +51,7 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
             false,
             Some("test:/".into()),
             "registry.kloudlite.io".into(),
+            String::new(),
             Arc::new(NoopNix),
             pool.join("profiles"),
             settings,

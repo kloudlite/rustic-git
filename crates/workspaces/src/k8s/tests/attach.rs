@@ -152,5 +152,5 @@ pub(crate) fn every_space_pod_builder_carries_the_resolv_conf_mount() {
         "bench-1",
         serde_json::from_value(serde_json::json!({"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"})).unwrap(),
     );
-    has_mount(bench_pod(&b, "bench-1", ctx().pool, None, "cr.example", 600).unwrap(), "bench-1");
+    has_mount(bench_pod(&b, "bench-1", ctx().pool, None, "cr.example", "", 600).unwrap(), "bench-1");
 }

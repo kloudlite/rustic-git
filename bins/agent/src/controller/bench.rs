@@ -203,7 +203,7 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     match bench_state(&b, pod.as_ref()) {
         PodVerdict::Create => {
             let idle_secs = ctx.settings.load().bench_idle_secs;
-            let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, idle_secs).map_err(ReconcileErr)?;
+            let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, &ctx.api_url, idle_secs).map_err(ReconcileErr)?;
             super::create_if_absent(&pods, &p).await?;
             let c = cond("Ready", false, "Starting", "the bench pod is starting");
             write(&b, crd::BenchStatus { phase: Phase::Starting, pod_ref, idle_since: None, conditions: with(&prev, c), ..prev }, &ctx).await?;
@@ -335,7 +335,7 @@ mod tests {
         b.status.as_mut().unwrap().idle_since = Some(FINISHED_AT.into());
         b.spec.wake_at = Some("2099-01-01T00:00:00Z".into());
         assert!(matches!(bench_state(&b, None), PodVerdict::Create));
-        let p = k8s::bench_pod(&b, "bench-1", "/pool", None, "cr.example", 600).unwrap();
+        let p = k8s::bench_pod(&b, "bench-1", "/pool", None, "cr.example", "", 600).unwrap();
         assert_eq!(p.spec.unwrap().containers.iter().find(|c| c.name == k8s::BENCH_CONTAINER).unwrap().image.as_deref(), Some("bench:new"));
     }
 
