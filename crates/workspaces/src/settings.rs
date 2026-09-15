@@ -76,7 +76,9 @@ impl AgentSettings {
             trace_promote_rate: kloudlite_trace::PROMOTE_RATE,
             trace_promote_burst: kloudlite_trace::PROMOTE_BURST,
             stall_dumps: kloudlite_core::settings::env_parsed("WS_STALL_DUMPS", false),
-            member_removal_deletes: kloudlite_core::settings::env_parsed("WS_MEMBER_REMOVAL_DELETES", false),
+            // No env: the controller deletes on it and `/v1` delete-now reports it, and only a value
+            // both processes read from the same place can agree. `ClusterSettings` is its one source.
+            member_removal_deletes: false,
         }
     }
 

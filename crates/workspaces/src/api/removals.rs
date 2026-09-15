@@ -112,8 +112,9 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     (StatusCode::ACCEPTED, Json(json!({"deletes_enabled": deletes_enabled(k).await}))).into_response()
 }
 
-/// The region's switch as the controller resolves it (`stored ?? env ?? default`); unreadable
-/// answers off, which only changes what the response says, never what is deleted.
+/// The region's switch as the controller resolves it: `ClusterSettings` alone (`stored ?? false`),
+/// since `memberRemovalDeletes` has no env source on either side. Unreadable answers off, which only
+/// changes what the response says, never what is deleted.
 async fn deletes_enabled(k: &kube::Client) -> bool {
     let stored = Api::<crd::ClusterSettings>::all(k.clone()).get_opt("default").await.ok().flatten().map(|c| c.spec).unwrap_or_default();
     crate::settings::AgentSettings::from_env().merged_with(&stored).member_removal_deletes
@@ -141,4 +142,29 @@ pub(crate) async fn all(s: &ApiState) -> Result<Vec<membership::Removal>, Respon
     let k = s.kube.as_ref().ok_or_else(|| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
     let o = list_all(k).await.map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e).into_response())?;
     Ok(membership::removals(&o))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kube_test::{get, mock_client, not_found};
+
+    const PATH: &str = "/apis/kloudlite.io/v1alpha1/clustersettings/default";
+
+    /// One source: what `ClusterSettings` stores, else off — the same resolution the controller's
+    /// GC acts on, so the response can never claim deletes the controller will not make.
+    #[tokio::test]
+    async fn the_switch_is_read_from_cluster_settings_alone() {
+        let stored = |on: Option<bool>| {
+            let mut spec = serde_json::json!({});
+            if let Some(on) = on {
+                spec["memberRemovalDeletes"] = on.into();
+            }
+            get(PATH, serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "ClusterSettings", "metadata": {"name": "default"}, "spec": spec}))
+        };
+        assert!(deletes_enabled(&mock_client(vec![stored(Some(true))]).0).await);
+        assert!(!deletes_enabled(&mock_client(vec![stored(Some(false))]).0).await);
+        assert!(!deletes_enabled(&mock_client(vec![stored(None)]).0).await);
+        assert!(!deletes_enabled(&mock_client(vec![not_found(PATH)]).0).await);
+    }
 }
