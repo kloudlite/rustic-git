@@ -547,7 +547,7 @@ async fn proxy_uid(c: &Ctx, env: &str) -> Result<String> {
 /// is DELETED FIRST, because a release is what takes the proxy down and an environment delete that
 /// raced one has left a proxy pod running on the fleet before; and the team goes LAST, because
 /// `delete_team` is refused while it still holds a workspace. The team's bench has no route of its
-/// own to go by: the api's keys beat deletes a gone team's benches (`prune_team_benches`), and
+/// own to go by: the api's keys beat deletes a gone team's benches (`membership::reconcile`, after its seven-day grace), and
 /// its namespace follows on a later beat.
 ///
 /// Nothing is deleted by a name that is not `run-{id}`-prefixed, so a crashed run is swept by the

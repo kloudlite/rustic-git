@@ -66,6 +66,7 @@ pub(crate) mod scope;
 
 mod bench;
 mod me;
+pub mod membership;
 pub mod spaces;
 mod volumes;
 // `pub`: the SLO probe reads `KNOWN_CENTRAL` so its rollout yield asks about exactly the

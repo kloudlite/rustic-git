@@ -49,7 +49,7 @@ pub(crate) fn ensure_bench_folder(pool: &str, export: &str, team: &str, owner: &
     if crate::may_mount() {
         crate::mount_homes(pool, export)?;
     }
-    // ponytail: a pruned team bench (`prune_team_benches`) leaves this folder on the region share
+    // ponytail: a pruned team bench (`membership::reconcile`, after its seven-day grace) leaves this folder on the region share
     // forever — safe, since a reused slug hands it back to the same person only; collect folders no
     // Bench names in the agent's janitor sweep if the share's size ever matters.
     let folder = kloudlite_workspaces::k8s::bench_folder(pool, team, owner)?;
