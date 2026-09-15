@@ -291,6 +291,9 @@ pub(crate) async fn claim_username(
 // says WHICH team; it never says whether the caller may touch it. A non-member gets 404, not 403,
 // so the routes cannot be used to learn which slugs exist — the same shape the repo routes use.
 
+mod pause;
+pub(crate) use pause::{pause_member, unpause_member};
+
 use kloudlite_pulls::directory::{AcceptInvite, DeleteTeam, Invite, Membership, Role, Team};
 use sha2::Digest;
 

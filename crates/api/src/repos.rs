@@ -114,7 +114,7 @@ pub(crate) async fn may_act_under(
     Ok(db
         .get(owner)
         .await?
-        .is_some_and(|t| t.members.iter().any(|m| m.user.eq_ignore_ascii_case(user))))
+        .is_some_and(|t| t.members.iter().any(|m| m.user.eq_ignore_ascii_case(user) && m.state == kloudlite_pulls::directory::MemberState::Active)))
 }
 
 pub(crate) async fn create_repo(

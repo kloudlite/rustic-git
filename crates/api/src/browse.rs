@@ -216,7 +216,7 @@ impl Membership {
 /// `may_act_under`, through `Membership`. Only the browse path uses this: a write still asks
 /// the directory every time, because a minute of stale "yes" on a read is a tolerable window and
 /// on a write it is not.
-async fn may_read_under(api: &Api, db: &kloudlite_pulls::directory::Directory, user: &str, owner: &str) -> Result<bool> {
+pub(crate) async fn may_read_under(api: &Api, db: &kloudlite_pulls::directory::Directory, user: &str, owner: &str) -> Result<bool> {
     if let Some(yes) = api.membership.get(user, owner) {
         return Ok(yes);
     }
