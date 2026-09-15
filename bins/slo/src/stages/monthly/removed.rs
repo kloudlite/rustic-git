@@ -2,9 +2,10 @@
 //! keeps, and that an unreadable directory deletes nothing.
 //!
 //! Its own team (`run-{id}-rmv`), so removing the second probe member touches nothing another
-//! drill stands on. The removal and `delete-now` run BEFORE the step: `memberRemovalDeletes` is off
-//! on a fleet until somebody decides otherwise, and then `delete-now` only marks — a skip naming the
-//! setting, never a failure the product did not commit.
+//! drill stands on. The removal and `delete-now` run BEFORE the step, and the step judges whichever
+//! half the region's `memberRemovalDeletes` (`ClusterSettings`, echoed as delete-now's
+//! `deletes_enabled`) selects: on, the controller's GC has deleted the pair within `GC_BOUND`; off,
+//! every object still exists carrying a due, api-written `kloudlite.io/delete-after`.
 //!
 //! The bench folder `{pool}/homes/.benches/{team}/{owner}` is not visible from the probe: no pod
 //! the probe can exec into mounts the share's root. The Bench object is gone only once the agent
@@ -15,7 +16,7 @@ use std::time::Instant;
 
 use super::*;
 use crate::stages::{call, clip, raw};
-use kloudlite_workspaces::api::membership::REMOVED_AT;
+use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, REMOVED_AT};
 use kloudlite_workspaces::crd;
 use kube::api::ListParams;
 
@@ -29,7 +30,9 @@ const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
 /// How long teardown waits for the workspace before deleting the snapshot it was based on.
 const WS_GONE: Duration = Duration::from_secs(60);
-const CLEANUP_CEILING: Duration = Duration::from_secs(TWO_BEATS.as_secs() + 120);
+/// Two GC ticks (60 s) plus the agent's bench-folder finalizer and the workspace's own.
+const GC_BOUND: Duration = Duration::from_secs(180);
+const CLEANUP_CEILING: Duration = Duration::from_secs(GC_BOUND.as_secs() + 120);
 
 fn team(c: &Ctx) -> String {
     format!("{}-rmv", c.prefix())
@@ -140,7 +143,7 @@ async fn cleaned(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
 
 async fn audited(c: &Ctx, team: &str) -> Result<()> {
     let target = format!("{team}%2F{}", c.other_user);
-    for action in ["member.removed.judged", "member.removed.delete_now", "member.removed.cleanup"] {
+    for action in ["member.removed.judged", "member.removed.delete_now"] {
         let url = admin(c, &format!("/admin/audit?action={action}&target={target}"));
         poll_json(c, &url, &c.admin_jwt(), Duration::from_secs(30), |v| v.get("rows").and_then(Value::as_array).is_some_and(|r| !r.is_empty()))
             .await
@@ -149,11 +152,22 @@ async fn audited(c: &Ctx, team: &str) -> Result<()> {
     Ok(())
 }
 
-const DELETES_OFF: &str = "memberRemovalDeletes is off on this fleet: a removal only marks the pair";
-
-/// The stored document omits an unset field, and the compiled-in default is off, so absent is off.
-fn deletes_on(doc: &Value) -> bool {
-    doc.get("memberRemovalDeletes").and_then(Value::as_bool) == Some(true)
+/// Deletes off: every object of the pair is still there and carries a due, api-written mark.
+async fn marked_due(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
+    let k = kube(c)?;
+    let now = chrono::Utc::now();
+    let due = |m: &kube::core::ObjectMeta, what: &str| -> Result<()> {
+        let at = system_annotation(m, DELETE_AFTER).ok_or_else(|| anyhow!("{what} carries no api-written {DELETE_AFTER}"))?;
+        let at = chrono::DateTime::parse_from_rfc3339(&at).with_context(|| format!("{what}'s {DELETE_AFTER} {at} is not RFC 3339"))?;
+        if at > now {
+            return Err(anyhow!("{what}'s {DELETE_AFTER} {at} is not due after delete-now"));
+        }
+        Ok(())
+    };
+    let b = kube::Api::<crd::Bench>::all(k.clone()).get_opt(&crd::bench_id(&c.other_user, team)).await?.ok_or_else(|| anyhow!("the Bench was deleted with deletes off"))?;
+    due(&b.metadata, "the Bench")?;
+    let w = kube::Api::<crd::Workspace>::all(k).get_opt(&p.ws).await?.ok_or_else(|| anyhow!("the team Workspace was deleted with deletes off"))?;
+    due(&w.metadata, "the team Workspace")
 }
 
 pub(crate) async fn member_removed(c: &mut Ctx) {
@@ -165,16 +179,6 @@ async fn cleanup(c: &mut Ctx) {
     if c.kube.is_none() {
         return c.skip(CLEANUP_ID, "no kubeconfig");
     }
-    // Decided before anything is created: with deletes off the journey could only mark.
-    match get(c, &admin(c, "/admin/settings/central"), &c.admin_jwt()).await {
-        Ok(doc) if deletes_on(&doc) => {}
-        Ok(_) => return c.skip(CLEANUP_ID, DELETES_OFF),
-        Err(e) => {
-            let why = format!("could not read memberRemovalDeletes: {e:#}");
-            c.step(CLEANUP_ID, CLEANUP_CEILING, move |_| async move { Err(anyhow!("{why}")) }.boxed()).await;
-            return;
-        }
-    }
     let team = team(c);
     let prep = match prepare(c, &team).await {
         Ok(p) => p,
@@ -184,26 +188,26 @@ async fn cleanup(c: &mut Ctx) {
             return teardown(c, &team, None).await;
         }
     };
-    match remove(c, &team).await {
-        Ok(true) => {}
-        Ok(false) => {
-            c.skip(CLEANUP_ID, DELETES_OFF);
-            return teardown(c, &team, Some(&prep)).await;
-        }
+    let deletes = match remove(c, &team).await {
+        Ok(on) => on,
         Err(e) => {
             let why = format!("removing the member: {e:#}");
             c.step(CLEANUP_ID, CLEANUP_CEILING, move |_| async move { Err(anyhow!("{why}")) }.boxed()).await;
             return teardown(c, &team, Some(&prep)).await;
         }
-    }
+    };
     let (t, p) = (team.clone(), Prep { ws: prep.ws.clone(), volume: prep.volume.clone(), snap: prep.snap.clone() });
     c.step(CLEANUP_ID, CLEANUP_CEILING, move |c| {
         async move {
+            if !deletes {
+                marked_due(c, &t, &p).await?;
+                return audited(c, &t).await;
+            }
             let start = Instant::now();
             loop {
                 match cleaned(c, &t, &p).await {
                     Ok(()) => break,
-                    Err(e) if start.elapsed() >= TWO_BEATS => return Err(e.context(format!("not cleaned within {} s", TWO_BEATS.as_secs()))),
+                    Err(e) if start.elapsed() >= GC_BOUND => return Err(e.context(format!("not cleaned within {} s", GC_BOUND.as_secs()))),
                     Err(_) => tokio::time::sleep(Duration::from_secs(10)).await,
                 }
             }
@@ -224,9 +228,8 @@ async fn cleanup(c: &mut Ctx) {
 /// Best effort; the `run-` prefix sweep takes what this misses (the per-member team-workspace sweep
 /// in `stages::sweep`). The member's own objects go as the member, BEFORE the removal, while their
 /// token still reaches the team; the snapshot waits for the workspace, whose base it is.
-// ponytail: a crash after the member's removal leaves their workspace to the product's own
-// delete-now beat (the member's token no longer reaches it); it leaks only if memberRemovalDeletes
-// is switched off between the crash and that beat.
+// ponytail: a crash after the member's removal leaves their workspace to the controller's GC on its
+// delete-now mark (the member's token no longer reaches it); it leaks while memberRemovalDeletes is off.
 async fn teardown(c: &Ctx, team: &str, p: Option<&Prep>) {
     if let Some(p) = p {
         let ws = api(c, &format!("/v1/workspaces/{}", p.ws));
@@ -261,13 +264,6 @@ mod tests {
             let s = kloudlite_workspaces::slo::catalogue::find(id).unwrap();
             assert_eq!(s.stage, "13 · Monthly");
         }
-    }
-
-    #[test]
-    fn deletes_are_on_only_when_stored_true() {
-        assert!(deletes_on(&json!({ "memberRemovalDeletes": true })));
-        assert!(!deletes_on(&json!({ "memberRemovalDeletes": false })));
-        assert!(!deletes_on(&json!({})));
     }
 
     #[tokio::test]
