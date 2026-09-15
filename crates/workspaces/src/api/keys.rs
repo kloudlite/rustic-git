@@ -27,6 +27,13 @@ pub fn beat_lease(now: k8s_openapi::jiff::Timestamp) -> k8s_openapi::api::coordi
     }
 }
 
+/// The heartbeat follows a fully judged pass only (`membership::reconcile`'s `Ok` rule).
+pub(crate) async fn membership_beat(s: &ApiState) {
+    if super::membership::reconcile(s).await.is_ok() {
+        renew_beat(s).await;
+    }
+}
+
 /// Best effort: a lost write only makes the GC hold, which is the safe direction.
 async fn renew_beat(s: &ApiState) {
     let Some(k) = s.kube.as_ref() else { return };
@@ -169,8 +176,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
     loop {
         tick.tick().await;
         project_all(&s).await;
-        super::membership::reconcile(&s).await;
-        renew_beat(&s).await;
+        membership_beat(&s).await;
         prune_namespaces(&s).await;
         prune_builders(&s).await;
         super::spaces::migrate(&s).await;

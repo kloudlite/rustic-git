@@ -261,7 +261,7 @@ async fn a_departed_member_gets_403_on_their_old_bench() {
         ],
         Stub::new(&[], &[]),
     );
-    kloudlite_workspaces::api::membership::reconcile(&t.state).await;
+    let _ = kloudlite_workspaces::api::membership::reconcile(&t.state).await;
     let p = t.rec.sent("PATCH", &bench_path("carol", "acme"));
     assert_eq!(p.len(), 2, "the stamp by apply, then the pause by merge");
     assert!(p[0]["metadata"]["annotations"][kloudlite_workspaces::api::membership::REMOVED_AT].is_string(), "the grace starts");

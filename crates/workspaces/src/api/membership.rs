@@ -137,11 +137,18 @@ pub fn system_annotation(m: &kube::core::ObjectMeta, key: &str) -> Option<String
     owned.then(|| m.annotations.as_ref().and_then(|a| a.get(key)).cloned()).flatten()
 }
 
-pub async fn reconcile(s: &ApiState) {
-    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
+/// `Ok` only when every pair was judged: the directory and kube client present, the listing read,
+/// and no pair's judge failed. ONE failed pair is an `Err` too, not only a wholesale failure: the
+/// keys beat renews its heartbeat Lease on `Ok` alone, and the controller's GC reads that Lease as
+/// "re-adds are being cleared" — a pair this pass could not judge is exactly a re-add it did not clear.
+pub async fn reconcile(s: &ApiState) -> Result<(), String> {
+    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return Err("no kube client or directory".into()) };
     let o = match list_all(c).await {
         Ok(o) => o,
-        Err(error) => return tracing::warn!(%error, "membership.reconcile.listing.failed"),
+        Err(error) => {
+            tracing::warn!(%error, "membership.reconcile.listing.failed");
+            return Err(error.to_string());
+        }
     };
     let (mut failed, mut last) = (0usize, String::new());
     for (owner, team) in pairs(&o) {
@@ -151,7 +158,9 @@ pub async fn reconcile(s: &ApiState) {
     }
     if failed > 0 {
         tracing::warn!(failed, error = %last, "membership.reconcile.skipped");
+        return Err(format!("{failed} pairs unjudged: {last}"));
     }
+    Ok(())
 }
 
 pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
@@ -547,10 +556,40 @@ mod tests {
         rec.calls().into_iter().filter(|c| c.starts_with("DELETE ")).collect()
     }
 
+    const BEAT: &str = "/apis/coordination.k8s.io/v1/namespaces/kube-system/leases/kloudlite-keys-beat";
+
+    fn beat_patches(rec: &Recorder) -> usize {
+        rec.calls().iter().filter(|c| *c == &format!("PATCH {BEAT}")).count()
+    }
+
+    /// The heartbeat means "re-adds are being cleared": renewed after a whole judged pass, never
+    /// after a pass that could not read the directory, the listing, or any one pair.
+    #[tokio::test]
+    async fn the_keys_beat_lease_is_renewed_only_after_a_fully_judged_pass() {
+        let lease = || patch(BEAT, json!({"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": {"name": "kloudlite-keys-beat"}}));
+        let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", None)]), lease()], &[]);
+        crate::api::keys::membership_beat(&s).await;
+        assert_eq!(beat_patches(&rec), 1, "success: {:?}", rec.calls());
+
+        let (s, rec, _) = setup(vec![benches(vec![bench("alice", "down", "full", None)]), lease()], &[]);
+        crate::api::keys::membership_beat(&s).await;
+        assert_eq!(beat_patches(&rec), 0, "every judge erroring: {:?}", rec.calls());
+
+        let failing = crate::kube_test::Route { method: "GET", path: format!("{API}/benches"), status: 500, body: json!({}) };
+        let (s, rec, _) = setup(vec![failing, lease()], &[]);
+        crate::api::keys::membership_beat(&s).await;
+        assert_eq!(beat_patches(&rec), 0, "listing failed: {:?}", rec.calls());
+
+        let (client, rec) = mock_client(vec![benches(vec![]), lease()]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+        crate::api::keys::membership_beat(&ApiState::new(jwt).with_kube(client)).await;
+        assert_eq!(beat_patches(&rec), 0, "no directory: {:?}", rec.calls());
+    }
+
     #[tokio::test]
     async fn a_mixed_case_team_is_judged_by_its_slug() {
         let (s, rec, dir) = setup(vec![benches(vec![bench("alice", " Acme", "full", None)])], &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(dir.asked.load(Ordering::SeqCst), 1);
         assert!(writes(&rec).is_empty(), "a live member of acme is kept: {:?}", writes(&rec));
     }
@@ -564,7 +603,7 @@ mod tests {
         routes[0] = benches(vec![b]);
         routes[1] = list_of("Workspace", "workspaces", vec![]);
         let (s, rec, _) = setup(routes, &[("bob", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
         let sent = rec.sent("PATCH", &path("bob", "acme"));
         assert_ne!(sent[0]["metadata"]["annotations"][REMOVED_AT], json!(OLD), "a fresh stamp");
@@ -574,7 +613,7 @@ mod tests {
     async fn a_workspace_only_pair_is_stamped_on_its_workspaces() {
         let routes = vec![list_of("Workspace", "workspaces", vec![ws("w1", "bob", "acme")]), patch(format!("{API}/workspaces/w1"), ws("w1", "bob", "acme"))];
         let (s, rec, _) = setup(routes, &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         let sent = rec.sent("PATCH", &format!("{API}/workspaces/w1"));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0]["kind"], "Workspace");
@@ -600,7 +639,7 @@ mod tests {
             patch(format!("{API}/workspaces/w1"), ws("w1", "bob", "acme")),
         ];
         let (s, rec, _) = setup(routes, &[("bob", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(rec.sent("PATCH", &path("bob", "acme"))[0]["metadata"]["annotations"][REMOVED_AT].is_string());
         let w = rec.sent("PATCH", &format!("{API}/workspaces/w1"));
         assert_eq!(w.len(), 1);
@@ -612,14 +651,14 @@ mod tests {
     async fn a_bench_set_back_to_full_during_the_grace_is_paused_again() {
         let fresh = chrono::Utc::now().to_rfc3339();
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "acme", "full", Some(&fresh))])], &[("bob", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("bob", "acme")), vec![json!({"spec": {"access": "paused"}})]);
     }
 
     #[tokio::test]
     async fn a_due_pair_is_marked_on_every_object_and_nothing_is_deleted() {
         let (s, rec, _) = setup(removed("bob"), &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
         let paths = [path("bob", "acme"), format!("{API}/workspaces/w1"), format!("{API}/workspaces/w2"), format!("{API}/spaceenvironments/{}", crd::space_name("bob", "acme"))];
         for p in &paths {
@@ -636,7 +675,7 @@ mod tests {
         b["metadata"]["annotations"] = json!({REMOVED_AT: OLD, DELETE_AFTER: "2020-01-08T00:00:00Z"});
         b["metadata"]["managedFields"] = owned(&[REMOVED_AT, DELETE_AFTER]);
         let (s, rec, _) = setup(vec![benches(vec![b])], &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
@@ -668,14 +707,14 @@ mod tests {
     #[tokio::test]
     async fn a_directory_error_changes_nothing() {
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "down", "full", Some("2020-01-01T00:00:00Z"))])], &[("bob", "down")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
     #[tokio::test]
     async fn a_personal_pair_is_never_a_candidate() {
         let (s, rec, dir) = setup(vec![benches(vec![bench("alice", "Alice", "full", None), bench("carol", "", "full", None)])], &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(dir.asked.load(Ordering::SeqCst), 0);
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
@@ -684,7 +723,7 @@ mod tests {
     async fn a_removed_pair_is_stamped_once_and_the_second_beat_writes_nothing() {
         let routes = vec![benches(vec![bench("bob", "acme", "full", None)]), benches(vec![bench("bob", "acme", "paused", Some("2026-09-15T00:00:00Z"))])];
         let (s, rec, _) = setup(routes, &[("bob", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         let sent = rec.sent("PATCH", &path("bob", "acme"));
         assert_eq!(sent.len(), 2);
         let a = &sent[0]["metadata"]["annotations"];
@@ -692,28 +731,28 @@ mod tests {
         assert_eq!(a[DELETE_AFTER], json!((at + MEMBER_REMOVAL_GRACE).to_rfc3339()), "grace starts with the stamp");
         assert!(rec.requests().iter().any(|r| r.contains("fieldManager=kloudlite-membership")), "{:?}", rec.requests());
         assert_eq!(sent[1], json!({"spec": {"access": "paused"}}));
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("bob", "acme")).len(), 2, "the second beat writes nothing");
     }
 
     #[tokio::test]
     async fn a_deleted_team_waits_out_the_grace_too() {
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "gone", "paused", Some(&chrono::Utc::now().to_rfc3339()))])], &[("bob", "gone")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
     #[tokio::test]
     async fn a_readd_during_the_grace_clears_the_stamp() {
         let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "full", Some("2026-09-15T00:00:00Z"))])], &[("alice", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("alice", "acme")), vec![json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null, DELETE_AFTER: null}}})]);
     }
 
     #[tokio::test]
     async fn a_paused_member_is_never_stamped() {
         let (s, rec, _) = setup(vec![benches(vec![bench("paula", "acme", "full", None)])], &[("paula", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
         assert!(rec.calls().iter().all(|c| !c.contains("removed-at")));
     }
@@ -734,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn pause_stops_bench_and_team_workspaces_and_marks_access() {
         let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
         assert_eq!(rec.sent("PATCH", &format!("{API}/workspaces/w1")), vec![json!({"spec": {"desiredState": "stopped"}})]);
         assert_eq!(deletes(&rec), vec![format!("DELETE {}", secret_path("paula", "acme"))], "only the tool token is deleted");
@@ -747,7 +786,7 @@ mod tests {
         let mut w = ws("w1", "paula", "acme");
         w["spec"]["desiredState"] = json!("stopped");
         let (s, rec, _) = setup(paused_pair(b, w), &[]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
@@ -758,7 +797,7 @@ mod tests {
         let mut w = ws("w1", "alice", "acme");
         w["spec"]["desiredState"] = json!("stopped");
         let (s, rec, _) = setup(vec![benches(vec![b]), list_of("Workspace", "workspaces", vec![w])], &[("alice", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert_eq!(writes(&rec), vec![format!("PATCH {}", path("alice", "acme"))]);
         assert_eq!(rec.sent("PATCH", &path("alice", "acme")), vec![json!({"spec": {"access": "full"}})]);
     }
@@ -766,14 +805,14 @@ mod tests {
     #[tokio::test]
     async fn a_readd_after_removal_gets_full_access_back() {
         let (s, rec, _) = setup(vec![benches(vec![bench("alice", "acme", "paused", Some("2026-09-15T00:00:00Z"))])], &[("alice", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(rec.sent("PATCH", &path("alice", "acme")).contains(&json!({"spec": {"access": "full"}})));
     }
 
     #[tokio::test]
     async fn a_personal_workspace_of_a_paused_member_is_untouched() {
         let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", None), ws("w1", "paula", "acme")), &[("paula", "acme")]);
-        reconcile(&s).await;
+        let _ = reconcile(&s).await;
         assert!(!writes(&rec).iter().any(|c| c.contains("/workspaces/w9")), "{:?}", writes(&rec));
     }
 

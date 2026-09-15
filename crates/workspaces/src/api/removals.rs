@@ -116,8 +116,7 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
 /// since `memberRemovalDeletes` has no env source on either side. Unreadable answers off, which only
 /// changes what the response says, never what is deleted.
 async fn deletes_enabled(k: &kube::Client) -> bool {
-    let stored = Api::<crd::ClusterSettings>::all(k.clone()).get_opt("default").await.ok().flatten().map(|c| c.spec).unwrap_or_default();
-    crate::settings::AgentSettings::from_env().merged_with(&stored).member_removal_deletes
+    Api::<crd::ClusterSettings>::all(k.clone()).get_opt("default").await.ok().flatten().and_then(|c| c.spec.member_removal_deletes).unwrap_or(false)
 }
 
 /// `GET /v1/teams/{slug}/removals`: handles and dates only, for the members table.
