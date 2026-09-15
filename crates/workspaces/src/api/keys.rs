@@ -145,6 +145,8 @@ pub async fn run_beat(s: Arc<ApiState>) {
     loop {
         tick.tick().await;
         project_all(&s).await;
+        // Before the namespaces: a deleted team's bench is what would otherwise spare its namespace.
+        prune_team_benches(&s).await;
         prune_namespaces(&s).await;
         prune_builders(&s).await;
         readonly_departed_benches(&s).await;
@@ -183,6 +185,79 @@ pub async fn readonly_departed_benches(s: &ApiState) {
             Ok(_) => tracing::info!(%owner, %team, "bench.access.readonly"),
             Err(e) => tracing::warn!(%owner, %team, error = %e, "bench.access.readonly.failed"),
         }
+    }
+}
+
+/// Which of `seen` — `(name, owner, team)` for every Bench — belongs to a team in `gone`. A
+/// personal bench (team empty or the owner, in any case) is never a candidate, whatever `gone` says.
+fn orphan_benches(seen: &[(String, String, String)], gone: &BTreeSet<String>) -> Vec<String> {
+    seen.iter()
+        .filter(|(_, owner, team)| !team.is_empty() && !team.eq_ignore_ascii_case(owner) && gone.contains(team))
+        .map(|(name, _, _)| name.clone())
+        .collect()
+}
+
+/// A deleted team's benches go on the beat, not in `delete_team`: that route lives in the directory
+/// binary, which holds no kubeconfig, and a beat also heals a delete that happened while this was
+/// down. Keep-biased: only a directory that ANSWERS "no such team" marks one gone — an unreadable
+/// one keeps every bench.
+pub(crate) async fn prune_team_benches(s: &ApiState) {
+    let (Some(c), Some(dir)) = (s.kube.as_ref(), s.directory.as_ref()) else { return };
+    let api: Api<crd::Bench> = Api::all(c.clone());
+    let benches = match api.list(&Default::default()).await {
+        Ok(l) => l.items,
+        Err(kube::Error::Api(e)) if e.code == 404 => return,
+        Err(e) => {
+            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let seen: Vec<(String, String, String)> =
+        benches.iter().map(|b| (b.name_any(), b.spec.owner.clone(), b.spec.team.clone())).collect();
+    let teams: BTreeSet<&str> = seen.iter().map(|(_, _, t)| t.as_str()).filter(|t| !t.is_empty()).collect();
+    let mut gone = BTreeSet::new();
+    for t in teams {
+        if let Ok(None) = dir.bench_team(t).await {
+            gone.insert(t.to_string());
+        }
+    }
+    for name in orphan_benches(&seen, &gone) {
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => tracing::info!(bench = %name, "keys.bench.pruned"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => tracing::warn!(bench = %name, error = %e, "keys.bench.prune.failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench_prune_tests {
+    use super::orphan_benches;
+    use std::collections::BTreeSet;
+
+    fn b(name: &str, owner: &str, team: &str) -> (String, String, String) {
+        (name.into(), owner.into(), team.into())
+    }
+
+    #[test]
+    fn only_a_gone_teams_benches_are_orphaned() {
+        let seen = vec![
+            b("alice-acme", "alice", "acme"),
+            b("bob-acme", "bob", "acme"),
+            b("alice-live", "alice", "live"),
+            b("alice", "alice", "alice"),
+            b("carol", "carol", ""),
+        ];
+        let gone = BTreeSet::from(["acme".to_string()]);
+        assert_eq!(orphan_benches(&seen, &gone), vec!["alice-acme".to_string(), "bob-acme".to_string()]);
+    }
+
+    /// A personal bench survives even a directory that (wrongly) names its owner as a gone team.
+    #[test]
+    fn a_personal_bench_is_never_orphaned() {
+        let seen = vec![b("alice", "alice", "Alice"), b("x", "x", "")];
+        let gone = BTreeSet::from(["Alice".to_string(), "x".to_string(), String::new()]);
+        assert!(orphan_benches(&seen, &gone).is_empty());
     }
 }
 

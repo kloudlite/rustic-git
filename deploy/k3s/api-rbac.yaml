@@ -20,11 +20,12 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "create", "patch", "delete"]
-  # A Bench, like a workspace, is spec the API writes and status the agent writes. No `delete`
-  # (decision 10): a bench is one per person per team, released rather than removed.
+  # A Bench, like a workspace, is spec the API writes and status the agent writes. A member leaving
+  # is a release, not a delete (decision 10); `delete` is only the keys beat collecting the benches
+  # of a team the directory says no longer exists (`prune_team_benches`).
   - apiGroups: ["kloudlite.io"]
     resources: ["benches"]
-    verbs: ["get", "list", "create", "patch"]
+    verbs: ["get", "list", "create", "patch", "delete"]
   # A person's space environment (`/v1/me/environments`): spec the api writes by server-side apply
   # (`create` + `patch`); `delete` is the person's DELETE, `delete_env`'s by-label sweep, and the
   # keys beat dropping a departed member's choice.
