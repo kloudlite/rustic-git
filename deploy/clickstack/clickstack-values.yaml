@@ -15,14 +15,35 @@ clickhouse:
   # capped at 1.8 GiB fails whichever query lands while the alert evaluator, HyperDX and the SLO
   # status read overlap ("memory limit exceeded", the console's "history layer unavailable").
   # Sized for pool2's E4s_v5 (32 GB): room for the evaluator's 25 rules every 30 s plus a console.
+  # 2026-09-16: 8 GiB was not the problem, ClickHouse's defaults were. The 5 GiB mark cache (sized
+  # for a big dedicated server) filled toward the 7.2 GiB server cap, and from 15 Sep 17:00 UTC
+  # every overlap failed with "total memory limit exceeded" — 100+ failed alert/console queries an
+  # hour — while our data is ~1 GB and ClickHouse's own untrimmed system logs were ~7 GB. Measured
+  # need: queries < 0.2 GiB each, merges < 0.2 GiB each, ~2 GiB working set. So: caches bounded to
+  # what an 8 GiB-class server can afford, system logs expire, and the limit raised to 12 GiB so a
+  # merge burst plus the console plus HyperDX never meets the cap (node has ~8 GiB unclaimed limits).
   cluster:
     # Rendered verbatim into the ClickHouseCluster CR, so these are the operator's field names,
     # not the chart's.
     spec:
       containerTemplate:
         resources:
-          requests: { cpu: "1", memory: 4Gi }
-          limits: { memory: 8Gi }
+          requests: { cpu: "1", memory: 6Gi }
+          limits: { memory: 12Gi }
+      settings:
+        extraConfig:
+          # verify: server-level keys, rendered into config.d by the operator's `extraConfig`.
+          mark_cache_size: 1073741824              # 1 GiB (default 5 GiB)
+          index_mark_cache_size: 268435456         # 256 MiB
+          merges_mutations_memory_usage_to_ram_ratio: 0.3
+          # ClickHouse's own logs grew without bound (text_log alone 127 M rows / 4.8 GB): keep a
+          # week of the ones worth reading, drop trace-level chatter from text_log.
+          text_log: { level: warning, ttl: "event_date + INTERVAL 7 DAY DELETE" }
+          query_log: { ttl: "event_date + INTERVAL 7 DAY DELETE" }
+          part_log: { ttl: "event_date + INTERVAL 7 DAY DELETE" }
+          metric_log: { ttl: "event_date + INTERVAL 7 DAY DELETE" }
+          asynchronous_metric_log: { ttl: "event_date + INTERVAL 7 DAY DELETE" }
+          trace_log: { ttl: "event_date + INTERVAL 3 DAY DELETE" }
       replicas: 1
       shards: 1
       dataVolumeClaimSpec:
