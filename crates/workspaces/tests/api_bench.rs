@@ -493,3 +493,40 @@ async fn a_bench_tool_token_gets_403_on_another_team() {
     assert_eq!(st, 403, "{body}");
     assert_eq!(body, Value::String("bench tools act only for alice and acme".into()));
 }
+
+fn space(owner: &str, team: &str) -> Value {
+    serde_json::to_value(kloudlite_workspaces::crd::space_environment(owner, team, "env-1")).unwrap()
+}
+
+#[tokio::test]
+async fn a_bench_tool_token_chooses_environments_only_in_its_own_spaces() {
+    let spaces = list("SpaceEnvironment", vec![space("alice", "acme"), space("alice", "t2"), space("alice", "alice")]);
+    let routes = || {
+        vec![
+            get(bench_path("alice", "acme"), bench_obj("alice", "acme", "running", Some("ready"), "full")),
+            get(format!("{API}/spaceenvironments"), spaces.clone()),
+        ]
+    };
+    let dir = || Stub::new(&[("alice", "acme"), ("alice", "t2")], &[]);
+    let t = setup(routes(), dir());
+    let tok = tool_tok(&t, LIVE_PARENT);
+    for (m, uri, body) in [
+        ("PUT", "/v1/me/environments/t2", Some(json!({"environment": "env-1"}))),
+        ("PUT", "/v1/me/environments/T2", Some(json!({"environment": "env-1"}))),
+        ("DELETE", "/v1/me/environments/t2", None),
+    ] {
+        let (st, body) = t.call(m, uri, &tok, body).await;
+        assert_eq!(st, 403, "{m} {uri}: {body}");
+    }
+    let (st, body) = t.call("GET", "/v1/me/environments", &tok, None).await;
+    assert_eq!(st, 200, "{body}");
+    let teams: Vec<&str> = body.as_array().unwrap().iter().map(|x| x["team"].as_str().unwrap()).collect();
+    assert_eq!(teams, ["acme", "alice"]);
+
+    // An unscoped login is unchanged: every space listed, t2 not a scope refusal.
+    let t = setup(routes(), dir());
+    let (_, body) = t.call("GET", "/v1/me/environments", &t.tok("alice"), None).await;
+    assert_eq!(body.as_array().unwrap().len(), 3, "{body}");
+    let (st, _) = t.call("DELETE", "/v1/me/environments/t2", &t.tok("alice"), None).await;
+    assert_ne!(st, 403);
+}

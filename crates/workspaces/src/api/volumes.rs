@@ -7,7 +7,7 @@
 //! a second time only to answer "is the parent still around?", which is a display detail, never an
 //! authorization one.
 
-use super::scope::{caller_owners, mine, owner_set_selector};
+use super::scope::{caller_owners, in_scope, mine, owner_set_selector, scope_refusal};
 use super::{caller_for, check_path_segment, kube, kube_err, kube_unavailable, not_found, ApiState, Caller};
 use crate::crd::{self, VolumeSource};
 use kube::api::{Api, ListParams};
@@ -244,7 +244,7 @@ pub(crate) async fn list_volumes(
     // saw volumes the same caller's delete could not (2026-09-12).
     let owners = caller_owners(&s, &caller_id).await;
     let owners = match &q.owner {
-        Some(o) if !super::scope::in_scope(&caller_id, o) => return Err(super::scope::scope_refusal(&caller_id)),
+        Some(o) if !in_scope(&caller_id, o) => return Err(scope_refusal(&caller_id)),
         Some(o) if owners.iter().any(|mine| mine == o) => vec![o.clone()],
         Some(_) => return Err(not_found()),
         None => owners,

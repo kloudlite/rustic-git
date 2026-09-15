@@ -9,7 +9,7 @@
 //! `docs/superpowers/specs/2026-09-14-person-environment-design.md`.
 
 use super::*;
-use super::scope::teams_for;
+use super::scope::{in_scope, scope_refusal, teams_for};
 
 
 #[derive(serde::Serialize)]
@@ -25,6 +25,9 @@ pub(crate) struct SpaceDoc {
 /// Everything else is a 404: the caller learns nothing about teams they are not in.
 async fn space_team(s: &ApiState, caller: &Caller, team: &str) -> Result<String, Response> {
     let team = team.to_lowercase();
+    if !in_scope(caller, &team) {
+        return Err(scope_refusal(caller));
+    }
     if team == caller.name.to_lowercase() || teams_for(s, &caller.name).await.iter().any(|t| t.eq_ignore_ascii_case(&team)) {
         return Ok(team);
     }
@@ -48,7 +51,7 @@ pub(crate) async fn list_my_environments(
     let lp = ListParams::default().labels(&format!("{}={}", crate::k8s::OWNER_LABEL, caller.name.to_lowercase()));
     // The label is a view; `spec.owner` is the answer.
     let mine: Vec<crd::SpaceEnvironment> =
-        spaces(&s)?.list(&lp).await.map_err(kube_err)?.items.into_iter().filter(|x| x.spec.owner.eq_ignore_ascii_case(&caller.name)).collect();
+        spaces(&s)?.list(&lp).await.map_err(kube_err)?.items.into_iter().filter(|x| x.spec.owner.eq_ignore_ascii_case(&caller.name) && in_scope(&caller, &x.spec.team)).collect();
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let mut out = Vec::with_capacity(mine.len());
     for x in mine {
@@ -106,6 +109,9 @@ pub(crate) async fn clear_my_environment(
     Path(team): Path<String>,
 ) -> Result<Response, Response> {
     let caller = caller_for(&s, &headers, &method, uri.path()).await?;
+    if !in_scope(&caller, &team) {
+        return Err(scope_refusal(&caller));
+    }
     match spaces(&s)?.delete(&crd::space_name(&caller.name, &team), &Default::default()).await {
         Ok(_) => {}
         Err(kube::Error::Api(ae)) if ae.code == 404 => {}

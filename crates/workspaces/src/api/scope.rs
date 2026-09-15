@@ -63,7 +63,8 @@ pub(crate) async fn may_allocate_for(s: &ApiState, caller: &Caller, owner: &str)
 /// A bench-tool caller acts only for its own handle and the bench's team, even for another team
 /// the person really belongs to: the token lives in a pod, and a leak must not reach every team.
 pub(crate) fn in_scope(c: &Caller, owner: &str) -> bool {
-    c.scope.as_deref().is_none_or(|team| owner == c.name || owner == team)
+    // Slugs are lowercase at write; a query's casing must not move a caller out of (or into) scope.
+    c.scope.as_deref().is_none_or(|team| owner.eq_ignore_ascii_case(&c.name) || owner.eq_ignore_ascii_case(team))
 }
 
 /// The one sentence a listing answers when `?owner=`/`?team=` leaves a scoped caller's scope.
@@ -259,7 +260,7 @@ mod tests {
     #[test]
     fn in_scope_is_own_handle_and_team_only() {
         let c = scoped("t1", false);
-        assert!(in_scope(&c, "meera") && in_scope(&c, "t1"));
+        assert!(in_scope(&c, "meera") && in_scope(&c, "t1") && in_scope(&c, "T1"));
         assert!(!in_scope(&c, "t2") && !in_scope(&c, "bob"));
         let open = Caller { scope: None, ..c };
         assert!(in_scope(&open, "t2") && in_scope(&open, "bob"));
