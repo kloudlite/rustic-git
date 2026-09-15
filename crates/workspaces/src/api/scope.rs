@@ -60,6 +60,18 @@ pub(crate) async fn may_allocate_for(s: &ApiState, caller: &Caller, owner: &str)
     in_scope(caller, owner) && (caller.name == owner || teams_for(s, &caller.name).await.iter().any(|t| t == owner))
 }
 
+/// The refusal after a `may_act_on`/`may_allocate_for` false: a paused member is told so (they
+/// know the team; "not found" would read as a removal), everyone else gets `otherwise` unchanged.
+/// An unreadable directory is `otherwise` too — refused either way, never granted.
+pub(crate) async fn denial(s: &ApiState, c: &Caller, owner: &str, otherwise: Response) -> Response {
+    match &s.directory {
+        Some(d) if d.membership(owner, &c.name).await == Ok(super::Judged::Member(super::MemberState::Paused)) => {
+            (StatusCode::FORBIDDEN, format!("your access to {owner} is paused")).into_response()
+        }
+        _ => otherwise,
+    }
+}
+
 /// A bench-tool caller acts only for its own handle and the bench's team, even for another team
 /// the person really belongs to: the token lives in a pod, and a leak must not reach every team.
 pub(crate) fn in_scope(c: &Caller, owner: &str) -> bool {
@@ -145,7 +157,7 @@ pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Wor
     // owner's workspace without leaving the `superadmin.acting` line the claim's whole design
     // rests on, so support's cross-owner reads were the only unlogged ones (2026-09-12).
     if !super::admin::timing::step("directory.may_act_on", may_act_on(s, c, &w.spec.owner)).await {
-        return Err(not_found());
+        return Err(denial(s, c, &w.spec.owner, not_found()).await);
     }
     Ok(w)
 }
@@ -163,7 +175,7 @@ pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Opti
     match &s.directory {
         None => Err((StatusCode::SERVICE_UNAVAILABLE, "team lookup not configured on this node").into_response()),
         Some(_) if may_allocate_for(s, caller, &owner).await => Ok(owner),
-        Some(_) => Err((StatusCode::FORBIDDEN, "not a member of that team").into_response()),
+        Some(_) => Err(denial(s, caller, &owner, (StatusCode::FORBIDDEN, "not a member of that team").into_response()).await),
     }
 }
 
@@ -183,7 +195,7 @@ pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id: &str) -> Result<
         return Err(not_found());
     }
     if !may_act_on(s, caller, &e.spec.owner).await {
-        return Err(not_found());
+        return Err(denial(s, caller, &e.spec.owner, not_found()).await);
     }
     Ok(e)
 }

@@ -1,7 +1,7 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
-use super::scope::{may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
+use super::scope::{denial, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
 use super::{caller, caller_for, Caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
 use super::volumes::{find_snapshot, volume_region};
@@ -243,7 +243,7 @@ pub(crate) async fn create_ws(
             if may_allocate_for(&s, &owner, &t).await {
                 t
             } else {
-                return Err((StatusCode::NOT_FOUND, "no such team").into_response());
+                return Err(denial(&s, &owner, &t, (StatusCode::NOT_FOUND, "no such team").into_response()).await);
             }
         }
     };
@@ -360,7 +360,7 @@ pub(crate) async fn list_ws(
             if may_act_on(&s, &owner, &t).await {
                 t
             } else {
-                return Err((StatusCode::NOT_FOUND, "no such team").into_response());
+                return Err(denial(&s, &owner, &t, (StatusCode::NOT_FOUND, "no such team").into_response()).await);
             }
         }
     };
@@ -394,7 +394,7 @@ pub(crate) async fn list_for_owner(
     owner: &str,
 ) -> Result<Response, Response> {
     if !may_act_on(s, caller_id, owner).await {
-        return Err(not_found());
+        return Err(denial(s, caller_id, owner, not_found()).await);
     }
     let list = ws_for_owner(s, owner).await?;
     // The key-minting side effect belongs to this `/v1` wrapper, never to `ws_for_owner` itself —

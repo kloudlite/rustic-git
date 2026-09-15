@@ -41,7 +41,7 @@ pub(crate) async fn clone_ws(
     // this is the ALLOCATING step, and that claim must not spend a team's quota it is not a member
     // of. A 404 here matches `my_ws`'s own refusal shape for someone else's workspace.
     if !may_allocate_for(&s, &owner, &owner_of).await {
-        return Err(not_found());
+        return Err(crate::api::scope::denial(&s, &owner, &owner_of, not_found()).await);
     }
     guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(quota, &src.spec.resources)).await?;
     // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
@@ -214,7 +214,7 @@ pub(crate) async fn restore_ws(
     // Same reasoning as `clone_ws`: `find_snapshot`/`my_ws` above admit a superadmin claim to READ
     // someone else's history, but that claim must not spend a team's quota it is not a member of.
     if !may_allocate_for(&s, &owner, &owner_of).await {
-        return Err(not_found());
+        return Err(crate::api::scope::denial(&s, &owner, &owner_of, not_found()).await);
     }
     guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota, &resources)).await?;
     let new_id = rid("ws");

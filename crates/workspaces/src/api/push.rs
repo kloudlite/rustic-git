@@ -2,7 +2,7 @@
 //! a new working copy onto one.
 
 use super::{caller_for, guard_alloc, kube, kube_err, not_found, not_ready, ApiState};
-use super::scope::{find_env, may_allocate_for, my_ws};
+use super::scope::{denial, find_env, may_allocate_for, my_ws};
 use super::workspaces::ws_volume;
 use super::environments::env_volume;
 use crate::crd;
@@ -198,7 +198,7 @@ pub(crate) async fn push_ws(
     // push is an allocation (a snapshot against the quota) and that claim must not spend a team's
     // without being a member.
     if !may_allocate_for(&s, &owner, &owner_of).await {
-        return Err(not_found());
+        return Err(denial(&s, &owner, &owner_of, not_found()).await);
     }
     guard_alloc(&s, &owner_of, !w.spec.team.is_empty(), &[(crate::quota::Dim::Snapshots, 1)]).await?;
     let head = w.status.as_ref().and_then(|st| st.head.clone());
@@ -221,7 +221,7 @@ pub(crate) async fn push_env(
     // Same reasoning as `push_ws`: `find_env` admits a superadmin claim to reach any owner's
     // environment (get, allowed); the push itself must not spend a team's quota on that claim.
     if !may_allocate_for(&s, &caller_id, &e.spec.owner).await {
-        return Err(not_found());
+        return Err(denial(&s, &caller_id, &e.spec.owner, not_found()).await);
     }
     guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id.name, &[(crate::quota::Dim::Snapshots, 1)]).await?;
     let head = e.status.as_ref().and_then(|st| st.head.clone());

@@ -6,7 +6,7 @@ mod common;
 use common::token;
 
 use kloudlite_core::jwt::Jwt;
-use kloudlite_workspaces::api::{router, ApiState, Directory};
+use kloudlite_workspaces::api::{router, ApiState, Directory, Judged, MemberState};
 use kloudlite_workspaces::kube_test::{get, mock_client, not_found, post, Recorder, Route};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -51,6 +51,14 @@ impl Directory for StubMembership {
 
     async fn is_team(&self, slug: &str) -> bool {
         slug == "acme"
+    }
+    // `priya` is a PAUSED member of `acme`: `teams_for` omits it, the strict answer says why.
+    async fn membership(&self, team: &str, user: &str) -> Result<Judged, String> {
+        Ok(match (team, user) {
+            ("acme", "karthik") => Judged::Member(MemberState::Active),
+            ("acme", "priya") => Judged::Member(MemberState::Paused),
+            _ => Judged::NotMember,
+        })
     }
     async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
         Err("no directory".into())
@@ -308,4 +316,39 @@ fn the_owner_set_selector_drops_slugs_that_are_not_segments() {
     let owners = vec!["alice".to_string(), "bad,slug".to_string(), "ok-team".to_string(), "no)paren".to_string()];
     let sel = kloudlite_workspaces::api::owner_set_selector(&owners);
     assert_eq!(sel, "kloudlite.io/owner in (alice,ok-team)", "only validated segments");
+}
+
+#[tokio::test]
+async fn a_paused_member_lists_nothing_and_creates_nothing_in_the_team() {
+    let s = server(true, create_routes()).await;
+    let client = reqwest::Client::new();
+    let priya = token(&s.jwt, "priya");
+    let resp = client
+        .post(format!("{}/v1/environments", s.base))
+        .bearer_auth(&priya)
+        .json(&json!({"name": "app-dev", "region": "centralindia", "owner": "acme"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "your access to acme is paused");
+    assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "a refused create writes nothing");
+    let resp = client.get(format!("{}/v1/environments?owner=acme", s.base)).bearer_auth(&priya).send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "your access to acme is paused");
+    let resp = client.get(format!("{}/v1/workspaces?team=acme", s.base)).bearer_auth(&priya).send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.text().await.unwrap(), "your access to acme is paused");
+}
+
+#[tokio::test]
+async fn an_active_member_is_unchanged() {
+    let s = server(true, create_routes()).await;
+    let client = reqwest::Client::new();
+    let karthik = token(&s.jwt, "karthik");
+    let resp = client.get(format!("{}/v1/environments?owner=acme", s.base)).bearer_auth(&karthik).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    // A stranger keeps the old answers: nothing about pause leaks to a non-member.
+    let resp = client.get(format!("{}/v1/workspaces?team=acme", s.base)).bearer_auth(token(&s.jwt, "mallory")).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
 }

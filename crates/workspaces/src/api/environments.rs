@@ -1,7 +1,7 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
-use super::scope::{caller_owners, find_env, in_scope, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, scope_refusal};
+use super::scope::{caller_owners, denial, find_env, in_scope, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, scope_refusal};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
@@ -297,7 +297,7 @@ pub(crate) async fn list_env(
     let owners: Vec<String> = match q.owner {
         Some(o) if !in_scope(&caller_id, &o) => return Err(scope_refusal(&caller_id)),
         Some(o) if may_act_on(&s, &caller_id, &o).await => vec![o],
-        Some(_) => return Err(not_found()),
+        Some(o) => return Err(denial(&s, &caller_id, &o, not_found()).await),
         None => caller_owners(&s, &caller_id).await,
     };
     Ok(Json(envs_for(&s, &owners).await?).into_response())
@@ -477,7 +477,7 @@ pub(crate) async fn clone_env(
     // the clone is the allocation, and that claim must not spend a team's quota it is not a
     // member of.
     if !may_allocate_for(&s, &caller_id, &src.spec.owner).await {
-        return Err(not_found());
+        return Err(denial(&s, &caller_id, &src.spec.owner, not_found()).await);
     }
     guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(quota, src.spec.services.len())).await?;
     let e = create_environment(
@@ -950,7 +950,7 @@ pub(crate) async fn get_my_builder(
         return Err(scope_refusal(&c));
     }
     if !team.is_empty() && !may_act_on(&s, &c, &team).await {
-        return Err(not_found());
+        return Err(denial(&s, &c, &team, not_found()).await);
     }
     let slug = crate::k8s::owner_slug(&c.name, &team);
     let id = crd::builder_id(slug);

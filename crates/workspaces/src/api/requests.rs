@@ -30,7 +30,7 @@ pub(crate) async fn get_quota(
         return Err(scope::scope_refusal(&c));
     }
     if !scope::may_act_on(&s, &c, &owner).await {
-        return Err(not_found());
+        return Err(scope::denial(&s, &c, &owner, not_found()).await);
     }
     let client = kube(&s)?;
     let team = scope::is_team(&s, &owner).await;
@@ -172,7 +172,7 @@ pub(crate) async fn list_quota_requests(
                 return Err(scope::scope_refusal(&caller));
             }
             if !scope::may_act_on(&s, &caller, &owner).await {
-                return Err(not_found());
+                return Err(scope::denial(&s, &caller, &owner, not_found()).await);
             }
             rows.extend(requests_of(client, &owner).await?);
         }
@@ -341,7 +341,7 @@ pub(crate) async fn list_requests(
                 return Err(scope::scope_refusal(&c));
             }
             if !scope::may_act_on(&s, &c, &owner).await {
-                return Err(not_found());
+                return Err(scope::denial(&s, &c, &owner, not_found()).await);
             }
             rows.extend(requests_of_generic(client, &owner).await?);
         }
@@ -367,7 +367,7 @@ pub(crate) async fn get_request(
     let r = api.get_opt(&id).await.map_err(kube_err)?.ok_or_else(not_found)?;
     // 404, never 403: a refusal that distinguishes "not yours" from "no such id" confirms the id.
     if !scope::may_act_on(&s, &c, &r.spec.owner).await {
-        return Err(not_found());
+        return Err(scope::denial(&s, &c, &r.spec.owner, not_found()).await);
     }
     Ok(Json(generic_doc(&r)).into_response())
 }
