@@ -224,7 +224,8 @@ rules:
     resources: ["volumes"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
   # `ownerbindings` are created by the agent that WINS a placement claim — `claim::ensure_binding`;
-  # a losing claimant never creates one, and nothing ever edits or deletes one.
+  # a losing claimant never creates one, and the agent never edits or deletes one (the api's keys
+  # beat prunes a dead team's).
   - apiGroups: ["kloudlite.io"]
     resources: ["ownerbindings"]
     verbs: ["get", "list", "watch", "create"]

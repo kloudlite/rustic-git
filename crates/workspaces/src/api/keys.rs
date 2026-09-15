@@ -147,6 +147,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
         project_all(&s).await;
         super::membership::reconcile(&s).await;
         prune_namespaces(&s).await;
+        prune_bindings(&s).await;
         prune_builders(&s).await;
         super::spaces::migrate(&s).await;
     }
@@ -278,6 +279,91 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
     }
 }
 
+/// Which of `seen` — `(name, spec.owner, age in seconds)` for every `OwnerBinding` — belongs to a
+/// dead TEAM. The claiming agent creates one per (region, owner) and nothing deleted one, so by
+/// 2026-09-16 109 of 116 were probe teams gone for days, each re-applied by every agent on every
+/// Quota event. The rule is `stale_namespaces`' for a `ws-` team namespace: no Workspace, Bench or
+/// Environment names the owner (`keep`, lowercased — `binding_name` folds case), older than a beat,
+/// and the directory calls the owner a team; a person, or anyone it could not answer for, is kept.
+///
+/// What a delete takes, by ownerReference: the four NetworkPolicies and two RoleBindings
+/// `apply_binding` stamps in the owner's namespaces — nothing else names it as owner. With nothing
+/// left naming the owner there is no pod they fence or grant for, and the next claim recreates the
+/// binding, which re-applies all six.
+fn stale_bindings(keep: &BTreeSet<String>, seen: &[(String, String, i64)], max_age: i64, teams: &BTreeSet<String>) -> Vec<String> {
+    seen.iter()
+        .filter(|(_, owner, age)| {
+            let o = owner.to_lowercase();
+            !keep.contains(&o) && *age >= max_age && teams.contains(&o)
+        })
+        .map(|(name, _, _)| name.clone())
+        .collect()
+}
+
+/// The binding half of the beat; see `stale_bindings`. Keep-biased like `prune_namespaces` and in
+/// the same order for the same reason: bindings are listed FIRST, so the lists that spare them are
+/// never older than it, and any failed list prunes NOTHING.
+pub(crate) async fn prune_bindings(s: &ApiState) {
+    let Some(c) = s.kube.as_ref() else { return };
+    let listed = match Api::<crd::OwnerBinding>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "OwnerBinding", error = %e, "listing.failed");
+            return;
+        }
+    };
+    let mut keep = BTreeSet::new();
+    match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => keep.extend(l.items.into_iter().map(|w| w.spec.owner.to_lowercase())),
+        Err(e) => {
+            tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
+            return;
+        }
+    }
+    // An environment's controller reads `OwnerBinding.status.team` to size its quota, and a hidden
+    // builder is an environment too, so either keeps its owner's binding.
+    match Api::<crd::Environment>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => keep.extend(l.items.into_iter().map(|e| e.spec.owner.to_lowercase())),
+        Err(e) => {
+            tracing::warn!(kind = "Environment", error = %e, "listing.failed");
+            return;
+        }
+    }
+    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
+        Ok(l) => keep.extend(l.items.into_iter().map(|b| b.spec.owner.to_lowercase())),
+        Err(kube::Error::Api(e)) if e.code == 404 => {}
+        Err(e) => {
+            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
+            return;
+        }
+    }
+    let now = chrono::Utc::now().timestamp();
+    let max_age = KEYS_RESYNC_SECS as i64;
+    let seen: Vec<(String, String, i64)> = listed
+        .iter()
+        .map(|b| {
+            let age = b.metadata.creation_timestamp.as_ref().map_or(0, |t| now - t.0.as_second());
+            (b.name_any(), b.spec.owner.clone(), age)
+        })
+        .collect();
+    // The directory is asked only about owners that pass the other guards, as `team_owners` does.
+    let owners: BTreeSet<String> = seen
+        .iter()
+        .filter(|(_, o, age)| !keep.contains(&o.to_lowercase()) && *age >= max_age)
+        .map(|(_, o, _)| o.to_lowercase())
+        .collect();
+    let answers = futures::future::join_all(owners.iter().map(|o| super::scope::is_team(s, o))).await;
+    let teams: BTreeSet<String> = owners.into_iter().zip(answers).filter(|(_, t)| *t).map(|(o, _)| o).collect();
+    let api: Api<crd::OwnerBinding> = Api::all(c.clone());
+    for name in stale_bindings(&keep, &seen, max_age, &teams) {
+        match api.delete(&name, &Default::default()).await {
+            Ok(_) => tracing::info!(binding = %name, "keys.binding.pruned"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => tracing::warn!(binding = %name, error = %e, "keys.binding.prune.failed"),
+        }
+    }
+}
+
 /// Which of `seen` — `(name, spec.owner)` for every `system` environment — belongs to nobody any
 /// more. `keep` is `k8s::keys_owner` of every Workspace, the SAME fold `ensure_builder` names the
 /// builder with, so a team spelled `Alice` over an owner `alice` cannot keep one slug and delete
@@ -377,6 +463,109 @@ mod builder_prune_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dead team's old binding goes; a live owner's, a young one, a person's and an owner the
+    /// directory could not answer for all stay.
+    #[test]
+    fn only_an_old_binding_of_a_dead_team_is_stale() {
+        let keep = BTreeSet::from(["acme".to_string()]);
+        let teams = BTreeSet::from(["run-hourly-1-team".to_string(), "acme".to_string(), "run-hourly-2-team".to_string()]);
+        let seen = vec![
+            ("r1-run-hourly-1-team-x".to_string(), "Run-Hourly-1-Team".to_string(), 9999), // the leak
+            ("r1-acme-x".to_string(), "acme".to_string(), 9999),                            // still named
+            ("r1-run-hourly-2-team-x".to_string(), "run-hourly-2-team".to_string(), 10),    // too young
+            ("r1-bob-x".to_string(), "bob".to_string(), 9999),                              // not a team, or unknown
+        ];
+        assert_eq!(stale_bindings(&keep, &seen, 300, &teams), vec!["r1-run-hourly-1-team-x".to_string()]);
+        assert!(stale_bindings(&BTreeSet::new(), &seen, 300, &BTreeSet::new()).is_empty(), "no directory answer keeps all");
+    }
+
+    /// Any failed list prunes nothing: an empty keep set would read as every owner gone.
+    #[tokio::test]
+    async fn a_failed_listing_prunes_no_binding() {
+        let list = |kind: &str, items: serde_json::Value| serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": items});
+        let bindings = list("OwnerBindingList", serde_json::json!([{
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
+            "metadata": {"name": "r1-gone", "creationTimestamp": "2020-01-01T00:00:00Z"},
+            "spec": {"owner": "gone", "region": "r1"},
+        }]));
+        for failing in ["workspaces", "environments", "benches"] {
+            let route = |p: &str, kind: &str| {
+                let path = format!("/apis/kloudlite.io/v1alpha1/{p}");
+                if p == failing {
+                    crate::kube_test::Route { method: "GET", path, status: 500, body: serde_json::json!({}) }
+                } else {
+                    crate::kube_test::get(path, list(kind, serde_json::json!([])))
+                }
+            };
+            let (client, rec) = crate::kube_test::mock_client(vec![
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", bindings.clone()),
+                route("workspaces", "WorkspaceList"),
+                route("environments", "EnvironmentList"),
+                route("benches", "BenchList"),
+            ]);
+            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+            let mut s = ApiState::new(jwt);
+            s.kube = Some(client);
+            s.directory = Some(Arc::new(AllTeams));
+            prune_bindings(&s).await;
+            assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{failing}: {:?}", rec.calls());
+        }
+    }
+
+    /// With every list answered and the directory calling the owner a team, the binding is deleted.
+    #[tokio::test]
+    async fn a_dead_teams_binding_is_deleted() {
+        let list = |kind: &str, items: serde_json::Value| serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": items});
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", list("OwnerBindingList", serde_json::json!([{
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
+                "metadata": {"name": "r1-gone", "creationTimestamp": "2020-01-01T00:00:00Z"},
+                "spec": {"owner": "gone", "region": "r1"},
+            }]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", serde_json::json!([]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/environments", list("EnvironmentList", serde_json::json!([]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", serde_json::json!([]))),
+        ]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.kube = Some(client);
+        s.directory = Some(Arc::new(AllTeams));
+        prune_bindings(&s).await;
+        assert!(rec.calls().contains(&"DELETE /apis/kloudlite.io/v1alpha1/ownerbindings/r1-gone".to_string()), "{:?}", rec.calls());
+    }
+
+    struct AllTeams;
+    #[async_trait::async_trait]
+    impl crate::api::Directory for AllTeams {
+        async fn teams_for(&self, _u: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn is_live(&self, _j: &str) -> bool {
+            true
+        }
+        async fn for_owner(&self, _o: &str) -> Option<crate::api::OwnerMaterial> {
+            None
+        }
+        async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+            None
+        }
+        async fn owners_of(&self, _e: &str) -> Vec<String> {
+            Vec::new()
+        }
+        async fn team_role(&self, _u: &str, _t: &str) -> Option<crate::api::TeamRole> {
+            None
+        }
+        async fn is_team(&self, _s: &str) -> bool {
+            true
+        }
+        async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+        async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+            Err("no".into())
+        }
+    }
 
     /// The whole rule, and every way a namespace earns its keep. The `wt-bob-dead` case is the
     /// 2026-09-08 leak; every other row is one that must survive it.

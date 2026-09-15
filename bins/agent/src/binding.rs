@@ -11,11 +11,10 @@
 //! server-side-applied, which is convergent under concurrent appliers) and placement is the
 //! claim's own business.
 //!
-//! ponytail: bindings are never deleted, and the node-retirement path (`decommission.rs`) does
-//! not collect them — deliberately. A binding is an OWNER's namespaces, not a node's: draining
-//! the last node an owner happened to run on must not delete the namespace their workspaces come
-//! back to. The upgrade, if orphaned bindings ever cost anything, is an owner-deletion path in
-//! `/v1`, not a node-side sweep.
+//! The agent never deletes a binding, and the node-retirement path (`decommission.rs`) does not
+//! collect them — deliberately. A binding is an OWNER's namespaces, not a node's: draining the
+//! last node an owner happened to run on must not delete the namespace their workspaces come back
+//! to. A dead TEAM's binding is pruned by the api's keys beat (`api::keys::prune_bindings`).
 
 use crate::controller::{conditions_eq, ensure, patch_status, settle, Ctx, Outcome, ReconcileErr};
 use k8s_openapi::api::core::v1::{LimitRange, Namespace, ResourceQuota};

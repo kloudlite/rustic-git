@@ -51,11 +51,16 @@ rules:
   # ownerReference points at it any more and GC will never take it. `DELETE /v1/volumes/{name}`
   # and the last-snapshot arm of `DELETE .../snapshots/{id}` are the two callers, both refusing
   # while a live parent names it. `create` stays with the agent (a controller owns the children it
-  # authors); the API's parent delete is still one call to the Workspace. `ownerbindings` are gone
-  # from this file entirely: the claiming agent creates them now.
+  # authors); the API's parent delete is still one call to the Workspace.
   - apiGroups: ["kloudlite.io"]
     resources: ["volumes"]
     verbs: ["get", "list", "delete"]
+  # The claiming agent creates `ownerbindings`; the keys beat's prune (`api::keys::prune_bindings`)
+  # deletes one whose TEAM owner no Workspace, Bench or Environment names any more. Every agent
+  # re-applied each of 109 dead probe-team bindings ~36 times per 30 min until it did.
+  - apiGroups: ["kloudlite.io"]
+    resources: ["ownerbindings"]
+    verbs: ["list", "delete"]
   # Read for enforcement (`guard_alloc` needs the owner's effective limit) and for `GET /v1/quota`;
   # no create, patch or delete — writing a Quota is the admin role's alone.
   - apiGroups: ["kloudlite.io"]
