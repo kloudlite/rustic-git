@@ -24,7 +24,7 @@
 //! `docs/superpowers/specs/2026-09-14-person-environment-design.md` and
 //! `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`.
 
-use super::{delete_ignoring_404, ensure, owner_ref_of_kind, Ctx, ReconcileErr};
+use super::{delete_ignoring_404, ensure, forget_applied, owner_ref_of_kind, Ctx, ReconcileErr};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{Api, ResourceExt};
@@ -136,16 +136,28 @@ pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attache
     let from_space = chosen.as_ref().is_some_and(|c| c.space.is_some());
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     let legacy_name = k8s::attach_policy_name(p.id);
+    // Every legacy delete forgets `ensure`'s memory of the policy: fallback → choice → fallback
+    // inside the 600 s skip would otherwise leave the pair missing.
+    let drop_legacy_egress = || async {
+        delete_ignoring_404(&policies, &legacy_name).await?;
+        forget_applied(ctx, "NetworkPolicy", &ns, &legacy_name);
+        Ok::<(), ReconcileErr>(())
+    };
     let drop_legacy_ingress = |env_id: String| {
-        let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &crd::env_namespace(&env_id));
+        let env_ns = crd::env_namespace(&env_id);
+        let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &env_ns);
         let name = legacy_name.clone();
-        async move { delete_ignoring_404(&api, &name).await }
+        async move {
+            delete_ignoring_404(&api, &name).await?;
+            forget_applied(ctx, "NetworkPolicy", &env_ns, &name);
+            Ok::<(), ReconcileErr>(())
+        }
     };
     let reason = match (&env, &env_ns, from_space) {
         // A choice exists: its grants are the controller's; the legacy pair goes once.
         (Some(_), Some(_), true) => {
             if let Some(old) = legacy_prev {
-                delete_ignoring_404(&policies, &legacy_name).await?;
+                drop_legacy_egress().await?;
                 drop_legacy_ingress(old.message.clone()).await?;
             }
             SPACE_REASON
@@ -163,7 +175,7 @@ pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attache
         }
         _ => {
             if let Some(old) = legacy_prev {
-                delete_ignoring_404(&policies, &legacy_name).await?;
+                drop_legacy_egress().await?;
                 drop_legacy_ingress(old.message.clone()).await?;
             }
             ""

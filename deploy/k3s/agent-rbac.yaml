@@ -109,8 +109,10 @@
 #                                                                       namespace, which the proxy dials
 #   networkpolicies                        create,patch,list            ensure of the intercept pair
 #                                                                       (`intercept-{ws}-{service}`)
-#                                                                       and the legacy per-pod
-#                                                                       `attach-{id}` pair; list for
+#                                                                       the legacy per-pod
+#                                                                       `attach-{id}` pair and the
+#                                                                       bench's own `bench-{id}`
+#                                                                       ingress; list for
 #                                                                       prune_attach_grants
 #                                          delete                       delete_ignoring_404 of those
 #                                                                       two pairs only — never a

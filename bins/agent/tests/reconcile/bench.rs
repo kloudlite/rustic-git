@@ -230,11 +230,8 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
 #[tokio::test]
 async fn a_bench_follows_its_spaces_environment() {
     let tmp = homes_pool();
-    let np = |path: String| kloudlite_workspaces::kube_test::patch(path, serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "space"}}));
-    let egress = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/space-env", ns());
-    let ingress = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/space-{}", crd::env_namespace("env-abc"), ns());
     let mut routes = up_to_the_pod(not_found(pod_path()));
-    routes.extend([np(egress.clone()), np(ingress.clone()), env_route("env-abc", "r1")]);
+    routes.push(env_route("env-abc", "r1"));
     let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
     ctx.remember_spaces(vec![space("alice", "acme", "env-abc")]);
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx.clone()).await.unwrap();

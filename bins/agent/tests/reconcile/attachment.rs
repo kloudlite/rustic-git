@@ -136,7 +136,7 @@ async fn a_switch_rewrites_resolv_conf_in_place() {
 /// controller owns it and deletes it on a transition.
 #[tokio::test]
 async fn the_environment_never_prunes_a_space_grant() {
-    for (spaces, deleted) in [(Some("env-other"), false), (Some("env-1"), false), (None, false)] {
+    for spaces in [Some("env-other"), Some("env-1"), None] {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![kloudlite_workspaces::kube_test::get(
             "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies",
@@ -149,7 +149,7 @@ async fn the_environment_never_prunes_a_space_grant() {
         }
         let _ = kloudlite_agent::controller::apply_environment(&environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"})), &ctx).await;
         let did = rec.calls().contains(&"DELETE /apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/space-ws-alice".to_string());
-        assert_eq!(did, deleted, "space -> {spaces:?}: {:?}", rec.calls());
+        assert!(!did, "space -> {spaces:?}: {:?}", rec.calls());
     }
 }
 
@@ -280,6 +280,32 @@ async fn the_field_fallback_manages_only_the_pods_own_legacy_pair() {
     let calls = rec.calls();
     assert!(calls.contains(&"DELETE /apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1".to_string()), "{calls:?}");
     assert!(!calls.iter().any(|c| c.contains("space-env")), "{calls:?}");
+}
+
+/// A dropped legacy pair is re-applied when the fallback needs it again in the same process:
+/// the delete forgets `ensure`'s memory, or the 600 s skip would leave the pair missing.
+#[tokio::test]
+async fn a_dropped_legacy_pair_is_reapplied_when_needed_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = attach_routes();
+    routes.extend([env_route("env-abc", "r1"), legacy_np("ws-alice"), legacy_np("env-abc"), Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/workspaces/ws-1".into(), status: 200, body: ws_json(serde_json::json!({})) }]);
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    let egress = "/apis/networking.k8s.io/v1/namespaces/ws-alice/networkpolicies/attach-ws-1";
+    let ingress = "/apis/networking.k8s.io/v1/namespaces/env-abc/networkpolicies/attach-ws-1";
+    let mut w = ready_workspace("ws-1", vec![]);
+    w.spec.attached_environment = Some("env-abc".into());
+    apply_until_settled(&w, &ctx).await;
+    let (e1, i1) = (rec.sent("PATCH", egress).len(), rec.sent("PATCH", ingress).len());
+    assert!(e1 > 0 && i1 > 0, "{:?}", rec.calls());
+
+    let mut detached = ready_workspace("ws-1", vec![]);
+    detached.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Converged", "env-abc", 1)];
+    kloudlite_agent::controller::apply_workspace(&detached, &ctx).await.unwrap();
+    assert!(rec.calls().contains(&format!("DELETE {egress}")), "{:?}", rec.calls());
+
+    apply_until_settled(&w, &ctx).await;
+    assert!(rec.sent("PATCH", egress).len() > e1, "egress re-applied: {:?}", rec.calls());
+    assert!(rec.sent("PATCH", ingress).len() > i1, "ingress re-applied: {:?}", rec.calls());
 }
 
 /// Once the migration has settled an object, its still-set field is ignored: a choice the person
