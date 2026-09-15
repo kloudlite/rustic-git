@@ -52,6 +52,13 @@ pub const DELETE_NOW: &str = "kloudlite.io/delete-now";
 /// manager wrote it).
 pub const DELETE_AFTER: &str = "kloudlite.io/delete-after";
 pub const MEMBERSHIP_FIELD_MANAGER: &str = "kloudlite-membership";
+/// The controller's removal GC tick. Here, not in the controller, so the SLO probe's bound is
+/// computed from the same numbers the GC runs on.
+pub const GC_TICK_SECS: u64 = 60;
+/// How far past `delete-after` an object must be before the GC deletes it: one keys beat plus a
+/// margin. Every re-add clears the mark, but some paths (a superadmin grant from the admin process,
+/// an accept whose immediate reconcile timed out) only clear on the api's keys beat.
+pub const GC_DELETE_SLACK_SECS: u64 = super::keys::KEYS_RESYNC_SECS + 60;
 
 #[derive(Debug, PartialEq)]
 pub enum Verdict {

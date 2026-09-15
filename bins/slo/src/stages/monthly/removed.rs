@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use super::*;
 use crate::stages::{call, clip, raw};
-use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, REMOVED_AT};
+use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, GC_DELETE_SLACK_SECS, GC_TICK_SECS, REMOVED_AT};
 use kloudlite_workspaces::crd;
 use kube::api::ListParams;
 
@@ -30,9 +30,11 @@ const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
 /// How long teardown waits for the workspace before deleting the snapshot it was based on.
 const WS_GONE: Duration = Duration::from_secs(60);
-/// The GC's slack past delete-after (`DELETE_SLACK_SECS`, 360 s), two 60 s ticks, and the agent's
-/// bench-folder finalizer and the workspace's own.
-const GC_BOUND: Duration = Duration::from_secs(540);
+/// The GC's slack past delete-after, two of its ticks (one to land in, one for a pass that listed
+/// just before), and 180 s for the finalizers that run after the delete: the agent's bench-folder
+/// removal and the workspace's sync-point cleanup. 660 s today.
+const GC_BOUND: Duration = Duration::from_secs(GC_DELETE_SLACK_SECS + 2 * GC_TICK_SECS + FINALIZER_HEADROOM_SECS);
+const FINALIZER_HEADROOM_SECS: u64 = 180;
 const CLEANUP_CEILING: Duration = Duration::from_secs(GC_BOUND.as_secs() + 120);
 
 fn team(c: &Ctx) -> String {
@@ -258,6 +260,13 @@ async fn teardown(c: &Ctx, team: &str, p: Option<&Prep>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The catalogue's "Within 11 minutes" is this bound; a change to either constant must move both.
+    #[test]
+    fn the_bound_is_the_gc_constants_plus_finalizer_headroom() {
+        assert_eq!(GC_BOUND.as_secs(), 660);
+        assert!(kloudlite_workspaces::slo::catalogue::find(CLEANUP_ID).unwrap().sli.starts_with("Within 11 minutes"));
+    }
 
     #[test]
     fn both_ids_are_catalogued_monthly() {

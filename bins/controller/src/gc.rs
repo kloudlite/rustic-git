@@ -23,19 +23,16 @@
 use crate::Ctx;
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::jiff::Timestamp;
-use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER};
+use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, GC_DELETE_SLACK_SECS, GC_TICK_SECS};
 use kloudlite_workspaces::{crd, k8s};
 use kube::api::{Api, DeleteParams, Preconditions};
 use kube::{Resource, ResourceExt};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const TICK: Duration = Duration::from_secs(60);
-/// How far past `delete-after` an object must be before it goes: one keys beat plus a margin.
-/// Every re-add clears the mark, but some paths (a superadmin grant from the admin process, an
-/// accept whose immediate reconcile timed out) only clear on the api's keys beat — without this
-/// slack the GC could delete a person who was re-added a moment after their mark fell due.
-pub const DELETE_SLACK_SECS: i64 = kloudlite_workspaces::api::keys::KEYS_RESYNC_SECS as i64 + 60;
+pub const TICK: Duration = Duration::from_secs(GC_TICK_SECS);
+/// `GC_DELETE_SLACK_SECS`; its reason lives beside it.
+pub const DELETE_SLACK_SECS: i64 = GC_DELETE_SLACK_SECS as i64;
 
 pub async fn run(ctx: Arc<Ctx>) {
     let mut tick = tokio::time::interval(TICK);
