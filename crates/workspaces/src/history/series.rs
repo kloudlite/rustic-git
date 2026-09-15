@@ -171,7 +171,7 @@ pub fn sql_for(series: &str, q: &SeriesQuery) -> Option<String> {
         "firing_signals" => format!(
             "SELECT b, countIf(s = 'firing') AS v FROM (\
                 SELECT b, region, rule, argMaxIf(state, ts, ts <= b) AS s \
-                FROM (SELECT {bucket}(now() - INTERVAL n HOUR) AS b \
+                FROM (SELECT {bucket}(now() - INTERVAL number HOUR) AS b \
                       FROM numbers({days} * 24)) AS buckets \
                 CROSS JOIN (SELECT ts, region, rule, state FROM kloudlite.alerts FINAL \
                             WHERE 1 = 1 {region_filter}) AS a \

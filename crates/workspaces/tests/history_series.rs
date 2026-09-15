@@ -229,3 +229,17 @@ fn audit_events_is_central_only_and_matches_the_admin_namespace() {
     assert!(sql.contains("kind LIKE 'admin.%'"), "{sql}");
     assert!(!sql.contains("region ="), "{sql}");
 }
+
+/// `numbers(N)` yields a column named `number`; a bare `n` was a ClickHouse code 47 on every
+/// Overview load until 2026-09-16. Asserted over every statement, since the tokens are cheap.
+#[test]
+fn no_statement_names_a_bare_n() {
+    let usage = SeriesQuery { owner: Some("acme".into()), dimension: Some("cpu".into()), ..q() };
+    for (name, query) in NAMES.iter().map(|n| (*n, q())).chain([("usage", usage)]) {
+        let sql = sql_for(name, &query).unwrap();
+        assert!(
+            !sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|t| t == "n"),
+            "{name}: {sql}"
+        );
+    }
+}
