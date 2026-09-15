@@ -1,8 +1,8 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { BadGateway, ensureBench, Expired, listTeams, mintSession } from "../../src/connect/bench.ts";
+import { BadGateway, ensureBench, Expired, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "../../src/connect/bench.ts";
 
 type Answer = { status: number; body?: unknown };
 /** A stub api answering each route (method + path + query) from its own queue; the last answer repeats. */
@@ -195,6 +195,110 @@ test("an abort cancels the 202 wait loop instead of retrying forever", async () 
     const seenAfterAbort = s.calls.length;
     await new Promise((r) => setTimeout(r, 60));
     assert.equal(s.calls.length, seenAfterAbort); // no further polling after abort
+  } finally {
+    s.close();
+  }
+});
+
+const TOOL = "POST /v1/bench/tool-token?team=acme";
+const DROP = "DELETE /v1/bench/tool-token?team=acme";
+const settle = () => new Promise((r) => setImmediate(r)).then(() => new Promise((r) => setTimeout(r, 30)));
+
+test("connect mints a tool token after the bench is ensured", async () => {
+  const s = await stub({ [SESSION]: [ready], [TOOL]: [{ status: 204 }] });
+  try {
+    await ensureBench(s.api, "tok", "acme", () => undefined, fast);
+    await mintToolToken(s.api, "tok", "acme");
+    assert.deepEqual(s.calls, [SESSION, TOOL]);
+    assert.equal(s.auth[1], "Bearer tok");
+  } finally {
+    s.close();
+  }
+});
+
+test("a tool token refusal carries the api's sentence and status", async () => {
+  const s = await stub({ [TOOL]: [{ status: 409, body: { error: "bench is stopped; start it" } }] });
+  try {
+    await assert.rejects(mintToolToken(s.api, "tok", "acme"), (e: Error & { status?: number }) => e.message === "bench is stopped; start it" && e.status === 409);
+  } finally {
+    s.close();
+  }
+});
+
+test("the tool token is renewed every five minutes and stops on disconnect", async () => {
+  const s = await stub({ [TOOL]: [{ status: 204 }] });
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    const stop = keepToolToken(s.api, "tok", "acme", () => assert.fail("not expired"));
+    mock.timers.tick(5 * 60_000 - 1);
+    await settle();
+    assert.deepEqual(s.calls, []);
+    mock.timers.tick(1);
+    await settle();
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    assert.deepEqual(s.calls, [TOOL, TOOL]);
+    stop();
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(s.calls.length, 2);
+  } finally {
+    mock.timers.reset();
+    s.close();
+  }
+});
+
+test("a renew answered 401 expires the login", async () => {
+  const s = await stub({ [TOOL]: [{ status: 401 }] });
+  mock.timers.enable({ apis: ["setInterval"] });
+  let expired = 0;
+  try {
+    keepToolToken(s.api, "tok", "acme", () => void expired++);
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    assert.equal(expired, 1);
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    assert.equal(s.calls.length, 1); // the beat stops with the login
+  } finally {
+    mock.timers.reset();
+    s.close();
+  }
+});
+
+test("a renew answered 409 stops the beat instead of retrying", async () => {
+  const s = await stub({ [TOOL]: [{ status: 409, body: { error: "bench is stopped; start it" } }] });
+  mock.timers.enable({ apis: ["setInterval"] });
+  const err = mock.method(console, "error", () => undefined);
+  try {
+    keepToolToken(s.api, "tok", "acme", () => assert.fail("not expired"));
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    assert.equal(s.calls.length, 1);
+  } finally {
+    err.mock.restore();
+    mock.timers.reset();
+    s.close();
+  }
+});
+
+test("sign-out deletes the tool token before revoking the login", async () => {
+  const s = await stub({ [DROP]: [{ status: 204 }], "DELETE /v1/cli/tokens/j1": [{ status: 204 }] });
+  try {
+    await revokeLogin(s.api, "tok", "acme", "j1");
+    assert.deepEqual(s.calls, [DROP, "DELETE /v1/cli/tokens/j1"]);
+  } finally {
+    s.close();
+  }
+});
+
+test("sign-out still revokes the login when the tool token delete fails", async () => {
+  const s = await stub({ [DROP]: [{ status: 500 }], "DELETE /v1/cli/tokens/j1": [{ status: 204 }] });
+  try {
+    await revokeLogin(s.api, "tok", "acme", "j1");
+    assert.deepEqual(s.calls, [DROP, "DELETE /v1/cli/tokens/j1"]);
   } finally {
     s.close();
   }

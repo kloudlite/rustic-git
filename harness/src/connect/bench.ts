@@ -139,3 +139,44 @@ export async function mintSession(api: string, token: string, team: string, opts
     return a.body as Session;
   }
 }
+
+/**
+ * The bench's tool credential (`POST|DELETE /v1/bench/tool-token`, `api/bench.rs`): a 15-minute
+ * token the api writes into the bench pod's Secret. This process only asks for it — the token
+ * itself never reaches us, so nothing here can leak it over IPC.
+ */
+export async function mintToolToken(api: string, token: string, team: string, signal?: AbortSignal): Promise<void> {
+  const a = await call(api, token, "POST", `/v1/bench/tool-token${q(team)}`, undefined, signal ?? AbortSignal.timeout(10_000));
+  if (a.status >= 300) throw Object.assign(refused(a), { status: a.status });
+}
+
+export async function dropToolToken(api: string, token: string, team: string): Promise<void> {
+  await call(api, token, "DELETE", `/v1/bench/tool-token${q(team)}`, undefined, AbortSignal.timeout(5000)).catch(() => undefined);
+}
+
+/**
+ * Renews every `everyMs` (5 min, inside the 15-minute TTL with room for the kubelet's Secret sync)
+ * until the returned stop runs. A 401 ends the login; a 409 (bench stopped) ends the beat, since
+ * every further renew would be refused the same way until the next Connect.
+ */
+export function keepToolToken(api: string, token: string, team: string, onExpired: () => void, everyMs = 5 * 60_000): () => void {
+  const timer = setInterval(() => {
+    mintToolToken(api, token, team).catch((e: Error & { status?: number }) => {
+      if (e.name === "Expired") return clearInterval(timer), onExpired();
+      if (e.status === 409) clearInterval(timer);
+      console.error(`bench tool token: ${e.message}`);
+    });
+  }, everyMs);
+  return () => clearInterval(timer);
+}
+
+/** Sign-out: the bench's tool token first (it hangs off this login), then the login itself. */
+export async function revokeLogin(api: string, token: string, team: string | undefined, jti: string): Promise<void> {
+  if (team) await dropToolToken(api, token, team);
+  await fetch(`${api}/v1/cli/tokens/${encodeURIComponent(jti)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(5000),
+  }).catch(() => undefined);
+}

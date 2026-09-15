@@ -8,7 +8,7 @@ import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from 
 import { createStore } from "./auth/store";
 import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/device";
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
-import { ensureBench, listTeams, mintSession } from "./connect/bench";
+import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { getEnvironment, listEnvironments, listWorkspaces, volumeHistory } from "./connect/platform";
 
@@ -344,7 +344,10 @@ ipcMain.handle("set-theme", (_e, mode: unknown) => {
 
 /** Tears down whatever Connect built; safe to call when nothing is connected. */
 let closeTunnel: (() => void) | undefined;
+let stopToolToken: (() => void) | undefined;
 function disconnect() {
+  stopToolToken?.();
+  stopToolToken = undefined;
   bench?.close();
   bench = undefined;
   closeTunnel?.();
@@ -413,6 +416,9 @@ function authDeps(): Deps {
           bench = new BenchClient(BENCH, toRenderer, cache, `${c.username}@${BENCH}`);
         } else {
           await ensureBench(c.api, c.token, team, step);
+          // Not fatal: without a tool token the bench still works and its tools say to sign in.
+          await mintToolToken(c.api, c.token, team).catch((e) => (e.name === "Expired" ? Promise.reject(e) : console.error(`bench tool token: ${e.message}`)));
+          stopToolToken = keepToolToken(c.api, c.token, team, () => auth.expired());
           const t = await openTunnel(
             () => mintSession(c.api, c.token, team),
             (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
@@ -431,13 +437,11 @@ function authDeps(): Deps {
     revoke: async (c: Credential) => {
       const jti = claim(c.token, "jti");
       if (!jti) return;
+      // Stop renewing first, so no beat re-mints between the delete and the revoke.
+      stopToolToken?.();
+      stopToolToken = undefined;
       // Best effort: a login that cannot be revoked server-side still leaves this disk.
-      await fetch(`${c.api}/v1/cli/tokens/${encodeURIComponent(jti)}`, {
-        method: "DELETE",
-        headers: { authorization: `Bearer ${c.token}` },
-        redirect: "error",
-        signal: AbortSignal.timeout(5000),
-      }).catch(() => undefined);
+      await revokeLogin(c.api, c.token, teamStore.load(), jti);
     },
     emit: emitAuth,
   };
