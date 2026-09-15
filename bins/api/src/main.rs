@@ -117,6 +117,18 @@ impl kloudlite_workspaces::api::Directory for Dir {
         self.0.get(slug).await.ok().flatten().is_some()
     }
 
+    // Person first: a handle is never pruned, even if a team row ever shared its slug.
+    async fn owner_kind(&self, slug: &str) -> std::result::Result<kloudlite_workspaces::api::OwnerKind, String> {
+        use kloudlite_workspaces::api::OwnerKind;
+        if self.0.user_by_handle(slug).await.map_err(|e| e.to_string())?.is_some() {
+            return Ok(OwnerKind::Person);
+        }
+        Ok(match self.0.get(slug).await.map_err(|e| e.to_string())? {
+            Some(_) => OwnerKind::Team,
+            None => OwnerKind::Gone,
+        })
+    }
+
     // Straight from the directory, no cache: a removed member's next call no longer lists the team.
     async fn membership(&self, team: &str, user: &str) -> std::result::Result<kloudlite_workspaces::api::Judged, String> {
         use kloudlite_pulls::directory::{MemberState as S, MembershipErr};

@@ -536,7 +536,11 @@ touches `OwnerKeys`). The `user-key` Secret no longer carries `authorized_keys`.
 resolves to, is older than one beat, and holds no pod (`api::keys::prune_namespaces`). The
 namespace half is what stops a deleted team leaving one behind — nothing had ever deleted one, and
 a region held 101 empty ones by 2026-09-08, one per hourly probe run. A person's own `ws-`
-namespace is never a candidate.
+namespace is never a candidate. The same beat deletes an `OwnerBinding` no Workspace, Environment
+or Bench names, older than one beat, whose owner the directory positively answers is not a person
+(`Directory::owner_kind` → team or gone; a failed read keeps) — `api::keys::prune_bindings`; 109 of
+116 were dead probe teams on 2026-09-16, re-applied by every agent on every Quota event. A parent
+that then finds its binding missing recreates it (`binding::namespace_ready`).
 
 **Membership is `active`/`paused`, not just in/out** (`MemberState` in
 `crates/pulls/src/directory/members.rs`); `crates/api/src/teams/pause.rs`'s pause/unpause routes

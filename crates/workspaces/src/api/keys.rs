@@ -197,8 +197,21 @@ async fn team_owners(s: &ApiState, keep: &BTreeSet<String>, seen: &[(String, i64
         .filter(|(name, age)| !keep.contains(name) && *age >= max_age)
         .filter_map(|(name, _)| name.strip_prefix("ws-").map(str::to_string))
         .collect();
-    let answers = futures::future::join_all(owners.iter().map(|o| super::scope::is_team(s, o))).await;
-    owners.into_iter().zip(answers).filter(|(_, team)| *team).map(|(o, _)| o).collect()
+    prunable_owners(s, owners).await
+}
+
+/// The owners a prune may treat as not a person: the directory ANSWERED, and named a team or
+/// nothing at all. A person, a failed read and a missing directory all keep.
+async fn prunable_owners(s: &ApiState, owners: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    let Some(dir) = s.directory.as_ref() else { return BTreeSet::new() };
+    let owners: Vec<String> = owners.into_iter().collect();
+    let answers = futures::future::join_all(owners.iter().map(|o| dir.owner_kind(o))).await;
+    owners
+        .into_iter()
+        .zip(answers)
+        .filter(|(_, k)| matches!(k, Ok(super::OwnerKind::Team | super::OwnerKind::Gone)))
+        .map(|(o, _)| o)
+        .collect()
 }
 
 /// The namespace half of the same beat: see `stale_namespaces` for the rule and why it is safe.
@@ -284,7 +297,9 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
 /// 2026-09-16 109 of 116 were probe teams gone for days, each re-applied by every agent on every
 /// Quota event. The rule is `stale_namespaces`' for a `ws-` team namespace: no Workspace, Bench or
 /// Environment names the owner (`keep`, lowercased — `binding_name` folds case), older than a beat,
-/// and the directory calls the owner a team; a person, or anyone it could not answer for, is kept.
+/// and the directory answered that the owner is not a person (a team, or gone — the leak's teams
+/// were deleted); a person, or anyone it could not answer for, is kept. A claim that races the
+/// delete is healed by the agent: `namespace_ready` recreates a missing binding.
 ///
 /// What a delete takes, by ownerReference: the four NetworkPolicies and two RoleBindings
 /// `apply_binding` stamps in the owner's namespaces — nothing else names it as owner. With nothing
@@ -352,8 +367,7 @@ pub(crate) async fn prune_bindings(s: &ApiState) {
         .filter(|(_, o, age)| !keep.contains(&o.to_lowercase()) && *age >= max_age)
         .map(|(_, o, _)| o.to_lowercase())
         .collect();
-    let answers = futures::future::join_all(owners.iter().map(|o| super::scope::is_team(s, o))).await;
-    let teams: BTreeSet<String> = owners.into_iter().zip(answers).filter(|(_, t)| *t).map(|(o, _)| o).collect();
+    let teams = prunable_owners(s, owners).await;
     let api: Api<crd::OwnerBinding> = Api::all(c.clone());
     for name in stale_bindings(&keep, &seen, max_age, &teams) {
         match api.delete(&name, &Default::default()).await {
@@ -507,37 +521,75 @@ mod tests {
             let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
             let mut s = ApiState::new(jwt);
             s.kube = Some(client);
-            s.directory = Some(Arc::new(AllTeams));
+            s.directory = Some(Arc::new(AllTeams(true)));
             prune_bindings(&s).await;
             assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{failing}: {:?}", rec.calls());
         }
     }
 
-    /// With every list answered and the directory calling the owner a team, the binding is deleted.
+    /// The directory as production answers it: a deleted team is `Gone` (and `is_team` false), a
+    /// person is a `Person`. The gone team's binding is deleted, the person's kept, and a
+    /// directory that cannot answer keeps both.
     #[tokio::test]
-    async fn a_dead_teams_binding_is_deleted() {
+    async fn a_gone_teams_binding_is_deleted_and_a_persons_is_kept() {
         let list = |kind: &str, items: serde_json::Value| serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": items});
+        let binding = |owner: &str| serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
+            "metadata": {"name": format!("r1-{owner}"), "creationTimestamp": "2020-01-01T00:00:00Z"},
+            "spec": {"owner": owner, "region": "r1"},
+        });
+        for answers in [true, false] {
+            let (client, rec) = crate::kube_test::mock_client(vec![
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", list("OwnerBindingList", serde_json::json!([binding("gone"), binding("bob")]))),
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", serde_json::json!([]))),
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/environments", list("EnvironmentList", serde_json::json!([]))),
+                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", serde_json::json!([]))),
+            ]);
+            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+            let mut s = ApiState::new(jwt);
+            s.kube = Some(client);
+            s.directory = Some(Arc::new(AllTeams(answers)));
+            prune_bindings(&s).await;
+            let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+            let want = if answers { vec!["DELETE /apis/kloudlite.io/v1alpha1/ownerbindings/r1-gone".to_string()] } else { vec![] };
+            assert_eq!(deleted, want, "answers={answers}");
+        }
+    }
+
+    /// The same directory answer drives the `ws-` namespace arm: a gone team's is pruned, a
+    /// person's never.
+    #[tokio::test]
+    async fn a_gone_teams_ws_namespace_is_pruned_and_a_persons_is_not() {
+        let list = |kind: &str, api: &str, items: serde_json::Value| serde_json::json!({"apiVersion": api, "kind": kind, "metadata": {}, "items": items});
+        let ns = |name: &str| serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name, "creationTimestamp": "2020-01-01T00:00:00Z"}});
         let (client, rec) = crate::kube_test::mock_client(vec![
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", list("OwnerBindingList", serde_json::json!([{
-                "apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerBinding",
-                "metadata": {"name": "r1-gone", "creationTimestamp": "2020-01-01T00:00:00Z"},
-                "spec": {"owner": "gone", "region": "r1"},
-            }]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", serde_json::json!([]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/environments", list("EnvironmentList", serde_json::json!([]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", serde_json::json!([]))),
+            crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([ns("ws-gone"), ns("ws-bob")]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
+            crate::kube_test::get("/api/v1/namespaces/ws-gone/pods", list("PodList", "v1", serde_json::json!([]))),
+            crate::kube_test::get("/api/v1/namespaces/ws-bob/pods", list("PodList", "v1", serde_json::json!([]))),
         ]);
         let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let mut s = ApiState::new(jwt);
         s.kube = Some(client);
-        s.directory = Some(Arc::new(AllTeams));
-        prune_bindings(&s).await;
-        assert!(rec.calls().contains(&"DELETE /apis/kloudlite.io/v1alpha1/ownerbindings/r1-gone".to_string()), "{:?}", rec.calls());
+        s.directory = Some(Arc::new(AllTeams(true)));
+        prune_namespaces(&s).await;
+        let deleted: Vec<String> = rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
+        assert_eq!(deleted, vec!["DELETE /api/v1/namespaces/ws-gone".to_string()]);
     }
 
-    struct AllTeams;
+    /// Mirrors production: `is_team` is false for a deleted team. `owner_kind` answers `bob` as a
+    /// person and anything else as gone — or, with `false`, fails every read.
+    struct AllTeams(bool);
     #[async_trait::async_trait]
     impl crate::api::Directory for AllTeams {
+        async fn owner_kind(&self, slug: &str) -> Result<crate::api::OwnerKind, String> {
+            match (self.0, slug) {
+                (false, _) => Err("unreadable".into()),
+                (true, "bob") => Ok(crate::api::OwnerKind::Person),
+                (true, _) => Ok(crate::api::OwnerKind::Gone),
+            }
+        }
         async fn teams_for(&self, _u: &str) -> Vec<String> {
             Vec::new()
         }

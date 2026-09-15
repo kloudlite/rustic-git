@@ -148,6 +148,13 @@ pub trait Directory: Send + Sync {
         Err("unsupported".into())
     }
 
+    /// What `slug` names, with "nothing" a positive answer rather than a failed read — `is_team`
+    /// alone answers `false` for a deleted team and a person alike, so a prune keyed on it never
+    /// fired for the teams it was written for. `Err` = unreadable or unsupported: keep.
+    async fn owner_kind(&self, _slug: &str) -> Result<OwnerKind, String> {
+        Err("unsupported".into())
+    }
+
     /// Is `user` (a handle) on the superadmin roster ROW, not merely carrying the token claim? A
     /// revoked superadmin keeps the claim for the token's life. `Err` refuses; so does the default.
     async fn is_superadmin(&self, _user: &str) -> Result<bool, String> {
@@ -175,6 +182,14 @@ pub trait Directory: Send + Sync {
 
 /// A strict membership answer. A paused member is not a member for access (`teams_for` omits the
 /// team) but IS one for data: nothing of theirs is pruned or rewritten while paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerKind {
+    Person,
+    Team,
+    /// Neither a person nor a team exists under this slug, and the directory said so.
+    Gone,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Judged {
     TeamGone,
