@@ -33,3 +33,16 @@
 - With `memberRemovalDeletes` off on the fleet, cleanup will skip every month until the setting is flipped.
 - dir_down needs a directory fault hook (e.g. a netpol denying api→directory egress through `drill::with_netpol`), filed and not built.
 - The audit `action` filter is assumed to be an exact match, and `target` is sent URL-encoded (`%2F`).
+
+## Fix round 1
+
+- **Q1+Q2, skip decided first.** Before anything is created, `cleanup` reads `GET /admin/settings/central` with the admin token. If `memberRemovalDeletes` is not stored as `true`, the id skips with "memberRemovalDeletes is off on this fleet: a removal only marks the pair". The stored document leaves an unset field out and the compiled-in default is off, so a missing field counts as off (`deletes_on`, unit-tested). If the read fails, the step is recorded as failed. The `deletes_enabled` check on the delete-now answer stays as a second guard, with the same reason.
+- **Teardown.** The workspace and the kept snapshot are deleted as `probe_jwt`, and both deletes run BEFORE the member removal. Nothing is deleted with the removed member's token.
+- **Run-prefixed workspace id: not possible.** `create_ws` names the id `rid("ws")` on the server and the create body has no id field. The workspace NAME (`run-{id}-rmv-ws`) and the push message (`run-{id}-rmv`) carry the prefix instead. The push message is what `sweep_detached_volumes` matches on.
+- **`sweep_teams`.** Before `drain_team` (which deletes the team's workspaces), it now calls `sweep_detached_volumes(c, &slug, jwt, matches)`, so a crashed run's detached volume is collected by the next run. No ordering unit test: `sweep_teams` is HTTP-only against a live api and has no test seam today, and building a mock api for it is out of scope.
+- **Q5.** The re-add check now requires 404 AND a body containing "no bench".
+- **Q6.** "(filed)" removed from the dir_down reason.
+- **Verification.** `cargo test -p kloudlite-workspaces slo` 11 passed; `cargo test -p kloudlite-slo-bin` 153 passed; clippy with `-D warnings` clean.
+- **Concerns.**
+  - `sweep_detached_volumes(c, &slug, …)` lists `/v1/volumes?owner={team}`. A team workspace's Volume may be owned by the PERSON rather than the team, and then this finds nothing. The per-owner sweep over the member still catches it, because the history messages carry the prefix.
+  - `probe_jwt` deleting another member's team workspace and snapshot assumes the team owner is allowed to. If the api refuses, the next run's sweep collects them.

@@ -740,6 +740,9 @@ async fn sweep_teams<M: Fn(&str) -> bool>(c: &mut Ctx, jwt: &str, matches: &M) -
         // A team with an orphaned workspace is worse than a leaked team: the workspace is billed
         // to an owner that no longer exists and no listing anywhere shows it. So the team is
         // deleted only once its workspaces are gone, and the sweep gives up on it otherwise.
+        // A crashed removal drill leaves a detached volume under the team; collect it with the
+        // team's workspaces (the drain below) so the delete is not stranded behind them.
+        gone += sweep_detached_volumes(c, &slug, jwt, matches).await;
         if let Err(e) = drain_team(c, &slug, jwt).await {
             tracing::warn!(kind = "team", op = "drain", name = %slug, error = %format!("{e:#}"), "slo.teardown.failed");
             continue;

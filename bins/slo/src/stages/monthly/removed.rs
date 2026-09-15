@@ -23,7 +23,7 @@ pub(crate) const CLEANUP_ID: &str = "team.member.removed.cleanup";
 pub(crate) const DIR_DOWN_ID: &str = "team.member.removed.dir_down";
 /// The drills suite has no hook that points the api's directory at a black hole; not built here.
 pub(crate) const NO_DIR_HOOK: &str =
-    "no directory fault hook in the drills suite: nothing points the api's directory address at a black hole for one beat (filed)";
+    "no directory fault hook in the drills suite: nothing points the api's directory address at a black hole for one beat";
 /// Two membership beats (the keys beat, 300 s).
 const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
@@ -147,6 +147,13 @@ async fn audited(c: &Ctx, team: &str) -> Result<()> {
     Ok(())
 }
 
+const DELETES_OFF: &str = "memberRemovalDeletes is off on this fleet: a removal only marks the pair";
+
+/// The stored document omits an unset field, and the compiled-in default is off, so absent is off.
+fn deletes_on(doc: &Value) -> bool {
+    doc.get("memberRemovalDeletes").and_then(Value::as_bool) == Some(true)
+}
+
 pub(crate) async fn member_removed(c: &mut Ctx) {
     cleanup(c).await;
     c.skip(DIR_DOWN_ID, NO_DIR_HOOK);
@@ -155,6 +162,16 @@ pub(crate) async fn member_removed(c: &mut Ctx) {
 async fn cleanup(c: &mut Ctx) {
     if c.kube.is_none() {
         return c.skip(CLEANUP_ID, "no kubeconfig");
+    }
+    // Decided before anything is created: with deletes off the journey could only mark.
+    match get(c, &admin(c, "/admin/settings/central"), &c.admin_jwt()).await {
+        Ok(doc) if deletes_on(&doc) => {}
+        Ok(_) => return c.skip(CLEANUP_ID, DELETES_OFF),
+        Err(e) => {
+            let why = format!("could not read memberRemovalDeletes: {e:#}");
+            c.step(CLEANUP_ID, CLEANUP_CEILING, move |_| async move { Err(anyhow!("{why}")) }.boxed()).await;
+            return;
+        }
     }
     let team = team(c);
     let prep = match prepare(c, &team).await {
@@ -168,7 +185,7 @@ async fn cleanup(c: &mut Ctx) {
     match remove(c, &team).await {
         Ok(true) => {}
         Ok(false) => {
-            c.skip(CLEANUP_ID, "memberRemovalDeletes is off on this fleet: delete-now only marked the pair");
+            c.skip(CLEANUP_ID, DELETES_OFF);
             return teardown(c, &team, Some(&prep)).await;
         }
         Err(e) => {
@@ -191,7 +208,7 @@ async fn cleanup(c: &mut Ctx) {
             audited(c, &t).await?;
             join(c, &t).await.context("could not re-add the person")?;
             let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/bench?team={t}")), &c.other_jwt, None, &[]).await?;
-            if status != reqwest::StatusCode::NOT_FOUND {
+            if status != reqwest::StatusCode::NOT_FOUND || !body.contains("no bench") {
                 return Err(anyhow!("the re-added person finds a bench ({status}): {}", clip(&body)));
             }
             Ok(())
@@ -202,13 +219,15 @@ async fn cleanup(c: &mut Ctx) {
     teardown(c, &team, Some(&prep)).await;
 }
 
-/// Best effort; the `run-` prefix sweep takes what this misses, the kept volume included.
+/// Best effort; the `run-` prefix sweep takes what this misses (`sweep_teams` collects the team's
+/// workspaces and detached volumes first). Every delete is the probe owner's: the member may have
+/// been removed already, and a removed member's token is refused on the team's objects.
 async fn teardown(c: &Ctx, team: &str, p: Option<&Prep>) {
-    let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}/members/{}", c.other_email)), &c.probe_jwt, None).await;
     if let Some(p) = p {
-        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{}", p.ws)), &c.other_jwt, None).await;
-        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/volumes/{}/snapshots/{}", p.volume, p.snap)), &c.other_jwt, None).await;
+        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/workspaces/{}", p.ws)), &c.probe_jwt, None).await;
+        let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/volumes/{}/snapshots/{}", p.volume, p.snap)), &c.probe_jwt, None).await;
     }
+    let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}/members/{}", c.other_email)), &c.probe_jwt, None).await;
     if let Err(e) = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}")), &c.probe_jwt, None).await {
         tracing::warn!(kind = "team", op = "delete", name = %team, error = %format!("{e:#}"), "slo.teardown.failed");
         return;
@@ -226,6 +245,13 @@ mod tests {
             let s = kloudlite_workspaces::slo::catalogue::find(id).unwrap();
             assert_eq!(s.stage, "13 · Monthly");
         }
+    }
+
+    #[test]
+    fn deletes_are_on_only_when_stored_true() {
+        assert!(deletes_on(&json!({ "memberRemovalDeletes": true })));
+        assert!(!deletes_on(&json!({ "memberRemovalDeletes": false })));
+        assert!(!deletes_on(&json!({})));
     }
 
     #[tokio::test]
