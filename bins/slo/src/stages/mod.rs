@@ -35,6 +35,7 @@ pub(crate) fn state_is(v: &Value, want: &str) -> bool {
 
 pub mod admin;
 pub mod bench;
+pub mod controller;
 pub mod edge;
 pub mod env_intercept;
 pub mod environment;
@@ -77,6 +78,7 @@ pub const MONTHLY: &str = "13 · Monthly";
 /// Hourly's own stage. Numbered after monthly because the stage numbers are stored in ClickHouse
 /// and renumbering two of them to keep the list contiguous would rewrite history for nothing.
 pub use experience::EXPERIENCE;
+pub use controller::CONTROLLER;
 
 /// One HTTP call, with the body carried into the error.
 ///

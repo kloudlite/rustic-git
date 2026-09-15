@@ -42,6 +42,7 @@ fn fast() -> Vec<Stage> {
         Stage { name: stages::REGISTRY, run: |c| Box::pin(stages::registry::run(c)) },
         Stage { name: stages::WORKSPACE, run: |c| Box::pin(stages::workspace::run(c)) },
         Stage { name: stages::ENVIRONMENT, run: |c| Box::pin(stages::environment::run(c)) },
+        Stage { name: stages::CONTROLLER, run: |c| Box::pin(stages::controller::run(c)) },
         Stage { name: stages::LIFECYCLE, run: |c| Box::pin(stages::lifecycle::run(c)) },
         Stage { name: stages::ADMIN, run: |c| Box::pin(stages::admin::run(c)) },
         Stage { name: stages::SECURITY, run: |c| Box::pin(stages::security::run(c)) },

@@ -20,6 +20,7 @@
 # | the roll guard reads gateway/builder-gate     | deployments: get, list                             |
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
 # | bench.idle.wake reads the region's idle secs  | clustersettings: get                               |
+# | ctl.leader reads the controller's Lease       | leases: get, kube-system, that one name only       |
 #
 # There is no `pods: delete`: the monthly dead-node drill is a hard skip
 # (`bins/slo/src/stages/monthly/nodes.rs`, `c.skip("drill.dead.node", …)`), so the
@@ -134,6 +135,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: kloudlite-slo
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-slo
+    namespace: kube-system
+---
+# `ctl.leader` asserts the lease IS held, so it reads the one Lease by name. No `pods: delete`
+# here: `ctl.failover` skips on the 403 until the owner decides to grant it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-slo-controller-lease
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get"]
+    resourceNames: ["kloudlite-controller"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-slo-controller-lease
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-slo-controller-lease
 subjects:
   - kind: ServiceAccount
     name: kloudlite-slo

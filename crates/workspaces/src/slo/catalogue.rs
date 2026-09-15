@@ -106,6 +106,9 @@ pub const STAGES: &[&str] = &[
     "4 · Registry",
     "5 · Workspace",
     "6 · Environment",
+    // Walked right after 6, whose workspace and environment it grants between; numbered 15
+    // because stage names are stored in ClickHouse and renumbering would rewrite history.
+    "15 · Cluster controller",
     "7 · Lifecycle",
     "8 · Admin",
     "9 · Security",
@@ -332,6 +335,18 @@ pub const CATALOGUE: &[Slo] = &[
     // Hourly: proving a hidden thing stays hidden is not a five-minute cost, and the builder
     // is not stood up by this id — it asks about whatever the owner's builder already is.
     Slo { id: "builder.hidden", feature: "Environments", sli: "The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
+
+    // 15 · Cluster controller. The single elected writer of the space grants (stage 1 of
+    // `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`). Every id but `ctl.leader`
+    // and `ctl.agent.nowrite` judges by CONNECTING, never by reading a policy object: a rendered
+    // NetworkPolicy that the CNI never programmed is exactly the outage these exist to catch.
+    Slo { id: "ctl.leader", feature: "Cluster controller", sli: "Exactly one controller pod holds the `kloudlite-controller` Lease and has renewed it within its TTL", target: avail(99.9), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.set", feature: "Cluster controller", sli: "Choosing an environment for a space lets a probe workspace resolve and connect to one of its services", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.switch", feature: "Cluster controller", sli: "Switching the choice makes the new environment's service reachable and the old one unreachable", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.grant.cleared", feature: "Cluster controller", sli: "Clearing the choice refuses the connect and leaves no `space-*` policy for that space", target: bound(30_000), suite: Suite::Fast, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.failover", feature: "Cluster controller", sli: "Deleting the leader pod elects another within 20 s and a choice made during the gap converges once it is up", target: bound(120_000), suite: Suite::Hourly, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.agent.nowrite", feature: "Cluster controller", sli: "Every `space-*` NetworkPolicy in the cluster is managed by `kloudlite-controller` and by no agent", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Cluster controller" },
+    Slo { id: "ctl.fanout", feature: "Cluster controller", sli: "One change of a space's choice reconciles at most two environments", target: avail(99.9), suite: Suite::Hourly, stage: "15 · Cluster controller" },
 
     // Stage 7 · lifecycle
     Slo { id: "ws.stop.p95", feature: "Workspace lifecycle", sli: "Stopping a workspace completes", target: p95(15_000), suite: Suite::Fast, stage: "7 · Lifecycle" },
