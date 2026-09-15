@@ -547,8 +547,11 @@ keep-biased, so a directory error judges nothing rather than acting on a guess. 
 Bench goes `access: paused` and stops, their team Workspaces stop, and `/v1` answers a paused
 caller 403 `"your access to {team} is paused"` (`scope::team_access`) while a removed one gets 403
 `"you are no longer a member of {team}"` and a stranger a 404; the gateway refuses a tunnel to a
-paused Bench the same way with no directory of its own
-(`bins/gateway/src/resolve.rs`), and a bench tool token off a paused or wrong-team Bench is refused
+paused Bench or a Workspace carrying a system `removed-at` the same way with no directory of its own
+(`bins/gateway/src/resolve.rs`) — an unreadable Bench is its 409 where `/v1` fails open for the
+caller's own object, because the gateway cannot tell a blip from a pause while `/v1` has the
+directory and the beat behind it — an SSH tunnel already open ends only when the pause or removal
+stops the pod, and a bench tool token off a paused or wrong-team Bench is refused
 by `bench_admits_tool`. Pause never deletes and unpause restores access without starting anything;
 a paused member cannot leave their own team, but an admin can still remove them. A removed member
 or a deleted team instead gets `kloudlite.io/removed-at` stamped (via SSA under field manager
