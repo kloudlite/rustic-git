@@ -33,6 +33,10 @@ clickhouse:
       settings:
         extraConfig:
           # verify: server-level keys, rendered into config.d by the operator's `extraConfig`.
+          # ClickHouse 25.7 checks its total-memory cap against the CGROUP's usage, which counts
+          # reclaimable page cache: with 2.6–3.8 GiB real RSS the cgroup sat at the pod limit for
+          # 40 h and every query and collector INSERT near it failed 241. Track the process instead.
+          memory_worker_use_cgroup: 0
           mark_cache_size: 1073741824              # 1 GiB (default 5 GiB)
           index_mark_cache_size: 268435456         # 256 MiB
           merges_mutations_memory_usage_to_ram_ratio: 0.3
