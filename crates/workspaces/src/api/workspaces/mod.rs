@@ -535,8 +535,7 @@ pub(crate) async fn delete_as(
     let w = my_ws(s, owner, id).await?;
     let c = kube(s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
-    // Nothing stamps a finalizer on a Workspace, so its deletion is pure garbage collection and the
-    // agent never observes it. The workspace-side policy goes with its ownerReference and the
+    // The agent's `WORKTREE_FINALIZER` cleans up the worktree, but not this policy. The workspace-side policy goes with its ownerReference and the
     // attach directory is swept by the janitor, but the ENVIRONMENT-side half lives in another
     // namespace under the Environment's ownership — so it is removed here. The Workspace goes
     // FIRST: an agent pass landing between the two would otherwise re-`ensure` the grant and then
@@ -646,7 +645,7 @@ pub(crate) async fn stop_as(
 /// Workspace's ownerReference cannot reach. Best-effort with a warning: the environment's own
 /// deletion collects it either way, and a grant left behind is dormant until something re-adds an
 /// egress with the same workspace id.
-pub(super) async fn drop_attach_policy(c: &kube::Client, id: &str, env: Option<&str>) {
+pub(crate) async fn drop_attach_policy(c: &kube::Client, id: &str, env: Option<&str>) {
     let Some(env) = env else { return };
     let policies: Api<k8s_openapi::api::networking::v1::NetworkPolicy> =
         Api::namespaced(c.clone(), &crd::env_namespace(env));

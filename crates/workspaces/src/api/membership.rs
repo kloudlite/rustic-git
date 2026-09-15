@@ -272,7 +272,7 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
                     tracing::warn!(%owner, %team, name = %b.name_any(), "membership.cleanup.bench_waits_finalizer");
                 }
             }
-            steps.extend(workspaces.iter().map(|w| Target::of(*w, "Workspace")));
+            steps.extend(workspaces.iter().map(|w| Target { env: crd::attached_environment(w), ..Target::of(*w, "Workspace") }));
             steps.extend(spaces.iter().map(|x| Target::of(*x, "SpaceEnvironment")));
             cleanup(s, dir, (&bapi, &wapi, &sapi), owner, team, steps, budget).await;
         }
@@ -286,11 +286,12 @@ struct Target {
     uid: Option<String>,
     rv: Option<String>,
     deleting: bool,
+    env: Option<String>,
 }
 
 impl Target {
     fn of<K: kube::Resource>(x: &K, kind: &'static str) -> Self {
-        Target { kind, name: x.name_any(), uid: x.uid(), rv: x.resource_version(), deleting: x.meta().deletion_timestamp.is_some() }
+        Target { kind, name: x.name_any(), uid: x.uid(), rv: x.resource_version(), deleting: x.meta().deletion_timestamp.is_some(), env: None }
     }
 }
 
@@ -313,6 +314,16 @@ async fn cleanup(s: &ApiState, dir: &dyn Directory, apis: Apis<'_>, owner: &str,
             "Workspace" => apis.1.delete(&t.name, &dp).await.map(|_| ()),
             _ => apis.2.delete(&t.name, &dp).await.map(|_| ()),
         };
+        // The env-side attach policy lives in another namespace, so no ownerReference collects it:
+        // drop it after the Workspace, exactly as `delete_as` does (best effort, logged there).
+        let gone = match &res {
+            Ok(()) => true,
+            Err(kube::Error::Api(e)) => e.code == 404,
+            Err(_) => false,
+        };
+        if t.kind == "Workspace" && gone {
+            super::workspaces::drop_attach_policy(&apis.1.clone().into_client(), &t.name, t.env.as_deref()).await;
+        }
         match res {
             Ok(()) => {
                 *budget -= 1;
@@ -606,6 +617,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_attached_workspace_delete_also_drops_the_env_side_policy() {
+        let mut routes = removed("bob", 200);
+        let mut w1 = ws("w1", "bob", "acme");
+        w1["spec"]["attachedEnvironment"] = json!("env-7");
+        routes[1] = list_of("Workspace", "workspaces", vec![w1, ws("w2", "bob", "acme")]);
+        let policy = format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}", crd::env_namespace("env-7"), crate::k8s::attach_policy_name("w1"));
+        routes.push(del(policy.clone(), 200));
+        let (s, rec, _) = setup(routes, &[]);
+        reconcile(&deleting(s)).await;
+        let d = deletes(&rec);
+        let at = |x: &str| d.iter().position(|c| c == x).unwrap_or_else(|| panic!("{x} missing: {d:?}"));
+        assert!(at(&format!("DELETE {API}/workspaces/w1")) < at(&format!("DELETE {policy}")), "the Workspace goes first");
+        assert_eq!(d.iter().filter(|c| c.contains("networkpolicies")).count(), 1, "an unattached workspace has none");
+    }
+
+    #[tokio::test]
     async fn with_deletes_off_nothing_is_deleted() {
         let (s, rec, _) = setup(removed("bob", 200), &[]);
         reconcile(&s).await;
@@ -658,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn a_directory_error_changes_nothing() {
         let (s, rec, _) = setup(vec![benches(vec![bench("bob", "down", "full", Some("2020-01-01T00:00:00Z"))])], &[("bob", "down")]);
-        reconcile(&s).await;
+        reconcile(&deleting(s)).await;
         assert!(writes(&rec).is_empty(), "{:?}", writes(&rec));
     }
 
