@@ -266,8 +266,8 @@ test("a renew answered 401 expires the login", async () => {
   }
 });
 
-test("a renew answered 409 stops the beat instead of retrying", async () => {
-  const s = await stub({ [TOOL]: [{ status: 409, body: { error: "bench is stopped; start it" } }] });
+test("a renew answered 409 keeps the beat and succeeds after the bench restarts", async () => {
+  const s = await stub({ [TOOL]: [{ status: 409, body: { error: "bench is stopped; start it" } }, { status: 204 }] });
   mock.timers.enable({ apis: ["setInterval"] });
   const err = mock.method(console, "error", () => undefined);
   try {
@@ -276,7 +276,11 @@ test("a renew answered 409 stops the beat instead of retrying", async () => {
     await settle();
     mock.timers.tick(5 * 60_000);
     await settle();
-    assert.equal(s.calls.length, 1);
+    assert.equal(s.calls.length, 2);
+    mock.timers.tick(5 * 60_000);
+    await settle();
+    assert.equal(s.calls.length, 3);
+    assert.equal(err.mock.callCount(), 1);
   } finally {
     err.mock.restore();
     mock.timers.reset();

@@ -156,14 +156,12 @@ export async function dropToolToken(api: string, token: string, team: string): P
 
 /**
  * Renews every `everyMs` (5 min, inside the 15-minute TTL with room for the kubelet's Secret sync)
- * until the returned stop runs. A 401 ends the login; a 409 (bench stopped) ends the beat, since
- * every further renew would be refused the same way until the next Connect.
+ * until the returned stop runs. A 401 ends the login; any other refusal is logged and the beat goes on.
  */
 export function keepToolToken(api: string, token: string, team: string, onExpired: () => void, everyMs = 5 * 60_000): () => void {
   const timer = setInterval(() => {
     mintToolToken(api, token, team).catch((e: Error & { status?: number }) => {
       if (e.name === "Expired") return clearInterval(timer), onExpired();
-      if (e.status === 409) clearInterval(timer);
       console.error(`bench tool token: ${e.message}`);
     });
   }, everyMs);
