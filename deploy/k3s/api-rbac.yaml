@@ -328,3 +328,34 @@ subjects:
   - kind: ServiceAccount
     name: kloudlite-admin
     namespace: kube-system
+---
+# `api::keys::renew_beat`: the keys beat's heartbeat Lease, which the controller's removal GC reads
+# before deleting anything. Server-side apply, so `patch` by name; `create` cannot be scoped by
+# name in RBAC and is only exercised on the first beat of a region.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kloudlite-api-keys-beat
+  namespace: kube-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["kloudlite-keys-beat"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kloudlite-api-keys-beat
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kloudlite-api-keys-beat
+subjects:
+  - kind: ServiceAccount
+    name: kloudlite-api
+    namespace: kube-system

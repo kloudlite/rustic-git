@@ -582,11 +582,19 @@ mod tests {
         ctx.remember_environments(vec![env("env-1", "acme", "test")]);
         reconcile_space(Arc::new(space("alice", "acme", "env-1")), ctx.clone()).await.unwrap();
         let sent = rec.sent("PATCH", &ingress);
-        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent.len(), 2, "the apply, then the agent's release: {sent:?}");
         let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an owner reference");
         assert_eq!(refs.len(), 1, "{refs:?}");
         assert_eq!(refs[0]["uid"], "uid-space");
         assert_eq!(refs[0]["kind"], "SpaceEnvironment");
+        // The co-owner an identical-bytes apply leaves behind is removed, guarded by a test op.
+        assert_eq!(
+            sent[1],
+            serde_json::json!([
+                {"op": "test", "path": "/metadata/managedFields/0/manager", "value": "kloudlite-agent"},
+                {"op": "remove", "path": "/metadata/managedFields/0"},
+            ])
+        );
     }
 
     /// An unlisted environment cache renders nothing and deletes nothing — the rule that, read the

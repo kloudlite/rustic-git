@@ -183,7 +183,6 @@ const CLUSTER_ENV_VARS: &[(&str, &str)] = &[
     ("gitInitImage", "WS_GIT_INIT_IMAGE"),
     ("runtimeClass", "WS_RUNTIME_CLASS"),
     ("stallDumps", "WS_STALL_DUMPS"),
-    ("memberRemovalDeletes", "WS_MEMBER_REMOVAL_DELETES"),
 ];
 
 fn cluster_default(name: &str) -> serde_json::Value {

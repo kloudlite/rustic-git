@@ -187,8 +187,47 @@ where
     if fresh {
         return Ok(());
     }
-    api.patch(&name, &PatchParams::apply(crd::CONTROLLER_FIELD_MANAGER).force(), &Patch::Apply(obj)).await?;
+    let live = api.patch(&name, &PatchParams::apply(crd::CONTROLLER_FIELD_MANAGER).force(), &Patch::Apply(obj)).await?;
+    // Not remembered on a failed release: the next pass applies and releases again.
+    release_agent(api, &name, &live).await?;
     ctx.applied.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (hash, Instant::now()));
+    Ok(())
+}
+
+/// The JSON patch that removes every `kloudlite-agent` entry from `managedFields`, or `None` when
+/// there is none (the steady state, so a converged object costs no second write).
+///
+/// A forced apply of identical bytes moves no field, so an adopted object keeps the agent listed as
+/// co-owner and a later agent apply fights ours. Removing the entry is the documented mechanism
+/// (Kubernetes "Server-Side Apply → Clearing managedFields": managedFields sent in a patch replace
+/// the stored set). Each remove is guarded by a `test` on the manager at that index, so an object
+/// that changed since our apply fails the whole patch and nothing is removed — keep-biased.
+pub(crate) fn release_ops<K: Resource>(live: &K) -> Option<json_patch::Patch> {
+    let entries = live.meta().managed_fields.as_deref().unwrap_or_default();
+    let ops: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .rev() // highest index first, so each removal leaves the earlier indices valid
+        .filter(|(_, e)| e.manager.as_deref() == Some(crd::AGENT_FIELD_MANAGER))
+        .flat_map(|(i, _)| {
+            let at = |tail: &str| format!("/metadata/managedFields/{i}{tail}").parse().expect("static pointer");
+            [
+                json_patch::PatchOperation::Test(json_patch::TestOperation { path: at("/manager"), value: crd::AGENT_FIELD_MANAGER.into() }),
+                json_patch::PatchOperation::Remove(json_patch::RemoveOperation { path: at("") }),
+            ]
+        })
+        .collect();
+    (!ops.is_empty()).then_some(json_patch::Patch(ops))
+}
+
+async fn release_agent<K>(api: &Api<K>, name: &str, live: &K) -> Result<(), ReconcileErr>
+where
+    K: Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    K::DynamicType: Default,
+{
+    let Some(ops) = release_ops(live) else { return Ok(()) };
+    api.patch(name, &PatchParams::default(), &Patch::Json::<()>(ops)).await?;
+    tracing::info!(kind = %K::kind(&Default::default()), name, "adopt.agent_released");
     Ok(())
 }
 
@@ -264,6 +303,28 @@ mod tests {
         assert!(Config::check("centralindia-k3s", "kloudlite-controller-abc").is_ok());
         assert!(Config::check("centralindia-k3s", "").is_err());
         assert!(Config::check("", "kloudlite-controller-abc").is_err());
+    }
+
+    /// Only the agent's entries go, highest index first, each behind a `test` on its manager; an
+    /// object the agent never touched needs no second write at all.
+    #[test]
+    fn release_removes_only_the_agents_entries() {
+        use k8s_openapi::api::networking::v1::NetworkPolicy;
+        let np = |managers: &[&str]| -> NetworkPolicy {
+            let mf: Vec<_> = managers.iter().map(|m| serde_json::json!({"manager": m, "operation": "Apply"})).collect();
+            serde_json::from_value(serde_json::json!({"metadata": {"name": "p", "managedFields": mf}})).unwrap()
+        };
+        assert!(release_ops(&np(&[crd::CONTROLLER_FIELD_MANAGER])).is_none());
+        let ops = release_ops(&np(&["kloudlite-agent", crd::CONTROLLER_FIELD_MANAGER, "kloudlite-agent"])).unwrap();
+        assert_eq!(
+            serde_json::to_value(ops).unwrap(),
+            serde_json::json!([
+                {"op": "test", "path": "/metadata/managedFields/2/manager", "value": "kloudlite-agent"},
+                {"op": "remove", "path": "/metadata/managedFields/2"},
+                {"op": "test", "path": "/metadata/managedFields/0/manager", "value": "kloudlite-agent"},
+                {"op": "remove", "path": "/metadata/managedFields/0"},
+            ])
+        );
     }
 
     /// The epoch guard is a process-wide fact, not a parameter threaded through every call site:
