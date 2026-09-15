@@ -27,6 +27,8 @@ mod nodes;
 pub(crate) use nodes::*;
 mod backups;
 pub(crate) use backups::*;
+mod removed;
+pub(crate) use removed::member_removed;
 
 
 /// The container and the fixed slot names `deploy/k3s/backup-controlplane.sh` writes: 24 hourly
@@ -65,6 +67,7 @@ pub async fn run(c: &mut Ctx) {
     decommission(c).await;
     redis_down(c).await;
     clickhouse_down(c).await;
+    member_removed(c).await;
 }
 
 
@@ -93,7 +96,7 @@ mod tests {
     use super::*;
 
     /// Every id exactly once, whatever is configured. With no Azure credential, no kubeconfig and
-    /// no Redis host, the console still owes seven rows — a stage that dropped ids when its
+    /// no Redis host, the console still owes every row — a stage that dropped ids when its
     /// preconditions were absent would make an unconfigured probe look like a healthy one.
     #[tokio::test]
     async fn monthly_produces_every_id_once() {
@@ -116,6 +119,8 @@ mod tests {
                 "cluster.decommission",
                 "drill.redis.down",
                 "drill.clickhouse.down",
+                "team.member.removed.cleanup",
+                "team.member.removed.dir_down",
             ]
         );
         assert_eq!(c.failed(), 0, "an unconfigured probe skips; it does not breach");

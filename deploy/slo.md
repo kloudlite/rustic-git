@@ -270,6 +270,8 @@ first destructive stage.
 | `drill.clickhouse.down` | Resilience drills | With ClickHouse denied, every /v1 verb still works and `/admin/history/*` answers 503, never 500 | 99.9 % | monthly | 13 · Monthly |
 | `ws.interrupted` | Workspace lifecycle | Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill | 99.9 % | monthly | 13 · Monthly |
 | `env.clone.interrupted` | Environments | Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy | 99.9 % | monthly | 13 · Monthly |
+| `team.member.removed.cleanup` | Teams | A removed member's bench, team workspace, sync points and space choice are deleted within two beats of delete-now, the pushed snapshot and its volume are kept, the removal is audited, and a re-added person finds no bench | 99.9 % | monthly | 13 · Monthly |
+| `team.member.removed.dir_down` | Teams | With the directory unreachable for one beat, a removed pair's objects all survive and the reconcile logs that it skipped | 99.9 % | monthly | 13 · Monthly |
 | — | Identity | A person can reset access via the email magic link | — | manual | manual · email link |
 | — | Identity | A person can register a new passkey | — | manual | manual · passkey registration |
 | — | Identity | A `kloudlite-jwt` rotation is honoured by every tier | — | manual | manual · jwt rotation |
