@@ -226,8 +226,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let (vol_self, vol_ws, vol_env, vol_snap) = (subscribe()?, subscribe()?, subscribe()?, subscribe()?);
     let volume_watch = {
         use kube::runtime::{watcher, WatchStreamExt};
-        watcher(Api::<crd::Volume>::all(ctx.client.clone()), mine.clone())
-            .default_backoff()
+        let (api, cfg) = (Api::<crd::Volume>::all(ctx.client.clone()), mine.clone());
+        super::watch::resilient("Volume", super::watch::WATCH_STALE, move || watcher(api.clone(), cfg.clone()).default_backoff())
             // `reflect_shared`, not `reflect`: a shared writer only DISPATCHES to its subscribers
             // (the Volume controller and the three parents) from the shared variant — plain
             // `reflect` fills the store and tells nobody, which is a Volume controller that
@@ -257,8 +257,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let node_watch = {
         use kube::runtime::{watcher, WatchStreamExt};
         let writer = ctx.node_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the node writer is already taken")?;
-        watcher(Api::<Node>::all(ctx.client.clone()), my_node_only.clone())
-            .default_backoff()
+        let (api, cfg) = (Api::<Node>::all(ctx.client.clone()), my_node_only.clone());
+        super::watch::resilient("Node", super::watch::WATCH_STALE, move || watcher(api.clone(), cfg.clone()).default_backoff())
             .reflect(writer)
             .touched_objects()
             .for_each(|r| async move {
@@ -537,8 +537,11 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         use kube::runtime::{watcher, WatchStreamExt};
         let wake = ctx.wake_volume.clone();
         let volumes = ctx.volumes.clone();
-        watcher(Api::<crd::Snapshot>::all(ctx.client.clone()), crate::controller::watch_config())
-            .default_backoff()
+        let api = Api::<crd::Snapshot>::all(ctx.client.clone());
+        // `resilient`: the 2026-09-15 incident's watch — see `controller::watch`.
+        super::watch::resilient("Snapshot", super::watch::WATCH_STALE, move || {
+            watcher(api.clone(), crate::controller::watch_config()).default_backoff()
+        })
             .reflect_shared(snap_writer)
             .inspect_ok(move |ev| {
                 if let watcher::Event::Delete(s) = ev {
@@ -613,8 +616,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             ctx.workspace_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the workspace writer is already taken")?;
         let env_writer =
             ctx.environment_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the environment writer is already taken")?;
-        let ws = watcher(Api::<crd::Workspace>::all(ctx.client.clone()), crate::controller::watch_config())
-            .default_backoff()
+        let api = Api::<crd::Workspace>::all(ctx.client.clone());
+        let ws = super::watch::resilient("Workspace", super::watch::WATCH_STALE, move || {
+            watcher(api.clone(), crate::controller::watch_config()).default_backoff()
+        })
             .reflect(ws_writer)
             .touched_objects()
             .for_each(|r| async move {
@@ -622,8 +627,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                     tracing::warn!(kind = "Workspace", reason = "cache", error = %e, "reconcile.queue.failed")
                 }
             });
-        let env = watcher(Api::<crd::Environment>::all(ctx.client.clone()), crate::controller::watch_config())
-            .default_backoff()
+        let api = Api::<crd::Environment>::all(ctx.client.clone());
+        let env = super::watch::resilient("Environment", super::watch::WATCH_STALE, move || {
+            watcher(api.clone(), crate::controller::watch_config()).default_backoff()
+        })
             .reflect(env_writer)
             .touched_objects()
             .for_each(|r| async move {
@@ -633,8 +640,10 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             });
         let space_writer =
             ctx.space_writer.lock().unwrap_or_else(|p| p.into_inner()).take().ok_or("the space writer is already taken")?;
-        let spaces = watcher(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config())
-            .default_backoff()
+        let api = Api::<crd::SpaceEnvironment>::all(ctx.client.clone());
+        let spaces = super::watch::resilient("SpaceEnvironment", super::watch::WATCH_STALE, move || {
+            watcher(api.clone(), crate::controller::watch_config()).default_backoff()
+        })
             .reflect(space_writer)
             .touched_objects()
             .for_each(|r| async move {
