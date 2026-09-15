@@ -4,7 +4,11 @@
 //! it only stops the person acting under the team until an admin unpauses them. The reach is
 //! `remove_member`'s (`may_grant` on the target's role), a superadmin reaches any team, a paused
 //! admin reaches nobody, and nobody pauses or unpauses themself: a paused person reinstating
-//! themself would make the pause meaningless.
+//! themself would make the pause meaningless — a superadmin included.
+//!
+//! Reach: `/v1` and the team routes refuse at once, but `App::may_act` (git over ssh and http, the
+//! registry) caches membership for `MEMBERSHIP_TTL`, so a pause reaches those up to 60 s late —
+//! the same lag as a removal.
 
 use super::*;
 use kloudlite_pulls::directory::MemberState;
@@ -44,21 +48,25 @@ async fn set_state(api: &Arc<Api>, headers: &axum::http::HeaderMap, slug: &str, 
         Ok(a) => a,
         Err(e) => return db_err("check admin", slug, e),
     };
+    if user.eq_ignore_ascii_case(email.trim()) {
+        let verb = if state == MemberState::Paused { "pause" } else { "unpause" };
+        return (StatusCode::FORBIDDEN, format!("you cannot {verb} yourself")).into_response();
+    }
     let active = |who: &str| team.members.iter().find(|m| m.user.eq_ignore_ascii_case(who)).filter(|m| m.state == MemberState::Active);
     if !superadmin {
         // Same 404 as `team_for` for a non-member, so the route cannot probe which slugs exist.
         if kloudlite_pulls::directory::Directory::role_of(&team, &user).is_none() {
             return (StatusCode::NOT_FOUND, "no such team").into_response();
         }
-        if user.eq_ignore_ascii_case(email.trim()) {
-            let verb = if state == MemberState::Paused { "pause" } else { "unpause" };
-            return (StatusCode::FORBIDDEN, format!("you cannot {verb} yourself")).into_response();
-        }
         let target = kloudlite_pulls::directory::Directory::role_of(&team, email);
         let reach = active(&user).is_some_and(|me| target.is_some_and(|t| may_grant(me.role, t)));
         if !reach {
             return (StatusCode::FORBIDDEN, "your role does not allow that").into_response();
         }
+    }
+    // A no-op is not an admin write: no audit row, no keys refresh.
+    if team.members.iter().any(|m| m.user.eq_ignore_ascii_case(email.trim()) && m.state == state) {
+        return StatusCode::NO_CONTENT.into_response();
     }
     let (action, event) = match state {
         MemberState::Paused => ("pause-member", "member.paused"),
@@ -165,6 +173,42 @@ mod tests {
         assert_eq!(unpause(&api, "a@x", "a@x").await.0, StatusCode::FORBIDDEN);
         let p = axum::extract::Path(("acme".to_string(), "m@x".to_string()));
         assert_eq!(pause_member(State(api.clone()), as_user(&api, "stranger@x"), p).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_superadmin_member_cannot_pause_themself_and_a_repause_writes_nothing() {
+        let api = fixture().await;
+        api.directory.as_ref().unwrap().add_member("acme", "root@x", Role::Member).await.unwrap();
+        assert_eq!(pause(&api, "root@x", "root@x").await, (StatusCode::FORBIDDEN, "you cannot pause yourself".into()));
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        assert_eq!(unpause(&api, "a@x", "n@x").await.0, StatusCode::NO_CONTENT);
+        use futures::StreamExt;
+        assert_eq!(api.store.os.list(Some(&"audit".into())).collect::<Vec<_>>().await.len(), 1, "only the real pause");
+    }
+
+    #[tokio::test]
+    async fn a_paused_member_gets_403_on_team_routes_and_cannot_leave_but_can_be_removed() {
+        let api = fixture().await;
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        let get = get_team(State(api.clone()), as_user(&api, "m@x"), axum::extract::Path("acme".to_string())).await;
+        assert_eq!(body(get).await, (StatusCode::FORBIDDEN, "your access to this team is paused".into()));
+        let leave = axum::extract::Path(("acme".to_string(), "m@x".to_string()));
+        assert_eq!(remove_member(State(api.clone()), as_user(&api, "m@x"), leave).await.status(), StatusCode::FORBIDDEN);
+        let p = axum::extract::Path(("acme".to_string(), "m@x".to_string()));
+        assert_eq!(remove_member(State(api.clone()), as_user(&api, "a@x"), p).await.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn listing_teams_badges_a_paused_one() {
+        let api = fixture().await;
+        assert_eq!(pause(&api, "a@x", "m@x").await.0, StatusCode::NO_CONTENT);
+        let (st, b) = body(list_teams(State(api.clone()), as_user(&api, "m@x")).await).await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(v[0]["state"], "paused");
+        let (_, b) = body(list_teams(State(api.clone()), as_user(&api, "n@x")).await).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&b).unwrap()[0]["state"], "active");
     }
 
     #[tokio::test]

@@ -72,7 +72,19 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
         Err(r) => return r,
     };
     match db.for_user(&user).await {
-        Ok(list) => axum::Json(list).into_response(),
+        // `state` is the caller's own in each team, so the UI can badge a paused one.
+        Ok(list) => {
+            let rows: Vec<serde_json::Value> = list
+                .into_iter()
+                .map(|t| {
+                    let state = t.members.iter().find(|m| m.user.eq_ignore_ascii_case(&user)).map(|m| m.state).unwrap_or_default();
+                    let mut v = serde_json::to_value(&t).unwrap_or_default();
+                    v["state"] = serde_json::json!(state);
+                    v
+                })
+                .collect();
+            axum::Json(rows).into_response()
+        }
         Err(e) => {
             tracing::error!(reason = "list-teams", user = %user, error = %e, "directory.read.failed");
             (StatusCode::BAD_GATEWAY, "could not list teams").into_response()
@@ -362,8 +374,11 @@ async fn team_for<'a>(
             return Err((StatusCode::BAD_GATEWAY, "could not read team").into_response());
         }
     };
-    // A paused member administers nothing and reads the team as a stranger would.
+    // A paused member administers nothing, leaving included; the 403 says why, unlike a stranger's 404.
     let Some(role) = kloudlite_pulls::directory::Directory::active_role_of(&team, &user) else {
+        if kloudlite_pulls::directory::Directory::role_of(&team, &user).is_some() {
+            return Err((StatusCode::FORBIDDEN, "your access to this team is paused").into_response());
+        }
         return Err((StatusCode::NOT_FOUND, "no such team").into_response());
     };
     if let Some(min) = min {

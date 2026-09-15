@@ -55,7 +55,8 @@ impl Directory {
         let email = email.trim().to_lowercase();
         let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
         let Some(current) = Self::role_of(&team, &email) else { return Ok(Membership::NotAMember) };
-        let demoting = current == Role::Owner && role != Role::Owner;
+        // Demoting a PAUSED owner takes no active owner away, so only an active one is guarded.
+        let demoting = current == Role::Owner && role != Role::Owner && Self::active_role_of(&team, &email).is_some();
         if demoting && Self::owner_count(&team) == 1 {
             return Ok(Membership::LastOwner);
         }
@@ -65,7 +66,7 @@ impl Directory {
             Backend::Mongo(m) => {
                 let mut filter = doc! { "_id": slug, "members.user": &email };
                 if demoting {
-                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
+                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email }, "state": { "$ne": "paused" } } });
                 }
                 let r = m
                     .teams
@@ -83,7 +84,7 @@ impl Directory {
                     Some(t)
                         if t.members.iter().any(|m| m.user == email)
                             && (!demoting
-                                || t.members.iter().any(|m| m.role == Role::Owner && m.user != email)) =>
+                                || t.members.iter().any(|m| m.role == Role::Owner && m.state == MemberState::Active && m.user != email)) =>
                     {
                         for m in t.members.iter_mut().filter(|m| m.user == email) {
                             m.role = role;
@@ -182,7 +183,7 @@ impl Directory {
         let email = email.trim().to_lowercase();
         let Some(team) = self.get(slug).await? else { return Ok(Membership::NoSuchTeam) };
         let Some(current) = Self::role_of(&team, &email) else { return Ok(Membership::NotAMember) };
-        let last_owner_risk = current == Role::Owner;
+        let last_owner_risk = current == Role::Owner && Self::active_role_of(&team, &email).is_some();
         if last_owner_risk && Self::owner_count(&team) == 1 {
             return Ok(Membership::LastOwner);
         }
@@ -190,7 +191,7 @@ impl Directory {
             Backend::Mongo(m) => {
                 let mut filter = doc! { "_id": slug };
                 if last_owner_risk {
-                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email } } });
+                    filter.insert("members", doc! { "$elemMatch": { "role": "owner", "user": { "$ne": &email }, "state": { "$ne": "paused" } } });
                 }
                 let r = m
                     .teams
@@ -204,7 +205,7 @@ impl Directory {
                 match s.teams.get_mut(slug) {
                     Some(t)
                         if !last_owner_risk
-                            || t.members.iter().any(|m| m.role == Role::Owner && m.user != email) =>
+                            || t.members.iter().any(|m| m.role == Role::Owner && m.state == MemberState::Active && m.user != email) =>
                     {
                         t.members.retain(|m| m.user != email);
                         true
@@ -314,6 +315,16 @@ mod tests {
         assert_eq!(Directory::active_role_of(&t, "bob@x.io"), None);
         assert_eq!(Directory::role_of(&t, "bob@x.io"), Some(Role::Member));
         assert!(d.is_member("alice@x.io", "acme").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_paused_owner_does_not_count_toward_the_last_owner_rule() {
+        let d = team_of_two().await;
+        assert_eq!(d.set_role("acme", "bob@x.io", Role::Owner).await.unwrap(), Membership::Done);
+        assert_eq!(d.set_member_state("acme", "bob@x.io", MemberState::Paused, "alice@x.io").await.unwrap(), Membership::Done);
+        assert_eq!(d.set_role("acme", "alice@x.io", Role::Member).await.unwrap(), Membership::LastOwner);
+        assert_eq!(d.remove_member("acme", "alice@x.io").await.unwrap(), Membership::LastOwner);
+        assert_eq!(d.remove_member("acme", "bob@x.io").await.unwrap(), Membership::Done, "the paused owner can still be removed");
     }
 
     #[tokio::test]

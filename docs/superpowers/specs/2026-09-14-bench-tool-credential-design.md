@@ -285,7 +285,8 @@ only and starts nothing; the person starts things again. Decided: see decision 9
 
 **Propagation.** Pause takes effect in these stages:
 - immediately on the pause route itself;
-- within 60 s for `may_act` (git, registry), through its cache;
+- within 60 s for `may_act` (git over ssh and http, registry), through its `MEMBERSHIP_TTL` cache
+  — the same lag as a removal;
 - within the directory cache TTL for `teams_for` on the api;
 - within one keys beat (300 s) for `Bench.spec.access`, the gateway refusal, the stop and the keys
   projection.

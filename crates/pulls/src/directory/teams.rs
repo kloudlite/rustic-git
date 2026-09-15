@@ -424,8 +424,9 @@ impl Directory {
         }
     }
 
+    /// ACTIVE owners only: a paused owner cannot administer the team, or unpause themself.
     pub(super) fn owner_count(team: &Team) -> usize {
-        team.members.iter().filter(|m| m.role == Role::Owner).count()
+        team.members.iter().filter(|m| m.role == Role::Owner && m.state == MemberState::Active).count()
     }
 
     // ── invitations ─────────────────────────────────────────────────────────
