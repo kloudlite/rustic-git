@@ -91,10 +91,12 @@ async fn the_retired_field_is_a_fallback_only_while_the_cache_is_known_and_empty
     }
 }
 
-/// A workspace in a space with a choice gets the environment first in its search line and the
-/// namespace-level pair, both owned by the SpaceEnvironment, before its pod.
+/// The agent renders the pod's `/etc/resolv.conf` and writes the `Attached` condition, and
+/// NOTHING else: both halves of the grant belong to `kloudlite-controller` since stage 1 of
+/// the cluster-controller split. Two writers across a roll is the one thing that release must
+/// never have.
 #[tokio::test]
-async fn a_workspace_follows_its_spaces_environment() {
+async fn the_agent_writes_no_network_policy_for_a_space() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = attach_routes();
     routes.push(env_route("env-abc", "r1"));
@@ -103,20 +105,14 @@ async fn a_workspace_follows_its_spaces_environment() {
     apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
 
     let calls = rec.calls();
-    let egress = calls.iter().position(|c| *c == format!("PATCH {WS_EGRESS}")).expect("space egress");
-    let ingress = calls.iter().position(|c| *c == format!("PATCH {}", env_ingress("env-abc"))).expect("space ingress");
-    let pod = calls.iter().position(|c| c.starts_with("POST") && c.contains("/pods")).unwrap();
-    assert!(egress < pod && ingress < pod, "the grant lands before the pod: {calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("networkpolicies")), "the agent must make no NetworkPolicy call: {calls:?}");
     assert!(resolv(&ctx, "ws-1").contains("env-abc.svc."), "{}", resolv(&ctx, "ws-1"));
-    for path in [WS_EGRESS.to_string(), env_ingress("env-abc")] {
-        assert_eq!(rec.sent("PATCH", &path).last().unwrap()["metadata"]["ownerReferences"][0]["kind"], "SpaceEnvironment");
-    }
     let cond = attached_condition(&rec).expect("Attached");
     assert_eq!((cond["status"].as_str(), cond["reason"].as_str(), cond["message"].as_str()), (Some("True"), Some("Space"), Some("env-abc")));
 }
 
-/// A switch rewrites the SAME file (the running pod holds the inode) and grants the new
-/// environment; the old environment's half is the Environment reconciler's to prune.
+/// A switch rewrites the SAME file (the running pod holds the inode); the grants follow the switch
+/// in the controller, never here.
 #[tokio::test]
 async fn a_switch_rewrites_resolv_conf_in_place() {
     use std::os::unix::fs::MetadataExt;
@@ -133,14 +129,14 @@ async fn a_switch_rewrites_resolv_conf_in_place() {
     apply_until_settled(&ready_workspace("ws-1", vec![]), &ctx).await;
     assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode, "written in place, never renamed");
     assert!(resolv(&ctx, "ws-1").contains("env-def.svc.") && !resolv(&ctx, "ws-1").contains("env-abc"));
-    assert!(rec.calls().contains(&format!("PATCH {}", env_ingress("env-def"))));
+    assert!(!rec.calls().iter().any(|c| c.contains("networkpolicies")), "{:?}", rec.calls());
 }
 
-/// The environment's own prune drops a `space-*` ingress whose space points elsewhere, keeps the one
-/// that still points here, and keeps everything while the cache is unlisted.
+/// The environment's own prune never deletes a `space-*` ingress, whatever the space points at: the
+/// controller owns it and deletes it on a transition.
 #[tokio::test]
-async fn the_environment_prunes_a_space_grant_left_by_a_switch() {
-    for (spaces, deleted) in [(Some("env-other"), true), (Some("env-1"), false), (None, false)] {
+async fn the_environment_never_prunes_a_space_grant() {
+    for (spaces, deleted) in [(Some("env-other"), false), (Some("env-1"), false), (None, false)] {
         let tmp = tempfile::tempdir().unwrap();
         let routes = vec![kloudlite_workspaces::kube_test::get(
             "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies",
@@ -220,10 +216,10 @@ async fn a_missing_or_cross_region_environment_is_reported_and_grants_nothing() 
     }
 }
 
-/// No choice and never attached: no condition and no DELETE on every pass (2026-09-12). Once a
-/// choice is cleared the egress half goes by name, exactly once.
+/// No choice and never attached: no condition and no DELETE on every pass (2026-09-12). A cleared
+/// choice drops the condition and leaves `space-env` to the controller.
 #[tokio::test]
-async fn no_choice_reports_nothing_and_a_cleared_choice_drops_the_egress_once() {
+async fn no_choice_reports_nothing_and_a_cleared_choice_deletes_no_space_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), attach_routes());
     kloudlite_agent::controller::apply_workspace(&ready_workspace("ws-1", vec![]), &ctx).await.unwrap();
@@ -233,7 +229,7 @@ async fn no_choice_reports_nothing_and_a_cleared_choice_drops_the_egress_once() 
     let mut w = ready_workspace("ws-1", vec![]);
     w.status.get_or_insert_with(Default::default).conditions = vec![crd::condition(crd::ATTACHED, true, "Space", "env-abc", 1)];
     kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-    assert!(rec.calls().contains(&format!("DELETE {WS_EGRESS}")), "{:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c.contains("networkpolicies")), "{:?}", rec.calls());
     assert!(attached_condition(&rec).is_none(), "the condition goes with the choice");
 }
 

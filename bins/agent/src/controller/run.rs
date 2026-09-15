@@ -398,7 +398,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             move |r| held(&env_store_for_stops, owned_by::<crd::Environment, _>(&r)),
         );
     let env_store_for_quota = env_store.clone();
-    let env_store_for_spaces = env_store.clone();
     let env_store_for_replicas = env_store.clone();
     let environments = environments
         .watches(Api::<Node>::all(ctx.client.clone()), my_node_only, move |_: Node| all_in_store(&env_store))
@@ -427,12 +426,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 .filter(|e| e.spec.intercepts.iter().any(|i| i.workspace == name))
                 .map(|e| kube::runtime::reflector::ObjectRef::from_obj(e.as_ref()))
                 .collect::<Vec<_>>()
-        })
-        // A space switching environments releases its intercepts in the OLD one and prunes the old
-        // ingress half there, and the event carries only the new choice — so every environment
-        // this node hosts re-decides. Few per node, same shape as the Quota watch above.
-        .watches(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config(), move |_: crd::SpaceEnvironment| {
-            all_in_store(&env_store_for_spaces)
         })
         .shutdown_on_signal()
         .run(|e, c| async move { observed("environment", &*e, &c, reconcile_environment(e.clone(), c.clone())).await }, error_policy, ctx.clone())

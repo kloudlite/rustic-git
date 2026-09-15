@@ -107,17 +107,16 @@
 #                                                                       and the `intercept-target-{ws}`
 #                                                                       ClusterIP in the WORKSPACE
 #                                                                       namespace, which the proxy dials
-#   networkpolicies                        create,patch,list            ensure (incl. both halves of
-#                                                                       an attachment grant; the
-#                                                                       env-side intercept grant is
-#                                                                       per service now, named
-#                                                                       `intercept-{ws}-{service}`)
-#                                          delete                       delete_ignoring_404 — the
-#                                                                       unattached branch of EVERY
-#                                                                       workspace pass takes it, and
-#                                                                       RBAC refuses with 403, not
-#                                                                       404, so without this every
-#                                                                       reconcile aborts
+#   networkpolicies                        create,patch,list            ensure of the intercept pair
+#                                                                       (`intercept-{ws}-{service}`)
+#                                                                       and the legacy per-pod
+#                                                                       `attach-{id}` pair; list for
+#                                                                       prune_attach_grants
+#                                          delete                       delete_ignoring_404 of those
+#                                                                       two pairs only — never a
+#                                                                       `space-*` policy. RBAC refuses
+#                                                                       with 403, not 404, so without
+#                                                                       this every reconcile aborts
 #   rolebindings (rbac)                    create,patch                 ensure (api-secrets,
 #                                                                       agent-secrets)
 #   clusterroles (rbac)                    bind  [named]                the two roles those bindings
@@ -164,6 +163,11 @@
 #                                                                       node's own
 #                                                                       `kloudlite.io/decommission-
 #                                                                       status` annotation only
+#
+# Rows removed on 2026-09-14 moved to `deploy/k3s/controller-rbac.yaml` with their call sites; apply
+# that file and roll the agents BEFORE applying this one — see `deploy/k3s/README.md`. (The
+# `space-*` call sites left the `networkpolicies` row; its verbs stay for the intercept and legacy
+# attach pairs.)
 #
 # Two things RBAC cannot say, and where the ValidatingAdmissionPolicy in `agent-admission.yaml`
 # takes over. Apply both files; the role without the policy is the honest-but-wide version:

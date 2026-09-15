@@ -11,8 +11,18 @@
 //! `spec.attachedEnvironment` resolves through it only while the cache is KNOWN and holds no choice
 //! for the space and the migration has not settled the object (`crd::retired_attach`), so an agent
 //! rolled before the api keeps a live attach working. The fallback manages only that pod's legacy
-//! per-pod `attach-{id}` pair; the pair is collected once when a choice takes over. See
-//! `docs/superpowers/specs/2026-09-14-person-environment-design.md`.
+//! per-pod `attach-{id}` pair; the pair is collected once when a choice takes over.
+//!
+//! What this module writes is the pod's `resolv.conf` and its `Attached` condition. The two
+//! namespace-level grants of a space (`space-env` in the space, `space-{ns}` in the environment)
+//! belong to `kloudlite-controller` since stage 1 of the cluster-controller split, owned by the
+//! `SpaceEnvironment`: the agent never writes or deletes a `space-*` policy on any path, because
+//! two writers across a roll is the one thing that release must never have. The legacy
+//! `attach-{id}` pair stays here for one release — the fleet still runs on per-workspace attach,
+//! and the pair is per pod with this pass as its only writer — and is retired together with the
+//! field fallback when the controller takes its collection. See
+//! `docs/superpowers/specs/2026-09-14-person-environment-design.md` and
+//! `docs/superpowers/specs/2026-09-14-cluster-controller-design.md`.
 
 use super::{delete_ignoring_404, ensure, owner_ref_of_kind, Ctx, ReconcileErr};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -88,9 +98,8 @@ pub(crate) struct Pod<'a> {
     pub gen: i64,
 }
 
-/// One pass for one pod of a space, in the spec's order: resolve, resolv.conf in place, the two
-/// namespace-level policies, the legacy per-pod grant, and the condition to write. Idempotent SSA
-/// throughout, so two nodes hosting pods of one space converge on identical objects.
+/// One pass for one pod of a space, in the spec's order: resolve, resolv.conf in place, the legacy
+/// per-pod grant, and the condition to write. The namespace-level grants are the controller's.
 pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attached, ReconcileErr> {
     let ns = crd::ws_namespace(p.owner, p.team);
     let chosen = match space_environment(ctx, p.owner, p.team, p.field) {
@@ -124,8 +133,7 @@ pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attache
     // legacy pair: written by an older build, or by the field fallback below.
     let prev = p.prev.iter().find(|c| c.type_ == crd::ATTACHED && c.status == "True");
     let legacy_prev = prev.filter(|c| c.reason != SPACE_REASON);
-    let space_prev = prev.filter(|c| c.reason == SPACE_REASON);
-    let from_space = chosen.as_ref().and_then(|c| c.space.clone());
+    let from_space = chosen.as_ref().is_some_and(|c| c.space.is_some());
     let policies: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
     let legacy_name = k8s::attach_policy_name(p.id);
     let drop_legacy_ingress = |env_id: String| {
@@ -133,31 +141,23 @@ pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attache
         let name = legacy_name.clone();
         async move { delete_ignoring_404(&api, &name).await }
     };
-    let reason = match (&env, &env_ns, &from_space) {
-        // A choice exists: the namespace pair, owned by it, and the legacy pair goes once.
-        (Some(_), Some(env_ns), Some(space)) => {
-            let owner_ref = owner_ref_of_kind(space.as_ref())?;
-            ensure(&policies, &k8s::space_egress(&ns, env_ns, p.owner, &owner_ref), ctx).await?;
-            let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
-            ensure(&in_env, &k8s::space_ingress(env_ns, &ns, p.owner, &owner_ref), ctx).await?;
+    let reason = match (&env, &env_ns, from_space) {
+        // A choice exists: its grants are the controller's; the legacy pair goes once.
+        (Some(_), Some(_), true) => {
             if let Some(old) = legacy_prev {
                 delete_ignoring_404(&policies, &legacy_name).await?;
                 drop_legacy_ingress(old.message.clone()).await?;
             }
             SPACE_REASON
         }
-        // The field fallback manages ONLY this pod's own legacy pair. `space-env` is one per
-        // namespace, and siblings still on their own fields would otherwise fight over it.
+        // The field fallback manages ONLY this pod's own legacy pair.
         // ponytail: removed with the fallback next release.
-        (Some(e), Some(env_ns), None) => {
+        (Some(e), Some(env_ns), false) => {
             ensure(&policies, &k8s::attach_egress(&ns, p.id, env_ns, p.owner, &p.owner_ref), ctx).await?;
             let in_env: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), env_ns);
             ensure(&in_env, &k8s::attach_ingress(env_ns, &ns, p.id, p.owner, &owner_ref_of_kind(e)?), ctx).await?;
             if let Some(old) = legacy_prev.filter(|c| c.message != e.name_any()) {
                 drop_legacy_ingress(old.message.clone()).await?;
-            }
-            if space_prev.is_some() {
-                delete_ignoring_404(&policies, k8s::SPACE_EGRESS_POLICY).await?;
             }
             LEGACY_REASON
         }
@@ -165,9 +165,6 @@ pub(crate) async fn converge_space(ctx: &Arc<Ctx>, p: Pod<'_>) -> Result<Attache
             if let Some(old) = legacy_prev {
                 delete_ignoring_404(&policies, &legacy_name).await?;
                 drop_legacy_ingress(old.message.clone()).await?;
-            }
-            if space_prev.is_some() {
-                delete_ignoring_404(&policies, k8s::SPACE_EGRESS_POLICY).await?;
             }
             ""
         }

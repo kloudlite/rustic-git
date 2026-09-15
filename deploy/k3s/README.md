@@ -63,10 +63,14 @@ Order matters and is not the usual one:
    controller adopts the existing objects on its first pass (a forced server-side apply moves the
    field manager from `kloudlite-agent` to `kloudlite-controller`; identical bytes, so no pod sees
    a change).
-3. `kubectl apply -f deploy/k3s/agent-rbac.yaml` LAST. It removes the agent's NetworkPolicy write
-   verbs. Applied before step 1, a still-writing agent gets a 403 and aborts its whole reconcile —
-   the same failure as the missing `networkpolicies: delete` verb on 2026-09-11, which stopped
-   every environment on the fleet converging for eight minutes.
+3. `kubectl apply -f deploy/k3s/agent-rbac.yaml` LAST. Its `networkpolicies` verbs stay (the
+   agent still writes the intercept pair and the legacy `attach-{id}` pair); only the table's call
+   sites narrowed, so applying it early costs nothing — the order is for the stages that do remove
+   verbs.
+
+Step 1 before step 2 is load-bearing: a controller running while an old agent still writes a
+space policy can miss the agent's re-creation in its settled memory, and the object then drifts
+from what the controller believes it wrote.
 
 Rollback is the reverse: re-apply the old `agent-rbac.yaml`, scale the controller to 0, roll the
 previous agent image.

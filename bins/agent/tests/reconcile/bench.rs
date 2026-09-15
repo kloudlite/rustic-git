@@ -224,9 +224,9 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
     assert!(rec.sent("DELETE", &pod_path()).is_empty(), "{:?}", rec.calls());
 }
 
-/// A bench is a pod of the space like any workspace: the space's choice gives it the namespace
-/// pair (owned by the SpaceEnvironment) and the environment in its resolv.conf; clearing the
-/// choice drops the egress half.
+/// A bench is a pod of the space like any workspace: the space's choice gives it the environment in
+/// its resolv.conf and the condition; the namespace pair is the controller's, so no NetworkPolicy
+/// call is made on a choice or on clearing it.
 #[tokio::test]
 async fn a_bench_follows_its_spaces_environment() {
     let tmp = homes_pool();
@@ -238,11 +238,7 @@ async fn a_bench_follows_its_spaces_environment() {
     let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
     ctx.remember_spaces(vec![space("alice", "acme", "env-abc")]);
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx.clone()).await.unwrap();
-    for path in [&egress, &ingress] {
-        let sent = rec.sent("PATCH", path);
-        assert_eq!(sent.len(), 1, "{path}: {:?}", rec.calls());
-        assert_eq!(sent[0]["metadata"]["ownerReferences"][0]["kind"], "SpaceEnvironment");
-    }
+    assert!(!rec.calls().iter().any(|c| c.contains("/networkpolicies/space-")), "{:?}", rec.calls());
     let written = std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, BENCH)).unwrap();
     assert!(written.contains("env-abc.svc."), "{written}");
     assert!(has_cond(&last_status(&rec), "Attached", "True", "Space"), "{}", last_status(&rec));
@@ -250,7 +246,7 @@ async fn a_bench_follows_its_spaces_environment() {
     let st = last_status(&rec);
     let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st)), ctx).await.unwrap();
-    assert!(rec.calls().contains(&format!("DELETE {egress}")), "{:?}", rec.calls());
+    assert!(!rec.calls().iter().any(|c| c.contains("/networkpolicies/space-")), "{:?}", rec.calls());
 }
 
 /// I5: the environment's own prune keeps a grant an attached Bench names, and drops one it does not.
