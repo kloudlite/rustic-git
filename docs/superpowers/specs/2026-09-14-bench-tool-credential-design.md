@@ -1,37 +1,66 @@
 # Bench tool credential — design
 
-Status: draft for owner review · 2026-09-14 · builds on `2026-09-14-desktop-login-design.md`
+Status: approved decisions · owner review 2026-09-15 · builds on `2026-09-14-desktop-login-design.md`
 
 ## Problem
 
-The bench's `kl_*` tools (`harness/pi/kloudlite.ts`, also `call` in `harness/pi/workspace-tools.ts`)
-call `/v1/workspaces`, `/v1/environments`, `/v1/regions`, `/v1/quota`, `/v1/volumes`,
-`/v1/builders/me` and `/v1/workspaces/{id}/tools`. The pod holds no platform credential, so a person
-runs `/kl-login` inside the bench: a second device-code login whose 30-day CLI token is saved to
-`~/.config/kl-connect/config.json`. On a bench that path is the NFS home `/home/kl`
-(`k8s/bench.rs` `home_volume`), the same one every workspace of that owner mounts. So a full,
-unscoped, month-long login ends up readable by anything running in any of their workspaces.
+Two different network paths are involved, and only one of them exists today.
 
-The owner asked why a session the desktop already authorized needs a second login. It doesn't.
+- **Inbound: desktop → bench.** The desktop reaches the bench through the gateway tunnel. The
+  gateway checks a `bench-session` token and dials the pod (`bins/gateway/src/tunnel.rs`,
+  `resolve_bench` in `bins/gateway/src/resolve.rs:57`). The gateway only pipes bytes. It holds no
+  credential and cannot call the api on anyone's behalf.
+- **Outbound: bench pod → platform api.** The bench's `kl_*` tools (`harness/pi/kloudlite.ts`, also
+  `call` in `harness/pi/workspace-tools.ts`) call `/v1/workspaces`, `/v1/environments`,
+  `/v1/regions`, `/v1/quota`, `/v1/volumes`, `/v1/builders/me` and `/v1/workspaces/{id}/tools`.
+  These calls leave the pod and go to the public api host. The gateway tunnel does not carry them,
+  so the desktop's login is of no use to them.
+
+The pod holds no platform credential, so today a person runs `/kl-login` inside the bench. That is a
+second device-code login, and its 30-day CLI token is saved to `~/.config/kl-connect/config.json`.
+On a bench that path is the NFS home `/home/kl` (`k8s/bench.rs` `home_volume`), the same home every
+workspace of that owner mounts. The result is a full, unscoped, month-long login that anything
+running in any of their workspaces can read.
+
+The desktop has already authorized the session, so a second login is unnecessary.
 `POST /v1/bench/session` is already called with the desktop's CLI token (which carries a `jti`)
 and already proves who is using which bench in which team.
 
 ## Requirements
 
 1. The desktop's CLI token never leaves the laptop's main process.
-2. The pod's credential is minted by the platform and scoped to the bench owner and the bench's team.
-   It is accepted only on the tool routes above, never on `/v1/cli/*`, `/v1/keys*`, `/v1/bench/*`,
-   `/v1/internal/*` or admin.
-3. The credential has a short TTL. It is renewed only while a desktop login is live and the bench is
-   running. It dies when the parent login is revoked (the parent `jti` is checked on every use
-   through `cli_token_live`) and when the bench is stopped or the person signs out.
+2. The platform mints the pod's credential, scoped to the bench owner's handle plus the bench's
+   team. It is accepted only on the tool routes above, never on `/v1/cli/*`, `/v1/keys*`,
+   `/v1/bench/*`, `/v1/internal/*` or admin.
+3. The credential lives 15 minutes and is renewed every 5 minutes, but only while a desktop is
+   connected and the bench is running. It dies when the parent login is revoked (the parent `jti`
+   is checked on every use through `cli_token_live`), when the bench is stopped, when the person
+   signs out, and when the member is paused or removed.
 4. It never appears in logs, in pod-spec env, or in a file another user can read. Every tool call
    reads it fresh.
 5. It fails closed. With no credential or an expired one, the tool answers
    `sign in on the Kloudlite desktop app` and never starts a device code.
-6. `/kl-login` is deleted.
+6. `/kl-login` is deleted, and every login it already created is revoked and removed.
+7. The bench is the member's personal workspace inside the team. It lasts only as long as the
+   membership (see "Membership lifecycle").
 
-## Approach A — derived `bench-tool` JWT, projected into a Secret (recommended)
+## Decisions (owner, 2026-09-15)
+
+1. **TTL.** After the laptop disconnects, tools keep working for 15 minutes: a 15-minute token
+   renewed every 5 minutes while the desktop is connected. Approach A.
+2. **Old logins.** The platform revokes every existing `(bench)` CLI token and deletes
+   `~/.config/kl-connect/config.json` from bench homes. This is rollout step 6.
+3. **Scope.** The token acts for the bench's team and for the person's own handle.
+4. **Bench = personal workspace in the team.** When a person leaves a team, everything they own
+   in that team is deleted, data included. A separate pause state keeps the data but removes
+   access. See "Membership lifecycle".
+5. **API address.** The pod calls the platform api at the public host, not through the gateway.
+   The ingress allow-list must carry every tool family. `deploy/kloudlite-web.yaml:253` already
+   lists `environments|regions|quota|volumes|me` on this branch. The rollout step verifies that the
+   pin being rolled carries that line, and a tool call from a pod must never get the HTML page
+   back.
+
+## Approach A — derived `bench-tool` JWT, projected into a Secret
 
 **Token.** Add a new kind to `crates/core/src/jwt.rs` next to `bench-session`:
 
@@ -41,96 +70,234 @@ BENCH_TOOL_TTL_SECS = 900
 mint_bench_tool(handle, team, bench, parent) / verify_bench_tool(token)
 ```
 
-`verify` and `verify_any_user` already refuse any other `typ` through `verify_typed`, so the
-directory tier (`crates/api`), the admin process and the registry reject this kind with no change.
-Only the one new arm in `caller` accepts it.
+`verify` and `verify_any_user` already refuse every other `typ` through `verify_typed`. The
+directory tier (`crates/api`), the admin process and the registry therefore reject this kind with
+no change. The only place that accepts it is one new arm in `caller`.
 
-**Mint and renew.** Add `POST /v1/bench/tool-token?team=` in `api/bench.rs`. It uses `my_bench`, so
-the rules on membership, departed members and 404s are unchanged. It refuses:
+**Mint and renew.** Add `POST /v1/bench/tool-token?team=` in `api/bench.rs`. It goes through
+`my_bench`, so the membership and 404 rules stay as they are. It refuses:
 
-- a caller with no `jti` (a web session cookie), with 403;
-- a `bench-tool` caller, with 401, so a pod cannot extend its own token;
-- a bench whose `desiredState` is `Stopped`, with 409.
+- a caller with no `jti` (a web session cookie): 403;
+- a `bench-tool` caller: 401, so a pod cannot extend its own token;
+- a bench whose `desiredState` is `Stopped`: 409;
+- a caller who is not an active member (`Standing` other than `Member`, which includes paused): 403.
 
-To support this, `caller` returns the `jti` it already computes, as `Caller.parent`. The route then
+To support this, `caller` returns the `jti` it already computes as `Caller.parent`. The route
 server-side-applies the Secret `bench-tool` (key `token`, annotation `kloudlite.io/exp`) into
 `ws_namespace(owner, team)` and answers 204 with no body. The desktop calls it:
 
 - once in Connect, right after `ensureBench`;
 - every 5 minutes while the app is signed in and connected to that bench.
 
-The 5-minute beat and 15-minute TTL leave room for the kubelet's Secret-volume sync, which takes
-about 60–90 s. Renewal therefore stops when the desktop quits, disconnects or signs out. The pod
+The gap between the 5-minute renew and the 15-minute TTL absorbs the kubelet's Secret-volume sync,
+which takes about 60–90 s. Renewal stops when the desktop quits, disconnects or signs out. The pod
 already exits after `benchIdleSecs` once no WebSocket is open.
 
 **Delivery.** `k8s::bench_pod` adds a Secret volume `bench-tool` (`optional: true`, mode 0444),
-mounted read-only at `/etc/kloudlite/bench-tool`. Only the file path goes into env:
-`KL_TOOL_TOKEN_FILE=/etc/kloudlite/bench-tool/token` and `KL_API_URL`. This is the same projection
-`user-key` uses: rotation means rewriting the Secret, and the kubelet swaps the file atomically with
-a symlink. Mode 0444 has the same justification as `user_key_volume`: the kubelet owns the file as
-root and the process runs as `kl`, inside a pod that belongs to one person.
+mounted read-only at `/etc/kloudlite/bench-tool`. Only file paths go into env:
+`KL_TOOL_TOKEN_FILE=/etc/kloudlite/bench-tool/token` and `KL_API_URL` (the public api host). This
+is the same projection `user-key` uses. Rotating the credential means rewriting the Secret, and the
+kubelet swaps the file atomically through a symlink. Mode 0444 is justified the same way as
+`user_key_volume`: the kubelet owns the file as root, the process runs as `kl`, and the pod belongs
+to one person.
 
 The namespace belongs to one (owner, team) pair (`crd::ws_namespace`), so no other user's pod can
-mount the Secret. Workspace pods in that namespace do not mount it either: the name is separate from
-`user-key` on purpose. It never goes on the shared home. `kloudlite.ts` reads the file on every call
-(a few hundred bytes), so rotation is picked up with no watcher.
+mount the Secret. Workspace pods in that namespace do not mount it either, which is why its name is
+separate from `user-key`. The Secret never goes on the shared home. `kloudlite.ts` reads the file
+on every call (a few hundred bytes), so a rotation is picked up with no watcher.
 
-**Use.** `caller` gets one extra arm for `typ == "bench-tool"`. Each check below runs on every
-request:
+**Use.** `caller` gets one extra arm for `typ == "bench-tool"`. Every request runs these checks:
 
-1. **Audience.** Method and path must match `BENCH_TOOL_ROUTES`, a single table in `api/mod.rs`.
-   It covers the seven route families above, including their `start`, `stop`, `push`, `clone`,
+1. **Audience.** Method and path must match `BENCH_TOOL_ROUTES`, a single table in `api/mod.rs`
+   that covers the seven route families above, including their `start`, `stop`, `push`, `clone`,
    `attach`, `detach`, `intercepts` and `packages` subroutes. Anything else gets 401. A test holds
-   the table against the router, the same way `every_browse_route_is_routable` does, so every new
-   `/v1` route has to be classified.
-2. **Parent.** `cli_token_live(parent)` must be true. This is the existing 30 s positive cache, so a
-   revoked desktop login stops working within 30 s.
+   the table against the router, the way `every_browse_route_is_routable` does, so every new `/v1`
+   route has to be classified.
+2. **Parent.** `cli_token_live(parent)` must be true. This uses the existing 30 s positive cache, so
+   a revoked desktop login stops working within 30 s.
 3. **Bench.** A GET on `Bench/{bench}` must show `spec.owner == sub`, `spec.team == team`,
-   `desiredState != Stopped` and `access == Full`. If it doesn't, the answer is 401. This is what
-   makes stop immediate, even if a copy of the token is still in memory. A `ReadOnly` (departed)
-   bench gets no tools.
+   `desiredState != Stopped` and `access == Full`. Otherwise the answer is 401. This makes a stop
+   take effect immediately, even while a copy of the token is still in memory. Paused and deleted
+   benches fail this check.
 4. **Scope.** `Caller { name: sub, superadmin: false, scope: Some(team) }`. The new `scope` field is
    read in `api/scope.rs`: `may_act_on` and `may_allocate_for` refuse any owner other than `sub` and
-   `team` with 403. A tool call that names a different team fails even if the person belongs to it.
+   `team` with 403. A tool call that names another team fails even if the person belongs to it.
 
 **Revoke.**
 
 - `stop_bench` deletes the Secret, and check 3 already refuses the token.
-- On sign-out, the desktop sends `DELETE /v1/bench/tool-token?team=` (best effort; it deletes the
-  Secret) and then `DELETE /v1/cli/tokens/{jti}` (existing). Check 2 refuses the token within 30 s.
-- Removal from a team makes `my_bench` return `Departed`, `ensure_access` sets `ReadOnly`, and
-  check 3 refuses the token.
-- If no desktop is live, the token expires within 15 minutes.
+- On sign-out, the desktop sends `DELETE /v1/bench/tool-token?team=`, best effort (it deletes the
+  Secret), and then `DELETE /v1/cli/tokens/{jti}` (existing). Check 2 refuses the token within 30 s.
+- Pause sets `access: Paused` and removal deletes the Bench. Check 3 refuses the token either way.
+- With no desktop live, the token expires within 15 minutes.
 
-## Approach B — the desktop answers tool calls over the session
+## Approach B — the desktop answers tool calls over the session (rejected)
 
 When the pod needs `/v1`, it sends an `api` request over the BenchClient WebSocket that is already
-open. The desktop main process checks it against the same route table and replays it with its own
-CLI token. A variant has the gateway inject the credential instead. That variant is really A with
-an extra hop, because the gateway holds no user credential and would have to mint one.
+open. The desktop main process checks the request against the same route table and replays it with
+its own CLI token.
 
 | | A: derived token in a Secret | B: desktop proxies |
 |---|---|---|
 | New server surface | one JWT kind, one route, a `caller` arm, one pod volume | none |
-| Tools with no desktop connected (a turn left running, a second device, the web) | work until TTL | fail: no device holds a token |
+| Tools with no desktop connected | work until TTL | fail |
 | Audience enforced by | the api (server side) | the desktop (client side; a modified app bypasses it) |
 | Revocation | ≤30 s on parent, immediate on stop | immediate |
 | Latency | pod → api | pod → gateway → laptop → api → back |
 | Multiple devices on one bench | n/a | must choose which device answers; racy |
-| Credential in the pod | yes, 15 min, narrowed | none |
 
-**Recommendation: A.** The bench runs turns on the server side and is shared by every device, so a
-credential that exists only while one particular laptop is connected contradicts that design. A
-also enforces audience and scope on the server.
+The bench runs turns on the server side and is shared by every device. A credential that exists
+only while one particular laptop is connected contradicts that design.
+
+## Membership lifecycle
+
+**Rule.** A bench is the member's personal workspace inside the team. It exists only while the
+person is a member. A member can be in one of three states:
+
+| State | Access | Data |
+|---|---|---|
+| Active | full | kept |
+| Paused | none | kept |
+| Removed (removed, left, or team deleted) | none | deleted, all of it |
+
+### What exists today
+
+- `my_bench` (`crates/workspaces/src/api/bench.rs:115`) answers `Standing::Departed` for a person
+  who is no longer a member but still has a Bench. `ensure_access` (`:141`) sets
+  `spec.access = ReadOnly` for that person, and `create_bench` (`:232`) 404s them.
+- `readonly_departed_benches` (`crates/workspaces/src/api/keys.rs:161`) runs on the keys beat
+  (`run_beat`, `KEYS_RESYNC_SECS` = 300 s). It flips a departed member's Full bench to ReadOnly and
+  keeps the Bench. It relies on `teams_for`, which fails closed to an empty list, so the demotion
+  also happens when the directory is down.
+- `prune_team_benches` (`keys.rs:204`) deletes a bench only when the directory ANSWERS that the
+  team is gone (`gone_teams`), and pins the delete to the judged uid and resourceVersion
+  (commit 31ccb07f). A departed member of a team that still exists is not touched.
+- `spaces::prune_departed` (`crates/workspaces/src/api/spaces.rs:208`) deletes a departed member's
+  `SpaceEnvironment`. It is keep-biased: `member_teams` errors mean nothing is pruned.
+- Nothing deletes the bench folder `{pool}/homes/.benches/{team}/{owner}`. See the `ponytail:`
+  note in `ensure_bench_folder` (`bins/agent/src/controller/workspace/home.rs:52`).
+- Nothing deletes a departed member's team Workspaces (namespace `wt-{owner}-…`). `prune_namespaces`
+  only removes a `wt-` namespace once no Workspace resolves to it.
+- The directory's `Member` (`crates/pulls/src/directory/mod.rs:34`) is `{user, role, joined_at}`.
+  It has no state field. `remove_member` (`crates/pulls/src/directory/teams.rs:442`, route
+  `crates/api/src/teams.rs:864`) `$pull`s the row and does nothing else.
+
+### What changes
+
+**ReadOnly departed benches go away.** `Standing::Departed`, `BenchAccess::ReadOnly` and
+`readonly_departed_benches` are deleted. `my_bench` answers 404 for a non-member, exactly as it
+does for a person who never had a bench. A stored `ReadOnly` value still parses, is read as
+`Paused` until the removal reconcile collects it, and is never written again.
+
+**Removal reconcile.** One beat function, `api::membership::reconcile`, replaces
+`readonly_departed_benches`, `prune_team_benches` and `spaces::prune_departed` on the keys beat
+(`run_beat`, api `user` role). The controller-owns-cleanup rule applies: `remove_member` and
+`delete_team` live in the directory binary, which has no kubeconfig, and a beat also heals a
+removal that happened while the api was down.
+
+For each distinct (owner, team) pair with `team != owner`, taken from Bench, Workspace,
+SpaceEnvironment and the bench folders on the share:
+
+1. **Judge (keep-biased).** Delete only when the directory ANSWERS either "team gone"
+   (`bench_team` → `Ok(None)`) or "team exists and this person is not in it". The second answer
+   needs a new strict `Directory::membership(team, user) -> Result<Option<MemberState>, String>`.
+   `teams_for` must not be used for this, because it answers an empty list on failure. Any error,
+   timeout or `Source::Unavailable` keeps everything, logs `membership.reconcile.skipped` once per
+   beat, and is retried on the next beat. A paused member is a member and is never removed.
+2. **Grace.** The first beat that judges a pair removed stamps `kloudlite.io/removed-at` on the
+   Bench (or, if there is no Bench, on each of that pair's Workspaces). Deletion starts only on a
+   beat at least `MEMBER_REMOVAL_GRACE` after that stamp, and it re-judges first. A re-add during
+   the grace clears the stamp and nothing is lost. See open question 1.
+3. **Delete, in this order.** Access goes first and bytes go last, so a failure partway leaves
+   data behind rather than access:
+   1. The Bench, with a uid/resourceVersion precondition as `prune_team_benches` already does.
+      Its pod and the `bench-tool` Secret go with the namespace objects. The gateway's
+      `resolve_bench` 404s from this point.
+   2. Every Workspace with `spec.owner == owner` and `spec.team == team`. This runs the existing
+      `WORKTREE_FINALIZER` (`cleanup_parent`), which drops the worktree and sync points and detaches
+      the Volume only if a snapshot remains.
+   3. Pushed snapshots of those volumes. Removal means ALL data, so the reconcile deletes each
+      such `Snapshot` (the explicit delete verb's path) once its Workspace is gone. The Volume then
+      has no owner entry and no snapshot, and `retire_pass` collects it along with its replicas on
+      every node.
+   4. The `SpaceEnvironment` for (owner, team).
+   5. Keys projection: `project_all` stops listing the person's keys for that team's namespace on
+      its next write. `prune_namespaces` removes the `wt-` namespace (and `user-key`) once it holds
+      no Workspace and no pod.
+   6. The bench folder. The agent's janitor, not the api, deletes
+      `{pool}/homes/.benches/{team}/{owner}` once no Bench names that pair and the folder's
+      `.removed` marker is older than the grace. The api cannot reach the share; the agent already
+      mounts it. The marker is written by the api's delete in step 1 through a `BenchFolderRelease`
+      annotation that the agent reads, and it re-checks that no Bench exists immediately before
+      `rm -rf`. The janitor also collects folders no Bench has named for longer than the grace,
+      which clears the `ponytail:` note in `ensure_bench_folder`.
+   Environments are owned by the team (`spec.owner` = team) and are NOT deleted. No creator is
+   recorded on them. See open question 3.
+4. **Idempotent.** Every step is "delete if present". A 404 counts as done and a 409 (precondition)
+   means the object changed, so it is re-judged next beat. A pair whose objects are all gone is no
+   longer listed. A second beat therefore writes nothing.
+5. **Audit.** Each deletion writes one `crate::audit::record` row, `member.removed.cleanup`, with
+   `{owner, team, kind, name, reason ∈ {left, removed, team_deleted}}`, plus `member.removed.judged`
+   when the grace stamp is set. These rows are also dual-written to history as `admin.<action>`.
+   Logs: `membership.cleanup.deleted`, `membership.cleanup.failed`,
+   `membership.reconcile.skipped`.
+6. **What people see.**
+   - The person, in the desktop and web: the team leaves their list, and `/v1/bench` for it 404s.
+     While the grace runs, the team page's remove dialog says "their bench, workspaces and
+     snapshots in this team will be deleted in {grace}".
+   - The admin: the members table shows "removing — data deleted at {time}". Superadmin Owners
+     lists pending removals. The Audit area shows the rows above.
+
+### Pause and unpause
+
+**Directory.** Add `state: active | paused` to `Member` (a missing field reads as active), plus
+`paused_at` and `paused_by`. `Directory::set_member_state(slug, email, state)` in
+`crates/pulls/src/directory/teams.rs` gets the same shape as `set_role`. Routes:
+`POST /api/teams/{slug}/members/{email}/pause` and `/unpause` in `crates/api/src/teams.rs`.
+
+**Who can pause.** A team admin can pause members and admins, and a team owner can pause anyone.
+This is the same reach as `may_grant` in `remove_member`. A superadmin can pause anyone through the
+admin router, and that writes an audit row. Nobody can pause themselves, and the last active owner
+cannot be paused (the same rule as `LastOwner`).
+
+**Effect.** A paused member is not a member for access purposes and IS a member for data purposes:
+
+- `teams_for` / `member_teams` / `may_act` omit teams where the person is paused. `/v1` on that team
+  answers 403 `your access to {team} is paused`, and a push to the team's git repos and registry is
+  refused.
+- The `bench-tool` token fails check 3 (the Bench is `access: Paused`), and `tool-token` 403s.
+- The gateway gains one read. Before it dials, `resolve_bench` and `resolve` refuse a Bench with
+  `access == Paused`, or a Workspace whose Bench pair is paused, with 403. The gateway has no
+  directory, so it reads the CR field, which `membership::reconcile` writes on every beat from the
+  directory's answer.
+- Workspace SSH and the tool server: the keys projection drops the person's keys from that team's
+  `OwnerKeys` on the next write, and `/v1/workspaces/{id}/tools` 403s through `may_act_on`.
+- Removal reconcile: a paused member is never judged removed, and the data is kept indefinitely.
+
+**Running pods.** Recommended: pause STOPS them. The reconcile sets `desiredState: Stopped` on the
+member's Bench and team Workspaces in that team, which cuts the usual stop sync point, so nothing
+keeps running (or spending quota) on behalf of someone who has no access. Unpause restores access
+only and starts nothing; the person starts things again. See open question 2.
+
+**Propagation.** Pause takes effect in these stages:
+- immediately on the pause route itself;
+- within 60 s for `may_act` (git, registry), through its cache;
+- within the directory cache TTL for `teams_for` on the api;
+- within one keys beat (300 s) for `Bench.spec.access`, the gateway refusal, the stop and the keys
+  projection.
+
+For immediate effect, `pause` calls the api's existing `POST /v1/internal` resync path to run
+`membership::reconcile` for that one pair. The beat remains the backstop. Unpause propagates on
+the same schedule.
 
 ## Pod side (`harness/pi/kloudlite.ts`)
 
-- Remove `load`, `save`, `dir`, `file`, `DEFAULT_API` and the `Config` type. Also remove the imports
-  of `spawn` and `os` if nothing else uses them.
+- Remove `load`, `save`, `dir`, `file`, `DEFAULT_API` and the `Config` type. Also remove the
+  imports of `spawn` and `os` if nothing else uses them.
 - `call` reads `KL_TOOL_TOKEN_FILE` and `KL_API_URL` on every call:
-  - missing file, empty file or unset env → throw `sign in on the Kloudlite desktop app`;
-  - 401 → the same message plus `(your desktop session ended or the bench was stopped)`;
-  - 403 → pass the server's own sentence through.
+  - a missing file, an empty file or unset env throws `sign in on the Kloudlite desktop app`;
+  - a 401 gives the same message plus `(your desktop session ended or the bench was stopped)`;
+  - a 403 passes the server's own sentence through, which covers paused access and scope.
 - Keep the `redirect: "error"` and HTML-page guards.
 - `kl_whoami` decodes the claims without verifying them and returns `{username, team, expires_at}`.
   It never returns the token.
@@ -142,10 +309,11 @@ also enforces audience and scope on the server.
   (10–17) that describes the 30-day token.
 - `harness/bench/test/workspace-tools.test.ts`: the `KL_CONFIG_DIR` fixture (129–142) becomes a
   `KL_TOOL_TOKEN_FILE` temp file.
-- Any mention of `/kl-login` in the harness UI or catalogue. `git grep kl-login` is empty after the
-  change.
-- `POST /v1/cli/code` stays, because the desktop and `kl-connect` still use it. Only the bench's use
-  of it goes away.
+- Every mention of `/kl-login`. After the change, `git grep kl-login` is empty.
+- `Standing::Departed`, `ensure_access`'s ReadOnly arm, `readonly_departed_benches`,
+  `prune_team_benches` and `spaces::prune_departed` are folded into `membership::reconcile`, and
+  their tests move with them.
+- `POST /v1/cli/code` stays, because the desktop and `kl-connect` still use it.
 
 ## Errors
 
@@ -154,73 +322,135 @@ also enforces audience and scope on the server.
 | No Secret yet (before first Connect, or after stop) | tool: sign-in message; no request sent |
 | Token expired (desktop gone >15 min) | api 401 → tool: sign-in message |
 | Parent revoked | api 401 within 30 s |
-| Directory unreachable (`is_live` false) | 401; fails closed, same as CLI tokens today |
-| Bench stopped, deleted or ReadOnly | 401 |
-| Route outside `BENCH_TOOL_ROUTES` (`/v1/cli/tokens`, `/v1/bench/session`, `/v1/keys`) | 401 |
+| Directory unreachable (`is_live` false) | 401; fails closed, as CLI tokens do today |
+| Bench stopped, deleted or paused | 401 |
+| Route outside `BENCH_TOOL_ROUTES` | 401 |
 | Owner or team outside scope | 403 `bench tools act only for {handle} and {team}` |
-| `tool-token` called with a session cookie or bench-tool token | 403 / 401 |
-| Secret write fails | 503 to the desktop; the beat retries; the old token keeps working until exp |
+| Member paused, any `/v1` on that team | 403 `your access to {team} is paused` |
+| Gateway tunnel to a paused bench or workspace | 403 before upgrade |
+| `tool-token` with a session cookie / bench-tool token | 403 / 401 |
+| Secret write fails | 503 to the desktop; the beat retries; the old token works until exp |
+| Removal reconcile cannot read the directory | nothing deleted; `membership.reconcile.skipped` |
 
 ## Audit and logging
 
 - `bench.tool_token.written`: `owner`, `team`, `jti8`, `parent8` (first 8 hex characters), `exp`.
-- `bench.tool.refused`: `owner`, `jti8`, and `reason ∈ {audience, parent, bench, scope, expired}`.
+- `bench.tool.refused`: `owner`, `jti8`, `reason ∈ {audience, parent, bench, scope, expired, paused}`.
 - The token, the Secret body and full `jti`s are never logged. `kube_err` on the Secret patch must not
-  echo the request body; the `kube::Error` display does not include it, and a test checks that.
-- Every `/v1` write the tool makes is already logged as `http.write` with the caller handle.
-  `via=bench-tool` is added so a person can tell a model's action from their own.
+  echo the request body; a test checks this.
+- Every `/v1` write the tool makes is logged as `http.write` with the caller handle, plus
+  `via=bench-tool`.
+- `member.paused` / `member.unpaused` audit rows `{team, member, by}`. For removals, see
+  "Membership lifecycle".
 
 ## Tests
 
 **Unit.**
 
-- `jwt.rs`: mint and verify round trip; `verify` and `verify_any_user` refuse `bench-tool`;
-  `verify_bench_tool` refuses `bench-session` and `cli`.
+- `jwt.rs`:
+  - mint and verify round trip;
+  - `verify` and `verify_any_user` refuse `bench-tool`;
+  - `verify_bench_tool` refuses `bench-session` and `cli`.
 - `api`: the route-table test covers every `/v1` route. `tests/api_bench.rs` covers:
   - the pod token works on `GET /v1/workspaces`;
   - it gets 401 on `/v1/cli/tokens`, `/v1/bench/session`, `/v1/bench/tool-token` and `/v1/keys`;
-  - 401 once `is_live` is false;
-  - 401 once the bench is stopped;
-  - 403 on another team;
-  - `tool-token` with a session JWT gets 403.
-- `k8s`: `bench_pod` mounts `bench-tool` as optional and read-only, with no token in env;
+  - it gets 401 once `is_live` is false, once the bench is stopped, and once the bench is paused;
+  - it gets 403 on another team;
+  - `tool-token` gets 403 with a session JWT and 403 for a paused member.
+- `membership::reconcile` with a fake directory:
+  - a directory error deletes nothing;
+  - a removed pair inside the grace is only stamped;
+  - after the grace, the delete runs in order (Bench before Workspaces before Snapshots before
+    SpaceEnvironment);
+  - a re-add during the grace clears the stamp;
+  - a paused member is never judged removed;
+  - a personal pair (`team == owner`) is never a candidate;
+  - the second beat writes nothing;
+  - a 409 precondition failure is retried and not forced.
+- `directory`:
+  - `set_member_state` round trip on Memory and Mongo;
+  - a missing `state` reads as active;
+  - the last active owner cannot be paused;
+  - `teams_for` omits paused teams.
+- `gateway`: `resolve_bench` and `resolve` refuse `access: Paused` with 403.
+- agent janitor: a bench folder is removed only when no Bench names it and its marker is older than
+  the grace; with a Bench present, it is kept.
+- `k8s`: `bench_pod` mounts `bench-tool` optional and read-only, with no token in env;
   `workspace_pod` does not mount it.
-- `harness`: `node --test` checks that `call` re-reads the file between two calls (rotation), that a
-  missing file gives the exact message and makes no fetch, and that 401 maps to the message.
+- `harness`: `node --test` checks that `call` re-reads the file between calls, that a missing file
+  gives the exact message with no fetch, and that 401 maps to that message.
 
-**SLO** (catalogue.rs plus `deploy/slo.md`, hourly):
+**SLO** (`crates/workspaces/src/slo/catalogue.rs` plus `deploy/slo.md`):
 
-- `bench.tool.token`: the probe's CLI login calls tool-token, then execs `kl_regions`'s fetch inside
-  the bench pod, and it passes.
-- `bench.tool.audience`: the pod token on `/v1/cli/tokens` and `/v1/bench/session` is refused.
-- `bench.tool.revoked`: the probe revokes the parent `jti`; within 60 s a pod call returns 401.
-  After a stop the next call returns 401 at once.
+- `bench.tool.token` (hourly): the probe's login calls tool-token and then runs `kl_regions`'s fetch
+  inside the bench pod. It passes.
+- `bench.tool.audience` (hourly): the pod token on `/v1/cli/tokens` and `/v1/bench/session` is
+  refused.
+- `bench.tool.revoked` (hourly): the probe revokes the parent `jti`, and a pod call returns 401
+  within 60 s. After a stop, the next call returns 401 at once.
+- `team.member.paused` (hourly): pause the probe's second member.
+  - Within one beat: the tool token gets 401, `/v1` on the team gets 403, the gateway bench tunnel
+    gets 403, and the bench is `Stopped`.
+  - Unpause, then start: access returns and the bench folder's canary file is still there.
+- `team.member.removed.cleanup` (drills suite, with the grace overridden short for the probe team):
+  remove the member.
+  - After grace plus two beats, these are all gone: the Bench, the team Workspaces, the Snapshots,
+    the Volumes, the SpaceEnvironment and the bench folder.
+  - The audit rows exist, and a re-add of the same person finds nothing.
+- `team.member.removed.dir_down` (drills suite): with the directory unreachable, a removed pair's
+  objects all survive the beat.
 
 ## Rollout order
 
-1. **api.** Add the JWT kind, the `caller` arm with the route table and scope, `tool-token`, the
-   Secret delete in `stop_bench`, and the ingress. `deploy/kloudlite-web.yaml` line 252 does not
-   list `environments|regions|quota|volumes` today, which is why `kloudlite.ts` has a guard for HTML
-   pages; add them. Nothing mints a token yet, so this step is inert.
-2. **agent/k8s.** Add the optional volume to `bench_pod`. A running pod is not replaced; the next
-   wake picks it up.
-3. **desktop.** Call tool-token at Connect and on the 5-minute beat; add the delete on sign-out.
-4. **bench image.** New `kloudlite.ts` and `/kl-login` removed. Before this step the old tools still
-   work with a stored login.
-5. **Cleanup.** Revoke existing CLI tokens whose device label ends in `(bench)`, and delete
-   `~/.config/kl-connect/config.json` from bench homes (see Q2).
+1. **directory.** Add the `Member.state` field (a missing value reads as active), `set_member_state`,
+   and the pause/unpause routes. `teams_for` / `may_act` omit paused teams. This step is inert until
+   somebody pauses a member.
+2. **api.** Add:
+   - the JWT kind, the `caller` arm with the route table and scope, `tool-token`, and the Secret
+     delete in `stop_bench`;
+   - `membership::reconcile`, first in **dry-run**: it logs and audits `member.removed.judged`
+     without deleting anything, for one week. Before enabling deletes, the owner reads the list;
+   - the ingress: confirm that the rolled pin of `deploy/kloudlite-web.yaml` carries the line-253
+     allow-list, and check that `curl https://{api-host}/v1/regions` answers JSON with no token
+     (401 JSON, not HTML).
+3. **gateway.** Add the paused refusal in `resolve_bench` / `resolve`.
+4. **agent/k8s.** Add the optional `bench-tool` volume in `bench_pod`, and the janitor's
+   bench-folder collection (behind the same dry-run flag). A running pod is not replaced; its next
+   wake picks up the volume.
+5. **desktop.** Call tool-token at Connect and on the 5-minute beat, and send the delete on
+   sign-out.
+6. **bench image and old-login cleanup.** Ship the new `kloudlite.ts` without `/kl-login`, then run
+   one sweep. It is superadmin-only and audited:
+   - **Tokens: find.** List the directory's CLI tokens whose device label ends in `(bench)`. That is
+     the label `/kl-login` wrote.
+   - **Tokens: revoke.** Revoke each one through the existing revoke path, with an audit row
+     `bench.login.revoked {owner, jti8}`.
+   - **Tokens: verify.** A second listing returns zero, and one sampled revoked token gets 401 on
+     `GET /v1/workspaces`.
+   - **Files: find and delete.** Every agent's janitor, on one beat, deletes
+     `{pool}/homes/{owner}/.config/kl-connect/config.json` only when its JSON `device` label ends
+     in `(bench)`. A laptop `kl-connect` config synced into a home is left alone. It logs
+     `bench.login.file.deleted {owner}`.
+   - **Files: verify.** `find {pool}/homes -path '*/.config/kl-connect/config.json'` on one node,
+     with each hit's label checked, shows no `(bench)` file. The share is region-wide, so one node
+     is enough per region.
+7. **Enable deletes.** Turn off dry-run for `membership::reconcile` and the janitor once the owner
+   has reviewed the week's `member.removed.judged` rows. The ReadOnly bench code is removed in the
+   same release.
 
-## Open questions for the owner
+## New open questions
 
-1. **TTL and beat.** 15 min TTL with a 5 min renew. Is losing tools about 15 minutes after the
-   laptop disconnects acceptable, or should the bench's own idle clock be the only limit? A longer
-   limit means a longer TTL.
-2. **Old bench logins.** Should the platform revoke the `(bench)` CLI tokens and delete the
-   `config.json` written to NFS homes, or only tell people? The tokens are live for 30 days and
-   readable from their workspaces.
-3. **Scope.** Is the token limited to the bench's team plus the person's own handle (as proposed), or
-   to the team only?
-4. **ReadOnly benches.** Should a departed member's read-only bench get read-only tools (the GET
-   routes) instead of none?
-5. **API base.** Should the pod call `/v1` at the public host (which needs the ingress change) or at
-   an in-region internal address? A bench in a k3s region has no in-cluster `kloudlite-api`.
+1. **Deletion grace period.** Recommended: a 7-day grace after removal, with the admin able to
+   "delete now" (explicit confirmation naming the person and team) and the removal dialog stating
+   the date. The alternative is immediate deletion behind a typed confirmation in the remove dialog.
+   A self-leave or a team delete has no admin in the loop, which is why a grace is recommended over
+   confirmation only.
+2. **Does pause stop running pods?** Recommended: yes, it stops the Bench and the team Workspaces,
+   and unpause starts nothing. The alternative leaves them running without access, which keeps
+   spending quota with nobody able to reach them.
+3. **Team environments a removed member created.** Environments are team-owned and record no
+   creator, so removal cannot tell which ones were "theirs". Recommended: keep them (they are the
+   team's) and only detach the member's intercepts and attachments, which go with their
+   Workspaces. Say so if a creator field and deletion are wanted.
+4. **Pushed snapshots on removal.** "Entire data" is read as including snapshots that would
+   otherwise survive detached. Confirm, or keep snapshots for the team to restore from.
