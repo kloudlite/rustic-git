@@ -114,9 +114,12 @@ rules:
   # `ws-` one is never a candidate), only when no Workspace resolves to it, only when it is older
   # than a beat, and only when it holds no pod. Without it a deleted team left its namespace
   # behind forever — 101 empty ones by 2026-09-08, one per hourly probe run.
+  #
+  # `get`: a refused `user-key` install reads its namespace to tell a terminating or brand-new one
+  # (expected, deferred) from a real fault (`workspaces::keys::write_user_key`).
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list", "delete"]
+    verbs: ["list", "get", "delete"]
   # The prune's last guard reads pods in the namespace it is about to delete; unreadable counts as
   # occupied, so this is the verb that lets a delete be refused rather than waved through. RBAC
   # cannot scope a list to a name prefix, so this IS cluster-wide pod read — every namespace,
