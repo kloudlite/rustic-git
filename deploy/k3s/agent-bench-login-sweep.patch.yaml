@@ -1,0 +1,19 @@
+# One-time bench login sweep (janitor.rs `sweep_bench_login_files`): mounts the OPTIONAL
+# `bench-login-sweep` ConfigMap into the agent at /etc/kloudlite/bench-login-sweep. A strategic
+# merge patch, not part of agent-daemonset.yaml, because that file was frozen under a roll when
+# this landed; a later apply of agent-daemonset.yaml drops the mount, which only ends the sweep.
+#   kubectl -n kube-system patch daemonset kloudlite-agent --patch-file deploy/k3s/agent-bench-login-sweep.patch.yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: agent
+          volumeMounts:
+            - name: bench-login-sweep
+              mountPath: /etc/kloudlite/bench-login-sweep
+              readOnly: true
+      volumes:
+        - name: bench-login-sweep
+          configMap:
+            name: bench-login-sweep
+            optional: true

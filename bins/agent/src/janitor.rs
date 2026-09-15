@@ -69,7 +69,58 @@ fn janitor_beat(pool: &str, live: Option<&std::collections::HashSet<String>>) ->
     warn_oversized_homes(std::path::Path::new(pool));
     let attach = live.map_or(0, |l| janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE, l));
     let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
+    let revoked = revoked_bench_logins(std::path::Path::new(BENCH_LOGIN_SWEEP_LIST));
+    if !revoked.is_empty() {
+        sweep_bench_login_files(&crate::homes_root(pool), &revoked);
+    }
     (attach, profiles)
+}
+
+/// The operator's list of sha256(jti) digests the one-time bench login sweep revoked (the api's
+/// `POST /api/admin/bench-logins/revoke`), from the OPTIONAL `bench-login-sweep` ConfigMap. Absent
+/// or unreadable is an empty set, and an empty set deletes nothing.
+const BENCH_LOGIN_SWEEP_LIST: &str = "/etc/kloudlite/bench-login-sweep/jtis";
+
+fn revoked_bench_logins(list: &std::path::Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(list)
+        .map(|s| s.lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// Deletes `{homes}/{owner}/.config/kl-connect/config.json` where the saved token's jti digest is
+/// in `revoked`. A file cannot be judged any other way: `/kl-login` and a laptop's `kl-connect
+/// login` save the same fields and no device label, so only a token the sweep itself revoked
+/// marks a bench login. Keep-biased: an unreadable file, bad JSON, an undecodable token or no jti
+/// is kept. The token is never logged. Re-running finds nothing to delete, so it is idempotent.
+fn sweep_bench_login_files(homes: &std::path::Path, revoked: &std::collections::HashSet<String>) -> usize {
+    use base64::Engine as _;
+    use sha2::Digest;
+    let Ok(owners) = std::fs::read_dir(homes) else { return 0 };
+    let mut deleted = 0;
+    for owner in owners.flatten() {
+        let path = owner.path().join(".config/kl-connect/config.json");
+        let jti = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v["token"].as_str().and_then(|t| t.split('.').nth(1)).map(str::to_string))
+            .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p.trim_end_matches('=')).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|c| c["jti"].as_str().map(str::to_string));
+        let Some(jti) = jti else { continue };
+        let digest: String = sha2::Sha256::digest(jti.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        if !revoked.contains(&digest) {
+            continue;
+        }
+        let owner = owner.file_name().to_string_lossy().into_owned();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(%owner, "bench.login.file.deleted");
+                deleted += 1;
+            }
+            Err(e) => tracing::warn!(%owner, error = %e, "bench.login.file.delete.failed"),
+        }
+    }
+    deleted
 }
 
 /// Reclaims `by-inputs/{hash}` index entries (Task 2) that no `{id}/current` link points at.
@@ -554,6 +605,45 @@ mod janitor_tests {
         let over = oversized_homes(tmp.path());
         assert_eq!(over.len(), 1, "{over:?}");
         assert_eq!(over[0].0, "bob");
+    }
+
+    fn kl_config(homes: &std::path::Path, owner: &str, body: &str) -> std::path::PathBuf {
+        let dir = homes.join(owner).join(".config/kl-connect");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), body).unwrap();
+        dir.join("config.json")
+    }
+
+    fn token_with_jti(jti: &str) -> String {
+        use base64::Engine as _;
+        let p = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"a@x","jti":"{jti}"}}"#));
+        format!(r#"{{"api":"https://x","token":"eyJhbGciOiJIUzI1NiJ9.{p}.sig","expires_at":"","username":"a"}}"#)
+    }
+
+    fn digest(s: &str) -> String {
+        use sha2::Digest;
+        sha2::Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Only a config whose token the sweep revoked goes; a laptop login, bad JSON and an empty
+    /// list all keep every file.
+    #[test]
+    fn the_bench_login_sweep_deletes_only_listed_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let homes = tmp.path();
+        let bench = kl_config(homes, "x", &token_with_jti("bench-jti"));
+        let laptop = kl_config(homes, "y", &token_with_jti("laptop-jti"));
+        let bad = kl_config(homes, "z", "{not json");
+
+        assert_eq!(sweep_bench_login_files(homes, &Default::default()), 0, "empty list deletes nothing");
+        let list = tmp.path().join("jtis");
+        std::fs::write(&list, format!("{}\n\n", digest("bench-jti").to_uppercase())).unwrap();
+        let revoked = revoked_bench_logins(&list);
+        assert!(revoked_bench_logins(&tmp.path().join("missing")).is_empty());
+
+        assert_eq!(sweep_bench_login_files(homes, &revoked), 1);
+        assert!(!bench.exists() && laptop.exists() && bad.exists());
+        assert_eq!(sweep_bench_login_files(homes, &revoked), 0, "idempotent");
     }
 
     /// An entry no workspace's `current` resolves to, older than the bound, is reclaimable.
