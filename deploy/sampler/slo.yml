@@ -1,0 +1,79 @@
+# SLO probe results in the terminal: `sampler -c deploy/sampler/slo.yml`
+# (https://github.com/sqshq/sampler).
+#
+# Reads the `kloudlite` database the admin process writes (`slo_runs`, `slo_results`, `alerts`;
+# all ReplacingMergeTree, so every read is FINAL). Credentials come from the environment:
+#   export CH_URL=https://<clickhouse-host>:8443 CH_USER=<reader> CH_PASSWORD=<password>
+# The reader needs SELECT on kloudlite.slo_runs, kloudlite.slo_results and kloudlite.alerts —
+# the ClickStack/HyperDX user does NOT have it, so use a dedicated read-only user.
+
+variables:
+  q: >-
+    curl -sS --fail --max-time 20 --user "$CH_USER:$CH_PASSWORD" "$CH_URL/?default_format=TSV"
+    --data-binary
+
+gauges:
+  - title: Fast suite pass rate (24 h)
+    position: [[0, 0], [26, 5]]
+    rate-ms: 60000
+    scale: 0
+    cur:
+      sample: $q "SELECT countIf(state IN ('passed', 'skipped')) FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 24 HOUR AND state != 'running'"
+    max:
+      sample: $q "SELECT count() FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 24 HOUR AND state != 'running'"
+    min:
+      sample: echo 0
+  - title: Hourly suite pass rate (24 h, per group)
+    position: [[26, 0], [27, 5]]
+    rate-ms: 60000
+    scale: 0
+    cur:
+      sample: $q "SELECT countIf(state IN ('passed', 'skipped')) FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND started > now() - INTERVAL 24 HOUR AND state != 'running'"
+    max:
+      sample: $q "SELECT count() FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND started > now() - INTERVAL 24 HOUR AND state != 'running'"
+    min:
+      sample: echo 0
+  - title: Firing alerts
+    position: [[53, 0], [27, 5]]
+    rate-ms: 60000
+    scale: 0
+    cur:
+      sample: $q "SELECT countIf(s = 'firing') FROM (SELECT rule, region, argMax(state, ts) AS s FROM kloudlite.alerts FINAL GROUP BY rule, region)"
+    max:
+      sample: $q "SELECT count() FROM (SELECT DISTINCT rule, region FROM kloudlite.alerts FINAL)"
+    min:
+      sample: echo 0
+
+runcharts:
+  - title: Failed SLO checks (per hour window)
+    position: [[0, 5], [53, 15]]
+    rate-ms: 60000
+    scale: 0
+    legend:
+      enabled: true
+      details: false
+    items:
+      - label: fast
+        color: 214
+        sample: $q "SELECT count() FROM kloudlite.slo_results FINAL r INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
+      - label: hourly
+        color: 196
+        sample: $q "SELECT count() FROM kloudlite.slo_results FINAL r INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
+
+  - title: Slowest hourly run (minutes, last 3 h)
+    position: [[53, 5], [27, 15]]
+    rate-ms: 60000
+    scale: 1
+    legend:
+      enabled: false
+      details: false
+    items:
+      - label: minutes
+        color: 45
+        sample: $q "SELECT round(max(dateDiff('second', started, finished)) / 60, 1) FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND finished IS NOT NULL AND started > now() - INTERVAL 3 HOUR"
+
+textboxes:
+  - title: Failing checks (last 3 h)
+    position: [[0, 20], [80, 20]]
+    rate-ms: 60000
+    sample: $q "SELECT concat(formatDateTime(max(ts), '%H:%i', 'Asia/Kolkata'), '  ', slo_id, '  x', toString(count()), '  ', substring(argMax(detail, ts), 1, 90)) FROM kloudlite.slo_results FINAL WHERE ts > now() - INTERVAL 3 HOUR AND ok = 0 AND skipped = 0 GROUP BY slo_id ORDER BY max(ts) DESC LIMIT 15"
