@@ -1,7 +1,13 @@
 //! `team.member.paused`: a paused member loses every surface at once, and nothing of theirs.
 //!
-//! Its own team (`run-{id}-pause`), so pausing the second probe member never touches the team
-//! group 0 walks or the intercept team group 1 stands up; hence group 2 (`suite::group_of`).
+//! Its own team (`run-{id}-pause`), so pausing the probe member never touches the team group 0
+//! walks or the intercept team group 1 stands up; hence group 2 (`suite::group_of`). A pause is
+//! per team membership, so the probe tenant stays whole in every other journey.
+//!
+//! Roles: the PROBE tenant is the paused member and owns the bench and canary, because a bench
+//! create charges its caller and the second tenant's Quota is all zeros by design (it exists only
+//! to be refused — the 15 Sep fleet 409). The second tenant owns the team and pauses; the crash
+//! sweep finds the team under its JWT.
 //!
 //! The gateway half cannot use a session token minted before the pause: those live 60 s
 //! (`SSH_SESSION_TTL_SECS`) and the Bench is marked paused only on the api's keys beat (300 s), so
@@ -46,7 +52,7 @@ struct Prep {
 
 async fn in_bench(c: &Ctx, team: &str, js: &str, arg: &str) -> Result<String> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    let ns = crd::ws_namespace(&c.other_user, team);
+    let ns = crd::ws_namespace(&c.probe_user, team);
     let (code, out, err) = crate::kube::exec(k, &ns, k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), &["node", "-e", js, arg], EXEC).await?;
     if code != 0 {
         return Err(anyhow!("node in the member's bench exited {code}: {}", clip(&err)));
@@ -55,24 +61,29 @@ async fn in_bench(c: &Ctx, team: &str, js: &str, arg: &str) -> Result<String> {
 }
 
 async fn ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
-    poll_json(c, &bench_url(c, "", team), &c.other_jwt, cap, |v| v.get("phase").and_then(Value::as_str) == Some("ready")).await
+    poll_json(c, &bench_url(c, "", team), &c.probe_jwt, cap, |v| v.get("phase").and_then(Value::as_str) == Some("ready")).await
+}
+
+/// The paused member's bench, charged to the probe tenant — the one with a Quota.
+async fn make_bench(c: &Ctx, team: &str) -> Result<Value> {
+    post(c, &api(c, "/v1/bench"), &c.probe_jwt, serde_json::json!({ "team": team, "region": c.cfg.region }))
+        .await
+        .context("could not create the member's bench")
 }
 
 /// Team with the member in it, their bench ready with a canary, a tool token in the pod, and the
 /// gateway URL a session answers with.
 async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
     let body = serde_json::json!({ "slug": team, "name": "kloudlite slo pause", "region": c.cfg.region });
-    post(c, &api(c, "/v1/teams"), &c.probe_jwt, body).await.context("could not create the pause team")?;
-    let invite = serde_json::json!({ "email": c.other_email, "role": "member" });
-    let issued = post(c, &api(c, &format!("/v1/teams/{team}/invites")), &c.probe_jwt, invite).await.context("could not invite")?;
+    post(c, &api(c, "/v1/teams"), &c.other_jwt, body).await.context("could not create the pause team")?;
+    let invite = serde_json::json!({ "email": c.probe_email, "role": "member" });
+    let issued = post(c, &api(c, &format!("/v1/teams/{team}/invites")), &c.other_jwt, invite).await.context("could not invite")?;
     let token = issued.get("token").and_then(Value::as_str).filter(|t| !t.is_empty()).ok_or_else(|| anyhow!("no invite token"))?;
-    post(c, &api(c, &format!("/v1/invites/{token}/accept")), &c.other_jwt, Value::Null).await.context("the member could not join")?;
-    post(c, &api(c, "/v1/bench"), &c.other_jwt, serde_json::json!({ "team": team, "region": c.cfg.region }))
-        .await
-        .context("could not create the member's bench")?;
+    post(c, &api(c, &format!("/v1/invites/{token}/accept")), &c.probe_jwt, Value::Null).await.context("the member could not join")?;
+    make_bench(c, team).await?;
     ready(c, team, READY_WAIT).await.context("the member's bench never became ready")?;
     in_bench(c, team, r#"require("fs").writeFileSync(process.argv[1],process.argv[1])"#, CANARY).await.context("could not write the canary")?;
-    let (cli, cli_id) = super::super::experience_gaps::cli_login(c, &c.other_jwt, &format!("{team}-tool")).await?;
+    let (cli, cli_id) = super::super::experience_gaps::cli_login(c, &c.probe_jwt, &format!("{team}-tool")).await?;
     let prep = async {
         let (status, text) = raw(c, reqwest::Method::POST, &bench_url(c, "/tool-token", team), &cli, None, &[]).await?;
         if status != reqwest::StatusCode::NO_CONTENT {
@@ -89,7 +100,7 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         };
-        let session = post(c, &bench_url(c, "/session", team), &c.other_jwt, Value::Null).await.context("no bench session")?;
+        let session = post(c, &bench_url(c, "/session", team), &c.probe_jwt, Value::Null).await.context("no bench session")?;
         let gateway = session.get("gateway").and_then(Value::as_str).ok_or_else(|| anyhow!("the session named no gateway"))?;
         anyhow::Ok((tool, gateway.replacen("wss://", "https://", 1)))
     }
@@ -104,7 +115,7 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
 }
 
 async fn revoke(c: &Ctx, id: &str) {
-    let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &c.other_jwt, None).await;
+    let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &c.probe_jwt, None).await;
 }
 
 /// One pass over the five surfaces; `Err` names the first that still lets the member in.
@@ -113,22 +124,22 @@ async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     if status != reqwest::StatusCode::UNAUTHORIZED {
         return Err(anyhow!("the tool token answered {status}: {}", clip(&body)));
     }
-    let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/workspaces?team={team}")), &c.other_jwt, None, &[]).await?;
+    let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/workspaces?team={team}")), &c.probe_jwt, None, &[]).await?;
     if status != reqwest::StatusCode::FORBIDDEN || !body.contains(&paused_sentence(team)) {
         return Err(anyhow!("the team listing answered {status}: {}", clip(&body)));
     }
     // The refusal a desktop client actually meets, one hop before the gateway.
-    let (status, body) = raw(c, reqwest::Method::POST, &bench_url(c, "/session", team), &c.other_jwt, None, &[]).await?;
+    let (status, body) = raw(c, reqwest::Method::POST, &bench_url(c, "/session", team), &c.probe_jwt, None, &[]).await?;
     if status != reqwest::StatusCode::FORBIDDEN || !body.contains(&paused_sentence(team)) {
         return Err(anyhow!("a bench session answered {status}: {}", clip(&body)));
     }
     let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    let id = crd::bench_id(&c.other_user, team);
+    let id = crd::bench_id(&c.probe_user, team);
     let b = kube::Api::<crd::Bench>::all(k).get(&id).await.context("could not read the member's Bench")?;
     if b.spec.access != crd::BenchAccess::Paused || b.spec.desired_state != crd::DesiredState::Stopped {
         return Err(anyhow!("the Bench is {:?}/{:?}, not paused and stopped", b.spec.access, b.spec.desired_state));
     }
-    let ticket = c.mint_bench_session(&c.other_user, &id)?;
+    let ticket = c.mint_bench_session(&c.probe_user, &id)?;
     let status = c
         .http
         .get(&p.gateway)
@@ -168,12 +179,12 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
     c.step(PAUSED_ID, PAUSED_CEILING, move |c| {
         async move {
             let p = Prep { tool, gateway: gw, cli_id: String::new() };
-            let member = format!("/v1/teams/{t}/members/{}", c.other_email);
+            let member = format!("/v1/teams/{t}/members/{}", c.probe_email);
             let (pause, unpause) = (api(c, &format!("{member}/pause")), api(c, &format!("{member}/unpause")));
             let c: &Ctx = c;
             let body = async {
                 let start = Instant::now();
-                call(c, reqwest::Method::POST, &pause, &c.probe_jwt, None).await.context("could not pause the member")?;
+                call(c, reqwest::Method::POST, &pause, &c.other_jwt, None).await.context("could not pause the member")?;
                 loop {
                     match refused_everywhere(c, &t, &p).await {
                         Ok(()) => break,
@@ -183,10 +194,10 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
                         Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
                     }
                 }
-                call(c, reqwest::Method::POST, &unpause, &c.probe_jwt, None).await.context("could not unpause the member")?;
+                call(c, reqwest::Method::POST, &unpause, &c.other_jwt, None).await.context("could not unpause the member")?;
                 // Accepted either way, but parked on `access: paused` until the unpause's own
                 // reconcile writes `access: full`, which it has by the time the unpause answers.
-                call(c, reqwest::Method::POST, &bench_url(c, "/start", &t), &c.other_jwt, None).await.context("could not start the bench")?;
+                call(c, reqwest::Method::POST, &bench_url(c, "/start", &t), &c.probe_jwt, None).await.context("could not start the bench")?;
                 ready(c, &t, PAUSED_BODY.saturating_sub(start.elapsed())).await.context("the bench never came back")?;
                 let got = in_bench(c, &t, r#"process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))"#, CANARY).await?;
                 if got != CANARY {
@@ -194,7 +205,7 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
                 }
                 Ok(())
             };
-            let undo = || async { call(c, reqwest::Method::POST, &unpause, &c.probe_jwt, None).await.map(|_| ()) };
+            let undo = || async { call(c, reqwest::Method::POST, &unpause, &c.other_jwt, None).await.map(|_| ()) };
             undoing(PAUSED_BODY, body, undo).await
         }
         .boxed()
@@ -208,8 +219,8 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
 /// delete, unlike the intercept journey: this team holds only a bench, which never blocks
 /// `delete_team` the way a workspace does.
 async fn teardown(c: &Ctx, team: &str) {
-    let _ = call(c, reqwest::Method::POST, &bench_url(c, "/stop", team), &c.other_jwt, None).await;
-    if let Err(e) = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}")), &c.probe_jwt, None).await {
+    let _ = call(c, reqwest::Method::POST, &bench_url(c, "/stop", team), &c.probe_jwt, None).await;
+    if let Err(e) = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}")), &c.other_jwt, None).await {
         tracing::warn!(kind = "team", op = "delete", name = %team, error = %format!("{e:#}"), "slo.teardown.failed");
         return;
     }
@@ -226,6 +237,33 @@ mod tests {
         assert!(PAUSED_BODY.as_millis() >= target as u128);
         assert_eq!(crate::suite::group_of(PAUSED_ID), 2);
         assert_eq!(paused_sentence("acme"), "your access to acme is paused");
+    }
+
+    /// The bench create and every read of it run as the probe tenant: the second tenant's Quota is
+    /// all zeros, so a bench charged to it is the 409 this journey failed on (15 Sep 2026).
+    #[tokio::test]
+    async fn the_bench_is_the_probe_tenants() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+        let rec = seen.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(move |uri: axum::http::Uri, h: axum::http::HeaderMap| {
+            let rec = rec.clone();
+            async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                rec.lock().expect("recorder").push((uri.to_string(), auth));
+                axum::http::StatusCode::NOT_FOUND
+            }
+        }));
+        let mut c = crate::testkit::ctx_against(app).await;
+        c.retry_delay = Duration::from_millis(1);
+        let _ = make_bench(&c, "run-hourly-1-pause").await;
+        let _ = ready(&c, "run-hourly-1-pause", Duration::from_millis(1)).await;
+        let calls = seen.lock().expect("recorder").clone();
+        assert!(calls.iter().any(|(u, _)| u == "/v1/bench") && calls.len() >= 2, "{calls:?}");
+        assert!(c.probe_jwt != c.other_jwt);
+        for (u, auth) in &calls {
+            assert_eq!(auth, &c.bearer(&c.probe_jwt), "{u} ran as the wrong tenant");
+        }
     }
 
     #[tokio::test]
