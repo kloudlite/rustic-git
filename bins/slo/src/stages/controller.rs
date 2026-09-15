@@ -10,7 +10,12 @@
 //! Runs right after stage 6, whose workspace and environment it grants between; stage 6 ends with
 //! the space cleared, so every choice here starts from nothing. Dials are busybox `nc` speaking
 //! redis's inline `PING`, from the WORKSPACE pod: `redis-cli` is in the environment's image, not
-//! the workspace's, and the workspace is the side a grant is for.
+//! the workspace's, and the workspace is the side a grant is for. Every refusal is judged beside a
+//! positive control from the target environment's own service pod, so a redis that is down never
+//! reads as a policy taking effect.
+//!
+//! Every pod dialled here is a k3s region pod, and the controller and its policies are k3s-only,
+//! so what enforces them is the k3s CNI — AKS's missing network-policy engine is not in this path.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -65,13 +70,25 @@ pub async fn run(c: &mut Ctx) {
     }
     leader(c).await;
     let granted = grants(c).await;
+    // Whatever path `grants` left by, later stages see the space as a fast run leaves it: clear.
+    clear(c).await;
     if hourly {
         match granted {
             Some((ws, env)) => failover(c, &ws, &env).await,
             None => c.skip("ctl.failover", "ctl.grant.set did not pass, so a converged choice has nothing to be compared with"),
         }
+        // Before the clear: the grant `ctl.failover` made is what gives this id policies to read.
         agent_nowrite(c).await;
+        clear(c).await;
         c.skip("ctl.fanout", FANOUT_UNMEASURABLE);
+    }
+}
+
+/// Best-effort: an error here is teardown's to retry, never a sample.
+async fn clear(c: &Ctx) {
+    let url = my_space(c);
+    if let Err(e) = call(c, reqwest::Method::DELETE, &url, &c.probe_jwt, None).await {
+        tracing::warn!(kind = "space", op = "clear", error = %format!("{e:#}"), "slo.controller.clear.failed");
     }
 }
 
@@ -180,7 +197,7 @@ async fn grants(c: &mut Ctx) -> Option<(String, String)> {
     };
 
     let new_ip = Arc::new(Mutex::new(String::new()));
-    let (w, s, ip, old) = (ws.clone(), second.clone(), new_ip.clone(), old_ip.clone());
+    let (w, s, e, ip, old) = (ws.clone(), second.clone(), env.clone(), new_ip.clone(), old_ip.clone());
     let switched = c
         .step("ctl.grant.switch", GRANT_CEILING, move |c| {
             async move {
@@ -189,9 +206,9 @@ async fn grants(c: &mut Ctx) -> Option<(String, String)> {
                 // resolv.conf is re-rendered, and that DNS failure would pass this id with the old
                 // policy still standing.
                 let script = format!("{}; echo ==; {}; echo ==; {}", resolve(), ping(SERVICE), ping(&old));
-                let out = until(c, &w, &script, GRANT_CEILING, |o| {
+                let out = until_refused(c, &w, &script, &e, GRANT_CEILING, |o, in_env| {
                     let parts: Vec<&str> = o.split("==").collect();
-                    parts.len() == 3 && ip_of(parts[0]).is_some_and(|i| i != old) && pong(parts[1]) && !pong(parts[2])
+                    parts.len() == 3 && ip_of(parts[0]).is_some_and(|i| i != old) && pong(parts[1]) && refusal_proven(in_env, parts[2])
                 }, &format!("the new `{SERVICE}` never answered while the old ClusterIP {old} stopped answering"))
                 .await?;
                 *ip.lock().unwrap() = ip_of(out.split("==").next().unwrap_or("")).unwrap_or_default();
@@ -206,7 +223,7 @@ async fn grants(c: &mut Ctx) -> Option<(String, String)> {
     }
     let target = new_ip.lock().unwrap().clone();
 
-    let w = ws.clone();
+    let (w, s) = (ws.clone(), second.clone());
     let namespaces = [crd::env_namespace(&env), crd::env_namespace(&second)];
     let probe = c.probe_user.clone();
     c.step("ctl.grant.cleared", GRANT_CEILING, move |c| {
@@ -214,11 +231,11 @@ async fn grants(c: &mut Ctx) -> Option<(String, String)> {
             let url = my_space(c);
             call(c, reqwest::Method::DELETE, &url, &c.probe_jwt, None).await.context("could not clear the space's choice")?;
             let start = Instant::now();
-            until(c, &w, &ping(&target), GRANT_CEILING, |o| !pong(o), &format!("{target}:{PORT} still answers PONG after the clear")).await?;
+            until_refused(c, &w, &ping(&target), &s, GRANT_CEILING, |o, in_env| refusal_proven(in_env, o), &format!("{target}:{PORT} still answers PONG after the clear")).await?;
             // The SECOND assertion: the refusal above is the output, and this says the refusal is
             // the controller's removal rather than a pod that happened to be restarting.
             let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
-            let policy = format!("space-{}", crd::ws_namespace(&probe, ""));
+            let policy = kloudlite_workspaces::k8s::space_ingress_name(&crd::ws_namespace(&probe, ""));
             loop {
                 let mut left = vec![];
                 for ns in &namespaces {
@@ -296,13 +313,13 @@ async fn agent_nowrite(c: &mut Ctx) {
     const ID: &str = "ctl.agent.nowrite";
     let Some(k) = c.kube.clone() else { return c.skip(ID, "no kubeconfig") };
     // An empty list is not evidence; a list that fails is the step's to fail, below.
-    if space_policies(&k).await.is_ok_and(|p| p.is_empty()) {
+    let listed = space_policies(&k).await;
+    if listed.as_ref().is_ok_and(|p| p.is_empty()) {
         return c.skip(ID, "no space grants in the cluster");
     }
     c.step(ID, NOWRITE_CEILING, move |_| {
         async move {
-            let offenders: Vec<String> = space_policies(&k)
-                .await?
+            let offenders: Vec<String> = listed?
                 .into_iter()
                 .filter_map(|p| {
                     let managers: Vec<String> =
@@ -355,6 +372,40 @@ fn ip_of(out: &str) -> Option<String> {
     out.split_whitespace().rev().find(|t| t.parse::<std::net::IpAddr>().is_ok()).map(str::to_string)
 }
 
+/// A refusal counts only beside its positive control: the target service answered PONG from
+/// inside its own namespace in the same poll. A redis that is down refuses the workspace too.
+fn refusal_proven(in_env: &str, from_ws: &str) -> bool {
+    pong(in_env) && !pong(from_ws)
+}
+
+/// Poll `script` in the workspace AND `redis-cli ping` in `env`'s own service pod (the `env.dns`
+/// shape) until `ok(ws_stdout, env_stdout)`. A failed exec on either side reads as an empty answer,
+/// which no `ok` here accepts as a refusal.
+async fn until_refused(c: &Ctx, ws: &str, script: &str, env: &str, cap: Duration, ok: impl Fn(&str, &str) -> bool, what: &str) -> Result<String> {
+    let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    let ns = crd::env_namespace(env);
+    let pod = format!("{SERVICE}-0");
+    let control = format!("redis-cli -h {SERVICE} -p {PORT} ping");
+    let start = Instant::now();
+    let mut last = String::new();
+    loop {
+        let in_env = crate::kube::exec(&k, &ns, &pod, None, &["sh", "-c", &control], EXEC_CEILING).await.map(|(_, o, _)| o).unwrap_or_default();
+        if let Ok((_, out, _)) = ws_exec(c, ws, script, EXEC_CEILING).await {
+            if ok(&out, &in_env) {
+                return Ok(out);
+            }
+            last = out;
+        }
+        if start.elapsed() + Duration::from_secs(2) >= cap {
+            if !pong(&in_env) {
+                return Err(anyhow!("target environment's service did not answer from inside its own namespace ({ns}/{pod}); last answer {:?}", clip(in_env.trim())));
+            }
+            return Err(anyhow!("{what} within {} ms; last output {:?}", cap.as_millis(), clip(last.trim())));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// Poll `script` in the workspace until `ok(stdout)`. A failed exec is never read as either
 /// answer: a pod mid-restart refuses every connect, and that must not pass a refusal.
 async fn until(c: &Ctx, ws: &str, script: &str, cap: Duration, ok: impl Fn(&str) -> bool, what: &str) -> Result<String> {
@@ -401,6 +452,13 @@ mod tests {
         assert!(holder(&l, now).is_err(), "a lease past its TTL read as held");
         let (l, now) = lease("", 1);
         assert!(holder(&l, now).is_err(), "an empty holder read as a leader");
+    }
+
+    #[test]
+    fn a_refusal_is_proven_only_beside_the_in_env_pong() {
+        assert!(refusal_proven("PONG\n", ""), "env PONG + no ws PONG is a proven refusal");
+        assert!(!refusal_proven("", ""), "a down target read as a refusal");
+        assert!(!refusal_proven("PONG", "+PONG\r\n"));
     }
 
     #[test]
