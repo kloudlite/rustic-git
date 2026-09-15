@@ -92,10 +92,20 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     let name = s.name_any();
     // A placement view that still names this node for a worktree whose live subvolume has left it
     // (moved, retired, a builder torn down) failed `statfs` every tick for hours. Nothing to cut
-    // here is not an error: cut nothing, and requeue so a later pass re-reads placement.
-    if !ctx.engine.pool.worktree(&s.spec.volume, &s.spec.worktree).is_dir() {
-        tracing::info!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, "snapshot.cut.not_here");
-        return Ok(Action::requeue(crate::controller::RETRY));
+    // here is not an error: cut nothing, and requeue so a later pass re-reads placement. A cut that
+    // already LANDED (a crash before its status write) is finished below, worktree or not.
+    let pool = &ctx.engine.pool;
+    match (pool.worktree(&s.spec.volume, &s.spec.worktree).try_exists(), pool.snap(&s.spec.volume, &name).try_exists()) {
+        (Ok(false), Ok(false)) => {
+            tracing::info!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, "snapshot.cut.not_here");
+            return Ok(Action::requeue(crate::controller::RETRY));
+        }
+        // An unreadable pool (EIO, unmounted, permission) is not "not here": say so, touch nothing.
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::warn!(snapshot = %name, error = %e, "snapshot.cut.unreadable");
+            return Ok(Action::requeue(crate::controller::RETRY));
+        }
+        _ => {}
     }
     let (engine, volume, worktree) = (ctx.engine.clone(), s.spec.volume.clone(), s.spec.worktree.clone());
     let cut_name = name.clone();
