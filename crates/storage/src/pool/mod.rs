@@ -116,7 +116,34 @@ pub fn is_fenced(e: &crate::Error) -> bool {
         // slatedb 0.15: a fence surfaces as ErrorKind::Closed(CloseReason::Fenced). There is no
         // bare ErrorKind::Fenced.
         || e.downcast_ref::<slatedb::Error>()
-            .is_some_and(|e| matches!(e.kind(), slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)))
+            .is_some_and(|e| {
+                matches!(e.kind(), slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced))
+                    // Two openers racing to write the SAME new manifest: the loser's open fails
+                    // with this rather than a fence, but it is the same fact — another node holds
+                    // the database — and must re-route, never surface as a 500.
+                    || e.to_string().contains("version already exists")
+            })
+}
+
+tokio::task_local! {
+    /// The repo key a request was routed `Missing` for: the leader named no owner and the prefix
+    /// was empty, so the request is served on a node that holds no lease on it. See `unowned`.
+    static UNOWNED: String;
+}
+
+/// Run `f` as a request for `key` (`owner/name`, the routing key) that no node owns. Inside it
+/// that key's prefix reads as absent and `get` refuses to open it: the handler answers "no such
+/// repo/image" from what routing already decided, instead of re-probing the store and opening a
+/// database a creator elsewhere may have just claimed and flushed — which fences the creator (the
+/// first-request 503/500 on every new image, 2026-09-16). Every other key is untouched.
+pub async fn unowned<F: std::future::Future>(key: String, f: F) -> F::Output {
+    UNOWNED.scope(key, f).await
+}
+
+pub fn is_unowned(owner: &str, name: &str) -> bool {
+    UNOWNED
+        .try_with(|k| k.strip_prefix(owner).and_then(|r| r.strip_prefix('/')) == Some(name))
+        .unwrap_or(false)
 }
 
 /// Where a repo's database lives.
@@ -293,6 +320,9 @@ impl Pool {
     /// unknown path through `get` would bring a database into being for every bad request. A warm
     /// entry is proof enough; otherwise ask the object store, which costs one LIST.
     pub async fn exists(&self, owner: &str, name: &str) -> Result<bool> {
+        if is_unowned(owner, name) {
+            return Ok(false);
+        }
         if self
             .entries
             .lock()

@@ -26,6 +26,11 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
         return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
     }
     if !app.leader_live() {
+        // The 503 itself logs at info (an election settling is readiness working); a fleet with no
+        // leader past 2 × TTL is not settling, and says so.
+        if app.leaderless_too_long() {
+            tracing::warn!("leader.absent");
+        }
         return (StatusCode::SERVICE_UNAVAILABLE, "no live leader").into_response();
     }
     (
@@ -437,14 +442,13 @@ async fn route_inner(
     // exactly as it did before this gate existed. Answering 404 from the middleware would say "no
     // such repo" to a caller who has not authenticated, making private names enumerable.
     //
-    // What keeps this from opening a database on the wrong node is the handler's own `exists`
-    // probe (`open_repo`, `image_exists`), which is the same call the gate made. The residual is
-    // narrow but real: a creator elsewhere that claims and flushes between the leader's "nobody"
-    // and that probe would be fenced by an open here. See `App::route_for` for the ceiling and the
-    // upgrade path. It runs ahead of the hop bound because a name that exists nowhere is not a
-    // routing disagreement.
+    // What keeps this from opening a database on the wrong node is `pool::unowned`: inside it the
+    // key reads as absent and cannot be opened, so the handler answers from routing's decision
+    // instead of a second probe — a creator elsewhere that claims and flushes after the leader's
+    // "nobody" can no longer be fenced by an open here. It runs ahead of the hop bound because a
+    // name that exists nowhere is not a routing disagreement.
     if matches!(route, crate::ownership::Route::Missing) {
-        return next.run(req).await;
+        return kloudlite_storage::pool::unowned(repo, next.run(req)).await;
     }
     // Out of hops: never forward again (that is the bound), but never knowingly open a repo we do
     // not own either — a chain that arrives here disagreeing with our own view, or arrives at an

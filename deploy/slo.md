@@ -75,7 +75,7 @@ first destructive stage.
 | `reg.visibility` | Container registry | Image visibility (public vs. private) is enforced | 99.9 % | fast | 4 · Registry |
 | `reg.image.delete` | Container registry | Deleting a tag removes it from the tag list and deleting an image removes it from the catalogue | 99.9 % ≤ 10000 ms | fast | 4 · Registry |
 | `reg.catalogue` | Container registry | The image catalogue lists a pushed image from any node | 99.9 % ≤ 5000 ms | fast | 4 · Registry |
-| `reg.team.push` | Container registry | A team member's personal credential pushes to the team's image, and a non-member's is DENIED | 99.9 % | hourly | 4 · Registry |
+| `reg.team.push` | Container registry | A team member's personal credential pushes to the team's new image with no 5xx on its first requests, and a non-member's is DENIED | 99.9 % | hourly | 4 · Registry |
 | `ws.create.p95` | Workspaces | Creating a workspace completes | 95 % ≤ 90000 ms | fast | 5 · Workspace |
 | `ws.exec.ok` | Workspaces | Exec into a running workspace pod returns the command's output, from a pod whose home is the shared export | 99.9 % | fast | 5 · Workspace |
 | `homes.rw.p95` | Workspaces | A read/write round trip on the shared home completes | 95 % ≤ 200 ms | fast | 5 · Workspace |

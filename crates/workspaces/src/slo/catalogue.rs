@@ -238,7 +238,7 @@ pub const CATALOGUE: &[Slo] = &[
     // Hourly: a fresh throwaway team, whose only member is its creator, is enough to prove
     // both halves of the rule the registry actually enforces (`may_act(caller, owner)`, never
     // what a token was minted under) — no invite round trip needed every five minutes.
-    Slo { id: "reg.team.push", feature: "Container registry", sli: "A team member's personal credential pushes to the team's image, and a non-member's is DENIED", target: avail(99.9), suite: Suite::Hourly, stage: "4 · Registry" },
+    Slo { id: "reg.team.push", feature: "Container registry", sli: "A team member's personal credential pushes to the team's new image with no 5xx on its first requests, and a non-member's is DENIED", target: avail(99.9), suite: Suite::Hourly, stage: "4 · Registry" },
 
     // Stage 5 · workspace
     Slo { id: "ws.create.p95", feature: "Workspaces", sli: "Creating a workspace completes", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },

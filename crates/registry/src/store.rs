@@ -224,6 +224,12 @@ async fn has_blob_row(db: &Db, d: &Digest) -> Result<bool> {
 /// the safe direction. Delete the backfill branch once every image DB carries the mark, i.e.
 /// after every pre-existing image has been pulled by a stranger or re-pushed.
 pub async fn image_holds_blob(store: &Store, owner: &str, name: &str, d: &Digest) -> Result<bool> {
+    // A request routed to no owner may not open (that creates the image here, racing its pusher):
+    // nothing is held, which answers the stranger's HEAD with 404 rather than the pool's refusal.
+    let (o, n) = crate::pool_coords(owner, name);
+    if crate::pool::is_unowned(o, &n) {
+        return Ok(false);
+    }
     let db = store.image_db(owner, name).await?;
     if has_blob_row(&db, d).await? {
         return Ok(true);

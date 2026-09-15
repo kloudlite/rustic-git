@@ -826,6 +826,35 @@ async fn a_claim_that_lands_while_the_prefix_is_still_empty_is_forwarded_not_ser
     assert_eq!(b.store.pool.warm_count(), 0, "and B opened nothing");
 }
 
+/// One brand-new image, two nodes (the hourly `regteam` push, 2026-09-16). A team member's first
+/// blob HEAD lands on B, which the leader told "nobody owns it"; meanwhile A claims and creates the
+/// image. B must answer "absent" and open nothing: before the fix `image_holds_blob` (no probe)
+/// opened, i.e. created, the database on B after A's flush and fenced A.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_read_routed_to_no_owner_never_opens_a_new_image() {
+    use kloudlite_registry::store::{image_holds_blob, ImageExt};
+    let e = common::env().await;
+    let f = fleet(2);
+    let a = node(e.store.os.clone(), LEADER, &f).await;
+    let b = node(e.store.os.clone(), "kloudlite-1", &f).await;
+    let d = kloudlite_registry::Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap();
+
+    assert_eq!(b.app.route("img/team/img").await, kloudlite_storage::ownership::Route::Missing);
+    a.app.claim("img/team/img").await.unwrap();
+    a.store.touch_image("team", "img").await.unwrap();
+    let seen = kloudlite_storage::pool::unowned("img/team/img".into(), async {
+        (
+            image_holds_blob(&b.store, "team", "img", &d).await.unwrap(),
+            b.store.image_exists("team", "img").await.unwrap(),
+            b.store.image_db("team", "img").await.is_err(),
+        )
+    })
+    .await;
+    assert_eq!(seen, (false, false, true), "B served the unowned key as absent and refused to open it");
+    assert_eq!(b.store.pool.warm_count(), 0, "and B opened nothing");
+    a.store.touch_image("team", "img").await.expect("A still holds the writer");
+}
+
 /// The gate replaced one leader WRITE per invented name per LEASE_TTL with a leader READ — which
 /// would be one per request without this cache. A repeated invented name must cost exactly one
 /// ask per window, however often it is routed.

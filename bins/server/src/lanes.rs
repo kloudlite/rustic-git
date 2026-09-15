@@ -39,14 +39,25 @@ pub fn spawn_lease_tasks(app: Arc<App>) {
     let a = app.clone();
     tokio::spawn(async move {
         let mut last_checkpoint = std::time::Instant::now();
+        let mut failing_since: Option<std::time::Instant> = None;
         loop {
             tokio::time::sleep(RENEW_EVERY).await;
             // A renewal that cannot reach the leader is not fatal: the lease runs to its TTL and
             // the next beat is three seconds away. Missing every beat for a whole TTL is what lets
-            // another node claim, which is the intended outcome.
-            if let Err(e) = a.renew_once().await {
-                metrics::counter!("ownership_renew_failures_total").increment(1);
-                tracing::warn!(error = %e, "lease.renew.failed");
+            // another node claim, which is the intended outcome. A leader roll fails a beat or two
+            // on every node, so only a streak longer than an election settles (2 × TTL) warns;
+            // the counter (LeaseRenewFailing) counts every miss either way.
+            match a.renew_once().await {
+                Ok(()) => failing_since = None,
+                Err(e) => {
+                    metrics::counter!("ownership_renew_failures_total").increment(1);
+                    let since = *failing_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > 2 * kloudlite_storage::ownership::LEASE_TTL {
+                        tracing::warn!(error = %e, "lease.renew.failed");
+                    } else {
+                        tracing::info!(error = %e, "lease.renew.failed");
+                    }
+                }
             }
             // Move the ownership map's flush pointer so the WAL behind it can be reclaimed. A
             // no-op on a follower, so this beat is "on whoever writes" without being started or
