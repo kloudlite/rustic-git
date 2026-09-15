@@ -52,7 +52,7 @@ pub const MEMBER_REMOVAL_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const REMOVED_AT: &str = "kloudlite.io/removed-at";
 pub const DELETE_NOW: &str = "kloudlite.io/delete-now";
 pub const MEMBERSHIP_FIELD_MANAGER: &str = "kloudlite-membership";
-pub const BENCH_FOLDER_FINALIZER: &str = "kloudlite.io/bench-folder";
+pub use crate::crd::BENCH_FOLDER_FINALIZER;
 // ponytail: a fixed cap; a backlog after a big team delete drains at this rate per beat.
 pub const CLEANUP_DELETES_PER_BEAT: usize = 50;
 

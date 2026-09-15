@@ -39,7 +39,7 @@ pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status}
 pub(crate) mod keys;
 mod bench;
 pub mod space;
-pub use bench::reconcile_bench;
+pub use bench::{collect_bench_folders, reconcile_bench};
 
 /// Every watcher this process opens, list and watch alike, asks the server to end the call after
 /// this many seconds; kube-runtime resumes from the last resourceVersion, so a timeout costs one

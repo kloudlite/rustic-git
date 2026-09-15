@@ -102,8 +102,90 @@ async fn on_unplaceable_node(pod: &Pod, ctx: &Arc<Ctx>) -> Result<bool, Reconcil
     Ok(crate::peer::unplaceable(Some(&node), crate::peer::node_dead_secs(&ctx.settings), k8s_openapi::jiff::Timestamp::now()))
 }
 
+/// `BENCH_FOLDER_FINALIZER` through the same combinator as `WORKTREE_FINALIZER`: Apply adds it to a
+/// bench made before `/v1` set it, and its removal is a JSON-patch `test` on the finalizer list, so
+/// a second agent's removal fails rather than racing. The pod is ownerReference-collected; the
+/// folder is the only thing a delete has to take. A Terminating bench with no node is claimed like
+/// any other (the claim ignores `deletionTimestamp`), so some agent always reaches Cleanup.
 pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    // No finalizer: the pod is ownerReference-collected and the folder outlives the bench on purpose.
+    let api: Api<crd::Bench> = Api::all(ctx.client.clone());
+    let out = kube::runtime::finalizer::finalizer(&api, crd::BENCH_FOLDER_FINALIZER, b, |event| async {
+        match event {
+            kube::runtime::finalizer::Event::Cleanup(b) => delete_folder(&b, &ctx).await,
+            kube::runtime::finalizer::Event::Apply(b) => apply_bench(b, ctx.clone()).await,
+        }
+    })
+    .await;
+    super::finalized(out)
+}
+
+/// Ok only once the folder is gone: any other outcome is an Err, which keeps the finalizer and
+/// requeues — a bench stuck Terminating with `bench.folder.delete.failed` in the log is this.
+async fn delete_folder(b: &crd::Bench, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
+    let (team, owner) = (b.spec.team.clone(), b.spec.owner.clone());
+    let r = match ctx.homes_export.clone() {
+        None => Err("this node has no shared-home mount (WS_HOMES_EXPORT)".to_string()),
+        Some(export) => {
+            let (pool, t, o) = (ctx.pool.clone(), team.clone(), owner.clone());
+            tokio::task::spawn_blocking(move || super::workspace::delete_bench_folder(&pool, &export, &t, &o))
+                .await
+                .map_err(|e| ReconcileErr(e.to_string()))?
+        }
+    };
+    match r {
+        Ok(true) => {
+            tracing::info!(%team, %owner, "bench.folder.deleted");
+            Ok(Action::await_change())
+        }
+        Ok(false) => {
+            tracing::warn!(%team, %owner, err = "symlink or non-directory on the path", "bench.folder.delete.failed");
+            Err(ReconcileErr("bench folder path refused".into()))
+        }
+        Err(err) => {
+            tracing::warn!(%team, %owner, %err, "bench.folder.delete.failed");
+            Err(ReconcileErr(err))
+        }
+    }
+}
+
+/// ONE-OFF (`kloudlite-agent collect-bench-folders`, run once by hand in one agent pod): removes
+/// folders left by benches deleted before `BENCH_FOLDER_FINALIZER` existed. The keep-set is a
+/// fresh LIST, never a cache, and an unreadable one collects nothing. Delete after use.
+pub async fn collect_bench_folders(pool: &str, export: &str) -> Result<Vec<String>, String> {
+    let client = kube::Client::try_default().await.map_err(|e| e.to_string())?;
+    let live: std::collections::HashSet<(String, String)> = Api::<crd::Bench>::all(client)
+        .list(&Default::default())
+        .await
+        .map_err(|e| e.to_string())?
+        .items
+        .into_iter()
+        .map(|b| (b.spec.team, b.spec.owner))
+        .collect();
+    let (pool, export) = (pool.to_string(), export.to_string());
+    tokio::task::spawn_blocking(move || {
+        let mut removed = Vec::new();
+        let root = crate::homes_root(&pool).join(".benches");
+        for team in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
+            let team = team.map_err(|e| e.to_string())?.file_name().to_string_lossy().into_owned();
+            let Ok(owners) = std::fs::read_dir(root.join(&team)) else { continue };
+            for owner in owners {
+                let owner = owner.map_err(|e| e.to_string())?.file_name().to_string_lossy().into_owned();
+                if live.contains(&(team.clone(), owner.clone())) {
+                    continue;
+                }
+                if super::workspace::delete_bench_folder(&pool, &export, &team, &owner) == Ok(true) {
+                    tracing::info!(%team, %owner, "bench.folder.collected");
+                    removed.push(format!("{team}/{owner}"));
+                }
+            }
+        }
+        Ok(removed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn apply_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
     if b.meta().deletion_timestamp.is_some() {
         return Ok(Action::await_change());
     }

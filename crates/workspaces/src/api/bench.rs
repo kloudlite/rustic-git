@@ -247,6 +247,7 @@ pub(crate) async fn create_bench(
     let mut l = labels(&caller.name, "bench");
     l.insert(TEAM_LABEL.to_string(), team.clone());
     b.metadata.labels = Some(l);
+    b.metadata.finalizers = Some(vec![crd::BENCH_FOLDER_FINALIZER.to_string()]);
     let b = api.create(&PostParams::default(), &b).await.map_err(kube_err)?;
     tokio::spawn({
         let (s, c, owner, team, id) = (s.clone(), kube(&s)?.clone(), caller.name.clone(), team, id);

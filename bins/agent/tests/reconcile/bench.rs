@@ -25,6 +25,7 @@ fn bench_json(spec: serde_json::Value, status: serde_json::Value) -> serde_json:
     serde_json::json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
         "metadata": {"name": BENCH, "uid": "bench-uid", "generation": 1, "resourceVersion": "7",
+                     "finalizers": [crd::BENCH_FOLDER_FINALIZER],
                      "labels": {"kloudlite.io/owner": "alice", "kloudlite.io/kind": "bench", "kloudlite.io/team": "acme"}},
         "spec": s, "status": status,
     })
@@ -271,4 +272,50 @@ async fn the_environment_prune_keeps_an_attached_benchs_grant() {
         let deleted = rec.calls().contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{env_ns}/networkpolicies/attach-bench-1"));
         assert_eq!(!deleted, kept, "attached={attached:?}: {:?}", rec.calls());
     }
+}
+
+fn deleting_bench() -> crd::Bench {
+    let mut b = bench(serde_json::json!({}), placed());
+    b.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
+    b
+}
+
+fn bench_obj_patch() -> Route {
+    Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/benches/bench-1".into(), status: 200, body: bench_json(serde_json::json!({}), placed()) }
+}
+
+#[tokio::test]
+async fn a_bench_made_before_the_finalizer_gets_it_on_reconcile() {
+    let tmp = homes_pool();
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
+    let mut b = bench(serde_json::json!({}), placed());
+    b.metadata.finalizers = None;
+    kloudlite_agent::controller::reconcile_bench(Arc::new(b), ctx).await.unwrap();
+    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1");
+    assert!(sent.iter().any(|p| p.to_string().contains(crd::BENCH_FOLDER_FINALIZER)), "{:?}", rec.calls());
+}
+
+#[tokio::test]
+async fn a_deleted_bench_takes_its_folder_and_then_its_finalizer() {
+    let tmp = homes_pool();
+    std::fs::create_dir_all(tmp.path().join("homes/.benches/acme/alice")).unwrap();
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(deleting_bench()), ctx).await.unwrap();
+    assert!(!tmp.path().join("homes/.benches/acme/alice").exists());
+    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1");
+    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+    assert_eq!(sent[0][0]["op"], "test", "removal is guarded: {}", sent[0]);
+}
+
+#[tokio::test]
+async fn a_symlinked_bench_folder_keeps_the_finalizer() {
+    let tmp = homes_pool();
+    let victim = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::create_dir_all(tmp.path().join("homes/.benches/acme")).unwrap();
+    std::os::unix::fs::symlink(&victim, tmp.path().join("homes/.benches/acme/alice")).unwrap();
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
+    assert!(kloudlite_agent::controller::reconcile_bench(Arc::new(deleting_bench()), ctx).await.is_err());
+    assert!(victim.is_dir());
+    assert!(rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1").is_empty(), "{:?}", rec.calls());
 }

@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// On every Bench: `/v1` sets it at create and the agent adds it on reconcile to one made before it
+/// existed. The owning agent removes `{homes}/.benches/{team}/{owner}` and then clears it, so the
+/// membership beat's delete of a removed member's bench takes the folder with it.
+pub const BENCH_FOLDER_FINALIZER: &str = "kloudlite.io/bench-folder";
+
 
 #[derive(CustomResource, Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[kube(
