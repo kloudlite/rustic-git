@@ -13,6 +13,8 @@
 use super::*;
 use kloudlite_pulls::directory::MemberState;
 
+const RECONCILE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub(crate) async fn pause_member(
     State(api): State<Arc<Api>>,
     headers: axum::http::HeaderMap,
@@ -83,8 +85,12 @@ async fn set_state(api: &Arc<Api>, headers: &axum::http::HeaderMap, slug: &str, 
             if let Some(hook) = api.on_member_state.clone() {
                 match db.user(&email).await {
                     Ok(Some(u)) => {
+                        // Bounded: the directory write already landed, so a hung apiserver costs
+                        // the caller at most this and the keys beat converges the pair.
                         if let Some(handle) = u.username {
-                            hook(handle, slug.to_string()).await
+                            if tokio::time::timeout(RECONCILE_WAIT, hook(handle, slug.to_string())).await.is_err() {
+                                tracing::warn!(team = %slug, member = %email, "member.reconcile.timeout");
+                            }
                         }
                     }
                     Ok(None) => {}
