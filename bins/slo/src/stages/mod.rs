@@ -630,8 +630,10 @@ const KINDS: &[Kind] = &[
 async fn sweep_all<M: Fn(&str) -> bool>(c: &mut Ctx, matches: M) -> usize {
     let other = c.other_user.clone();
     let probe = c.probe_user.clone();
-    let mut gone = sweep(c, &probe, c.probe_jwt.clone(), &matches).await;
-    gone += sweep(c, &other, c.other_jwt.clone(), &matches).await;
+    // The second tenant first: its team workspaces are listed by team, and the probe's
+    // `sweep_teams` deletes those teams.
+    let mut gone = sweep(c, &other, c.other_jwt.clone(), &matches).await;
+    gone += sweep(c, &probe, c.probe_jwt.clone(), &matches).await;
     gone
 }
 

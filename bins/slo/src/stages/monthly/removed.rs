@@ -224,6 +224,9 @@ async fn cleanup(c: &mut Ctx) {
 /// Best effort; the `run-` prefix sweep takes what this misses (the per-member team-workspace sweep
 /// in `stages::sweep`). The member's own objects go as the member, BEFORE the removal, while their
 /// token still reaches the team; the snapshot waits for the workspace, whose base it is.
+// ponytail: a crash after the member's removal leaves their workspace to the product's own
+// delete-now beat (the member's token no longer reaches it); it leaks only if memberRemovalDeletes
+// is switched off between the crash and that beat.
 async fn teardown(c: &Ctx, team: &str, p: Option<&Prep>) {
     if let Some(p) = p {
         let ws = api(c, &format!("/v1/workspaces/{}", p.ws));

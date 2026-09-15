@@ -61,3 +61,9 @@
   - If a crashed run's team was already deleted, the member no longer lists it, and its workspaces are out of reach of this sweep. That is the same limit `sweep_teams`' drain has.
   - The snapshot left behind after a 409 is collected only once its volume is detached and every history message matches the prefix (`sweep_detached_volumes` over the member).
   - No unit test for the new sweep: it is HTTP against a live api with no seam.
+
+## Fix round 3
+
+- **(4)** `sweep_all` now sweeps the second tenant before the probe tenant, with a one-line comment giving the reason: its team workspaces are listed by team, and the probe's `sweep_teams` deletes those teams. `sweep_all` has only two callers, boot (`stale`) and teardown (this run's prefix). No journey depends on the old order: each tenant's sweep deletes only objects that tenant owns. The one cross-tenant link was this team listing, which the new order fixes. If the second member tries to delete a team they do not own, the call fails and is logged, as before.
+- **(5)** Added a `// ponytail:` note at `teardown` in `removed.rs`. If the probe crashes after the member is removed, the member's workspace is left to the product's own delete-now beat. It leaks only if `memberRemovalDeletes` is switched off between the crash and that beat.
+- **Verification.** `cargo test -p kloudlite-workspaces slo` 11 passed; `cargo test -p kloudlite-slo-bin` 153 passed; clippy `-D warnings` clean.
