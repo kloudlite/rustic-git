@@ -224,13 +224,17 @@ SpaceEnvironment and the bench folders on the share:
    5. Keys projection: `project_all` stops listing the person's keys for that team's namespace on
       its next write. `prune_namespaces` removes the `wt-` namespace (and `user-key`) once it holds
       no Workspace and no pod.
-   6. The bench folder. The agent's janitor, not the api, deletes
-      `{pool}/homes/.benches/{team}/{owner}` once no Bench names that pair and the folder's
-      `.removed` marker is older than the grace. The api cannot reach the share; the agent already
-      mounts it. The marker is written by the api's delete in step 1 through a `BenchFolderRelease`
-      annotation that the agent reads, and it re-checks that no Bench exists immediately before
-      `rm -rf`. The janitor also collects folders no Bench has named for longer than the grace,
-      which clears the `ponytail:` note in `ensure_bench_folder`.
+   6. The bench folder is not a separate step here: `create_bench` stamps every Bench with a
+      `kloudlite.io/bench-folder` finalizer at creation, so step 1's Bench `DELETE` sets
+      `deletionTimestamp` but the object stays `Terminating` until an agent has removed
+      `{pool}/homes/.benches/{team}/{owner}` and cleared the finalizer. The api cannot reach the
+      share; every agent already mounts it, and any agent whose controller sees the
+      `deletionTimestamp` may act — a second one is a harmless no-op (`remove_dir_all` on an already
+      gone directory, and the finalizer-clearing patch is a resourceVersion CAS the loser 409s on).
+      This is what clears the `ponytail:` note in `ensure_bench_folder`. The mark is owned by the
+      cluster controller in the sense that decides deletion (this reconcile only requests the Bench
+      delete); the agent is the only process that can do the host work, so it is the one that clears
+      the mark.
    Environments are owned by the team (`spec.owner` = team) and are NOT deleted. No creator is
    recorded on them. Decided: see decision 10.
 4. **Idempotent.** Every step is "delete if present". A 404 counts as done and a 409 (precondition)
@@ -373,8 +377,9 @@ the same schedule.
   - the last active owner cannot be paused;
   - `teams_for` omits paused teams.
 - `gateway`: `resolve_bench` and `resolve` refuse `access: Paused` with 403.
-- agent janitor: a bench folder is removed only when no Bench names it and its marker is older than
-  the grace; with a Bench present, it is kept.
+- agent: a Bench's finalizer reconcile removes `{pool}/homes/.benches/{team}/{owner}` and clears
+  `kloudlite.io/bench-folder` on delete; a second delete of an already-gone folder is `Ok`; a path
+  that fails validation (symlink, outside the homes root) refuses and leaves the finalizer, logged.
 - `k8s`: `bench_pod` mounts `bench-tool` optional and read-only, with no token in env;
   `workspace_pod` does not mount it.
 - `harness`: `node --test` checks that `call` re-reads the file between calls, that a missing file
@@ -414,9 +419,11 @@ the same schedule.
      allow-list, and check that `curl https://{api-host}/v1/regions` answers JSON with no token
      (401 JSON, not HTML).
 3. **gateway.** Add the paused refusal in `resolve_bench` / `resolve`.
-4. **agent/k8s.** Add the optional `bench-tool` volume in `bench_pod`, and the janitor's
-   bench-folder collection (behind the same dry-run flag). A running pod is not replaced; its next
-   wake picks up the volume.
+4. **agent/k8s.** Add the optional `bench-tool` volume in `bench_pod`, and the Bench finalizer
+   reconcile that removes the bench folder and clears `kloudlite.io/bench-folder`. This needs no
+   separate dry-run flag: it only ever runs once a Bench is actually being deleted, which itself
+   stays gated behind `member_removal_deletes` (Task 7) until the owner turns deletes on. A running
+   pod is not replaced; its next wake picks up the volume.
 5. **desktop.** Call tool-token at Connect and on the 5-minute beat, and send the delete on
    sign-out.
 6. **bench image and old-login cleanup.** Ship the new `kloudlite.ts` without `/kl-login`, then run

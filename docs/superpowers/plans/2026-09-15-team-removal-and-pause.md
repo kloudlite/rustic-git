@@ -22,10 +22,13 @@ Rollout (spec "Rollout order" 1, 2, 3, 4, 7): Tasks 1–3 directory (inert until
 Tasks 4–9 api, reconcile in dry-run. Task 10 gateway. Task 11 agent. Tasks 12–13 web. Tasks 14–15
 SLO. Task 16 turns deletes on after the owner reads a week of `member.removed.judged` rows.
 
-Spec deviation (Task 11): the agent marks an orphaned bench folder itself on the first janitor beat
-that finds no Bench for it, instead of reading a `BenchFolderRelease` annotation the api writes. The
-Bench is only deleted after the 7-day grace, so the folder needs no second grace, and the api never
-has to reach the share. Say so in review if the annotation is wanted.
+Owner decision (15 Sep): the bench folder is deleted by a mark the cluster controller owns, not by
+an agent inferring orphans. Task 11 uses a finalizer on the Bench itself
+(`kloudlite.io/bench-folder`, added at Bench create): the Bench stays in `Terminating` after its
+`DELETE` until an agent removes `{pool}/homes/.benches/{team}/{owner}` and clears the finalizer.
+Homes are region-shared and every agent mounts the export, so more than one agent's controller can
+see the same deletionTimestamp; that is fine by construction (see Task 11) rather than by a claim
+one agent wins and the rest skip.
 
 ---
 
@@ -197,7 +200,13 @@ Files: `crates/workspaces/src/api/membership.rs`, `crates/workspaces/src/api/spa
 On `Verdict::Delete` and `member_removal_deletes == true`, re-judge first (fresh `membership`
 call; anything but TeamGone/NotMember → Keep), then, each step "delete if present", 404 = done,
 409 = stop this pair until next beat, other error = stop and log `membership.cleanup.failed`:
-1. Bench, uid + resourceVersion precondition from the object judged.
+1. Bench, uid + resourceVersion precondition from the object judged. The `kloudlite.io/bench-folder`
+   finalizer (Task 11) keeps it in `Terminating` until an agent has removed
+   `{pool}/homes/.benches/{team}/{owner}`; `membership::reconcile` treats a `DELETE` accepted (200,
+   `deletionTimestamp` set) the same as 404 here — it moves on to the next step without waiting for
+   the finalizer to clear, since access (the pod, the gateway's `resolve_bench`, `tool-token`) is
+   already gone the moment `deletionTimestamp` is set. The folder itself is deleted independently by
+   the agent, not by this beat.
 2. Every Workspace with `spec.owner == owner && spec.team == team`, each with its own precondition.
    `WORKTREE_FINALIZER` does the rest: worktree and sync points go, the Volume is detached and kept
    when a pushed Snapshot remains (decision 11). The reconcile deletes NO Snapshot, NO Volume and NO
@@ -206,7 +215,8 @@ call; anything but TeamGone/NotMember → Keep), then, each step "delete if pres
 4. Keys: nothing to write — `project_all` (Task 1's `slugs_for`) already drops them;
    `prune_namespaces` removes the `wt-` namespace when empty.
 One audit row per deleted object `member.removed.cleanup {owner, team, kind, name, reason}`, log
-`membership.cleanup.deleted`.
+`membership.cleanup.deleted`. The bench folder is not one of these rows — Task 11's agent logs
+`bench.folder.collected {team, owner}` on its own when the finalizer clears.
 
 Tests:
 - `deletes_run_bench_then_workspaces_then_space_choice` (order of fake-kube DELETEs).
@@ -273,27 +283,75 @@ Tests (the file's fake-kube tests, add if absent): `a_paused_bench_is_403`;
 Run: `cargo test -p kloudlite-gateway resolve`.
 Commit: `Refuse gateway tunnels to a paused member's bench and workspaces`
 
-## Task 11 — agent janitor collects orphaned bench folders
+## Task 11 — a Bench finalizer marks its folder for deletion, an agent clears it
 
-Files: `bins/agent/src/janitor.rs`, `bins/agent/src/controller/workspace/home.rs` (drop the
-`ponytail:` note), `deploy/k3s/agent-rbac.yaml` only if `benches: list` is missing.
+Files: `crates/workspaces/src/crd/bench.rs` (the finalizer constant),
+`crates/workspaces/src/api/bench.rs` (`create_bench` sets it), `bins/agent/src/controller/workspace/bench.rs`
+(new; the Bench reconcile — check `grep -rn "impl.*Controller\|reconcile" bins/agent/src/controller/workspace/`
+for where Bench is watched today and whether this belongs beside it), `bins/agent/src/controller/workspace/home.rs`
+(the delete function, and drop the `ponytail:` note it replaces).
+
+Why a finalizer and not a janitor sweep: the cluster controller (`bins/controller`, see CLAUDE.md
+"Cluster controller") is the one process that could hold a cluster-wide mark, but it has no
+kubeconfig for mounting the homes share and no disk of its own — an agent is the only process that
+mounts `{pool}/homes`. So the mark has to live on the object an agent already watches, and a
+finalizer on the Bench itself is that mark: it names exactly the (team, owner) pair whose folder
+must go, needs no separate CRD field or annotation contract, and reuses the same
+delete-blocks-on-finalizer shape the codebase already uses for `WORKTREE_FINALIZER`
+(`cleanup_parent`) on Workspace/Environment. No orphan inference, no `.removed` marker file, no
+extra grace on top of Task 7's — the Bench is only deleted after the 7-day grace, so a folder is
+never marked before that.
 
 ```rust
-/// Pure over the filesystem: `live` = (team, owner) pairs any Bench names.
-fn sweep_bench_folders(homes: &Path, live: &HashSet<(String, String)>, min_age: Duration, now: SystemTime) -> usize;
-```
-For `{homes}/.benches/{team}/{owner}` not in `live`: no `.removed` marker → write it (mtime = now);
-marker older than `min_age` (one hour) → `remove_dir_all`, log `bench.folder.collected {team, owner}`.
-A pair in `live` with a marker → delete the marker. `live` comes from a fresh Bench LIST taken on
-the same beat immediately before; a LIST error skips the sweep. Gated by the central/cluster
-setting `member_removal_deletes` like Task 7 (the agent reads `ClusterSettings`; add the field there
-if the central one is not visible to agents).
+pub const BENCH_FOLDER_FINALIZER: &str = "kloudlite.io/bench-folder";
 
-Tests (tempdir): `an_orphan_folder_is_marked_then_collected_after_min_age`;
-`a_named_folder_is_kept_and_its_marker_cleared`; `a_list_error_collects_nothing`;
-`deletes_off_marks_but_never_removes`.
-Run: `cargo test -p kloudlite-agent janitor`.
-Commit: `Collect bench folders no bench names`
+/// Validates the path is still `{homes root}/.benches/{team}/{owner}` with no symlink component
+/// (reuses the segment validation `k8s::bench_folder` already does) before removing it. Ok(true) =
+/// removed or already absent; Ok(false) = the path failed validation — keep-biased, caller must not
+/// clear the finalizer.
+fn delete_bench_folder(pool: &str, export: &str, team: &str, owner: &str) -> Result<bool, String>;
+```
+
+- `create_bench` (`/v1`, the only writer of Bench spec) adds `BENCH_FOLDER_FINALIZER` on create, the
+  same place `WORKTREE_FINALIZER` is added for a Workspace.
+- Every agent's Bench controller reacts to `deletionTimestamp.is_some() && finalizers contains
+  BENCH_FOLDER_FINALIZER`: tear down the pod/Secret as it does today, call `delete_bench_folder`,
+  and on `Ok(true)` patch the finalizer off with a resourceVersion precondition (the same
+  optimistic-concurrency patch `cleanup_parent` uses). On `Ok(false)` (validation refused the path)
+  or an `Err` (the share unreachable, an IO error), do NOT clear the finalizer — log
+  `bench.folder.delete.failed {team, owner, err}` (alertable: a Bench stuck in `Terminating` past a
+  couple of beats is this) and let the next reconcile retry.
+- **Exactly one agent needs to act, and a second one is a harmless no-op by construction, not by a
+  claim**: `delete_bench_folder`'s `remove_dir_all` is idempotent (a second caller finds the
+  directory already gone and returns `Ok(true)`), and the finalizer-removing patch is a
+  resourceVersion CAS — the second agent's patch 409s, which it treats exactly like the analogous
+  race in `App::election_tick`/`cleanup_parent`: log at debug and stop, no retry storm, because the
+  next watch event already shows the finalizer gone. No node claim, no annotation, no extra RBAC
+  beyond the `benches` watch/patch the agent already holds.
+
+Tests (tempdir, reusing the fixture `ensure_bench_folder`'s test already sets up):
+- `a_bench_folder_is_deleted_when_the_finalizer_reconcile_runs`.
+- `a_second_delete_of_an_already_gone_folder_is_ok`.
+- `an_escaping_or_symlinked_path_refuses_and_the_finalizer_stays`.
+- `a_share_read_error_refuses_and_the_finalizer_stays`.
+Run: `cargo test -p kloudlite-agent bench && cargo test -p kloudlite-workspaces crd`.
+Commit: `Delete a bench's folder through its own finalizer`
+
+### One-time cleanup for benches already deleted
+
+Files: a short one-off in `bins/agent` (or a `kl-connect`-style admin script if one-off tooling
+already lives outside the binaries — check `deploy/` first) run once, by hand, against today's 4
+team benches that were deleted before this finalizer existed and so left their folders behind (the
+`ponytail:` note's exact complaint).
+
+- List every `{team, owner}` currently under `{pool}/homes/.benches/*/*` on the share.
+- Take a **fresh** `Bench` LIST from the API at run time (not a cache/reflector) and keep only pairs
+  with no matching Bench.
+- For each: run the same validated `delete_bench_folder`, log `bench.folder.collected {team, owner}`,
+  and record the list of what was removed in the ship notes (the audit trail for this one-off).
+- This step runs once, is not wired into any beat, and is deleted from the codebase after use if it
+  was added as a throwaway binary rather than a `kl-connect` subcommand.
+Commit: `Collect bench folders left by benches deleted before the finalizer`
 
 ## Task 12 — web: remove dialog, pause controls, pending removals
 
@@ -341,9 +399,11 @@ Files: same as Task 14, drills suite.
 
 - `team.member.removed.cleanup` (drills): member with a bench (canary), a team workspace with one
   PUSH, remove them, wait for the stamp, call delete-now, then within two beats: Bench, team
-  Workspace, transient sync points, SpaceEnvironment and bench folder gone; the pushed Snapshot and
-  its detached Volume STILL present (decision 11); `member.removed.*` audit rows exist; re-adding
-  the person finds no bench. Teardown deletes the kept snapshot by its `run-{id}` name.
+  Workspace, transient sync points and SpaceEnvironment gone, and the Bench's
+  `kloudlite.io/bench-folder` finalizer cleared with `{pool}/homes/.benches/{team}/{owner}` gone from
+  the share (Task 11 — an agent clears it, not this beat); the pushed Snapshot and its detached
+  Volume STILL present (decision 11); `member.removed.*` audit rows exist; re-adding the person
+  finds no bench. Teardown deletes the kept snapshot by its `run-{id}` name.
 - `team.member.removed.dir_down` (drills): with the api's directory address pointed at a black
   hole for one beat (the drills suite's existing fault hook; if none exists, mark the id skipped with
   the reason and file it — do not build a fault injector in this task), a removed pair's objects all
