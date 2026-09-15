@@ -310,7 +310,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "Volume", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -372,7 +372,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "Workspace", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -392,7 +392,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
         .run(|b, c| async move { observed("bench", &*b, &c, super::reconcile_bench(b.clone(), c.clone())).await }, error_policy, ctx.clone())
         .for_each(|r| async move {
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "Bench", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -468,7 +468,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "Environment", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -486,7 +486,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 // `error_policy` already logged a reconciler failure with its kind and name; what is
                 // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
-                    if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    if queue_worth_warning(&e) {
                         tracing::warn!(kind = "Workspace", reason = "claim", error = %e, "reconcile.queue.failed")
                     }
                 }
@@ -549,7 +549,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "OwnerBinding", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -606,7 +606,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             // `error_policy` already logged a reconciler failure with its kind and name; what is
             // left here is the queue and watch side, which it never sees.
             if let Err(e) = r {
-                if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                if queue_worth_warning(&e) {
                     tracing::warn!(kind = "Snapshot", error = %e, "reconcile.queue.failed")
                 }
             }
@@ -617,7 +617,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             .run(|b, c| async move { observed("claim", &*b, &c, claim::claim_bench(&b, &c)).await }, error_policy, ctx.clone())
             .for_each(|r| async move {
                 if let Err(e) = r {
-                    if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    if queue_worth_warning(&e) {
                         tracing::warn!(kind = "Bench", reason = "claim", error = %e, "reconcile.queue.failed")
                     }
                 }
@@ -631,7 +631,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 // `error_policy` already logged a reconciler failure with its kind and name; what is
                 // left here is the queue and watch side, which it never sees.
                 if let Err(e) = r {
-                    if !matches!(e, kube::runtime::controller::Error::ReconcilerFailed(..)) {
+                    if queue_worth_warning(&e) {
                         tracing::warn!(kind = "Environment", reason = "claim", error = %e, "reconcile.queue.failed")
                     }
                 }
@@ -731,6 +731,21 @@ async fn shutdown_signal() -> &'static str {
     tokio::select! {
         _ = term.recv() => "sigterm",
         _ = tokio::signal::ctrl_c() => "sigint",
+    }
+}
+
+/// Whether a controller stream error is the queue's own news. `error_policy` already logged a
+/// reconciler failure, and `ObjectNotFound` is a trigger for an object deleted before its pass ran —
+/// the ordinary tail of every delete, thousands an hour, so it goes to debug.
+fn queue_worth_warning<E: std::error::Error + 'static>(e: &kube::runtime::controller::Error<ReconcileErr, E>) -> bool {
+    use kube::runtime::controller::Error;
+    match e {
+        Error::ReconcilerFailed(..) => false,
+        Error::ObjectNotFound(r) => {
+            tracing::debug!(object = %r, "reconcile.queue.gone");
+            false
+        }
+        _ => true,
     }
 }
 
