@@ -1,3 +1,12 @@
 # A hung test fails the run in two minutes instead of holding the gate for hours.
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 2 }
+
+# The root package's integration tests (tests/*.rs) run real listeners and elections on wall
+# clocks; on 2026-09-15 routing and api_server each failed the ship gate once and passed on the
+# rerun. One retry keeps a scheduling blip from costing a re-ship; nextest marks the pass FLAKY
+# and counts it in the Summary, and ship.sh echoes those lines, so a flake stays visible.
+# ponytail: whole-package retry; narrow to named tests once the flakes are pinned.
+[[profile.default.overrides]]
+filter = 'package(kloudlite-tests)'
+retries = 1
