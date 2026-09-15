@@ -198,7 +198,7 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
       </Section>
 
       <Section
-        eyebrow="History"
+        eyebrow="History · last 7 days"
         title="Audit trail"
         toolbar={
           <Link href={`/superadmin/audit?target=${encodeURIComponent(owner.owner)}`} className="text-caption text-primary hover:underline">
