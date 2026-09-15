@@ -541,6 +541,19 @@ namespace half is what stops a deleted team leaving one behind — nothing had e
 a region held 101 empty ones by 2026-09-08, one per hourly probe run. A person's own `ws-`
 namespace is never a candidate.
 
+**A bench pod's `/v1` credential is a `bench-tool` JWT, not a person's own token.** 15-minute TTL,
+`parent` = the desktop CLI login's own `jti`, scope = the bench's team plus the minting person's own
+handle. `POST /v1/bench/tool-token` mints it (DELETE revokes it) only from a live desktop CLI
+login, and writes it into Secret `bench-tool` in the bench's `ws_namespace(owner, team)`, mounted
+read-only at `/etc/kloudlite/bench-tool` (`KL_TOOL_TOKEN_FILE`) beside `KL_API_URL` from the
+agent's own `WS_API_URL` — `harness/pi/kloudlite.ts` reads the file per call rather than caching a
+token in memory, since a renewal or a revoke must reach the next call, not the next pod restart.
+`caller_for` is the one gate (audience against `BENCH_TOOL_ROUTES`, parent login still live, bench
+`Running`/owned/`Full`, scope), logging every refusal as `bench.tool.refused`. The credential dies
+three ways: its parent `jti` goes (the person signs out), the bench stops (the Secret is deleted
+with it), or the 15 minutes run out — there is no longer an in-pod login command a person runs to
+mint their own.
+
 A profile is keyed by `packages::hash(pin, base + spec.packages)` and indexed per node at
 `{PROFILES_DIR}/by-inputs/{hash}` → the store path, so a second workspace or a clone with the same
 inputs is published straight from the index and never invokes nix (an evaluation of nixpkgs costs
