@@ -34,6 +34,12 @@ use std::time::Duration;
 /// expires at 600 s, so a policy deleted by hand comes back within roughly one beat after that.
 const RESYNC: Duration = Duration::from_secs(300);
 
+/// A pass refused only because this process is not (yet) the writer comes back inside one lease
+/// TTL, not at `RESYNC`: the reconcilers start before the election is won, so every startup pass
+/// lands here, and a 300 s wait turned a ~15 s failover into minutes (`ctl.failover`). Cheap for a
+/// follower: `may_write` answers from `ctx.leading()` without a lease GET.
+const NOT_LEADER_RETRY: Duration = Duration::from_secs(5);
+
 /// A grant younger than this is never pruned by the env-side sweep.
 ///
 /// With ONE writer the race this floor was written for (a new environment's node deleting a grant
@@ -178,7 +184,7 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
         return Ok(Action::requeue(Duration::from_secs(5)));
     }
     if !may_write(&ctx).await {
-        return Ok(Action::requeue(RESYNC));
+        return Ok(Action::requeue(NOT_LEADER_RETRY));
     }
     let env = match &choice {
         Choice::Env(e) => Some(e.as_ref()),
@@ -216,7 +222,7 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
                 // Return BEFORE the memory write, as the ingress arm below does: settling the
                 // memory to empty on a fenced pass would mean the delete is never retried.
                 if !may_write(&ctx).await {
-                    return Ok(Action::requeue(RESYNC));
+                    return Ok(Action::requeue(NOT_LEADER_RETRY));
                 }
                 drop_object(&in_space, &ctx, &d.egress_ns, k8s::SPACE_EGRESS_POLICY).await?;
             }
@@ -230,7 +236,7 @@ pub async fn reconcile_space(space: Arc<crd::SpaceEnvironment>, ctx: Arc<Ctx>) -
         let old_ns = crd::env_namespace(&old);
         let api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &old_ns);
         if !may_write(&ctx).await {
-            return Ok(Action::requeue(RESYNC));
+            return Ok(Action::requeue(NOT_LEADER_RETRY));
         }
         drop_object(&api, &ctx, &old_ns, &ingress_name).await?;
     }
@@ -282,7 +288,7 @@ pub async fn reconcile_environment(env: Arc<crd::Environment>, ctx: Arc<Ctx>) ->
         // Re-read the lease before each delete, same rule as the space side: this sweep has no
         // applies, so every write it makes is one of these.
         if !may_write(&ctx).await {
-            return Ok(Action::requeue(RESYNC));
+            return Ok(Action::requeue(NOT_LEADER_RETRY));
         }
         tracing::info!(environment = %id, policy = %name, kept = keep.len(), "grant.pruned");
         drop_object(&policies, &ctx, &ns, &name).await?;
@@ -373,6 +379,11 @@ pub async fn run(ctx: Arc<Ctx>) {
 mod tests {
     use super::*;
     use kloudlite_workspaces::kube_test;
+
+    #[test]
+    fn not_leader_requeues_within_one_lease_ttl() {
+        assert!(NOT_LEADER_RETRY <= lease::TTL);
+    }
 
     fn space(owner: &str, team: &str, env: &str) -> crd::SpaceEnvironment {
         let mut s = crd::space_environment(owner, team, env);
