@@ -37,6 +37,7 @@ pub use workspace::write_resolv_conf;
 pub use workspace::kept_conditions;
 pub(crate) use workspace::{migrate_and_seed_baseline, replaced, write_ws_status};
 pub(crate) mod keys;
+pub(crate) mod watch;
 mod bench;
 pub mod space;
 pub use bench::reconcile_bench;

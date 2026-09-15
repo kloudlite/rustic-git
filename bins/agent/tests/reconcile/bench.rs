@@ -134,6 +134,19 @@ async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
     assert!(last_status(&rec).get("idleSince").is_none(), "the write that records podRef clears idleSince");
 }
 
+/// The pod's DELETE event reconciles a cached Bench one status write behind (no `idleSince`) while
+/// the API server already holds Idle: no pod may be created.
+#[tokio::test]
+async fn a_stale_cached_bench_does_not_recreate_the_pod_it_just_put_to_sleep() {
+    let tmp = homes_pool();
+    let asleep = serde_json::json!({"phase": "idle", "nodeName": "node-a", "idleSince": FINISHED_AT});
+    let mut routes = up_to_the_pod(not_found(pod_path()));
+    routes.push(get("/apis/kloudlite.io/v1alpha1/benches/bench-1", bench_json(serde_json::json!({}), asleep)));
+    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
+    assert!(rec.sent("POST", &pods_path()).is_empty(), "{:?}", rec.calls());
+}
+
 #[tokio::test]
 async fn stopping_a_bench_leaves_no_pod_at_all() {
     let tmp = homes_pool();
