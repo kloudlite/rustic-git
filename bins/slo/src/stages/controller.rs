@@ -261,9 +261,9 @@ async fn grants(c: &mut Ctx) -> Option<(String, String)> {
 /// `ctl.failover`, hourly: delete the leader pod, choose during the gap, and assert a DIFFERENT
 /// holder inside 20 s and the choice converged once it is up.
 ///
-/// The probe's role holds no `pods: delete` in kube-system (`deploy/k3s/slo-rbac.yaml` explains
-/// why that grant was withdrawn), so on today's role the delete answers 403 and this id SKIPS with
-/// that status. Granting it is the owner's decision; the journey below is ready for it.
+/// The probe holds `pods: delete` in kube-system fenced by admission to the controller's own pods
+/// (`deploy/k3s/slo-rbac.yaml`); a region that has not applied that file answers 403 and this id
+/// SKIPS with that status rather than failing.
 async fn failover(c: &mut Ctx, ws: &str, env: &str) {
     const ID: &str = "ctl.failover";
     let Some(k) = c.kube.clone() else { return c.skip(ID, "no kubeconfig") };
@@ -277,7 +277,7 @@ async fn failover(c: &mut Ctx, ws: &str, env: &str) {
     match Api::<Pod>::namespaced(k.clone(), LEASE_NS).delete(&old, &DeleteParams::default()).await {
         Ok(_) => {}
         Err(kube::Error::Api(e)) if e.code == 403 => {
-            return c.skip(ID, &format!("needs pod delete in kube-system; owner decision (the API answered {} {})", e.code, e.reason));
+            return c.skip(ID, &format!("slo-rbac.yaml not applied on this region (the API answered {} {})", e.code, e.reason));
         }
         Err(e) => return c.skip(ID, &format!("could not delete the leader pod {old}: {e}")),
     }

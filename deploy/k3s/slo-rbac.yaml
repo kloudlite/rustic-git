@@ -21,8 +21,15 @@
 # | sec.agent.spec dry-runs a patch AS the agent  | serviceaccounts: impersonate, the agent SA only    |
 # | bench.idle.wake reads the region's idle secs  | clustersettings: get                               |
 # | ctl.leader reads the controller's Lease       | leases: get, kube-system, that one name only       |
+# | ctl.failover deletes the leader pod           | pods: delete, kube-system, admission-fenced to     |
+# |                                               | `app: kloudlite-controller` pods only              |
 #
-# There is no `pods: delete`: the monthly dead-node drill is a hard skip
+# The failover grant (owner, 2026-09-15) is `pods: delete` in kube-system — RBAC cannot select by
+# label, and the controller's pod name is generated — so `kloudlite-slo-deletes-only-the-controller`
+# below refuses the probe any delete of a pod not labelled `app: kloudlite-controller`. Without that
+# policy this Role would reach the agent DaemonSet's pods too; apply both or neither.
+#
+# There is no general `pods: delete`: the monthly dead-node drill is a hard skip
 # (`bins/slo/src/stages/monthly/nodes.rs`, `c.skip("drill.dead.node", …)`), so the
 # `kloudlite-slo-drill` Role and its binding — delete on every pod in kube-system, the agent
 # DaemonSet's included — were a standing grant for a call nothing makes. Restore them with the
@@ -152,6 +159,9 @@ rules:
     resources: ["leases"]
     verbs: ["get"]
     resourceNames: ["kloudlite-controller"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -166,3 +176,37 @@ subjects:
   - kind: ServiceAccount
     name: kloudlite-slo
     namespace: kube-system
+---
+# The fence on the grant above. A DELETE carries the pod as `oldObject`; anything the probe deletes in
+# kube-system that is not the controller's own pod is refused, the agent DaemonSet's first of all.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kloudlite-slo-deletes-only-the-controller
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: from-the-probe
+      expression: request.userInfo.username == 'system:serviceaccount:kube-system:kloudlite-slo'
+  validations:
+    - expression: >-
+        has(oldObject.metadata.labels) && 'app' in oldObject.metadata.labels
+          && oldObject.metadata.labels['app'] == 'kloudlite-controller'
+      message: "kloudlite-slo may delete only kloudlite-controller pods in kube-system"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kloudlite-slo-deletes-only-the-controller
+spec:
+  policyName: kloudlite-slo-deletes-only-the-controller
+  validationActions: ["Deny"]
