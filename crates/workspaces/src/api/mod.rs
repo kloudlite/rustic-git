@@ -655,9 +655,13 @@ pub(crate) async fn bench_tool_check(
 /// `is_bench` leads deliberately: the claim names a workspace id, and an ORDINARY workspace of the
 /// same owner must not answer a bench-tool token — the audience is the bench, not the person.
 pub(crate) fn bench_admits_tool(w: &crd::Workspace, sub: &str, team: &str) -> bool {
+    // The token names the team the way the desktop asked for it (a personal bench is asked for
+    // by the handle, `?team=<handle>`), while the Workspace stores a personal bench as `team: ""`
+    // like every personal workspace — compare the folded slugs, or every personal bench is
+    // refused `bench` (owner's terminal, 2026-09-17 04:07 IST).
     crd::is_bench(w)
         && w.spec.owner == sub
-        && w.spec.team == team
+        && crd::space_slug(&w.spec.owner, &w.spec.team) == crd::space_slug(sub, team)
         && w.spec.desired_state != crd::DesiredState::Stopped
         && w.spec.access == crd::Access::Full
 }

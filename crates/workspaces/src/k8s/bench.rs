@@ -115,8 +115,10 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         // non-zero once the bench has gone idle, which is the verdict the agent reads.
         readiness_probe: Some(Probe {
             exec: Some(ExecAction { command: Some(vec!["harness-bench".to_string(), "--ping".to_string()]) }),
-            period_seconds: Some(5),
-            timeout_seconds: Some(3),
+            // 2 s, not 5: the pod is Ready when this first passes, and every second here is a
+            // second the desktop waits on 202 (a wake measured 17 s on 2026-09-17, 5 of them here).
+            period_seconds: Some(2),
+            timeout_seconds: Some(2),
             ..Default::default()
         }),
         // Readiness alone cannot tell "asleep" from "never came up": the kubelet collapses every
@@ -126,9 +128,9 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         // idleness at all. 24 x 5 s is the budget from `running` to first serve.
         startup_probe: Some(Probe {
             exec: Some(ExecAction { command: Some(vec!["harness-bench".to_string(), "--ping".to_string()]) }),
-            period_seconds: Some(5),
-            failure_threshold: Some(24),
-            timeout_seconds: Some(3),
+            period_seconds: Some(2),
+            failure_threshold: Some(60),
+            timeout_seconds: Some(2),
             ..Default::default()
         }),
         // So a lock holder's name reaches `status.containerStatuses[].state.terminated.message`.

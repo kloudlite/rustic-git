@@ -72,7 +72,7 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     // sshd is the other container's, so the one capability it needs stays dropped here.
     let caps = c.security_context.as_ref().unwrap().capabilities.clone().unwrap();
     assert!(!caps.add.unwrap().contains(&"SYS_CHROOT".to_string()));
-    assert_eq!(c.readiness_probe.as_ref().unwrap().period_seconds, Some(5));
+    assert_eq!(c.readiness_probe.as_ref().unwrap().period_seconds, Some(2));
 
     let get = |n: &str| c.env.as_ref().unwrap().iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
