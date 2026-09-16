@@ -411,10 +411,11 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
 
 
 #[test]
-pub(crate) fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
+pub(crate) fn the_login_env_redirects_every_cache_and_keeps_histfile_with_the_tree() {
     let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io");
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
-    assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
+    // In the tree, not on the node: history travels with a clone, a restore and a move.
+    assert_eq!(get("HISTFILE"), "/home/kl/workspaces/ws-1/.cache/zsh/history");
     // What `kl` addresses `/v1` with from inside the pod: the CR name (never the person's name
     // for it), the SPACE (personal folds to the handle) and the api base.
     assert_eq!(get("KL_WORKSPACE_ID"), "w-abc123");
@@ -795,7 +796,9 @@ pub(crate) fn a_non_bench_pod_never_mounts_the_bench_tool_secret() {
 /// The rc text moved into `k8s::shell_rc` so the bench image could bake the same bytes. The
 /// snapshot is the prelude as it read before that move (HEAD c271c73e), captured verbatim: the
 /// files a pod ends up with are only as good as this shell string, and nothing else here would
-/// catch a printf quoting change.
+/// catch a printf quoting change. Updated deliberately since, once: the `HISTFILE` and tmux
+/// directories under `{ws}/.cache`, made as `kl` AFTER the chown so a restored tree's root-owned
+/// files cannot fail the seed.
 #[test]
 pub(crate) fn the_prelude_is_byte_identical_to_the_snapshot_before_shell_rc() {
     assert_eq!(prelude("api"), include_str!("prelude-snapshot.txt"));

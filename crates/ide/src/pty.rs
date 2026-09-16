@@ -10,6 +10,13 @@
 //! `{"error":"…"}` and then close. No session id, no scrollback replay, no reconnect: a closed
 //! socket is a `SIGHUP` to the shell's process group. One socket, one shell, one life.
 //!
+//! A `?session=<name>` runs `tmux -L kl new-session -A -s <name>` under the terminal instead of a
+//! bare login shell, so a dropped socket detaches a client rather than hanging a shell up and a
+//! reconnect with the same name lands in the same session with tmux redrawing its scrollback.
+//! Without a name the route keeps the one-shot shell, which is what `exec`-style callers and the
+//! probe want. `/stream/pty/sessions` lists and `DELETE /stream/pty/sessions/{name}` kills; the
+//! server itself is the workspace container's, saved by tmux-resurrect into `{ws}/.cache/tmux`.
+//!
 //! `libc::openpty` + `fork`/`setsid`/`TIOCSCTTY`/`execvp` rather than `portable-pty`: `libc` is
 //! already here and `kl` is a musl binary with a size budget.
 use crate::server::App;
@@ -88,7 +95,51 @@ fn login_argv0(path: &CString) -> CString {
     CString::new(format!("-{base}")).unwrap_or_else(|_| CString::new("-sh").unwrap())
 }
 
-pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
+/// The tmux server every named terminal lives on. One per pod, named rather than the default so
+/// nothing a person starts by hand shares it.
+pub const SOCKET: &str = "kl";
+
+/// `[a-z0-9-]{1,48}`. The desktop names sessions (`kl-<tab>-<n>`); the server never invents one
+/// and never passes anything else to tmux, where a name is also a shell-free but `-t`-matched
+/// target.
+pub fn valid_session(name: &str) -> bool {
+    let body = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-';
+    // Not a leading dash: the name is an argument to `-s`/`-t`, and one that looks like a flag is
+    // a trap waiting for the next tmux version to parse it as one.
+    name.len() <= 48 && name.bytes().next().is_some_and(|b| body(&b) && b != b'-') && name.bytes().all(|b| body(&b))
+}
+
+/// `tmux` as the profile puts it on PATH. Resolved in the parent: between fork and exec only
+/// async-signal-safe calls are sound, and `execvp` would search PATH inside the child.
+fn which(bin: &str) -> Option<CString> {
+    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+        let c = CString::new(dir.join(bin).as_os_str().as_encoded_bytes()).ok()?;
+        if unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0 {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// What the terminal runs, in the order to try it: one tmux attach-or-create, or every candidate
+/// login shell. `-A` is what makes a reconnect an attach; `-x`/`-y` start the session at the
+/// client's size so nothing reflows from 80x24 on the first redraw.
+fn program(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Result<Vec<(CString, Vec<CString>)>> {
+    let Some(name) = session else {
+        return Ok(candidates().into_iter().map(|sh| { let a0 = login_argv0(&sh); (sh, vec![a0]) }).collect());
+    };
+    if !valid_session(name) {
+        return Err(io::Error::other("bad session name"));
+    }
+    let tmux = which("tmux").ok_or_else(|| io::Error::other("tmux is not on PATH"))?;
+    let args = ["tmux".to_string(), "-L".into(), SOCKET.into(), "new-session".into(), "-A".into(), "-s".into(), name.into(), "-x".into(), cols.to_string(), "-y".into(), rows.to_string(), "-c".into(), root.to_string_lossy().into_owned()];
+    let argv = args.into_iter().map(|a| CString::new(a).map_err(|_| io::Error::other("a NUL in the tmux argv"))).collect::<io::Result<Vec<_>>>()?;
+    Ok(vec![(tmux, argv)])
+}
+
+pub fn spawn(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Result<Pty> {
+    // Before the pty is opened, so a refusal leaks no descriptors.
+    let attempts = program(root, cols, rows, session)?;
     let (mut master, mut slave): (RawFd, RawFd) = (-1, -1);
     let mut ws = winsize(cols, rows);
     // The size is set at open, so the shell and everything it starts never see 80x24 first and
@@ -101,11 +152,12 @@ pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
     // Everything the child needs is built BEFORE the fork: between fork and exec only
     // async-signal-safe calls are sound in a process with tokio's threads in it.
     let cwd = CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::other("root has a NUL"))?;
-    let shells = candidates();
-    let argv0: Vec<CString> = shells.iter().map(login_argv0).collect();
+    let argv_ptrs: Vec<Vec<*const libc::c_char>> = attempts.iter().map(|(_, a)| a.iter().map(|c| c.as_ptr()).chain([std::ptr::null()]).collect()).collect();
     // The environment too: `setenv` allocates, so it is built here and handed to `execve`.
     let envp_owned: Vec<CString> = std::env::vars_os()
-        .filter(|(k, _)| k != "TERM" && k != "COLORTERM")
+        // `TMUX` too: it is only ever set when this process is itself inside a session (a dev
+        // machine, never a pod), where tmux refuses to nest without `-d`.
+        .filter(|(k, _)| k != "TERM" && k != "COLORTERM" && k != "TMUX")
         .map(|(k, v)| {
             let mut b = k.into_encoded_bytes();
             b.push(b'=');
@@ -138,9 +190,8 @@ pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
             }
             libc::close(master);
             libc::chdir(cwd.as_ptr());
-            for (shell, a0) in shells.iter().zip(&argv0) {
-                let argv = [a0.as_ptr(), std::ptr::null()];
-                libc::execve(shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            for ((path, _), argv) in attempts.iter().zip(&argv_ptrs) {
+                libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
             }
             // No shell at all: 127 is what a shell itself reports for "not found".
             libc::_exit(127);
@@ -291,14 +342,92 @@ impl Drop for Slot {
     }
 }
 
-pub async fn handler(State(app): State<Arc<App>>, ws: WebSocketUpgrade) -> Response {
+#[derive(serde::Deserialize)]
+pub struct Query {
+    /// The tmux session to attach to or create. Absent = today's one-shot login shell.
+    session: Option<String>,
+}
+
+pub async fn handler(State(app): State<Arc<App>>, axum::extract::Query(q): axum::extract::Query<Query>, ws: WebSocketUpgrade) -> Response {
+    // A bad name never reaches tmux, and it is a request error rather than something to print
+    // into a terminal: the desktop, not a person, chooses these.
+    if q.session.as_deref().is_some_and(|n| !valid_session(n)) {
+        return (axum::http::StatusCode::BAD_REQUEST, "session must match [a-z0-9-]{1,48}").into_response();
+    }
     let Some(slot) = Slot::take(&app) else {
         // Refused after the upgrade, not as an HTTP status: the tab is already a terminal and has
         // nowhere but the socket to print why.
         return ws.on_upgrade(|sock| fail(sock, "too many shells".into())).into_response();
     };
     let root = app.cfg.root.clone();
-    ws.on_upgrade(move |sock| pump(sock, root, slot)).into_response()
+    ws.on_upgrade(move |sock| pump(sock, root, q.session, slot)).into_response()
+}
+
+/// `tmux -L kl <args>`, with the workspace's own environment. Every session route is one of
+/// these: the tmux server is the state, so there is nothing to keep in this process.
+async fn tmux(args: &[&str]) -> std::io::Result<std::process::Output> {
+    tokio::process::Command::new("tmux").arg("-L").arg(SOCKET).args(args).output().await
+}
+
+/// `GET /stream/pty/sessions` → `[{name, windows, attached, created}]`, and an empty list when no
+/// server is running: another device shows the same terminals and reattaches them by name.
+pub async fn sessions() -> axum::Json<Vec<serde_json::Value>> {
+    const FORMAT: &str = "#{session_name} #{session_windows} #{session_attached} #{session_created}";
+    let out = match tmux(&["ls", "-F", FORMAT]).await {
+        // No server (nothing started yet, or the last session ended) is an empty list, not a fault.
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return axum::Json(Vec::new()),
+    };
+    let rows = String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split(' ');
+            let name = f.next()?.to_string();
+            let n = |f: &mut std::str::Split<char>| f.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            Some(serde_json::json!({ "name": name, "windows": n(&mut f), "attached": n(&mut f) > 0, "created": n(&mut f) }))
+        })
+        .collect();
+    axum::Json(rows)
+}
+
+/// `DELETE /stream/pty/sessions/{name}`: killing a shell is the person's choice, which a dropped
+/// socket never is — so it is a route of its own and not something the detach does.
+pub async fn kill_session(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    if !valid_session(&name) {
+        return (axum::http::StatusCode::BAD_REQUEST, "session must match [a-z0-9-]{1,48}").into_response();
+    }
+    match tmux(&["kill-session", "-t", &name]).await {
+        Ok(o) if o.status.success() => axum::http::StatusCode::NO_CONTENT.into_response(),
+        // tmux says "can't find session" for an unknown name and the same nonzero exit for no
+        // server at all; both mean the terminal the caller named is gone.
+        Ok(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Restore what tmux-resurrect last saved into `{root}/.cache/tmux/resurrect`, once, before the
+/// first socket arrives — so after a pod stop, a move or a clone the same terminal names come
+/// back with their layout, cwd and pane text. The processes do not; no tool can bring those back.
+/// Never fatal: a workspace with no save, no tmux or a broken plugin still serves terminals.
+pub async fn restore(root: &Path) {
+    let dir = root.join(".cache/tmux/resurrect");
+    // tmux-resurrect writes `last` as a symlink to the newest save file; no save, nothing to do.
+    // `symlink_metadata`: a dangling link is still a save it should try, and `exists` follows.
+    if dir.join("last").symlink_metadata().is_err() {
+        return;
+    }
+    let profile = std::env::var("NIX_PROFILE").unwrap_or_else(|_| "/nix/profile/current".into());
+    let script = format!("{profile}/share/tmux-plugins/resurrect/scripts/restore.sh");
+    let set = format!("set -g @resurrect-dir {}", dir.display());
+    if let Err(e) = tmux(&["start-server", ";", &set, ";", "run-shell", &script]).await {
+        tracing::warn!(error = %e, "tmux.restore.failed");
+        return;
+    }
+    let n = match tmux(&["ls", "-F", "#{session_name}"]).await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().count(),
+        _ => 0,
+    };
+    tracing::info!(sessions = n, "tmux.restored");
 }
 
 async fn fail(mut sock: WebSocket, why: String) {
@@ -315,7 +444,7 @@ fn resize_of(text: &str) -> Option<(u16, u16)> {
     (cols > 0 && rows > 0).then_some((cols, rows))
 }
 
-async fn pump(sock: WebSocket, root: std::path::PathBuf, _slot: Slot) {
+async fn pump(sock: WebSocket, root: std::path::PathBuf, session: Option<String>, _slot: Slot) {
     let (mut tx, mut rx) = sock.split();
     // The client's first frame is its size. Anything else it sent first is kept and delivered to
     // the shell once there is one, so no keystroke is lost to the race.
@@ -329,7 +458,7 @@ async fn pump(sock: WebSocket, root: std::path::PathBuf, _slot: Slot) {
         Ok(None) | Ok(Some(Err(_))) => return,
     }
 
-    let mut pty = match spawn(&root, size.0, size.1) {
+    let mut pty = match spawn(&root, size.0, size.1, session.as_deref()) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(Message::Text(serde_json::json!({ "error": e.to_string() }).to_string().into())).await;
@@ -414,7 +543,7 @@ mod tests {
     async fn a_shell_runs_under_the_terminal_and_reports_its_exit_code() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let mut pty = spawn(tmp.path(), 80, 24).unwrap();
+        let mut pty = spawn(tmp.path(), 80, 24, None).unwrap();
         pty.write_all(b"printf kl-%s ok\\n; exit 3\n").await.unwrap();
         let out = drain(&pty).await;
         assert!(out.contains("kl-ok"), "{out:?}");
@@ -425,7 +554,7 @@ mod tests {
     async fn a_resize_reaches_the_shell_as_a_window_size() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let mut pty = spawn(tmp.path(), 80, 24).unwrap();
+        let mut pty = spawn(tmp.path(), 80, 24, None).unwrap();
         pty.resize(120, 40);
         pty.write_all(b"stty size; exit 0\n").await.unwrap();
         let out = drain(&pty).await;
@@ -437,7 +566,7 @@ mod tests {
     async fn dropping_the_pty_hangs_up_the_process_group() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let pty = spawn(tmp.path(), 80, 24).unwrap();
+        let pty = spawn(tmp.path(), 80, 24, None).unwrap();
         pty.write_all(b"sleep 300\n").await.unwrap();
         let pid = pty.child;
         drop(pty);
@@ -451,16 +580,18 @@ mod tests {
         panic!("child {pid} outlived its socket by a second");
     }
 
-    async fn open(addr: std::net::SocketAddr) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
-        let (s, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/stream/pty")).await.unwrap();
-        s
+    type Sock = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+    async fn open(addr: std::net::SocketAddr) -> Sock {
+        dial(addr, "").await.unwrap()
     }
 
-    /// The 9th shell is refused on the socket, and a closed one frees its slot.
-    #[tokio::test]
-    async fn a_ninth_shell_is_refused_and_a_closed_one_frees_its_slot() {
-        use_sh();
-        use futures::StreamExt as _;
+    async fn dial(addr: std::net::SocketAddr, query: &str) -> Result<Sock, tokio_tungstenite::tungstenite::Error> {
+        tokio_tungstenite::connect_async(format!("ws://{addr}/stream/pty{query}")).await.map(|(s, _)| s)
+    }
+
+    /// A server on a port, as a client sees it.
+    async fn served() -> (tempfile::TempDir, Arc<App>, std::net::SocketAddr) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().canonicalize().unwrap();
         let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.clone(), home, graft_dir: None }));
@@ -468,6 +599,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let served = crate::server::router(app.clone());
         tokio::spawn(async move { axum::serve(listener, served).await });
+        (tmp, app, addr)
+    }
+
+    /// The 9th shell is refused on the socket, and a closed one frees its slot.
+    #[tokio::test]
+    async fn a_ninth_shell_is_refused_and_a_closed_one_frees_its_slot() {
+        use_sh();
+        use futures::StreamExt as _;
+        let (_tmp, app, addr) = served().await;
 
         // Seven of the eight slots are simply counted, not lived: one real shell is enough to
         // prove the gate, and eight forked login shells beside the rest of the suite is a load
@@ -496,4 +636,134 @@ mod tests {
         }
         assert_eq!(app.shells.load(Ordering::SeqCst), MAX_SHELLS - 1);
     }
+
+    /// tmux comes from the Nix profile in a workspace; this machine may not have one, and nothing
+    /// here may install it — so the tmux tests say so and pass rather than fail on a precondition
+    /// that has nothing to do with the code.
+    fn tmux_here() -> bool {
+        if which("tmux").is_some() {
+            // One private tmux server for the whole test binary, so a run never touches (or is
+            // confused by) whatever the person running it has open. Process-wide, like `SHELL`.
+            static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            std::env::set_var("TMUX_TMPDIR", DIR.get_or_init(|| tempfile::tempdir().unwrap()).path());
+            return true;
+        }
+        eprintln!("skipping: tmux is not on PATH");
+        false
+    }
+
+    #[test]
+    fn a_session_name_is_lowercase_digits_and_dashes() {
+        for ok in ["kl-bench-1", "a", "0", &"a".repeat(48)] {
+            assert!(valid_session(ok), "{ok:?}");
+        }
+        for bad in ["", &"a".repeat(49), "Kl-1", "kl_1", "kl 1", "../x", "kl;ls", "kl\n1", "-d"] {
+            assert!(!valid_session(bad), "{bad:?}");
+        }
+    }
+
+    /// The name is the desktop's, and a bad one is refused at the handshake — before tmux, and
+    /// before there is a terminal to print an error into.
+    #[tokio::test]
+    async fn a_bad_session_name_is_refused_with_400() {
+        let (_tmp, _app, addr) = served().await;
+        let e = dial(addr, "?session=Bad%20Name").await.expect_err("a bad name must not upgrade");
+        match e {
+            tokio_tungstenite::tungstenite::Error::Http(r) => assert_eq!(r.status(), 400),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn read_until(sock: &mut Sock, needle: &str) -> String {
+        use futures::StreamExt as _;
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), sock.next()).await {
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b)))) => seen.push_str(&String::from_utf8_lossy(&b)),
+                Ok(Some(Ok(_))) => {}
+                _ => break,
+            }
+            if seen.contains(needle) {
+                break;
+            }
+        }
+        seen
+    }
+
+    async fn say(sock: &mut Sock, m: tokio_tungstenite::tungstenite::Message) {
+        sock.send(m).await.unwrap();
+    }
+
+    /// A plain HTTP call against the running server: these tests share a port with their sockets,
+    /// where the route tests elsewhere use `oneshot`.
+    async fn http(addr: std::net::SocketAddr, method: &str, path: &str) -> (u16, Vec<u8>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("{method} {path} HTTP/1.0\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status = text.split(' ').nth(1).unwrap().parse().unwrap();
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b.as_bytes().to_vec()).unwrap_or_default();
+        (status, body)
+    }
+
+    /// The whole named-terminal contract against a live server: the session exists under
+    /// `tmux -L kl`, a second socket with the same name ATTACHES (tmux redraws what the first left
+    /// on screen instead of starting a new shell), the listing shows it, and only a kill removes it.
+    #[tokio::test]
+    async fn a_named_terminal_is_a_tmux_session_a_second_socket_reattaches() {
+        use tokio_tungstenite::tungstenite::Message;
+        if !tmux_here() {
+            return;
+        }
+        let (_tmp, _app, addr) = served().await;
+        let name = format!("kl-test-{}", std::process::id());
+        let mark = format!("MARK-{name}");
+        let mut first = dial(addr, &format!("?session={name}")).await.unwrap();
+        say(&mut first, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        say(&mut first, Message::Binary(format!("echo {mark}\n").into())).await;
+        let out = read_until(&mut first, &mark).await;
+        assert!(out.contains(&mark), "{out:?}");
+
+        // Polled: tmux forks its server, so the socket exists a moment after the shell inside it
+        // has already answered.
+        let mut listed = String::new();
+        for _ in 0..100 {
+            listed = String::from_utf8_lossy(&tmux(&["ls", "-F", "#{session_name}"]).await.unwrap().stdout).into_owned();
+            if listed.lines().any(|l| l == name) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(listed.lines().any(|l| l == name), "{listed:?}");
+
+        // The socket closing is a DETACH: the session, and what is on its screen, outlive it.
+        drop(first);
+        let mut again = dial(addr, &format!("?session={name}")).await.unwrap();
+        say(&mut again, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        let redraw = read_until(&mut again, &mark).await;
+        assert!(redraw.contains(&mark), "the reattach redrew nothing: {redraw:?}");
+
+        let (status, body) = http(addr, "GET", "/stream/pty/sessions").await;
+        assert_eq!(status, 200);
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let row = rows.iter().find(|r| r["name"] == name.as_str()).unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!((row["windows"].as_u64(), row["attached"].as_bool()), (Some(1), Some(true)));
+        assert!(row["created"].as_u64().unwrap() > 0, "{row}");
+        drop(again);
+
+        // Killing a shell is the person's choice; a dropped socket never is.
+        assert_eq!(http(addr, "DELETE", &format!("/stream/pty/sessions/{name}")).await.0, 204);
+        assert_eq!(http(addr, "DELETE", &format!("/stream/pty/sessions/{name}")).await.0, 404);
+        assert_eq!(http(addr, "DELETE", "/stream/pty/sessions/NOPE").await.0, 400);
+        // `exit-empty` takes the server with the last session, so this is also the no-server
+        // path: a failed `tmux ls` is an empty list with a 200, which is what the desktop asks
+        // for on every tab before anything has been opened.
+        let (status, body) = http(addr, "GET", "/stream/pty/sessions").await;
+        assert_eq!(status, 200);
+        assert!(!String::from_utf8_lossy(&body).contains(&name), "{body:?}");
+    }
+
 }

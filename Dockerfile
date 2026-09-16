@@ -183,6 +183,10 @@ COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
 # git's default `core.excludesFile`. `prelude` appends this block to the person's own file once;
 # a per-repository `.gitignore` line would be a diff they did not ask for, in every repository.
 COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
+# Every named terminal runs in `tmux -L kl` (see `crates/ide/src/pty.rs`), so the config is the
+# image's rather than the person's: it is platform behaviour — a hidden status line, the
+# resurrect save under `{ws}/.cache/tmux` — and `~/.tmux.conf` still wins for their own bindings.
+COPY deploy/workspace-image/tmux.conf /etc/tmux.conf
 # graft, for `kl ide serve`: the graph of every symbol and call edge an outside agent asks about,
 # proxied from `graft mcp` and kept fresh by the server. Pinned; the image is the version.
 # tree-sitter's grammars are native modules: node-gyp needs python3, make and g++ for the install

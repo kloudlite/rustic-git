@@ -85,9 +85,10 @@ pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, regist
         var("UV_CACHE_DIR", format!("{}/.cache/uv", workspace_dir(name))),
         var("PIP_CACHE_DIR", format!("{}/.cache/pip", workspace_dir(name))),
         var("DENO_DIR", format!("{}/.cache/deno", workspace_dir(name))),
-        // History is per-node write traffic on every keystroke; keeping it off NFS is why it gets
-        // its own var instead of riding HOME_CACHE_DIR — it isn't a cache, it's state worth keeping.
-        var("HISTFILE", format!("{HOME_STATE_DIR}/shell_history")),
+        // History belongs to the WORK, not the node (owner, 2026-09-16): in the workspace tree it
+        // is snapshotted, replicated and cloned with it, so a start on another node or a restore
+        // finds what was typed, where the per-node state dir left every move blank.
+        var("HISTFILE", format!("{}/.cache/zsh/history", workspace_dir(name))),
     ];
     // Unset rather than empty when the agent has no `WS_API_URL`, exactly as the bench pod does:
     // `kl` then fails closed with "not in a workspace" instead of dialling an empty host.
@@ -171,6 +172,7 @@ pub(super) fn prelude(name: &str) -> String {
          SEED\n\
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          echo prelude.chown.done\n\
+         su {SSH_USER} -s /bin/sh -c 'mkdir -p {workspace_dir}/.cache/zsh {workspace_dir}/.cache/tmux'\n\
          su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
          echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"

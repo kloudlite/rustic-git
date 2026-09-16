@@ -53,6 +53,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/stream/watch/{id}", get(crate::stream::watch))
         // Not a tool and never listed by `/tools`: a terminal, not something a session calls.
         .route("/stream/pty", get(crate::pty::handler))
+        // The named terminals themselves: what exists, and killing one on purpose.
+        .route("/stream/pty/sessions", get(crate::pty::sessions))
+        .route("/stream/pty/sessions/{name}", axum::routing::delete(crate::pty::kill_session))
         // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
         // themselves accept up to `MAX_BYTES` (2026-09-12).
         // One server span per request, named by the route TEMPLATE (`/tools/{name}`, `/fs/file`),
