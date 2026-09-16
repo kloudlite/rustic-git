@@ -120,7 +120,6 @@ mod tests {
                 "drill.redis.down",
                 "drill.clickhouse.down",
                 "team.member.removed.cleanup",
-                "team.member.removed.dir_down",
             ]
         );
         assert_eq!(c.failed(), 0, "an unconfigured probe skips; it does not breach");

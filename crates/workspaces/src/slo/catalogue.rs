@@ -582,7 +582,10 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "ws.interrupted", feature: "Workspace lifecycle", sli: "Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "env.clone.interrupted", feature: "Environments", sli: "Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
     Slo { id: "team.member.removed.cleanup", feature: "Teams", sli: "Within 11 minutes of delete-now the controller's GC deletes a removed member's bench, team workspace, sync points and space choice (with memberRemovalDeletes off they carry a due delete-after and stay), the pushed snapshot and its volume are kept, the removal is audited, and a re-added person finds no bench", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
-    Slo { id: "team.member.removed.dir_down", feature: "Teams", sli: "With the directory unreachable for one beat, a removed pair's objects all survive and the reconcile logs that it skipped", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
+    // `team.member.removed.dir_down` is MANUAL in `deploy/slo.md`, deliberately not catalogued: the
+    // drills suite has no hook that points the api's directory at a black hole, so the probe could
+    // only ever skip — and a skipped id reads as a pass in attainment (the 2026-09-09 incident).
+    // Catalogue it the day the fault hook exists.
 ];
 
 #[cfg(test)]
