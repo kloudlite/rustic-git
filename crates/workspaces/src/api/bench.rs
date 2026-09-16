@@ -267,7 +267,7 @@ pub(crate) async fn create_bench(
             name: BENCH_WS_NAME.to_string(),
             region: region.clone(),
             image: crate::model::default_ws_image(),
-            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(&s, crd::DEFAULT_WS_QUOTA_GB), source: None }),
+            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(&s, crd::BENCH_QUOTA_GB), source: None }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: Vec::new(),

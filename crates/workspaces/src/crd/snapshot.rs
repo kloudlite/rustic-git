@@ -107,6 +107,10 @@ where
 /// source tree needs: since 2026-09-11 build output lives INSIDE the tree (`{ws}/.cache/`,
 /// `login_env`), so the number has to hold a Rust `target/` or a `node_modules/` as well.
 pub const DEFAULT_WS_QUOTA_GB: u64 = 50;
+/// A bench's volume holds transcripts and tool state — kilobytes, not a checkout — so it takes a
+/// fifth of a workspace's disk. At 50 the first bench on an account with four workspaces was a
+/// 409 "diskGb: 80 of 100 in use" (owner, 2026-09-17 00:10 IST).
+pub const BENCH_QUOTA_GB: u64 = 10;
 /// `default_env_quota()`'s value in `api.rs` — both the `NewEnvironment.quota_gb` request-body
 /// default (an environment created without one gets this) and `SnapshotState::of_environment`'s
 /// fallback for a legacy `spec.storage`-less object; was already `20`, named here to share it.
