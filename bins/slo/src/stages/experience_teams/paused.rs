@@ -312,7 +312,7 @@ mod tests {
             b.status = Some(crd::BenchStatus { phase, pod_ref: pod.map(Into::into), ..Default::default() });
             b
         };
-        use crd::{BenchAccess::*, DesiredState::*, Phase};
+        use crd::{Access::*, DesiredState::*, Phase};
         let up = bench(Full, Running, Phase::Ready, Some("ns/bench"));
         assert!(back_up(Some(&up)));
         // Ready, but the stop cleared the pod: the very read that passed on 16 Sep.

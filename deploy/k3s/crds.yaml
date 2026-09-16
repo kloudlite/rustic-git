@@ -347,10 +347,36 @@
                 "properties": {
                   "spec": {
                     "properties": {
+                      "access": {
+                        "default": "full",
+                        "description": "Membership pause, on EVERY workspace (it was `Bench.spec.access`): `Paused` means the owner\nmay not use it, so no pod. The api's membership beat writes it; the gateway and `/v1` read\nit.",
+                        "enum": [
+                          "full",
+                          "paused",
+                          "readOnly"
+                        ],
+                        "type": "string"
+                      },
                       "attachedEnvironment": {
                         "description": "RETIRED (2026-09-14): the environment is chosen per space now (`SpaceEnvironment`). Kept\nparseable one release: the api's migration beat copies it into a `SpaceEnvironment` and\nclears it, and the agent falls back to it only while the space cache is known and empty.\nNothing else writes it.\n\nThe environment whose services this workspace resolves by bare name, or `None`.\n\nOne, not a list: bare-name resolution has to be unambiguous, and two attached environments\nboth exposing `db` would let search-domain order silently pick the winner.\n\nWritten only by `/v1` — the agent's admission policy forbids it writing spec, and a stale\nid here is not an error: the reconciler treats a missing or wrong-region environment as\nunattached rather than leaving a grant behind.",
                         "nullable": true,
                         "type": "string"
+                      },
+                      "bench": {
+                        "description": "`Some` = this workspace IS the owner's bench in `team`. `is_bench` is the only predicate\nfor that anywhere — never the name prefix, a label or the container list, all of which a\nrestored or hand-edited object can carry without being one. Written only by `/v1`.",
+                        "nullable": true,
+                        "properties": {
+                          "model": {
+                            "default": "",
+                            "type": "string"
+                          },
+                          "wakeAt": {
+                            "description": "RFC 3339, written by `/v1` when a client asks for a tunnel to a sleeping bench. A pod is\nwanted again only while this is later than `status.idleSince`.",
+                            "nullable": true,
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
                       },
                       "desiredState": {
                         "description": "What the operator asked for, independent of what is currently true.",
@@ -608,6 +634,11 @@
                       },
                       "head": {
                         "description": "The snapshot id this worktree is checked out on right now. Written ONLY by the node actually\nrunning the pod — no other node can observe it, and a stale value here is exactly what\n\"the pod moved and hasn't reconciled yet\" looks like, never a fact anyone else may act on.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "idleSince": {
+                        "description": "Bench only: the `finishedAt` of the pod that exited idle; cleared when a pod is created.",
                         "nullable": true,
                         "type": "string"
                       },

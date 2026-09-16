@@ -63,6 +63,8 @@ pub(crate) async fn clone_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
             owner: owner.name.clone(),
             // A clone lives where its source lives: same team, same namespace.
             team: src.spec.team.clone(),
@@ -222,6 +224,8 @@ pub(crate) async fn restore_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
             owner: owner.name.clone(),
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,

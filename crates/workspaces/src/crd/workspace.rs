@@ -82,7 +82,111 @@ pub struct WorkspaceSpec {
     /// unattached rather than leaving a grant behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_environment: Option<String>,
+    /// `Some` = this workspace IS the owner's bench in `team`. `is_bench` is the only predicate
+    /// for that anywhere — never the name prefix, a label or the container list, all of which a
+    /// restored or hand-edited object can carry without being one. Written only by `/v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench: Option<BenchOptions>,
+    /// Membership pause, on EVERY workspace (it was `Bench.spec.access`): `Paused` means the owner
+    /// may not use it, so no pod. The api's membership beat writes it; the gateway and `/v1` read
+    /// it.
+    #[serde(default)]
+    #[schemars(schema_with = "access_schema")]
+    pub access: Access,
 }
+
+
+/// The bench-only half of a workspace's spec.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchOptions {
+    #[serde(default)]
+    pub model: String,
+    /// RFC 3339, written by `/v1` when a client asks for a tunnel to a sleeping bench. A pod is
+    /// wanted again only while this is later than `status.idleSince`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<String>,
+}
+
+
+/// Whether the owner may use this workspace at all. Shared with the retired `Bench` through the
+/// `BenchAccess` alias, so a stored object's value means the same thing on both kinds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Access {
+    #[default]
+    Full,
+    /// `readOnly` is the retired departed state; stored objects still carry it and parse as this.
+    #[serde(alias = "readOnly")]
+    Paused,
+}
+
+
+/// The PUBLISHED schema carries a third value the Rust type does not: `readOnly`, the retired
+/// departed state. `serde(alias)` fixes the READER, but the API server validates the whole object
+/// on every write — a `/status` patch included — so a stored object still carrying `readOnly`
+/// would be rejected and wedge; it must stay writable until every region is confirmed to hold
+/// none, and then this goes. Deliberately NOT a third Rust variant: every reader compares against
+/// `Full`/`Paused`, and a new arm is one more place for a value to fall through to "full".
+/// The value list is read off the derived schema rather than hand-written, so a variant added to
+/// `Access` still publishes; the flattening to one `enum` is what kube does to schemars'
+/// per-variant `oneOf` anyway, so the published shape is unchanged apart from the extra value.
+pub(crate) fn access_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let derived = <Access as JsonSchema>::json_schema(generator);
+    let branches = derived.get("oneOf").and_then(serde_json::Value::as_array).expect("a unit-variant enum");
+    let mut values: Vec<serde_json::Value> = branches
+        .iter()
+        .map(|b| match (b.get("const"), b.get("enum").and_then(|e| e.as_array()).and_then(|e| e.first())) {
+            (Some(v), _) | (None, Some(v)) => v.clone(),
+            _ => panic!("a unit-variant enum branch names one value"),
+        })
+        .collect();
+    values.push("readOnly".into());
+    serde_json::from_value(serde_json::json!({"type": "string", "enum": values})).expect("static schema literal")
+}
+
+
+/// `spec.bench.is_some()` — THE predicate for "this workspace is a bench".
+pub fn is_bench(w: &Workspace) -> bool {
+    w.spec.bench.is_some()
+}
+
+
+/// Whether a pod should exist now. An ordinary workspace runs while it is asked to; a bench also
+/// sleeps when idle, and a wake only counts if it came after the sleep it is meant to end.
+pub fn wants_pod(w: &Workspace) -> bool {
+    if w.spec.desired_state != DesiredState::Running {
+        return false;
+    }
+    let Some(bench) = w.spec.bench.as_ref() else {
+        return true;
+    };
+    if w.spec.access == Access::Paused {
+        return false;
+    }
+    let Some(idle_since) = w.status.as_ref().and_then(|s| s.idle_since.as_deref()) else {
+        return true;
+    };
+    let Ok(idle_since) = chrono::DateTime::parse_from_rfc3339(idle_since) else {
+        return true;
+    };
+    match bench.wake_at.as_deref().and_then(|w| chrono::DateTime::parse_from_rfc3339(w).ok()) {
+        Some(wake_at) => wake_at > idle_since,
+        None => false,
+    }
+}
+
+
+/// `Ready=False` reason: a bench slept because nothing used it. Not a failure — the next
+/// connection wakes it.
+pub const BENCH_IDLE: &str = "Idle";
+
+/// `Ready=False` reason: another node still holds this owner's bench folder.
+pub const FOLDER_LOCKED: &str = "FolderLocked";
+
+/// Condition type recording that the legacy `{homes}/.benches/{team}/{owner}` folder has been
+/// moved into this workspace's volume, so the migration runs once per bench and never again.
+pub const FOLDER_MIGRATED: &str = "FolderMigrated";
 
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -116,6 +220,9 @@ pub struct WorkspaceStatus {
     /// "the pod moved and hasn't reconciled yet" looks like, never a fact anyone else may act on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Bench only: the `finishedAt` of the pod that exited idle; cleared when a pod is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_since: Option<String>,
 }
 
 
@@ -194,4 +301,84 @@ pub fn attached_environment(w: &Workspace) -> Option<String> {
         .find(|c| c.type_ == ATTACHED && c.status == "True")
         .map(|c| c.message.clone())
         .filter(|m| !m.is_empty())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws(bench: bool) -> Workspace {
+        let mut spec: WorkspaceSpec = serde_json::from_value(serde_json::json!({
+            "owner": "alice", "name": "w", "region": "r", "image": "i", "desiredState": "running"
+        }))
+        .unwrap();
+        if bench {
+            spec.bench = Some(BenchOptions::default());
+        }
+        Workspace::new("ws-1", spec)
+    }
+
+    /// A spec written before any of this existed must still parse — an object that 422s on read is
+    /// a workspace no controller can reconcile again.
+    #[test]
+    fn a_spec_without_bench_parses_as_an_ordinary_full_access_workspace() {
+        let w = ws(false);
+        assert!(!is_bench(&w));
+        assert_eq!(w.spec.access, Access::Full);
+        assert!(w.spec.bench.is_none());
+        assert!(wants_pod(&w));
+    }
+
+    #[test]
+    fn a_stored_readonly_access_parses_as_paused_and_stays_writable() {
+        let schema = serde_json::to_value(access_schema(&mut schemars::SchemaGenerator::default())).unwrap();
+        assert_eq!(schema["enum"], serde_json::json!(["full", "paused", "readOnly"]), "the legacy value stays writable");
+        let s: WorkspaceSpec = serde_json::from_value(serde_json::json!({
+            "owner": "alice", "name": "w", "region": "r", "image": "i", "desiredState": "running", "access": "readOnly"
+        }))
+        .unwrap();
+        assert_eq!(s.access, Access::Paused);
+        assert_eq!(serde_json::to_value(s.access).unwrap(), "paused");
+    }
+
+    /// The truth table `bench_wants_pod` shipped with, now on the Workspace side.
+    #[test]
+    fn a_bench_pod_is_wanted_while_running_and_awake_or_woken_after_it_slept() {
+        let mut w = ws(true);
+        assert!(wants_pod(&w), "never slept");
+        w.status = Some(WorkspaceStatus { idle_since: Some("2026-09-13T10:00:00Z".into()), ..Default::default() });
+        assert!(!wants_pod(&w), "asleep and nobody asked");
+        let wake = |w: &mut Workspace, at: &str| w.spec.bench.as_mut().unwrap().wake_at = Some(at.into());
+        wake(&mut w, "2026-09-13T09:59:59Z");
+        assert!(!wants_pod(&w), "a wake from before it slept is spent");
+        wake(&mut w, "2026-09-13T10:00:01Z");
+        assert!(wants_pod(&w));
+        w.spec.access = Access::Paused;
+        assert!(!wants_pod(&w), "a wake never starts a paused bench");
+        w.spec.access = Access::Full;
+        w.spec.desired_state = DesiredState::Stopped;
+        assert!(!wants_pod(&w), "stopped refuses a wake");
+    }
+
+    /// An ordinary workspace has no idle clock: a stale `idleSince` (from a bench that stopped
+    /// being one) must never stop it starting.
+    #[test]
+    fn an_ordinary_workspace_ignores_the_idle_clock() {
+        let mut w = ws(false);
+        w.status = Some(WorkspaceStatus { idle_since: Some("2026-09-13T10:00:00Z".into()), ..Default::default() });
+        assert!(wants_pod(&w));
+        w.spec.desired_state = DesiredState::Stopped;
+        assert!(!wants_pod(&w));
+    }
+
+    /// `is_bench` is the only predicate, so no other minter may produce a name that reads like one:
+    /// `api::rid("ws")` and the probes' run names are all `ws-`/`run-`, never `bench-`.
+    #[test]
+    fn no_workspace_name_generator_yields_a_bench_prefix() {
+        assert!(bench_id("alice", "acme").starts_with("bench-"));
+        for id in ["ws-0123456789abcdef", "run-fast-1-clone", "env-abc"] {
+            assert!(!id.starts_with("bench-"), "{id}");
+        }
+    }
 }

@@ -286,6 +286,8 @@ pub(crate) async fn create_ws(
         c,
         &id,
         crd::WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
             owner: owner.name.clone(),
             team: team.clone(),
             name: body.name,
@@ -701,6 +703,8 @@ mod tests {
         crd::Workspace::new(
             "ws-1",
             crd::WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
                 owner: "karthik".into(),
                 team: String::new(),
                 name: "web".into(),

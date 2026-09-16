@@ -423,6 +423,8 @@ mod inputs_tests {
         crd::Workspace::new(
             "ws-1",
             crd::WorkspaceSpec {
+                bench: None,
+                access: Default::default(),
                 owner: "alice".into(),
                 team: String::new(),
                 name: "w".into(),

@@ -350,6 +350,8 @@ mod tests {
     #[test]
     fn workspace_spec_carries_packages_and_omits_it_when_empty() {
         let mut spec = WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
             owner: "o".into(),
             team: String::new(),
             name: "n".into(),
@@ -506,6 +508,8 @@ mod tests {
     #[test]
     fn of_workspace_copies_the_spec_and_falls_back_to_the_default_quota() {
         let mut w = Workspace::new("ws-1", WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
             owner: "o".into(), team: String::new(), name: "n".into(), region: "r".into(),
             image: "alpine:3.20".into(), storage: None, desired_state: DesiredState::Running,
             resources: PodResources::default(), packages: vec!["jq".into()],

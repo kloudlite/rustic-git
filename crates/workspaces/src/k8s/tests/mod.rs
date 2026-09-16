@@ -48,6 +48,8 @@ pub(super) fn svc(folder: &str, path: &str) -> model::Service {
 
 pub(super) fn ws_spec() -> WorkspaceSpec {
     WorkspaceSpec {
+            bench: None,
+            access: Default::default(),
         team: String::new(),
         owner: "alice".into(),
         name: "dev".into(),
