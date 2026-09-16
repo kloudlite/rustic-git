@@ -10,6 +10,7 @@ import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
 import { checkPty } from "../../src/pty-ipc.ts";
 import { makeTab, scopesOf } from "../../src/renderer/components/terminal/tabs.ts";
+import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
 
 const ws = (id: string, name: string, branch: string, state: Workspace["state"]) => ({ id, name, branch, state }) as Workspace;
@@ -45,7 +46,19 @@ test("pty ipc: only a tab id and a real scope are accepted", () => {
   }
 });
 
-test("BenchClient.pty: refused while offline, a real shell once connected", async () => {
+test("BenchClient.pty: refused while offline, a shell from the pod's tool server once connected", async (t) => {
+  // The bench scope splices to the workspace container beside it; stand that container in here.
+  const tools = new WebSocketServer({ host: "127.0.0.1", port: 7788 });
+  const listening = await new Promise<boolean>((r) => (tools.once("listening", () => r(true)), tools.once("error", () => r(false))));
+  if (!listening) return void t.skip("127.0.0.1:7788 is busy on this machine");
+  tools.on("connection", (up) => {
+    up.on("message", (d: Buffer, binary: boolean) => {
+      if (!binary) return;
+      const line = d.toString("utf8");
+      if (line.startsWith("exit ")) return void (up.send(JSON.stringify({ exit: Number(line.slice(5)) })), up.close());
+      up.send(Buffer.from("kl-ok"), { binary: true });
+    });
+  });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "desk-pty-"));
   const bench = new Bench({ dir: path.join(dir, "bench"), readOnly: false, model: "fake/m", bin: FAKE });
   await bench.start();
@@ -72,5 +85,6 @@ test("BenchClient.pty: refused while offline, a real shell once connected", asyn
     c.close();
     await bench.stop();
     await srv.close();
+    tools.close();
   }
 });

@@ -1,5 +1,4 @@
 import WebSocket from "ws";
-import * as nodePty from "node-pty";
 
 /**
  * The bench's shells. One socket, one shell, one life: no scrollback replay, no
@@ -7,9 +6,11 @@ import * as nodePty from "node-pty";
  * group). Binary frames are raw PTY bytes both ways; text frames are control
  * JSON (`{"resize":{"cols":N,"rows":N}}` in, `{"exit":N}` / `{"error":"…"}` out).
  *
- * Two scopes, one protocol: `bench` forks a shell here, a workspace id splices
- * this socket onto that workspace's tool server `/stream/pty` and forwards
- * frames unchanged, so the far end owns the PTY and we own nothing but the pipe.
+ * Two scopes, one protocol, one mechanism: both splice this socket onto a tool
+ * server's `/stream/pty` and forward frames unchanged, so the far end owns the
+ * PTY and we own nothing but the pipe. `bench` is the workspace container beside
+ * us on 127.0.0.1 (the bench IS a workspace pod now, so its shell is the
+ * person's zsh with their Nix profile, not a shell forked in this container).
  */
 export type Resize = { cols: number; rows: number };
 
@@ -70,40 +71,6 @@ export function holdFrames(w: WebSocket, timeoutMs: number): { first: Promise<Re
       for (const [d, binary] of pending.splice(0)) w.emit("message", d, binary);
     },
   };
-}
-
-/** A login shell on the bench itself, cwd $HOME. */
-export function attachBenchShell(w: WebSocket, env: NodeJS.ProcessEnv, first: Resize): void {
-  const e = { ...env, TERM: "xterm-256color", COLORTERM: "truecolor" } as Record<string, string>;
-  // A person with a shell here must not be one `cat` away from the platform token; pi's extensions read it, a person does not need it.
-  delete e.KL_TOOL_TOKEN_FILE;
-  let p: nodePty.IPty;
-  try {
-    p = nodePty.spawn(e.SHELL ?? "/bin/bash", ["-l"], { name: "xterm-256color", cols: first.cols, rows: first.rows, cwd: e.HOME ?? "/", env: e });
-  } catch (err) {
-    send(w, JSON.stringify({ error: (err as Error).message }));
-    return void w.close();
-  }
-  let gone = false;
-  p.onData((d) => send(w, Buffer.from(d, "utf8"), true));
-  p.onExit(({ exitCode }) => {
-    gone = true;
-    send(w, JSON.stringify({ exit: exitCode }));
-    w.close();
-  });
-  w.on("message", (d: Buffer, binary: boolean) => {
-    if (binary) return void p.write(d.toString("utf8"));
-    const r = parseResize(d);
-    if (r) p.resize(r.cols, r.rows);
-  });
-  w.on("close", () => {
-    if (gone) return;
-    try {
-      p.kill("SIGHUP");
-    } catch {
-      /* already reaped */
-    }
-  });
 }
 
 /** Splice this socket onto a workspace tool server's PTY route; frames cross unchanged, either close closes the other. */

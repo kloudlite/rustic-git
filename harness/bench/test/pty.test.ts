@@ -9,11 +9,6 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 
-// A real PTY, a real shell: /bin/sh keeps the login profile short, and the token
-// file is set here so the test can prove the shell's env does not carry it.
-process.env.SHELL = "/bin/sh";
-process.env.KL_TOOL_TOKEN_FILE = "/run/secrets/kl-tool-token";
-
 async function up(resolveTools?: (ws: string) => Promise<string>) {
   const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-pty-")), readOnly: false, model: "fake/m", bin: FAKE });
   await bench.start();
@@ -35,65 +30,63 @@ function collect(w: WebSocket) {
 const bin = (w: WebSocket, s: string) => w.send(Buffer.from(s, "utf8"), { binary: true });
 const resize = (w: WebSocket, cols: number, rows: number) => w.send(JSON.stringify({ resize: { cols, rows } }));
 
-test("bench scope: a shell runs, echoes, and reports its exit code", async () => {
-  const t = await up();
-  const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=bench`);
+/** The workspace container's tool server lives on a fixed port; bind it only if this machine has it free. */
+async function fakeLocalTools(): Promise<WebSocketServer | undefined> {
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: 7788 });
+  return new Promise((r) => {
+    wss.once("listening", () => r(wss));
+    wss.once("error", () => r(undefined));
+  });
+}
+
+test("bench scope: the socket splices to the workspace container's own tool server", async (t) => {
+  const tools = await fakeLocalTools();
+  if (!tools) return void t.skip("127.0.0.1:7788 is busy on this machine");
+  const seen: string[] = [];
+  tools.on("connection", (up, req) => {
+    seen.push(req.url ?? "");
+    up.on("message", (d: Buffer, binary: boolean) => {
+      if (!binary) return void seen.push(d.toString());
+      up.send(Buffer.from("got:" + d.toString("utf8")), { binary: true });
+      up.send(JSON.stringify({ exit: 3 }));
+      up.close();
+    });
+  });
+  const b = await up();
+  const w = new WebSocket(`ws://127.0.0.1:${b.port}/pty?scope=bench`);
   try {
     await opened(w);
     const got = collect(w);
-    resize(w, 100, 30);
-    bin(w, "printf kl-%s ok\n");
-    await until(() => got.text.includes("kl-ok"), 10_000, "the shell's output");
     const closed = new Promise((r) => w.once("close", r));
-    bin(w, "exit 4\n");
+    resize(w, 100, 30);
+    bin(w, "printf hi\n");
     await closed;
-    assert.deepEqual(got.json, [{ exit: 4 }]);
+    assert.equal(got.text, "got:printf hi\n");
+    assert.deepEqual(got.json, [{ exit: 3 }]);
+    assert.equal(seen[0], "/stream/pty");
+    assert.deepEqual(JSON.parse(seen[1]), { resize: { cols: 100, rows: 30 } });
   } finally {
     w.close();
-    await t.down();
+    await b.down();
+    tools.close();
   }
 });
 
-test("bench scope: the shell's env carries no tool token", async () => {
-  const t = await up();
-  const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=bench`);
+test("bench scope: nothing listening in the pod is one error frame and a close", async (t) => {
+  const tools = await fakeLocalTools();
+  if (!tools) return void t.skip("127.0.0.1:7788 is busy on this machine");
+  tools.close();
+  await new Promise((r) => setTimeout(r, 50));
+  const b = await up();
+  const w = new WebSocket(`ws://127.0.0.1:${b.port}/pty?scope=bench`);
   try {
     await opened(w);
     const got = collect(w);
     resize(w, 80, 24);
-    assert.ok(process.env.KL_TOOL_TOKEN_FILE, "the bench process itself has one");
-    bin(w, 'printf tok=%s\\\\n "${KL_TOOL_TOKEN_FILE:-unset}"\n');
-    await until(() => /tok=(unset|\/run)/.test(got.text), 10_000, "the token line");
-    assert.match(got.text, /tok=unset/);
-    assert.doesNotMatch(got.text, /tok=\/run/);
+    await new Promise((r) => w.once("close", r));
+    assert.match(String(got.json[0]?.error ?? ""), /127\.0\.0\.1:7788 did not answer/);
   } finally {
-    w.close();
-    await t.down();
-  }
-});
-
-test("bench scope: closing the socket kills the shell", async () => {
-  const t = await up();
-  const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=bench`);
-  try {
-    await opened(w);
-    const got = collect(w);
-    resize(w, 80, 24);
-    bin(w, "printf pid=%s\\\\n $$\n");
-    await until(() => /pid=\d+/.test(got.text), 10_000, "the shell's pid");
-    const pid = Number(/pid=(\d+)/.exec(got.text)![1]);
-    assert.ok(process.kill(pid, 0), "alive while the socket is");
-    w.close();
-    await until(() => {
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    }, 2_000, "the shell to die with its socket");
-  } finally {
-    await t.down();
+    await b.down();
   }
 });
 

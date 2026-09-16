@@ -54,11 +54,13 @@ test("REST: list, create, messages, archive, exchanges by both views, delete", a
     const quiet = await health(t.base);
     assert.equal(quiet.clients, 0);
     assert.equal(typeof quiet.idleSince, "number", "no client and nothing running is idle");
+    assert.equal(quiet.idle, new Date(quiet.idleSince).toISOString(), "healthz carries the moment --ping reads");
     const ev = t.ws("/events");
     await opened(ev);
     const held = await health(t.base);
     assert.equal(held.clients, 1);
     assert.equal(held.idleSince, null, "a connected client holds the bench up");
+    assert.equal(held.idle, undefined, "and no idle moment for the probe to fail on");
     const seen: Record<string, unknown>[] = [];
     frames(ev, seen);
     const j = async (method: string, p: string, body?: unknown) => {

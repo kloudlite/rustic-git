@@ -2,8 +2,11 @@
 /**
  * harness-bench: one person's bench on one folder, as the platform's pod runs it
  * (constraints decisions 11 and 12). The pod runs it with no flags and
- * KL_BENCH_IDLE_SECS in its env; its readiness probe is `harness-bench --ping`;
- * the agent reads exit 75 as FolderLocked and a Succeeded pod as asleep.
+ * KL_BENCH_IDLE_SECS in its env; its readiness probe is `harness-bench --ping`.
+ * The agent reads exit 75 as FolderLocked and an unready-because-idle container
+ * as asleep: the pod's restartPolicy is Always, so idling by exiting would only
+ * be restarted — idleness is a file (`{dir}/.idle`, see idle.ts) and the process
+ * keeps serving. Nothing but a signal exits 0.
  * Children inherit this process's env, so KL_TEAM reaches pi's extensions as is.
  *
  * Only node: builtins are imported statically: `--ping` is an exec readiness
@@ -16,7 +19,8 @@ import { parseArgs } from "node:util";
 
 const { values: a } = parseArgs({
   options: {
-    dir: { type: "string", default: "/bench" },
+    // The bench lives inside its workspace's worktree, so its folder is snapshotted and replicated with it.
+    dir: { type: "string", default: process.env.KL_WORKSPACE ? path.join(process.env.KL_WORKSPACE, ".bench") : "/bench" },
     // The pod IP: the gateway dials it, and the platform's NetworkPolicy admits only the gateway.
     host: { type: "string", default: "0.0.0.0" },
     port: { type: "string", default: "7789" },
@@ -24,14 +28,15 @@ const { values: a } = parseArgs({
     "read-only": { type: "boolean", default: false },
     wait: { type: "boolean", default: false },
     ping: { type: "boolean", default: false },
-    // The platform's benchIdleSecs, stamped into the pod; 0 (a laptop) never sleeps.
+    // The platform's benchIdleSecs, stamped into the pod; kept for compatibility, see below.
     "idle-secs": { type: "string", default: process.env.KL_BENCH_IDLE_SECS || "0" },
   },
 });
 
 if (a.ping) {
-  const ok = await fetch(`http://127.0.0.1:${a.port}/healthz`, { signal: AbortSignal.timeout(900) }).then((r) => r.ok, () => false);
-  process.exit(ok ? 0 : 1);
+  // 2 = serving but idle: the agent's cue to delete the pod. 1 = not serving at all.
+  const h = await fetch(`http://127.0.0.1:${a.port}/healthz`, { signal: AbortSignal.timeout(900) }).then((r) => (r.ok ? (r.json() as Promise<{ idle?: string }>) : null), () => null);
+  process.exit(h === null ? 1 : h.idle ? 2 : 0);
 }
 
 // Kubernetes keeps this file as the container's last message.
@@ -45,8 +50,10 @@ const terminationLog = (msg: string) => {
 
 const dir = path.resolve(a.dir);
 const readOnly = a["read-only"];
-const idleMs = Number(a["idle-secs"]) * 1000;
-if (!Number.isFinite(idleMs) || idleMs < 0) {
+// Still accepted and validated because the pod stamps it, but idleness is no longer timed here:
+// the file below says WHEN it began and the agent decides how long is long enough.
+const idleSecs = Number(a["idle-secs"]);
+if (!Number.isFinite(idleSecs) || idleSecs < 0) {
   console.error(`harness-bench: --idle-secs must be a non-negative number, got ${a["idle-secs"]}`);
   process.exit(2);
 }
@@ -77,26 +84,17 @@ if (!readOnly) {
   fs.writeFileSync(path.join(dir, ".health"), ""); // the probe appends; start each process from empty
   bench.writable.probe();
 }
-const idle = new Idle(() => bench.busy());
+const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir);
 const srv = await serve(bench, Number(a.port), a.host, idle);
 console.log(`harness-bench listening on ${a.host}:${srv.port} (${readOnly ? "read-only" : "running"}) dir=${dir}`);
 
 const beat = readOnly ? undefined : setInterval(() => bench.writable.probe(), 10_000).unref();
-const sleep = setInterval(() => {
-  const since = idle.state().idleSince;
-  if (idleMs > 0 && since !== null && Date.now() - since >= idleMs) void shutdown("idle");
-}, 5_000).unref();
 
 let leaving = false;
-async function shutdown(why?: string) {
+async function shutdown() {
   if (leaving) return;
   leaving = true;
   clearInterval(beat);
-  clearInterval(sleep);
-  if (why) {
-    terminationLog(why);
-    console.error(`harness-bench: ${why}: no client and nothing running for ${a["idle-secs"]} s`);
-  }
   // Whatever fails while closing, the lock goes and the exit stays 0: the agent reads non-zero as a crash.
   try {
     await bench.stop();

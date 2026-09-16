@@ -2,7 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
-import { attachBenchShell, holdFrames, spliceWorkspaceShell } from "./pty.ts";
+import { holdFrames, spliceWorkspaceShell } from "./pty.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -25,6 +25,9 @@ function segments(pathname: string): string[] {
 }
 
 const SCOPE_RE = /^ws-[0-9a-f]{16}$/;
+
+/** The tool server in this pod's workspace container; same pod, so no NetworkPolicy and no token. */
+const LOCAL_TOOLS = "127.0.0.1:7788";
 
 export function serve(
   bench: Bench,
@@ -150,8 +153,9 @@ export function serve(
         // 80x24 is the fallback, never the shell a client that spoke gets.
         const held = holdFrames(w, 2_000);
         void held.first.then((first) => {
+          // The bench runs in the workspace pod: its own shell is that pod's tool server, one hop over loopback.
           if (scope === "bench") {
-            attachBenchShell(w, process.env, first);
+            spliceWorkspaceShell(w, LOCAL_TOOLS, first);
             return held.release();
           }
           return resolveTools(scope!).then(

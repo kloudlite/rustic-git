@@ -49,10 +49,11 @@ test("a second writer exits 75 naming the holder; a reader beside it is served a
   const port = portOf(await r.line(/\(read-only\)/));
   const rows = await (await fetch(`http://127.0.0.1:${port}/sessions`)).json();
   assert.equal(rows[0].id, "s-1");
+  // 2, not 0: nobody is connected, so it is idle — which is what the probe reports now.
   // The first --ping pays a cold Node start; time the second, as a probe after the first would see it.
-  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 2);
   const t0 = performance.now();
-  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 2);
   const pingMs = performance.now() - t0;
   console.log(`--ping took ${pingMs.toFixed(0)} ms`);
   assert.ok(pingMs < 2500, `--ping must beat the probe's 3 s timeout, took ${pingMs.toFixed(0)} ms`);
@@ -67,33 +68,41 @@ test("a second writer exits 75 naming the holder; a reader beside it is served a
   }
 });
 
-test("with nobody connected and nothing running it exits 0 naming idle, and releases the lock", async () => {
+test("with nobody connected and nothing running it marks .idle and keeps serving, and --ping says so", async () => {
   const { dir, term } = scratch();
   const a = run(["--dir", dir, "--port", "0"], { KL_BENCH_IDLE_SECS: "1", TERMINATION_LOG: term });
-  let b: ReturnType<typeof run> | undefined;
   try {
-  const started = Date.now();
+  const port = portOf(await a.line(/\(running\)/));
+  const mark = path.join(dir, ".idle");
+  await until(() => fs.existsSync(mark), 10_000, "the idle mark");
+  assert.equal(a.c.exitCode, null, "idling never exits: kubelet would only restart the container");
+  assert.equal((await (await fetch(`http://127.0.0.1:${port}/healthz`)).json()).idle, fs.readFileSync(mark, "utf8"));
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 2, "idle is unready, which is the agent's cue");
+
+  // A client takes it out of idle, and the probe passes again.
+  const w = new WebSocket(`ws://127.0.0.1:${port}/events`);
+  await new Promise((r) => w.once("open", r));
+  await until(() => !fs.existsSync(mark), 5_000, "the mark to go");
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
+  w.close();
+
+  a.c.kill("SIGTERM");
   assert.equal(await exited(a.c), 0);
-  assert.ok(Date.now() - started < 15_000, "within the idle period plus two beats");
-  assert.equal(fs.readFileSync(term, "utf8"), "idle");
-  b = run(["--dir", dir, "--port", "0"], { TERMINATION_LOG: term });
-  await b.line(/\(running\)/);
-  b.c.kill("SIGTERM");
-  assert.equal(await exited(b.c), 0, "the next start takes the lock at once");
+  assert.equal(fs.readFileSync(term, "utf8"), "", "a signal is not a termination message");
   } finally {
-    cleanup(dir, [a.c, b?.c]);
+    cleanup(dir, [a.c]);
   }
 });
 
-test("a connected WebSocket holds an idle bench up", async () => {
+test("a connected WebSocket holds an idle bench out of idle", async () => {
   const { dir, term } = scratch();
   const a = run(["--dir", dir, "--port", "0", "--idle-secs", "1"], { TERMINATION_LOG: term });
   try {
   const w = new WebSocket(`ws://127.0.0.1:${portOf(await a.line(/\(running\)/))}/events`);
   await new Promise((r) => w.once("open", r));
-  await new Promise((r) => setTimeout(r, 7_000)); // past one idle beat with idleSince long stale if the socket did not count
+  await new Promise((r) => setTimeout(r, 7_000)); // past several idle beats with the mark written if the socket did not count
   assert.equal(a.c.exitCode, null, "still running with a client connected");
-  assert.equal(fs.readFileSync(term, "utf8"), "");
+  assert.equal(fs.existsSync(path.join(dir, ".idle")), false);
   w.close();
   a.c.kill("SIGTERM");
   assert.equal(await exited(a.c), 0);
