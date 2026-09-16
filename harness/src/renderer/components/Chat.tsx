@@ -51,6 +51,8 @@ export function Chat(props: {
   /** The shell, likewise: it runs in this machine, so it opens under the
       conversation inside the same container rather than across the window. */
   shell?: JSX.Element;
+  /** The shell takes the whole pane: the conversation row collapses to nothing. */
+  shellFull?: boolean;
 }) {
   const thread = createMemo<Thread | undefined>(
     () => props.threads.find((t) => t.id === props.threadId),
@@ -287,7 +289,7 @@ export function Chat(props: {
       {/* Every level here is `min-w-0`: a grid item defaults to a min-content
           width, and one wide table or unbroken token in the transcript would
           otherwise widen the column and run the text under the inspector. */}
-      <div class="grid h-full min-h-0 w-full min-w-0 grid-rows-[minmax(0,1fr)_auto]">
+      <div class={props.shellFull ? "grid h-full min-h-0 w-full min-w-0 grid-rows-[0_minmax(0,1fr)]" : "grid h-full min-h-0 w-full min-w-0 grid-rows-[minmax(0,1fr)_auto]"}>
       <div class="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)]">
       <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono text-sm leading-[18px]">
         {/* A file opens in place: the thread stays selected and the sidebar

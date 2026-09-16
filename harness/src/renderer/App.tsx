@@ -809,6 +809,7 @@ export function App() {
               onCloseThread={closeThread}
               onDropTab={(id, index) => moveTab(id, pi(), index)}
               onSplit={panes.length < 2 && p.open.length > 1 ? splitRight : undefined}
+              shellFull={isActive() && maximised() && drawer() && tabsHere().length > 0}
               shell={
                 isActive() && tabsHere().length ? (
                   <div
