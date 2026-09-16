@@ -150,6 +150,28 @@ pub fn register_dependency(dep: &'static str, ops: &[&'static str]) {
     }
 }
 
+/// A readiness 503 a handler MEANT: put it on the response (`res.extensions_mut().insert(..)`) and
+/// this layer logs `http.unready` at info instead of `http.failed` at warn. Only reasons that are
+/// the system working belong here — a dependency that has stopped answering is an outage and must
+/// keep its warn, which is why an unreachable object store deliberately sets none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unready {
+    /// Handing this node's repos over; the Service must stop sending it traffic.
+    Draining,
+    /// No live leader yet — an election settling. `healthz` warns on its own once it outlasts
+    /// the lease TTL, so this stays info however long it lasts.
+    NoLeader,
+}
+
+impl Unready {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unready::Draining => "draining",
+            Unready::NoLeader => "no_leader",
+        }
+    }
+}
+
 /// Per-request count and latency, labelled by listener, route class and status. Mount it
 /// OUTERMOST so it sees the status every inner layer (auth, routing) settles on.
 /// `axum::middleware::from_fn_with_state("peer", http_metrics)`.
@@ -210,10 +232,13 @@ async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next
     // every write on the api listener (a `/v1` write is the moment an object changed, and the
     // agent's `event.seen` measures from it). The path carries ids, never bodies or tokens.
     let write = listener == "api" && !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
-    if status == 503 && path == "/healthz" {
-        // Readiness answering "not now" (draining, an election settling) is the probe working,
-        // not a failure; a leaderless spell that outlasts the TTL warns from `healthz` itself.
-        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, "http.unready");
+    if let Some(reason) = res.extensions().get::<Unready>().copied() {
+        // Readiness answering "not now" for a PLANNED reason (draining, an election settling) is
+        // the probe working, not a failure. The handler names the reason on the response rather
+        // than this layer guessing from the path: an unreachable object store answers 503 on the
+        // same route with the same code and sets NO extension, so it falls through to
+        // `http.failed` below — which is the one readiness 503 somebody has to be woken for.
+        tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, reason = reason.as_str(), "http.unready");
     } else if status >= 500 {
         tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.failed");
     } else if ms > slow_ms(&path) {
@@ -471,6 +496,52 @@ mod trace_tests {
         assert_eq!(spans.get_finished_spans().unwrap().len(), 1, "a 500 is kept");
         call(app, "/v1/slow", &[("traceparent", UNSAMPLED)]).await;
         assert_eq!(spans.get_finished_spans().unwrap().len(), 2, "a slow request is kept");
+    }
+
+    /// Only a 503 the handler MARKED is demoted. The object store being unreachable answers 503 on
+    /// the same route with the same code and must stay `http.failed`, or the one readiness failure
+    /// somebody has to be woken for becomes an info line.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_a_marked_readiness_503_is_demoted_to_unready() {
+        use axum::response::IntoResponse as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        #[derive(Clone, Default)]
+        struct Events(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+            fn on_event(&self, ev: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+                struct V<'a>(&'a mut Vec<String>);
+                impl tracing::field::Visit for V<'_> {
+                    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+                        if f.name() == "message" {
+                            self.0.push(v.to_string());
+                        }
+                    }
+                    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                        if f.name() == "message" {
+                            self.0.push(format!("{v:?}"));
+                        }
+                    }
+                }
+                ev.record(&mut V(&mut self.0.lock().unwrap()));
+            }
+        }
+        let events = Events::default();
+        let _g = tracing::dispatcher::set_default(&tracing_subscriber::registry().with(events.clone()).into());
+        let app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async {
+                let mut res = (axum::http::StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
+                res.extensions_mut().insert(super::Unready::Draining);
+                res
+            }))
+            .route("/healthz-store", axum::routing::get(|| async {
+                (axum::http::StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response()
+            }))
+            .layer(axum::middleware::from_fn_with_state("public", super::http_metrics));
+        call(app.clone(), "/healthz", &[]).await;
+        call(app, "/healthz-store", &[]).await;
+        let got = events.0.lock().unwrap().clone();
+        assert!(got.contains(&"http.unready".to_string()), "{got:?}");
+        assert!(got.contains(&"http.failed".to_string()), "an object-store 503 keeps its warn: {got:?}");
     }
 
     #[tokio::test(flavor = "current_thread")]

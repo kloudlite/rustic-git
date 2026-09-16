@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use kloudlite_core::httpx::Trusted;
+use kloudlite_core::metrics::Unready;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -16,6 +17,15 @@ use std::sync::Arc;
 /// the probe costs nothing. Peer DNS is NOT gated on this (`publishNotReadyAddresses`), so
 /// forwarding between nodes keeps working through a failover.
 /// Same handler on both listeners: nothing in-repo probes the peer one.
+/// A 503 this handler MEANT, marked so `metrics::observe` logs it as `http.unready` at info
+/// rather than `http.failed` at warn. The object-store 503 above is deliberately NOT one: the
+/// route and the status code are the same, and only the reason says whether somebody has to look.
+fn unready(reason: Unready, body: &'static str) -> Response {
+    let mut res = (StatusCode::SERVICE_UNAVAILABLE, body).into_response();
+    res.extensions_mut().insert(reason);
+    res
+}
+
 /// Whether `leader.absent` has already been reported for the current leaderless window.
 static LEADERLESS_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -27,7 +37,7 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     // Ahead of the leader check because it is the more specific answer, and because a drain that
     // resigned the lease would otherwise report "no live leader" for a beat.
     if app.is_draining() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response();
+        return unready(Unready::Draining, "draining");
     }
     if !app.leader_live() {
         // The 503 itself logs at info (an election settling is readiness working); a fleet with no
@@ -37,7 +47,7 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
         if app.leaderless_too_long() && !LEADERLESS_WARNED.swap(true, Ordering::Relaxed) {
             tracing::warn!("leader.absent");
         }
-        return (StatusCode::SERVICE_UNAVAILABLE, "no live leader").into_response();
+        return unready(Unready::NoLeader, "no live leader");
     }
     if LEADERLESS_WARNED.swap(false, Ordering::Relaxed) {
         tracing::info!("leader.back");
