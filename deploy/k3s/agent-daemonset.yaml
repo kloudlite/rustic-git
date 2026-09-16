@@ -115,6 +115,16 @@ spec:
           volumeMounts:
             - name: nix
               mountPath: /host-nix
+        # Warm the tenant images on this node as part of the roll: a bench woke 37 s after its
+        # wake on 2026-09-17 03:42 IST, 30 of them pulling the two images the roll had just
+        # changed. Both are pinned by deploy/pin.sh like the env values below (same reference
+        # regex), so a roll pulls them once per node here and no person's first start pays it.
+        - name: warm-workspace-image
+          image: ghcr.io/kloudlite/kloudlite-workspace:8373a4d50e2f88d0500d207683c92c4e86cac405@sha256:1a2f63b35efca79b6daff831838c9e40ae6013e243ab1f5f1ab9c02361d0ffc5
+          command: ["true"]
+        - name: warm-bench-image
+          image: ghcr.io/kloudlite/kloudlite-bench:8373a4d50e2f88d0500d207683c92c4e86cac405@sha256:7145f481030789ec96079e859e5a890c3ae2e17b706b885ba3b337ad1bf1a4ba
+          command: ["true"]
       containers:
         - name: agent
           # Pinned to the commit CI built, not `:latest`. A DaemonSet on `:latest` re-resolves the
