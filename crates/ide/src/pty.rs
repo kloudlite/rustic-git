@@ -137,6 +137,48 @@ fn program(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Resu
     Ok(vec![(tmux, argv)])
 }
 
+/// What `kl ide serve` was started with is NOT what an ssh login gets: the prelude starts it
+/// through `su kl -s /bin/sh`, and the pod env it inherits is only half the story. Three groups
+/// go, one comes back.
+///
+/// `SHELL` is the load-bearing one. `su -s /bin/sh` leaves it `/bin/sh`, and this process passes
+/// it down; sshd instead sets it from the passwd entry. `spawn` already execs the passwd shell
+/// (that was the first half of this bug — every PTY landed in busybox ash while ssh got the Nix
+/// zsh, so the prompt was ash's `dir $` with no rc and no starship), but anything the person's
+/// shell RESPAWNS reads `$SHELL` — above all tmux, whose `default-shell` defaults to it, which
+/// would have put every named terminal straight back in ash one layer down.
+///
+/// `TERM`/`COLORTERM` are ours to state: this end is a real terminal whatever the server's env
+/// says. `TMUX` is only ever set when this process is itself inside a session (a dev machine,
+/// never a pod), where tmux refuses to nest without `-d`.
+///
+/// The rest are this process's own private state, which an ssh login never carries: the serve
+/// command's telemetry identity (anything the person then runs would report as `kl-ide`), and the
+/// position vars a forked child must not inherit — `spawn` chdirs, so `PWD`/`OLDPWD` would name a
+/// directory the shell is not in (zsh recomputes them, `sh` believes them) and `SHLVL` would start
+/// the person two levels deep.
+fn child_env(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>, shell: Option<&std::ffi::CStr>) -> Vec<CString> {
+    const DROP: [&str; 9] = ["TERM", "COLORTERM", "TMUX", "SHLVL", "PWD", "OLDPWD", "_", "OTEL_SERVICE_NAME", "KLOUDLITE_OTLP_URL"];
+    let replace_shell = shell.is_some();
+    let shell = shell.map(|s| {
+        let mut b = b"SHELL=".to_vec();
+        b.extend_from_slice(s.to_bytes());
+        CString::new(b).unwrap_or_default()
+    });
+    // `SHELL` is replaced, not dropped: with no passwd entry to read there is nothing better to
+    // say than what we were started with.
+    vars.filter(|(k, _)| !DROP.iter().any(|d| k == d) && !(replace_shell && k == "SHELL"))
+        .map(|(k, v)| {
+            let mut b = k.into_encoded_bytes();
+            b.push(b'=');
+            b.extend(v.into_encoded_bytes());
+            CString::new(b).unwrap_or_default()
+        })
+        .chain([CString::new("TERM=xterm-256color").unwrap(), CString::new("COLORTERM=truecolor").unwrap()])
+        .chain(shell)
+        .collect()
+}
+
 pub fn spawn(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Result<Pty> {
     // Before the pty is opened, so a refusal leaks no descriptors.
     let attempts = program(root, cols, rows, session)?;
@@ -154,18 +196,7 @@ pub fn spawn(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Re
     let cwd = CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::other("root has a NUL"))?;
     let argv_ptrs: Vec<Vec<*const libc::c_char>> = attempts.iter().map(|(_, a)| a.iter().map(|c| c.as_ptr()).chain([std::ptr::null()]).collect()).collect();
     // The environment too: `setenv` allocates, so it is built here and handed to `execve`.
-    let envp_owned: Vec<CString> = std::env::vars_os()
-        // `TMUX` too: it is only ever set when this process is itself inside a session (a dev
-        // machine, never a pod), where tmux refuses to nest without `-d`.
-        .filter(|(k, _)| k != "TERM" && k != "COLORTERM" && k != "TMUX")
-        .map(|(k, v)| {
-            let mut b = k.into_encoded_bytes();
-            b.push(b'=');
-            b.extend(v.into_encoded_bytes());
-            CString::new(b).unwrap_or_default()
-        })
-        .chain([CString::new("TERM=xterm-256color").unwrap(), CString::new("COLORTERM=truecolor").unwrap()])
-        .collect();
+    let envp_owned = child_env(std::env::vars_os(), passwd_shell().as_deref());
     let mut envp: Vec<*const libc::c_char> = envp_owned.iter().map(|e| e.as_ptr()).collect();
     envp.push(std::ptr::null());
 
@@ -524,6 +555,44 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The PTY's shell must see what an ssh login sees: the workspace's own `login_env`, a
+    /// `SHELL` naming the shell we actually exec (tmux's `default-shell` reads it, and `/bin/sh`
+    /// there is how the prompt bug came back one layer down), and none of `kl ide serve`'s own
+    /// process state.
+    #[test]
+    fn the_child_env_matches_an_ssh_login() {
+        let os = |s: &str| std::ffi::OsString::from(s);
+        let inherited = [
+            ("ZDOTDIR", "/home/kl/.config/zsh"),
+            ("KL_WORKSPACE", "/home/kl/workspaces/w"),
+            ("PATH", "/nix/profile/current/bin:/bin"),
+            // `su -s /bin/sh`'s, not the person's.
+            ("SHELL", "/bin/sh"),
+            // The serve process's own, never an ssh login's.
+            ("OTEL_SERVICE_NAME", "kl-ide"),
+            ("KLOUDLITE_OTLP_URL", "http://otel:4318"),
+            ("SHLVL", "2"),
+            ("PWD", "/"),
+            ("OLDPWD", "/"),
+            ("TERM", "dumb"),
+        ];
+        let zsh = std::ffi::CString::new("/nix/profile/current/bin/zsh").unwrap();
+        let env: Vec<String> = child_env(inherited.iter().map(|(k, v)| (os(k), os(v))), Some(&zsh)).iter().map(|c| c.to_string_lossy().into_owned()).collect();
+        let has = |k: &str| env.iter().any(|e| e.starts_with(&format!("{k}=")));
+
+        assert!(env.contains(&"SHELL=/nix/profile/current/bin/zsh".to_string()), "{env:?}");
+        assert!(env.contains(&"ZDOTDIR=/home/kl/.config/zsh".to_string()));
+        assert!(env.contains(&"KL_WORKSPACE=/home/kl/workspaces/w".to_string()));
+        assert!(env.contains(&"PATH=/nix/profile/current/bin:/bin".to_string()));
+        assert!(env.contains(&"TERM=xterm-256color".to_string()), "the terminal is ours to state");
+        assert!(env.contains(&"COLORTERM=truecolor".to_string()));
+        for gone in ["OTEL_SERVICE_NAME", "KLOUDLITE_OTLP_URL", "SHLVL", "PWD", "OLDPWD"] {
+            assert!(!has(gone), "{gone} is the serve process's, not the person's: {env:?}");
+        }
+        assert_eq!(env.iter().filter(|e| e.starts_with("SHELL=")).count(), 1);
+        assert_eq!(env.iter().filter(|e| e.starts_with("TERM=")).count(), 1);
     }
 
     /// `$SHELL` is `/bin/sh` inside a workspace pod because `kl ide serve` is started under
