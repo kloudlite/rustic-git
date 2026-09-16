@@ -71,9 +71,9 @@ pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
     let mut ws = winsize(cols, rows);
     // The size is set at open, so the shell and everything it starts never see 80x24 first and
     // reflow on the client's resize.
-    // `&mut` and `null_mut` for both: the pointers are `*const` on Linux and `*mut` on macOS, and
-    // only a mutable one coerces to either.
-    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut::<libc::c_char>(), std::ptr::null_mut::<libc::termios>(), &mut ws) } != 0 {
+    // Raw pointers cast with `as _` for the last three: they are `*const` on Linux and `*mut` on
+    // macOS, and a `&mut` coerces to either but trips clippy's unnecessary_mut_passed on Linux.
+    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut::<libc::c_char>(), std::ptr::null_mut::<libc::termios>(), std::ptr::addr_of_mut!(ws) as _) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // Everything the child needs is built BEFORE the fork: between fork and exec only
