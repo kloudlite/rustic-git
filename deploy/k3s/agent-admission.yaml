@@ -228,7 +228,10 @@ spec:
       - apiGroups: ["kloudlite.io"]
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["benches", "workspaces", "spaceenvironments"]
+        # `/status` is listed too: the API server discards `spec` on a `/status` write but still
+        # accepts a `metadata.annotations` change on it, so without these the removal stamps could
+        # be set through a status SSA with a different field manager, bypassing this policy entirely.
+        resources: ["benches", "workspaces", "spaceenvironments", "benches/status", "workspaces/status", "spaceenvironments/status"]
   matchConditions:
     - name: not-the-api
       expression: "request.userInfo.username != 'system:serviceaccount:kube-system:kloudlite-api'"
