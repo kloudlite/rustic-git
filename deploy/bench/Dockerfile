@@ -6,6 +6,10 @@
 FROM node:24-bookworm-slim AS deps
 WORKDIR /opt/harness
 COPY harness/package.json harness/package-lock.json ./
+# node-pty publishes no linux prebuild, so `npm ci` builds it from source here. Build stage only —
+# the runtime stage copies the compiled node_modules and needs none of this.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm ci --omit=dev
 
 # Node 24: .ts type stripping is unflagged, and it is what the bench suite ran on.

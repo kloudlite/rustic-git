@@ -106,6 +106,7 @@ fn a_bench_pod_carries_only_the_token_path_in_env() {
     let get = |n: &str| env.iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
     assert_eq!(get("KL_API_URL").as_deref(), Some("https://api.example"));
+    assert_eq!(get("SHELL").as_deref(), Some("/bin/bash"), "a bench shell is bash, not the passwd default");
     let bare = bench_pod(&b, "bench-1", "/wspool", None, "cr", "", 300).unwrap().spec.unwrap().containers[0].env.clone().unwrap();
     assert!(!bare.iter().any(|e| e.name == "KL_API_URL"), "no api url means unset, so tools fail closed");
 }

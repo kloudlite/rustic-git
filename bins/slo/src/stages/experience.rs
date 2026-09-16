@@ -96,10 +96,12 @@ pub const IDS: &[&str] = &[
     "bench.session.roundtrip",
     "bench.exchange.both_views",
     "bench.two_clients",
+    "bench.shell.roundtrip",
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
     "bench.workspace.tool_roundtrip",
+    "bench.shell.workspace",
     "feed.experience",
     "home.persists",
 ];
@@ -201,7 +203,10 @@ pub async fn run(c: &mut Ctx) {
                 crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
                 super::bench::tool_only(c).await
             }
+            // Both shells are filed by the calls above: the bench shell with the session journey,
+            // the workspace shell beside the tool round trip, in the group that owns the workspace.
             "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
+            "bench.shell.roundtrip" | "bench.shell.workspace" => {}
             _ => c.skip(id, "not implemented yet"),
         }
     }

@@ -160,9 +160,9 @@ pub fn journey(suite: Suite) -> Vec<(&'static str, Vec<&'static str>)> {
 /// same way the probe walked it: the partition is a fact about the catalogue, not about the binary.
 pub const HOURLY_GROUPS: u8 = 4;
 
-/// Group 3. Not `bench.workspace.tool_roundtrip`: it runs in group 0's workspace, so group 0 walks
-/// it after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 10] = [
+/// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
+/// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
+const BENCH_IDS: [&str; 11] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -173,6 +173,7 @@ const BENCH_IDS: [&str; 10] = [
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
+    "bench.shell.roundtrip",
 ];
 
 /// Group 1: every id the intercept journey owns. It is also the skip list a probe run that cannot
@@ -603,6 +604,8 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.tool.revoked", feature: "Benches", sli: "After a stop the next call with the pod's token is 401 at once; after the parent login is revoked a pod call is 401 within 60 s", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
     // thread file.
+    Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
@@ -741,7 +744,8 @@ mod tests {
         for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.idle.wake",
                    "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
-                   "bench.tool.token", "bench.tool.audience", "bench.tool.revoked"] {
+                   "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
+                   "bench.shell.roundtrip", "bench.shell.workspace"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }

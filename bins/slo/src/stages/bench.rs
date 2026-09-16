@@ -47,12 +47,23 @@ const IDLE_GRACE: Duration = Duration::from_secs(60);
 const START_WAIT: Duration = Duration::from_secs(90);
 /// `bench.session.roundtrip`: target 60 s.
 const ROUNDTRIP_CEILING: Duration = Duration::from_secs(60);
+/// `bench.shell.roundtrip`: target 15 s.
+const SHELL_CEILING: Duration = Duration::from_secs(20);
+/// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first.
+const SHELL_WS_CEILING: Duration = Duration::from_secs(30);
 
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
-/// The four ids that read `harness-bench`'s history, in journey order.
-const SESSION_IDS: [&str; 4] =
-    ["bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients", "bench.workspace.tool_roundtrip"];
+/// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
+/// but they need the same bench, so they skip with the same reasons.
+const SESSION_IDS: [&str; 6] = [
+    "bench.session.roundtrip",
+    "bench.exchange.both_views",
+    "bench.two_clients",
+    "bench.shell.roundtrip",
+    "bench.shell.workspace",
+    "bench.workspace.tool_roundtrip",
+];
 
 fn bench_url(c: &Ctx, path: &str) -> String {
     api(c, &format!("/v1/bench{path}"))
@@ -275,6 +286,7 @@ pub async fn hourly(c: &mut Ctx) {
 }
 
 const TOOL: &str = "bench.workspace.tool_roundtrip";
+const SHELL_WS: &str = "bench.shell.workspace";
 
 /// The session ids this pod walks: a grouped hourly run leaves `TOOL` to group 0.
 fn skip_sessions(c: &mut Ctx, why: &str) {
@@ -293,18 +305,29 @@ pub async fn tool_only(c: &mut Ctx) {
     }
     .await;
     match health {
-        Ok(h) if is_stub(&h) => c.skip(TOOL, STUB),
+        Ok(h) if is_stub(&h) => {
+            c.skip(TOOL, STUB);
+            c.skip(SHELL_WS, STUB);
+        }
         Ok(_) => {
             let thread = tool_roundtrip(c).await;
+            shell_workspace(c).await;
             drop_sessions(c, thread).await;
         }
-        Err(e) => c.skip(TOOL, &format!("the bench could not be reached: {e:#}")),
+        Err(e) => {
+            let why = format!("the bench could not be reached: {e:#}");
+            c.skip(TOOL, &why);
+            c.skip(SHELL_WS, &why);
+        }
     }
 }
 
 /// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
 /// and judged from the transcript, and the two sockets that watched it are compared afterwards.
 async fn sessions(c: &mut Ctx) {
+    if c.walks("bench.shell.roundtrip") {
+        shell_roundtrip(c).await;
+    }
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
@@ -359,13 +382,17 @@ async fn sessions(c: &mut Ctx) {
             c.skip("bench.exchange.both_views", NO_MODEL);
             if c.walks(TOOL) {
                 c.skip(TOOL, NO_MODEL);
+                // The shell needs no model, so a missing provider key never skips it.
+                shell_workspace(c).await;
             }
             None
         }
         None => {
             exchanges(c, sid.clone()).await;
             if c.walks(TOOL) {
-                tool_roundtrip(c).await
+                let thread = tool_roundtrip(c).await;
+                shell_workspace(c).await;
+                thread
             } else {
                 None
             }
@@ -388,6 +415,89 @@ async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
             Ok(Err(e)) => tracing::warn!(error = %e, "slo.bench.session.teardown"),
             Err(_) => tracing::warn!("slo.bench.session.teardown timed out"),
         }
+    }
+}
+
+/// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
+/// goes as binary frames, output comes back as binary frames, and the server ends with one text
+/// control frame. Returns what the shell printed and its exit code.
+async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(String, i64)> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/pty?scope={scope}")).await.context("pty socket")?;
+    ws.send(Message::text(json!({"resize": {"cols": 100, "rows": 30}}).to_string())).await?;
+    ws.send(Message::binary(input.as_bytes().to_vec())).await?;
+    let mut out = String::new();
+    while let Some(msg) = ws.next().await {
+        match msg.context("pty frame")? {
+            // Not necessarily UTF-8 on a boundary — this is a judgement, not a terminal.
+            Message::Binary(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            Message::Text(t) => {
+                let v: Value = serde_json::from_str(&t).with_context(|| format!("pty control frame {}", super::clip(&t)))?;
+                if let Some(e) = v["error"].as_str() {
+                    bail!("the shell did not start: {e}");
+                }
+                let code = v["exit"].as_i64().with_context(|| format!("a control frame that is neither exit nor error: {}", super::clip(&t)))?;
+                return Ok((out, code));
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    bail!("the shell closed without an exit frame; output {}", super::clip(&out))
+}
+
+/// The shell ran what it was given and left cleanly. `want` is looked for in the OUTPUT, and the
+/// PTY echoes the typed line back too — which is why both probes send a line that does not itself
+/// contain what is asserted.
+fn judge_shell(out: &str, want: &str, code: i64) -> Result<()> {
+    if !out.contains(want) {
+        bail!("the shell never printed {want}: {}", super::clip(out));
+    }
+    if code != 0 {
+        bail!("the shell exited {code}");
+    }
+    Ok(())
+}
+
+/// `bench.shell.roundtrip`: a shell on the bench itself. `printf` builds the marker, so the echoed
+/// command line cannot pass the assertion on its own.
+async fn shell_roundtrip(c: &mut Ctx) {
+    c.step("bench.shell.roundtrip", SHELL_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (out, code) = pty_shell(port, "bench", "printf 'kl-%s\\n' ok; exit 0\n").await?;
+            judge_shell(&out, "kl-ok", code)
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `bench.shell.workspace`: the same socket with a workspace scope, which the bench splices to
+/// that workspace's tool server — so `pwd` proves both the splice and the shell's cwd. Runs in
+/// group 0, which owns the workspace, beside `bench.workspace.tool_roundtrip`.
+async fn shell_workspace(c: &mut Ctx) {
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => return c.skip(SHELL_WS, why),
+    };
+    // The bench resolves the tool server with its pod token, exactly as the tool round trip does,
+    // so the same login has to be live for this step.
+    let login = match super::bench_tool::arm(c).await {
+        Ok(id) => id,
+        Err(why) => return c.skip(SHELL_WS, &why),
+    };
+    let want = kloudlite_workspaces::k8s::workspace_dir(&ws);
+    c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (out, code) = pty_shell(port, &ws, "pwd; exit 0\n").await?;
+            judge_shell(&out, &want, code)
+        }
+        .boxed()
+    })
+    .await;
+    if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
+        tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.login.revoke");
     }
 }
 
@@ -897,7 +1007,7 @@ mod tests {
     #[test]
     fn ceilings_are_at_least_their_targets() {
         use kloudlite_workspaces::slo::catalogue::find;
-        for (id, cap) in [("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
+        for (id, cap) in [("bench.shell.roundtrip", SHELL_CEILING), (SHELL_WS, SHELL_WS_CEILING), ("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
             assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
         }
     }
@@ -936,7 +1046,7 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        assert_eq!(c.steps.len(), 6);
+        assert_eq!(c.steps.len(), 8);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
         assert_eq!(run_state(true, false, &c.steps), RunState::Skipped);

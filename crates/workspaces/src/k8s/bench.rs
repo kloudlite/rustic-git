@@ -44,6 +44,9 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
     let mut env = vec![
         var("KL_OWNER", owner.clone()),
         var("KL_TEAM", team.clone()),
+        // `/pty` forks `$SHELL` as a login shell; unset, a person lands in whatever the image's
+        // passwd entry names rather than the bash the bench is built around.
+        var("SHELL", "/bin/bash".to_string()),
         var("KL_BENCH", id.to_string()),
         var("KL_MODEL", b.spec.model.clone()),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
