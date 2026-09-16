@@ -10,7 +10,7 @@
 
 use super::history_or_503;
 use crate::api::ApiState;
-use crate::history::{series::ident, slo, HistoryError};
+use crate::history::{exclusions, series::ident, slo, HistoryError};
 use crate::slo::catalogue::{self, Suite};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -149,6 +149,84 @@ pub(crate) async fn run_detail(
         .ok_or_else(|| (StatusCode::NOT_FOUND, "no such run").into_response())?;
     let suite = Suite::parse(&run.suite).unwrap_or(Suite::Fast);
     Ok(Json(RunDetail { run, steps, journey: journey_of(suite) }).into_response())
+}
+
+// ── acknowledged incident windows ────────────────────────────────────────────
+
+/// `GET /admin/slo/exclusions`: every live window, newest first.
+pub(crate) async fn list_exclusions(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
+    let h = history_or_503(&s)?;
+    Ok(Json(exclusions::exclusions(h).await.map_err(bad_gateway)?).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ExcludeBody {
+    from: chrono::DateTime<chrono::Utc>,
+    to: chrono::DateTime<chrono::Utc>,
+    /// Empty means every SLO — what an infrastructure incident actually looks like.
+    #[serde(default)]
+    slo_ids: Vec<String>,
+    note: String,
+}
+
+/// `POST /admin/slo/exclusions`: take a window out of every budget, on the record.
+///
+/// The note is required and the window is capped (`exclusions::MAX_WINDOW_DAYS`) for the same
+/// reason: an exclusion moves numbers other people decide from, so it has to say why, and it has
+/// to stay an incident rather than quietly becoming the target.
+pub(crate) async fn exclude(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ExcludeBody>,
+) -> Result<Response, Response> {
+    let h = history_or_503(&s)?;
+    let c = crate::api::caller(&s, &headers).await?;
+    let unprocessable = |m: String| (StatusCode::UNPROCESSABLE_ENTITY, m).into_response();
+    let note = body.note.trim().to_string();
+    if note.is_empty() {
+        return Err(unprocessable("note is required".into()));
+    }
+    if body.to <= body.from {
+        return Err(unprocessable("to must be after from".into()));
+    }
+    if (body.to - body.from).num_days() >= exclusions::MAX_WINDOW_DAYS {
+        return Err(unprocessable(format!(
+            "a window may cover at most {} days",
+            exclusions::MAX_WINDOW_DAYS
+        )));
+    }
+    if let Some(bad) = body.slo_ids.iter().find(|id| !catalogue::CATALOGUE.iter().any(|s| s.id == id.as_str())) {
+        return Err(unprocessable(format!("{bad:?} is not an SLO id")));
+    }
+    let mut buf = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+    let e = exclusions::Exclusion {
+        id: format!("x-{}", kloudlite_core::hex(&buf)),
+        from: body.from,
+        to: body.to,
+        slo_ids: body.slo_ids,
+        note: note.clone(),
+        by: c.name.clone(),
+        created: chrono::Utc::now(),
+    };
+    exclusions::put_exclusion(h, &e).await.map_err(bad_gateway)?;
+    super::audit(&s, &c.name, "slo-exclude", &e.id, Some(note), "ok").await;
+    Ok(Json(e).into_response())
+}
+
+/// `DELETE /admin/slo/exclusions/{id}`: put the window back into the budgets.
+pub(crate) async fn unexclude(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, Response> {
+    let h = history_or_503(&s)?;
+    let c = crate::api::caller(&s, &headers).await?;
+    let id = ident(&id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "id is not an identifier").into_response())?;
+    exclusions::delete_exclusion(h, id, &c.name).await.map_err(bad_gateway)?;
+    super::audit(&s, &c.name, "slo-unexclude", id, None, "ok").await;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ── the three reads the probe itself makes (stage 10, "edge and pipeline") ───
