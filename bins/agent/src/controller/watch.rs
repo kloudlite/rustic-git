@@ -30,6 +30,12 @@ pub(crate) const STALE_AFTER_ERROR: Duration = Duration::from_secs(600);
 pub(crate) const STALE_QUIET: Duration = Duration::from_secs(3600);
 /// Between a stream ending and its rebuild, so one that ends at once cannot spin.
 const REBUILD_PAUSE: Duration = Duration::from_secs(5);
+/// Ceiling on the doubled error window. A watch that errors PERMANENTLY — RBAC revoked, the CRD
+/// removed — never delivers an event, so at a flat `STALE_AFTER_ERROR` every kind on every agent
+/// relists forever at the same cadence, against the same API server whose watch cache froze on
+/// 2026-09-15. Doubling after each eventless rebuild decays that to one LIST an hour per kind
+/// while leaving the first few relists — the ones that actually unstick a stuck watch — prompt.
+const STALE_BACKOFF_MAX: Duration = Duration::from_secs(3600);
 
 type Events<K> = BoxStream<'static, Result<Event<K>, Error>>;
 
@@ -49,18 +55,24 @@ where
     F: FnMut() -> S + Send + 'static,
 {
     let first: Events<K> = make().boxed();
-    // (stream, last event, an error since it, builder)
-    futures::stream::unfold((first, Instant::now(), false, make), move |(mut events, mut last, mut failed, mut make)| async move {
+    // (stream, last event, an error since it, eventless rebuilds so far, builder)
+    futures::stream::unfold((first, Instant::now(), false, 0u32, make), move |(mut events, mut last, mut failed, mut misses, mut make)| async move {
         loop {
-            let window = if failed { after_error } else { quiet };
+            let window = if failed { (after_error * 2u32.saturating_pow(misses.min(16))).min(STALE_BACKOFF_MAX) } else { quiet };
             match tokio::time::timeout_at(last + window, events.next()).await {
-                Ok(Some(Ok(ev))) => return Some((Ok(ev), (events, Instant::now(), false, make))),
-                Ok(Some(Err(e))) => return Some((Err(e), (events, last, true, make))),
+                // An event proves the rebuilds are working: start the backoff over.
+                Ok(Some(Ok(ev))) => return Some((Ok(ev), (events, Instant::now(), false, 0, make))),
+                Ok(Some(Err(e))) => return Some((Err(e), (events, last, true, misses, make))),
                 Ok(None) => {
                     tracing::warn!(kind, "watch.ended");
                     tokio::time::sleep(REBUILD_PAUSE).await;
                 }
-                Err(_) => tracing::warn!(kind, silent_secs = last.elapsed().as_secs(), errored = failed, "watch.stale"),
+                Err(_) => {
+                    tracing::warn!(kind, silent_secs = last.elapsed().as_secs(), errored = failed, misses, "watch.stale");
+                    // Only an ERRORING watch backs off; a kind that is merely quiet keeps its
+                    // hourly safety net at full cadence.
+                    misses = if failed { misses.saturating_add(1) } else { 0 };
+                }
             }
             events = make().boxed();
             (last, failed) = (Instant::now(), false);
@@ -121,6 +133,22 @@ mod tests {
         assert_eq!(made.load(Ordering::SeqCst), 1);
         assert!(tokio::time::timeout(Duration::from_secs(200), s.next()).await.is_err());
         assert_eq!(made.load(Ordering::SeqCst), 2, "and relisted once the safety net passes");
+    }
+
+    /// A watch that can never succeed (RBAC revoked, CRD gone) must not relist at a flat cadence
+    /// forever: each eventless rebuild doubles the window, capped at an hour.
+    #[tokio::test(start_paused = true)]
+    async fn a_permanently_erroring_watch_backs_its_relists_off() {
+        let (made, make) = counted(|_| futures::stream::iter([Err(Error::NoResourceVersion)]).chain(futures::stream::pending::<Ev>()));
+        let mut s = Box::pin(with_windows("ConfigMap", SHORT, STALE_QUIET, make));
+        assert!(matches!(s.next().await, Some(Err(_))), "the error passes through");
+        let started = Instant::now();
+        // Three more errors means three rebuilds, waiting SHORT, 2×SHORT and 4×SHORT.
+        for _ in 0..3 {
+            assert!(matches!(s.next().await, Some(Err(_))));
+        }
+        assert_eq!(made.load(Ordering::SeqCst), 4);
+        assert!(started.elapsed() >= SHORT * 7, "backed off: {:?}", started.elapsed());
     }
 
     #[tokio::test(start_paused = true)]
