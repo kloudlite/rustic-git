@@ -628,13 +628,24 @@ fn pi_no_api_key_provider(msg: &str) -> Option<String> {
     (!provider.is_empty()).then(|| provider.to_string())
 }
 
+/// The tenant's credential cannot buy a turn: no key at all, or a key whose account the provider
+/// refuses with HTTP 402 (DeepSeek: `402: {"message":"Insufficient Balance", ...}`, the 2026-09-16
+/// 10:02 UTC hourly). Both are the probe tenant's wallet, not the platform, so both demote to skip.
+/// Anything else — rate limit, timeout, tool error — stays a failure.
+fn pi_credential_refusal(msg: &str) -> Option<String> {
+    if let Some(provider) = pi_no_api_key_provider(msg) {
+        return Some(format!("no API key for {provider}"));
+    }
+    (msg.contains("402:") || msg.contains("Insufficient Balance")).then(|| "the model provider refused the tenant's balance (402)".to_string())
+}
+
 /// Runs after a socket task that may have failed on a refused prompt: if the failure is pi
 /// reporting no provider key, records the provider in `no_model` before propagating the error, so
 /// the caller can demote the step (and its dependents) to skip instead of failing it.
 fn mark_no_key(res: Result<Vec<String>>, no_model: &Mutex<Option<String>>) -> Result<Vec<String>> {
     if let Err(e) = &res {
-        if let Some(provider) = pi_no_api_key_provider(&e.to_string()) {
-            *no_model.lock().unwrap() = Some(format!("no API key for {provider}"));
+        if let Some(why) = pi_credential_refusal(&e.to_string()) {
+            *no_model.lock().unwrap() = Some(why);
         }
     }
     res
@@ -651,7 +662,7 @@ fn judge_reply(body: &str) -> Result<Reply> {
     let last = msgs.iter().rev().find(|m| m["role"] == "assistant").context("no assistant message in the transcript")?;
     if last["stopReason"] == "error" || last["stopReason"] == "aborted" {
         let why = last["errorMessage"].as_str().unwrap_or_default().to_string();
-        if pi_no_api_key_provider(&why).is_some() {
+        if let Some(why) = pi_credential_refusal(&why) {
             return Ok(Reply::NoCredential(why));
         }
         bail!("the model turn failed: {}", super::clip(&why));
@@ -854,6 +865,13 @@ mod tests {
         assert_eq!(pi_no_api_key_provider("No API key found for \"anthropic\"").as_deref(), Some("anthropic"));
         // A non-auth refusal (rate limit, tool error, ...) must still fail, never skip.
         assert_eq!(pi_no_api_key_provider("the prompt was refused: rate limited, retry later"), None);
+        assert_eq!(pi_credential_refusal("the prompt was refused: rate limited, retry later"), None);
+        // DeepSeek's out-of-credit answer, as the 2026-09-16 10:07 UTC hourly saw it: the tenant's
+        // wallet, so a skip, not a platform failure.
+        let broke_wallet = "402: {\"message\":\"Insufficient Balance\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}";
+        assert!(pi_credential_refusal(broke_wallet).unwrap().contains("402"));
+        let nobal = json!({"messages": [user, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": broke_wallet}]});
+        assert!(matches!(judge_reply(&nobal.to_string()).unwrap(), Reply::NoCredential(_)));
         match judge_reply(&broke.to_string()) {
             Err(e) => assert!(e.to_string().contains("the model turn failed")),
             Ok(_) => panic!("a non-auth refusal must fail, not skip or pass"),
