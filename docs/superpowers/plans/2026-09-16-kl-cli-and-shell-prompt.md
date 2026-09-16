@@ -161,12 +161,44 @@ files rendered from one Rust constant the workspace prelude also uses.
       `bench.shell.workspace` with `❯`, `ws.build.p95` on `kl container build` all pass.
 - [ ] owner: bench shell shows the starship prompt; `kl pkg add cowsay` in a workspace shell.
 
+### Task 6: the desktop mirrors the platform (owner add, 20:25 IST: "whenever the env change or package installed via workspace tools or shell the data outside should also update")
+
+**Files**
+- Modify: `harness/src/connect/platform.ts` — `myEnvironment(api, token, team): Promise<string |
+  undefined>` = `GET /v1/me/environments`, the row for `team` (read `crates/workspaces/src/api/me.rs`
+  `list_my_environments` for the exact response shape), returning its environment id;
+  `setMyEnvironment(api, token, team, id)` = `PUT /v1/me/environments/{team}` `{"environment": id}`;
+  `clearMyEnvironment` = DELETE.
+- Modify: `harness/src/main.ts` — IPC `platform:myEnvironment`, `platform:setMyEnvironment(id)`,
+  `platform:clearMyEnvironment` through the existing `platform()` wrapper; `harness/src/preload.ts`
+  exposes them under `window.harness.platform`.
+- Modify: `harness/src/renderer/App.tsx` — `connected` is no longer a local choice: `refresh()`
+  also reads `platform.myEnvironment()` and sets `connected` from it (empty string when none, and
+  then `environment()` is `undefined`, never `environments()[0]`); whatever UI sets `connected`
+  today (find `setConnected` callers) calls `platform.setMyEnvironment(id)` / `clearMyEnvironment()`
+  first and refreshes after. The beat goes from 30 s to 10 s while visible; a shell tab's exit
+  (`pty:exit`, any code) and every pi `tool_execution_end` whose tool name starts with `kl_` or
+  `workspace_`/`environment_` (read `harness/src/renderer/live.ts` line ~244 for where the event
+  lands and `harness/pi/workspace-tools.ts` + `harness/pi/kloudlite.ts` for tool names) trigger one
+  `refresh()` (coalesced by the existing `refreshing` flag).
+- Modify: `harness/src/renderer/components/MachinePanel.tsx` (or wherever a workspace's packages are
+  rendered) — nothing structural; confirm the list re-renders from `workspaces()`.
+- Tests: `harness/bench/test/desktop-platform.test.ts` gains `myEnvironment`/`setMyEnvironment`
+  against the fake api the file already uses; a small pure helper `shouldRefreshOn(ev): boolean`
+  in `harness/src/renderer/rows.ts` or a new `harness/src/renderer/refresh.ts` with a table test.
+- Gates: `cd harness && npm run typecheck && npm run bench:test && npm run build`.
+
+- [ ] platform.ts + main + preload
+- [ ] App.tsx: connected from the platform; beat 10 s; refresh on shell exit and kl/workspace tool end
+- [ ] tests; commit `Mirror the space environment and refresh the desktop on shell and tool changes`
+
 ## Self-review
 
 - Spec §1 → T3; §2 → T2 (+T4 probes/docs); §3 → T1; §4 → T2; §5 → T4. Out-of-scope items
   not planned.
 - Names: `WorkspaceToolClaims.space`, `KL_TEAM` = space, `KL_WORKSPACE_ID`; `Api` client in
   `bins/kl/src/api.rs`; `shell_rc::{ZSHRC, STARSHIP_TOML, seed_zshrc}`.
+- T6 touches only `harness/src/**` and runs in parallel with any of T1–T4.
 - T1 and T2 share no files (T2 reads env names only); T3 touches `crates/ide` and
   `k8s/{workspace,bench}.rs` + `deploy/bench`; T1 touches `k8s/workspace.rs` `login_env` too —
   T3 waits for T1. T4 waits for T2 (command names) and T3 (prompt assertion).
