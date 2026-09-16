@@ -2582,7 +2582,8 @@
                         "description": "`Full` for a member; `Paused` while the owner may not use it (no pod). Written only by the\napi's reconcile beat.",
                         "enum": [
                           "full",
-                          "paused"
+                          "paused",
+                          "readOnly"
                         ],
                         "type": "string"
                       },

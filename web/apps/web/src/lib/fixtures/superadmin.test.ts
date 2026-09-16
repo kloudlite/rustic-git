@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { CATALOGUE, fixtureFor } from "./superadmin";
 import type { OwnerRow } from "@/lib/api";
 import type { HistorySeries } from "@/lib/history";
+import { historyOf } from "@/lib/settings";
 
 test("every route the eight rebuilt pages read has a seeded answer", () => {
   for (const p of [
@@ -87,4 +88,29 @@ test("the fixture catalogue is deploy/slo.md, row for row", async () => {
       stage,
     ]);
   expect(CATALOGUE).toEqual(want as typeof CATALOGUE);
+});
+
+test("pending removals and cluster history rows have the shape the pages read", () => {
+  const removals = fixtureFor("/admin/owners/removals") as { owner: string; team: string; delete_at: string }[];
+  expect(removals.length).toBeGreaterThan(0);
+  for (const r of removals) {
+    expect(typeof r.owner).toBe("string");
+    expect(typeof r.team).toBe("string");
+    expect(Number.isNaN(Date.parse(r.delete_at))).toBe(false);
+  }
+  // devraj is pending from two teams at once, the case removalKey/deleteNowConfirm exist for.
+  expect(removals.filter((r) => r.owner === "devraj").length).toBeGreaterThan(1);
+
+  const detail = fixtureFor("/admin/settings/clusters/centralindia-k3s") as {
+    spec: Record<string, unknown>;
+    metadata: { annotations: Record<string, string> };
+  };
+  // The editor renders a past version by the knobs in it, so a history row carrying a key the
+  // live spec doesn't have would render a field the page has no schema row for.
+  const history = historyOf(detail as Parameters<typeof historyOf>[0]);
+  expect(history.length).toBeGreaterThan(0);
+  for (const h of history) {
+    expect(Object.keys(h).length).toBeGreaterThan(0);
+    for (const k of Object.keys(h)) expect(Object.keys(detail.spec)).toContain(k);
+  }
 });

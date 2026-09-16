@@ -23,7 +23,7 @@ gauges:
       sample: $q "SELECT count() FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 24 HOUR AND state != 'running'"
     min:
       sample: echo 0
-  - title: Hourly suite pass rate (24 h, per group)
+  - title: Hourly suite pass rate (24 h)
     position: [[26, 0], [27, 5]]
     rate-ms: 60000
     scale: 0
@@ -55,10 +55,10 @@ runcharts:
     items:
       - label: fast
         color: 214
-        sample: $q "SELECT count() FROM kloudlite.slo_results FINAL r INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
+        sample: $q "SELECT count() FROM kloudlite.slo_results AS r FINAL INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'fast' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
       - label: hourly
         color: 196
-        sample: $q "SELECT count() FROM kloudlite.slo_results FINAL r INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
+        sample: $q "SELECT count() FROM kloudlite.slo_results AS r FINAL INNER JOIN (SELECT run_id FROM kloudlite.slo_runs FINAL WHERE suite = 'hourly' AND started > now() - INTERVAL 1 HOUR) s USING run_id WHERE r.ok = 0 AND r.skipped = 0"
 
   - title: Slowest hourly run (minutes, last 3 h)
     position: [[53, 5], [27, 15]]

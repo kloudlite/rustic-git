@@ -81,20 +81,20 @@ barcharts:
     scale: 0
     items:
       - label: api
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-api'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-api'"
       - label: admin
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-admin'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-admin'"
       - label: server
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-srv'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-srv'"
       - label: worker
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-worker'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-worker'"
       - label: agent
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-agent'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-agent'"
       - label: gateway
-        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('error', 'fatal') AND ServiceName = 'kloudlite-gateway'"
+        sample: $q "SELECT count() FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('error', 'fatal') AND ServiceName = 'kloudlite-gateway'"
 
 textboxes:
   - title: Latest warnings / errors
     position: [[0, 32], [80, 8]]
     rate-ms: 30000
-    sample: $q "SELECT concat(formatDateTime(Timestamp, '%H:%i:%S', 'Asia/Kolkata'), '  ', ServiceName, '  ', Body) FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND SeverityText IN ('warn', 'warning', 'error', 'fatal') AND ServiceName LIKE 'kloudlite-%' AND Body NOT IN ('http.slow') ORDER BY Timestamp DESC LIMIT 6"
+    sample: $q "SELECT concat(formatDateTime(Timestamp, '%H:%i:%S', 'Asia/Kolkata'), '  ', ServiceName, '  ', Body) FROM default.otel_logs WHERE Timestamp > now() - INTERVAL 15 MINUTE AND lower(SeverityText) IN ('warn', 'warning', 'error', 'fatal') AND ServiceName LIKE 'kloudlite-%' AND Body NOT IN ('http.slow') ORDER BY Timestamp DESC LIMIT 6"
