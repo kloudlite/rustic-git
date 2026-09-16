@@ -169,12 +169,12 @@ Ready → podRef → IP. `resolve(...)` for ssh reads `spec.access` directly.
   node-pty path is deleted. `spliceWorkspaceShell` is reused with a fixed address.
 - Workspace-tools resolve for OTHER workspaces is unchanged (`/v1/workspaces/{id}/tools`).
 
-## Desktop
+## Desktop and web
 
-No protocol change. Two UI changes: the bench appears in the machine panel as the first
-workspace, named "bench", with its packages and shells like any other (it already has a shell
-scope); "Connect"/environment controls apply to it the same way. `/v1/workspaces` no longer
-returns it, so the desktop fetches it through `GET /v1/bench` (it already does) and prepends it.
+No protocol change and NO listing change: the owner ruled (2026-09-16 23:30 IST) that the bench is
+never shown as a workspace in the desktop or the web. It keeps its own place (the bench shell scope,
+the sessions view); `GET /v1/workspaces` excludes it, and the desktop does not fetch it as a
+workspace. `kl pkg`/`kl env` inside the bench shell are how its packages and environment are managed.
 
 ## SLO
 
