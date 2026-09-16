@@ -47,6 +47,15 @@ picker is gone (a scope is the tab). The tmux session name is `kl-<owner-slug>-<
 tab on another device reattaches the same shells; on open the desktop lists `/stream/pty/sessions`
 for the scope and pre-populates the tab's terminals from what exists.
 
+### 2b. Tabs are the sessions (owner, 2026-09-17 04:30 IST)
+
+The tabs of a session tab are a one-to-one mirror of the tmux sessions named `kl-<slug>-*` for
+that scope, both ways: the desktop reconciles against `GET /pty/sessions` every 5 s (and on tab
+switch and reconnect) — a session that appeared elsewhere gets a tab, a session that ended loses
+its tab, a shell that exits closes its tab at once, and a tab's × kills its session. Never two tabs
+for one session. A tab younger than 10 s is spared one reconcile, since its session may not be
+listed yet.
+
 ### 3. Reconnect
 
 On a socket drop the view prints `[disconnected — reconnecting…]` and retries `pty:open` with
