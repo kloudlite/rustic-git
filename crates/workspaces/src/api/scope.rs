@@ -64,11 +64,46 @@ pub(crate) async fn may_allocate_for(s: &ApiState, caller: &Caller, owner: &str)
 /// know the team; "not found" would read as a removal), everyone else gets `otherwise` unchanged.
 /// An unreadable directory is `otherwise` too — refused either way, never granted.
 pub(crate) async fn denial(s: &ApiState, c: &Caller, owner: &str, otherwise: Response) -> Response {
-    match &s.directory {
-        Some(d) if d.membership(owner, &c.name).await == Ok(super::Judged::Member(super::MemberState::Paused)) => {
+    // Through the same 30 s cache `team_access` uses: a caller hammering a refused owner used to be
+    // one uncached directory call per refusal.
+    match verdict(s, owner, &c.name).await {
+        Some(super::Judged::Member(super::MemberState::Paused)) => {
             (StatusCode::FORBIDDEN, format!("your access to {owner} is paused")).into_response()
         }
         _ => otherwise,
+    }
+}
+
+/// How long one `(team, handle)` verdict is reused.
+const VERDICT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The cached strict membership answer. `None` means no directory, or one that could not be read —
+/// never a grant; each caller keeps its own keep-or-refuse bias.
+///
+/// ponytail: 30 s per-state cache, invalidated only by `reconcile_pair` on the replica that wrote a
+/// pause — elsewhere a pause or removal takes effect within TTL + one beat; move to a
+/// directory-pushed invalidation if that window ever matters.
+pub(crate) async fn verdict(s: &ApiState, team: &str, user: &str) -> Option<super::Judged> {
+    let d = s.directory.as_ref()?;
+    let key = (super::membership::norm(team), super::membership::norm(user));
+    let cache = &s.member_verdicts;
+    let hit = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).filter(|(at, _)| at.elapsed() < VERDICT_TTL).map(|(_, j)| *j);
+    if let Some(j) = hit {
+        return Some(j);
+    }
+    match d.membership(&key.0, user).await {
+        Ok(j) => {
+            let mut g = cache.lock().unwrap_or_else(|p| p.into_inner());
+            // Swept here and nowhere else: without it an expired entry lives for the process's
+            // life, one per distinct (team, handle) this node ever asked about.
+            g.retain(|_, (at, _)| at.elapsed() < VERDICT_TTL);
+            g.insert(key, (std::time::Instant::now(), j));
+            Some(j)
+        }
+        Err(e) => {
+            tracing::warn!(owner = %user, %team, error = %e, "scope.membership.unavailable");
+            None
+        }
     }
 }
 
@@ -79,29 +114,12 @@ pub(crate) async fn denial(s: &ApiState, c: &Caller, owner: &str, otherwise: Res
 /// directory blip must not lock every active owner out of their own workspace.
 pub(crate) async fn team_access(s: &ApiState, c: &Caller, owner: &str, team: &str, owns: bool) -> Result<(), (StatusCode, String)> {
     use super::{Judged, MemberState};
-    let Some(d) = &s.directory else { return Ok(()) };
     if !super::membership::team_pair(owner, team) {
         return Ok(());
     }
     let team = super::membership::norm(team);
-    let key = (team.clone(), super::membership::norm(&c.name));
-    // ponytail: 30 s per-state cache, invalidated nowhere — a pause or removal takes effect within
-    // TTL + one beat; move to a directory-pushed invalidation if that window ever matters.
-    let cache = &s.member_verdicts;
-    let hit = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key).filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(30)).map(|(_, j)| *j);
-    let judged = match hit {
-        Some(j) => j,
-        None => match d.membership(&team, &c.name).await {
-            Ok(j) => {
-                cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (std::time::Instant::now(), j));
-                j
-            }
-            Err(e) => {
-                tracing::warn!(owner = %c.name, %team, error = %e, "scope.membership.unavailable");
-                return Ok(());
-            }
-        },
-    };
+    // An unreadable directory serves the caller's own object as before (see above).
+    let Some(judged) = verdict(s, &team, &c.name).await else { return Ok(()) };
     match judged {
         Judged::Member(MemberState::Paused) => Err((StatusCode::FORBIDDEN, format!("your access to {team} is paused"))),
         Judged::NotMember | Judged::TeamGone if owns => Err((StatusCode::FORBIDDEN, format!("you are no longer a member of {team}"))),
