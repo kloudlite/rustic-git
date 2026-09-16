@@ -49,8 +49,6 @@ const harness = {
   /** Kloudlite's /v1, read by main for the connected team: one call per read, plain validated JSON back. */
   platform: {
     workspaces: (): Promise<ApiWorkspace[]> => ipcRenderer.invoke("platform:workspaces"),
-    /** The bench, which the workspace list excludes; `undefined` when the person has none yet. */
-    bench: (): Promise<ApiWorkspace | undefined> => ipcRenderer.invoke("platform:bench"),
     environments: (): Promise<ApiEnvironment[]> => ipcRenderer.invoke("platform:environments"),
     environment: (id: string): Promise<ApiEnvironment> => ipcRenderer.invoke("platform:environment", id),
     snapshots: (volume: string): Promise<ApiSnapshot[]> => ipcRenderer.invoke("platform:snapshots", volume),

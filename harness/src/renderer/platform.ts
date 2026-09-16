@@ -27,9 +27,6 @@ export function toWorkspace(w: ApiWorkspace): Workspace {
   };
 }
 
-/** The bench is a workspace like any other and leads the panel; the api leaves it out of the list. */
-export const withBench = (bench: Workspace | undefined, list: Workspace[]): Workspace[] => (bench ? [bench, ...list] : list);
-
 export function toEnvironment(e: ApiEnvironment, team: string): Environment {
   return {
     id: e.id,
