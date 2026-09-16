@@ -248,8 +248,13 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
     match verdict {
         // During the grace a bench someone set back to Full has no tools either.
         Verdict::Keep if matches!(judged, Judged::NotMember | Judged::TeamGone) => {
+            let mut written = false;
             for b in &full {
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
+                written |= write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
+            }
+            // Same as `pause`: an already-minted tool token dies with the access, not 15 minutes later.
+            if written {
+                drop_tool_secret(c, owner, team).await;
             }
         }
         // A paused member's pair is re-converged on every beat, so a workspace started since the
@@ -361,9 +366,13 @@ async fn pause(c: &kube::Client, bapi: &Api<crd::Bench>, benches: &[&crd::Bench]
     }
     // Already-minted tool tokens die now, not when their 15 minutes run out.
     if bench_written {
-        if let Err(e) = super::bench::delete_tool_secret(c, owner, team).await {
-            tracing::warn!(%owner, %team, error = %e, "membership.tool_token.delete.failed");
-        }
+        drop_tool_secret(c, owner, team).await;
+    }
+}
+
+async fn drop_tool_secret(c: &kube::Client, owner: &str, team: &str) {
+    if let Err(e) = super::bench::delete_tool_secret(c, owner, team).await {
+        tracing::warn!(%owner, %team, error = %e, "membership.tool_token.delete.failed");
     }
 }
 
