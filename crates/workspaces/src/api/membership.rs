@@ -286,6 +286,11 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
                 let detail = json!({"owner": owner, "team": team}).to_string();
                 super::admin::audit(s, "system:membership", "member.removed.cleared", &format!("{team}/{owner}"), Some(detail), "ok").await;
             }
+            // Removed → re-added → paused inside one beat (the pause route's own `reconcile_pair`
+            // hits exactly this): clearing the stamps is only half of it, the pause still applies.
+            if judged == Judged::Member(MemberState::Paused) {
+                pause(c, &bapi, &benches, &workspaces, owner, team).await;
+            }
         }
         Verdict::Stamp => {
             let at = chrono::DateTime::from_timestamp(now, 0).unwrap_or_default();
@@ -777,6 +782,23 @@ mod tests {
         assert_eq!(rec.sent("PATCH", &path("paula", "acme")), vec![json!({"spec": {"access": "paused", "desiredState": "stopped"}})]);
         assert_eq!(rec.sent("PATCH", &format!("{API}/workspaces/w1")), vec![json!({"spec": {"desiredState": "stopped"}})]);
         assert_eq!(deletes(&rec), vec![format!("DELETE {}", secret_path("paula", "acme"))], "only the tool token is deleted");
+    }
+
+    /// Removed, re-added and paused inside one beat: one pass both clears the stamps and pauses.
+    #[tokio::test]
+    async fn a_paused_member_still_carrying_a_stamp_is_cleared_and_paused_in_one_pass() {
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let (s, rec, _) = setup(paused_pair(bench("paula", "acme", "full", Some(&fresh)), ws("w1", "paula", "acme")), &[("paula", "acme")]);
+        let _ = reconcile(&s).await;
+        assert_eq!(
+            rec.sent("PATCH", &path("paula", "acme")),
+            vec![
+                json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null, DELETE_AFTER: null}}}),
+                json!({"spec": {"access": "paused", "desiredState": "stopped"}}),
+            ]
+        );
+        assert_eq!(rec.sent("PATCH", &format!("{API}/workspaces/w1")), vec![json!({"spec": {"desiredState": "stopped"}})]);
+        assert_eq!(deletes(&rec), vec![format!("DELETE {}", secret_path("paula", "acme"))]);
     }
 
     #[tokio::test]
