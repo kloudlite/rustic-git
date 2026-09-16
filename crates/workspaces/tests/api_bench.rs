@@ -520,14 +520,15 @@ async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
 
 /// The one change to decision 3: a bench has a volume now, so its disk is the person's from the
 /// moment it exists — running, asleep or stopped — and it is still never one of their `workspaces`
-/// and never the team's.
+/// and never the team's. Since quota charges OCCUPIED bytes, that disk is the Volume's own stamp:
+/// a bench whose Volume is not in the listing at all costs nothing, because nothing is there.
 #[tokio::test]
 async fn a_benchs_disk_is_always_the_persons_and_its_count_is_nobodys() {
     let bench = bench_obj("alice", "acme", "stopped", Some("idle"), "full");
     let (client, _) = mock_client(alloc("alice", vec![bench, plain_ws("ws-1", "alice", "acme")]));
     let alice = kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap();
     let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
-    assert_eq!((alice.disk_gb, alice.workspaces), (10, 0), "the bench's disk, and not its count");
+    assert_eq!((alice.disk_gb, alice.workspaces), (0, 0), "no Volume, no disk — and never a count");
     // The ordinary team workspace is the team's one count; the bench is neither counted nor
     // charged there, however its labels read.
     assert_eq!((acme.disk_gb, acme.workspaces), (0, 1));
@@ -543,12 +544,15 @@ async fn a_bench_volume_is_charged_through_its_workspace_and_not_again() {
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": "bench-vol", "labels": {"kloudlite.io/owner": "alice", "kloudlite.io/team": "acme"}},
         "spec": {"owner": "alice", "team": "acme", "nodeName": "node-a", "region": "r1", "quotaGb": 10, "replicas": 1},
+        // The stamp, not the 10 GB ceiling: quota charges what is occupied.
+        "status": {"phase": "ready", "usedBytes": 3u64 << 30, "usedAt": "2026-09-17T04:00:00Z"},
     });
     let mut routes = alloc("alice", vec![bench]);
     routes.retain(|r| !r.path.ends_with("/volumes"));
     routes.push(get(format!("{API}/volumes"), list("Volume", vec![vol])));
     let (client, _) = mock_client(routes);
-    assert_eq!(kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap().disk_gb, 10);
+    let alice = kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap();
+    assert_eq!((alice.disk_gb, alice.disk_used_at.as_deref()), (3, Some("2026-09-17T04:00:00Z")));
     assert_eq!(kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap().disk_gb, 0, "never the team's");
 }
 
@@ -901,5 +905,106 @@ async fn deleting_the_tool_token_deletes_the_secret_and_tolerates_404() {
         let (st, _) = t.call("DELETE", "/v1/bench/tool-token?team=acme", &cli_tok(&t), None).await;
         assert_eq!(st, 204, "kube {status}");
         assert!(t.rec.calls().contains(&format!("DELETE {sp}")));
+    }
+}
+
+/// A bench id is deterministic, so a recreate meets whatever the last one left behind. The three
+/// cases of `surviving_volume`, asserted on the created spec's `storage.source`.
+mod recreate {
+    use super::*;
+
+    fn volume_obj(id: &str, owner: &str) -> Value {
+        json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": id, "labels": {"kloudlite.io/owner": owner}},
+            "spec": {"owner": owner, "nodeName": "node-a", "region": "r1", "quotaGb": 10, "replicas": 1}
+        })
+    }
+
+    fn snap(name: &str, volume: &str, owner: &str, transient: bool, phase: &str, at: &str) -> Value {
+        json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
+            "metadata": {"name": name, "creationTimestamp": at, "labels": {"kloudlite.io/owner": owner}},
+            "spec": {"owner": owner, "volume": volume, "worktree": volume, "transient": transient},
+            "status": {"phase": phase}
+        })
+    }
+
+    fn created(t: &T) -> Value {
+        let sent = t.rec.sent("POST", &format!("{API}/workspaces"));
+        assert_eq!(sent.len(), 1, "one create");
+        sent[0].clone()
+    }
+
+    fn setup_create(extra: Vec<Route>) -> T {
+        let path = bench_path("alice", "acme");
+        setup(
+            with(
+                with(
+                    vec![
+                        not_found(path),
+                        post(format!("{API}/workspaces"), bench_obj("alice", "acme", "running", None, "full")),
+                        region("r1"),
+                    ],
+                    extra,
+                ),
+                alloc("alice", vec![]),
+            ),
+            Stub::new(&[("alice", "acme")], &[("acme", "r1")]),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_leftover_volume_with_a_pushed_snapshot_is_restored_onto() {
+        let id = bench_id("alice", "acme");
+        let t = setup_create(vec![
+            get(format!("{API}/volumes/{id}"), volume_obj(&id, "alice")),
+            get(
+                format!("{API}/snapshots"),
+                list(
+                    "Snapshot",
+                    vec![
+                        snap("old", &id, "alice", false, "ready", "2026-09-01T10:00:00Z"),
+                        snap("newest", &id, "alice", false, "ready", "2026-09-05T10:00:00Z"),
+                        // Neither is a restore target: a sync point, and a push still uploading.
+                        snap("sync", &id, "alice", true, "ready", "2026-09-06T10:00:00Z"),
+                        snap("pending", &id, "alice", false, "pending", "2026-09-07T10:00:00Z"),
+                        // Another volume's newest — matched on `spec.volume`, not on the label.
+                        snap("other", "someone-else", "alice", false, "ready", "2026-09-08T10:00:00Z"),
+                    ],
+                ),
+            ),
+        ]);
+        let (st, b) = t.call("POST", "/v1/bench", &t.tok("alice"), Some(json!({"team": "acme"}))).await;
+        assert_eq!(st, 201, "{b}");
+        assert_eq!(created(&t)["spec"]["storage"]["source"], json!({"cloneOf": {"volume": id, "commit": "newest"}}));
+        assert!(!t.rec.calls().contains(&format!("DELETE {API}/volumes/{id}")), "{:?}", t.rec.calls());
+    }
+
+    #[tokio::test]
+    async fn a_leftover_volume_with_no_snapshot_is_deleted_and_the_bench_created_fresh() {
+        let id = bench_id("alice", "acme");
+        let t = setup_create(vec![
+            get(format!("{API}/volumes/{id}"), volume_obj(&id, "alice")),
+            get(format!("{API}/snapshots"), list("Snapshot", vec![snap("sync", &id, "alice", true, "ready", "2026-09-06T10:00:00Z")])),
+            route("DELETE", format!("{API}/volumes/{id}"), 200, deleted()),
+        ]);
+        let (st, _) = t.call("POST", "/v1/bench", &t.tok("alice"), Some(json!({"team": "acme"}))).await;
+        assert_eq!(st, 201);
+        assert!(t.rec.calls().contains(&format!("DELETE {API}/volumes/{id}")), "{:?}", t.rec.calls());
+        assert!(created(&t)["spec"]["storage"].get("source").is_none(), "{}", created(&t));
+    }
+
+    #[tokio::test]
+    async fn no_volume_at_all_is_the_ordinary_create() {
+        let id = bench_id("alice", "acme");
+        let t = setup_create(vec![not_found(format!("{API}/volumes/{id}"))]);
+        let (st, _) = t.call("POST", "/v1/bench", &t.tok("alice"), Some(json!({"team": "acme"}))).await;
+        assert_eq!(st, 201);
+        assert!(created(&t)["spec"]["storage"].get("source").is_none(), "{}", created(&t));
+        assert!(!t.rec.calls().contains(&format!("DELETE {API}/volumes/{id}")));
+        // One snapshot listing, `guard_alloc`'s: a missing Volume ends the question before
+        // `surviving_volume` asks for a second.
+        assert_eq!(t.rec.calls().iter().filter(|c| *c == &format!("GET {API}/snapshots")).count(), 1);
     }
 }

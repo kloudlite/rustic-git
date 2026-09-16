@@ -224,6 +224,46 @@ pub(crate) async fn get_bench(
     Ok(Json(bench_doc(&b, &region)).into_response())
 }
 
+/// The graft point for a recreated bench: `CloneOf{volume: id, commit}` naming the newest Ready
+/// snapshot on the leftover Volume — exactly what `POST /v1/workspaces/restore` writes, which is
+/// what re-attaches a working copy to a detached volume.
+///
+/// With no such snapshot the Volume is garbage the GC would take anyway (no worktree, nothing to
+/// keep it alive), and it is deleted so the create starts from nothing. The snapshots are listed
+/// UNFILTERED and matched on `spec.volume`: a label is a view, and a delete decided from a label
+/// selector that missed a row would take a volume somebody's push still holds.
+async fn surviving_volume(s: &ApiState, id: &str) -> Result<Option<crd::VolumeSource>, Response> {
+    let c = kube(s)?.clone();
+    let vols: Api<crd::Volume> = Api::all(c.clone());
+    if vols.get_opt(id).await.map_err(kube_err)?.is_none() {
+        return Ok(None);
+    }
+    let snaps: Api<crd::Snapshot> = Api::all(c);
+    let newest = snaps
+        .list(&Default::default())
+        .await
+        .map_err(kube_err)?
+        .items
+        .into_iter()
+        .filter(|sn| {
+            sn.spec.volume == id
+                && sn.is_snapshot()
+                && sn.status.as_ref().is_some_and(|st| st.phase == Phase::Ready)
+        })
+        // Nameless is unreachable from an API server, and dropping it here is what keeps `commit`
+        // a `Some`: `CloneOf{commit: None}` means "copy bytes into a FRESH child volume", which is
+        // the one thing this must never write when a volume of that id already exists.
+        .filter_map(|sn| sn.metadata.name.clone().map(|n| (sn.metadata.creation_timestamp.clone(), n)))
+        .max();
+    let Some((_, commit)) = newest else {
+        tracing::info!(volume = %id, "bench.volume.leftover.deleted");
+        vols.delete(id, &Default::default()).await.map_err(kube_err)?;
+        return Ok(None);
+    };
+    tracing::info!(volume = %id, snapshot = %commit, "bench.volume.restored");
+    Ok(Some(crd::VolumeSource::CloneOf { volume: id.to_string(), commit: Some(commit) }))
+}
+
 pub(crate) async fn create_bench(
     State(s): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -245,6 +285,12 @@ pub(crate) async fn create_bench(
         return Ok(Json(bench_doc(&w, &region)).into_response());
     }
     let id = crd::bench_id(&caller.name, &team);
+    // A bench id is DETERMINISTIC, so a recreate lands on the volume the last one left behind: a
+    // deleted workspace detaches its Volume but the Volume survives whenever a pushed snapshot
+    // still references it (the ordinary workspace rule). Creating fresh onto it parked the bench
+    // in `Ready=False/HeadUnknown` forever — snapshots, no head — so the recreate takes the
+    // RESTORE shape instead and the person's bench comes back with its data.
+    let source = surviving_volume(&s, &id).await?;
     // No `refuse_taken_name`: the name is ours, the id is derived from (owner, team), and the
     // person never typed either — a workspace of theirs that happens to be called "bench" is not
     // a reason to refuse them the bench the desktop is asking for.
@@ -267,7 +313,7 @@ pub(crate) async fn create_bench(
             name: BENCH_WS_NAME.to_string(),
             region: region.clone(),
             image: crate::model::default_ws_image(),
-            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(&s, crd::BENCH_QUOTA_GB), source: None }),
+            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(&s, crd::BENCH_QUOTA_GB), source }),
             desired_state: DesiredState::Running,
             resources: Default::default(),
             packages: Vec::new(),
