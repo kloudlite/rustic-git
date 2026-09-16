@@ -28,15 +28,24 @@ spec:
               command: ["/bin/bash", "-ceu"]
               args:
                 - |
-                  # The identity holds a role on ONE storage account, so it sees no subscription at
-                  # login; log in without one and name the subscription on every call instead.
-                  az login --identity --client-id "$CLIENT_ID" --allow-no-subscriptions -o none
-                  az storage share-rm snapshot --subscription "$SUB" --storage-account "$ACCOUNT" -g "$RG" --name homes --query snapshotTime -o tsv
+                  # The identity holds a role on ONE storage account and none on the subscription, so
+                  # every subscription-aware CLI verb (and az rest, which resolves the URL's
+                  # subscription against the account list) refuses it. Plain curl with the identity's
+                  # ARM token needs nothing but the role. Share snapshot = PUT the share with
+                  # x-ms-snapshot: true.
+                  az login --identity --allow-no-subscriptions -o none
+                  TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)
+                  BASE="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Storage/storageAccounts/$ACCOUNT/fileServices/default/shares"
+                  API="api-version=2023-05-01"
+                  H="Authorization: Bearer $TOKEN"
+                  out=$(curl -sS -w '\n%{http_code}' -X PUT "$BASE/homes?$API" -H "$H" -H "x-ms-snapshot: true" -H "Content-Type: application/json" -d '{}')
+                  code=${out##*$'\n'}; body=${out%$'\n'*}
+                  case "$code" in 200|201) echo "snapshot taken ($code): $(printf '%s' "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("properties",{}).get("snapshotTime","?"))' 2>/dev/null || echo '?')";; *) echo "snapshot PUT failed ($code): $body" >&2; exit 1;; esac
                   # Prune: keep 14 days.
                   cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
-                  az storage share-rm list --subscription "$SUB" --storage-account "$ACCOUNT" -g "$RG" --include-snapshot \
-                    --query "[?name=='homes' && snapshotTime!=null && snapshotTime<'$cutoff'].snapshotTime" -o tsv \
-                    | while read -r ts; do [ -n "$ts" ] && az storage share-rm delete --subscription "$SUB" --storage-account "$ACCOUNT" -g "$RG" --name homes --snapshot "$ts" --yes -o none && echo "pruned $ts"; done
+                  curl -fsS "$BASE?$API&\$expand=snapshots" -H "$H" \
+                    | python3 -c "import sys,json; [print(v['properties']['snapshotTime']) for v in json.load(sys.stdin)['value'] if v['name']=='homes' and v['properties'].get('snapshotTime') and v['properties']['snapshotTime'] < '$cutoff']" \
+                    | while read -r ts; do [ -n "$ts" ] && curl -fsS -X DELETE "$BASE/homes?$API&\$include=snapshots" -H "$H" -H "x-ms-snapshot: $ts" && echo "pruned $ts"; done
               env:
                 - name: CLIENT_ID
                   value: "a083e811-c4cb-4d9d-884f-97aa1bc5f261"
