@@ -42,6 +42,8 @@ spec:
                   value: kloudlitegithomes
                 - name: RG
                   value: rustic-git-k3s
+                - name: SUB
+                  value: 9941afe7-e220-492f-bfab-63f539dc0b69
               resources:
                 requests: { cpu: 50m, memory: 128Mi }
                 limits: { cpu: 500m, memory: 512Mi }
