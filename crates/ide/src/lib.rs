@@ -22,6 +22,7 @@ pub mod graft;
 pub mod guard;
 pub mod paths;
 pub mod procs;
+pub mod pty;
 pub mod server;
 pub mod stream;
 pub mod tools;

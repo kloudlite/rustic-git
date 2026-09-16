@@ -5,6 +5,7 @@ use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTool
 use crate::watches::Watches;
 use crate::Config;
 use axum::{extract::{DefaultBodyLimit, State}, routing::{get, post}, Json, Router};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 pub struct App {
@@ -13,6 +14,8 @@ pub struct App {
     pub procs: Arc<Procs>,
     pub watches: Arc<Watches>,
     pub graft: Arc<Graft>,
+    /// Live PTYs; the ceiling is `pty::MAX_SHELLS`.
+    pub shells: AtomicUsize,
 }
 
 impl App {
@@ -31,7 +34,7 @@ impl App {
             Box::new(WatchTools { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), watches: watches.clone() }),
             Box::new(GraftTools { graft: graft.clone(), procs: procs.clone() }),
         ]);
-        App { cfg, registry, procs, watches, graft }
+        App { cfg, registry, procs, watches, graft, shells: AtomicUsize::new(0) }
     }
 }
 
@@ -48,6 +51,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/diff", get(crate::fs::diff))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
+        // Not a tool and never listed by `/tools`: a terminal, not something a session calls.
+        .route("/stream/pty", get(crate::pty::handler))
         // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
         // themselves accept up to `MAX_BYTES` (2026-09-12).
         // One server span per request, named by the route TEMPLATE (`/tools/{name}`, `/fs/file`),
@@ -168,6 +173,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
         let names: Vec<&str> = v["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["read", "write", "edit", "patch", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast"]);
+        assert!(!names.contains(&"pty"), "a PTY is not a tool: {names:?}");
         assert_eq!(v["tools"][0]["schema"]["type"], "object");
         let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt"})).await;
         assert_eq!(s, 200);

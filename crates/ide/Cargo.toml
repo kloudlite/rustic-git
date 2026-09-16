@@ -30,3 +30,5 @@ kloudlite-trace = { path = "../trace", default-features = false }
 kloudlite-trace = { path = "../trace", default-features = false, features = ["testing"] }
 tempfile = { workspace = true }
 tower = { workspace = true }
+# Only to drive `/stream/pty` as a real client in the route test.
+tokio-tungstenite = { workspace = true }
