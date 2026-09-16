@@ -210,9 +210,14 @@ async fn observe(listener: &'static str, trusted: bool, req: Request, next: Next
     // every write on the api listener (a `/v1` write is the moment an object changed, and the
     // agent's `event.seen` measures from it). The path carries ids, never bodies or tokens.
     let write = listener == "api" && !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
-    if status == 503 && path == "/healthz" {
+    if status == 503 && path == "/healthz" && matches!(listener, "public" | "peer") {
         // Readiness answering "not now" (draining, an election settling) is the probe working,
         // not a failure; a leaderless spell that outlasts the TTL warns from `healthz` itself.
+        // Only the server's own listeners, the ones whose `healthz` plans a 503: on the api and
+        // gateway listeners a 503 there is a broken health endpoint and stays a warning.
+        // ponytail: keyed on the listener, not the reason — `healthz` also 503s for an unreachable
+        // object store, which is demoted here too; key on the reason once the handler carries one
+        // (a response extension) rather than teaching this layer to read bodies.
         tracing::info!(listener, class, method = %method, %path, status, ms, %req_id, "http.unready");
     } else if status >= 500 {
         tracing::warn!(listener, class, method = %method, %path, status, ms, %req_id, "http.failed");
@@ -414,6 +419,39 @@ mod trace_tests {
 
     fn peer() -> axum::Router {
         echo().layer(axum::middleware::from_fn_with_state(("peer", std::sync::Arc::<str>::from("s3cret")), super::http_metrics_peer))
+    }
+
+    /// Planned readiness (the server's own listeners) is info; a 503 from any other listener's
+    /// health endpoint is a broken endpoint and stays a warning.
+    #[tokio::test(flavor = "current_thread")]
+    async fn only_the_server_listeners_demote_a_503_healthz() {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        async fn logs(listener: &'static str) -> String {
+            let buf = Buf::default();
+            let w = buf.clone();
+            let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();
+            let app = axum::Router::new()
+                .route("/healthz", axum::routing::get(|| async { (axum::http::StatusCode::SERVICE_UNAVAILABLE, "no live leader") }))
+                .layer(axum::middleware::from_fn_with_state(listener, super::http_metrics));
+            let _g = tracing::subscriber::set_default(sub);
+            call(app, "/healthz", &[]).await;
+            let out = buf.0.lock().unwrap().clone();
+            String::from_utf8(out).unwrap()
+        }
+        assert!(logs("public").await.contains("http.unready"));
+        assert!(logs("peer").await.contains("http.unready"));
+        assert!(logs("api").await.contains("http.failed"), "a broken api health endpoint is still a failure");
+        assert!(logs("gateway").await.contains("http.failed"));
     }
 
     #[tokio::test(flavor = "current_thread")]
