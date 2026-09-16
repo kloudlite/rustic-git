@@ -186,6 +186,15 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
 /// were deleted); a person, or anyone it could not answer for, is kept. A claim that races the
 /// delete is healed by the agent: `namespace_ready` recreates a missing binding.
 ///
+/// PAIRED RULE, in another binary: `binding.rs::namespace_ready` (`bins/agent`) is a read-shaped
+/// gate that WRITES — it recreates a missing binding on every miss, so a claim that raced this
+/// prune is healed on the spot rather than stalling a workspace in `ensure_ssh`'s 60 s retry. The
+/// two rules cannot ping-pong only because of `keep`: an owner that reaches that line still holds a
+/// Bench, Workspace or Environment, and `keep` spares exactly those owners, so a binding the agent
+/// would recreate is never a candidate here. Loosen `keep` — or stop building it from all three
+/// kinds — and the beat deletes what the agent recreates, every beat, forever. Change the two
+/// together.
+///
 /// What a delete takes, by ownerReference: the four NetworkPolicies and two RoleBindings
 /// `apply_binding` stamps in the owner's namespaces — nothing else names it as owner. With nothing
 /// left naming the owner there is no pod they fence or grant for, and the next claim recreates the
