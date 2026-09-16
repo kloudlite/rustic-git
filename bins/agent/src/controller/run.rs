@@ -377,26 +377,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             }
         });
-    // A bench holds one pod and no volume, so its only child watch is that pod.
-    let benches = Controller::new(Api::<crd::Bench>::all(ctx.client.clone()), placed.clone());
-    let bench_store = benches.store();
-    let bench_store_for_spaces = bench_store.clone();
-    let benches = benches
-        .watches(Api::<crd::SpaceEnvironment>::all(ctx.client.clone()), crate::controller::watch_config(), move |s: crd::SpaceEnvironment| {
-            in_space(&bench_store_for_spaces, &s.name_any(), |b: &crd::Bench| crd::ws_namespace(&b.spec.owner, &b.spec.team))
-        })
-        .watches(Api::<Pod>::all(ctx.client.clone()), crate::controller::watch_config().labels(&format!("{}=bench", k8s::KIND_LABEL)), move |p| {
-            held(&bench_store, owned_by::<crd::Bench, _>(&p))
-        })
-        .shutdown_on_signal()
-        .run(|b, c| async move { observed("bench", &*b, &c, super::reconcile_bench(b.clone(), c.clone())).await }, error_policy, ctx.clone())
-        .for_each(|r| async move {
-            if let Err(e) = r {
-                if queue_worth_warning(&e) {
-                    tracing::warn!(kind = "Bench", error = %e, "reconcile.queue.failed")
-                }
-            }
-        });
     // Label-selected like the pods: every StatefulSet in the cluster is not this controller's.
     let env_sets = crate::controller::watch_config().labels(&format!("{}=environment", k8s::KIND_LABEL));
     let env_pods = env_sets.clone();
@@ -519,18 +499,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 )))
             }
         })
-        // A bench placed here needs its (owner, team) namespace exactly as a workspace does.
-        .watches_stream(
-            kube::runtime::watcher(Api::<crd::Bench>::all(ctx.client.clone()), placed)
-                .applied_objects()
-                .predicate_filter(kube::runtime::predicates::generation, Default::default()),
-            {
-                let region = ctx.region.clone();
-                move |b: crd::Bench| {
-                    Some(kube::runtime::reflector::ObjectRef::<crd::OwnerBinding>::new(&crd::binding_name(&region, &b.spec.owner)))
-                }
-            },
-        );
+        ;
     // A raised or lowered `Quota` must re-stamp the `ResourceQuota` promptly, not wait out the
     // next unrelated event. `OwnerBinding.metadata.name` is a hash of (region, owner), so the wake
     // filters the local store by `spec.owner` instead — see `bindings_for_quota`. Waking every
@@ -611,18 +580,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
                 }
             }
         });
-    let claim_bench = ctx.has_pool.then(|| {
-        Controller::new(Api::<crd::Bench>::all(ctx.client.clone()), unplaced.clone())
-            .shutdown_on_signal()
-            .run(|b, c| async move { observed("claim", &*b, &c, claim::claim_bench(&b, &c)).await }, error_policy, ctx.clone())
-            .for_each(|r| async move {
-                if let Err(e) = r {
-                    if queue_worth_warning(&e) {
-                        tracing::warn!(kind = "Bench", reason = "claim", error = %e, "reconcile.queue.failed")
-                    }
-                }
-            })
-    });
     let claim_env = ctx.has_pool.then(|| {
         Controller::new(Api::<crd::Environment>::all(ctx.client.clone()), unplaced)
             .shutdown_on_signal()
@@ -700,8 +657,6 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
             snapshots,
             futures::future::OptionFuture::from(claim_ws),
             futures::future::OptionFuture::from(claim_env),
-            benches,
-            futures::future::OptionFuture::from(claim_bench),
         );
     };
     // The controllers stop on SIGTERM (`shutdown_on_signal`), but `volume_watch` is a bare watch

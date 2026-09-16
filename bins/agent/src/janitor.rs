@@ -233,13 +233,13 @@ fn live_profile_targets(profiles: &std::path::Path) -> Option<std::collections::
     Some(live)
 }
 
-/// Every id that may own an attach directory — every Workspace and Bench name in the cluster — or
-/// `None` when either listing cannot be read. `None` skips the attach sweep for the whole beat: read
+/// Every id that may own an attach directory — every Workspace name in the cluster, a bench
+/// included — or `None` when the listing cannot be read. `None` skips the attach sweep for the whole beat: read
 /// as "nothing is live", an unavailable listing would sweep every `resolv.conf` on the pool out from
 /// under its running pod (the unknown-is-not-empty rule). A 404 is a cluster without that CRD
 /// installed: none of that kind.
 ///
-/// Two cluster-wide LISTs per ten-minute beat. The janitor holds no reflector of its own and the
+/// One cluster-wide LIST per ten-minute beat. The janitor holds no reflector of its own and the
 /// controller's stores are node-scoped, which is the wrong set here anyway — an attach directory on
 /// this node belongs to a workspace this node may not have claimed.
 async fn live_attach_ids(client: &kube::Client) -> Option<std::collections::HashSet<String>> {
@@ -257,9 +257,7 @@ async fn live_attach_ids(client: &kube::Client) -> Option<std::collections::Hash
             }
         }
     }
-    let ws = names::<kloudlite_workspaces::crd::Workspace>(client, "Workspace").await?;
-    let bench = names::<kloudlite_workspaces::crd::Bench>(client, "Bench").await?;
-    Some(ws.into_iter().chain(bench).collect())
+    Some(names::<kloudlite_workspaces::crd::Workspace>(client, "Workspace").await?.into_iter().collect())
 }
 
 /// Reclaims `{pool}/attach/{id}` directories a deleted workspace or bench leaves behind. There is no

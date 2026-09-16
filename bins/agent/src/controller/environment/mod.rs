@@ -57,20 +57,16 @@ async fn prune_attach_grants(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<(),
         Err(err) => return Err(ReconcileErr(err.to_string())),
     };
     let workspaces: Api<crd::Workspace> = Api::all(ctx.client.clone());
-    let benches: Api<crd::Bench> = Api::all(ctx.client.clone());
     for p in list {
         let name = p.name_any();
         let Some(ws) = name.strip_prefix("attach-") else { continue };
-        let keep = match workspaces.get_opt(ws).await.map_err(|err| ReconcileErr(err.to_string()))? {
-            Some(w) => crd::attached_environment(&w).as_deref() == Some(e.name_any().as_str()),
-            // A bench's grant is named `attach-{bench id}` the same way. A 404 on the Bench list is
-            // a cluster without the CRD, which is no bench.
-            None => match benches.get_opt(ws).await {
-                Ok(b) => b.is_some_and(|b| b.spec.attached_environment.as_deref() == Some(e.name_any().as_str())),
-                Err(kube::Error::Api(ae)) if ae.code == 404 => false,
-                Err(err) => return Err(ReconcileErr(err.to_string())),
-            },
-        };
+        // A bench is a Workspace and its grant is named `attach-{bench id}` the same way, so one
+        // lookup answers for both.
+        let keep = workspaces
+            .get_opt(ws)
+            .await
+            .map_err(|err| ReconcileErr(err.to_string()))?
+            .is_some_and(|w| crd::attached_environment(&w).as_deref() == Some(e.name_any().as_str()));
         if !keep {
             tracing::info!(environment = %e.name_any(), workspace = %ws, "attach.grant.pruned");
             delete_ignoring_404(&policies, &name).await?;

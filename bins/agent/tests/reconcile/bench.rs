@@ -1,337 +1,198 @@
-//! The bench reconciler, its claim and its dead-node release, against the mocked API server.
+//! A bench reconciled as a WORKSPACE: the second container, the idle clock, the held folder, the
+//! one-time legacy folder migration and the pause — against the mocked API server.
+//!
+//! There is no bench reconciler any more. `crd::is_bench` is the only predicate and
+//! `crd::wants_pod` the only pod decision, so everything here goes through `apply_workspace`.
 
 use super::*;
-use kloudlite_workspaces::kube_test::{get, not_found};
 
-const BENCH: &str = "bench-1";
-const BENCH_STATUS: &str = "/apis/kloudlite.io/v1alpha1/benches/bench-1/status";
-const FINISHED_AT: &str = "2026-09-13T10:00:00Z";
+const POD: &str = "/api/v1/namespaces/ws-alice/pods/ws-1";
+const PODS: &str = "/api/v1/namespaces/ws-alice/pods";
+const AT: &str = "2026-09-13T10:00:00Z";
 
-fn ns() -> String {
-    crd::ws_namespace("alice", "acme")
-}
-fn pods_path() -> String {
-    format!("/api/v1/namespaces/{}/pods", ns())
-}
-fn pod_path() -> String {
-    format!("{}/bench", pods_path())
-}
-
-fn bench_json(spec: serde_json::Value, status: serde_json::Value) -> serde_json::Value {
-    let mut s = serde_json::json!({"owner": "alice", "team": "acme", "image": "bench:1", "desiredState": "running"});
+/// `ws_json`'s workspace, flagged as a bench, with whatever status the pass should start from.
+fn bench_ws(spec: serde_json::Value, status: serde_json::Value) -> crd::Workspace {
+    let mut o = ws_json(status);
+    o["spec"]["bench"] = serde_json::json!({"model": "m"});
+    o["spec"]["name"] = serde_json::json!("bench");
     for (k, v) in spec.as_object().unwrap() {
-        s[k] = v.clone();
+        o["spec"][k] = v.clone();
     }
+    serde_json::from_value(o).unwrap()
+}
+
+fn creating() -> serde_json::Value {
+    serde_json::json!({"phase": "creating", "nodeName": "node-a"})
+}
+
+/// A bench pod as the kubelet reports it: `ready` is the `bench` container's readiness (the idle
+/// channel), `running` false stands for a restarting container, and `exit` is its last exit.
+fn bench_pod(ready: bool, running: bool, exit: Option<i32>, since: &str) -> serde_json::Value {
+    let state = if running {
+        serde_json::json!({"running": {"startedAt": since}})
+    } else {
+        serde_json::json!({"waiting": {"reason": "CrashLoopBackOff"}})
+    };
     serde_json::json!({
-        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
-        "metadata": {"name": BENCH, "uid": "bench-uid", "generation": 1, "resourceVersion": "7",
-                     "finalizers": [crd::BENCH_FOLDER_FINALIZER],
-                     "labels": {"kloudlite.io/owner": "alice", "kloudlite.io/kind": "bench", "kloudlite.io/team": "acme"}},
-        "spec": s, "status": status,
+        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1", "namespace": "ws-alice"},
+        "spec": {"nodeName": "node-a", "containers": []},
+        "status": {
+            "phase": "Running", "podIP": "10.1.2.3",
+            "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }, "lastTransitionTime": since}],
+            "containerStatuses": [{
+                "name": "bench", "ready": ready, "restartCount": 0, "image": "b", "imageID": "",
+                "state": state,
+                "lastState": exit.map(|c| serde_json::json!({"terminated": {"exitCode": c, "message": "node-b", "finishedAt": since}})).unwrap_or(serde_json::Value::Null),
+            }],
+        },
     })
 }
 
-fn bench(spec: serde_json::Value, status: serde_json::Value) -> crd::Bench {
-    serde_json::from_value(bench_json(spec, status)).unwrap()
-}
-
-fn placed() -> serde_json::Value {
-    serde_json::json!({"phase": "starting", "nodeName": "node-a"})
-}
-
-/// Binding, namespace, policy apply, user-key and the status write: everything before the pod.
-fn up_to_the_pod(pod: Route) -> Vec<Route> {
-    vec![
-        ready_binding(),
-        get(format!("/api/v1/namespaces/{}", ns()), serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns()}})),
-        kloudlite_workspaces::kube_test::patch(
-            format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/bench-{BENCH}", ns()),
-            serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": format!("bench-{BENCH}")}}),
-        ),
-        get(format!("/api/v1/namespaces/{}/secrets/user-key", ns()), serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "user-key"}})),
-        kloudlite_workspaces::kube_test::patch(BENCH_STATUS, bench_json(serde_json::json!({}), placed())),
-        kloudlite_workspaces::kube_test::post(pods_path(), serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bench"}})),
-        Route { method: "DELETE", path: pod_path(), status: 200, body: serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bench"}}) },
-        pod,
-    ]
-}
-
-fn pod_json(command: &[&str], phase: &str, ready: bool, terminated: Option<i32>) -> serde_json::Value {
-    let mut cs = serde_json::json!({"name": "bench", "ready": ready, "restartCount": 0, "image": "bench:1", "imageID": ""});
-    if let Some(code) = terminated {
-        cs["state"] = serde_json::json!({"terminated": {"exitCode": code, "finishedAt": FINISHED_AT}});
-    }
-    serde_json::json!({
-        "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bench", "namespace": ns()},
-        "spec": {"containers": [{"name": "bench", "command": command}]},
-        "status": {"phase": phase, "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }}],
-                   "containerStatuses": [cs]},
-    })
-}
-
-fn homes_pool() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("homes")).unwrap();
-    tmp
+fn delete_pod() -> Route {
+    Route { method: "DELETE", path: POD.into(), status: 200, body: serde_json::json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "ws-1"}}) }
 }
 
 fn last_status(rec: &Recorder) -> serde_json::Value {
-    rec.sent("PATCH", BENCH_STATUS).last().expect("a status write")["status"].clone()
+    rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone()
+}
+
+/// Whether ANY status write of the pass carried this condition: the migration writes it once, on
+/// the pass that moved the folder, and a later pass has nothing to re-derive it from.
+fn wrote_cond(rec: &Recorder, t: &str, status: &str, reason: &str) -> bool {
+    rec.sent("PATCH", WS_STATUS).iter().any(|w| has_cond(&w["status"], t, status, reason))
 }
 
 fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool {
     st["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["type"] == t && c["status"] == status && c["reason"] == reason))
 }
 
+/// A bench is a workspace pod plus the `bench` container, stamped with the agent's configured
+/// image and the region's `benchIdleSecs` — neither of which is a spec field.
 #[tokio::test]
-async fn a_bench_on_a_node_without_the_share_parks_and_starts_no_pod() {
-    let tmp = homes_pool();
-    let (ctx, rec) = ctx_without_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(has_cond(&last_status(&rec), "Ready", "False", "FolderNotReady"), "{}", last_status(&rec));
-    assert!(rec.sent("POST", &pods_path()).is_empty() && !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")));
-}
+async fn a_running_bench_gets_one_pod_with_both_containers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ssh_routes();
+    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(true, true, None, AT)));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    let idle_secs = ctx.settings.load().bench_idle_secs.to_string();
 
-#[tokio::test]
-async fn a_running_bench_makes_its_folder_and_one_pod() {
-    let tmp = homes_pool();
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(tmp.path().join("homes/.benches/acme/alice").is_dir());
-    let sent = rec.sent("POST", &pods_path());
+    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
+
+    let sent = rec.sent("POST", PODS);
     assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    // `/bin/sh -c` now, because the bench seeds the person's zsh rc before exec'ing the harness.
-    let cmd = sent[0]["spec"]["containers"][0]["command"].as_array().unwrap();
-    assert_eq!(cmd[0], "/bin/sh");
-    assert!(cmd[2].as_str().unwrap().ends_with("exec harness-bench\n"), "{cmd:?}");
-    let vols = sent[0]["spec"]["volumes"].as_array().unwrap();
-    assert!(vols.iter().any(|v| v["hostPath"]["path"].as_str().is_some_and(|p| p.ends_with("/.benches/acme/alice"))), "{vols:?}");
+    let names: Vec<_> = sent[0]["spec"]["containers"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["workspace", "bench"], "{:?}", sent[0]["spec"]["containers"]);
+    let bench = &sent[0]["spec"]["containers"][1];
+    assert_eq!(bench["image"], ctx.bench_image.as_str());
+    let env = bench["env"].as_array().unwrap();
+    assert!(env.iter().any(|e| e["name"] == "KL_BENCH_IDLE_SECS" && e["value"] == idle_secs.as_str()), "{env:?}");
+    assert_eq!(sent[0]["metadata"]["labels"]["kloudlite.io/kind"], "bench");
+    assert_eq!(last_status(&rec)["phase"], "ready");
 }
 
+/// The idle channel is READINESS now, not a pod exit: the container keeps serving, `--ping` says
+/// asleep, and the pass deletes the pod and stamps the pod's own clock as `idleSince`.
 #[tokio::test]
-async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
-    let tmp = homes_pool();
-    let exited = get(pod_path(), pod_json(&["harness-bench"], "Succeeded", false, Some(0)));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(exited), Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert_eq!(rec.calls().iter().filter(|c| **c == format!("DELETE {}", pod_path())).count(), 1);
+async fn an_idle_bench_loses_its_pod_and_only_a_later_wake_brings_it_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ssh_routes();
+    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(false, true, None, &rfc3339_ago(600))));
+    routes.push(delete_pod());
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
+
+    assert_eq!(rec.sent("DELETE", POD).len(), 1, "{:?}", rec.calls());
     let st = last_status(&rec);
     assert_eq!(st["phase"], "idle");
     assert!(has_cond(&st, "Ready", "False", "Idle"), "{st}");
-    assert_eq!(st["idleSince"], FINISHED_AT);
-    assert!(st.get("podRef").is_none(), "{st}");
+    assert!(st["idleSince"].is_string(), "{st}");
 
-    // Second pass: asleep, nobody asked.
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st.clone())), ctx).await.unwrap();
-    assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods") || c.starts_with("DELETE")), "{:?}", rec.calls());
+    // Asleep and nobody asked: no pod at all, and the pass never reaches the volume.
+    let tmp2 = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp2.path(), vec![delete_pod()]);
+    kloudlite_agent::controller::apply_workspace(&bench_ws(serde_json::json!({}), st.clone()), &ctx).await.unwrap();
+    assert!(rec.sent("POST", PODS).is_empty(), "{:?}", rec.calls());
+    // Converged: the same Idle status computed again is not rewritten, and nothing but the pod
+    // delete is even attempted — no volume, no namespace, no profile.
+    assert!(rec.sent("PATCH", WS_STATUS).is_empty(), "{:?}", rec.calls());
 
-    // Third pass: a wake one second after the exit.
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
-    let want = ctx.settings.load().bench_idle_secs.to_string();
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({"wakeAt": "2026-09-13T10:00:01Z"}), st)), ctx).await.unwrap();
-    let sent = rec.sent("POST", &pods_path());
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    let env = sent[0]["spec"]["containers"][0]["env"].as_array().unwrap();
-    assert!(env.iter().any(|e| e["name"] == "KL_BENCH_IDLE_SECS" && e["value"] == want.as_str()), "{env:?}");
-    assert!(last_status(&rec).get("idleSince").is_none(), "the write that records podRef clears idleSince");
+    // A wake stamped after it slept starts one again.
+    let tmp3 = tempfile::tempdir().unwrap();
+    let mut routes = ssh_routes();
+    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(true, true, None, AT)));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp3.path(), routes);
+    let woken = bench_ws(serde_json::json!({"bench": {"model": "m", "wakeAt": "2099-01-01T00:00:00Z"}}), st);
+    apply_until_settled(&woken, &ctx).await;
+    assert_eq!(rec.sent("POST", PODS).len(), 1, "{:?}", rec.calls());
 }
 
-/// The pod's DELETE event reconciles a cached Bench one status write behind (no `idleSince`) while
-/// the API server already holds Idle: no pod may be created.
+/// Exit 75 is another pod holding the folder; the kubelet restarts it with backoff and the person
+/// is told who has it.
 #[tokio::test]
-async fn a_stale_cached_bench_does_not_recreate_the_pod_it_just_put_to_sleep() {
-    let tmp = homes_pool();
-    let asleep = serde_json::json!({"phase": "idle", "nodeName": "node-a", "idleSince": FINISHED_AT});
-    let mut routes = up_to_the_pod(not_found(pod_path()));
-    routes.push(get("/apis/kloudlite.io/v1alpha1/benches/bench-1", bench_json(serde_json::json!({}), asleep)));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(rec.sent("POST", &pods_path()).is_empty(), "{:?}", rec.calls());
+async fn a_held_folder_reports_the_holder_and_keeps_the_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut routes = ssh_routes();
+    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(false, false, Some(75), &rfc3339_ago(600))));
+    routes.push(delete_pod());
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
+
+    assert!(rec.sent("DELETE", POD).is_empty(), "a held lock is not an idle pod: {:?}", rec.calls());
+    let st = last_status(&rec);
+    assert_eq!(st["phase"], "starting");
+    assert!(has_cond(&st, "Ready", "False", "FolderLocked"), "{st}");
+    assert!(st["conditions"].as_array().unwrap().iter().any(|c| c["message"].as_str().is_some_and(|m| m.contains("node-b"))), "{st}");
 }
 
+/// A paused member's bench loses its pod and says so — and `Paused` is not `Idle`, because a
+/// connection cannot wake it.
 #[tokio::test]
-async fn stopping_a_bench_leaves_no_pod_at_all() {
-    let tmp = homes_pool();
-    let running = get(pod_path(), pod_json(&["harness-bench"], "Running", true, None));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(running), Arc::new(FakeNix::default()), Some("unused".into()));
-    let stopped = bench(serde_json::json!({"desiredState": "stopped"}), placed());
-    kloudlite_agent::controller::reconcile_bench(Arc::new(stopped.clone()), ctx).await.unwrap();
-    assert_eq!(rec.calls().iter().filter(|c| **c == format!("DELETE {}", pod_path())).count(), 1);
-    assert!(rec.sent("POST", &pods_path()).is_empty());
+async fn a_paused_bench_has_no_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), vec![delete_pod()]);
+    let paused = bench_ws(serde_json::json!({"access": "paused"}), creating());
+    kloudlite_agent::controller::apply_workspace(&paused, &ctx).await.unwrap();
 
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(stopped), ctx).await.unwrap();
-    assert!(rec.sent("POST", &pods_path()).is_empty());
+    assert_eq!(rec.sent("DELETE", POD).len(), 1, "{:?}", rec.calls());
+    assert!(rec.sent("POST", PODS).is_empty(), "{:?}", rec.calls());
     let st = last_status(&rec);
     assert_eq!(st["phase"], "stopped");
-    assert!(has_cond(&st, "Ready", "False", "Stopped"), "{st}");
+    assert!(has_cond(&st, "Ready", "False", "Paused"), "{st}");
 }
 
+/// The one-time move: the transcripts land inside the volume before any pod starts, and the legacy
+/// folder is renamed aside.
 #[tokio::test]
-async fn an_unplaced_bench_is_claimed_without_touching_a_volume() {
+async fn a_legacy_bench_folder_is_migrated_into_the_volume_before_the_pod() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![Route { method: "PUT", path: BENCH_STATUS.into(), status: 200, body: bench_json(serde_json::json!({}), placed()) }, binding_route()],
-    );
-    kloudlite_agent::claim::claim_bench(&bench(serde_json::json!({}), serde_json::Value::Null), &ctx).await.unwrap();
-    let sent = rec.sent("PUT", BENCH_STATUS);
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["status"]["nodeName"], "node-a");
-    assert!(has_cond(&sent[0]["status"], "Placed", "True", "Claimed"));
-    assert!(!rec.calls().iter().any(|c| c.contains("/apis/kloudlite.io/v1alpha1/volumes")), "{:?}", rec.calls());
-}
+    // A personal bench's legacy folder is keyed by the HANDLE, not by the empty `spec.team`.
+    let legacy = tmp.path().join("homes/.benches/alice/alice/sessions");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("a.jsonl"), "hello").unwrap();
+    let mut routes = ssh_routes();
+    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(true, true, None, AT)));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
 
-#[tokio::test]
-async fn a_bench_on_a_dead_node_is_released_for_another_node() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dead = bench_json(serde_json::json!({}), serde_json::json!({"phase": "ready", "nodeName": "n-dead"}));
-    let (ctx, rec) = ctx(
-        tmp.path(),
-        vec![
-            get("/apis/kloudlite.io/v1alpha1/benches", serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "BenchList", "metadata": {}, "items": [dead.clone()]})),
-            get("/apis/kloudlite.io/v1alpha1/benches/bench-1", dead.clone()),
-            Route { method: "PUT", path: BENCH_STATUS.into(), status: 200, body: dead },
-        ],
-    );
-    let node: k8s_openapi::api::core::v1::Node = serde_json::from_value(serde_json::json!({
-        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-dead"},
-        "status": {"conditions": [{"type": "Ready", "status": "False", "lastTransitionTime": rfc3339_ago(3600)}]}
-    }))
-    .unwrap();
-    kloudlite_agent::peer::sweeps::release_benches(&ctx, &[node], 180, k8s_openapi::jiff::Timestamp::now()).await;
-    let sent = rec.sent("PUT", BENCH_STATUS);
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["status"]["nodeName"], "");
-    assert!(has_cond(&sent[0]["status"], "Placed", "False", "NodeDead"), "{}", sent[0]);
-}
+    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
 
-/// I1: the old pod pinned to a dead node is force-deleted (grace 0) so this node can create one.
-#[tokio::test]
-async fn a_pod_left_on_a_dead_node_is_force_deleted() {
-    let tmp = homes_pool();
-    let mut stranded = pod_json(&["harness-bench"], "Running", false, None);
-    stranded["spec"]["nodeName"] = serde_json::json!("n-dead");
-    let mut routes = up_to_the_pod(get(pod_path(), stranded));
-    routes.push(get("/api/v1/nodes/n-dead", serde_json::json!({
-        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-dead"},
-        "status": {"conditions": [{"type": "Ready", "status": "False", "lastTransitionTime": rfc3339_ago(3600)}]}
-    })));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    let del = rec.sent("DELETE", &pod_path());
-    assert_eq!(del.len(), 1, "{:?}", rec.calls());
-    assert_eq!(del[0]["gracePeriodSeconds"], 0, "{}", del[0]);
-}
-
-/// I1's other half: a pod on a LIVE other node is left alone (the folder lock fences it).
-#[tokio::test]
-async fn a_pod_on_a_live_other_node_is_not_forced() {
-    let tmp = homes_pool();
-    let mut elsewhere = pod_json(&["harness-bench"], "Running", false, None);
-    elsewhere["spec"]["nodeName"] = serde_json::json!("n-live");
-    let mut routes = up_to_the_pod(get(pod_path(), elsewhere));
-    routes.push(get("/api/v1/nodes/n-live", serde_json::json!({
-        "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-live"},
-        "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": rfc3339_ago(3600)}]}
-    })));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(rec.sent("DELETE", &pod_path()).is_empty(), "{:?}", rec.calls());
-}
-
-/// A bench is a pod of the space like any workspace: the space's choice gives it the environment in
-/// its resolv.conf and the condition; the namespace pair is the controller's, so no NetworkPolicy
-/// call is made on a choice or on clearing it.
-#[tokio::test]
-async fn a_bench_follows_its_spaces_environment() {
-    let tmp = homes_pool();
-    let mut routes = up_to_the_pod(not_found(pod_path()));
-    routes.push(env_route("env-abc", "r1"));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
-    ctx.remember_spaces(vec![space("alice", "acme", "env-abc")]);
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx.clone()).await.unwrap();
-    assert!(!rec.calls().iter().any(|c| c.contains("/networkpolicies/space-")), "{:?}", rec.calls());
-    let written = std::fs::read_to_string(kloudlite_workspaces::k8s::attach_file(&ctx.pool, BENCH)).unwrap();
-    assert!(written.contains("env-abc.svc."), "{written}");
-    assert!(has_cond(&last_status(&rec), "Attached", "True", "Space"), "{}", last_status(&rec));
-
-    let st = last_status(&rec);
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st)), ctx).await.unwrap();
-    assert!(!rec.calls().iter().any(|c| c.contains("/networkpolicies/space-")), "{:?}", rec.calls());
-}
-
-/// I5: the environment's own prune keeps a grant an attached Bench names, and drops one it does not.
-#[tokio::test]
-async fn the_environment_prune_keeps_an_attached_benchs_grant() {
-    for (attached, kept) in [(Some("env-1"), true), (None, false)] {
-        let tmp = tempfile::tempdir().unwrap();
-        let env_ns = crd::env_namespace("env-1");
-        let mut b = bench_json(serde_json::json!({}), placed());
-        b["metadata"]["name"] = serde_json::json!("bench-1");
-        if let Some(e) = attached {
-            b["spec"]["attachedEnvironment"] = serde_json::json!(e);
-        }
-        let (ctx, rec) = ctx(
-            tmp.path(),
-            vec![
-                get(format!("/apis/networking.k8s.io/v1/namespaces/{env_ns}/networkpolicies"), serde_json::json!({
-                    "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicyList", "metadata": {},
-                    "items": [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": "attach-bench-1"}}]
-                })),
-                get("/apis/kloudlite.io/v1alpha1/benches/bench-1", b),
-            ],
-        );
-        let _ = kloudlite_agent::controller::apply_environment(&environment(serde_json::json!({"phase": "creating", "nodeName": "node-a"})), &ctx).await;
-        let deleted = rec.calls().contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{env_ns}/networkpolicies/attach-bench-1"));
-        assert_eq!(!deleted, kept, "attached={attached:?}: {:?}", rec.calls());
-    }
-}
-
-fn deleting_bench() -> crd::Bench {
-    let mut b = bench(serde_json::json!({}), placed());
-    b.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()));
-    b
-}
-
-fn bench_obj_patch() -> Route {
-    Route { method: "PATCH", path: "/apis/kloudlite.io/v1alpha1/benches/bench-1".into(), status: 200, body: bench_json(serde_json::json!({}), placed()) }
-}
-
-#[tokio::test]
-async fn a_bench_made_before_the_finalizer_gets_it_on_reconcile() {
-    let tmp = homes_pool();
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
-    let mut b = bench(serde_json::json!({}), placed());
-    b.metadata.finalizers = None;
-    kloudlite_agent::controller::reconcile_bench(Arc::new(b), ctx).await.unwrap();
-    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1");
-    assert!(sent.iter().any(|p| p.to_string().contains(crd::BENCH_FOLDER_FINALIZER)), "{:?}", rec.calls());
-}
-
-#[tokio::test]
-async fn a_deleted_bench_takes_its_folder_and_then_its_finalizer() {
-    let tmp = homes_pool();
-    std::fs::create_dir_all(tmp.path().join("homes/.benches/acme/alice")).unwrap();
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
-    kloudlite_agent::controller::reconcile_bench(Arc::new(deleting_bench()), ctx).await.unwrap();
-    assert!(!tmp.path().join("homes/.benches/acme/alice").exists());
-    let sent = rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1");
-    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0][0]["op"], "test", "removal is guarded: {}", sent[0]);
-}
-
-#[tokio::test]
-async fn a_symlinked_bench_folder_keeps_the_finalizer() {
-    let tmp = homes_pool();
-    let victim = tmp.path().join("victim");
-    std::fs::create_dir_all(&victim).unwrap();
-    std::fs::create_dir_all(tmp.path().join("homes/.benches/acme")).unwrap();
-    std::os::unix::fs::symlink(&victim, tmp.path().join("homes/.benches/acme/alice")).unwrap();
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), vec![bench_obj_patch()], Arc::new(FakeNix::default()), Some("unused".into()));
-    assert!(kloudlite_agent::controller::reconcile_bench(Arc::new(deleting_bench()), ctx).await.is_err());
-    assert!(victim.is_dir());
-    assert!(rec.sent("PATCH", "/apis/kloudlite.io/v1alpha1/benches/bench-1").is_empty(), "{:?}", rec.calls());
+    let moved = tmp.path().join("vol/ws-1/live/ws-1/.bench/sessions/a.jsonl");
+    assert_eq!(std::fs::read_to_string(&moved).unwrap(), "hello");
+    assert!(!tmp.path().join("homes/.benches/alice/alice").exists(), "the legacy folder is renamed aside");
+    assert!(wrote_cond(&rec, "FolderMigrated", "True", "Migrated"), "{:?}", rec.sent("PATCH", WS_STATUS));
+    assert_eq!(rec.sent("POST", PODS).len(), 1, "the pod still starts in the same pass");
 }

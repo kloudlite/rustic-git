@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 pub const NAMESPACE_READY: &str = "NamespaceReady";
 
-/// Every team this owner has a workspace or a bench in ON THIS NODE, plus the personal namespace.
+/// Every team this owner has a workspace in ON THIS NODE (a bench is one), plus the personal namespace.
 ///
 /// The personal one is unconditional: a first workspace's reconcile waits on `NamespaceReady`, and
 /// gating the namespace on a workspace that is itself waiting for the namespace is a deadlock.
@@ -56,21 +56,6 @@ async fn teams_in_use(ctx: &Arc<Ctx>, owner: &str) -> Result<BTreeSet<String>, R
         if w.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
             teams.insert(w.spec.team.clone());
         }
-    }
-    // A bench needs its (owner, team) namespace exactly as a workspace does, and a person may hold
-    // a team bench with no workspace in that team at all. A 404 is a cluster without the Bench CRD.
-    let benches: Api<crd::Bench> = Api::all(ctx.client.clone());
-    match benches.list(&lp).await {
-        Ok(l) => {
-            for b in l.items {
-                if b.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
-                    // A personal bench carries its own handle as the team; `ws_namespace` is keyed on "".
-                    teams.insert(if b.spec.team.eq_ignore_ascii_case(owner) { String::new() } else { b.spec.team.clone() });
-                }
-            }
-        }
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => return Err(e.into()),
     }
     Ok(teams)
 }
@@ -162,6 +147,12 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref), ctx).await?;
         // The owner's bench reaches their workspaces' tool server on the pod IP, this namespace only.
         ensure(&policies, &k8s::allow_bench_tools(&ns, owner, &owner_ref), ctx).await?;
+        // The gateway's hole to the bench's own port, beside the ssh hole and namespace-scoped for
+        // the same reason. The bench's id is DERIVED from the pair, so the policy is written whether
+        // the bench exists yet or not — and `teams_in_use` folds a personal team to "", which
+        // `bench_id` does not, so the handle goes back in here.
+        let bench = crd::bench_id(owner, if team.is_empty() { owner } else { &team });
+        ensure(&policies, &k8s::allow_gateway_bench(&ns, &bench), ctx).await?;
         // The one egress hole to a builder: the gate, and nothing past it. Every workspace this
         // owner has shares this namespace, so this reaches all of them — same reasoning as the
         // gateway ingress hole just above.

@@ -25,9 +25,11 @@ pub(crate) fn ws_conditions(prev: &crd::WorkspaceStatus, ready: Condition) -> Ve
 pub fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     // Every type here is owned by a writer that is NOT this path: `PackagesReady` by the profile
     // step, `Attached` by the pod path, `Replicated` by `replicated_condition` (which the
-    // per-volume sweep reads and never computes), `Decommissioning` by the drain notice. A wait
-    // arm dropping one makes its reader see a value nobody computed.
-    let keep = [crd::PACKAGES_READY, crd::ATTACHED, "Replicated", "Decommissioning"];
+    // per-volume sweep reads and never computes), `Decommissioning` by the drain notice, and
+    // `FolderMigrated` by the bench's one-time folder move — which runs ONCE and would otherwise be
+    // erased by the very next write in the same pass. A wait arm dropping one makes its reader see
+    // a value nobody computed.
+    let keep = [crd::PACKAGES_READY, crd::ATTACHED, "Replicated", "Decommissioning", crd::FOLDER_MIGRATED];
     let mut c: Vec<Condition> =
         prev.iter().filter(|c| keep.contains(&c.type_.as_str()) && c.type_ != ready.type_).cloned().collect();
     c.push(ready);

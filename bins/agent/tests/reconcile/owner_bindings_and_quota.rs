@@ -50,7 +50,7 @@ pub(crate) fn ns_routes(ns: &str) -> Vec<Route> {
             "RoleBinding",
         ),
     ];
-    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-otlp", "allow-gateway-ssh", "allow-bench-tools", "allow-builder-gate"] {
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-otlp", "allow-gateway-ssh", "allow-bench-tools", "allow-gateway-bench", "allow-builder-gate"] {
         r.push(ok(
             format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
             "networking.k8s.io/v1",
@@ -258,25 +258,25 @@ pub(crate) fn home_vol_json(quota: u64) -> serde_json::Value {
     })
 }
 
-/// C1: a team bench with no workspace in that team still gets its namespace — the real
-/// `teams_in_use` decision, not a faked Namespace GET. A bench on another node does not.
+/// C1: a team bench with no other workspace in that team still gets its namespace — the real
+/// `teams_in_use` decision, not a faked Namespace GET. A bench on another node does not. A bench is
+/// a Workspace now, so this is the one listing rather than two.
 #[tokio::test]
 async fn a_team_bench_with_no_workspace_in_that_team_gets_its_namespace() {
     let tmp = tempfile::tempdir().unwrap();
-    let ws_list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": []});
     let bench = |team: &str, node: &str| serde_json::json!({
-        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
-        "metadata": {"name": format!("bench-{team}")},
-        "spec": {"owner": "alice", "team": team, "image": "i", "desiredState": "running"},
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": crd::bench_id("alice", team)},
+        "spec": {"owner": "alice", "team": if team == "alice" { "" } else { team }, "name": "bench", "region": "r1",
+                 "image": "i", "desiredState": "running", "bench": {"model": "m"}},
         "status": {"phase": "idle", "nodeName": node},
     });
-    let benches = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "BenchList", "metadata": {},
+    let ws_list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
         "items": [bench("acme", "node-a"), bench("elsewhere", "node-b"), bench("alice", "node-a")]});
     let (ctx, rec) = ctx(
         tmp.path(),
         vec![
             kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws_list),
-            kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", benches),
             Route { method: "PATCH", path: binding_status(), status: 200, body: binding_json() },
         ]
         .into_iter()

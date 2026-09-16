@@ -1,10 +1,15 @@
 //! The `Workspace` reconciler: profile, host key, home, worktree, attachment and the one pod.
 //! Split out of `controller.rs` unchanged.
 //!
-//! The module map: `profile` (nix packages), `conditions`, `replicas`, `home` (the NFS home),
-//! `seed` (the git seed container), `lifecycle` (stop, delete, migrate), `status` (the status
-//! write, labels, resolv.conf, host key). `apply_workspace` and the two reconcile entry points
-//! stay here.
+//! The module map: `profile` (nix packages), `conditions`, `replicas`, `home` (the NFS home and
+//! the legacy bench-folder migration), `seed` (the git seed container), `bench` (the second
+//! container's verdicts), `lifecycle` (stop, delete, migrate), `status` (the status write, labels,
+//! resolv.conf, host key). `apply_workspace` and the two reconcile entry points stay here.
+//!
+//! A BENCH is a Workspace with `spec.bench` set and nothing else special: same volume, same home,
+//! same keys, same pod — plus a `bench` container and an idle clock. `crd::wants_pod` is what the
+//! pod decision asks instead of `desiredState == Running`, and it is false for a bench that is
+//! asleep or paused.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::{my_node, conditions_eq, create_if_absent, delete_ignoring_404, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
@@ -35,6 +40,8 @@ mod replicas;
 
 mod home;
 mod seed;
+mod bench;
+use bench::{bench_verdict_action, migrate_bench, park_bench};
 pub(crate) use profile::*;
 pub use conditions::*;
 pub(crate) use replicas::*;
@@ -141,6 +148,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     // unstoppable, stuck reporting `creating` with a pod still running on a broken subvolume.
     if w.spec.desired_state == DesiredState::Stopped {
         return stop_workspace(w, prev, gen, ctx).await;
+    }
+    // A bench that is asleep or paused: the pod goes, nothing else does. Deliberately NOT
+    // `stop_workspace` — an idle bench wakes on the next connection, and cutting a stop snapshot
+    // every idle cycle would cost one every `benchIdleSecs` for a workspace nobody stopped. The
+    // sync beat already keeps a recent cut for the replicas. Above the volume and namespace gates
+    // for the same reason a stop is: removing a pod must not depend on either being healthy.
+    if !crd::wants_pod(w) {
+        return park_bench(w, prev, gen, ctx).await;
     }
     let vol = match super::timed(
         "resolve_volume",
@@ -327,6 +342,14 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         }
     }
 
+    // The legacy bench folder, moved into this worktree once and BEFORE any pod: a pod started
+    // first would make its own empty `.bench` in the volume and race the copy for the same files.
+    if crd::is_bench(w) {
+        if let Some(action) = migrate_bench(w, &id, gen, &mut prev, ctx).await? {
+            return Ok(action);
+        }
+    }
+
     let ns = crd::ws_namespace(&w.spec.owner, &w.spec.team);
     let owner_ref = owner_ref_of_kind(w)?;
     let pod_ctx = k8s::PodContext {
@@ -428,8 +451,12 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
-            let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init, // ponytail: the bench container is wired in Task 4 of the bench-is-a-workspace plan
-                None) {
+            // `Some` exactly when `is_bench`: the image is the agent's configured one (a bench
+            // follows it on every start, so it is not a spec field) and `benchIdleSecs` is stamped
+            // in at create like every other `Mark::Live` value, so a setting change never reaches
+            // a session already running.
+            let bench = crd::is_bench(w).then(|| (ctx.bench_image.as_str(), ctx.settings.load().bench_idle_secs));
+            let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init, bench) {
                 Ok(p) => p,
                 // Unreachable while `validate_ws_spec` runs at the top of this function; kept
                 // because the builder is the boundary and must be able to say no on its own.
@@ -502,6 +529,13 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // would point this workspace at its source's pod — the gateway dials `podRef`, so an
             // ssh to the clone would land in the source's shell.
             let observed = pods.get_opt(&pod_name).await?;
+            // Before the ordinary readiness read: a bench reports idleness and a held folder
+            // through its own container, and both look like "the pod is not ready" from here.
+            if let (true, Some(p)) = (crd::is_bench(w), observed.as_ref()) {
+                if let Some(action) = bench_verdict_action(w, p, &pods, &pod_name, &ns, gen, &prev, ctx).await? {
+                    return Ok(action);
+                }
+            }
             if !observed.as_ref().is_some_and(|p| own_ready_pod(p, &ctx.node)) {
                 // A clone that keeps failing is the one pod fault a person can act on (a key not
                 // yet authorised, a repo this key may not read), and a bare `PodNotReady` hid it

@@ -38,16 +38,20 @@ pub const BENCH_SUBDIR: &str = ".bench";
 /// container's prelude owns the home) and `exec`ing through `/bin/sh` only hides the exit code
 /// the agent reads off `containerStatuses`.
 ///
-/// No `resources`: the namespace's `LimitRange` supplies the defaults, so the bench's cpu and
-/// memory are not a second copy of `spec.resources` charged twice against the owner's quota for
-/// one pod.
+/// `resources` is `model::bench_container_resources()` and NEVER `spec.resources`: that field
+/// sizes the `workspace` container the person works in, and a bench that shrank because somebody
+/// sized their workspace small would OOM mid-turn. The same function `quota` charges, so what
+/// runs and what is billed cannot drift apart.
 pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs: u64, api_url: &str, registry_host: &str) -> Container {
     let dir = workspace_dir(&spec.name);
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     let model = spec.bench.as_ref().map(|b| b.model.clone()).unwrap_or_default();
     let mut env = vec![
         var("KL_OWNER", spec.owner.clone()),
-        var("KL_TEAM", spec.team.clone()),
+        // The SPACE slug, exactly as the workspace container's `login_env` spells it (a personal
+        // space folds to the handle): two containers of one pod must never disagree on which team
+        // they are in.
+        var("KL_TEAM", crate::crd::space_slug(&spec.owner, &spec.team)),
         var("KL_BENCH", ws_id.to_string()),
         // Same two names the workspace container carries, so `kl` and the tool server agree with
         // the bench about which workspace this is and where it lives.
@@ -104,6 +108,7 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
             VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
         ]),
+        resources: Some(quantities(&crate::model::bench_container_resources())),
         security_context: Some(security),
         // `--ping` does GET /healthz on `BENCH_PORT`, but that request isn't counted as a
         // client by the idle clock `harness-bench` keeps — only WebSockets count — so the

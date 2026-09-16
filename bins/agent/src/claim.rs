@@ -657,21 +657,6 @@ pub async fn claim_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
     .await
 }
 
-/// A bench holds no volume, so `decide` reaches only the capacity and placeability arms. It has no
-/// region field: /v1 writes it to its team's region's cluster, so this agent's region is the team's.
-/// A sleeping bench asks for no capacity.
-pub async fn claim_bench(b: &crd::Bench, ctx: &Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    claim(b, ctx, "Bench", crd::Phase::Pending, |o, c| Parts {
-        node_name: o.status.as_ref().map(|s| s.node_name.clone()).unwrap_or_default(),
-        storage: None,
-        volume: None,
-        region: &c.region,
-        owner: &o.spec.owner,
-        want: if crd::bench_wants_pod(o) { want_of(&o.spec.resources) } else { Want::default() },
-    })
-    .await
-}
-
 /// The `{region, owner}` binding for this node, created atomically. A 409 means a peer got there
 /// first and its answer is as good as ours — the binding is what makes the per-owner namespace
 /// reconciler run, not a second placement decision.
