@@ -365,7 +365,7 @@ pub const CATALOGUE: &[Slo] = &[
     // inside the workspace, with no browser. Judged on the API's own state rather than on what the
     // command printed — a `kl` that reached nothing would print the same lines.
     Slo { id: "ws.kl.pkg.add", feature: "Workspaces", sli: "`kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package", target: bound(20_000), suite: Suite::Hourly, stage: "5 · Workspace" },
-    Slo { id: "ws.kl.env.switch", feature: "Workspaces", sli: "`kl env switch` inside the probe workspace moves the person's own space to the run's environment — `GET /v1/me/environments` names it — and `kl env clear` puts it back", target: bound(10_000), suite: Suite::Hourly, stage: "5 · Workspace" },
+    Slo { id: "ws.kl.env.switch", feature: "Workspaces", sli: "`kl env switch` inside the probe workspace moves the person's own space to the run's environment — `GET /v1/me/environments` names it — and `kl env clear` puts it back", target: bound(10_000), suite: Suite::Hourly, stage: "6 · Environment" },
 
     // Stage 6 · environment
     Slo { id: "env.create.p95", feature: "Environments", sli: "Creating an environment completes", target: p95(120_000), suite: Suite::Fast, stage: "6 · Environment" },
