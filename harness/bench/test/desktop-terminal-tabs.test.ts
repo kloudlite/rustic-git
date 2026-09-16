@@ -9,7 +9,7 @@ import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
 import { checkPty, checkSession } from "../../src/pty-ipc.ts";
-import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug } from "../../src/renderer/components/terminal/tabs.ts";
+import { makeTab, nextIndex, reconcile, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, YOUNG_MS, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
 
@@ -66,6 +66,36 @@ test("tabs belong to the tab they were opened from", () => {
   const all = [makeTab(machine, "K", "m1", "bench", 1), makeTab(machine, "K", "ws-51480ba5", "ws-51480ba5", 1), makeTab(machine, "K", "m1", "bench", 2)];
   assert.deepEqual(all.filter((t) => t.owner === "m1").map((t) => t.session), ["kl-m1-1", "kl-m1-2"]);
   assert.deepEqual(all.filter((t) => t.owner === "ws-51480ba5").map((t) => t.session), ["kl-ws-51480ba5-1"]);
+});
+
+// The tabs and the scope's tmux sessions are one list, both ways.
+const tab = (id: string, session: string, at: number, owner = "m1") => ({ id, session, owner, label: "bench", scope: "bench", banner: "", at }) as TermTab;
+const NOW = 1_000_000;
+const OLD = NOW - YOUNG_MS - 1;
+
+test("reconcile: a session opened elsewhere gets a tab", () => {
+  const r = reconcile([tab("t1", "kl-m1-1", OLD)], ["kl-m1-1", "kl-m1-2", "kl-other-1", "scratch"], "m1", NOW);
+  assert.deepEqual(r, { add: ["kl-m1-2"], remove: [] });
+});
+
+test("reconcile: a session killed elsewhere takes its tab", () => {
+  const r = reconcile([tab("t1", "kl-m1-1", OLD), tab("t2", "kl-m1-2", OLD)], ["kl-m1-2"], "m1", NOW);
+  assert.deepEqual(r, { add: [], remove: ["t1"] });
+});
+
+test("reconcile: one tab per session, never two", () => {
+  // Both the duplicate tab and a second tab for a held session are refused.
+  const r = reconcile([tab("t1", "kl-m1-1", OLD), tab("t2", "kl-m1-1", OLD)], ["kl-m1-1"], "m1", NOW);
+  assert.deepEqual(r, { add: [], remove: ["t2"] });
+});
+
+test("reconcile: a tab younger than the grace is spared an unlisted session", () => {
+  const young = [tab("t1", "kl-m1-1", NOW - 1_000)];
+  assert.deepEqual(reconcile(young, [], "m1", NOW), { add: [], remove: [] });
+  // …and once it is old enough with nothing behind it, it goes.
+  assert.deepEqual(reconcile([tab("t1", "kl-m1-1", OLD)], [], "m1", NOW), { add: [], remove: ["t1"] });
+  // Another tab's terminals are never touched.
+  assert.deepEqual(reconcile([tab("t9", "kl-ws-51480ba5-1", OLD, "ws-51480ba5")], [], "m1", NOW), { add: [], remove: [] });
 });
 
 test("pty ipc: a session name is the tool server's rule, refused before tmux sees it", () => {

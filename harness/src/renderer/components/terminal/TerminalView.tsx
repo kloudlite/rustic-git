@@ -19,7 +19,7 @@ import { banner as dropBanner, step, type Reconnect } from "./reconnect";
  * a real exit, or the tab's x, ends anything.
  * A tab stays mounted while another is shown, so its scrollback survives.
  */
-export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onClose?: () => void }) {
+export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onEnded?: () => void }) {
   let host!: HTMLDivElement;
   let term: Terminal;
   let fit: FitAddon;
@@ -96,11 +96,14 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     // Undefined while the shell is attached; a Reconnect while it is not.
     let drop: Reconnect | undefined;
 
-    const end = (code: number | undefined, error?: string) => {
+    // A shell that ended took its tmux session with it, and a tab is a session:
+    // the tab goes too, without a kill and without waiting for Enter (owner,
+    // 2026-09-17: the tabs are a one-to-one map of the sessions).
+    const end = () => {
       if (exited) return;
       exited = true;
-      term.write(code === undefined ? `\r\n\x1b[2m[${error ?? "disconnected"} — reopen the shell]\x1b[0m` : `\r\n\x1b[2m[process exited with code ${code}]\x1b[0m`);
       props.onExited?.(props.tab.id);
+      props.onEnded?.();
     };
 
     const dial = () =>
@@ -138,7 +141,7 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
       if (id !== props.tab.id) return;
       // A shell that exited is gone for good; a socket that dropped is not —
       // tmux still holds the session, so that one is reattached, not mourned.
-      if (typeof code === "number") return end(code);
+      if (typeof code === "number") return end();
       feed({ type: "drop", now: Date.now() }, error);
     });
     // Enter on a dead shell closes the tab; on one that gave up reconnecting it
@@ -146,7 +149,7 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     term.onBell(() => {}); // a PTY bell is not this app's notification channel
     term.onKey(({ domEvent }) => {
       if (domEvent.key !== "Enter") return;
-      if (exited) props.onClose?.();
+      if (exited) props.onEnded?.();
       else if (drop?.gaveUp) feed({ type: "retry", now: Date.now() });
     });
 

@@ -17,6 +17,8 @@ export function TerminalPanel(props: {
   onActivate: (id: string) => void;
   onOpen: () => void;
   onCloseTab: (id: string) => void;
+  /** The shell ended by itself: drop the tab, nothing to kill. */
+  onEnded: (id: string) => void;
   onToggleMaximise: () => void;
   onClose: () => void;
 }) {
@@ -77,7 +79,7 @@ export function TerminalPanel(props: {
       </header>
 
       <div class="relative min-h-0 pl-4">
-        <For each={props.tabs}>{(t) => <TerminalView tab={t} visible={t.id === props.active} onExited={markExited} onClose={() => props.onCloseTab(t.id)} />}</For>
+        <For each={props.tabs}>{(t) => <TerminalView tab={t} visible={t.id === props.active} onExited={markExited} onEnded={() => props.onEnded(t.id)} />}</For>
       </div>
     </section>
   );

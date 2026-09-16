@@ -6,7 +6,7 @@ import type { Machine } from "../../model";
  * inside the scope, so the same tab on another device reattaches the same
  * shells rather than forking new ones.
  */
-export type TermTab = { id: string; label: string; scope: string; owner: string; session: string; banner: string };
+export type TermTab = { id: string; label: string; scope: string; owner: string; session: string; banner: string; at: number };
 
 let seq = 0;
 
@@ -48,6 +48,30 @@ export function nextIndex(taken: string[], ownerTabId: string): number {
   return n;
 }
 
+/** A tab younger than this is spared the reconcile: its session may not be listed yet. */
+export const YOUNG_MS = 10_000;
+
+/**
+ * The tabs and the scope's tmux sessions are one list, in both directions
+ * (owner, 2026-09-17: "close the tab here, the session there should close and
+ * vice versa"). Pure so the ordering rules are testable: a session nobody holds
+ * gets a tab, a tab whose session is gone goes, and a session is never held
+ * twice. `live` is the whole listing; only this tab's names are its business.
+ */
+export function reconcile(tabs: TermTab[], live: string[], ownerTabId: string, now: number): { add: string[]; remove: string[] } {
+  const mine = sessionsOfTab(live, ownerTabId);
+  const here = tabs.filter((t) => t.owner === ownerTabId);
+  const held = new Set<string>();
+  const remove: string[] = [];
+  for (const t of here) {
+    // A duplicate is dropped whatever the listing says: one tab per session.
+    if (held.has(t.session)) remove.push(t.id);
+    else if (!mine.includes(t.session) && now - t.at >= YOUNG_MS) remove.push(t.id);
+    else held.add(t.session);
+  }
+  return { add: mine.filter((n) => !held.has(n)), remove };
+}
+
 /**
  * A scope is not picked any more: it IS the tab. A workspace tab (or one of
  * its ephemerals) opens in that workspace, every other tab on the bench.
@@ -68,6 +92,7 @@ export function makeTab(machine: Machine, team: string, ownerTabId: string, scop
     scope: scopeId,
     owner: ownerTabId,
     session: sessionName(ownerTabId, n),
+    at: Date.now(),
     banner: `kloudlite shell · ${name} · ${team}\r\n\x1b[2m${dim}\x1b[0m`,
   };
 }
