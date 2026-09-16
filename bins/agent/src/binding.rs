@@ -196,6 +196,12 @@ pub async fn namespace_ready(ctx: &Arc<Ctx>, region: &str, owner: &str, team: &s
         // The api's keys beat may delete a binding in the seconds between this owner's claim
         // (which found it and did nothing) and the prune; recreating it here brings the namespace
         // policies and grants back on the binding's next reconcile instead of at the next claim.
+        //
+        // PAIRED RULE, in another binary: this read-shaped gate WRITES on every miss, so it can
+        // only avoid ping-ponging with the pruner because `api::keys::prune_bindings`
+        // (`crates/workspaces/src/api/keys.rs`) keeps any binding whose owner still holds a Bench,
+        // Workspace or Environment — exactly the owners that reach this line. Loosen that filter
+        // and the beat deletes what this recreates, every beat, forever. Change the two together.
         crate::claim::ensure_binding(ctx, region, owner).await?;
         return Ok(false);
     };
