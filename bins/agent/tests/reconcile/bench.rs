@@ -100,7 +100,10 @@ async fn a_running_bench_makes_its_folder_and_one_pod() {
     assert!(tmp.path().join("homes/.benches/acme/alice").is_dir());
     let sent = rec.sent("POST", &pods_path());
     assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["spec"]["containers"][0]["command"], serde_json::json!(["harness-bench"]));
+    // `/bin/sh -c` now, because the bench seeds the person's zsh rc before exec'ing the harness.
+    let cmd = sent[0]["spec"]["containers"][0]["command"].as_array().unwrap();
+    assert_eq!(cmd[0], "/bin/sh");
+    assert!(cmd[2].as_str().unwrap().ends_with("exec harness-bench\n"), "{cmd:?}");
     let vols = sent[0]["spec"]["volumes"].as_array().unwrap();
     assert!(vols.iter().any(|v| v["hostPath"]["path"].as_str().is_some_and(|p| p.ends_with("/.benches/acme/alice"))), "{vols:?}");
 }

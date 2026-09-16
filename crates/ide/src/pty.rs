@@ -45,10 +45,32 @@ pub struct Pty {
     exit: Option<i32>,
 }
 
-/// `$SHELL`, then the two shells every image has. argv0 is `-name`, which is how a shell is told
-/// it is a login shell — the pod prelude's profile is what builds `PATH` and the caches.
+/// The uid's passwd shell, when it has one that exists and is executable. `getpwuid_r` rather
+/// than `$SHELL`: `kl ide serve` is started through `su -s /bin/sh`, so `$SHELL` in a workspace
+/// pod is `/bin/sh` and every PTY landed in ash while ssh to the same pod got the Nix zsh. The
+/// passwd entry is what ssh reads, so reading it here is what makes the two shells one shell.
+fn passwd_shell() -> Option<CString> {
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = [0u8; 4096];
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: `buf` outlives the `pwd` we read from, which is all `getpwuid_r` borrows it for.
+    let rc = unsafe { libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr().cast(), buf.len(), &mut out) };
+    if rc != 0 || out.is_null() || pwd.pw_shell.is_null() {
+        return None;
+    }
+    let shell = unsafe { std::ffi::CStr::from_ptr(pwd.pw_shell) }.to_owned();
+    if shell.as_bytes().is_empty() || unsafe { libc::access(shell.as_ptr(), libc::X_OK) } != 0 {
+        return None;
+    }
+    Some(shell)
+}
+
+/// The passwd shell, then `$SHELL`, then the two shells every image has. argv0 is `-name`, which
+/// is how a shell is told it is a login shell — the pod prelude's profile is what builds `PATH`
+/// and the caches.
 fn candidates() -> Vec<CString> {
     let mut v: Vec<CString> = Vec::new();
+    v.extend(passwd_shell());
     if let Ok(s) = std::env::var("SHELL") {
         if !s.is_empty() {
             v.push(CString::new(s).unwrap_or_else(|_| CString::new("/bin/sh").unwrap()));
@@ -373,6 +395,19 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// `$SHELL` is `/bin/sh` inside a workspace pod because `kl ide serve` is started under
+    /// `su -s /bin/sh`; the passwd entry is the one that names the person's real shell.
+    #[test]
+    fn the_passwd_shell_beats_shell() {
+        use_sh();
+        let want = passwd_shell();
+        let first = candidates().into_iter().next().unwrap();
+        match want {
+            Some(p) => assert_eq!(first, p, "the uid's passwd shell comes first"),
+            None => assert_eq!(first.to_str().unwrap(), "/bin/sh", "$SHELL is next when there is none"),
+        }
     }
 
     #[tokio::test]

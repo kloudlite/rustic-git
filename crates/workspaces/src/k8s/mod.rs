@@ -19,6 +19,7 @@
 //! - `environment`: a service's StatefulSet and its ClusterIP (an intercept is `intercept`'s now)
 //! - `intercept`: the proxy pod, the workspace-side target Service and the proxy's egress grant
 //! - `policies`: every NetworkPolicy
+//! - `shell_rc`: the zsh/starship rc text the workspace prelude and the bench image share
 //! - `bench`: the bench Pod, its home-relative folder, and its gateway-only ingress policy
 //! - `tests`: one file, since the fixtures are shared
 //!
@@ -54,6 +55,7 @@ mod environment;
 mod intercept;
 mod policies;
 mod bench;
+mod shell_rc;
 pub use namespace::*;
 pub use secrets::*;
 pub use workspace::*;
@@ -62,6 +64,7 @@ pub use environment::*;
 pub use intercept::*;
 pub use policies::*;
 pub use bench::*;
+pub use shell_rc::*;
 
 #[cfg(test)]
 mod tests;

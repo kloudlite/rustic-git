@@ -36,7 +36,7 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
     assert!(paths.contains(&"/wspool/homes/alice".to_string()));
     assert!(!paths.iter().any(|p| p.contains("/vol/") || p.contains("homecache") || p.ends_with("/.benches") || p.ends_with("/acme")));
     let c = &spec.containers[0];
-    assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
+    assert!(matches!(c.command.as_deref(), Some([sh, dash_c, p]) if sh == "/bin/sh" && dash_c == "-c" && p.ends_with("exec harness-bench\n")));
     assert!(c.volume_mounts.as_ref().unwrap().iter().any(|m| m.mount_path == "/bench"));
     assert_eq!(c.readiness_probe.as_ref().unwrap().timeout_seconds, Some(3), "a slow Node start must not flap the bench unready");
 }
@@ -46,7 +46,14 @@ fn every_bench_runs_the_harness_and_may_exit_idle() {
     let b = fixture_bench("alice", "acme", DesiredState::Running);
     let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", "", 420).unwrap().spec.unwrap();
     let c = &spec.containers[0];
-    assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
+    let cmd = c.command.as_ref().unwrap();
+    assert_eq!(cmd[0], "/bin/sh");
+    // `exec`, so harness-bench is pid 1 and gets the kubelet's TERM — and so an idle exit 0 is
+    // its own, not a shell's.
+    assert!(cmd[2].ends_with("exec harness-bench\n"), "{}", cmd[2]);
+    // Seeded once: the home is persistent, so a person's own edits survive the next bench.
+    assert!(cmd[2].contains("[ -e /home/kl/.config/zsh/.zshrc ] ||"), "{}", cmd[2]);
+    assert!(cmd[2].contains("starship init zsh"), "{}", cmd[2]);
     assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"), "exit 0 is idle and must not restart");
     let idle = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_BENCH_IDLE_SECS").unwrap();
     assert_eq!(idle.value.as_deref(), Some("420"));
@@ -106,7 +113,11 @@ fn a_bench_pod_carries_only_the_token_path_in_env() {
     let get = |n: &str| env.iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
     assert_eq!(get("KL_API_URL").as_deref(), Some("https://api.example"));
-    assert_eq!(get("SHELL").as_deref(), Some("/bin/bash"), "a bench shell is bash, not the passwd default");
+    // The image's uid-1000 passwd shell is bash; zsh is what the prompt and `/etc/zsh/zshrc` are
+    // built for, so the bench names it rather than leaving `/pty` to the passwd default.
+    assert_eq!(get("SHELL").as_deref(), Some("/bin/zsh"));
+    assert_eq!(get("ZDOTDIR").as_deref(), Some("/home/kl/.config/zsh"));
+    assert_eq!(get("HISTFILE").as_deref(), Some("/home/kl/.local/state/zsh_history"));
     let bare = bench_pod(&b, "bench-1", "/wspool", None, "cr", "", 300).unwrap().spec.unwrap().containers[0].env.clone().unwrap();
     assert!(!bare.iter().any(|e| e.name == "KL_API_URL"), "no api url means unset, so tools fail closed");
 }

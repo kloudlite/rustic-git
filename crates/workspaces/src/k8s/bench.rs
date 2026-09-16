@@ -29,6 +29,25 @@ pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, Strin
 }
 
 
+/// What the container runs before `harness-bench`: the bench has no pod prelude of its own and
+/// `harness-bench` is the workload, not an init system, so the two directories zsh needs under the
+/// shared home — and the person's own `.zshrc`, seeded once and theirs afterwards, exactly as the
+/// workspace prelude seeds it — are made here. The platform's half of the prompt is baked into the
+/// image (`/etc/zsh/zshrc`), so nothing root-owned is written at start.
+///
+/// `$PATH` rather than a rendered PATH: a bench has no Nix profile, so the image's own PATH at
+/// the moment the shell starts is the right one, and it stays a literal inside the single quotes.
+fn prelude() -> String {
+    let seed = super::shell_rc::printf_text(&super::shell_rc::seed_zshrc("$PATH"));
+    format!(
+        "set -e\n\
+         mkdir -p {HOME_DIR}/.config/zsh {HOME_DIR}/.local/state\n\
+         [ -e {HOME_DIR}/.config/zsh/.zshrc ] || {seed} > {HOME_DIR}/.config/zsh/.zshrc\n\
+         exec harness-bench\n"
+    )
+}
+
+
 /// The bench's one pod. `idle_secs` is the region's `benchIdleSecs`, stamped in at create so a
 /// live setting change never reaches a running pod mid-session — the same `Mark::Live`-vs-`Boot`
 /// split as everywhere else in `k8s`: this value takes effect only on the pod's next create.
@@ -38,15 +57,21 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
     let folder = bench_folder(pool, team, owner)?;
     let ns = crate::crd::ws_namespace(owner, team);
 
-    let command = vec!["harness-bench".to_string()];
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), prelude()];
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
 
     let mut env = vec![
         var("KL_OWNER", owner.clone()),
         var("KL_TEAM", team.clone()),
-        // `/pty` forks `$SHELL` as a login shell; unset, a person lands in whatever the image's
-        // passwd entry names rather than the bash the bench is built around.
-        var("SHELL", "/bin/bash".to_string()),
+        // `/pty` prefers the uid's passwd shell and falls back to `$SHELL`; the image's uid 1000
+        // is node's, whose passwd shell is bash, so the bench says zsh here — the shell the
+        // image's `/etc/zsh/zshrc` and starship are for.
+        var("SHELL", "/bin/zsh".to_string()),
+        // zsh reads the person's rc from `ZDOTDIR`, which keeps `.zshrc` under the shared home's
+        // `.config` (where a workspace's also lives) rather than loose in `$HOME`. History is
+        // state, not config, so it goes where the rest of the state does.
+        var("ZDOTDIR", format!("{HOME_DIR}/.config/zsh")),
+        var("HISTFILE", format!("{HOME_DIR}/.local/state/zsh_history")),
         var("KL_BENCH", id.to_string()),
         var("KL_MODEL", b.spec.model.clone()),
         var("KL_REGISTRY_HOST", registry_host.to_string()),

@@ -791,3 +791,12 @@ pub(crate) fn a_workspace_pod_never_mounts_the_bench_tool_secret() {
     assert!(!spec.volumes.unwrap().iter().any(|v| v.name == "bench-tool" || v.secret.as_ref().and_then(|s| s.secret_name.as_deref()) == Some(crate::k8s::BENCH_TOOL_SECRET)));
     assert!(!spec.containers.iter().flat_map(|c| c.env.clone().unwrap_or_default()).any(|e| e.name == "KL_TOOL_TOKEN_FILE"));
 }
+
+/// The rc text moved into `k8s::shell_rc` so the bench image could bake the same bytes. The
+/// snapshot is the prelude as it read before that move (HEAD c271c73e), captured verbatim: the
+/// files a pod ends up with are only as good as this shell string, and nothing else here would
+/// catch a printf quoting change.
+#[test]
+pub(crate) fn the_prelude_is_byte_identical_to_the_snapshot_before_shell_rc() {
+    assert_eq!(prelude("api"), include_str!("prelude-snapshot.txt"));
+}

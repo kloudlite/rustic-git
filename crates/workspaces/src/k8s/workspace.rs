@@ -144,6 +144,11 @@ pub(super) fn prelude(name: &str) -> String {
     let workspace_dir = workspace_dir(name);
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
+    // The rc text itself is `shell_rc`'s, shared byte for byte with the bench image; only the
+    // quoting for `printf` and the redirects are this prelude's.
+    let zshrc = super::shell_rc::printf_lines(super::shell_rc::ZSHRC);
+    let starship = super::shell_rc::printf_lines(super::shell_rc::STARSHIP_TOML);
+    let seed = super::shell_rc::printf_text(&super::shell_rc::seed_zshrc(&path));
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
@@ -151,9 +156,9 @@ pub(super) fn prelude(name: &str) -> String {
          chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
          chown {SSH_UID}:{SSH_UID} $H/.local\n\
          mkdir -p /etc/fish/conf.d\n\
-         printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' '[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh' > /etc/zshrc\n\
+         {zshrc} > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish\n\
-         printf '%s\\n' 'format = \"$directory$git_branch$git_status$cmd_duration$line_break$character\"' > /etc/starship.toml\n\
+         {starship} > /etc/starship.toml\n\
          echo prelude.seed.start\n\
          su {SSH_USER} -s /bin/sh <<'SEED'\n\
          set -e\n\
@@ -161,7 +166,7 @@ pub(super) fn prelude(name: &str) -> String {
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh $H/.config/git $H/.local-cache/tmp\n\
          grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
-         [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
+         [ -e $H/.config/zsh/.zshrc ] || {seed} > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
