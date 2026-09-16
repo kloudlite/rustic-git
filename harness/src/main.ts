@@ -343,6 +343,7 @@ app.on("before-quit", () => disconnect());
 // sees the socket. Nothing is queued — a write to a shell that is gone is
 // dropped, exactly as typing into a closed terminal is.
 const ptys = new Map<string, WebSocket>();
+const sizes = new Map<string, { cols: number; rows: number }>();
 // What each shell is attached to, kept past the socket: the tab's x has to
 // name the tmux session to kill, and by then its socket may already be gone.
 const ptyAt = new Map<string, { scope: string; session?: string }>();
@@ -379,8 +380,15 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
     ended = true;
     send("pty:exit", id, code, error);
   };
-  // The first frame is the size, so the shell never starts at 80x24 and reflows.
-  w.on("open", () => w.send(JSON.stringify({ resize: { cols, rows } })));
+  // The first frame is the size, so the shell never starts at 80x24 and reflows. The LATEST
+  // size, not the one the open was asked with: the view measures itself a moment after dialling,
+  // and a resize that lands while the socket is still connecting cannot be sent then — xterm
+  // never repeats a size that has not changed, so tmux sat at 80x24 (owner, 2026-09-17 04:10 IST).
+  sizes.set(id, { cols, rows });
+  w.on("open", () => {
+    const at = sizes.get(id) ?? { cols, rows };
+    w.send(JSON.stringify({ resize: at }));
+  });
   w.on("message", (d: Buffer, isBinary: boolean) => {
     if (isBinary) return send("pty:data", id, new Uint8Array(d));
     let ev: { exit?: unknown; error?: unknown };
@@ -404,8 +412,10 @@ ipcMain.on("pty:write", (_e, id: unknown, data: unknown) => {
   if (w && data instanceof Uint8Array) w.send(Buffer.from(data), { binary: true });
 });
 ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
-  const w = typeof id === "string" ? openPty(id) : undefined;
-  if (w && typeof cols === "number" && typeof rows === "number") w.send(JSON.stringify({ resize: { cols, rows } }));
+  if (typeof id !== "string" || typeof cols !== "number" || typeof rows !== "number") return;
+  sizes.set(id, { cols, rows });
+  const w = openPty(id);
+  if (w) w.send(JSON.stringify({ resize: { cols, rows } }));
 });
 ipcMain.on("pty:close", (_e, id: unknown) => {
   if (typeof id !== "string") return;
@@ -428,6 +438,7 @@ ipcMain.handle("pty:kill", async (_e, id: unknown) => {
   }
   ptys.get(id)?.close();
   ptys.delete(id);
+  sizes.delete(id);
 });
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {
