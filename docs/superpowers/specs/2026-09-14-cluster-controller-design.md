@@ -291,16 +291,18 @@ already uses for the attach migration. Placement is NOT in this stage and is not
   node's objects wakes exactly one environment, not every environment on both; a node reporting
   `WriteFailed` leaves the cluster condition `True` while the other node is current.
 
-## Open questions
+## Open questions — all settled by the owner
 
 1. *Settled (owner, 2026-09-14):* one controller per k3s CLUSTER. A Region may hold several
    clusters, so there is no per-Region controller — only a per-cluster one, stamped with the
    Region it belongs to.
-2. Stage 3's `Mark::Boot` flag is an extra knob that exists for one release — acceptable, or ship
-   stage 3 as a hard cutover with a documented maintenance window?
-3. `OwnerKeys.status.nodes[]` grows with the node count for every owner. Cap it (drop entries for
-   nodes that no longer exist, on the controller's fold) — or is a `Synced` condition plus a log
-   line enough, with no per-node entry at all?
-4. Should the controller also own `Snapshot` retention? It is cluster-wide reasoning over
-   `VolumeReplica` rows, but the owning node has the local truth. This spec leaves it in the agent.
-5. Is the bench pod force-delete worth moving at all, given the folder lock is the real fence?
+2. *Settled (owner, 2026-09-16):* stage 3 ships as a **hard cutover** in a stated window, ordered
+   like every stage so far. No `Mark::Boot` flag: a knob that exists for one release is a knob
+   somebody forgets to remove.
+3. *Settled (owner, 2026-09-16):* **no per-node entries** on `OwnerKeys.status`. A `Synced`
+   condition plus the agent's `key.install` log line is the whole answer; which node is stale is
+   read from the log, not from a status list that grows with nodes × owners.
+4. *Settled (owner, 2026-09-16):* `Snapshot` retention **stays in the agent**. The owning node
+   has the local btrfs truth; cluster-wide `VolumeReplica` reasoning stays advisory.
+5. *Settled (owner, 2026-09-16):* the bench pod force-delete **stays in the agent**. The folder
+   lock is the real fence; moving the delete buys nothing.

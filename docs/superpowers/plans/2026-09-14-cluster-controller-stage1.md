@@ -14,13 +14,13 @@ controller is per **cluster** — one elected leader per k3s cluster, over that 
 
 **Spec:** `docs/superpowers/specs/2026-09-14-cluster-controller-design.md` (commit `4fee9974`), stage 1 only.
 
-**Rulings recorded here (the owner has NOT answered the spec's open questions; these are the spec's own recommendations, taken provisionally — mark each as provisional in code comments where it matters):**
+**Rulings (all five settled by the owner — 1 on 2026-09-14, 2–5 on 2026-09-16; the spec's "Open questions" section carries the wording):**
 
-1. **One controller per k3s CLUSTER only.** A Region is the unit a team is bound to and may hold several clusters; the controller is per cluster, over that cluster's agents. AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so nothing is deployed there. *(Settled by the owner, 2026-09-14.)*
-2. **Stage 3 ships later behind a `Mark::Boot` flag.** Nothing in this plan adds that flag; it is named only so a reader knows stage 1 does not pre-empt it. *(Provisional — spec open question 2.)*
-3. **`OwnerKeys` per-node status entries are out of stage 1 scope.** They are stage 2. Do not touch `keys.rs`. *(Provisional — spec open question 3.)*
-4. **Snapshot retention stays in the agent.** *(Provisional — spec open question 4.)*
-5. **Bench force-delete stays in the agent.** *(Provisional — spec open question 5.)*
+1. **One controller per k3s CLUSTER only.** A Region is the unit a team is bound to and may hold several clusters; the controller is per cluster, over that cluster's agents. AKS has no `Region` CRD, no agents and no `SpaceEnvironment` objects, so nothing is deployed there.
+2. **Stage 3 ships as a hard cutover**, no `Mark::Boot` flag. Nothing in this plan adds a flag.
+3. **`OwnerKeys` gets no per-node status entries**, in any stage: a `Synced` condition plus the `key.install` log line. Do not touch `keys.rs` in stage 1.
+4. **Snapshot retention stays in the agent.**
+5. **Bench force-delete stays in the agent.**
 
 ## Global Constraints
 
