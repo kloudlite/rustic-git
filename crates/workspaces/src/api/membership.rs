@@ -946,6 +946,26 @@ mod tests {
     }
 
 
+    /// The real path: a removal the beat has not stamped yet is judged, stamped by `reconcile_pair`
+    /// and then marked due now — one call, no waiting for the next beat.
+    #[tokio::test]
+    async fn delete_now_stamps_an_unjudged_removal_and_marks_it_due() {
+        let name = crd::bench_id("bob", "acme");
+        let stamped = with_meta(bench("bob", "acme", "paused", None), &name, Some(&chrono::Utc::now().to_rfc3339()), true);
+        let routes = vec![benches(vec![bench("bob", "acme", "full", None)]), benches(vec![stamped]), patch(path("bob", "acme"), bench("bob", "acme", "paused", None))];
+        let (s, rec, _) = setup(routes, &[]);
+        let before = chrono::Utc::now().timestamp();
+        let r = crate::api::removals::delete_now(&s, &who("ann"), "acme", "bob", &confirm("bob", "acme")).await;
+        assert_eq!(r.status(), 202);
+        let sent = rec.sent("PATCH", &path("bob", "acme"));
+        assert!(sent[0]["metadata"]["annotations"][REMOVED_AT].is_string(), "the beat's stamp first: {sent:?}");
+        let last = sent.last().unwrap();
+        assert_eq!(last["metadata"]["annotations"][DELETE_NOW], json!("true"));
+        let after = chrono::DateTime::parse_from_rfc3339(last["metadata"]["annotations"][DELETE_AFTER].as_str().unwrap()).unwrap().timestamp();
+        assert!((before..=chrono::Utc::now().timestamp()).contains(&after), "due now: {last}");
+        assert!(deletes(&rec).is_empty(), "{:?}", deletes(&rec));
+    }
+
     #[test]
     fn removals_lists_stamped_pairs_only() {
         let parse = |v: serde_json::Value| serde_json::from_value::<crd::Bench>(v).unwrap();
