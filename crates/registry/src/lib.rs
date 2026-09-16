@@ -63,6 +63,9 @@ pub fn oci_internal(e: crate::Error) -> Response {
     // A key routed to no owner (`pool::unowned`): the image was never created, whatever read
     // skipped its probe to get here.
     if pool::is_unowned_err(&e) {
+        // Debug for the same reason as `limits::internal`: a scoping bug would present as this
+        // 404 on an image that does exist, and nothing else in the log would say so.
+        tracing::debug!(error = %e, "request.unowned");
         return oci_err(StatusCode::NOT_FOUND, "NAME_UNKNOWN", "no such image");
     }
     tracing::error!(error = %e, "request.failed");
