@@ -88,3 +88,25 @@ test("the fixture catalogue is deploy/slo.md, row for row", async () => {
     ]);
   expect(CATALOGUE).toEqual(want as typeof CATALOGUE);
 });
+
+test("pending removals and cluster history rows have the shape the pages read", () => {
+  const removals = fixtureFor("/admin/owners/removals") as { owner: string; team: string; delete_at: string }[];
+  expect(removals.length).toBeGreaterThan(0);
+  for (const r of removals) {
+    expect(typeof r.owner).toBe("string");
+    expect(typeof r.team).toBe("string");
+    expect(Number.isNaN(Date.parse(r.delete_at))).toBe(false);
+  }
+  // devraj is pending from two teams at once, the case removalKey/deleteNowConfirm exist for.
+  expect(removals.filter((r) => r.owner === "devraj").length).toBeGreaterThan(1);
+
+  const detail = fixtureFor("/admin/settings/clusters/centralindia-k3s") as {
+    metadata: { annotations: Record<string, string> };
+  };
+  const history = JSON.parse(detail.metadata.annotations["kloudlite.io/settings-history"]) as Record<string, unknown>[];
+  expect(history.length).toBeGreaterThan(0);
+  for (const h of history) {
+    expect(typeof h).toBe("object");
+    expect(h).not.toBeNull();
+  }
+});
