@@ -74,15 +74,21 @@ pub(crate) async fn list_teams(State(api): State<Arc<Api>>, headers: axum::http:
     match db.for_user(&user).await {
         // `state` is the caller's own in each team, so the UI can badge a paused one.
         Ok(list) => {
-            let rows: Vec<serde_json::Value> = list
-                .into_iter()
-                .map(|t| {
-                    let state = t.members.iter().find(|m| m.user.eq_ignore_ascii_case(&user)).map(|m| m.state).unwrap_or_default();
-                    let mut v = serde_json::to_value(&t).unwrap_or_default();
-                    v["state"] = serde_json::json!(state);
-                    v
-                })
-                .collect();
+            let mut rows: Vec<serde_json::Value> = Vec::with_capacity(list.len());
+            for t in list {
+                let state = t.members.iter().find(|m| m.user.eq_ignore_ascii_case(&user)).map(|m| m.state).unwrap_or_default();
+                // Never `unwrap_or_default`: that made a failed serialization `Null`, and the next
+                // line promoted it to `{"state":"active"}` — a fabricated team row.
+                let mut v = match serde_json::to_value(&t) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(reason = "list-teams", user = %user, team = %t.slug, error = %e, "directory.read.failed");
+                        return (StatusCode::BAD_GATEWAY, "could not list teams").into_response();
+                    }
+                };
+                v["state"] = serde_json::json!(state);
+                rows.push(v);
+            }
             axum::Json(rows).into_response()
         }
         Err(e) => {

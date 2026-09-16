@@ -5,6 +5,9 @@
 //! The mark is written HERE, by the user-role process, because the admission policy
 //! `kloudlite-removal-stamps-are-the-apis` admits only that process's account to either annotation;
 //! a superadmin therefore uses this `/v1` route with their claim, and the admin process only lists.
+//! The `{email}` segment of the route is spelled that way only to match the directory router's
+//! `/v1/teams/{slug}/members/{email}/*`; everything here treats it as a HANDLE, and an email put
+//! there answers 400 rather than reading as an outage.
 //! The pair is judged once BEFORE the mark, so a removal the beat has not stamped yet is stamped now
 //! (with its audit row) and a member who is back is cleared — a paused or active member always
 //! answers 409. Deletion still obeys the region's `memberRemovalDeletes` (`ClusterSettings`).
@@ -75,7 +78,19 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     // never be marked, and an unreadable directory marks nothing.
     match dir.membership(&team, &owner).await {
         Ok(Judged::Member(_)) => return (StatusCode::CONFLICT, "still a member of the team").into_response(),
-        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "team membership could not be checked").into_response(),
+        // A handle the directory cannot resolve to a person — an email pasted into the `{email}`
+        // path segment (which is a HANDLE, named to match the directory router), or a typo — is a
+        // bad argument, not an outage. Only asked on the error path, so a readable directory costs
+        // nothing extra and an unreadable one still answers 503.
+        Err(e) => {
+            return match dir.owner_kind(&owner).await {
+                Ok(super::OwnerKind::Person) | Err(_) => {
+                    tracing::warn!(%team, %owner, error = %e, "removals.membership.unreadable");
+                    (StatusCode::SERVICE_UNAVAILABLE, "team membership could not be checked").into_response()
+                }
+                Ok(_) => (StatusCode::BAD_REQUEST, format!("name the person by their handle; {owner} is not one")).into_response(),
+            }
+        }
         Ok(Judged::NotMember | Judged::TeamGone) => {}
     }
     membership::reconcile_pair(s, &owner, &team).await;
