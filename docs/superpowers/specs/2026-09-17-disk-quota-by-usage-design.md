@@ -19,26 +19,29 @@ holds; the builder's `BUILDER_CACHE_GB` counts always. `guard_alloc` refuses a c
    snapshots; `btrfs qgroup show -re --raw {pool}/vol/{id}`), plus `status.usedAt: RFC3339`. A
    node that does not hold the volume writes nothing. Status only, through the `/status`
    subresource, as every other observed fact.
-2. **Disk is informational, never enforced** (owner, 2026-09-17 00:35 IST: "there is no need to be
-   strict rule about the storage size. I don't want to keep checking.. it will be inefficient").
-   `quota::usage` diskGb = Σ `status.usedBytes` (0 when unstamped) rounded up to GB; it is shown as
-   `used / budget` everywhere quota is shown and turns amber past the budget. `guard_alloc` no longer
-   has a disk dimension: no create, clone, restore, push or start is refused for disk. The only hard
-   stop is each volume's btrfs ceiling (`spec.storage.quotaGb`), and the node-disk alerts.
-   `BUILDER_CACHE_GB` and per-volume ceilings leave the quota math.
+2. **A limit, checked at allocation moments only** (owner, 2026-09-17 00:35–00:40 IST: "I need to
+   limit. but not like everytime watching whenever I write a file"). `quota::usage` diskGb =
+   Σ `status.usedBytes` (0 when unstamped) rounded up to GB, plus a 1 GiB floor per volume so an
+   empty volume is not free. Enforcement happens ONLY inside the verbs that already gate on quota
+   — `guard_alloc` for create, clone, restore (refuse when `usage + floor > limit`) — and, when
+   `usage > limit`, push, clone, restore and start-of-stopped are refused with the same
+   `quota::refuse` sentence until usage is back under. No write is watched, no pod is stopped, no
+   beat checks anything: the only reads are the stamps the sync beat already left. The per-volume
+   btrfs ceiling (`spec.storage.quotaGb`) stays the runaway stop for one volume.
+   `BUILDER_CACHE_GB` leaves the math (the builder counts its stamp).
 3. **Cost.** The stamp rides the sync beat: only when the beat already cuts a sync point for a
    worktree whose generation moved does the agent read the qgroup (one `btrfs qgroup show` on a
    path it just touched) and patch `status.usedBytes` if it changed by ≥ 1 MiB. Idle volumes cost
    nothing. No extra beat, no polling.
 4. **Wire.** `GET /v1/quota` gains `disk: {usedGb, budgetGb}`; the Volume doc gains `usedBytes`,
-   `usedAt`. `quota.refused` stops testing disk (it refuses on workspaces count instead);
+   `usedAt`. `quota.refused` sets the run owner's disk limit below its stamped usage and asserts a push 409s;
    `quota.view` reads the new shape; new hourly `vol.usage.stamped`: a workspace writes 200 MB,
    within two sync beats `usedBytes ≥ 200 MB`.
 
 ## Rulings folded in
 
-- Ceilings are not reservations and disk is not enforced: the risk of everyone filling at once is
-  the pool's, watched by the node-disk alerts, not the person's.
+- Ceilings are not reservations. Enforcement is at verbs, never at writes; between verbs a person
+  may exceed the limit by filling, and the next verb tells them.
 - No stored counter: usage is still recomputed from the CRDs on every request (the stamps are
   observed facts on the objects, refreshed by the agent), which keeps the "never cached in the api"
   invariant.

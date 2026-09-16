@@ -12,7 +12,7 @@
 - Gates: `cargo clippy --workspace --all-targets -- -D warnings` + touched crates' tests; web
   `bun test` when web touched.
 - Wire names verbatim: `Volume.status.usedBytes`, `Volume.status.usedAt`, `GET /v1/quota` →
-  `disk: {usedGb, budgetGb}`. No floor, no disk refusals.
+  `disk: {usedGb, limitGb}`, `quota::DISK_FLOOR_BYTES` = 1 GiB. Refusals only inside verbs.
 - Status is written only through `/status`; spec untouched. Commits imperative, no attribution.
 
 ### Task 1: the agent stamps usage (bins/agent + crd)
@@ -30,24 +30,24 @@
 
 ### Task 2: quota sums usage (crates/workspaces)
 
-- `quota.rs`: diskGb usage = Σ `used_bytes` (0 when unstamped) over the owner's Volumes, ceil to
-  GB; drop `quotaGb` and `BUILDER_CACHE_GB` as inputs. REMOVE the disk dimension from
-  `guard_alloc` entirely (owner: disk is never enforced); no `guard_fill`. The `Quota` CRD's
-  `diskGb` field is renamed in meaning only ("budget"): keep the field, change the doc comment.
-- `GET /v1/quota` adds `disk: {usedGb, budgetGb}`; Volume doc adds `usedBytes`, `usedAt`.
-- Admin `fold_usage` mirrors. Tests: usage math, no disk refusal on any verb, doc shapes. Fixtures.
-- Commit `Report disk as occupied bytes against a budget and stop enforcing it`.
+- `quota.rs`: diskGb usage = Σ `max(used_bytes, DISK_FLOOR_BYTES = 1 GiB)` over the owner's
+  Volumes, ceil to GB; drop `quotaGb` and `BUILDER_CACHE_GB` as inputs. `guard_alloc` disk check
+  = `usage + floor > limit` (create, clone, restore). New `guard_fill` (usage > limit → same 409
+  sentence) called by push, clone, restore, start-of-stopped ONLY — never a beat, never a pod stop.
+- `GET /v1/quota` adds `disk: {usedGb, limitGb}`; Volume doc adds `usedBytes`, `usedAt`.
+- Admin `fold_usage` mirrors. Tests: usage math, floor, verb refusals when over, doc shapes. Fixtures.
+- Commit `Charge disk quota by occupied bytes, checked only at allocation verbs`.
 
 ### Task 3: web + desktop show used vs ceiling
 
 - Quota views (`web/apps/web` owner quota page, superadmin owners detail; desktop MachinePanel
-  if it shows disk) render `used / budget` (amber past it) and per-volume `used / ceiling`. Tests where the
+  if it shows disk) render `used / limit` (amber past it) and per-volume `used / ceiling`. Tests where the
   siblings have them.
 - Commit `Show occupied disk against the quota, not reserved`.
 
 ### Task 4: probes
 
-- `quota.view` reads the new shape; `quota.refused` refuses on the workspaces COUNT, never disk;
+- `quota.view` reads the new shape; `quota.refused`: lower the run owner's disk limit below its stamped usage, assert a push 409s, restore the limit;
   new hourly `vol.usage.stamped` (write 200 MB in the run's workspace via the
   tool server, wait two sync beats, `usedBytes ≥ 200 MB`). Catalogue + `deploy/slo.md` + fixture.
 - Commit `Probe occupied-bytes quota`.
