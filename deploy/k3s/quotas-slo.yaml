@@ -43,7 +43,7 @@ spec:
   # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
   # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
   # builder — the api writes it with the owner's first workspace, and nothing deletes it.
-  diskGb: 90
+  diskGb: 200  # a bench now holds a volume (10 GB default; the first ones took 50)
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
@@ -115,7 +115,7 @@ spec:
   # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
   # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
   # builder — the api writes it with the owner's first workspace, and nothing deletes it.
-  diskGb: 90
+  diskGb: 200
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
@@ -183,7 +183,7 @@ spec:
   # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
   # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
   # builder — the api writes it with the owner's first workspace, and nothing deletes it.
-  diskGb: 90
+  diskGb: 200
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The
