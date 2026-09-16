@@ -172,3 +172,14 @@ test("a WebSocket frame over the body cap closes the socket", async () => {
     await t.down();
   }
 });
+
+test("a /pty upgrade with a scope that is neither the bench nor a workspace id is refused", async () => {
+  const t = await up();
+  try {
+    const w = new WebSocket(`ws://127.0.0.1:${t.srv.port}/pty?scope=${encodeURIComponent("../x")}`);
+    const e = await new Promise<Error>((r) => w.once("error", r));
+    assert.match(e.message, /400/);
+  } finally {
+    await t.down();
+  }
+});

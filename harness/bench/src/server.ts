@@ -2,6 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
+import { attachBenchShell, readFirstResize, spliceWorkspaceShell } from "./pty.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -23,7 +24,18 @@ function segments(pathname: string): string[] {
   return p;
 }
 
-export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new Idle(() => bench.busy()), maxBody = MAX_BODY): Promise<{ port: number; close(): Promise<void> }> {
+const SCOPE_RE = /^ws-[0-9a-f]{16}$/;
+
+export function serve(
+  bench: Bench,
+  port: number,
+  host = "127.0.0.1",
+  idle = new Idle(() => bench.busy()),
+  maxBody = MAX_BODY,
+  // Tests pass a fake; the real one is loaded lazily so the bench's own routes never pull pi's SDK in.
+  opts: { resolveTools?: (ws: string) => Promise<string> } = {},
+): Promise<{ port: number; close(): Promise<void> }> {
+  const resolveTools = opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
   const body = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
     let s = "";
     let size = 0;
@@ -113,20 +125,39 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
   });
 
   server.on("upgrade", (req, socket, head) => {
-    let p: string[];
+    let p: string[], u: URL;
     try {
-      p = segments(new URL(req.url ?? "/", "http://bench").pathname);
+      u = new URL(req.url ?? "/", "http://bench");
+      p = segments(u.pathname);
     } catch {
       return void socket.destroy();
     }
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
-    if (!rpc && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
+    let scope: string | undefined;
+    if (p.length === 1 && p[0] === "pty") {
+      scope = u.searchParams.get("scope") ?? "";
+      // A scope that is neither the bench nor a workspace id is refused before anything is opened or dialled.
+      if (scope !== "bench" && !SCOPE_RE.test(scope)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+    }
+    if (!rpc && scope === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
       // A connected device holds the bench up whichever socket it holds.
       idle.opened();
       w.on("close", () => idle.closed());
       // An oversized frame (maxPayload) or a torn socket errors before it closes; unheard, it would crash the bench.
       w.on("error", () => undefined);
+      if (scope !== undefined) {
+        // 80x24 is the fallback, never the shell a client that spoke gets.
+        void readFirstResize(w, 2_000).then((first) =>
+          scope === "bench"
+            ? attachBenchShell(w, process.env, first)
+            : resolveTools(scope!).then(
+                (a) => spliceWorkspaceShell(w, a, first),
+                (e: Error) => (w.send(JSON.stringify({ error: e.message })), w.close()),
+              ),
+        );
+        return;
+      }
       if (!rpc) {
         events.add(w);
         w.on("close", () => events.delete(w));
