@@ -70,19 +70,24 @@ Find why the PTY shell printed `test>`: compare `env` inside `/stream/pty` again
 (`ZDOTDIR`, `ENV`, `TERM`, `STARSHIP_CONFIG`, `PATH` to starship); the fix is in
 `crates/ide/src/pty.rs` env or `shell_rc`. A probe assertion already looks for `❯`.
 
-### 6. Where a terminal lives (owner question, 2026-09-16 23:58 IST)
+### 6. Where a terminal lives (owner ruling, 2026-09-16 23:58 IST: "persist in that workspace
+working directory … use that cache")
 
-In the tmux server inside the workspace container: `tmux -L kl` puts its socket under
-`$XDG_RUNTIME_DIR`/`/tmp` of the pod. It survives the laptop closing, the tunnel dropping, the
-desktop restarting, another device attaching, and the bench sleeping (the bench is a different
-pod). It does not survive the workspace pod stopping or moving — no running process does. What
-does survive a pod restart is on disk: zsh history in `HOME_STATE_DIR` (homecache), and, as a
-later step if wanted, `tmux-resurrect` to restore window layout and scrollback TEXT on the next
-start (never the processes). Stated ceiling.
+Live state is the tmux server inside the workspace container (`tmux -L kl`, socket under the pod's
+`/tmp`): it survives the laptop closing, the tunnel dropping, the desktop restarting, another device
+attaching, and the bench sleeping. Saved state lives in the WORKSPACE at `{ws}/.cache/tmux/`
+(`resurrect/` — tmux-resurrect's save files — and `history/`), so it is snapshotted, replicated,
+cloned and restored with the workspace like every other cache (the caches design: everything that
+can be cached goes in the workspace folder). `tmux-resurrect` (from the Nix profile, pinned) saves
+every 60 s (`tmux-continuum` interval) and on detach, and `kl ide serve` runs `restore` once at
+start before serving `/stream/pty`, so after a pod stop, a move, or a clone the same terminal
+names come back with their layout, cwd and scrollback text; the running processes do not (stated
+ceiling, no tool can). The zsh `HISTFILE` also moves into `{ws}/.cache/zsh/history` per this ruling
+(history belongs to the work, not the node), replacing the homecache location.
 
 ## Out of scope
 
-Typeahead (ceiling above). Sharing a tmux session between two people. Terminals in environments.
+Typeahead (ceiling above). Sharing a tmux session between two people. Terminals in environments. Restoring running processes after a pod restart.
 
 ## Security
 
