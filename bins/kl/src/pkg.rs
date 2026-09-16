@@ -68,7 +68,7 @@ pub fn list(api: &Api, id: &str) -> Result<(), String> {
 }
 
 fn patch(api: &Api, id: &str, packages: Vec<String>) -> Result<Value, String> {
-    api.patch_json(&format!("{}/packages", ws_path(id)), &json!({ "packages": packages }))
+    api.patch_json(&ws_path(id), &json!({ "packages": packages }))
 }
 
 pub fn add(api: &Api, id: &str, entries: &[String]) -> Result<(), String> {
