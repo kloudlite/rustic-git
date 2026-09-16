@@ -459,6 +459,9 @@ export type SloStatus = {
   window_long_secs: number;
   last: { ts: string; ok: boolean; ms: number } | null;
   state: "ok" | "burning" | "breaching" | "unknown";
+  /** Samples an acknowledged incident window took out of the attainment window. The raw rows are
+   *  still in `slo_results`; this is what lets the row say so rather than quietly shrinking. */
+  excluded: number;
 };
 
 /** One stage of the journey the probe walks, in journey order, derived from the catalogue's
@@ -503,4 +506,35 @@ export function adminSloRuns(token: string, opts: { suite?: string; limit?: numb
 
 export function adminSloRun(token: string, id: string) {
   return adminCall<SloRunDetail>(`/admin/slo/runs/${encodeURIComponent(id)}`, { method: "GET", token });
+}
+
+/** One acknowledged incident window (`crates/workspaces/src/history/exclusions.rs::Exclusion`).
+ *  An exclusion never deletes a sample — the budget maths anti-joins it, and the SLO row states
+ *  how many samples the windows took out. Empty `slo_ids` means every SLO, which is the shape an
+ *  infrastructure incident has. */
+export type SloExclusion = {
+  id: string;
+  from: string;
+  to: string;
+  slo_ids: string[];
+  note: string;
+  by: string;
+  created: string;
+};
+
+export function adminSloExclusions(token: string) {
+  return adminCall<SloExclusion[]>("/admin/slo/exclusions", { method: "GET", token });
+}
+
+/** The api requires the note and caps the window at seven days (past that it is a policy, not an
+ *  incident); both refusals are 422s whose message the form shows verbatim. */
+export function adminSloExclude(
+  token: string,
+  body: { from: string; to: string; slo_ids: string[]; note: string },
+) {
+  return adminCall<SloExclusion>("/admin/slo/exclusions", { method: "POST", token, body: JSON.stringify(body) });
+}
+
+export function adminSloUnexclude(token: string, id: string) {
+  return adminCall<undefined>(`/admin/slo/exclusions/${encodeURIComponent(id)}`, { method: "DELETE", token });
 }

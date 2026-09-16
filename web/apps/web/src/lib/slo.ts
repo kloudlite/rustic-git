@@ -245,3 +245,30 @@ export function progressOf(tree: StageNode[]): { done: number; total: number } {
   }
   return { done, total };
 }
+
+/** The longest window one exclusion may cover, mirroring `exclusions::MAX_WINDOW_DAYS` — the api
+ *  refuses a longer one anyway; checking here means the form says so before the round trip. */
+export const MAX_EXCLUSION_DAYS = 7;
+
+/** The exclude form's two `datetime-local` fields carry no zone, so they are read as IST — the
+ *  zone the table above them prints and the one the labels name — and leave here as the RFC 3339
+ *  instants the api deserialises. An empty `slo_ids` means every SLO, which is the default.
+ *
+ *  Shaped and validated in one place so the run page's prefilled button and the section's own
+ *  dialog can never disagree about what a window means. */
+export function exclusionPayload(d: { from: string; to: string; sloIds: string[]; note: string }):
+  | { ok: true; body: { from: string; to: string; slo_ids: string[]; note: string } }
+  | { ok: false; message: string } {
+  const note = d.note.trim();
+  if (!note) return { ok: false, message: "note is required" };
+  const from = new Date(`${d.from}:00+05:30`);
+  const to = new Date(`${d.to}:00+05:30`);
+  if (!d.from || !d.to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    return { ok: false, message: "from and to are required" };
+  }
+  if (to.getTime() <= from.getTime()) return { ok: false, message: "to must be after from" };
+  if (to.getTime() - from.getTime() >= MAX_EXCLUSION_DAYS * 86_400_000) {
+    return { ok: false, message: `a window may cover at most ${MAX_EXCLUSION_DAYS} days` };
+  }
+  return { ok: true, body: { from: from.toISOString(), to: to.toISOString(), slo_ids: d.sloIds, note } };
+}

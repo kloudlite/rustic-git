@@ -84,6 +84,12 @@ function Fragmentish({ feature, slos }: { feature: string; slos: SloStatus[] }) 
                 className="whitespace-nowrap"
               />
             )}
+            {/* An acknowledged incident window took samples out of this one. Saying so is what
+                keeps the number honest — nothing was deleted, the raw rows are still counted in
+                `slo_results`, and the window itself is listed under "Excluded windows". */}
+            {s.excluded > 0 && (
+              <span className="mt-0.5 block text-caption text-muted-foreground">{s.excluded} excluded</span>
+            )}
           </Td>
           {/* Each row names its own window: the catalogue mixes per-request SLOs with weekly
               ones, so a single "burn 1 h / 6 h" header would mislabel half the table. */}

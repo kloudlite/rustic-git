@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SloRun, SloStatus, SloStep } from "@/lib/api";
-import { budgetLabel, burnLabel, groupByFeature, jobDone, jobsOf, msLabel, progressOf, runStateLabel, runTone, targetMs, treeOf, windowLabel } from "@/lib/slo";
+import { budgetLabel, exclusionPayload, burnLabel, groupByFeature, jobDone, jobsOf, msLabel, progressOf, runStateLabel, runTone, targetMs, treeOf, windowLabel } from "@/lib/slo";
 
 const slo = (id: string, feature: string, state: SloStatus["state"]): SloStatus => ({
   id,
@@ -18,6 +18,7 @@ const slo = (id: string, feature: string, state: SloStatus["state"]): SloStatus 
   window_long_secs: 21600,
   last: null,
   state,
+  excluded: 0,
 });
 
 const step = (slo_id: string, stage: string): SloStep => ({
@@ -232,5 +233,38 @@ describe("runTone and its words", () => {
     expect(runStateLabel("yielded")).toBe("stood aside");
     expect(runStateLabel("lost")).toBe("lost — no heartbeat for 30 min");
     expect(runStateLabel("passed")).toBe("passed");
+  });
+});
+
+describe("exclusionPayload", () => {
+  const good = { from: "2026-09-15T04:00", to: "2026-09-15T10:00", sloIds: [], note: " apiserver freeze " };
+
+  // The form's fields carry no zone; they mean IST, and what leaves is the instant.
+  test("reads the two fields as IST", () => {
+    const r = exclusionPayload(good);
+    expect(r.ok && r.body.from).toBe("2026-09-14T22:30:00.000Z");
+    expect(r.ok && r.body.to).toBe("2026-09-15T04:30:00.000Z");
+    expect(r.ok && r.body.note).toBe("apiserver freeze");
+    expect(r.ok && r.body.slo_ids).toEqual([]);
+  });
+
+  test("the note is required", () => {
+    expect(exclusionPayload({ ...good, note: "   " })).toEqual({ ok: false, message: "note is required" });
+  });
+
+  test("a window runs forwards", () => {
+    const r = exclusionPayload({ ...good, to: good.from });
+    expect(r.ok).toBe(false);
+  });
+
+  // Past seven days it is a policy, not an incident — the api refuses it too.
+  test("a window is capped", () => {
+    const r = exclusionPayload({ ...good, to: "2026-09-25T04:00" });
+    expect(r.ok).toBe(false);
+  });
+
+  test("selected ids ride along", () => {
+    const r = exclusionPayload({ ...good, sloIds: ["reg.push.ok"] });
+    expect(r.ok && r.body.slo_ids).toEqual(["reg.push.ok"]);
   });
 });

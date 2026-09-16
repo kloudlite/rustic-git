@@ -13,6 +13,7 @@ import type {
   RequestDoc,
   SettingsSchema,
   SignalsResponse,
+  SloExclusion,
   SloJourney,
   SloJourneyStage,
   SloOverview,
@@ -771,6 +772,8 @@ const SLOS: SloStatus[] = CATALOGUE.map(([id, feature, sli, target, suite, ,]) =
     window_long_secs: windows[1],
     last: attainment == null ? null : { ts: mins(3), ok: state !== "breaching", ms },
     state,
+    // The apiserver window below took a morning out of every fast SLO's 30 d attainment.
+    excluded: suite === "fast" ? 96 : 0,
   };
 });
 
@@ -941,6 +944,29 @@ const SLO_DETAILS: Record<string, SloRunDetail> = Object.fromEntries(
 );
 
 
+/** Two acknowledged incident windows: an infrastructure one (every SLO) and a narrow one naming
+ *  the ids it covers — the two shapes the table has to draw. */
+const EXCLUSIONS: SloExclusion[] = [
+  {
+    id: "x-4f2c8ab19de03571",
+    from: "2026-09-14T22:30:00Z",
+    to: "2026-09-15T04:30:00Z",
+    slo_ids: [],
+    note: "k3s apiserver watch-cache freeze; agents frozen (incident, fixed by apiserver restart + agent restarts)",
+    by: "karthik@kloudlite.io",
+    created: "2026-09-15T05:10:00Z",
+  },
+  {
+    id: "x-9b7e1d04c6a2f883",
+    from: "2026-09-10T06:00:00Z",
+    to: "2026-09-10T07:15:00Z",
+    slo_ids: ["reg.push.ok", "reg.manifest.p95"],
+    note: "Cloudflare edge incident in the registry hostname's colo (incident, upstream)",
+    by: "karthik@kloudlite.io",
+    created: "2026-09-10T08:02:00Z",
+  },
+];
+
 const EXACT: Record<string, unknown> = {
   "/admin/overview": OVERVIEW,
   "/admin/owners": OWNERS,
@@ -948,6 +974,7 @@ const EXACT: Record<string, unknown> = {
   "/admin/workloads": WORKLOADS,
   "/admin/monitoring/signals": SIGNALS,
   "/admin/slo": SLO_OVERVIEW,
+  "/admin/slo/exclusions": EXCLUSIONS,
   "/admin/settings/schema": SCHEMA,
   "/admin/settings/central": CENTRAL_SETTINGS,
   // Read through the ordinary api host, not /admin — but the same single funnel, so the same seed.

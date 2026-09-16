@@ -48,6 +48,27 @@ const STAMP_TIME = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-d
 // takes the whole page down over one missing timestamp.
 export const stamp = (ms: number) => (Number.isFinite(ms) ? `${STAMP_DAY.format(ms)}, ${STAMP_TIME.format(ms)} UTC` : "unknown");
 
+/** An incident window, in the zone the people who decide about one actually work in. Pinned to
+ *  IST rather than the viewer's zone for the same hydration reason `stamp` is pinned to UTC, and
+ *  the label says which zone it is so a window is never read as local by accident. */
+const IST_DAY = new Intl.DateTimeFormat("en", { year: "numeric", month: "short", day: "numeric", timeZone: "Asia/Kolkata" });
+const IST_TIME = new Intl.DateTimeFormat("en", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+export const ist = (ms: number) => (Number.isFinite(ms) ? `${IST_DAY.format(ms)}, ${IST_TIME.format(ms)} IST` : "unknown");
+
+/** The same instant as a `datetime-local` value (`YYYY-MM-DDTHH:mm`) in IST, so a prefilled form
+ *  and the table above it read the same. The form states the zone; `exclusionPayload` parses it
+ *  back with an explicit `+05:30`, so a browser in another zone still means the same window. */
+export function istInput(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  const p = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(ms);
+  const at = (t: string) => p.find((x) => x.type === t)?.value ?? "00";
+  return `${at("year")}-${at("month")}-${at("day")}T${at("hour")}:${at("minute")}`;
+}
+
 /** The same, for the unix SECONDS that git objects carry. */
 export const whenSeconds = (seconds: number) => when(seconds * 1000);
 

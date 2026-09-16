@@ -11,6 +11,7 @@ import { KpiStrip, KpiTile } from "../ui/kpi";
 import { EmptyState } from "../ui/data-table";
 import { SloTable } from "./slo-table";
 import { RunsTable } from "./runs-table";
+import { Exclusions } from "./exclusions";
 import { RunTree, Glyph } from "./run-tree";
 import { Pill } from "../ui/pill";
 
@@ -27,7 +28,9 @@ export const metadata: Metadata = { title: "SLOs" };
  *  a placeholder saying so, never a page of zeroes that would read as a probe reporting success. */
 export default async function SloPage({ searchParams }: { searchParams: Promise<{ idle?: string }> }) {
   const { token } = await requireSuperadmin("/superadmin/slo");
-  const o = await api.adminSlo(token);
+  // The second read of the poll, and the cheapest — a handful of rows. Its own failure is not the
+  // page's: a console that cannot list the exclusions still has every number worth reading.
+  const [o, excl] = await Promise.all([api.adminSlo(token), api.adminSloExclusions(token)]);
   if (!o.ok) {
     return (
       <div className="space-y-4">
@@ -126,6 +129,7 @@ export default async function SloPage({ searchParams }: { searchParams: Promise<
       ))}
 
       <SloTable slos={slos} />
+      <Exclusions exclusions={excl.ok ? excl.value : []} slos={slos} />
       <RunsTable runs={runs} />
     </div>
   );

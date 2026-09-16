@@ -265,3 +265,27 @@ export async function deleteRemovalNowAction(team: string, owner: string, confir
     ? { ok: true, notice: "Their data goes within about 7 minutes." }
     : { ok: true, notice: "Marked. Their data will be deleted once deletion is switched on for this platform." };
 }
+
+/** The two writes behind "Excluded windows". Both refusals the api can give — a blank note, a
+ *  window over seven days, an id that is not in the catalogue — come back as a 422 whose message
+ *  the dialog prints verbatim, so the operator reads the api's own rule rather than a guess at it.
+ *  The audit row is the api's (`admin.slo-exclude` / `admin.slo-unexclude`), not this action's. */
+export async function excludeWindowAction(
+  body: { from: string; to: string; slo_ids: string[]; note: string },
+): Promise<WriteResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminSloExclude(token, body);
+  if (!r.ok) return { ok: false, message: r.message };
+  revalidatePath("/superadmin/slo");
+  return { ok: true };
+}
+
+export async function unexcludeWindowAction(id: string): Promise<WriteResult> {
+  const token = await tokenOr();
+  if (typeof token !== "string") return { ok: false, message: token.error };
+  const r = await api.adminSloUnexclude(token, id);
+  if (!r.ok) return { ok: false, message: r.message };
+  revalidatePath("/superadmin/slo");
+  return { ok: true };
+}

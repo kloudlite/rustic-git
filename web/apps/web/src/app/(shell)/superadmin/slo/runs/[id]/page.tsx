@@ -10,6 +10,7 @@ import { Section } from "../../../ui/section";
 import { KpiStrip, KpiTile } from "../../../ui/kpi";
 import { EmptyState } from "../../../ui/data-table";
 import { RunTree } from "../../run-tree";
+import { ExcludeDialog } from "../../exclusions";
 
 export const metadata: Metadata = { title: "Probe run" };
 
@@ -65,6 +66,18 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
         count={tree.length}
         toolbar={
           <div className="flex items-center gap-2">
+            {/* Only on a failed run, and prefilled with ITS window and ITS failed ids: an
+                exclusion acknowledges something that happened here, so the operator never has to
+                retype what the page already knows. */}
+            {run.state === "failed" && (
+              <ExcludeDialog
+                slos={slos}
+                label="Exclude this window…"
+                from={run.started}
+                to={run.finished ?? undefined}
+                sloIds={run.steps.filter((s) => !s.ok && !s.skipped).map((s) => s.slo_id)}
+              />
+            )}
             {hyperdx && (
               <a
                 href={`${hyperdx.replace(/\/$/, "")}/search?q=${encodeURIComponent(search)}`}
