@@ -281,18 +281,19 @@ pub fn validate(r: &RunReport) -> Result<(), String> {
     Ok(())
 }
 
+/// The step the console names as the run's failure: the first that RAN and was not good. A skip
+/// is no sample, so a run whose only non-ok steps are skips failed nowhere (2026-09-16: a skipped
+/// sibling group carried `ctl.fanout`, "not measurable", into the console's "Jobs failed today"
+/// while the real failure two rows down was `team.member.paused`).
+pub fn failed_step(steps: &[StepReport]) -> Option<&StepReport> {
+    steps.iter().find(|s| !s.ok && !s.skipped)
+}
+
 /// Both tables, one report. `updated = now64(3)` is the ReplacingMergeTree version, so the LAST
 /// write of a run wins — which is what makes the probe's running → passed/failed updates work at
 /// all, and what makes a retried report a no-op.
 pub async fn upsert(h: &History, r: &RunReport) -> Result<(), HistoryError> {
-    // The first FAILURE if there is one, else — for a `skipped` run — the first skip, because the
-    // console renders these two columns as "why", and for a run that measured nothing the honest
-    // why is the reason it stopped measuring.
-    let failed = r
-        .steps
-        .iter()
-        .find(|s| !s.ok && !s.skipped)
-        .or_else(|| (r.state == RunState::Skipped).then(|| r.steps.iter().find(|s| s.skipped)).flatten());
+    let failed = failed_step(&r.steps);
     let run = serde_json::json!({
         "run_id": r.run_id,
         "suite": r.suite,

@@ -233,6 +233,22 @@ mod tests {
         assert_eq!(run_state(true, false, &[]), RunState::Passed, "no steps at all is the old behaviour");
     }
 
+    /// The fleet's own case, 2026-09-16: the console named `ctl.fanout` ("not measurable", a skip)
+    /// as the day's failure while the run's real failure was a later step that actually ran.
+    #[test]
+    fn a_skip_is_never_the_failed_step() {
+        use kloudlite_workspaces::history::slo::failed_step;
+        let mut skip = step(false, true, "not measurable");
+        skip.slo_id = "ctl.fanout".into();
+        let mut bad = step(false, false, "still paused");
+        bad.slo_id = "team.member.paused".into();
+        assert_eq!(
+            failed_step(&[skip.clone(), bad]).map(|s| s.slo_id.as_str()),
+            Some("team.member.paused"),
+        );
+        assert!(failed_step(&[skip]).is_none(), "skips alone fail nowhere");
+    }
+
     /// The fleet's own case, 2026-09-12: a roll after stage 2 left one measured step and a pile
     /// of skips, and the run read `passed`. `failed` still wins over `skipped`.
     #[test]
