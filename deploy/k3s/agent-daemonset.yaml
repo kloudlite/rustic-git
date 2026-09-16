@@ -123,7 +123,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-agent:0966580cf793cc891e8c8966bd9c75936d8a2cca@sha256:4f73152a9f957d9d25a93538888cf9016364da7e913316bd111d7e8d2bd8e1d5
+          image: ghcr.io/kloudlite/kloudlite-agent:b29079f6c859e066f87dd6655360c8bbc99da154@sha256:4f73152a9f957d9d25a93538888cf9016364da7e913316bd111d7e8d2bd8e1d5
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -231,10 +231,10 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-workspace:0966580cf793cc891e8c8966bd9c75936d8a2cca@sha256:1f18014a7f746d0290c7457b129d641f2cf0d081224cfafed5b59634d281d52e
+              value: ghcr.io/kloudlite/kloudlite-workspace:b29079f6c859e066f87dd6655360c8bbc99da154@sha256:55cfbdafe52dd8fdb203d21fa30696702a643db6f4c599475613002e6bb62c35
             # The forwarder that stands in for an intercepted service. Pinned by deploy/pin.sh.
             - name: WS_INTERCEPT_PROXY_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-intercept-proxy:0966580cf793cc891e8c8966bd9c75936d8a2cca@sha256:76d59c9b8cacbe508d4fbcd19d7d49e08c266886daaead4ed026c508b7810a9d
+              value: ghcr.io/kloudlite/kloudlite-intercept-proxy:b29079f6c859e066f87dd6655360c8bbc99da154@sha256:76d59c9b8cacbe508d4fbcd19d7d49e08c266886daaead4ed026c508b7810a9d
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
