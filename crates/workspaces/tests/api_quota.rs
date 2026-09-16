@@ -105,12 +105,20 @@ fn ws_obj(id: &str, owner: &str, state: &str) -> Value {
     })
 }
 
+/// `gb` is the volume's own btrfs CEILING. It is not what quota charges any more — the stamp is
+/// (`stamped` below) — and a volume with no stamp charges the 1 GiB floor.
 fn vol_obj(name: &str, owner: &str, gb: u64) -> Value {
     json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
         "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
         "spec": {"owner": owner, "team": "", "nodeName": "node-a", "region": "centralindia", "quotaGb": gb}
     })
+}
+
+/// What the node holding the volume stamped on its last sync beat.
+fn stamped(mut v: Value, gib: u64, at: &str) -> Value {
+    v["status"] = json!({"phase": "ready", "usedBytes": gib << 30, "usedAt": at});
+    v
 }
 
 /// The four listings usage sums, with no `Quota` object anywhere: the compiled-in default table is
@@ -121,7 +129,17 @@ async fn quota_reports_the_default_limits_and_the_computed_use() {
     let routes = vec![
         get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "running"), ws_obj("ws-2", "karthik", "stopped")])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
-        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("ws-1", "karthik", 20), vol_obj("ws-2", "karthik", 30)])),
+        get(
+            format!("{API}/volumes"),
+            list_of(
+                "Volume",
+                vec![
+                    stamped(vol_obj("ws-1", "karthik", 20), 6, "2026-09-17T04:00:00Z"),
+                    // Never stamped: the floor, never free and never its 30 GB ceiling.
+                    vol_obj("ws-2", "karthik", 30),
+                ],
+            ),
+        ),
         get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
@@ -135,8 +153,11 @@ async fn quota_reports_the_default_limits_and_the_computed_use() {
 
     assert_eq!(doc["limit"]["workspaces"], 5, "{doc}");
     assert_eq!(doc["used"]["workspaces"], 2, "a stopped workspace still holds its place");
-    // Detached and attached volumes alike.
-    assert_eq!(doc["used"]["diskGb"], 50);
+    // Detached and attached volumes alike, charged by what they OCCUPY: 6 GiB stamped plus the
+    // unstamped one's 1 GiB floor, never the 20 + 30 GB of ceilings they reserve.
+    assert_eq!(doc["used"]["diskGb"], 7, "{doc}");
+    // The same pair, in the shape the console reads, with the stamp's own "as of" beside it.
+    assert_eq!(doc["disk"], json!({"usedGb": 7, "limitGb": 100, "usedAt": "2026-09-17T04:00:00Z"}), "{doc}");
     // Only the RUNNING one occupies capacity: 4 cores, 8Gi.
     assert_eq!(doc["used"]["cpu"], 4);
     assert_eq!(doc["used"]["memoryGb"], 8);
@@ -176,12 +197,12 @@ async fn a_team_workspace_counts_against_the_team_and_not_its_maker() {
     };
     let team = read("acme").await;
     assert_eq!(team["used"]["workspaces"], 1, "{team}");
-    assert_eq!(team["used"]["diskGb"], 40, "{team}");
+    assert_eq!(team["used"]["diskGb"], 1, "unstamped, so the floor — never the 40 GB ceiling: {team}");
     assert_eq!(team["used"]["snapshots"], 1, "{team}");
     assert_eq!(team["used"]["cpu"], 4, "the running team workspace occupies the team's capacity: {team}");
     let mine = read("karthik").await;
     assert_eq!(mine["used"]["workspaces"], 1, "the maker's own count skips the team's: {mine}");
-    assert_eq!(mine["used"]["diskGb"], 20, "{mine}");
+    assert_eq!(mine["used"]["diskGb"], 1, "{mine}");
     assert_eq!(mine["used"]["snapshots"], 0, "{mine}");
     assert_eq!(mine["used"]["cpu"], 0, "{mine}");
 }
@@ -251,15 +272,16 @@ async fn a_create_at_the_workspace_limit_is_refused_with_the_specs_sentence() {
     assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/workspaces")), "{:?}", s.rec.calls());
 }
 
-/// Disk is its own dimension and it counts DETACHED volumes: 96 of 100 GB used leaves no room for
-/// a 5 GB workspace even though the workspace COUNT is fine.
+/// Disk is its own dimension and it counts DETACHED volumes. It is charged by the STAMP, and what
+/// a create adds is the per-volume floor, never the ceiling it asks for — so a full 100 GB of
+/// occupied bytes is what leaves no room, even though the workspace COUNT is fine.
 #[tokio::test]
 async fn a_create_that_would_cross_the_disk_limit_is_refused_on_disk() {
     let routes = vec![
         region_route(),
         get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
-        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("gone-1", "karthik", 96)])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![stamped(vol_obj("gone-1", "karthik", 120), 100, "2026-09-17T04:00:00Z")])),
         get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
@@ -271,7 +293,55 @@ async fn a_create_that_would_cross_the_disk_limit_is_refused_on_disk() {
         .json(&json!({"name": "big", "region": "centralindia", "quota_gb": 5}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 409);
-    assert_eq!(resp.text().await.unwrap(), "diskGb: 96 of 100 in use; request more under Quota");
+    assert_eq!(resp.text().await.unwrap(), "diskGb: 100 of 100 in use; request more under Quota");
+}
+
+/// The FILL verbs. Nothing watches a write, so a person fills past the limit between verbs and the
+/// next verb is what tells them — in the same sentence, on the same status. Push and start-of-
+/// stopped are the two checked here; clone and restore share `guard_alloc` with create above.
+#[tokio::test]
+async fn push_and_start_are_refused_while_the_owner_is_over_the_disk_limit() {
+    let over = || {
+        vec![
+            get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
+            get(format!("{API}/environments"), list_of("Environment", vec![])),
+            // 101 GiB occupied against the default 100: over, not merely full.
+            get(format!("{API}/volumes"), list_of("Volume", vec![stamped(vol_obj("ws-1", "karthik", 120), 101, "2026-09-17T04:00:00Z")])),
+            get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
+            not_found(format!("{API}/quotas/karthik")),
+            not_found(format!("{API}/quotas/default-user")),
+        ]
+    };
+    let sentence = "diskGb: 101 of 100 in use; request more under Quota";
+
+    let mut running = ws_obj("ws-1", "karthik", "running");
+    running["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"});
+    let mut routes = vec![get(format!("{API}/workspaces/ws-1"), running)];
+    routes.extend(over());
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), sentence);
+    assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/snapshots")), "{:?}", s.rec.calls());
+
+    let mut stopped = ws_obj("ws-1", "karthik", "stopped");
+    stopped["status"] = json!({"phase": "stopped", "nodeName": "node-a", "volumeRef": "ws-1"});
+    let mut routes = vec![get(format!("{API}/workspaces/ws-1"), stopped)];
+    routes.extend(over());
+    let s = server(true, routes).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/v1/workspaces/ws-1/start", s.base))
+        .bearer_auth(token(&s.jwt, "karthik"))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(resp.text().await.unwrap(), sentence);
+    // And nothing was asked to start: a refused start must not leave `desiredState: Running`. A
+    // STOP is checked nowhere — taking away the one verb that frees capacity would trap an owner
+    // who is over — which is why `guard_fill` is called from the start handlers alone.
+    assert!(!s.rec.calls().iter().any(|c| c == &format!("PATCH {API}/workspaces/ws-1")), "{:?}", s.rec.calls());
 }
 
 /// A push at the snapshot limit is refused, and the working copy keeps running — the refusal is

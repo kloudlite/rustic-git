@@ -36,7 +36,14 @@ pub(crate) async fn get_quota(
     let team = scope::is_team(&s, &owner).await;
     let limit = crate::quota::effective(client, &owner, team).await.map_err(kube_err)?;
     let used = crate::quota::usage(client, &owner).await.map_err(kube_err)?;
-    Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used})).into_response())
+    // `disk` states what is OCCUPIED and when it was measured: the stamps ride the sync beat, so
+    // the honest reading is "as of usedAt", never a live figure.
+    let disk = serde_json::json!({
+        "usedGb": used.disk_gb,
+        "limitGb": limit.disk_gb,
+        "usedAt": used.disk_used_at,
+    });
+    Ok(Json(serde_json::json!({"owner": owner, "limit": limit, "used": used, "disk": disk})).into_response())
 }
 
 

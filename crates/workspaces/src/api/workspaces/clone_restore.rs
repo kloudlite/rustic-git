@@ -58,7 +58,7 @@ pub(crate) async fn clone_ws(
     if !may_allocate_for(&s, &owner, &owner_of).await {
         return Err(crate::api::scope::denial(&s, &owner, &owner_of, not_found()).await);
     }
-    guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(quota, &src.spec.resources)).await?;
+    guard_alloc(&s, &owner_of, !src.spec.team.is_empty(), &workspace_cost(&src.spec.resources)).await?;
     // A clone is a second worktree of the SOURCE's own volume, pinned to a cut taken NOW — resolved
     // ONCE, here, so the clone never drifts with the source's later pushes and never lags whatever
     // the last sync beat happened to leave.
@@ -233,7 +233,7 @@ pub(crate) async fn restore_ws(
     if !may_allocate_for(&s, &owner, &owner_of).await {
         return Err(crate::api::scope::denial(&s, &owner, &owner_of, not_found()).await);
     }
-    guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota, &resources)).await?;
+    guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(&resources)).await?;
     let new_id = rid("ws");
     let w = create_workspace(
         c,

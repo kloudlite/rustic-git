@@ -4,6 +4,14 @@
 //! direction that matters — under-counting, which hands out allocation nobody has — and the lists
 //! below are already indexed by the owner label, so the truth costs four list calls. The label is
 //! the INDEX; every sum re-reads `spec.owner`, because a label is a view and never authorization.
+//!
+//! Disk is the one dimension read off STATUS rather than spec: what a volume OCCUPIES is an
+//! observed fact the holding node stamps on the sync beat (`Volume.status.usedBytes`), floored at
+//! 1 GiB per volume — a ceiling was never a reservation (owner ruling 2026-09-17). Still
+//! recomputed per request: the stamps live on the objects, nothing here caches them. The limit is
+//! checked only inside the allocation verbs (`guard_alloc`) and the fill verbs (`guard_fill`) —
+//! never at a write, never on a beat, never by stopping a pod.
+
 
 use crate::crd;
 use crate::crd::VOLUME_LABEL;
@@ -11,15 +19,36 @@ use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
 use std::collections::HashSet;
 use kube::api::{Api, ListParams};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub workspaces: u32,
     pub environments: u32,
     pub snapshots: u32,
+    /// What the owner's volumes OCCUPY, not what their ceilings reserve — the sum of the stamps
+    /// the agent leaves on the sync beat, floored per volume, ceiled to GB (spec §2).
     pub disk_gb: u64,
     pub cpu: u32,
     pub memory_gb: u32,
+    /// The OLDEST `Volume.status.usedAt` among the volumes charged above, so a reader can say
+    /// "as of" rather than implying the number is live. `None` when nothing is stamped yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_used_at: Option<String>,
+}
+
+/// A volume occupies at least this much however empty it reads: an empty volume is not free, and
+/// an unstamped one must not be (owner ruling, spec §2 — 1 GiB per volume).
+pub const DISK_FLOOR_BYTES: u64 = 1 << 30;
+
+/// What one Volume costs its owner. The stamp is an observed fact on the object, refreshed by the
+/// agent; a volume no node has stamped yet reads as the floor, never as free.
+pub fn volume_bytes(v: &crd::Volume) -> u64 {
+    v.status.as_ref().and_then(|st| st.used_bytes).unwrap_or(0).max(DISK_FLOOR_BYTES)
+}
+
+/// Bytes to the whole GB quota is written in. Ceil: a part-used GB is a used GB.
+pub fn disk_gb(bytes: u64) -> u64 {
+    bytes.div_ceil(1 << 30)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +102,16 @@ impl Dim {
 /// and six call sites formatting their own would drift.
 pub fn refuse(dim: Dim, used: u64, limit: u64) -> String {
     format!("{}: {used} of {limit} in use; request more under Quota", dim.word())
+}
+
+/// Already over the disk limit — the check the FILL verbs make (push, clone, restore, and starting
+/// a stopped worktree). Nothing watches a write and no beat checks anything: between verbs a
+/// person may fill past the limit, and the next verb is what tells them (spec §2).
+pub fn over_limit(limit: &crd::QuotaSpec, used: &Usage) -> Result<(), String> {
+    if used.disk_gb > limit.disk_gb {
+        return Err(refuse(Dim::DiskGb, used.disk_gb, limit.disk_gb));
+    }
+    Ok(())
 }
 
 /// Read-then-write, so two concurrent creates can overshoot by one. Accepted deliberately (design
@@ -163,6 +202,9 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // A bench's own Volume is charged HERE, off its workspace, so it is never charged to the team
     // the bench opens in — the volume's labels say `team`, and the volume loop below would.
     let mut bench_volumes: HashSet<String> = HashSet::new();
+    // ...and of those, the ones this owner is the person behind, which are charged here by BYTES
+    // in the volume loop like every other volume — the bench's ceiling is no longer an input.
+    let mut bench_mine: HashSet<String> = HashSet::new();
     for w in ws_own.items.into_iter().chain(ws_team.items) {
         let bench = crd::is_bench(&w);
         if bench {
@@ -173,14 +215,18 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
         // A bench belongs to its PERSON however it is labelled: `spec.team` names where it opens,
         // not who pays for it. Nobody creates a bench, so it cannot spend a team's ceilings.
         let charged_here = if bench { w.spec.owner == owner } else { charged(&w.spec.owner, &w.spec.team) };
+        if bench && charged_here {
+            if let Some(v) = w.status.as_ref().and_then(|st| st.volume_ref.clone()) {
+                bench_mine.insert(v);
+            }
+        }
         if !charged_here || !seen.insert(format!("ws/{}", w.name_any())) {
             continue;
         }
         if bench {
             // Decision 3, as amended: a bench has a volume now, so its DISK is the owner's from the
-            // moment it exists; cpu and memory only while a pod is actually wanted — asleep,
-            // stopped or paused costs nothing.
-            u.disk_gb += w.spec.storage.as_ref().map_or(0, |st| st.quota_gb);
+            // moment it exists (charged off that Volume's own stamp); cpu and memory only while a
+            // pod is actually wanted — asleep, stopped or paused costs nothing.
             let idle = w.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
             if crd::wants_pod(&w) && !idle {
                 // BOTH containers: a bench pod runs the workspace one and the bench one.
@@ -222,17 +268,31 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // the owner's disk, and deleting the snapshots is how they get it back.
     let mut charged_volumes: Vec<String> = Vec::new();
     let mut known_volumes: HashSet<String> = HashSet::new();
+    let mut disk_bytes = 0u64;
     for v in vol_own.items.into_iter().chain(vol_team.items) {
-        known_volumes.insert(v.name_any());
-        if bench_volumes.contains(&v.name_any()) {
+        let name = v.name_any();
+        known_volumes.insert(name.clone());
+        // A bench's volume is charged to the PERSON behind the bench, never through the team
+        // label the volume carries.
+        let charged_here = if bench_volumes.contains(&name) {
+            bench_mine.contains(&name)
+        } else {
+            charged(&v.spec.owner, &v.spec.team)
+        };
+        if !charged_here || !seen.insert(format!("vol/{name}")) {
             continue;
         }
-        if !charged(&v.spec.owner, &v.spec.team) || !seen.insert(format!("vol/{}", v.name_any())) {
-            continue;
-        }
-        u.disk_gb += v.spec.quota_gb;
-        charged_volumes.push(v.name_any());
+        disk_bytes += volume_bytes(&v);
+        let at = v.status.as_ref().and_then(|st| st.used_at.clone());
+        // The OLDEST stamp: the sum is only as fresh as its stalest term, and saying so is the
+        // whole point of reporting "as of" beside it.
+        u.disk_used_at = match (u.disk_used_at.take(), at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        charged_volumes.push(name);
     }
+    u.disk_gb = disk_gb(disk_bytes);
     // A snapshot follows its volume; one whose volume is in no listing at all (a fixture, a volume
     // mid-collection) falls back to its own `spec.owner`, the rule this had before teams. A volume
     // that IS listed and charged to someone else takes its snapshots with it.
@@ -331,8 +391,8 @@ mod tests {
         const SERVICES_PER_ENV: u64 = 4;
         for team in [false, true] {
             let q = crd::default_quota(team);
-            let ws = crate::api::workspace_cost(0, &crd::PodResources::default());
-            let env = crate::api::environment_cost(0, SERVICES_PER_ENV as usize);
+            let ws = crate::api::workspace_cost(&crd::PodResources::default());
+            let env = crate::api::environment_cost(SERVICES_PER_ENV as usize);
             for dim in [Dim::Cpu, Dim::MemoryGb] {
                 let of = |cost: &[(Dim, u64)]| cost.iter().find(|(d, _)| *d == dim).map_or(0, |(_, n)| *n);
                     // `+ of(&ws)`: one builder per owner, at `PodResources::default()` — the same
@@ -342,6 +402,49 @@ mod tests {
                 assert!(have >= need, "{dim:?}: {have} does not cover {need} for team={team}");
             }
         }
+    }
+
+    fn vol(used: Option<u64>) -> crd::Volume {
+        let spec = crd::VolumeSpec {
+            owner: "alice".into(),
+            team: String::new(),
+            node_name: "node-a".into(),
+            region: "r1".into(),
+            quota_gb: 50,
+            replicas: 1,
+            source: None,
+            restore_to: None,
+        };
+        let mut v = crd::Volume::new("v", spec);
+        if let Some(b) = used {
+            v.status = Some(crd::VolumeStatus { used_bytes: Some(b), ..Default::default() });
+        }
+        v
+    }
+
+    /// Occupied, never reserved — and never free. An unstamped volume is the floor rather than
+    /// zero: "no node has measured it yet" must not read as "it holds nothing".
+    #[test]
+    fn a_volume_costs_its_stamp_but_never_less_than_the_floor() {
+        assert_eq!(volume_bytes(&vol(None)), DISK_FLOOR_BYTES);
+        assert_eq!(volume_bytes(&vol(Some(0))), DISK_FLOOR_BYTES);
+        assert_eq!(volume_bytes(&vol(Some(512 << 20))), DISK_FLOOR_BYTES, "half a gig still costs the floor");
+        assert_eq!(volume_bytes(&vol(Some(7 << 30))), 7 << 30);
+        // Part of a GB is a used GB, and three floors are three GB, not one.
+        assert_eq!(disk_gb(0), 0);
+        assert_eq!(disk_gb((1 << 30) + 1), 2);
+        assert_eq!(disk_gb(3 * DISK_FLOOR_BYTES), 3);
+    }
+
+    /// The fill check: at the limit is fine, past it is the same sentence `check` gives.
+    #[test]
+    fn the_fill_check_refuses_only_past_the_limit() {
+        let limit = crd::QuotaSpec { disk_gb: 100, ..crd::default_quota(false) };
+        assert!(over_limit(&limit, &Usage { disk_gb: 100, ..Default::default() }).is_ok());
+        assert_eq!(
+            over_limit(&limit, &Usage { disk_gb: 101, ..Default::default() }).unwrap_err(),
+            "diskGb: 101 of 100 in use; request more under Quota"
+        );
     }
 
     #[test]

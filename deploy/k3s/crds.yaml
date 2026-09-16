@@ -1892,7 +1892,7 @@
                         "type": "integer"
                       },
                       "diskGb": {
-                        "description": "Sum of `Volume.spec.quotaGb` over every volume of this owner, DETACHED INCLUDED: disk kept\nby snapshots after a working copy is deleted is still the owner's disk.",
+                        "description": "Disk the owner may OCCUPY: the sum of `Volume.status.usedBytes` (a 1 GiB floor per volume)\nover every volume of this owner, DETACHED INCLUDED — disk kept by snapshots after a working\ncopy is deleted is still the owner's disk. Since 2026-09-17 this is what is occupied, not\nwhat the per-volume ceilings reserve, and it is checked only at the allocation verbs\n(create, clone, restore, push, start-of-stopped) — never at a write, never on a beat.",
                         "format": "uint64",
                         "minimum": 0.0,
                         "type": "integer"

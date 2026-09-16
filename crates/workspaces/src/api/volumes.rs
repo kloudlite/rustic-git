@@ -55,6 +55,22 @@ pub(crate) struct VolumeSummary {
     snapshots: u64,
     /// `readyAt` of the newest push, RFC3339; `None` while the only push is still being cut.
     last_push_at: Option<String>,
+    /// What the volume OCCUPIES, as the node holding it last stamped it — what quota charges for.
+    /// `None` until a sync beat has stamped it, which is not the same as empty.
+    ///
+    /// camelCase on the wire, unlike the older fields above: the stamp's name is `usedBytes`
+    /// everywhere else (CRD status, `GET /v1/quota`), and one name per fact beats consistency
+    /// with a snake_case doc nobody can rename without breaking the web.
+    #[serde(rename = "usedBytes")]
+    used_bytes: Option<u64>,
+    /// When that stamp was taken, RFC3339. The bytes ride the sync beat, so every reader says
+    /// "as of" rather than implying the number is live.
+    #[serde(rename = "usedAt")]
+    used_at: Option<String>,
+    /// The volume's own btrfs ceiling (`spec.storage.quotaGb`) — the runaway stop for this one
+    /// volume, never a reservation against the owner's quota.
+    #[serde(rename = "quotaGb")]
+    quota_gb: Option<u64>,
 }
 
 /// A live Workspace/Environment, reduced to what the volume routes need of it.
@@ -268,6 +284,16 @@ pub(crate) async fn volumes_for(
     // The cluster answers only "does a parent still exist", so this degrades the page rather than
     // emptying it. `None` is an unanswered question, never an answer of "nothing": labelling every
     // row "source deleted" during a blip is the failure mode this distinction exists to prevent.
+    // The `Volume` objects themselves, for the stamp quota now charges by. One list, not one GET
+    // per row, and a listing the cluster could not answer just leaves the columns empty.
+    let vols: BTreeMap<String, crd::Volume> = match Api::<crd::Volume>::all(kube(s)?.clone())
+        .list(&ListParams::default().labels(&owner_set_selector(owners)))
+        .await
+    {
+        Ok(l) => l.items.into_iter().map(|v| (v.name_any(), v)).collect(),
+        Err(_) => BTreeMap::new(),
+    };
+
     let live = live_parents(s, owners).await;
     let known = live.is_some();
     let live = live.unwrap_or_default();
@@ -316,6 +342,9 @@ pub(crate) async fn volumes_for(
             latest_ms: rows.iter().filter_map(|sn| sn.creation_timestamp()).map(|t| t.0.as_millisecond()).max(),
             snapshots: pushes.len() as u64,
             last_push_at: pushes.iter().filter_map(|sn| sn.status.as_ref()?.ready_at.clone()).max(),
+            used_bytes: vols.get(&name).and_then(|v| v.status.as_ref()?.used_bytes),
+            used_at: vols.get(&name).and_then(|v| v.status.as_ref()?.used_at.clone()),
+            quota_gb: vols.get(&name).map(|v| v.spec.quota_gb),
             name,
         });
     }

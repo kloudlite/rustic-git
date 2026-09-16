@@ -34,8 +34,11 @@ pub struct QuotaSpec {
     /// Snapshots — pushes, not sync points. The agent's own transient cuts are its business and
     /// are never anyone's allocation.
     pub snapshots: u32,
-    /// Sum of `Volume.spec.quotaGb` over every volume of this owner, DETACHED INCLUDED: disk kept
-    /// by snapshots after a working copy is deleted is still the owner's disk.
+    /// Disk the owner may OCCUPY: the sum of `Volume.status.usedBytes` (a 1 GiB floor per volume)
+    /// over every volume of this owner, DETACHED INCLUDED — disk kept by snapshots after a working
+    /// copy is deleted is still the owner's disk. Since 2026-09-17 this is what is occupied, not
+    /// what the per-volume ceilings reserve, and it is checked only at the allocation verbs
+    /// (create, clone, restore, push, start-of-stopped) — never at a write, never on a beat.
     pub disk_gb: u64,
     /// Whole cores, summed over live working copies' limits.
     pub cpu: u32,
@@ -81,7 +84,7 @@ pub const DEFAULT_TEAM_QUOTA: &str = "default-team";
 /// definite ceiling — a missing fallback object must not mean "unlimited".
 ///
 /// `cpu` and `memoryGb` are DERIVED from the count dimensions, never picked independently: quota
-/// charges the LIMIT (`workspace_cost`, `environment_cost`), so a ceiling must cover
+/// charges the cpu/memory LIMIT (`workspace_cost`, `environment_cost`), so a ceiling must cover
 /// `workspaces x PodResources::default()` plus `environments x 4 services x env_unit_resources()`
 /// (four being the environment size we plan for) plus one builder per owner at
 /// `PodResources::default()` (the hidden `bld-{slug}` environment, whose buildkit service carries

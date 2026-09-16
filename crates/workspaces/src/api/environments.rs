@@ -7,7 +7,7 @@ use super::workspaces::{
     check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
 };
-use super::{caller_for, check_region, environment_cost, guard_alloc, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
+use super::{caller_for, check_region, environment_cost, guard_alloc, guard_fill, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
 use crate::crd::{self, DesiredState, VolumeSource};
 use crate::k8s::labels;
 use crate::model::*;
@@ -121,7 +121,7 @@ pub(crate) async fn create_env(
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
     let quota_gb = clamp_quota(&s, body.quota_gb);
-    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(quota_gb, body.services.len())).await?;
+    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(body.services.len())).await?;
     let id = rid("env");
     let e = create_environment(
         c,
@@ -246,7 +246,7 @@ pub(crate) async fn restore_env(
         (None, None) => default_env_quota(),
     };
     let c = kube(&s)?;
-    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(quota, services.len())).await?;
+    guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(services.len())).await?;
     // The source environment may be long gone; the Volume holding the bytes still names its region.
     let region = match body.region {
         Some(r) => r,
@@ -360,6 +360,8 @@ pub(crate) async fn start_env(
     if e.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("environment"));
     }
+    // Same as `start_ws`: a start resumes filling and is checked; a stop never is.
+    guard_fill(&s, &e.spec.owner, e.spec.owner != caller_id.name).await?;
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Running).await?;
     let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
     Ok((StatusCode::ACCEPTED, Json(env_doc(&e, &pushed))).into_response())
@@ -479,7 +481,7 @@ pub(crate) async fn clone_env(
     if !may_allocate_for(&s, &caller_id, &src.spec.owner).await {
         return Err(denial(&s, &caller_id, &src.spec.owner, not_found()).await);
     }
-    guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(quota, src.spec.services.len())).await?;
+    guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(src.spec.services.len())).await?;
     let e = create_environment(
         c,
         &new_id,

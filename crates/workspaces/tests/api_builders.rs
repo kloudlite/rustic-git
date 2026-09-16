@@ -478,11 +478,14 @@ async fn the_builder_costs_disk_and_capacity_but_is_not_an_environment() {
                  "services": [{"name": "db", "image": "mongo", "command": [], "env": {}, "mounts": [], "ports": []}],
                  "storage": {"quotaGb": 20}, "desiredState": "running"},
     });
-    let vol = |name: &str, gb: u64| {
+    // `gb` is the ceiling; `gib` is what the node stamped as occupied, which is what quota
+    // charges — the builder's cache counts its stamp like any other volume.
+    let vol = |name: &str, gb: u64, gib: u64| {
         json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
                "metadata": {"name": name, "labels": {"kloudlite.io/owner": "karthik"}},
                "spec": {"owner": "karthik", "team": "", "nodeName": "node-a", "region": "centralindia",
-                        "quotaGb": gb, "replicas": 1}})
+                        "quotaGb": gb, "replicas": 1},
+               "status": {"phase": "ready", "usedBytes": gib << 30, "usedAt": "2026-09-17T04:00:00Z"}})
     };
     let running = |desired: &str| {
         let mut b = builder_obj("karthik", desired, true);
@@ -494,7 +497,7 @@ async fn the_builder_costs_disk_and_capacity_but_is_not_an_environment() {
         let s = server(vec![
             empty("Workspace", "workspaces"),
             list_of("Environment", "environments", vec![real_env.clone(), running(desired)]),
-            list_of("Volume", "volumes", vec![vol("env-1", 20), vol("bld-karthik", 50)]),
+            list_of("Volume", "volumes", vec![vol("env-1", 20, 4), vol("bld-karthik", 50, 12)]),
             empty("Snapshot", "snapshots"),
             kloudlite_workspaces::kube_test::not_found(format!("{API}/quotas/karthik")),
             kloudlite_workspaces::kube_test::not_found(format!("{API}/quotas/default-user")),
@@ -511,7 +514,7 @@ async fn the_builder_costs_disk_and_capacity_but_is_not_an_environment() {
         assert_eq!(st, 200, "{body}");
         let used = &body["used"];
         assert_eq!(used["environments"], 1, "the builder is nobody's environment: {used}");
-        assert_eq!(used["diskGb"], 70, "its cache is still the owner's disk: {used}");
+        assert_eq!(used["diskGb"], 16, "its cache is still the owner's disk, by what it holds: {used}");
         assert_eq!(used["cpu"], cpu, "desiredState {desired}: {used}");
         assert_eq!(used["memoryGb"], mem, "desiredState {desired}: {used}");
     }

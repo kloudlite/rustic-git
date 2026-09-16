@@ -331,8 +331,7 @@ pub(super) async fn allocate_and_create(
     spec: crd::WorkspaceSpec,
 ) -> Result<crd::Workspace, Response> {
     let c = kube(s)?;
-    let quota_gb = spec.storage.as_ref().map_or(0, |st| st.quota_gb);
-    let mut cost = workspace_cost(quota_gb, &spec.resources);
+    let mut cost = workspace_cost(&spec.resources);
     // A bench is charged to the PERSON, never the team it opens in, and never against the
     // `workspaces` count: nobody asked for it as one of their workspaces, so spending that ceiling
     // on it would take a workspace away from every person who joins a team.
@@ -630,6 +629,10 @@ pub(crate) async fn start_ws(
     if w.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("workspace"));
     }
+    // Starting a stopped worktree resumes filling, so it is one of the four moments the disk
+    // limit is checked at. Stopping is never refused.
+    let owner_of = if w.spec.team.is_empty() { w.spec.owner.clone() } else { w.spec.team.clone() };
+    super::guard_fill(&s, &owner_of, !w.spec.team.is_empty()).await?;
     set_desired::<crd::Workspace>(kube(&s)?, &id, DesiredState::Running).await?;
     Ok(StatusCode::ACCEPTED.into_response())
 }

@@ -487,6 +487,12 @@ pub(crate) async fn guard_alloc(
     // computed from the CRDs on every request — concurrency is not a cache.
     let (limit, used) = futures::try_join!(crate::quota::effective(c, owner, team), crate::quota::usage(c, owner))
         .map_err(kube_err)?;
+    // Over the disk limit already — the fill check every allocating verb makes too, since a
+    // create that adds a volume to an owner who is over is exactly what the limit is for.
+    if let Err(msg) = crate::quota::over_limit(&limit, &used) {
+        metrics::counter!("quota_refusals_total", "dimension" => crate::quota::Dim::DiskGb.word()).increment(1);
+        return Err((StatusCode::CONFLICT, msg).into_response());
+    }
     for (dim, adding) in want {
         if let Err(msg) = crate::quota::check(*dim, &limit, &used, *adding) {
             // The single gate every create/restore/clone/push passes through, so one counter here
@@ -499,6 +505,23 @@ pub(crate) async fn guard_alloc(
     Ok(())
 }
 
+/// The fill check on its own, for the verbs that bring no new allocation but do resume filling:
+/// starting a stopped worktree. Everything else that fills — push, clone, restore — already
+/// passes `guard_alloc`, which makes the same check.
+///
+/// Deliberately NOT called from any beat, any stop, or any write path: the limit is checked at
+/// verbs and nowhere else (spec §2), so nobody's pod is ever stopped for being over.
+pub(crate) async fn guard_fill(s: &ApiState, owner: &str, team: bool) -> Result<(), Response> {
+    let c = kube(s)?;
+    let (limit, used) = futures::try_join!(crate::quota::effective(c, owner, team), crate::quota::usage(c, owner))
+        .map_err(kube_err)?;
+    if let Err(msg) = crate::quota::over_limit(&limit, &used) {
+        metrics::counter!("quota_refusals_total", "dimension" => crate::quota::Dim::DiskGb.word()).increment(1);
+        return Err((StatusCode::CONFLICT, msg).into_response());
+    }
+    Ok(())
+}
+
 // The design doc also lists "changing a volume's quota" and "changing resources". Neither has a
 // route today (`/v1` has no resize and no resources patch — `patch_ws_packages` is packages only),
 // so there is nothing to gate. A future resize route calls `guard_alloc` with the DELTA, never a
@@ -506,11 +529,15 @@ pub(crate) async fn guard_alloc(
 
 
 /// What a new workspace costs, from the values the handler has already resolved and clamped.
-pub(crate) fn workspace_cost(quota_gb: u64, res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
-    use crate::quota::{mebibytes, millicores, Dim};
+///
+/// Disk is the per-volume FLOOR, not the volume's ceiling: quota charges what is occupied, and a
+/// brand-new volume occupies the floor (spec §2). The ceiling stays the runaway stop for one
+/// volume, never a reservation against the owner's limit.
+pub(crate) fn workspace_cost(res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::{disk_gb, mebibytes, millicores, Dim, DISK_FLOOR_BYTES};
     vec![
         (Dim::Workspaces, 1),
-        (Dim::DiskGb, quota_gb),
+        (Dim::DiskGb, disk_gb(DISK_FLOOR_BYTES)),
         (Dim::Cpu, millicores(&res.cpu_limit).div_ceil(1000)),
         (Dim::MemoryGb, mebibytes(&res.memory_limit).div_ceil(1024)),
     ]
@@ -518,13 +545,13 @@ pub(crate) fn workspace_cost(quota_gb: u64, res: &crd::PodResources) -> Vec<(cra
 
 
 /// The same for an environment: every service gets the env unit, one definition in `k8s`.
-pub(crate) fn environment_cost(quota_gb: u64, services: usize) -> Vec<(crate::quota::Dim, u64)> {
-    use crate::quota::{mebibytes, millicores, Dim};
+pub(crate) fn environment_cost(services: usize) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::{disk_gb, mebibytes, millicores, Dim, DISK_FLOOR_BYTES};
     let unit = crate::k8s::env_unit_resources();
     let n = services as u64;
     vec![
         (Dim::Environments, 1),
-        (Dim::DiskGb, quota_gb),
+        (Dim::DiskGb, disk_gb(DISK_FLOOR_BYTES)),
         (Dim::Cpu, (n * millicores(&unit.cpu_limit)).div_ceil(1000)),
         (Dim::MemoryGb, (n * mebibytes(&unit.memory_limit)).div_ceil(1024)),
     ]

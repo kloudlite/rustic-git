@@ -616,6 +616,8 @@ async fn a_plain_stopped_workspace_still_starts() {
     let routes = vec![
         get(format!("{API}/workspaces/ws-1"), w.clone()),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: w },
+        // A start is a FILL verb: it reads the owner's usage before it asks for a pod.
+        get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");

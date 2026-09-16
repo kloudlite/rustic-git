@@ -112,6 +112,11 @@ fn fold_usage(
     // A bench's Volume is charged off its workspace below, never in the volume loop, which would
     // bill the team the bench opens in (`quota::usage` splits it the same way).
     let mut bench_volumes: std::collections::HashSet<String> = Default::default();
+    // Volume -> the person charged for it, for the benches: their bytes are billed in the volume
+    // loop like everyone else's, just never through the team label the volume carries.
+    let mut bench_owner: HashMap<String, String> = HashMap::new();
+    // Occupied bytes and the oldest stamp behind them, per owner — `quota::usage`'s disk rule.
+    let mut bytes: HashMap<String, u64> = HashMap::new();
     for w in ws {
         // A bench belongs to the PERSON however it is labelled, and spends no `workspaces` slot:
         // nobody creates one. Same rules as `quota::usage` — a number here that differs from the
@@ -121,11 +126,11 @@ fn fold_usage(
         let u = out.entry(key.clone()).or_default();
         if bench {
             if let Some(v) = w.status.as_ref().and_then(|st| st.volume_ref.clone()) {
-                bench_volumes.insert(v);
+                bench_volumes.insert(v.clone());
+                bench_owner.insert(v, key.clone());
             }
-            // Disk from the moment it exists; cpu and memory only while a pod is actually wanted,
-            // and then for BOTH containers of the bench pod.
-            u.disk_gb += w.spec.storage.as_ref().map_or(0, |st| st.quota_gb);
+            // Disk from the moment it exists, off that Volume's own stamp; cpu and memory only
+            // while a pod is actually wanted, and then for BOTH containers of the bench pod.
             let idle = w.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
             if crd::wants_pod(w) && !idle {
                 let (c, m) = crate::model::bench_pod_capacity(&w.spec.resources);
@@ -155,12 +160,20 @@ fn fold_usage(
     }
     let mut volume_charge: HashMap<String, String> = HashMap::new();
     for v in vols {
-        if bench_volumes.contains(&kube::ResourceExt::name_any(&**v)) {
-            continue;
-        }
-        let key = charged(&v.spec.owner, &v.spec.team);
-        out.entry(key.clone()).or_default().disk_gb += v.spec.quota_gb;
-        volume_charge.insert(kube::ResourceExt::name_any(&**v), key);
+        let name = kube::ResourceExt::name_any(&**v);
+        let key = match bench_owner.get(&name) {
+            Some(person) => person.clone(),
+            None if bench_volumes.contains(&name) => continue,
+            None => charged(&v.spec.owner, &v.spec.team),
+        };
+        *bytes.entry(key.clone()).or_default() += crate::quota::volume_bytes(v);
+        let u = out.entry(key.clone()).or_default();
+        let at = v.status.as_ref().and_then(|st| st.used_at.clone());
+        u.disk_used_at = match (u.disk_used_at.take(), at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        volume_charge.insert(name, key);
     }
     for s in snaps {
         if s.is_snapshot() {
@@ -169,6 +182,7 @@ fn fold_usage(
         }
     }
     for (owner, u) in out.iter_mut() {
+        u.disk_gb = crate::quota::disk_gb(bytes.get(owner).copied().unwrap_or(0));
         u.cpu = millis.get(owner).copied().unwrap_or(0).div_ceil(1000) as u32;
         u.memory_gb = mib.get(owner).copied().unwrap_or(0).div_ceil(1024) as u32;
     }

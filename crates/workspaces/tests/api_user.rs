@@ -608,11 +608,15 @@ async fn restore_of_an_unknown_or_foreign_snapshot_is_not_found() {
 
 #[tokio::test]
 async fn start_and_stop_patch_the_desired_state() {
-    let routes = vec![
-        no_snapshots(),
+    // A start is a FILL verb — it reads the owner's usage before asking for a pod — so the quota
+    // listings are mocked here too. A stop is checked nowhere.
+    let mut routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        no_workspaces(),
+        no_environments(),
     ];
+    routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let client = reqwest::Client::new();
@@ -664,11 +668,15 @@ async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
 
     // A healthy workspace: same route, no `NodeDead` condition — no warning key at all, but the
     // body still parses as JSON (a body-less 202 throws in the web client's `res.json()`).
-    let routes = vec![
-        no_snapshots(),
+    // A start is a FILL verb — it reads the owner's usage before asking for a pod — so the quota
+    // listings are mocked here too. A stop is checked nowhere.
+    let mut routes = vec![
         get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
         Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        no_workspaces(),
+        no_environments(),
     ];
+    routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
