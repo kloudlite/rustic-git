@@ -486,7 +486,10 @@ async fn shell_workspace(c: &mut Ctx) {
         Ok(id) => id,
         Err(why) => return c.skip(SHELL_WS, &why),
     };
-    let want = kloudlite_workspaces::k8s::workspace_dir(&ws);
+    // The directory is named by the workspace's NAME, not its id (`workspace_dir(name)`), and the
+    // probe holds the id — so the judgement is "pwd printed a path under the workspaces root",
+    // which `/bin/sh` at `$HOME` would not (2026-09-16 21:19 hourly: the id-built path never matched).
+    let want = format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR);
     c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
