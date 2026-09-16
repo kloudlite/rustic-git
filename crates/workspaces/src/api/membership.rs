@@ -452,6 +452,15 @@ mod tests {
         async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
             Err("no".into())
         }
+        async fn owner_kind(&self, slug: &str) -> Result<crate::api::OwnerKind, String> {
+            use crate::api::OwnerKind;
+            match slug {
+                "blind" => Err("directory unreachable".into()),
+                s if s.contains('@') => Ok(OwnerKind::Gone),
+                _ => Ok(OwnerKind::Person),
+            }
+        }
+
         async fn is_superadmin(&self, u: &str) -> Result<bool, String> {
             match u {
                 "root" => Ok(true),
@@ -463,6 +472,9 @@ mod tests {
             self.asked.fetch_add(1, Ordering::SeqCst);
             match (team, user) {
                 ("down", _) => Err("directory unreachable".into()),
+                // What the real directory answers for an argument that is no handle (an email).
+                (_, u) if u.contains('@') => Err(format!("no person {u}")),
+                (_, "blind") => Err("directory unreachable".into()),
                 ("gone", _) => Ok(Judged::TeamGone),
                 (_, "paula") => Ok(Judged::Member(MemberState::Paused)),
                 ("acme", "alice") => Ok(Judged::Member(MemberState::Active)),
@@ -890,6 +902,19 @@ mod tests {
         let r = crate::api::removals::delete_now(&s, &admin, "down", "bob", &confirm("bob", "down")).await;
         assert_eq!(r.status(), 503);
         assert!(rec.calls().is_empty(), "{:?}", rec.calls());
+    }
+
+    /// The path segment is a handle: an email resolves to no person, which is a bad argument, while
+    /// a directory that cannot be read is still an outage.
+    #[tokio::test]
+    async fn delete_now_refuses_an_email_with_400_and_an_unreadable_directory_with_503() {
+        use crate::api::removals::delete_now;
+        let (s, rec, _) = setup(vec![], &[]);
+        let r = delete_now(&s, &who("ann"), "acme", "bob@x.io", &confirm("bob@x.io", "acme")).await;
+        assert_eq!(r.status(), 400);
+        let r = delete_now(&s, &who("ann"), "acme", "blind", &confirm("blind", "acme")).await;
+        assert_eq!(r.status(), 503, "membership readable? no — and the owner cannot be classified either");
+        assert!(rec.calls().is_empty(), "nothing written either way: {:?}", rec.calls());
     }
 
     #[tokio::test]
