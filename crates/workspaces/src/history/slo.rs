@@ -71,6 +71,9 @@ impl RunState {
             "failed" => RunState::Failed,
             "yielded" => RunState::Yielded,
             "skipped" => RunState::Skipped,
+            // Never stored — `RUN_COLS` computes it over a stale heartbeat — but it reaches this
+            // parser like any other state, and without the arm it read back as `running` again.
+            "lost" => RunState::Lost,
             _ => RunState::Running,
         }
     }
@@ -727,6 +730,32 @@ mod tests {
         assert!(steps.contains("WHERE run_id = 'fast-42' ORDER BY ts"));
         // Anything that is not an identifier never reaches a statement at all.
         assert!(run_steps_sql("fast-42' OR 1=1 --").is_none());
+    }
+
+    /// The `lost` the SELECT computes has to survive the parser: without its arm it fell to the
+    /// `running` default, and every abandoned run read as in flight again.
+    #[test]
+    fn a_lost_row_parses_as_lost() {
+        assert_eq!(RunState::parse(RunState::Lost.as_str()), RunState::Lost);
+        let row: Vec<serde_json::Value> = vec![
+            "hourly-1-g3".into(),
+            "hourly".into(),
+            "central".into(),
+            "2026-09-16 06:00:00.000".into(),
+            serde_json::Value::Null,
+            "lost".into(),
+            "5 · Workspace".into(),
+            3.into(),
+            0.into(),
+            "".into(),
+            "".into(),
+            0.into(),
+            "2026-09-16 06:05:00.000".into(),
+        ];
+        let run = parse_run(&row);
+        assert_eq!(run.state, RunState::Lost);
+        assert_eq!(run.group, Some(3));
+        assert!(run.finished.is_none());
     }
 
     #[test]
