@@ -30,6 +30,36 @@ test("work finishing with no client connected starts the idle clock", () => {
   assert.equal(typeof i.state().idleSince, "number");
 });
 
+test("the signal waits out a continuous idle period: a client before it resets the clock", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-idle-"));
+  const mark = path.join(dir, ".idle");
+  let t = 0; // a fake clock in ms, so 300 s passes without waiting 300 s
+  try {
+    const i = new Idle(() => false, dir, 300_000, () => t);
+    assert.equal(i.state().idle, undefined, "idle at t=0, but nothing is signalled yet");
+
+    // A desktop tunnel reconnect at t=100 s: the clock starts over, and nothing was ever written.
+    t = 100_000;
+    i.opened();
+    i.closed();
+    assert.equal(fs.existsSync(mark), false, "a client inside the period leaves no signal behind");
+
+    t = 399_000;
+    i.check();
+    assert.equal(fs.existsSync(mark), false, "one second short is not idle");
+    t = 400_000;
+    i.check();
+    assert.equal(fs.readFileSync(mark, "utf8"), new Date(100_000).toISOString(), "and the moment is when idleness began");
+    assert.equal(i.state().idle, new Date(100_000).toISOString());
+
+    i.opened();
+    assert.equal(fs.existsSync(mark), false, "a client clears the signal");
+    assert.equal(i.state().idle, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("with a folder the moment is written to .idle and cleared by a client, so --ping can read it", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-idle-"));
   const mark = path.join(dir, ".idle");

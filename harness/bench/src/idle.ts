@@ -12,15 +12,26 @@ import path from "node:path";
  * by kubelet. Instead the moment is written to `{dir}/.idle` (RFC 3339), which
  * `--ping` reads (exit 2) so the readiness probe carries it, and the agent
  * deletes the pod. Any client or work deletes the file again.
+ *
+ * The signal waits out `afterMs` of CONTINUOUS idleness, and the wait is here
+ * rather than in the agent because the agent's only answer to an unready bench
+ * is to delete the pod: a desktop tunnel reconnect drops every socket for about
+ * a second, and that must cost the person nothing.
  */
 export class Idle {
   private busy: () => boolean;
   private mark?: string;
+  private afterMs: number;
+  private now: () => number;
+  private marked = false;
   private clients = 0;
   private since: number | null = null;
 
-  constructor(busy: () => boolean, dir?: string) {
+  /** `afterMs` is how long idleness must hold before it is signalled; tests pass `now` as a fake clock. */
+  constructor(busy: () => boolean, dir?: string, afterMs = 0, now: () => number = Date.now) {
     this.busy = busy;
+    this.afterMs = afterMs;
+    this.now = now;
     if (dir) this.mark = path.join(dir, ".idle");
     this.check();
   }
@@ -35,24 +46,35 @@ export class Idle {
     this.check();
   }
 
-  /** Re-read busy(); the server calls it on every bench event so the moment tracks work ending, not the next probe. */
+  /**
+   * Re-read busy(); the server calls it on every bench event so the moment tracks work ending,
+   * not the next probe, and main beats it so the signal appears without one.
+   */
   check(): void {
-    const was = this.since;
     if (this.clients > 0 || this.busy()) this.since = null;
-    else this.since ??= Date.now();
-    if (this.mark === undefined || (was === null) === (this.since === null)) return;
+    else this.since ??= this.now();
+    const signal = this.signal();
+    const want = signal !== null;
+    if (this.mark === undefined || want === this.marked) return;
     // Only the transitions touch the disk: check() runs on every bench event.
+    this.marked = want;
     try {
-      if (this.since === null) fs.rmSync(this.mark, { force: true });
-      else fs.writeFileSync(this.mark, new Date(this.since).toISOString());
+      if (signal === null) fs.rmSync(this.mark, { force: true });
+      else fs.writeFileSync(this.mark, signal);
     } catch {
       /* a read-only or vanished folder is not worth failing a request over */
     }
   }
 
-  /** `idle` is the RFC 3339 moment `--ping` and the agent read; absent means a client or work holds it up. */
+  /** The moment idleness began, once it has held for afterMs; null while a client, work, or the wait holds it up. */
+  private signal(): string | null {
+    return this.since !== null && this.now() - this.since >= this.afterMs ? new Date(this.since).toISOString() : null;
+  }
+
+  /** `idle` is the RFC 3339 moment `--ping` and the agent read; absent means a client, work or the wait holds it up. */
   state(): { clients: number; busy: boolean; idleSince: number | null; idle?: string } {
     this.check();
-    return { clients: this.clients, busy: this.busy(), idleSince: this.since, ...(this.since === null ? {} : { idle: new Date(this.since).toISOString() }) };
+    const idle = this.signal();
+    return { clients: this.clients, busy: this.busy(), idleSince: this.since, ...(idle === null ? {} : { idle }) };
   }
 }

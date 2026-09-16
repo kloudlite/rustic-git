@@ -5,8 +5,8 @@
  * KL_BENCH_IDLE_SECS in its env; its readiness probe is `harness-bench --ping`.
  * The agent reads exit 75 as FolderLocked and an unready-because-idle container
  * as asleep: the pod's restartPolicy is Always, so idling by exiting would only
- * be restarted — idleness is a file (`{dir}/.idle`, see idle.ts) and the process
- * keeps serving. Nothing but a signal exits 0.
+ * be restarted — idleness held for --idle-secs is a file (`{dir}/.idle`, see
+ * idle.ts) and the process keeps serving. Nothing but a signal exits 0.
  * Children inherit this process's env, so KL_TEAM reaches pi's extensions as is.
  *
  * Only node: builtins are imported statically: `--ping` is an exec readiness
@@ -28,8 +28,8 @@ const { values: a } = parseArgs({
     "read-only": { type: "boolean", default: false },
     wait: { type: "boolean", default: false },
     ping: { type: "boolean", default: false },
-    // The platform's benchIdleSecs, stamped into the pod; kept for compatibility, see below.
-    "idle-secs": { type: "string", default: process.env.KL_BENCH_IDLE_SECS || "0" },
+    // The platform's benchIdleSecs, stamped into the pod: how long idleness must hold before it is signalled.
+    "idle-secs": { type: "string", default: process.env.KL_BENCH_IDLE_SECS || "300" },
   },
 });
 
@@ -50,10 +50,8 @@ const terminationLog = (msg: string) => {
 
 const dir = path.resolve(a.dir);
 const readOnly = a["read-only"];
-// Still accepted and validated because the pod stamps it, but idleness is no longer timed here:
-// the file below says WHEN it began and the agent decides how long is long enough.
-const idleSecs = Number(a["idle-secs"]);
-if (!Number.isFinite(idleSecs) || idleSecs < 0) {
+const idleMs = Number(a["idle-secs"]) * 1000;
+if (!Number.isFinite(idleMs) || idleMs < 0) {
   console.error(`harness-bench: --idle-secs must be a non-negative number, got ${a["idle-secs"]}`);
   process.exit(2);
 }
@@ -84,17 +82,20 @@ if (!readOnly) {
   fs.writeFileSync(path.join(dir, ".health"), ""); // the probe appends; start each process from empty
   bench.writable.probe();
 }
-const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir);
+const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir, idleMs);
 const srv = await serve(bench, Number(a.port), a.host, idle);
 console.log(`harness-bench listening on ${a.host}:${srv.port} (${readOnly ? "read-only" : "running"}) dir=${dir}`);
 
 const beat = readOnly ? undefined : setInterval(() => bench.writable.probe(), 10_000).unref();
+// Nothing else would notice the wait running out: idleness begins when the last client left.
+const sleep = setInterval(() => idle.check(), 5_000).unref();
 
 let leaving = false;
 async function shutdown() {
   if (leaving) return;
   leaving = true;
   clearInterval(beat);
+  clearInterval(sleep);
   // Whatever fails while closing, the lock goes and the exit stays 0: the agent reads non-zero as a crash.
   try {
     await bench.stop();

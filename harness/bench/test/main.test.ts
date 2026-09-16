@@ -49,11 +49,10 @@ test("a second writer exits 75 naming the holder; a reader beside it is served a
   const port = portOf(await r.line(/\(read-only\)/));
   const rows = await (await fetch(`http://127.0.0.1:${port}/sessions`)).json();
   assert.equal(rows[0].id, "s-1");
-  // 2, not 0: nobody is connected, so it is idle — which is what the probe reports now.
   // The first --ping pays a cold Node start; time the second, as a probe after the first would see it.
-  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 2);
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
   const t0 = performance.now();
-  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 2);
+  assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
   const pingMs = performance.now() - t0;
   console.log(`--ping took ${pingMs.toFixed(0)} ms`);
   assert.ok(pingMs < 2500, `--ping must beat the probe's 3 s timeout, took ${pingMs.toFixed(0)} ms`);
