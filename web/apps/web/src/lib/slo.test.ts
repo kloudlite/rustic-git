@@ -177,6 +177,20 @@ describe("jobsOf", () => {
     expect(jobs).toHaveLength(2);
   });
 
+  // The real case: a hand-started hourly at 09:56 and the scheduled one at 10:02, which yields
+  // because a sibling suite is already in flight. Both walk all four groups, six minutes apart.
+  test("two hourly launches six minutes apart stay two jobs, not one of eight groups", () => {
+    const jobs = jobsOf([
+      ...[0, 1, 2, 3].map((g) => runOf(`hourly-1-g${g}`, "hourly", at(0), "passed", g)),
+      ...[0, 1, 2, 3].map((g) => runOf(`hourly-2-g${g}`, "hourly", at(6), "yielded", g)),
+    ]);
+    expect(jobs).toHaveLength(2);
+    expect(jobs.map((j) => j.runs.length)).toEqual([4, 4]);
+    expect(jobs[0].state).toBe("passed");
+    expect(jobs[1].state).toBe("yielded");
+    expect(runStateLabel(jobs[1].state)).toBe("stood aside");
+  });
+
   test("an ungrouped run is a job of one, never folded into a neighbour", () => {
     const jobs = jobsOf([runOf("fast-1", "fast", at(0), "passed", null), runOf("fast-2", "fast", at(1), "passed", null)]);
     expect(jobs).toHaveLength(2);

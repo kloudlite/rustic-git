@@ -127,6 +127,11 @@ export function jobsOf(runs: SloRun[]): SloJob[] {
             (j) =>
               j.suite === r.suite &&
               j.runs[0].group != null &&
+              // A group already taken means this is a SECOND launch, not a sibling: a
+              // hand-started hourly and the scheduled one six minutes later (which yields,
+              // SAME_SUITE_IN_FLIGHT) are inside the window, and folding them would draw one job
+              // of "2 of 8 groups done" with two g0s in it.
+              !j.runs.some((x) => x.group === r.group) &&
               Math.abs(new Date(j.started).getTime() - at) <= SIBLING_WINDOW_SECS * 1_000,
           );
     if (sibling) {
