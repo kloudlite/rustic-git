@@ -438,3 +438,13 @@
    long token anywhere would push its column under the next. Nothing in the
    centre is allowed to be wider than the room it was given. */
 main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
+
+/* Indeterminate progress: the login panel's only motion. A bar that sweeps its
+   own width across the track — no percentage is known, so nothing here pretends
+   one is. Reduced motion gets the track filled solid instead of nothing, so the
+   "busy" reading survives without movement. */
+@keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.sweep { animation: sweep 1.2s linear infinite; width: 40%; }
+@media (prefers-reduced-motion: reduce) {
+  .sweep { animation: none; width: 100%; }
+}

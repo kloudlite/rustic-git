@@ -18,7 +18,7 @@ const VARIANT: Record<Variant, string> = {
 
 export function Button(props: {
   variant?: Variant;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   icon?: string;
   iconRight?: string;
   disabled?: boolean;
@@ -31,6 +31,7 @@ export function Button(props: {
 }) {
   const v = () => props.variant ?? "default";
   const sm = () => props.size === "sm";
+  const lg = () => props.size === "lg";
   return (
     <button
       class={cx(
@@ -38,7 +39,7 @@ export function Button(props: {
         VARIANT[v()],
         v() === "icon"
           ? sm() ? "h-5.5 w-5.5" : "h-6 w-6"
-          : sm() ? "h-5.5 px-2 text-xs" : "h-6 px-2.5 text-sm",
+          : lg() ? "h-9 px-4 text-sm" : sm() ? "h-5.5 px-2 text-xs" : "h-6 px-2.5 text-sm",
         props.class,
       )}
       disabled={props.disabled}

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { screen } from "../../src/renderer/login.ts";
 
 test("signed out offers sign in and the address, with the reason when there is one", () => {
-  assert.deepEqual(screen({ phase: "signed-out" }), { title: "Sign in to Kloudlite", actions: ["signIn", "address"], busy: false });
+  assert.deepEqual(screen({ phase: "signed-out" }), { title: "Sign in to Kloudlite", body: "Use your browser to sign in. The app never sees your password.", actions: ["signIn", "address"], busy: false });
   assert.equal(screen({ phase: "signed-out", reason: "signed out: expired or revoked" }).body, "signed out: expired or revoked");
 });
 

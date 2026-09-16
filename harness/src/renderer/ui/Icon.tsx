@@ -1,6 +1,6 @@
 import { Dynamic } from "solid-js/web";
 import {
-  Archive, ArrowDownLeft, ArrowUpRight, Bell, Bot, Box, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, Circle, Clock, Columns2, Container, Copy, Ellipsis, FolderGit2, Globe, LoaderCircle,
+  Archive, ArrowDownLeft, ArrowUpRight, Bell, Bot, Box, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, Circle, Clock, Columns2, Container, Copy, Ellipsis, ExternalLink, FolderGit2, Globe, LoaderCircle,
   File, FileDiff, Folder, FolderOpen, GitBranch, GitCommitHorizontal, History, Lock, Monitor,
   Maximize2, MessageSquare, Minimize2, Moon, PanelLeft, PanelRight, Plus, Search, Server, Settings, Sparkles, SquareDashedMousePointer, Sun, Target, Terminal, User, Users, X,
 } from "lucide-solid";
@@ -57,6 +57,7 @@ const ICONS = {
   ephemeral: Bot,
   settings: Settings,
   globe: Globe,
+  "external-link": ExternalLink,
   chevronsUpDown: ChevronsUpDown,
   users: Users,
   copy: Copy,

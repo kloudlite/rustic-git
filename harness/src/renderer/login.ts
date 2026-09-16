@@ -10,9 +10,9 @@ export function screen(s: AuthState): { title: string; body?: string; code?: str
     case "ready":
       return { title: "Kloudlite", actions: [], busy: true };
     case "signed-out":
-      return { title: "Sign in to Kloudlite", ...(s.reason ? { body: s.reason } : {}), actions: ["signIn", "address"], busy: false };
+      return { title: "Sign in to Kloudlite", body: s.reason ?? "Use your browser to sign in. The app never sees your password.", actions: ["signIn", "address"], busy: false };
     case "waiting":
-      return { title: "Confirm this code in your browser", body: "waiting for approval", code: s.code, url: s.url, actions: ["openBrowser", "cancel"], busy: true };
+      return { title: "Confirm this code in your browser", body: "Waiting for your approval…", code: s.code, url: s.url, actions: ["openBrowser", "cancel"], busy: true };
     case "choose-team": {
       const body = s.reason ?? (s.teams.length ? "a bench belongs to a team" : "you are not in any team yet — ask an admin to add you");
       const teams = s.teams.map((t) => ({ slug: t.slug, label: t.name || t.slug, disabled: !t.region, ...(t.region ? {} : { note: "no region yet — ask an admin" }) }));
