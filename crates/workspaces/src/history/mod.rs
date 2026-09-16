@@ -20,6 +20,7 @@
 pub mod alerts;
 pub mod beats;
 pub mod events;
+pub mod exclusions;
 pub mod notify;
 pub mod schema;
 pub mod series;

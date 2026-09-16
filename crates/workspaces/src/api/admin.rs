@@ -211,6 +211,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/admin/slo/coverage", get(slo::coverage))
         .route("/admin/slo/pipeline", get(slo::pipeline))
         .route("/admin/slo/marker/{run_id}", get(slo::marker))
+        .route("/admin/slo/exclusions", get(slo::list_exclusions).post(slo::exclude))
+        .route("/admin/slo/exclusions/{id}", axum::routing::delete(slo::unexclude))
         .route("/admin/slo/runs", get(slo::list_runs))
         .route("/admin/slo/runs/{id}", get(slo::run_detail).put(slo::put_run))
         .route("/admin/audit", get(audit::list_audit))

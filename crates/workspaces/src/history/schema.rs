@@ -248,6 +248,25 @@ pub const MIGRATIONS: &[(u32, &str)] = &[
            ORDER BY (slo_id, ts, run_id) \
            TTL toDateTime(ts) + INTERVAL 400 DAY",
     ),
+    // Acknowledged incident windows the budget maths anti-joins. No TTL: an exclusion outlives
+    // the samples it covers, and a window that silently expired would move an attainment back
+    // with nobody having decided it. A delete is a TOMBSTONE row (`deleted`), never a mutation —
+    // `created`/`deleted` are millisecond so a create and an immediate undo still order, where a
+    // second-resolution version would leave FINAL free to keep either one.
+    (
+        18,
+        "CREATE TABLE IF NOT EXISTS kloudlite.slo_exclusions (\
+            id String, \
+            `from` DateTime, \
+            `to` DateTime, \
+            slo_ids Array(String), \
+            note String, \
+            `by` String, \
+            created DateTime64(3), \
+            deleted DateTime64(3) DEFAULT toDateTime64(0, 3)\
+         ) ENGINE = ReplacingMergeTree(created) \
+           ORDER BY (id)",
+    ),
 ];
 
 /// Applies every migration this server has not recorded yet. Returns how many ran, so boot logs
