@@ -305,11 +305,16 @@ export function App() {
   const [active, setActive] = createSignal("");
   const [maximised, setMaximised] = createSignal(false);
   const [height, setHeight] = createSignal(300);
+  // The drawer hides; it never closes what is in it. A shell is a process somebody may have left
+  // running, so putting the panel away keeps every tab mounted (display:none) and only the tab's
+  // own × ends its shell (owner, 2026-09-16: "every time I'm closing shell it's closing the session").
+  const [drawer, setDrawer] = createSignal(true);
 
   const openShell = (scopeId: string) => {
     const t = makeTab(machine(), teamName(), scopeId);
     setTabs((ts) => [...ts, t]);
     setActive(t.id);
+    setDrawer(true);
   };
   const closeTab = (id: string) => {
     const rest = tabs().filter((t) => t.id !== id);
@@ -318,11 +323,12 @@ export function App() {
     else if (active() === id) setActive(rest[rest.length - 1].id);
   };
   const closePanel = () => {
-    setTabs([]);
+    setDrawer(false);
     setMaximised(false);
   };
-  /** The Shell button and ⌘J are one gesture: open a shell here, or put the drawer away. */
-  const toggleShell = (scopeId: string) => (tabs().length ? closePanel() : openShell(scopeId));
+  const shellShown = () => tabs().length > 0 && drawer();
+  /** The Shell button and ⌘J are one gesture: open a shell here, bring the drawer back, or put it away. */
+  const toggleShell = (scopeId: string) => (shellShown() ? closePanel() : tabs().length ? setDrawer(true) : openShell(scopeId));
 
   /** Back out of one layer at a time: a file, then the environment, then a
       maximised shell, then the shell. Nothing else swallows escape. */
@@ -332,7 +338,7 @@ export function App() {
     else if (envTab()) setEnvTab(false);
     else if (settingsTab()) setSettingsTab(false);
     else if (maximised()) setMaximised(false);
-    else if (tabs().length) closePanel();
+    else if (shellShown()) closePanel();
     else return false;
     return true;
   };
@@ -410,7 +416,7 @@ export function App() {
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
     { id: "composer", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
-    { id: "shell", label: tabs().length ? "Close the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell(scope()) },
+    { id: "shell", label: shellShown() ? "Hide the shell" : tabs().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell(scope()) },
     { id: "env", label: envTab() ? "Close the environment" : "Open the environment", keys: KEYS.environment.keys, run: () => (setFile(undefined), setEnvTab((v) => !v)) },
     { id: "panel", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: KEYS.panel.keys, run: () => setLeftOpen((v) => !v) },
     { id: "inspector", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
@@ -744,7 +750,7 @@ export function App() {
                 isActive() && tabs().length ? (
                   <div
                     class="grid min-h-0 grid-rows-[3px_minmax(0,1fr)] border-t border-line"
-                    style={{ height: maximised() ? "100%" : `${height()}px` }}
+                    style={{ height: maximised() ? "100%" : `${height()}px`, display: drawer() ? undefined : "none" }}
                   >
                     <div class="cursor-row-resize hover:bg-accent" onPointerDown={startResize} title="Drag to resize" />
                     <TerminalPanel
