@@ -39,11 +39,14 @@ spec:
   # run's leftovers do not fail the next one, shallow enough that a teardown that stopped working
   # is caught within a day rather than never.
   snapshots: 20
-  # Ninety, not forty: the owner's hidden builder environment (`bld-{slug}`) is charged to them
-  # like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty could
-  # not hold one and every create after it 409'd. A hand-set Quota must include exactly one
-  # builder — the api writes it with the owner's first workspace, and nothing deletes it.
-  diskGb: 200  # a bench now holds a volume (10 GB default; the first ones took 50)
+  # Two hundred, not forty: the owner's hidden builder environment (`bld-{slug}`) is charged to
+  # them like everything else and its cache volume alone is `BUILDER_CACHE_GB` (50 GB), so forty
+  # could not hold one and every create after it 409'd. A hand-set Quota must include exactly one
+  # builder — the api writes it with the owner's first workspace, and nothing deletes it. A bench
+  # holds a volume of its own on top (10 GB default; the first ones took 50).
+  # Held equal to `experience_admin::probe_quota` by a test, which reads this line VERBATIM —
+  # a trailing comment on it is a failure, so the reasoning stays above.
+  diskGb: 200
   # Sized from the API's OWN per-object cost, not from a wish: `/v1` accepts no `resources` field on
   # a create (`NewWorkspace`/`NewEnvironment` have none — resources come from `PodResources::default`,
   # a 4 vCPU / 8 GiB limit), so a probe workspace costs 4 and 8 whatever the probe asks for. The

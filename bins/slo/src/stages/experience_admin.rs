@@ -67,8 +67,10 @@ pub(crate) fn probe_quota() -> Value {
         // briefly read 90. Room for the owner's hidden builder environment on top of the journey:
         // its cache volume is `BUILDER_CACHE_GB` (50 GB) and it costs 4 vCPU / 8 GiB while it
         // runs, charged to the owner like everything else. Too small and every create after the
-        // builder's back-fill answers 409 on diskGb.
-        "diskGb": 90,
+        // builder's back-fill answers 409 on diskGb. Raised to 200 on 2026-09-17: 90 was written
+        // here while the yaml said 200, so teardown reverted the region within five minutes and
+        // every bench create (a bench holds a volume of its own) answered 409 on diskGb.
+        "diskGb": 200,
         "cpu": 64,
         "memoryGb": 128,
     })
