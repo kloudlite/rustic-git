@@ -119,10 +119,29 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let h = std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
+            // Read until the whole request is in — headers AND the content-length body — or one
+            // read landed the headers alone and the body assertion flaked (2026-09-16 gate).
+            let mut req = Vec::new();
             let mut buf = [0u8; 4096];
-            let n = s.read(&mut buf).unwrap();
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_string();
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let want: usize = text[..head_end]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if req.len() >= head_end + 4 + want {
+                        break;
+                    }
+                }
+            }
             s.write_all(answer.as_bytes()).unwrap();
-            String::from_utf8_lossy(&buf[..n]).to_string()
+            String::from_utf8_lossy(&req).to_string()
         });
         (format!("http://127.0.0.1:{port}"), h)
     }
