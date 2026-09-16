@@ -463,7 +463,10 @@ pub fn burn_sql() -> String {
 /// filtered, so the screen can say how many samples an acknowledged incident took out instead of
 /// the attainment simply moving. The newest sample is NOT filtered — "is it working right now" is
 /// a different question from "what did this month cost", and an exclusion answers only the second.
-const STATUS_COLS: &str = "slo_id, \
+// `r.slo_id`, qualified: with the exclusions CTE cross-joined a bare `slo_id` is ambiguous
+// between `r` and `c` (ClickHouse 207 on the fleet, 2026-09-16 12:57 IST — the unit tests only
+// check strings, so this surfaced on the first request after the roll).
+const STATUS_COLS: &str = "r.slo_id AS slo_id, \
      countIf(in_att AND NOT excluded) AS total_att, countIf(in_att AND good AND NOT excluded) AS good_att, \
      countIf(in_long AND NOT excluded) AS total_long, countIf(in_long AND good AND NOT excluded) AS good_long, \
      countIf(in_longc AND NOT excluded) AS total_longc, countIf(in_longc AND good AND NOT excluded) AS good_longc, \
@@ -826,6 +829,7 @@ mod tests {
         assert_eq!(
             aliases,
             [
+                "slo_id",
                 "total_att",
                 "good_att",
                 "total_long",
