@@ -1,6 +1,7 @@
 //! The two keys-beat halves that keep `SpaceEnvironment` honest without a request behind them:
 //!
-//! * **migration** (one release): every Workspace or Bench still carrying the retired
+//! * **migration** (one release): every Workspace (a bench is one of them, `crd::is_bench`) still
+//!   carrying the retired
 //!   `spec.attachedEnvironment` whose space has no choice yet becomes one — if the environment
 //!   still passes `/v1/me/environments`' rules — and the field is then cleared, so the beat
 //!   terminates. Two objects of one space attached to different environments: the most recently
@@ -21,7 +22,6 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One object still naming an environment through the retired field.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Legacy {
-    pub kind: &'static str,
     pub name: String,
     pub owner: String,
     /// The space's team: the object's team, or the owner for a personal one.
@@ -125,17 +125,9 @@ pub async fn migrate(s: &ApiState) {
     match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => legacy.extend(l.items.iter().filter_map(|w| {
             let env = w.spec.attached_environment.clone().filter(|e| !e.is_empty())?;
-            Some((Legacy { kind: "Workspace", name: w.name_any(), owner: w.spec.owner.to_lowercase(), team: team_of(&w.spec.owner, &w.spec.team), environment: env, updated_ms: updated_ms(w) }, settled_marker(&w.metadata)))
+            Some((Legacy { name: w.name_any(), owner: w.spec.owner.to_lowercase(), team: team_of(&w.spec.owner, &w.spec.team), environment: env, updated_ms: updated_ms(w) }, settled_marker(&w.metadata)))
         })),
         Err(e) => return tracing::warn!(kind = "Workspace", error = %e, "listing.failed"),
-    }
-    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => legacy.extend(l.items.iter().filter_map(|b| {
-            let env = b.spec.attached_environment.clone().filter(|e| !e.is_empty())?;
-            Some((Legacy { kind: "Bench", name: b.name_any(), owner: b.spec.owner.to_lowercase(), team: team_of(&b.spec.owner, &b.spec.team), environment: env, updated_ms: updated_ms(b) }, settled_marker(&b.metadata)))
-        })),
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => return tracing::warn!(kind = "Bench", error = %e, "listing.failed"),
     }
     if legacy.is_empty() {
         return;
@@ -143,7 +135,7 @@ pub async fn migrate(s: &ApiState) {
     let fresh: Vec<Legacy> = legacy.iter().filter(|(_, settled)| !settled).map(|(l, _)| l.clone()).collect();
     let (writes, conflicts) = plan(&fresh, &existing);
     for l in &conflicts {
-        tracing::warn!(kind = l.kind, name = %l.name, environment = %l.environment, space = %crd::space_name(&l.owner, &l.team), "space.migrate.conflict");
+        tracing::warn!(kind = "Workspace", name = %l.name, environment = %l.environment, space = %crd::space_name(&l.owner, &l.team), "space.migrate.conflict");
     }
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let mut refused = BTreeSet::new();
@@ -187,14 +179,10 @@ pub async fn migrate(s: &ApiState) {
             patch["spec"] = serde_json::json!({"attachedEnvironment": null});
             patch["metadata"]["labels"] = serde_json::json!({k8s::ATTACHED_ENV_LABEL: null});
         } else {
-            tracing::info!(kind = l.kind, name = %l.name, "space.migrate.clear.deferred");
+            tracing::info!(kind = "Workspace", name = %l.name, "space.migrate.clear.deferred");
         }
-        let r = match l.kind {
-            "Workspace" => Api::<crd::Workspace>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()),
-            _ => Api::<crd::Bench>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()),
-        };
-        if let Err(e) = r {
-            tracing::warn!(kind = l.kind, name = %l.name, error = %e, "space.migrate.clear.failed");
+        if let Err(e) = Api::<crd::Workspace>::all(c.clone()).patch(&l.name, &PatchParams::default(), &Patch::Merge(&patch)).await {
+            tracing::warn!(kind = "Workspace", name = %l.name, error = %e, "space.migrate.clear.failed");
         }
     }
 }
@@ -204,7 +192,7 @@ mod tests {
     use super::*;
 
     fn l(name: &str, owner: &str, team: &str, env: &str, at: i64) -> Legacy {
-        Legacy { kind: "Workspace", name: name.into(), owner: owner.into(), team: team.into(), environment: env.into(), updated_ms: at }
+        Legacy { name: name.into(), owner: owner.into(), team: team.into(), environment: env.into(), updated_ms: at }
     }
 
     #[test]

@@ -239,6 +239,12 @@ pub(crate) async fn create_ws(
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     check_ws_name(&body.name)?;
+    // The bench is a Workspace named `bench` in the same (owner, team), so an ordinary create
+    // under that name would race it for `~/workspaces/bench` — and `refuse_taken_name` only sees
+    // the collision once a bench already exists.
+    if body.name == "bench" {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({"error": "the name bench is the bench's"}))).into_response());
+    }
     check_region(&s, &body.region).await?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner.name) {
         None => String::new(),

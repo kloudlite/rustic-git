@@ -148,9 +148,8 @@ pub(crate) fn every_space_pod_builder_carries_the_resolv_conf_mount() {
         assert!(spec.containers.iter().any(|c| c.volume_mounts.iter().flatten().any(|m| m.name == "attach" && m.mount_path == "/etc/resolv.conf")));
     };
     has_mount(workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap(), "ws-1");
-    let b = crate::crd::Bench::new(
-        "bench-1",
-        serde_json::from_value(serde_json::json!({"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"})).unwrap(),
-    );
-    has_mount(bench_pod(&b, "bench-1", ctx().pool, None, "cr.example", "", 600).unwrap(), "bench-1");
+    // A bench is the same builder with its second container, so it is covered by the same rule.
+    let mut bench = ws_spec();
+    bench.bench = Some(crate::crd::BenchOptions { model: "sonnet".into(), wake_at: None });
+    has_mount(workspace_pod(&bench, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v1", 600))).unwrap(), "bench-1");
 }
