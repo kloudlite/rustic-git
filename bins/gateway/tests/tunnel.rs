@@ -15,7 +15,7 @@ const SECRET: &str = "0123456789abcdef0123456789abcdef";
 const REGION: &str = "centralindia-k3s";
 const WS: &str = "/apis/kloudlite.io/v1alpha1/workspaces/ws-1";
 const POD: &str = "/api/v1/namespaces/ws-alice/pods/ws-1-abc";
-const BENCH: &str = "/apis/kloudlite.io/v1alpha1/benches/bench-1";
+const BENCH: &str = "/apis/kloudlite.io/v1alpha1/workspaces/bench-1";
 const BENCH_POD: &str = "/api/v1/namespaces/ws-alice/pods/bench";
 
 fn workspace(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
@@ -42,9 +42,11 @@ fn bench(phase: &str, pod_ref: Option<&str>) -> serde_json::Value {
     }
     serde_json::json!({
         "apiVersion": "kloudlite.io/v1alpha1",
-        "kind": "Bench",
+        "kind": "Workspace",
         "metadata": { "name": "bench-1" },
-        "spec": { "owner": "alice", "team": "acme", "image": "img", "desiredState": "running" },
+        // `bench` is what makes it one — the name means nothing to `is_bench`.
+        "spec": { "owner": "alice", "team": "acme", "name": "bench", "region": REGION, "image": "img",
+                  "desiredState": "running", "bench": { "model": "m" } },
         "status": status,
     })
 }
@@ -288,11 +290,11 @@ async fn a_bench_token_opens_a_tunnel_to_the_bench_port() {
 
 #[tokio::test]
 async fn a_workspace_token_cannot_open_a_bench_with_the_same_id() {
-    // Only a Bench named "bench-1" exists — no Workspace of that name — so an ssh-session token
-    // naming it must fail at resolve, and the echo listener behind it must never see a connection.
+    // The object named "bench-1" IS a bench workspace, so an ssh-session token naming it must
+    // still fail at resolve, and the echo listener behind it must never see a connection.
     let port = echo().await;
     let base = serve_with(
-        vec![kloudlite_workspaces::kube_test::not_found("/apis/kloudlite.io/v1alpha1/workspaces/bench-1")],
+        vec![get(BENCH, bench("ready", Some("ws-alice/bench")))],
         port,
         22,
     )

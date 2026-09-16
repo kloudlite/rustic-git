@@ -8,7 +8,7 @@
 use axum::http::StatusCode;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use kloudlite_workspaces::crd::{self, Bench, BenchAccess, Phase, Workspace};
+use kloudlite_workspaces::crd::{self, Access, Phase, Workspace};
 use std::net::SocketAddr;
 
 /// The pod's sshd address, and the owner the tunnel is charged to.
@@ -22,32 +22,63 @@ pub struct Target {
 pub type Refusal = (StatusCode, &'static str);
 
 pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Result<Target, Refusal> {
-    // Checked before it becomes a path segment of a kube API URL. Every workspace id IS a DNS
-    // label — it names a cluster-scoped object — so this refuses nothing real, and it is the one
-    // thing between a token's `ws` claim and the API server's URL space (2026-09-12).
-    if !is_dns_label(ws_id) {
+    let ws = workspace(client, ws_id).await?;
+    // A bench is a Workspace now, so the two paths would otherwise address each other's objects:
+    // an ssh ticket naming a bench would dial port 22 of a pod that runs no sshd. Each ticket
+    // kind answers for its own kind only, and the other is "no such object" as it always was.
+    if crd::is_bench(&ws) {
         return Err((StatusCode::NOT_FOUND, "no such object"));
     }
-    let ws = Api::<Workspace>::all(client.clone()).get(ws_id).await.map_err(api_err)?;
-    // The gateway holds no directory, so a paused (or removed, which pauses) member is read off
-    // the pair's Bench, which the api pauses at judgement time. No Bench is allowed — a member
-    // may never have made one; an unreadable one refuses the tunnel (409, retryable), never data.
+    // A removed member is stamped on the Workspace itself, and only a stamp the membership
+    // manager wrote counts — the same provenance the api's beat decides from. It is the fallback
+    // for the window before that beat has paused the workspace.
     let team = ws.spec.team.trim().to_ascii_lowercase();
-    if !team.is_empty() && team != ws.spec.owner.to_ascii_lowercase() {
-        // A removed member with no Bench is stamped on the Workspace itself; only a stamp the
-        // membership manager wrote counts, the same provenance the api's beat decides from.
-        if kloudlite_workspaces::api::membership::system_annotation(&ws.metadata, kloudlite_workspaces::api::membership::REMOVED_AT).is_some() {
-            return Err((StatusCode::FORBIDDEN, "access removed"));
-        }
-        match Api::<Bench>::all(client.clone()).get_opt(&crd::bench_id(&ws.spec.owner, &team)).await {
-            Ok(Some(b)) if b.spec.access == BenchAccess::Paused => return Err((StatusCode::FORBIDDEN, "access paused")),
-            Ok(_) => {}
-            Err(_) => return Err((StatusCode::CONFLICT, "bench unreadable")),
-        }
+    if !team.is_empty()
+        && team != ws.spec.owner.to_ascii_lowercase()
+        && kloudlite_workspaces::api::membership::system_annotation(
+            &ws.metadata,
+            kloudlite_workspaces::api::membership::REMOVED_AT,
+        )
+        .is_some()
+    {
+        return Err((StatusCode::FORBIDDEN, "access removed"));
     }
+    target(client, ws, ssh_port, "workspace not ready").await
+}
+
+/// The bench's harness address. A bench IS a workspace now, so this is `resolve` plus the one
+/// predicate that says the id names a bench — `is_bench`, never the name prefix — and an ordinary
+/// workspace is 404 here exactly as a missing object is: the caller asked for a bench.
+pub async fn resolve_bench(client: &kube::Client, id: &str, port: u16) -> Result<Target, Refusal> {
+    let ws = workspace(client, id).await?;
+    if !crd::is_bench(&ws) {
+        return Err((StatusCode::NOT_FOUND, "no such object"));
+    }
+    target(client, ws, port, "bench not ready").await
+}
+
+/// The one GET, with the one thing between a token's `ws` claim and the API server's URL space:
+/// every workspace id IS a DNS label — it names a cluster-scoped object — so this refuses nothing
+/// real (2026-09-12). `Paused` is the membership pause the api's beat writes; it is checked here
+/// because the gateway holds no directory of its own.
+async fn workspace(client: &kube::Client, id: &str) -> Result<Workspace, Refusal> {
+    if !is_dns_label(id) {
+        return Err((StatusCode::NOT_FOUND, "no such object"));
+    }
+    let ws = Api::<Workspace>::all(client.clone()).get(id).await.map_err(api_err)?;
+    if ws.spec.access == Access::Paused {
+        return Err((StatusCode::FORBIDDEN, "access paused"));
+    }
+    Ok(ws)
+}
+
+/// The second GET: `status.podRef` is the only place a pod IP lives, and a status field that
+/// stale would be worse than none.
+async fn target(client: &kube::Client, ws: Workspace, port: u16, not_ready: &'static str) -> Result<Target, Refusal> {
+    let owner = ws.spec.owner;
     let status = ws.status.ok_or((StatusCode::CONFLICT, "no status yet"))?;
     if status.phase != Phase::Ready {
-        return Err((StatusCode::CONFLICT, "workspace not ready"));
+        return Err((StatusCode::CONFLICT, not_ready));
     }
     let pod_ref = status.pod_ref.ok_or((StatusCode::CONFLICT, "no podRef"))?;
     let (ns, name) = pod_ref.split_once('/').ok_or((StatusCode::CONFLICT, "malformed podRef"))?;
@@ -65,38 +96,7 @@ pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Resul
         .and_then(|s| s.pod_ip)
         .ok_or((StatusCode::CONFLICT, "pod has no IP"))?;
     let ip = ip.parse().map_err(|_| (StatusCode::CONFLICT, "pod IP is not an address"))?;
-    Ok(Target { addr: SocketAddr::new(ip, ssh_port), owner: ws.spec.owner })
-}
-
-/// The bench's harness address, same two-GET shape as `resolve`: a Bench's `status.podRef` is
-/// the only place a bench's pod IP lives, and it is just as stale-prone as a workspace's.
-pub async fn resolve_bench(client: &kube::Client, id: &str, port: u16) -> Result<Target, Refusal> {
-    if !is_dns_label(id) {
-        return Err((StatusCode::NOT_FOUND, "no such object"));
-    }
-    let bench = Api::<Bench>::all(client.clone()).get(id).await.map_err(api_err)?;
-    if bench.spec.access == BenchAccess::Paused {
-        return Err((StatusCode::FORBIDDEN, "access paused"));
-    }
-    let status = bench.status.ok_or((StatusCode::CONFLICT, "no status yet"))?;
-    if status.phase != Phase::Ready {
-        return Err((StatusCode::CONFLICT, "bench not ready"));
-    }
-    let pod_ref = status.pod_ref.ok_or((StatusCode::CONFLICT, "no podRef"))?;
-    let (ns, name) = pod_ref.split_once('/').ok_or((StatusCode::CONFLICT, "malformed podRef"))?;
-    let pod = Api::<Pod>::namespaced(client.clone(), ns)
-        .get(name)
-        .await
-        .map_err(|e| match api_err(e) {
-            (StatusCode::NOT_FOUND, _) => (StatusCode::CONFLICT, "pod gone"),
-            other => other,
-        })?;
-    let ip = pod
-        .status
-        .and_then(|s| s.pod_ip)
-        .ok_or((StatusCode::CONFLICT, "pod has no IP"))?;
-    let ip = ip.parse().map_err(|_| (StatusCode::CONFLICT, "pod IP is not an address"))?;
-    Ok(Target { addr: SocketAddr::new(ip, port), owner: bench.spec.owner })
+    Ok(Target { addr: SocketAddr::new(ip, port), owner })
 }
 
 /// RFC 1123: at most 63 characters of lowercase alphanumerics and dashes, starting and ending
@@ -134,68 +134,65 @@ mod label_tests {
 #[cfg(test)]
 mod paused_tests {
     use super::*;
-    use kloudlite_workspaces::kube_test::{get, mock_client, not_found};
+    use kloudlite_workspaces::kube_test::{get, mock_client};
     use serde_json::json;
 
-    const B: &str = "/apis/kloudlite.io/v1alpha1/benches/";
+    const W: &str = "/apis/kloudlite.io/v1alpha1/workspaces/";
 
-    fn bench(id: &str, access: &str) -> serde_json::Value {
-        json!({"apiVersion":"kloudlite.io/v1alpha1","kind":"Bench","metadata":{"name":id},
-            "spec":{"owner":"paula","team":"acme","image":"i","desiredState":"running","access":access},
-            "status":{"phase":"ready","podRef":"ns/p"}})
+    /// `bench: {}` is what makes it a bench — `is_bench`, never the name.
+    fn ws(name: &str, access: &str, bench: bool) -> serde_json::Value {
+        let mut spec = json!({"owner":"paula","team":"acme","name":name,"region":"r","image":"i",
+            "desiredState":"running","access":access});
+        if bench {
+            spec["bench"] = json!({"model":"m"});
+        }
+        json!({"apiVersion":"kloudlite.io/v1alpha1","kind":"Workspace","metadata":{"name":name},
+            "spec":spec,"status":{"phase":"ready","podRef":"ns/p"}})
     }
 
-    fn routes_for_ws(bench_route: Option<kloudlite_workspaces::kube_test::Route>) -> Vec<kloudlite_workspaces::kube_test::Route> {
-        let ws = json!({"apiVersion":"kloudlite.io/v1alpha1","kind":"Workspace","metadata":{"name":"w1"},
-            "spec":{"owner":"paula","team":"acme","name":"w1","region":"r","image":"i","desiredState":"running"},
-            "status":{"phase":"ready","podRef":"ns/p"}});
+    fn routes(obj: serde_json::Value) -> Vec<kloudlite_workspaces::kube_test::Route> {
+        let name = obj["metadata"]["name"].as_str().expect("named").to_string();
         let pod = json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"p","namespace":"ns"},"status":{"podIP":"10.0.0.1"}});
-        let mut r = vec![get("/apis/kloudlite.io/v1alpha1/workspaces/w1", ws), get("/api/v1/namespaces/ns/pods/p", pod)];
-        r.extend(bench_route);
-        r
+        vec![get(format!("{W}{name}"), obj), get("/api/v1/namespaces/ns/pods/p", pod)]
     }
 
     #[tokio::test]
-    async fn a_paused_bench_is_403() {
-        let (c, _) = mock_client(vec![get(format!("{B}bench-x"), bench("bench-x", "paused"))]);
-        assert_eq!(resolve_bench(&c, "bench-x", 1).await.err().map(|e| e.0), Some(StatusCode::FORBIDDEN));
+    async fn a_paused_workspace_is_403_on_both_paths() {
+        let (c, _) = mock_client(routes(ws("bench-x", "paused", true)));
+        assert_eq!(resolve_bench(&c, "bench-x", 1).await.err(), Some((StatusCode::FORBIDDEN, "access paused")));
+        let (c, _) = mock_client(routes(ws("w1", "paused", false)));
+        assert_eq!(resolve(&c, "w1", 22).await.err(), Some((StatusCode::FORBIDDEN, "access paused")));
     }
 
     #[tokio::test]
-    async fn a_workspace_whose_team_bench_is_paused_is_403() {
-        let id = crd::bench_id("paula", "acme");
-        let (c, _) = mock_client(routes_for_ws(Some(get(format!("{B}{id}"), bench(&id, "paused")))));
-        assert_eq!(resolve(&c, "w1", 22).await.err().map(|e| e.0), Some(StatusCode::FORBIDDEN));
-        let (c, _) = mock_client(routes_for_ws(Some(get(format!("{B}{id}"), bench(&id, "full")))));
-        assert!(resolve(&c, "w1", 22).await.is_ok(), "an active member's bench admits");
-    }
-
-    #[tokio::test]
-    async fn a_removed_members_stamped_workspace_is_403_without_a_bench() {
-        use kloudlite_workspaces::api::membership::{MEMBERSHIP_FIELD_MANAGER, REMOVED_AT};
-        let id = crd::bench_id("paula", "acme");
-        let mut routes = routes_for_ws(Some(not_found(format!("{B}{id}"))));
-        let mut ws = json!({"apiVersion":"kloudlite.io/v1alpha1","kind":"Workspace","metadata":{"name":"w1",
-                "annotations":{REMOVED_AT:"2026-09-15T00:00:00Z"},
-                "managedFields":[{"manager":MEMBERSHIP_FIELD_MANAGER,"operation":"Apply","apiVersion":"kloudlite.io/v1alpha1","fieldsType":"FieldsV1",
-                    "fieldsV1":{"f:metadata":{"f:annotations":{format!("f:{REMOVED_AT}"):{}}}}}]},
-            "spec":{"owner":"paula","team":"acme","name":"w1","region":"r","image":"i","desiredState":"running"},
-            "status":{"phase":"ready","podRef":"ns/p"}});
-        routes[0] = get("/apis/kloudlite.io/v1alpha1/workspaces/w1", ws.clone());
-        let (c, _) = mock_client(routes);
-        assert_eq!(resolve(&c, "w1", 22).await.err().map(|e| e.0), Some(StatusCode::FORBIDDEN));
-        // A stamp anyone else wrote is no stamp.
-        ws["metadata"]["managedFields"][0]["manager"] = json!("kubectl");
-        let mut routes = routes_for_ws(Some(not_found(format!("{B}{id}"))));
-        routes[0] = get("/apis/kloudlite.io/v1alpha1/workspaces/w1", ws);
-        let (c, _) = mock_client(routes);
-        assert!(resolve(&c, "w1", 22).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn a_workspace_with_no_bench_resolves() {
-        let id = crd::bench_id("paula", "acme");
-        let (c, _) = mock_client(routes_for_ws(Some(not_found(format!("{B}{id}")))));
+    async fn an_active_workspace_resolves() {
+        let (c, _) = mock_client(routes(ws("w1", "full", false)));
         assert_eq!(resolve(&c, "w1", 22).await.ok().map(|t| t.owner), Some("paula".into()));
+        let (c, _) = mock_client(routes(ws("bench-x", "full", true)));
+        assert_eq!(resolve_bench(&c, "bench-x", 1).await.ok().map(|t| t.addr.port()), Some(1));
+    }
+
+    /// The bench path answers for benches only: an ordinary workspace is "no such object", so a
+    /// bench ticket can never be pointed at somebody's dev workspace.
+    #[tokio::test]
+    async fn an_ordinary_workspace_is_not_a_bench() {
+        let (c, _) = mock_client(routes(ws("w1", "full", false)));
+        assert_eq!(resolve_bench(&c, "w1", 1).await.err(), Some((StatusCode::NOT_FOUND, "no such object")));
+    }
+
+    #[tokio::test]
+    async fn a_removed_members_stamped_workspace_is_403() {
+        use kloudlite_workspaces::api::membership::{MEMBERSHIP_FIELD_MANAGER, REMOVED_AT};
+        let mut w = ws("w1", "full", false);
+        w["metadata"]["annotations"] = json!({REMOVED_AT:"2026-09-15T00:00:00Z"});
+        w["metadata"]["managedFields"] = json!([{"manager":MEMBERSHIP_FIELD_MANAGER,"operation":"Apply",
+            "apiVersion":"kloudlite.io/v1alpha1","fieldsType":"FieldsV1",
+            "fieldsV1":{"f:metadata":{"f:annotations":{format!("f:{REMOVED_AT}"):{}}}}}]);
+        let (c, _) = mock_client(routes(w.clone()));
+        assert_eq!(resolve(&c, "w1", 22).await.err(), Some((StatusCode::FORBIDDEN, "access removed")));
+        // A stamp anyone else wrote is no stamp.
+        w["metadata"]["managedFields"][0]["manager"] = json!("kubectl");
+        let (c, _) = mock_client(routes(w));
+        assert!(resolve(&c, "w1", 22).await.is_ok());
     }
 }
