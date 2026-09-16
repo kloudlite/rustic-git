@@ -290,7 +290,10 @@ export function Chat(props: {
           width, and one wide table or unbroken token in the transcript would
           otherwise widen the column and run the text under the inspector. */}
       <div class={props.shellFull ? "grid h-full min-h-0 w-full min-w-0 grid-rows-[0_minmax(0,1fr)]" : "grid h-full min-h-0 w-full min-w-0 grid-rows-[minmax(0,1fr)_auto]"}>
-      <div class="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)]">
+      {/* A zero-height grid row does not clip: the composer would still paint
+          over the terminal, so the whole chat column is hidden while a shell
+          has the tab to itself. */}
+      <div class="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)]" classList={{ hidden: props.shellFull }}>
       <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono text-sm leading-[18px]">
         {/* A file opens in place: the thread stays selected and the sidebar
             stays put, because reading a file is part of following the work
