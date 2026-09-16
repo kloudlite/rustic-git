@@ -133,7 +133,9 @@ export function SettingsEditor({
         />
         <div className="flex items-center gap-3">
           <Button type="button" onClick={save} disabled={pending || !canSave(changes, note)}>
-            Save {Object.keys(changes).length ? `${Object.keys(changes).length} change(s)` : ""}
+            {Object.keys(changes).length
+              ? `Save ${Object.keys(changes).length} change${Object.keys(changes).length === 1 ? "" : "s"}`
+              : "Save"}
           </Button>
           {status && (
             <p role={status.ok ? "status" : "alert"} className={status.ok ? "text-sm2 text-muted-foreground" : "text-sm2 font-medium text-destructive"}>
@@ -191,7 +193,7 @@ export function SettingsEditor({
               Every setting goes back to what this version held; a setting it left unset returns to its default. The current values are kept in history.
             </DialogDescription>
           </DialogHeader>
-          <Textarea value={revertNote} onChange={(e) => setRevertNote(e.target.value)} placeholder="Why revert?" rows={3} />
+          <Textarea value={revertNote} onChange={(e) => setRevertNote(e.target.value)} placeholder="Why revert?" rows={3} aria-label="Why revert?" />
           {revertError && <p role="alert" className="text-sm2 font-medium text-destructive">{revertError}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setRevertAt(null)}>Cancel</Button>
