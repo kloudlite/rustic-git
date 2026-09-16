@@ -232,6 +232,10 @@ spec:
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
               value: ghcr.io/kloudlite/kloudlite-workspace:b684f6504e3c650b399f5ded824781d32ed1111f@sha256:7ba9ad6f1891884b22a958ff6ba698cfc3aa94928424b77b30388e11bb577cf0
+            # The harness-bench container a bench workspace's pod carries beside the workspace
+            # container (a bench IS a Workspace since 2026-09-16). Pinned by deploy/pin.sh.
+            - name: KLOUDLITE_BENCH_IMAGE
+              value: ghcr.io/kloudlite/kloudlite-bench:b684f6504e3c650b399f5ded824781d32ed1111f@sha256:e8c0032d50e50d13718a29ca142fef46cd304814eed8f7e3de9d21770d707bde
             # The forwarder that stands in for an intercepted service. Pinned by deploy/pin.sh.
             - name: WS_INTERCEPT_PROXY_IMAGE
               value: ghcr.io/kloudlite/kloudlite-intercept-proxy:b684f6504e3c650b399f5ded824781d32ed1111f@sha256:76d59c9b8cacbe508d4fbcd19d7d49e08c266886daaead4ed026c508b7810a9d

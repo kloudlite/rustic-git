@@ -90,8 +90,10 @@ pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daem
 # The proxy image is not a workload of ours either: the agent hands it to a pod in a tenant
 # namespace (WS_INTERCEPT_PROXY_IMAGE), so it lives in the DaemonSet's env, not an `image:` line.
 pin 'kloudlite-intercept-proxy' "$SHA" "${DIGEST[kloudlite-intercept-proxy]}" k3s/agent-daemonset.yaml
-# The bench image is the api's to write into a Bench spec (KLOUDLITE_BENCH_IMAGE on the api
-# Deployment).
+# The bench image is the agent's to put on a bench workspace's second container
+# (KLOUDLITE_BENCH_IMAGE in the DaemonSet's env); the api Deployment keeps the same var for the
+# legacy /v1/bench path until the Bench CRD is gone.
+pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" kloudlite.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
