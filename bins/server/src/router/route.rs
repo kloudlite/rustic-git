@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use kloudlite_core::httpx::Trusted;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Liveness/readiness. 503 when the object store has stopped answering, or when no live leader
@@ -15,6 +16,9 @@ use std::sync::Arc;
 /// the probe costs nothing. Peer DNS is NOT gated on this (`publishNotReadyAddresses`), so
 /// forwarding between nodes keeps working through a failover.
 /// Same handler on both listeners: nothing in-repo probes the peer one.
+/// Whether `leader.absent` has already been reported for the current leaderless window.
+static LEADERLESS_WARNED: AtomicBool = AtomicBool::new(false);
+
 pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.store.healthy() {
         return (StatusCode::SERVICE_UNAVAILABLE, "object store unreachable").into_response();
@@ -28,10 +32,15 @@ pub(crate) async fn healthz(State(app): State<Arc<App>>) -> Response {
     if !app.leader_live() {
         // The 503 itself logs at info (an election settling is readiness working); a fleet with no
         // leader past 2 × TTL is not settling, and says so.
-        if app.leaderless_too_long() {
+        // Latched on the transition: every kubelet and LB probe lands here, so warning per probe
+        // turns one leaderless window into a warn per probe per pod — an alert nobody can count.
+        if app.leaderless_too_long() && !LEADERLESS_WARNED.swap(true, Ordering::Relaxed) {
             tracing::warn!("leader.absent");
         }
         return (StatusCode::SERVICE_UNAVAILABLE, "no live leader").into_response();
+    }
+    if LEADERLESS_WARNED.swap(false, Ordering::Relaxed) {
+        tracing::info!("leader.back");
     }
     (
         StatusCode::OK,
