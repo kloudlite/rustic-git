@@ -10,8 +10,6 @@ import { childTraceEnv } from "./tracing.ts";
  * here remembers anything — reopening a session is `--session <file>`.
  */
 export type PiEvent = Record<string, unknown> & { type: string; id?: string };
-/** The btw fork's tools: no kl_* — it answers one question, it never touches a workspace. */
-export const BTW_TOOLS = "read,grep,find,ls";
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** A workspace or ephemeral session's tools, all run on that workspace's tool server. */
@@ -45,9 +43,13 @@ export class RpcChild {
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     // The image installs the whole harness tree at /opt/harness, so the relative defaults resolve there; the env names another layout.
     const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
-    // A workspace session loads only the workspace's tools: background.ts would take bash back into the bench pod.
-    const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["background.ts", "process.ts", "kloudlite.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
-    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--tools", BTW_TOOLS] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : [])];
+    // A workspace session loads only the workspace's tools. A bench session loads the platform and
+    // kl_ws_*, and NOTHING that runs here: `--no-builtin-tools` takes pi's own read/write/bash away
+    // and background.ts/process.ts are not loaded, because a bench session has no hands in the bench
+    // pod at all (owner, 2026-09-17) — it reaches a workspace through that workspace's tool server.
+    // The btw fork answers one question from the transcript it forked: `--no-tools`, no extensions.
+    const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["kloudlite.ts", "workspaces.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
+    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : []), ...(o.fork || o.tools ? [] : ["--no-builtin-tools"])];
     // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
     // The trace of the request that started this child; every tool call of its life joins it.
     // ponytail: one waterfall per child lifetime, unbounded; `workspace-tools.ts` stops sending it

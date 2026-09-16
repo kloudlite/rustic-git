@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
-import { BTW_TOOLS } from "../src/rpc-child.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 
@@ -28,12 +27,11 @@ test("btw answers from a fork, is kept under btw/, and its child is gone", async
     assert.equal(a.id, "btw-1");
     assert.deepEqual((a.entries as { role: string }[]).map((m) => m.role), ["user", "assistant"]);
     assert.deepEqual(b.listBtw("s-1").map((x) => x.question), ["what is this"]);
-    // the ruling: the btw fork gets exactly read,grep,find,ls — no kl_* tools.
+    // the ruling: the btw fork has no tools at all — it answers one question from the transcript.
     const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
-    const at = argv.indexOf("--tools");
-    assert.notEqual(at, -1);
-    assert.equal(argv[at + 1], BTW_TOOLS);
-    assert.equal(BTW_TOOLS, "read,grep,find,ls");
+    assert.ok(argv.includes("--no-tools"), argv.join(" "));
+    assert.equal(argv.indexOf("--tools"), -1);
+    assert.deepEqual(argv.filter((_, i) => argv[i - 1] === "-e"), []);
   } finally {
     await b.stop();
   }

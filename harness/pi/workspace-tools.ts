@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { call } from "./kloudlite.ts";
+import { call, tellItWhereItStands } from "./kloudlite.ts";
 
 /**
  * A workspace session's hands. pi runs in the bench pod; these seven tools run
@@ -139,6 +139,8 @@ export async function resolveFromApi(ws: string): Promise<string> {
 export default function (pi: ExtensionAPI) {
   const ws = process.env.KL_TOOLS_WORKSPACE;
   if (!ws) return;
+  // Same identity as a bench session: what differs is only whose hands these are.
+  tellItWhereItStands(pi, `Your tools all run inside workspace ${ws} — its files, its shell — and reach nothing else.`);
   const server = new ToolServer(ws, resolveFromApi);
   const reg = (name: string, label: string, description: string, parameters: ReturnType<typeof Type.Object>) =>
     pi.registerTool({

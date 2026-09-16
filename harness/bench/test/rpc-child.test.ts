@@ -49,7 +49,10 @@ test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions
     await c.send({ type: "get_state" });
     const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
     const exts = argv.filter((_, i) => argv[i - 1] === "-e");
-    assert.deepEqual(exts, ["background.ts", "process.ts", "kloudlite.ts"].map((f) => path.join(ext, f)));
+    assert.deepEqual(exts, ["kloudlite.ts", "workspaces.ts"].map((f) => path.join(ext, f)));
+    // A bench session has no hands in its own pod: no builtin tools, and no allow-list to widen.
+    assert.ok(argv.includes("--no-builtin-tools"), argv.join(" "));
+    assert.equal(argv.indexOf("--tools"), -1);
   } finally {
     await c.stop();
     for (const [k, v] of [["HARNESS_PI_BIN", saved.bin], ["HARNESS_PI_EXT_DIR", saved.ext], ["FAKE_PI_ARGV_FILE", saved.argv]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;

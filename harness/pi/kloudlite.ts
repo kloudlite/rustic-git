@@ -59,33 +59,71 @@ const q = (o: Record<string, string | undefined>) => {
   return s ? `?${s}` : "";
 };
 
-export default function (pi: ExtensionAPI) {
+/**
+ * What the model is: the Kloudlite harness, and nothing else. This REPLACES pi's
+ * own system prompt rather than appending to it (owner, 2026-09-17): a bench
+ * session has no filesystem and no shell of its own, so a coding-agent prompt
+ * about local files, the CLI it happens to be built on, or paths under
+ * /opt/harness describes a machine it cannot touch and invites it to go looking.
+ * Its tools are the whole world it sees.
+ */
+export function identity(hands: string): string {
+  return [
+    "You are the Kloudlite harness: the person's bench on the Kloudlite platform.",
+    "You have no filesystem and no shell of your own — nothing you do touches the machine you run on, and there are no local files to read.",
+    hands,
+    "Those tools are the only way you can see or change anything. Never try to reach the platform another way, and never guess at what a tool would have told you.",
+    "Say what you did and what came back, briefly, in the person's own terms.",
+  ].join("\n\n");
+}
+
+/** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
+export function tellItWhereItStands(pi: ExtensionAPI, hands: string): void {
+  const prompt = identity(hands);
+  pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
+}
+
+/** The hands a bench session has: the platform, and workspaces through their own tool servers. */
+export const BENCH_HANDS =
+  "Workspaces are acted on through the kl_ws_* tools, which name the workspace by id and run inside that workspace. The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.";
+
+/**
+ * Registering one tool from the catalogue: the description a person reads is the
+ * description the model gets, and a call that hands work to a workspace or an
+ * environment is published as an exchange. `workspaces.ts` registers its
+ * `kl_ws_*` tools through this too, so there is one shape for all of them.
+ */
+export function makeReg(pi: ExtensionAPI) {
   const spec = (name: string) => TOOLS.find((t) => t.name === name)!;
-  const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
+  return <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
     const s = spec(name);
     pi.registerTool({
       name,
       label: name,
       description: `${s.summary} [${s.effect}]`,
       parameters: Type.Object(params),
-      async execute(toolCallId, a, _signal, _update, ctx) {
+      async execute(toolCallId, a, signal, _update, ctx) {
         const args = a as Record<string, any>;
         // A call that hands work to a workspace or environment is an exchange:
         // harness-bench records it in the bench's one log, where the session's
         // queue and the workspace's queue both read it.
-        const target = /^kl_(workspace|environment)_/.test(name) ? String(args.id ?? args.name ?? "") : "";
+        const target = /^kl_(ws|workspace|environment)_/.test(name) ? String(args.workspace ?? args.id ?? args.name ?? "") : "";
         const publish = (v: unknown) => target && ctx?.ui?.setWidget("harness:exchange", [JSON.stringify(v)]);
         const id = `x-${toolCallId}`;
         publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
-        const r = await run(args);
+        const r = await run(args, signal);
         publish({ id: `${id}-in`, workspace: target, dir: "in", text: r.content.map((c) => c.text).join("").slice(0, 2000), state: r.isError ? "failed" : "done", ref: id });
         publish({ id, state: r.isError ? "failed" : "done" });
         return r;
       },
     });
   };
+}
+
+export function tools(pi: ExtensionAPI) {
+  const reg = makeReg(pi);
   const S = (d: string) => Type.String({ description: d });
-  const O = (t: ReturnType<typeof Type.String>) => Type.Optional(t);
+  const O = <T>(t: T) => Type.Optional(t as any);
 
   // workspaces
   reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
@@ -108,6 +146,12 @@ export default function (pi: ExtensionAPI) {
   reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }));
   reg("kl_workspace_clone", { id: S("source workspace id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/workspaces/${a.id}/clone`, { name: a.name }));
   reg("kl_workspace_packages", { id: S("workspace id"), packages: Type.Array(Type.String(), { description: "the whole list: attr or attr@version" }) }, (a) => answer("PATCH", `/v1/workspaces/${a.id}`, { packages: a.packages }));
+  reg("kl_workspace_packages_update", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/packages/update`));
+  reg(
+    "kl_workspace_restore",
+    { name: S("name for the restored workspace"), snapshot_id: S("snapshot id to restore"), image: O(S("override the snapshot's image")), packages: O(Type.Array(Type.String(), { description: "override the snapshot's packages" })), quota_gb: O(Type.Number({ description: "override the snapshot's disk quota" })) },
+    (a) => answer("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb }),
+  );
   reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
 
   // environments
@@ -142,6 +186,15 @@ export default function (pi: ExtensionAPI) {
     },
     (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
   );
+  // The whole list, merge-patched: removals take their StatefulSet with them, so this is a write
+  // a person would want to have seen. Bytes stay on the volume.
+  reg("kl_environment_services", { id: S("environment id"), services: Type.Array(Type.Object({ name: Type.String(), image: Type.String(), ports: O(Type.Array(Type.Number())) }), { description: "the WHOLE services list; a service missing from it is removed" }) }, (a) => answer("PATCH", `/v1/environments/${a.id}`, { services: a.services }));
+  reg(
+    "kl_environment_restore",
+    { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(Type.Object({ name: Type.String(), image: Type.String(), ports: O(Type.Array(Type.Number())) }), { description: "override the services the snapshot froze" })) },
+    (a) => answer("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services }),
+  );
+  reg("kl_environment_restore_in_place", { id: S("environment id"), snapshot_id: S("snapshot id of this environment's own volume") }, (a) => answer("POST", `/v1/environments/${a.id}/restore-in-place`, { snapshot_id: a.snapshot_id }));
   reg("kl_environment_delete", { id: S("environment id") }, (a) => answer("DELETE", `/v1/environments/${a.id}`));
 
   // platform
@@ -149,9 +202,31 @@ export default function (pi: ExtensionAPI) {
   reg("kl_quota", {}, () => answer("GET", "/v1/quota"));
   reg("kl_volumes", { name: O(S("a volume name, for its history")) }, (a) => answer("GET", a.name ? `/v1/volumes/${a.name}/history` : "/v1/volumes"));
   reg("kl_builder", {}, () => answer("GET", "/v1/builders/me"));
+  reg("kl_volume_history", { name: S("volume name") }, (a) => answer("GET", `/v1/volumes/${a.name}/history`));
+  reg("kl_volume_delete", { name: S("volume name; it must be detached") }, (a) => answer("DELETE", `/v1/volumes/${a.name}`));
+  reg("kl_requests", {}, () => answer("GET", "/v1/requests"));
+  // Anything that has to be GRANTED is a request; one pending per owner per kind.
+  reg(
+    "kl_request_create",
+    {
+      kind: Type.Union([Type.Literal("quota"), Type.Literal("access"), Type.Literal("region"), Type.Literal("other")], { description: "what is being asked for" }),
+      reason: O(S("why, in the person's words")),
+      owner: O(S("team slug; absent = your own")),
+      quota: O(Type.Object({ workspaces: O(Type.Number()), environments: O(Type.Number()), snapshots: O(Type.Number()), diskGb: O(Type.Number()), cpu: O(Type.Number()), memoryGb: O(Type.Number()) }, { description: "kind=quota: the ceilings asked for" })),
+      access: O(Type.Object({ team: Type.String(), role: Type.String() }, { description: "kind=access: team and role" })),
+      region: O(Type.Object({ region: Type.String() }, { description: "kind=region: the region asked for" })),
+      other: O(Type.Object({ title: Type.String(), body: Type.String() }, { description: "kind=other: what is being asked" })),
+    },
+    (a) => answer("POST", "/v1/requests", { kind: a.kind, reason: a.reason, owner: a.owner, quota: a.quota, access: a.access, region: a.region, other: a.other }),
+  );
   // Claims only, unverified: the api is what verifies; the token itself never reaches the model.
   reg("kl_whoami", {}, async () => {
     const claims = JSON.parse(Buffer.from(token().token.split(".")[1] ?? "", "base64url").toString() || "{}") as { sub?: string; team?: string; exp?: number };
     return text({ username: claims.sub, team: claims.team, expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : undefined });
   });
+}
+
+export default function (pi: ExtensionAPI) {
+  tools(pi);
+  tellItWhereItStands(pi, BENCH_HANDS);
 }

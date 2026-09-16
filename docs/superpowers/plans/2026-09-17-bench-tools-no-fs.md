@@ -13,16 +13,23 @@
   catalogue (test enforces).
 - Wire names verbatim from the spec. Commits imperative, no attribution. Do not push.
 
-### Task 1: harness — no builtin tools, kl_ws_*, fuller catalogue, system line (harness/)
-- `bench/src/rpc-child.ts`: bench session args gain `--no-builtin-tools`, exts = `kloudlite.ts`,
-  `workspaces.ts`; fork = `--no-tools` (drop `BTW_TOOLS`). Workspace sessions unchanged.
-- `pi/workspaces.ts` (new): the seven `kl_ws_*` tools per spec §2, reusing `toIde`/`fromIde`
-  and the address resolver from `workspace-tools.ts` (export what is needed; do not duplicate).
-- `pi/catalog.ts` + `pi/kloudlite.ts`: tools per spec §3; exchange regex matches `kl_ws_`;
-  system-prompt line per §5 (find pi's hook in `node_modules/@earendil-works/pi-coding-agent/docs`).
-- Tests (`bench:test`): spawn args for bench/workspace/fork; `kl_ws_*` → IdeCall mapping with
-  the workspace id; catalogue names every registered tool.
-- Commit `Give bench sessions platform tools only and reach workspaces through their tool servers`.
+### Task 1: harness — no builtin tools, ask a workspace, own-workspace tools, identity (harness/)
+- `bench/src/rpc-child.ts`: bench session args gain `--no-builtin-tools`, exts = `kloudlite.ts`
+  only (drop `background.ts`/`process.ts` for bench sessions); fork = `--no-tools`; every child
+  gets `KL_SESSION=<session id>` in env. Workspace sessions keep `workspace-tools.ts` + `--tools`
+  and ALSO load `kloudlite.ts` in workspace mode (own `kl_pkg_*` only).
+- `bench/src/server.ts` + `bench.ts`: `POST /workspaces/{id}/ask {text, from}` per spec §2 —
+  open (create if absent) the workspace's own session, record the exchange, prompt the child
+  (followUp when busy), transition on agent_start/agent_end, deliver the final assistant text to
+  `from` as a follow-up prompt `[from workspace <name>] …`. Refuse a `from` that is not a live
+  session (400).
+- `pi/kloudlite.ts` + `pi/catalog.ts`: `kl_workspace_ask`; `kl_pkg_*`, `kl_env_*` on the own id
+  (bench: `KL_WORKSPACE_ID`; workspace session: `KL_TOOLS_WORKSPACE`); remove
+  `kl_workspace_packages`; tools per spec §3; system prompt per §5 (REPLACES pi's; "the Kloudlite
+  harness"; never "pi"; default target = itself; named workspace = ask).
+- Tests (`bench:test`): spawn args per kind; `/ask` creates the session, queues, transitions,
+  delivers back (fake child); catalogue names every registered tool; prompt has no "pi"/"/opt/harness".
+- Commit `Give bench sessions platform tools only and queue workspace work into the workspace's session`.
 
 ### Task 2: api + agent — PATCH environment services (crates/workspaces, bins/agent)
 - `api/environments.rs`: `patch_env_services` per spec §4, route `.patch(...)` on

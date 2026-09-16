@@ -221,7 +221,7 @@ test("whoami never returns the token", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
   const restore = withToken(path.join(dir, "token"), tok, "http://127.0.0.1:1");
   const tools: Record<string, { execute: (...a: unknown[]) => Promise<{ content: { text: string }[] }> }> = {};
-  kloudlite({ registerTool: (t: { name: string }) => (tools[t.name] = t as never) } as never);
+  kloudlite({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
   try {
     const out = (await tools.kl_whoami.execute("c1", {}, undefined, undefined, undefined)).content[0].text;
     assert.deepEqual(JSON.parse(out), { username: "ada", team: "acme", expires_at: "2100-01-01T00:00:00.000Z" });

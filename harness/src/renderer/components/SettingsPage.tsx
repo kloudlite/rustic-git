@@ -112,7 +112,7 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
 
           <Show when={page() === "tools"}>
             <Section id="tools" title="Tools" hint="what the bench can do; every write and delete is marked">
-              <For each={["shell", "workspace", "environment", "platform"] as const}>
+              <For each={["workspace", "environment", "platform"] as const}>
                 {(g) => (
                   <>
                     <div class="mt-4 mb-1 text-2xs font-semibold uppercase text-subtle first:mt-0">{g}</div>
@@ -120,7 +120,6 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
                       {(t) => (
                         <Row name={t.name} detail={t.summary} mono>
                           <span class={`rounded-sm px-1.5 font-mono text-2xs ${EFFECT[t.effect]}`}>{t.effect}</span>
-                          <Show when={t.builtin}><span class="text-2xs text-subtle">pi</span></Show>
                         </Row>
                       )}
                     </For>
