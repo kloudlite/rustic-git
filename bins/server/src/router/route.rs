@@ -446,7 +446,10 @@ async fn route_inner(
     // key reads as absent and cannot be opened, so the handler answers from routing's decision
     // instead of a second probe — a creator elsewhere that claims and flushes after the leader's
     // "nobody" can no longer be fenced by an open here. It runs ahead of the hop bound because a
-    // name that exists nowhere is not a routing disagreement.
+    // name that exists nowhere is not a routing disagreement. The scope is IN-TASK ONLY — it is a
+    // task-local, so a handler that opened the database from `spawn_blocking`/`tokio::spawn`, or
+    // from a body streamed after this future resolves, would open it anyway; nothing does today,
+    // and `pool::unowned`'s doc carries the upgrade path.
     if matches!(route, crate::ownership::Route::Missing) {
         return kloudlite_storage::pool::unowned(repo, next.run(req)).await;
     }

@@ -155,6 +155,14 @@ tokio::task_local! {
 /// repo/image" from what routing already decided, instead of re-probing the store and opening a
 /// database a creator elsewhere may have just claimed and flushed — which fences the creator (the
 /// first-request 503/500 on every new image, 2026-09-16). Every other key is untouched.
+///
+/// IN-TASK ONLY. This is a task-local, so `spawn_blocking`, `tokio::spawn` and a response body
+/// streamed after the middleware's future resolves do NOT inherit it: inside those the key reads
+/// as owned again and `get` will open it. Every handler that can reach a per-repo database opens
+/// it in-scope today — `unowned_does_not_reach_spawned_work` pins that shape — so nothing is
+/// missed; a handler added later that opens a DB off-task reopens the window silently.
+// ponytail: task-local, so the scope is in-task only. Upgrade path when a handler needs to open
+// off-task: carry the key on the request extensions and thread it through the `Store` handle.
 pub async fn unowned<F: std::future::Future>(key: String, f: F) -> F::Output {
     UNOWNED.scope(key, f).await
 }
@@ -406,6 +414,22 @@ mod tests {
 
     fn pool() -> Arc<Pool> {
         Arc::new(Pool::new(Arc::new(InMemory::new()), false))
+    }
+
+    /// The ceiling on `unowned`, pinned rather than described: the scope is in-task, so spawned
+    /// work sees the key as owned again and would open it. Everything that opens a per-repo
+    /// database does so in-scope today; this fails loudly if the mechanism is ever assumed to
+    /// propagate.
+    #[tokio::test]
+    async fn unowned_does_not_reach_spawned_work() {
+        unowned("alice/web".to_string(), async {
+            assert!(is_unowned("alice", "web"), "in-task, the key is refused");
+            let spawned = tokio::spawn(async { is_unowned("alice", "web") }).await.unwrap();
+            assert!(!spawned, "tokio::spawn does not inherit the scope");
+            let blocking = tokio::task::spawn_blocking(|| is_unowned("alice", "web")).await.unwrap();
+            assert!(!blocking, "spawn_blocking does not inherit the scope");
+        })
+        .await;
     }
 
     /// Tuned per test rather than through the environment: env vars are process-global, and these

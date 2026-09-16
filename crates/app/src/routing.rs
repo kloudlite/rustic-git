@@ -85,9 +85,11 @@ impl App {
                     // between them — after which falling through to a handler HERE opens the
                     // database unleased and fences the owner. The leader read narrows that window;
                     // `pool::unowned`, which the middleware wraps a `Missing` request in, closes the
-                    // rest — the handler cannot re-probe or open this key, so a flush after the
-                    // leader's "nobody" is answered "absent" rather than fenced. It bit: every new
-                    // image's first HEAD, hourly, until 2026-09-16.
+                    // rest FOR IN-TASK WORK — the handler cannot re-probe or open this key, so a
+                    // flush after the leader's "nobody" is answered "absent" rather than fenced.
+                    // It bit: every new image's first HEAD, hourly, until 2026-09-16. The scope is
+                    // a task-local: work moved to `spawn_blocking`/`tokio::spawn`, or a body
+                    // streamed after the handler returns, does NOT inherit it (see `pool::unowned`).
                     //
                     // A leader that cannot be reached is treated exactly like "nobody", on
                     // purpose: the alternative is 503 on a path an anonymous client reaches, and
