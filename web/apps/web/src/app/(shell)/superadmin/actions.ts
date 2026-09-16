@@ -254,7 +254,8 @@ export type DeleteRemovalNowResult = { ok: true; notice: string } | { ok: false;
  *  with the superadmin's own token: `may_manage` in `removals.rs` already admits the `superadmin`
  *  claim, and delete-now stays a `/v1` write on purpose (only that process's service account may
  *  stamp `delete-now`), so this never goes through the admin host. */
-export async function deleteRemovalNowAction(team: string, owner: string): Promise<DeleteRemovalNowResult> {
+export async function deleteRemovalNowAction(team: string, owner: string, confirm: string): Promise<DeleteRemovalNowResult> {
+  if (!team || !owner || confirm !== owner) return { ok: false, message: "Type their handle to confirm." };
   const token = await tokenOr();
   if (typeof token !== "string") return { ok: false, message: token.error };
   const r = await api.deleteRemovalNow(token, team, owner);

@@ -29,7 +29,7 @@ function RemovalRow({ r, open, onOpen, onClose }: { r: Row; open: boolean; onOpe
   function submit() {
     if (typed !== r.owner) return;
     startTransition(async () => {
-      const res = await deleteRemovalNowAction(r.team, r.owner);
+      const res = await deleteRemovalNowAction(r.team, r.owner, typed);
       if (!res.ok) {
         setError(res.message);
         return;
