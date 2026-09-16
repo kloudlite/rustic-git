@@ -27,7 +27,8 @@ export const SESSION_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 export async function toolSessions(address: string, method: "GET" | "DELETE", name?: string): Promise<{ code: number; body?: unknown }> {
   let r: Response;
   try {
-    r = await fetch(`http://${address}/stream/pty/sessions${name === undefined ? "" : `/${name}`}`, { method });
+    // Bounded like the WS dial (OPEN_MS): a hung tool server must not hang the bench's request.
+    r = await fetch(`http://${address}/stream/pty/sessions${name === undefined ? "" : `/${name}`}`, { method, signal: AbortSignal.timeout(OPEN_MS) });
   } catch (e) {
     return { code: 502, body: { error: `workspace ${address} did not answer: ${(e as Error).message}` } };
   }
