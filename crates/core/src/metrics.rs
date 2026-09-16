@@ -437,10 +437,6 @@ mod trace_tests {
         echo().layer(axum::middleware::from_fn_with_state("api", super::http_metrics))
     }
 
-    fn peer() -> axum::Router {
-        echo().layer(axum::middleware::from_fn_with_state(("peer", std::sync::Arc::<str>::from("s3cret")), super::http_metrics_peer))
-    }
-
     /// Only a 503 the handler MARKED is demoted. The object store being unreachable answers 503 on
     /// the same route with the same code and must stay `http.failed`, or the one readiness failure
     /// somebody has to be woken for becomes an info line.
