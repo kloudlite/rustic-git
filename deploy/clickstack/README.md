@@ -36,12 +36,32 @@ URI=$(python3 -c 'import sys,urllib.parse as u; p=u.urlsplit(sys.argv[1]); print
 kubectl -n clickstack create secret generic hyperdx-mongo --from-literal=MONGO_URI="$URI"
 unset CS URI
 
-# 3. The stack. HyperDX reads `hyperdx.config` through envFrom at start and the chart stamps no
+# 3. The chart's own ClickHouse users. Left unset, `hyperdx.secrets.*` are the chart's LITERAL
+#    defaults (`hyperdx`, `otelcollectorpass`) — which is what this install ran on until
+#    2026-09-16. Generate them once into a git-ignored file and pass it on every upgrade; the
+#    values are recoverable from the release secret (`helm get values`) if the file is lost.
+#    Do NOT add `extraUsersConfig.users.default.password`: the operator already declares
+#    `default` with `no_password`, and a second auth field crash-loops the server
+#    ("More than one field of 'password', ... 'no_password'"). `default` stays passwordless;
+#    it is used only from localhost, and the Service is ClusterIP.
+umask 077
+printf 'hyperdx:\n  secrets:\n    CLICKHOUSE_PASSWORD: "%s"\n    CLICKHOUSE_APP_PASSWORD: "%s"\n' \
+  "$(openssl rand -base64 30 | tr -d '/+=')" "$(openssl rand -base64 30 | tr -d '/+=')" \
+  > deploy/clickstack/secrets.yaml
+
+# 4. The stack. HyperDX reads `hyperdx.config` through envFrom at start and the chart stamps no
 #    checksum, so a values change under `config` needs `kubectl -n clickstack rollout restart
-#    deploy/clickstack-app` after the upgrade.
+#    deploy/clickstack-app` after the upgrade. The same is true of the collector after a
+#    `hyperdx.secrets` change: its pod template does not change, so it keeps exporting with the
+#    old password until `kubectl -n clickstack rollout restart deploy/clickstack-otel-collector`.
 helm upgrade --install clickstack clickstack/clickstack \
   --version 3.2.0 --namespace clickstack \
-  -f deploy/clickstack/clickstack-values.yaml
+  -f deploy/clickstack/clickstack-values.yaml -f deploy/clickstack/secrets.yaml
+
+# 5. After rotating `CLICKHOUSE_APP_PASSWORD`: HyperDX seeded its "Local ClickHouse" connection
+#    into its own Mongo on FIRST boot and never re-reads it, so set the new `app` password by
+#    hand in HyperDX → Team Settings → Connections → Local ClickHouse. Until then every HyperDX
+#    query (and the ClickStack MCP server) fails with `app: Authentication failed`.
 ```
 
 The operators chart also installs the MongoDB operator (no off switch in 1.1.0). With
