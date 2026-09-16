@@ -1,6 +1,7 @@
 import { createEffect, onCleanup, onMount } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { mode } from "../../theme";
 import type { TermTab } from "./tabs";
@@ -63,6 +64,23 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+
+    // The DOM renderer repaints a row per keystroke, which the owner sees as
+    // flicker on backspace. WebGL draws the whole grid; if the context is lost
+    // (GPU reset, a headless run) disposing the addon puts the DOM renderer back.
+    let webgl: WebglAddon | undefined;
+    try {
+      webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl?.dispose();
+        webgl = undefined;
+      });
+      term.loadAddon(webgl);
+    } catch (e) {
+      webgl = undefined;
+      console.warn("terminal: WebGL unavailable, using the DOM renderer", e);
+    }
+
     fit.fit();
 
     term.writeln(props.tab.banner);
@@ -72,6 +90,7 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     const end = (code: number | undefined, error?: string) => {
       if (exited) return;
       exited = true;
+      flush(); // whatever the shell said last, before the epitaph
       term.write(code === undefined ? `\r\n\x1b[2m[${error ?? "disconnected"} — reopen the shell]\x1b[0m` : `\r\n\x1b[2m[process exited with code ${code}]\x1b[0m`);
       props.onExited?.(props.tab.id);
     };
@@ -82,7 +101,28 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     term.onData((d) => window.harness.pty.write(props.tab.id, enc.encode(d)));
     term.onResize(({ cols, rows }) => window.harness.pty.resize(props.tab.id, cols, rows));
 
-    const offData = window.harness.pty.onData((id, data) => id === props.tab.id && term.write(data));
+    // One write per frame, not per IPC frame: a keystroke echo plus its redraw
+    // arrive as several small chunks and each write() is a repaint.
+    let pending: Uint8Array[] = [];
+    let frame: number | undefined;
+    const flush = () => {
+      frame = undefined;
+      if (!pending.length) return;
+      const n = pending.reduce((t, c) => t + c.length, 0);
+      const buf = new Uint8Array(n);
+      let at = 0;
+      for (const c of pending) {
+        buf.set(c, at);
+        at += c.length;
+      }
+      pending = [];
+      term.write(buf);
+    };
+    const offData = window.harness.pty.onData((id, data) => {
+      if (id !== props.tab.id) return;
+      pending.push(data);
+      frame ??= requestAnimationFrame(flush);
+    });
     const offExit = window.harness.pty.onExit((id, code, error) => id === props.tab.id && end(code, error));
     // Enter on a dead shell closes the tab: the same key that would have run
     // the next command, since there is nothing left to run it.
@@ -98,10 +138,12 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     ro.observe(host);
     onCleanup(() => {
       clearTimeout(refit);
+      if (frame !== undefined) cancelAnimationFrame(frame);
       ro.disconnect();
       offData();
       offExit();
       window.harness.pty.close(props.tab.id);
+      webgl?.dispose();
       term.dispose();
     });
   });
