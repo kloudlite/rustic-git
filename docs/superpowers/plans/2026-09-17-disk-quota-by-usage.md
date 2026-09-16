@@ -35,13 +35,13 @@
   `guard_alloc` entirely (owner: disk is never enforced); no `guard_fill`. The `Quota` CRD's
   `diskGb` field is renamed in meaning only ("budget"): keep the field, change the doc comment.
 - `GET /v1/quota` adds `disk: {usedGb, budgetGb}`; Volume doc adds `usedBytes`, `usedAt`.
-- Admin `fold_usage` mirrors. Tests: usage math, floor, fill refusals, doc shapes. Fixtures.
-- Commit `Charge disk quota by occupied bytes with a one-gigabyte floor`.
+- Admin `fold_usage` mirrors. Tests: usage math, no disk refusal on any verb, doc shapes. Fixtures.
+- Commit `Report disk as occupied bytes against a budget and stop enforcing it`.
 
 ### Task 3: web + desktop show used vs ceiling
 
 - Quota views (`web/apps/web` owner quota page, superadmin owners detail; desktop MachinePanel
-  if it shows disk) render `used / limit` and per-volume `used / ceiling`. Tests where the
+  if it shows disk) render `used / budget` (amber past it) and per-volume `used / ceiling`. Tests where the
   siblings have them.
 - Commit `Show occupied disk against the quota, not reserved`.
 
