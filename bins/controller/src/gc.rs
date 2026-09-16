@@ -132,13 +132,16 @@ pub async fn pass(ctx: &Ctx, now: i64) {
     if on && !todo.is_empty() && !beat_alive(ctx, now).await {
         return tracing::warn!(due = todo.len(), "gc.held_beat_stale");
     }
-    for d in todo {
+    let due_total = todo.len();
+    for (done, d) in todo.into_iter().enumerate() {
         if !on {
             tracing::info!(kind = d.kind, name = %d.name, owner = %d.owner, team = %d.team, due = %d.due, "gc.would_delete");
             continue;
         }
         if !crate::space::may_write(ctx).await {
-            return;
+            // Say so: a lease lost halfway through a pass and a pass that found nothing to do look
+            // identical in the log otherwise, and the difference is whether anything was skipped.
+            return tracing::info!(remaining = due_total - done, "gc.lease_lost");
         }
         let dp = DeleteParams { preconditions: Some(Preconditions { uid: d.uid.clone(), resource_version: d.rv.clone() }), ..Default::default() };
         let res = match d.kind {
