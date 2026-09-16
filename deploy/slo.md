@@ -88,7 +88,7 @@ first destructive stage.
 | `ws.push.p95` | Workspaces | Pushing a workspace snapshot completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `quota.refused` | Workspaces | A verb that fills disk is refused with 409 naming diskGb, what is occupied and the limit | 99.9 % | fast | 5 · Workspace |
-| `env.quota.refused` | Workspaces | An over-quota restore, clone and push are each refused with 409 | 99.9 % | fast | 5 · Workspace |
+| `env.quota.refused` | Workspaces | A restore, a clone and a push are each refused with 409 when the owner's limit is below what the run occupies or holds | 99.9 % | fast | 5 · Workspace |
 | `bench.create` | Benches | `POST /v1/bench` answers, and a second POST names the same id | 99.9 % | fast | 5 · Workspace |
 | `bench.start.p95` | Benches | A started bench reaches phase `ready` | 95 % ≤ 90000 ms | fast | 5 · Workspace |
 | `bench.tunnel` | Benches | A bench token opens the tunnel and `/healthz` answers through it | 99.9 % ≤ 20000 ms | fast | 5 · Workspace |

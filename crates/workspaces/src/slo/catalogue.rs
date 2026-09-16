@@ -348,8 +348,10 @@ pub const CATALOGUE: &[Slo] = &[
     // that refused for a reason nobody asked about.
     Slo { id: "quota.refused", feature: "Workspaces", sli: "A verb that fills disk is refused with 409 naming diskGb, what is occupied and the limit", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     // Create is only one of the four verbs behind `guard_alloc`; restore, clone and push route
-    // through the same gate and none was probed.
-    Slo { id: "env.quota.refused", feature: "Workspaces", sli: "An over-quota restore, clone and push are each refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    // through the same gate and none was probed. Each is stood against the gate by PINCHING the
+    // owner's limit, never by asking for a big ceiling: disk is charged by occupied bytes, so a
+    // declared size is not an allocation and a restore asking for `u32::MAX` is simply accepted.
+    Slo { id: "env.quota.refused", feature: "Workspaces", sli: "A restore, a clone and a push are each refused with 409 when the owner's limit is below what the run occupies or holds", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     // The owner's bench. Its object name is a hash of (owner, team), so it is long-lived rather
     // than a `run-{id}` object: left Running with no client, it sleeps between runs.
     Slo { id: "bench.create", feature: "Benches", sli: "`POST /v1/bench` answers, and a second POST names the same id", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },

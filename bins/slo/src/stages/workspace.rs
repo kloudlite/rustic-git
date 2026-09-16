@@ -33,8 +33,11 @@ const CLONE_CEILING: Duration = Duration::from_secs(60);
 /// The body's own cap plus `UNDO_SLACK`: both quota ids bring the probe's quota DOWN and must put
 /// it back, and `Ctx::step`'s timeout drops the whole future, undo included.
 const QUOTA_BODY: Duration = Duration::from_secs(15);
-const ENV_QUOTA_CEILING: Duration =
-    Duration::from_secs(QUOTA_BODY.as_secs() + crate::drill::UNDO_SLACK);
+const QUOTA_CEILING: Duration = Duration::from_secs(QUOTA_BODY.as_secs() + crate::drill::UNDO_SLACK);
+/// `env.quota.refused` pinches TWICE — disk for the restore, then the two counts for the clone and
+/// the push — because `guard_alloc` checks the disk limit BEFORE any count dimension, so one pinch
+/// carrying both would refuse the clone on `diskGb` and prove nothing about the counts.
+const ENV_QUOTA_CEILING: Duration = Duration::from_secs(2 * QUOTA_CEILING.as_secs());
 /// The catalogue's own 180 s for `ws.build.p95`: a real `docker buildx build --push`
 /// dispatched through the gate to a builder that has to start cold.
 const BUILD_CEILING: Duration = Duration::from_secs(180);
@@ -808,32 +811,40 @@ async fn clone(c: &mut Ctx, id: &str) {
 /// `env.quota.refused`'s is: a probe that left the limit PINCHED would refuse its own next run.
 async fn quota_refused(c: &mut Ctx, ws: &str) {
     let ws = ws.to_string();
-    c.step("quota.refused", ENV_QUOTA_CEILING, move |c| {
+    c.step("quota.refused", QUOTA_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let push = api(c, &format!("/v1/workspaces/{ws}/push"));
-        let admin_jwt = c.admin_jwt();
-        let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
         async move {
-            let body = serde_json::json!({ "spec": pinched_disk(c, &jwt).await?, "note": "slo probe quota.refused" });
-            super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(body))
-                .await
-                .context("could not bring the disk limit below what the run occupies")?;
-            let restore_quota = || async {
-                let back = serde_json::json!({
-                    "spec": super::experience_admin::probe_quota(),
-                    "note": "slo probe quota restore",
-                });
-                super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(back))
-                    .await
-                    .map(|_| ())
-                    .context("the probe's disk quota was left PINCHED")
-            };
+            let spec = pinched_disk(c, &jwt).await?;
             let refused = refused_over(c, reqwest::Method::POST, &push, &jwt, Some(serde_json::json!({})), "diskGb", "a push");
-            crate::drill::undoing(QUOTA_BODY, refused, restore_quota).await
+            pinching(c, spec, refused).await
         }
         .boxed()
     })
     .await;
+}
+
+/// Write `spec` as the probe owner's quota, run `body` against the gate, and put the yaml's quota
+/// back on EVERY path out — a probe that left the quota PINCHED would refuse its own next run's
+/// every create. The undo is outside the cancellable region for exactly that reason.
+async fn pinching(c: &Ctx, spec: Value, body: impl std::future::Future<Output = Result<()>>) -> Result<()> {
+    let admin_jwt = c.admin_jwt();
+    let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
+    let pinch = serde_json::json!({ "spec": spec, "note": "slo probe quota refusal" });
+    super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(pinch))
+        .await
+        .context("could not bring the quota down to what the run holds")?;
+    let restore_quota = || async {
+        let back = serde_json::json!({
+            "spec": super::experience_admin::probe_quota(),
+            "note": "slo probe quota restore",
+        });
+        super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(back))
+            .await
+            .map(|_| ())
+            .context("the probe's quota was left PINCHED")
+    };
+    crate::drill::undoing(QUOTA_BODY, body, restore_quota).await
 }
 
 /// The yaml's quota with `diskGb` brought just BELOW what the owner's volumes occupy, so the next
@@ -1003,10 +1014,15 @@ async fn promote(c: &mut Ctx, id: &str) {
 /// allocation nobody decided on through the other three. All three in one step, first failure
 /// wins — each alone says nothing about the others.
 ///
-/// The dimensions differ on purpose and are what each verb actually overshoots: a restore names
-/// its own disk, while a clone and a push cannot ask for a size at all, so they are refused on the
-/// count dimension the run is already at. The clone and the push are aimed at THIS run's own
-/// workspace, so nothing new is allocated even on the path where the gate fails open.
+/// The dimensions differ on purpose and are what each verb actually overshoots. Since 2026-09-17
+/// disk is charged by what the volumes OCCUPY, so NO verb can be made over-quota by asking for a
+/// big ceiling any more — a declared `quota_gb` was never a reservation, and the restore that
+/// asked for `u32::MAX` was answered 202 Accepted (hourly, 2026-09-17 03:43). The only way to
+/// stand any of the three against the gate is to bring the LIMIT down to what the run already
+/// holds: disk for the restore, the two counts for the clone and the push. Two pinches, not one,
+/// because `guard_alloc` checks the disk limit before any count. The clone and the push are aimed
+/// at THIS run's own workspace, so nothing new is allocated even on the path where the gate fails
+/// open.
 async fn env_quota_refused(c: &mut Ctx, ws: &str) {
     let ws = ws.to_string();
     c.step("env.quota.refused", ENV_QUOTA_CEILING, move |c| {
@@ -1020,37 +1036,22 @@ async fn env_quota_refused(c: &mut Ctx, ws: &str) {
             let Some(snapshot) = snapshot else {
                 return Err(anyhow!("the workspace was never pushed, so there is nothing to restore"));
             };
-            // A restore carries a size, so it is refused the same way a create is.
-            let body = serde_json::json!({ "name": name, "snapshot_id": snapshot, "quota_gb": u32::MAX });
-            refused_over(c, reqwest::Method::POST, &restore, &jwt, Some(body), "diskGb", "a restore").await?;
-            // A clone and a push carry no size at all, so neither can be made to overshoot by
-            // asking for more — the only way to stand them against the gate is to bring the LIMIT
-            // down to what the run already holds. Not the second tenant's zero quota: `may_act_on`
-            // refuses another owner's workspace long before `guard_alloc` is reached, so that
-            // would measure ownership and call it quota.
-            let admin_jwt = c.admin_jwt();
-            let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
-            let body = serde_json::json!({ "spec": pinched(c, &jwt).await?, "note": "slo probe quota.refused" });
-            super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(body))
-                .await
-                .context("could not bring the quota down to what the run holds")?;
-            // Outside the cancellable region, exactly as `request.approve`'s raise is: a probe
-            // that left the quota PINCHED would refuse its own next run's every create.
-            let restore_quota = || async {
-                let back = serde_json::json!({
-                    "spec": super::experience_admin::probe_quota(),
-                    "note": "slo probe quota restore",
-                });
-                super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(back))
-                    .await
-                    .map(|_| ())
-                    .context("the probe's quota was left PINCHED")
-            };
+            // The restore carries no `quota_gb` at all: it takes the snapshot's own frozen state,
+            // which is what a person restoring theirs gets, and the disk limit under it is what
+            // makes it one over.
+            let spec = pinched_disk(c, &jwt).await?;
+            let body = serde_json::json!({ "name": name.clone(), "snapshot_id": snapshot });
+            let one = refused_over(c, reqwest::Method::POST, &restore, &jwt, Some(body), "diskGb", "a restore");
+            pinching(c, spec, one).await?;
+            // Then the counts, for the two verbs that carry no size at all. Not the second
+            // tenant's zero quota: `may_act_on` refuses another owner's workspace long before
+            // `guard_alloc` is reached, so that would measure ownership and call it quota.
+            let spec = pinched(c, &jwt).await?;
             let both = async {
                 refused_over(c, reqwest::Method::POST, &clone, &jwt, Some(serde_json::json!({ "name": name })), "workspaces", "a clone").await?;
                 refused_over(c, reqwest::Method::POST, &push, &jwt, Some(serde_json::json!({})), "snapshots", "a push").await
             };
-            crate::drill::undoing(QUOTA_BODY, both, restore_quota).await
+            pinching(c, spec, both).await
         }
         .boxed()
     })
