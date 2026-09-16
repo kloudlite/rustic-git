@@ -17,7 +17,9 @@ const OPEN_MS = 5_000;
 
 /** Never throw out of a send: a socket the peer already closed is the normal end of a shell, not an error. */
 function send(w: WebSocket, data: string | Buffer, binary?: boolean): void {
-  if (w.readyState === WebSocket.OPEN) w.send(data, binary === undefined ? undefined : { binary });
+  if (w.readyState !== WebSocket.OPEN) return;
+  if (binary === undefined) w.send(data);
+  else w.send(data, { binary });
 }
 
 function parseResize(d: Buffer | ArrayBuffer | Buffer[]): Resize | undefined {
