@@ -243,7 +243,7 @@ spec:
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
             - name: WS_BASE_PACKAGES
-              value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
+              value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils tmux tmuxPlugins.resurrect tmuxPlugins.continuum"
             - name: WS_REPLICA_SECS
               value: "300"
             # How often the sync beat checks each running worktree's btrfs generation and cuts a

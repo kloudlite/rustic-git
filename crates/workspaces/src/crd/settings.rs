@@ -40,7 +40,9 @@ pub mod defaults {
     /// because `crates/workspaces` cannot depend on `bins/agent` (the dependency runs the other
     /// way). Keep the two strings in sync by hand; a mismatch is silent, not a compile error.
     pub fn base_packages() -> String {
-        "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils".to_string()
+        // tmux + resurrect + continuum: every desktop terminal is a tmux session and its saved
+        // state lives in `{ws}/.cache/tmux` (spec 2026-09-17-terminals-tmux-and-tabs).
+        "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils tmux tmuxPlugins.resurrect tmuxPlugins.continuum".to_string()
     }
     pub fn default_replicas() -> u32 {
         crate::crd::DEFAULT_REPLICAS
