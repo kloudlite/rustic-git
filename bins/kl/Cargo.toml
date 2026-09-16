@@ -13,10 +13,13 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 kloudlite-ide = { path = "../../crates/ide" }
-# Plain-HTTP export only: no `tls`, so no rustls/ring in the musl binary.
+# `kl pkg`/`kl env` call `/v1`, which is HTTPS behind Cloudflare — hence rustls here and in the
+# trace exporter's sibling below. Worth ~1.5 MB in the musl binary.
 kloudlite-trace = { path = "../../crates/trace", default-features = false }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # The buildx metadata file: created, not named and hoped for — see `Cmd::Build` in main.rs.
 tempfile = { workspace = true }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+serde_json = { workspace = true }
