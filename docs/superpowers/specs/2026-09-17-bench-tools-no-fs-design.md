@@ -36,7 +36,9 @@ deprived of exec tool too. it should use workspace ide tools directly".
 5. **The model is told where it stands.** `kloudlite.ts` adds a system-prompt line via pi's
    extension hook: it runs on a bench with no filesystem or shell of its own; workspaces are
    acted on through `kl_ws_*`; the platform only through `kl_*`; it never probes the platform
-   another way.
+   another way. **It does not know it is pi** (owner, 05:15 IST): the extension REPLACES pi's
+   default system prompt rather than appending — no "pi", no coding-agent boilerplate, no paths
+   under `/opt/harness`; it is "the Kloudlite bench", and its tools are the whole world it sees.
 6. **Probe.** Hourly `env.services.patched`: add a service to the run's environment via the
    PATCH, both ready; remove it, its StatefulSet gone within the stage budget. `bench.tools.no_fs`
    (hourly): the bench session's tool list has no `bash`/`read`/`write` and has `kl_ws_read`.
