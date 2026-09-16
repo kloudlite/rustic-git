@@ -1,0 +1,47 @@
+# Daily Azure Files share snapshot of the region's homes export (owner's yes, 2026-09-17 04:05 IST,
+# after the bench-folder loss of 2026-09-16 showed the share had none). Management plane only
+# (`share-rm`), so it runs on AKS under the kubelet's user-assigned identity, which holds
+# "Storage Account Contributor" on the one account; no storage key exists anywhere in the cluster.
+# Keeps 14 days: NFS shares have no file soft-delete, and a snapshot is the only undo for a rename
+# or a finalizer that ran a delete. Restore = mount the snapshot on a node
+# (`mount -t nfs ... :/homes/.snapshot/<ts>` or the portal's "Restore") and copy back.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: homes-snapshot
+  namespace: kloudlite
+spec:
+  schedule: "0 21 * * *"            # 02:30 IST
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: snapshot
+              image: mcr.microsoft.com/azure-cli:2.75.0
+              command: ["/bin/bash", "-ceu"]
+              args:
+                - |
+                  az login --identity --username "" -o none
+                  az storage share-rm snapshot --storage-account "" -g "" --name homes --query snapshotTime -o tsv
+                  # Prune: keep 14 days.
+                  cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+                  az storage share-rm list --storage-account "" -g "" --include-snapshot \
+                    --query "[?name=='homes' && snapshotTime!=null && snapshotTime<'$cutoff'].snapshotTime" -o tsv \
+                    | while read -r ts; do [ -n "$ts" ] && az storage share-rm delete --storage-account "" -g "" --name homes --snapshot "$ts" --yes -o none && echo "pruned $ts"; done
+              env:
+                - name: CLIENT_ID
+                  value: "a083e811-c4cb-4d9d-884f-97aa1bc5f261"
+                - name: ACCOUNT
+                  value: kloudlitegithomes
+                - name: RG
+                  value: rustic-git-k3s
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { cpu: 500m, memory: 512Mi }
