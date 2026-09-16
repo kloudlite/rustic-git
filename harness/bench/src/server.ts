@@ -2,7 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
-import { holdFrames, spliceWorkspaceShell } from "./pty.ts";
+import { holdFrames, SESSION_RE, spliceWorkspaceShell, toolSessions } from "./pty.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -100,6 +100,18 @@ export function serve(
         const b = await body(req);
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));
       }
+      // The two session routes are plain proxies of the tool server's own, scope-resolved like /pty.
+      if (p[0] === "pty" && p[1] === "sessions" && (p.length === 2 || p.length === 3)) {
+        const scope = u.searchParams.get("scope") ?? "";
+        if (scope !== "bench" && !SCOPE_RE.test(scope)) return send(res, 400, { error: `bad scope ${JSON.stringify(scope)}` });
+        const name = p[2];
+        if (name !== undefined && !SESSION_RE.test(name)) return send(res, 400, { error: `bad session ${JSON.stringify(name)}` });
+        if ((p.length === 2 && m === "GET") || (p.length === 3 && m === "DELETE")) {
+          const addr = scope === "bench" ? LOCAL_TOOLS : await resolveTools(scope);
+          const r = await toolSessions(addr, m as "GET" | "DELETE", name);
+          return send(res, r.code, r.body);
+        }
+      }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
       const msg = (e as Error).message;
@@ -136,11 +148,14 @@ export function serve(
       return void socket.destroy();
     }
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
-    let scope: string | undefined;
+    let scope: string | undefined, session: string | undefined;
     if (p.length === 1 && p[0] === "pty") {
       scope = u.searchParams.get("scope") ?? "";
       // A scope that is neither the bench nor a workspace id is refused before anything is opened or dialled.
       if (scope !== "bench" && !SCOPE_RE.test(scope)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+      session = u.searchParams.get("session") ?? undefined;
+      // Refused at the handshake like the scope: a bad name must never reach the far end's tmux argv.
+      if (session !== undefined && !SESSION_RE.test(session)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
     }
     if (!rpc && scope === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
@@ -155,12 +170,12 @@ export function serve(
         void held.first.then((first) => {
           // The bench runs in the workspace pod: its own shell is that pod's tool server, one hop over loopback.
           if (scope === "bench") {
-            spliceWorkspaceShell(w, LOCAL_TOOLS, first);
+            spliceWorkspaceShell(w, LOCAL_TOOLS, first, session);
             return held.release();
           }
           return resolveTools(scope!).then(
             (a) => {
-              spliceWorkspaceShell(w, a, first);
+              spliceWorkspaceShell(w, a, first, session);
               held.release();
             },
             (e: Error) => {

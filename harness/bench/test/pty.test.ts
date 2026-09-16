@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
@@ -169,5 +170,94 @@ test("bytes typed right after the resize survive a slow workspace resolve", asyn
   } finally {
     await t.down();
     tool.close();
+  }
+});
+
+/** A stand-in tool server speaking both halves: the PTY upgrade and the two session routes. */
+async function fakeTools(): Promise<{ addr: string; seen: string[]; close(): Promise<void> }> {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    if (req.method === "DELETE") {
+      if (req.url?.endsWith("/gone")) return void res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "no session gone" }));
+      return void res.writeHead(204).end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify([{ name: "kl-ann-1", windows: 2, attached: 1, created: 1700000000 }]));
+  });
+  const wss = new WebSocketServer({ server: srv });
+  wss.on("connection", (up, req) => {
+    seen.push(req.url ?? "");
+    up.on("message", (d: Buffer, binary: boolean) => {
+      if (binary) return;
+      up.send(JSON.stringify({ exit: 0 }));
+      up.close();
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+  return { addr: `127.0.0.1:${(srv.address() as { port: number }).port}`, seen, close: () => new Promise<void>((r) => srv.close(() => r())) };
+}
+
+test("the session name is forwarded to the tool server's PTY route", async () => {
+  const tools = await fakeTools();
+  const t = await up(async () => tools.addr);
+  const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef&session=kl-ann-1`);
+  try {
+    await opened(w);
+    const closed = new Promise((r) => w.once("close", r));
+    resize(w, 80, 24);
+    await closed;
+    assert.equal(tools.seen[0], "/stream/pty?session=kl-ann-1");
+  } finally {
+    w.close();
+    await t.down();
+    await tools.close();
+  }
+});
+
+test("a bad session name is refused at the handshake, before anything is dialled", async () => {
+  const tools = await fakeTools();
+  const t = await up(async () => tools.addr);
+  for (const bad of ["-lead", "Kl-Ann", "a".repeat(49), "has space"]) {
+    const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=bench&session=${encodeURIComponent(bad)}`);
+    await assert.rejects(opened(w), /400/, `name ${JSON.stringify(bad)} must not open`);
+  }
+  assert.deepEqual(tools.seen, []);
+  await t.down();
+  await tools.close();
+});
+
+test("the session listing and the kill are proxied to the tool server", async () => {
+  const tools = await fakeTools();
+  const t = await up(async () => tools.addr);
+  const call = (m: string, p: string) => fetch(`http://127.0.0.1:${t.port}${p}`, { method: m });
+  try {
+    const list = await call("GET", "/pty/sessions?scope=ws-0123456789abcdef");
+    assert.equal(list.status, 200);
+    assert.deepEqual(await list.json(), [{ name: "kl-ann-1", windows: 2, attached: 1, created: 1700000000 }]);
+    assert.equal((await call("DELETE", "/pty/sessions/kl-ann-1?scope=ws-0123456789abcdef")).status, 204);
+    assert.equal((await call("DELETE", "/pty/sessions/gone?scope=ws-0123456789abcdef")).status, 404);
+    assert.deepEqual(tools.seen, ["GET /stream/pty/sessions", "DELETE /stream/pty/sessions/kl-ann-1", "DELETE /stream/pty/sessions/gone"]);
+    // A bad scope or a bad name is refused here, not forwarded.
+    assert.equal((await call("GET", "/pty/sessions?scope=nope")).status, 400);
+    assert.equal((await call("DELETE", "/pty/sessions/-lead?scope=ws-0123456789abcdef")).status, 400);
+    assert.equal(tools.seen.length, 3);
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});
+
+test("a tool server that does not answer the listing is a 502", async () => {
+  const tools = await fakeTools();
+  const addr = tools.addr;
+  await tools.close();
+  const t = await up(async () => addr);
+  try {
+    const r = await fetch(`http://127.0.0.1:${t.port}/pty/sessions?scope=ws-0123456789abcdef`);
+    assert.equal(r.status, 502);
+    assert.match(String(((await r.json()) as { error: string }).error), /did not answer/);
+  } finally {
+    await t.down();
   }
 });

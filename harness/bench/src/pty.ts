@@ -1,9 +1,9 @@
 import WebSocket from "ws";
 
 /**
- * The bench's shells. One socket, one shell, one life: no scrollback replay, no
- * session id, no reconnect — a closed socket kills the shell (SIGHUP to the
- * group). Binary frames are raw PTY bytes both ways; text frames are control
+ * The bench's shells. One socket, one pipe: a closed socket ends this attachment,
+ * and whether the shell outlives it is the far end's business — a `session=` name
+ * puts it in tmux there, no name is today's bare shell. Binary frames are raw PTY bytes both ways; text frames are control
  * JSON (`{"resize":{"cols":N,"rows":N}}` in, `{"exit":N}` / `{"error":"…"}` out).
  *
  * Two scopes, one protocol, one mechanism: both splice this socket onto a tool
@@ -15,6 +15,30 @@ import WebSocket from "ws";
 export type Resize = { cols: number; rows: number };
 
 const OPEN_MS = 5_000;
+
+/**
+ * A terminal session name. The desktop mints it, the tool server validates it too, and we refuse
+ * it here as well: it lands in a URL and then in a `tmux -L kl` argument, so a leading dash (an
+ * option to tmux) is out even though the charset would allow it.
+ */
+export const SESSION_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
+
+/** Proxy the tool server's session listing/kill; an unreachable pod is a 502, not a crash. */
+export async function toolSessions(address: string, method: "GET" | "DELETE", name?: string): Promise<{ code: number; body?: unknown }> {
+  let r: Response;
+  try {
+    r = await fetch(`http://${address}/stream/pty/sessions${name === undefined ? "" : `/${name}`}`, { method });
+  } catch (e) {
+    return { code: 502, body: { error: `workspace ${address} did not answer: ${(e as Error).message}` } };
+  }
+  const text = await r.text();
+  if (!text) return { code: r.status };
+  try {
+    return { code: r.status, body: JSON.parse(text) as unknown };
+  } catch {
+    return { code: 502, body: { error: `workspace ${address} answered ${r.status} with non-JSON` } };
+  }
+}
 
 /** Never throw out of a send: a socket the peer already closed is the normal end of a shell, not an error. */
 function send(w: WebSocket, data: string | Buffer, binary?: boolean): void {
@@ -74,8 +98,9 @@ export function holdFrames(w: WebSocket, timeoutMs: number): { first: Promise<Re
 }
 
 /** Splice this socket onto a workspace tool server's PTY route; frames cross unchanged, either close closes the other. */
-export function spliceWorkspaceShell(w: WebSocket, address: string, first: Resize): void {
-  const up = new WebSocket(`ws://${address}/stream/pty`);
+export function spliceWorkspaceShell(w: WebSocket, address: string, first: Resize, session?: string): void {
+  // The name names a tmux session on the far end; without one the tool server gives today's bare shell.
+  const up = new WebSocket(`ws://${address}/stream/pty${session === undefined ? "" : `?session=${session}`}`);
   let open = false;
   const queue: [Buffer, boolean][] = [];
   const timer = setTimeout(() => {
