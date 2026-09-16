@@ -30,12 +30,14 @@ overlapping its own jobs and nothing else, so a Job created by hand (`kubectl cr
 suite share the tenant, its key, its quota and its `run-{id}` objects. A run never sees itself: the
 check skips its own run id, which the parent has already filed a `running` row under.
 
-A shorter run YIELDS to a longer one rather than filing a bad sample: a fast run skips every id
-with "an hourly run is in flight", "a weekly drill is in flight" or "a monthly drill is in flight"
-when that suite is mid-journey (they share the region's nodes, and the drills cordon and
-decommission them), and with "a rollout is in flight" when any central workload or the region's
-agent DaemonSet is short of its desired replicas — a run through a roll measures the roll, not the
-service. The hourly yields to the two drills the same way. The drills never yield; instead they
+A run YIELDS to a DRILL rather than filing a bad sample: a fast or hourly run skips every id
+with "a weekly drill is in flight" or "a monthly drill is in flight" when that drill is
+mid-journey (they cordon and decommission the region's nodes), and with "a rollout is in flight"
+when any central workload or the region's agent DaemonSet is short of its desired replicas — a run
+through a roll measures the roll, not the service. The fast run does NOT yield to the hourly
+(2026-09-16): the two are different tenants with their own quotas and collide on nothing, while
+each ~11 min hourly swallowed the fast ticks inside its window — 32 % of a six-hour day's fast
+runs. The drills never yield; instead they
 WAIT, up to one fast deadline, for a fast or hourly run already in flight to finish before their
 first destructive stage.
 

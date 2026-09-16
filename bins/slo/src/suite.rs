@@ -86,8 +86,6 @@ pub const STAGE_BUDGET: Duration = Duration::from_secs(700);
 
 /// The reason every id a spent budget cost is skipped with.
 pub const OVER_BUDGET: &str = "run budget exhausted";
-/// The detail on every id a fast run skips because an hourly run is in flight.
-pub const HOURLY_IN_FLIGHT: &str = "an hourly run is in flight";
 pub const WEEKLY_IN_FLIGHT: &str = "a weekly drill is in flight";
 pub const MONTHLY_IN_FLIGHT: &str = "a monthly drill is in flight";
 /// The detail on every id a run skips because the fleet is mid-roll — every suite, since 2026-09-11:
@@ -295,14 +293,19 @@ const STALE_OTHER: Duration = Duration::from_secs(600);
 
 /// The suites `kind` must not run beside, longest first, and the detail every skipped id carries.
 ///
-/// The two suites already run as different tenants, so they no longer collide on a key or a
-/// grant — but they share the region's nodes, and the drills go further: weekly cordons a node
-/// and monthly decommissions one, so a fast or hourly workspace placed beside them fails for the
-/// drill's reason, not its own. The longer journey covers every shorter id at the same targets,
-/// so the shorter run YIELDS: every id skipped, no sample filed, nothing measured twice.
+/// Only the DRILLS are here: weekly cordons a node and monthly decommissions one, so a fast or
+/// hourly workspace placed beside them fails for the drill's reason rather than its own, and a
+/// sample that measures the drill is worse than no sample.
+///
+/// The fast run no longer yields to the hourly (2026-09-16). Since the owner-pair split the two
+/// walk as different tenants with their own quotas, so they collide on nothing; the only thing
+/// the yield still bought was not measuring the same target twice, and a second availability
+/// sample is not a defect. What it cost was measurement: each hourly takes ~11 min as four
+/// parallel pods and swallowed the two or three fast runs inside its window — 32 % of the fast
+/// runs in the six hours of 2026-09-16 filed nothing and showed on the console as skipped.
 pub fn yields_to(kind: Suite) -> &'static [(Suite, &'static str)] {
     match kind {
-        Suite::Fast => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT), (Suite::Hourly, HOURLY_IN_FLIGHT)],
+        Suite::Fast => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT)],
         Suite::Hourly => &[(Suite::Monthly, MONTHLY_IN_FLIGHT), (Suite::Weekly, WEEKLY_IN_FLIGHT)],
         Suite::Weekly | Suite::Monthly => &[],
     }
@@ -358,7 +361,7 @@ fn mid_rollout(c: Counts) -> bool {
 /// A roll moves DB ownership between pods and restarts every tier in turn; the requests a fast
 /// run makes through it are exactly the ones the deploy work makes survivable, and a sample taken
 /// during one measures the roll rather than the service. So the fast run yields, the same way it
-/// yields to an hourly run — and the hourly, weekly and monthly never do, because their window is
+/// yields to a drill — and the hourly, weekly and monthly never do, because their window is
 /// the operator's own choice. `false` on any error: a probe that cannot ask must still probe.
 /// How long an answer is reused. The guard is asked before every stage and on every failed step,
 /// and each ask is five reads of two API servers — a stage with twenty failing steps made a
@@ -679,6 +682,22 @@ mod tests {
         *beat.lock().expect("lock") =
             (chrono::Utc::now() - chrono::Duration::minutes(30)).format("%Y-%m-%d %H:%M:%S%.3f").to_string();
         assert!(!suite_in_flight(&c, Suite::Hourly).await, "the stored format was not read");
+    }
+
+    /// The ladder itself: only the drills are a reason to yield. The fast run stopped yielding to
+    /// the hourly on 2026-09-16 and a re-added entry here would cost fast samples again.
+    #[test]
+    fn only_the_drills_are_yielded_to() {
+        assert_eq!(
+            yields_to(Suite::Fast).iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![Suite::Monthly, Suite::Weekly],
+            "the fast run yields to the drills only"
+        );
+        assert_eq!(
+            yields_to(Suite::Hourly).iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![Suite::Monthly, Suite::Weekly]
+        );
+        assert!(yields_to(Suite::Weekly).is_empty() && yields_to(Suite::Monthly).is_empty());
     }
 
     /// A run must never see ITSELF as a reason to yield. The parent files a `running` row before
