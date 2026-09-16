@@ -110,6 +110,10 @@ impl std::fmt::Display for FencedError {
 }
 impl std::error::Error for FencedError {}
 
+/// slatedb 0.15's `SlateDBError::TransactionalObjectVersionExists` text, verbatim: the manifest
+/// write that a racing opener won. Matched whole so no other `ErrorKind::Data` reads as a fence.
+const MANIFEST_CAS_LOST: &str = "transactional object (e.g. manifest) version already exists";
+
 /// Whether an error, anywhere in a request, is a fence: ours or SlateDB's own.
 pub fn is_fenced(e: &crate::Error) -> bool {
     e.downcast_ref::<FencedError>().is_some()
@@ -123,7 +127,15 @@ pub fn is_fenced(e: &crate::Error) -> bool {
                     // the database — and must re-route, never surface as a 500. A string match:
                     // slatedb 0.15 maps TransactionalObjectVersionExists to a bare ErrorKind::Data
                     // (error.rs), shared with corruption errors, so there is no typed kind to test.
-                    || e.to_string().contains("version already exists")
+                    // Anchored to the FULL upstream message, never a substring: ErrorKind::Data
+                    // also carries checksum and decode failures, and treating one of those as a
+                    // fence would re-route and retry a corrupt database forever instead of paging
+                    // somebody.
+                    // ponytail: message equality against slatedb 0.15's exact text — an upstream
+                    // reword makes this inert (a lost CAS goes back to being a 500, the
+                    // pre-2026-09-16 behaviour), never unsafe. Drop it for `e.kind()` once
+                    // slatedb has a typed kind for the lost transactional-object CAS.
+                    || e.to_string().ends_with(MANIFEST_CAS_LOST)
             })
 }
 
@@ -155,6 +167,14 @@ tokio::task_local! {
 /// repo/image" from what routing already decided, instead of re-probing the store and opening a
 /// database a creator elsewhere may have just claimed and flushed — which fences the creator (the
 /// first-request 503/500 on every new image, 2026-09-16). Every other key is untouched.
+///
+/// IN-TASK ONLY. This is a task-local, so `spawn_blocking`, `tokio::spawn` and a response body
+/// streamed after the middleware's future resolves do NOT inherit it: inside those the key reads
+/// as owned again and `get` will open it. Every handler that can reach a per-repo database opens
+/// it in-scope today — `unowned_does_not_reach_spawned_work` pins that shape — so nothing is
+/// missed; a handler added later that opens a DB off-task reopens the window silently.
+// ponytail: task-local, so the scope is in-task only. Upgrade path when a handler needs to open
+// off-task: carry the key on the request extensions and thread it through the `Store` handle.
 pub async fn unowned<F: std::future::Future>(key: String, f: F) -> F::Output {
     UNOWNED.scope(key, f).await
 }
@@ -406,6 +426,33 @@ mod tests {
 
     fn pool() -> Arc<Pool> {
         Arc::new(Pool::new(Arc::new(InMemory::new()), false))
+    }
+
+    /// The ceiling on `unowned`, pinned rather than described: the scope is in-task, so spawned
+    /// work sees the key as owned again and would open it. Everything that opens a per-repo
+    /// database does so in-scope today; this fails loudly if the mechanism is ever assumed to
+    /// propagate.
+    #[tokio::test]
+    async fn unowned_does_not_reach_spawned_work() {
+        unowned("alice/web".to_string(), async {
+            assert!(is_unowned("alice", "web"), "in-task, the key is refused");
+            let spawned = tokio::spawn(async { is_unowned("alice", "web") }).await.unwrap();
+            assert!(!spawned, "tokio::spawn does not inherit the scope");
+            let blocking = tokio::task::spawn_blocking(|| is_unowned("alice", "web")).await.unwrap();
+            assert!(!blocking, "spawn_blocking does not inherit the scope");
+        })
+        .await;
+    }
+
+    /// A lost manifest CAS must re-route; a corruption-shaped `Data` error must NOT — it is a 500
+    /// somebody gets paged for, not a reason to retry forever against a healthy node.
+    #[test]
+    fn only_a_lost_manifest_cas_reads_as_a_fence() {
+        let cas: crate::Error = slatedb::Error::data(MANIFEST_CAS_LOST.to_string()).into();
+        assert!(is_fenced(&cas), "a lost manifest CAS re-routes: {cas}");
+        let corrupt: crate::Error =
+            slatedb::Error::data("checksum mismatch in SST block".to_string()).into();
+        assert!(!is_fenced(&corrupt), "corruption must surface, not re-route: {corrupt}");
     }
 
     /// Tuned per test rather than through the environment: env vars are process-global, and these

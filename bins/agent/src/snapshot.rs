@@ -22,6 +22,22 @@ use std::sync::Arc;
 // already exists for the pull side.
 // -------------------------------------------------------------------------------------------
 
+/// How long a `Working` snapshot whose bytes are nowhere on this node stays "placement is catching
+/// up" before it reads as stranded. Ten `RETRY` passes.
+const STRANDED_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
+/// What a stranded record requeues at: nothing is going to change it, so re-check ten times slower.
+const STRANDED_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long since the API server created this object. Unparsable or absent reads as brand new,
+/// which keeps the quiet path — a stranded record is only ever escalated on evidence.
+fn age(s: &crd::Snapshot) -> std::time::Duration {
+    let secs = s
+        .creation_timestamp()
+        .map(|t| k8s_openapi::jiff::Timestamp::now().as_second() - t.0.as_second())
+        .unwrap_or(0);
+    std::time::Duration::from_secs(secs.max(0) as u64)
+}
+
 /// Where `worktree` (a Workspace or Environment name) is running, if it names one that still
 /// exists and still points at `volume` — a stale or foreign `spec.worktree` cuts nothing rather
 /// than snapshotting the wrong disk.
@@ -97,8 +113,19 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
     let pool = &ctx.engine.pool;
     match (pool.worktree(&s.spec.volume, &s.spec.worktree).try_exists(), pool.snap(&s.spec.volume, &name).try_exists()) {
         (Ok(false), Ok(false)) => {
-            tracing::info!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, "snapshot.cut.not_here");
-            return Ok(Action::requeue(crate::controller::RETRY));
+            // Minutes of this is placement catching up; hours of it is a record nothing will ever
+            // fulfil, and at info-every-minute it is invisible in both cases. Past STRANDED_AFTER
+            // say so once a pass at warn and requeue ten times slower — the object is not going to
+            // move, and a stranded push should cost one line an hour, not sixty.
+            // ponytail: a log, not a condition — `SnapshotStatus` has no `conditions` field and
+            // adding one is a CRD change. Stamp `Degraded/NotHere` there when the CRD grows them.
+            let stranded = age(&s) >= STRANDED_AFTER;
+            if stranded {
+                tracing::warn!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, age_secs = age(&s).as_secs(), "snapshot.cut.stranded");
+            } else {
+                tracing::info!(snapshot = %name, volume = %s.spec.volume, worktree = %s.spec.worktree, "snapshot.cut.not_here");
+            }
+            return Ok(Action::requeue(if stranded { STRANDED_RETRY } else { crate::controller::RETRY }));
         }
         // An unreadable pool (EIO, unmounted, permission) is not "not here": say so, touch nothing.
         (Err(e), _) | (_, Err(e)) => {

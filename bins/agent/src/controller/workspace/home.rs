@@ -1,5 +1,10 @@
 //! The owner's persistent home on the region-shared NFS export: made to exist (with a private
 //! `.ssh`) before any pod mounts into it. See the project guide's "one home per region".
+//!
+//! The home itself outlives every object that mounts it. A BENCH FOLDER (`.benches/{team}/{owner}`,
+//! where the transcripts live) does NOT: since `BENCH_FOLDER_FINALIZER` it dies with its `Bench`,
+//! for EVERY delete reason — the person deleting their own bench, the member-removal GC, an SLO
+//! teardown. Nothing else ever collects it, and nothing keeps a copy.
 
 
 

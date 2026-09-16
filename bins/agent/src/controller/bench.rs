@@ -5,6 +5,12 @@
 //! used it for `benchIdleSecs`; this pass turns that exit into `Idle` and creates no pod again until
 //! `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the container's own `finishedAt`, never
 //! this node's clock, so a replayed pass writes the identical status.
+//!
+//! The contract on the folder, since `BENCH_FOLDER_FINALIZER`: `.benches/{team}/{owner}` on the
+//! region share — where the transcripts live — dies with the `Bench`, for EVERY delete reason. A
+//! person deleting their own bench, the member-removal GC in `bins/controller/src/gc.rs`, an SLO
+//! teardown: each takes the folder. It used to outlive the object (see `workspace/home.rs`) and
+//! nothing keeps a copy, so `/v1`'s delete copy has to say the transcripts go with it.
 
 use super::{delete_ignoring_404, ensure, heal_labels, my_node, replaced, write_status, Ctx, ReconcileErr, TICK};
 use k8s_openapi::api::core::v1::{ContainerStateTerminated, Node, Pod, Secret};

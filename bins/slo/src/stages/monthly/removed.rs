@@ -1,5 +1,6 @@
-//! `team.member.removed.cleanup` and `team.member.removed.dir_down`: what a removal deletes, what it
-//! keeps, and that an unreadable directory deletes nothing.
+//! `team.member.removed.cleanup`: what a removal deletes and what it keeps. The directory-down
+//! half — that an unreadable directory deletes nothing — is a MANUAL row in `deploy/slo.md` and no
+//! id here; see the note by `CLEANUP_ID`.
 //!
 //! Its own team (`run-{id}-rmv`), so removing the second probe member touches nothing another
 //! drill stands on. The removal and `delete-now` run BEFORE the step, and the step judges whichever
@@ -21,10 +22,10 @@ use kloudlite_workspaces::crd;
 use kube::api::ListParams;
 
 pub(crate) const CLEANUP_ID: &str = "team.member.removed.cleanup";
-pub(crate) const DIR_DOWN_ID: &str = "team.member.removed.dir_down";
-/// The drills suite has no hook that points the api's directory at a black hole; not built here.
-pub(crate) const NO_DIR_HOOK: &str =
-    "no directory fault hook in the drills suite: nothing points the api's directory address at a black hole for one beat";
+// `team.member.removed.dir_down` is not probed here and is not catalogued: the drills suite has no
+// hook that points the api's directory at a black hole for one beat, so the step could only ever
+// skip — and a skip counts as a pass in attainment (2026-09-09), which made the row read as
+// measured when nothing measured it. It is a MANUAL row in `deploy/slo.md` until the hook exists.
 /// Two membership beats (the keys beat, 300 s).
 const TWO_BEATS: Duration = Duration::from_secs(600);
 const READY_WAIT: Duration = Duration::from_secs(300);
@@ -175,7 +176,6 @@ async fn marked_due(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
 
 pub(crate) async fn member_removed(c: &mut Ctx) {
     cleanup(c).await;
-    c.skip(DIR_DOWN_ID, NO_DIR_HOOK);
 }
 
 async fn cleanup(c: &mut Ctx) {
@@ -268,12 +268,12 @@ mod tests {
         assert!(kloudlite_workspaces::slo::catalogue::find(CLEANUP_ID).unwrap().sli.starts_with("Within 11 minutes"));
     }
 
+    /// The cleanup id is catalogued; the directory-fault row is deliberately NOT, so that a step
+    /// nothing can measure cannot file a skip that reads as a pass.
     #[test]
-    fn both_ids_are_catalogued_monthly() {
-        for id in [CLEANUP_ID, DIR_DOWN_ID] {
-            let s = kloudlite_workspaces::slo::catalogue::find(id).unwrap();
-            assert_eq!(s.stage, "13 · Monthly");
-        }
+    fn only_the_measurable_id_is_catalogued() {
+        assert_eq!(kloudlite_workspaces::slo::catalogue::find(CLEANUP_ID).unwrap().stage, "13 · Monthly");
+        assert!(kloudlite_workspaces::slo::catalogue::find("team.member.removed.dir_down").is_none());
     }
 
     #[tokio::test]
@@ -281,9 +281,8 @@ mod tests {
         let mut c = crate::testkit::ctx().await;
         c.kube = None;
         member_removed(&mut c).await;
-        for id in [CLEANUP_ID, DIR_DOWN_ID] {
-            let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == id).collect();
-            assert!(rows.len() == 1 && rows[0].skipped, "{id}");
-        }
+        let rows: Vec<_> = c.steps.iter().filter(|s| s.slo_id == CLEANUP_ID).collect();
+        assert!(rows.len() == 1 && rows[0].skipped);
+        assert!(!c.steps.iter().any(|s| s.slo_id == "team.member.removed.dir_down"), "an unmeasurable id files no row");
     }
 }

@@ -13,6 +13,10 @@ pub(crate) fn max_decompressed() -> u64 {
 pub(crate) fn internal(e: crate::Error) -> Response {
     // A key routed to no owner: nothing exists there, so a read that skipped its probe is a 404.
     if kloudlite_storage::pool::is_unowned_err(&e) {
+        // Debug, not silence: the 404 is right for a name nothing owns, but it is also how a
+        // scoping bug (a key wrongly inside `pool::unowned`) would present — a 404 on a repo that
+        // does exist, with nothing in the log to tell the two apart.
+        tracing::debug!(error = %e, "request.unowned");
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     tracing::error!(error = %e, "request.failed");

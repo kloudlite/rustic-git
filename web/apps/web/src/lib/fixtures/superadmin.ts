@@ -677,7 +677,6 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["ws.interrupted", "Workspace lifecycle", "Starting a workspace whose node is down is refused with the sentence naming why, and a clone of it names the cut it grafted onto — walked by the operator's node-level drill", "99.9 %", "monthly", "13 · Monthly"],
   ["env.clone.interrupted", "Environments", "Cloning an environment whose node is down is refused with 409 — walked by the operator's node-level drill, since there are no live bytes to copy", "99.9 %", "monthly", "13 · Monthly"],
   ["team.member.removed.cleanup", "Teams", "Within 11 minutes of delete-now the controller's GC deletes a removed member's bench, team workspace, sync points and space choice (with memberRemovalDeletes off they carry a due delete-after and stay), the pushed snapshot and its volume are kept, the removal is audited, and a re-added person finds no bench", "99.9 %", "monthly", "13 · Monthly"],
-  ["team.member.removed.dir_down", "Teams", "With the directory unreachable for one beat, a removed pair's objects all survive and the reconcile logs that it skipped", "99.9 %", "monthly", "13 · Monthly"],
 ];
 
 /** The journey in order. Boot and teardown report no SLO and are stages all the same: they take
