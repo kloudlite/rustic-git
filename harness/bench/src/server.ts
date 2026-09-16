@@ -91,6 +91,13 @@ export function serve(
         // A thread never opened has no history yet, which is an empty one, not a missing route.
         const thread = (id: string) => (bench.sessions.get(id) ? bench.messages(id, n("after"), n("limit")) : Promise.resolve({ messages: [], total: 0 }));
         if (p.length === 3 && p[2] === "session" && m === "POST") return send(res, 200, await bench.openWorkspace(p[1]));
+        // The bench's own extension asking a workspace to do something. Loopback only, like every
+        // other route here; `from` is the asking session, handed to its child at spawn as KL_SESSION.
+        if (p.length === 3 && p[2] === "ask" && m === "POST") {
+          const b = await body(req);
+          if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
+          return send(res, 202, await bench.ask(p[1], String(b.text ?? ""), b.from));
+        }
         if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await thread(`w-${p[1]}`));
         if (p.length === 5 && p[2] === "eph" && p[4] === "session" && m === "POST") return send(res, 200, await bench.openEphemeral(p[1], p[3]));
         if (p.length === 5 && p[2] === "eph" && p[4] === "messages" && m === "GET") return send(res, 200, await thread(`e-${p[3]}`));

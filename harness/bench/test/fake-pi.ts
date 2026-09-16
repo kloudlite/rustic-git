@@ -34,6 +34,8 @@ process.stdin.on("data", (d) => {
     if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
+    // A follow-up is queued beside the turn, not a turn of its own: recorded and acknowledged.
+    else if (cmd.type === "follow_up") { messages.push({ role: "user", content: cmd.message, timestamp: Date.now() }); ok(); }
     else if (cmd.type === "prompt") {
       if (cmd.message === "crash") process.exit(3);
       ok();

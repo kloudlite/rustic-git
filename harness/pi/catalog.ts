@@ -3,7 +3,8 @@
  * this list and the Settings › Tools page renders it, so what the model sees
  * and what a person reads are the same catalogue. A bench session has no hands
  * in its own pod — no builtin tools, no shell — so nothing here is local:
- * `kl_ws_*` runs in a workspace, `kl_*` is /v1.
+ * `kl_*` is /v1, `kl_pkg_*`/`kl_env_*` act on the machine it is itself, and
+ * another workspace is only ever ASKED (`kl_workspace_ask`), never driven.
  */
 export type ToolSpec = {
   name: string;
@@ -14,13 +15,13 @@ export type ToolSpec = {
 };
 
 export const TOOLS: ToolSpec[] = [
-  { name: "kl_ws_read", group: "workspace", summary: "Read a file in a workspace, by workspace id.", effect: "read" },
-  { name: "kl_ws_write", group: "workspace", summary: "Create or overwrite a file in a workspace.", effect: "write" },
-  { name: "kl_ws_edit", group: "workspace", summary: "Exact replacements in one file in a workspace, all or nothing.", effect: "write" },
-  { name: "kl_ws_exec", group: "workspace", summary: "Run a shell command inside a workspace and return its output.", effect: "write" },
-  { name: "kl_ws_grep", group: "workspace", summary: "Regex search inside a workspace, gitignore-aware.", effect: "read" },
-  { name: "kl_ws_glob", group: "workspace", summary: "Files matching a glob inside a workspace, newest first.", effect: "read" },
-  { name: "kl_ws_ls", group: "workspace", summary: "List a directory inside a workspace.", effect: "read" },
+
+  { name: "kl_workspace_ask", group: "workspace", summary: "Ask another workspace to do something: the request is queued into that workspace's own session, which does the work and answers back here.", effect: "write" },
+
+  { name: "kl_pkg_list", group: "workspace", summary: "The packages this machine has, and whether they are ready.", effect: "read" },
+  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to this machine (`attr` or `attr@version`).", effect: "write" },
+  { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from this machine.", effect: "write" },
+  { name: "kl_pkg_update", group: "workspace", summary: "Re-resolve this machine's pinned packages to their newest allowed versions.", effect: "write" },
 
   { name: "kl_workspaces", group: "workspace", summary: "List workspaces — yours, or a team's with `team`.", effect: "read" },
   { name: "kl_workspace", group: "workspace", summary: "One workspace in full: state, node, packages, its space's environment.", effect: "read" },
@@ -29,14 +30,13 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_workspace_stop", group: "workspace", summary: "Stop a running workspace (cuts a sync point first).", effect: "write" },
   { name: "kl_workspace_push", group: "workspace", summary: "Take a snapshot of the workspace, with a message.", effect: "write" },
   { name: "kl_workspace_clone", group: "workspace", summary: "Clone a workspace into a new one from its latest sync point.", effect: "write" },
-  { name: "kl_workspace_packages", group: "workspace", summary: "Set the workspace's package list (`attr` or `attr@version`).", effect: "write" },
   { name: "kl_workspace_packages_update", group: "workspace", summary: "Re-resolve the workspace's pinned packages to their newest allowed versions.", effect: "write" },
   { name: "kl_workspace_restore", group: "workspace", summary: "Restore a snapshot into a new workspace.", effect: "write" },
   { name: "kl_workspace_delete", group: "workspace", summary: "Delete a workspace; its snapshots survive on the volume.", effect: "destroy" },
 
-  { name: "kl_my_environment", group: "environment", summary: "Which environment each of your spaces (per team, plus personal) uses.", effect: "read" },
-  { name: "kl_my_environment_set", group: "environment", summary: "Use an environment for every workspace and the bench in one of your spaces.", effect: "write" },
-  { name: "kl_my_environment_clear", group: "environment", summary: "Stop using an environment in one of your spaces.", effect: "write" },
+  { name: "kl_env_current", group: "environment", summary: "Which environment this machine's space uses (and every other space of yours).", effect: "read" },
+  { name: "kl_env_switch", group: "environment", summary: "Use an environment for this space — this machine and every workspace in it.", effect: "write" },
+  { name: "kl_env_clear", group: "environment", summary: "Stop using an environment in this space.", effect: "write" },
   { name: "kl_environments", group: "environment", summary: "List environments you can see.", effect: "read" },
   { name: "kl_environment", group: "environment", summary: "One environment in full: services, ports, intercepts.", effect: "read" },
   { name: "kl_environment_create", group: "environment", summary: "Create an environment from a services list.", effect: "write" },

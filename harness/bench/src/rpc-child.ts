@@ -12,8 +12,13 @@ import { childTraceEnv } from "./tracing.ts";
 export type PiEvent = Record<string, unknown> & { type: string; id?: string };
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-/** A workspace or ephemeral session's tools, all run on that workspace's tool server. */
-export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls";
+/**
+ * A workspace or ephemeral session's tools: its own files and shell, on that
+ * workspace's tool server, plus that machine's own packages. `--tools` is a
+ * strict allow-list over EXTENSION tools too, so the kl_pkg_* four have to be
+ * named here or `kloudlite.ts` registers them into a session that cannot call them.
+ */
+export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls,kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update";
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string };
@@ -43,19 +48,21 @@ export class RpcChild {
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     // The image installs the whole harness tree at /opt/harness, so the relative defaults resolve there; the env names another layout.
     const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
-    // A workspace session loads only the workspace's tools. A bench session loads the platform and
-    // kl_ws_*, and NOTHING that runs here: `--no-builtin-tools` takes pi's own read/write/bash away
-    // and background.ts/process.ts are not loaded, because a bench session has no hands in the bench
-    // pod at all (owner, 2026-09-17) — it reaches a workspace through that workspace's tool server.
+    // A workspace session loads its own tools, plus `kloudlite.ts` for that machine's own packages.
+    // A bench session loads the platform and NOTHING that runs here: `--no-builtin-tools` takes the
+    // built-in read/write/bash away and background.ts/process.ts are not loaded, because a bench
+    // session has no hands in the bench pod at all (owner, 2026-09-17) — work for a workspace is
+    // queued into that workspace's own session instead.
     // The btw fork answers one question from the transcript it forked: `--no-tools`, no extensions.
-    const exts = o.fork ? [] : o.tools ? ["-e", path.join(extDir, "workspace-tools.ts")] : ["kloudlite.ts", "workspaces.ts"].flatMap((f) => ["-e", path.join(extDir, f)]);
+    const exts = o.fork ? [] : (o.tools ? ["workspace-tools.ts", "kloudlite.ts"] : ["kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
     const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : []), ...(o.fork || o.tools ? [] : ["--no-builtin-tools"])];
     // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
     // The trace of the request that started this child; every tool call of its life joins it.
     // ponytail: one waterfall per child lifetime, unbounded; `workspace-tools.ts` stops sending it
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
-    const env = { ...process.env, ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
+    // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

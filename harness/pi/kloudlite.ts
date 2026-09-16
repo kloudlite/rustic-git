@@ -83,9 +83,18 @@ export function tellItWhereItStands(pi: ExtensionAPI, hands: string): void {
   pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
 }
 
-/** The hands a bench session has: the platform, and workspaces through their own tool servers. */
-export const BENCH_HANDS =
-  "Workspaces are acted on through the kl_ws_* tools, which name the workspace by id and run inside that workspace. The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.";
+/**
+ * The hands a bench session has. Two rules the owner set (2026-09-17), both here
+ * because the model cannot read them anywhere else: what it IS is a machine of
+ * its own, so "install X" with nothing named is about itself; and another
+ * workspace is ASKED, never driven — the request is queued into that
+ * workspace's own session, which has its own hands and its own tab.
+ */
+export const BENCH_HANDS = [
+  "You are yourself a workspace on the platform: a machine with its own packages and its own environment. \"Install X\", \"add a package\", \"switch the environment\" with no workspace named mean YOURS — kl_pkg_list, kl_pkg_add, kl_pkg_rm, kl_pkg_update, kl_env_current, kl_env_switch, kl_env_clear.",
+  "You never change another workspace yourself. To have work done in one, use kl_workspace_ask with the workspace id and the request in plain words: it is queued into that workspace's own session, which does the work there and answers back to you. Say that you asked, and go on; the answer arrives as a message.",
+  "The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.",
+].join("\n\n");
 
 /**
  * Registering one tool from the catalogue: the description a person reads is the
@@ -120,12 +129,62 @@ export function makeReg(pi: ExtensionAPI) {
   };
 }
 
+/** Where harness-bench listens for its own extension; a test points this elsewhere. */
+const BENCH_URL = () => process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789";
+
+/**
+ * The machine this session IS: the bench's own workspace, or, in a workspace
+ * session, that workspace. Packages are read-modify-write against `/v1` because
+ * PATCH takes the WHOLE list — "add nats" has to keep what is already there.
+ */
+export function ownTools(pi: ExtensionAPI, own: string, space: string | undefined, reg = makeReg(pi)) {
+  const packages = async (): Promise<string[]> => {
+    const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(own)}`);
+    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+    return ((data as { packages?: string[] } | null)?.packages ?? []).slice();
+  };
+  // A pin is `attr@version`: matching on the attr alone is what lets "remove nodejs" take `nodejs@20`.
+  const attr = (e: string) => e.split("@")[0];
+  const setPackages = async (next: string[]) => answer("PATCH", `/v1/workspaces/${encodeURIComponent(own)}`, { packages: next });
+  const P = Type.Array(Type.String(), { description: "packages: attr or attr@version" });
+  reg("kl_pkg_list", {}, async () => text(await packages()));
+  reg("kl_pkg_add", { packages: P }, async (a) => {
+    const have = await packages();
+    // A re-pin replaces the entry it pins rather than sitting beside it.
+    const next = [...have.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e))), ...a.packages];
+    return setPackages(next);
+  });
+  reg("kl_pkg_rm", { packages: P }, async (a) => {
+    const have = await packages();
+    const next = have.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e)));
+    if (next.length === have.length) return { ...text(`none of ${a.packages.join(", ")} is installed here`), isError: true };
+    return setPackages(next);
+  });
+  reg("kl_pkg_update", {}, () => answer("POST", `/v1/workspaces/${encodeURIComponent(own)}/packages/update`));
+  if (!space) return;
+  // A person's space follows ONE environment; this machine and every workspace in it resolve its services by bare name.
+  reg("kl_env_current", {}, () => answer("GET", "/v1/me/environments"));
+  reg("kl_env_switch", { environment: Type.String({ description: "environment id owned by this space" }) }, (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: a.environment }));
+  reg("kl_env_clear", {}, () => answer("DELETE", `/v1/me/environments/${encodeURIComponent(space)}`));
+}
+
 export function tools(pi: ExtensionAPI) {
   const reg = makeReg(pi);
   const S = (d: string) => Type.String({ description: d });
   const O = <T>(t: T) => Type.Optional(t as any);
 
-  // workspaces
+  // workspaces. Another workspace is ASKED, never driven: the request goes to the bench's own
+  // server, which queues it into that workspace's session — the one place with hands there.
+  reg("kl_workspace_ask", { workspace: S("workspace id"), request: S("what to do there, in plain words") }, async (a) => {
+    const r = await fetch(`${BENCH_URL()}/workspaces/${encodeURIComponent(a.workspace)}/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: a.request, from: process.env.KL_SESSION }),
+    });
+    const d = (await r.json().catch(() => ({}))) as { error?: string };
+    if (!r.ok) return { ...text(d.error ?? `the bench answered ${r.status}`), isError: true };
+    return text(`queued in ${a.workspace}'s session; its reply arrives here`);
+  });
   reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
   reg("kl_workspace", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}`));
   reg(
@@ -145,7 +204,6 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_workspace_stop", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/stop`));
   reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }));
   reg("kl_workspace_clone", { id: S("source workspace id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/workspaces/${a.id}/clone`, { name: a.name }));
-  reg("kl_workspace_packages", { id: S("workspace id"), packages: Type.Array(Type.String(), { description: "the whole list: attr or attr@version" }) }, (a) => answer("PATCH", `/v1/workspaces/${a.id}`, { packages: a.packages }));
   reg("kl_workspace_packages_update", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/packages/update`));
   reg(
     "kl_workspace_restore",
@@ -155,11 +213,6 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
 
   // environments
-  // A person's space (one per team, plus personal = their handle) follows one environment; every
-  // workspace and the bench in it resolve its services by bare name.
-  reg("kl_my_environment", {}, () => answer("GET", "/v1/me/environments"));
-  reg("kl_my_environment_set", { team: S("team slug, or your handle for your personal space"), environment: S("environment id owned by that team") }, (a) => answer("PUT", `/v1/me/environments/${a.team}`, { environment: a.environment }));
-  reg("kl_my_environment_clear", { team: S("team slug, or your handle for your personal space") }, (a) => answer("DELETE", `/v1/me/environments/${a.team}`));
   reg("kl_environments", { owner: O(S("owner slug to list for")) }, (a) => answer("GET", `/v1/environments${q({ owner: a.owner })}`));
   reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
   reg(
@@ -226,7 +279,17 @@ export function tools(pi: ExtensionAPI) {
   });
 }
 
+/**
+ * Two modes, one file. A WORKSPACE session already has hands on its own files
+ * (`workspace-tools.ts`); all it gains here is the machine's own packages, so
+ * "install ripgrep" inside a workspace is that workspace's, not a platform call
+ * about somebody else. A BENCH session gets the platform, and asks.
+ */
 export default function (pi: ExtensionAPI) {
+  const inWorkspace = process.env.KL_TOOLS_WORKSPACE;
+  if (inWorkspace) return ownTools(pi, inWorkspace, undefined);
   tools(pi);
+  const own = process.env.KL_WORKSPACE_ID;
+  if (own) ownTools(pi, own, process.env.KL_TEAM);
   tellItWhereItStands(pi, BENCH_HANDS);
 }

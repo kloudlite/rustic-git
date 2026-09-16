@@ -42,6 +42,9 @@ export class Bench {
   /** Sessions between agent_start and agent_end: a turn nobody watches still holds the bench up. */
   private turning = new Set<string>();
   private btwSeq = new Map<string, number>();
+  /** A workspace session's turn that some bench session is waiting on: its exchange, and who to answer. */
+  private asked = new Map<string, { exchange: string; from: string; workspace: string }>();
+  private askSeq = 0;
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -127,12 +130,23 @@ export class Bench {
       void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
     }
     if (ev.type === "agent_start") {
+      const a = this.asked.get(id);
+      if (a) this.transitionAsk(a, "running");
       this.turning.add(id);
       this.write(() => this.sessions.update(id, { lastActive: now }));
     }
-    if (ev.type === "agent_end") this.turning.delete(id);
+    if (ev.type === "agent_end") {
+      this.turning.delete(id);
+      // `willRetry` means this run is not the answer yet — pi keeps going on its own.
+      if (ev.willRetry !== true) void this.deliver(id);
+    }
     if (ev.type === "exit") {
       this.turning.delete(id);
+      const a = this.asked.get(id);
+      if (a) {
+        this.asked.delete(id);
+        this.transitionAsk(a, "failed");
+      }
       // Only this session's pi went; the others still hold their commands.
       for (const row of this.write(() => this.tasks.markLost(id)) ?? []) this.emit({ type: "task", row });
       if (this.write(() => this.procs.markLost(id))?.length) this.emit({ type: "procs", rows: this.procs.all() });
@@ -174,6 +188,69 @@ export class Bench {
         /* a widget line that is not ours */
       }
     }
+  }
+
+  private transitionAsk(a: { exchange: string; from: string; workspace: string }, state: string) {
+    this.write(() => this.exchanges.transition(a.exchange, state));
+    this.emit({ type: "exchange", row: this.exchanges.bySession(a.from).find((e) => e.id === a.exchange) });
+  }
+
+  /**
+   * A workspace session finished a turn somebody asked for: the answer goes back
+   * into the asking session as a message, so the person sees one conversation
+   * rather than having to watch the other tab. A follow-up when that session is
+   * mid-turn, a prompt when it is not — the same choice as sending the ask.
+   */
+  private async deliver(id: string) {
+    const a = this.asked.get(id);
+    if (!a) return;
+    this.asked.delete(id);
+    let answer = "";
+    try {
+      const r = await this.children.get(id)?.send({ type: "get_messages" });
+      const all = ((r?.data as { messages?: unknown[] } | undefined)?.messages ?? []) as { role?: string; content?: unknown }[];
+      const last = [...all].reverse().find((m) => m.role === "assistant");
+      answer = typeof last?.content === "string" ? last.content : (Array.isArray(last?.content) ? last!.content : []).map((c: { text?: string }) => c.text ?? "").join("").trim();
+    } catch {
+      /* the child went; the exchange still has to settle */
+    }
+    this.transitionAsk(a, answer ? "done" : "failed");
+    const back = this.exchanges.record({ id: `${a.exchange}-in`, session: a.from, workspace: a.workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: a.exchange });
+    this.emit({ type: "exchange", row: back });
+    // The asking session may be gone by now (removed, archived): an answer nobody is waiting for is dropped, not thrown.
+    if (!answer || !this.sessions.get(a.from)) return;
+    await this.send(a.from, `[from workspace ${a.workspace}] ${answer}`).catch(() => undefined);
+  }
+
+  /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
+  private send(id: string, message: string): Promise<PiEvent> {
+    return this.rpc(id, { type: this.turning.has(id) ? "follow_up" : "prompt", message });
+  }
+
+  /**
+   * One session handing work to a workspace (owner, 2026-09-17: "it should send message to
+   * workspace in the queue and it need to be processed there"). The workspace's OWN session does
+   * it — created here if it has none — so the work happens where the hands and the history are,
+   * and is visible in that workspace's tab rather than hidden inside the asking session.
+   */
+  async ask(workspace: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string }> {
+    this.refuse(true);
+    if (typeof text !== "string" || !text.trim()) throw new Error("an ask needs something to do");
+    if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    const s = await this.openWorkspace(workspace);
+    if (this.asked.has(s.id)) throw new Error(`${workspace} is already working on something asked of it`);
+    const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
+    const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
+    this.emit({ type: "exchange", row });
+    this.asked.set(s.id, { exchange, from, workspace });
+    try {
+      await this.send(s.id, text);
+    } catch (e) {
+      this.asked.delete(s.id);
+      this.transitionAsk({ exchange, from, workspace }, "failed");
+      throw e;
+    }
+    return { session: s.id, exchange, workspace };
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */

@@ -25,9 +25,9 @@ test("a workspace thread runs its own pi on the workspace's tools, with its file
     assert.equal(st.tools, "api");
     assert.equal(st.team, "acme");
     assert.equal(st.sessionFile, s.file);
-    assert.equal(st.argv[st.argv.indexOf("--tools") + 1], "read,write,edit,bash,grep,find,ls");
+    assert.equal(st.argv[st.argv.indexOf("--tools") + 1], "read,write,edit,bash,grep,find,ls,kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update");
     const exts = st.argv.filter((_, i) => st.argv[i - 1] === "-e");
-    assert.deepEqual(exts.map((x) => path.basename(x)), ["workspace-tools.ts"], "only the workspace's tools are loaded");
+    assert.deepEqual(exts.map((x) => path.basename(x)), ["workspace-tools.ts", "kloudlite.ts"], "the workspace's own tools, and its own packages");
     assert.equal(st.argv.includes("--no-builtin-tools"), false, "a workspace session keeps its allow-listed tools");
     assert.ok(fs.existsSync(s.file!));
     assert.equal((await b.openWorkspace("api")).id, "w-api", "opening twice is one thread");
