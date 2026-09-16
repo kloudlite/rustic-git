@@ -30,7 +30,7 @@ spec:
                 - |
                   # The identity holds a role on ONE storage account, so it sees no subscription at
                   # login; log in without one and name the subscription on every call instead.
-                  az login --identity --username "$CLIENT_ID" --allow-no-subscriptions -o none
+                  az login --identity --client-id "$CLIENT_ID" --allow-no-subscriptions -o none
                   az storage share-rm snapshot --subscription "$SUB" --storage-account "$ACCOUNT" -g "$RG" --name homes --query snapshotTime -o tsv
                   # Prune: keep 14 days.
                   cutoff=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
