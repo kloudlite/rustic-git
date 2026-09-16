@@ -222,6 +222,22 @@ describe("jobsOf", () => {
     )[0];
     expect(jobDone(job)).toEqual({ done: 2, total: 4 });
   });
+
+  // The console's "Running now" KPI, 2026-09-16: the api's `running` list is stored state, so six
+  // lost rows from a week ago sat beside one live hourly and the tile read "10 runs across 1 job".
+  test("lost runs in the running list are neither running runs nor running jobs", () => {
+    const running = [
+      ...[0, 1, 2, 3].map((g) => runOf(`hourly-2-g${g}`, "hourly", at(30), "running", g)),
+      runOf("hourly-1788682088", "hourly", at(0), "lost", null),
+      runOf("hourly-1788682099", "hourly", at(1), "lost", null),
+    ];
+    const jobs = jobsOf(running);
+    expect(running.filter((r) => r.state === "running")).toHaveLength(4);
+    expect(jobs.filter((j) => j.state === "running")).toHaveLength(1);
+    expect(running.filter((r) => r.state === "lost")).toHaveLength(2);
+    // Each lost ungrouped run is its own job of one, and none of them is drawn as "Running".
+    expect(jobs.filter((j) => j.state === "lost").map((j) => j.runs.length)).toEqual([1, 1]);
+  });
 });
 
 describe("runTone and its words", () => {

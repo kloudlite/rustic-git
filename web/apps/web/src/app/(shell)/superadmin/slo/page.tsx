@@ -53,6 +53,11 @@ export default async function SloPage({ searchParams }: { searchParams: Promise<
   const byId = new Map([...(idle ? runs.filter((r) => r.state !== "running") : runs), ...running].map((r) => [r.run_id, r]));
   const jobs = jobsOf([...byId.values()]);
   const live = jobs.filter((j) => j.state === "running");
+  // The api's `running` is the stored state, which a run keeps forever once its pod goes away
+  // mid-journey: six rows from 6–15 Sep read as "10 runs across 1 job" beside one live hourly.
+  // Only a run that is still reporting is running; the rest are lost, and say so.
+  const liveRuns = running.filter((r) => r.state === "running");
+  const lostRuns = running.filter((r) => r.state === "lost");
   const finished = jobs.filter((j) => j.state !== "running");
   // Idle is never an empty box: the panel falls back to the last finished job, collapsed.
   const shown = live.length > 0 ? live : finished.slice(0, 1);
@@ -86,13 +91,13 @@ export default async function SloPage({ searchParams }: { searchParams: Promise<
       <KpiStrip cols={4}>
         <KpiTile
           label="Running now"
-          value={running.length > 0 ? `${running.length} runs` : "idle"}
+          value={liveRuns.length > 0 ? `${liveRuns.length} runs` : "idle"}
           sub={
-            running.length > 0
+            (liveRuns.length > 0
               ? `across ${live.length} ${live.length === 1 ? "job" : "jobs"} · ${live.map((j) => j.suite).join(", ")}`
               : last
                 ? `last job ${runStateLabel(last.state)} ${when(new Date(last.started).getTime())}`
-                : "no run has reported yet"
+                : "no run has reported yet") + (lostRuns.length > 0 ? ` · ${lostRuns.length} lost` : "")
           }
         />
         <KpiTile
