@@ -262,7 +262,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
         .expect("a valid repo is accepted")
         .expect("a gitRepo source seeds with an init container");
-    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init)).unwrap();
+    let pod = k8s::workspace_pod(&spec, "ws-1", "ws-1", &test_pod_ctx(), Some(init), None).unwrap();
 
     let inits = pod.spec.as_ref().unwrap().init_containers.as_ref().expect("init containers");
     assert_eq!(inits.len(), 1);

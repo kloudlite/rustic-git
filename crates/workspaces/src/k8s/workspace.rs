@@ -505,12 +505,19 @@ pub fn owner_slug<'a>(owner: &'a str, team: &'a str) -> &'a str {
 /// and is used only for the worktree path's root — the two differ for a shared-volume clone
 /// (`id` is the source volume; `ws_id` is this workspace's own
 /// worktree name) — see `Pool::worktree`.
+///
+/// `bench` is `Some((configured bench image, idle seconds))` exactly when `crd::is_bench(ws)`:
+/// the pod then grows a second container running `harness-bench` and is labelled `kind=bench`.
+/// The image is not a spec field on purpose — a bench follows the configured image on every
+/// start — and `idle_secs` is stamped in at create like every other `Mark::Live` value, so a
+/// setting change never reaches a session already running.
 pub fn workspace_pod(
     spec: &WorkspaceSpec,
     id: &str,
     ws_id: &str,
     ctx: &PodContext,
     init: Option<Container>,
+    bench: Option<(&str, u64)>,
 ) -> Result<Pod, String> {
     // The last place before `spec.name` becomes a root `/bin/sh -c` word, an sshd `SetEnv` value
     // and this container's `mount_path`. `/v1` checked it; this covers a Workspace written by any
@@ -622,7 +629,10 @@ pub fn workspace_pod(
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
-        }],
+        }]
+        .into_iter()
+        .chain(bench.map(|(image, idle)| bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host)))
+        .collect(),
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({
@@ -643,6 +653,19 @@ pub fn workspace_pod(
             }
             if default_image {
                 v.extend([ws_ssh_volume(ws_id), keys_volume(ctx.pool, keys_owner(spec))]);
+            }
+            if bench.is_some() {
+                v.extend([
+                    // A Secret of its own, never a key in `user-key`: only the bench container
+                    // mounts it, and an ordinary workspace pod never sees this token at all.
+                    // Optional because /v1 mints it after the namespace exists.
+                    Volume {
+                        name: "bench-tool".to_string(),
+                        secret: Some(SecretVolumeSource { secret_name: Some(BENCH_TOOL_SECRET.to_string()), optional: Some(true), default_mode: Some(0o444), ..Default::default() }),
+                        ..Default::default()
+                    },
+                    Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
+                ]);
             }
             v
         }),
@@ -668,7 +691,10 @@ pub fn workspace_pod(
         ws_id,
         Some(&crate::crd::ws_namespace(&spec.owner, &spec.team)),
         &spec.owner,
-        "workspace",
+        // `allow_bench_tools` and `allow_gateway_bench` both select on this, and the gateway
+        // resolves a bench by it — a view of `spec.bench`, re-stamped from spec like every other
+        // label here, never an authorization.
+        if bench.is_some() { "bench" } else { "workspace" },
         &ctx.owner_ref,
     );
     // Which workspace this pod IS. Siblings share the namespace, so an attachment grant that named

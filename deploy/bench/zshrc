@@ -1,7 +1,0 @@
-[[ -o interactive ]] || return 0
-[ "$PWD" = "$HOME" ] && [ -d "$KL_WORKSPACE" ] && cd "$KL_WORKSPACE"
-[ -e "$HOME/.config/starship.toml" ] || export STARSHIP_CONFIG=/etc/starship.toml
-mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
-autoload -Uz compinit && compinit -d "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump"
-zstyle ":completion:*" menu select
-[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh

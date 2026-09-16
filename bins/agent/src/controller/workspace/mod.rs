@@ -428,7 +428,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                     }
                 }
             };
-            let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init) {
+            let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init, // ponytail: the bench container is wired in Task 4 of the bench-is-a-workspace plan
+                None) {
                 Ok(p) => p,
                 // Unreachable while `validate_ws_spec` runs at the top of this function; kept
                 // because the builder is the boundary and must be able to say no on its own.
