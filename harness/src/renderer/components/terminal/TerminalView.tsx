@@ -4,16 +4,19 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { mode } from "../../theme";
+import { connected } from "../../live";
 import type { TermTab } from "./tabs";
+import { banner as dropBanner, step, type Reconnect } from "./reconnect";
 
 /**
  * One terminal. The emulator is xterm.js — the one VS Code and every other
  * Electron terminal uses — so ANSI, selection, links and reflow are its problem.
  *
- * The shell itself is a PTY on the bench (or, for a workspace scope, spliced
- * through to its tool server): main owns the socket, this view only names the
- * tab. One socket, one shell, one life — an exit or a dropped tunnel ends the
- * tab rather than reconnecting to something that is gone.
+ * The shell itself is a tmux session on the bench (or, for a workspace scope,
+ * spliced through to its tool server): main owns the socket, this view only
+ * names the tab and its session. A dropped socket is not a dead shell — tmux
+ * still holds it — so the view reattaches by itself (`reconnect.ts`) and only
+ * a real exit, or the tab's x, ends anything.
  * A tab stays mounted while another is shown, so its scrollback survives.
  */
 export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onClose?: () => void }) {
@@ -90,6 +93,8 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     term.writeln(props.tab.banner);
     const enc = new TextEncoder();
     let exited = false;
+    // Undefined while the shell is attached; a Reconnect while it is not.
+    let drop: Reconnect | undefined;
 
     const end = (code: number | undefined, error?: string) => {
       if (exited) return;
@@ -98,21 +103,52 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
       props.onExited?.(props.tab.id);
     };
 
-    void window.harness.pty
-      .open(props.tab.id, props.tab.scope, term.cols, term.rows)
-      .catch((e: Error) => end(undefined, e.message));
+    const dial = () =>
+      void window.harness.pty
+        .open(props.tab.id, props.tab.scope, term.cols, term.rows, props.tab.session)
+        .catch((e: Error) => feed({ type: "drop", now: Date.now() }, e.message));
+
+    /** One door into the state machine, so the banner and the dial stay in step with it. */
+    const feed = (ev: Parameters<typeof step>[1], why?: string) => {
+      const was = drop;
+      const r = step(drop, ev);
+      drop = r.state;
+      if (drop && drop !== was && (!was || was.gaveUp !== drop.gaveUp)) term.write(`\r\n\x1b[2m${dropBanner(drop)}${why ? ` (${why})` : ""}\x1b[0m\r\n`);
+      if (r.open) dial();
+    };
+
+    dial();
     term.onData((d) => window.harness.pty.write(props.tab.id, enc.encode(d)));
     term.onResize(({ cols, rows }) => window.harness.pty.resize(props.tab.id, cols, rows));
+
+    // One beat for the whole machine: cheap, and a second's granularity is well
+    // under the shortest backoff.
+    const beat = setInterval(() => drop && feed({ type: "tick", now: Date.now(), connected: connected() }), 1_000);
 
     // Straight through: xterm.js already batches writes into its own render
     // frame. Coalescing them ourselves split zsh's erase-and-redraw across two
     // frames, which the owner saw as flicker on backspace.
-    const offData = window.harness.pty.onData((id, data) => id === props.tab.id && term.write(data));
-    const offExit = window.harness.pty.onExit((id, code, error) => id === props.tab.id && end(code, error));
-    // Enter on a dead shell closes the tab: the same key that would have run
-    // the next command, since there is nothing left to run it.
+    const offData = window.harness.pty.onData((id, data) => {
+      if (id !== props.tab.id) return;
+      // Bytes are the only proof the reattach worked; tmux redraws the pane on attach.
+      if (drop) feed({ type: "data" });
+      term.write(data);
+    });
+    const offExit = window.harness.pty.onExit((id, code, error) => {
+      if (id !== props.tab.id) return;
+      // A shell that exited is gone for good; a socket that dropped is not —
+      // tmux still holds the session, so that one is reattached, not mourned.
+      if (typeof code === "number") return end(code);
+      feed({ type: "drop", now: Date.now() }, error);
+    });
+    // Enter on a dead shell closes the tab; on one that gave up reconnecting it
+    // tries again — the same key that would have run the next command.
     term.onBell(() => {}); // a PTY bell is not this app's notification channel
-    term.onKey(({ domEvent }) => exited && domEvent.key === "Enter" && props.onClose?.());
+    term.onKey(({ domEvent }) => {
+      if (domEvent.key !== "Enter") return;
+      if (exited) props.onClose?.();
+      else if (drop?.gaveUp) feed({ type: "retry", now: Date.now() });
+    });
 
     // Debounced: a drag resizes continuously, and every fit is a reflow plus a
     // resize frame to the shell.
@@ -123,6 +159,7 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     });
     ro.observe(host);
     onCleanup(() => {
+      clearInterval(beat);
       clearTimeout(refit);
       ro.disconnect();
       offData();

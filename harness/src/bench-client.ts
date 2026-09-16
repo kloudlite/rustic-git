@@ -15,6 +15,7 @@ export type Emit = (ev: Record<string, unknown> & { type: string; pi?: string })
 type Cache = { base: string; sessions: unknown[]; exchanges: unknown[]; messages: Record<string, { total: number; tail: unknown[] }> };
 const KEEP_MESSAGES = 200;
 const KEEP_EXCHANGES = 500;
+export type PtySession = { name: string; windows: number; attached: number; created: number };
 const OFFLINE = "not connected to the bench; nothing was sent";
 
 export class BenchClient {
@@ -83,9 +84,20 @@ export class BenchClient {
    * bench socket. The caller owns it: this class neither tracks nor closes it —
    * a shell's life is its socket's, and /events dropping kills it anyway.
    */
-  pty(scope: string): WebSocket {
+  pty(scope: string, session?: string): WebSocket {
     if (!this.up) throw new Error(OFFLINE);
-    return this.ws(`/pty?scope=${encodeURIComponent(scope)}`);
+    const q = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
+    return this.ws(`/pty?scope=${encodeURIComponent(scope)}${q}`);
+  }
+
+  /** What tmux holds in that scope, so a tab reattaches what is already running rather than opening a second shell. */
+  ptySessions(scope: string): Promise<PtySession[]> {
+    return this.rest<PtySession[]>("GET", `/pty/sessions?scope=${encodeURIComponent(scope)}`);
+  }
+
+  /** Ending a terminal is the person's choice and nothing else's: only the tab's x reaches here. */
+  killPtySession(scope: string, name: string): Promise<void> {
+    return this.rest("DELETE", `/pty/sessions/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`).then(() => undefined);
   }
 
   start(): void {

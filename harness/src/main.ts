@@ -11,7 +11,7 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
-import { checkPty } from "./pty-ipc";
+import { checkPty, checkScope, checkSession } from "./pty-ipc";
 import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
@@ -343,6 +343,9 @@ app.on("before-quit", () => disconnect());
 // sees the socket. Nothing is queued — a write to a shell that is gone is
 // dropped, exactly as typing into a closed terminal is.
 const ptys = new Map<string, WebSocket>();
+// What each shell is attached to, kept past the socket: the tab's x has to
+// name the tmux session to kill, and by then its socket may already be gone.
+const ptyAt = new Map<string, { scope: string; session?: string }>();
 
 // A shell that is still connecting cannot take bytes yet (`ws.send` throws), and one that is
 // closing has nobody to give them to: both are "not open", and the open handler already sends
@@ -357,12 +360,16 @@ function closePtys() {
   ptys.clear();
 }
 
-ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown, rows: unknown) => {
+ipcMain.handle("pty:sessions", (_e, rawScope: unknown) => needBench().ptySessions(checkScope(rawScope)));
+
+ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown, rows: unknown, rawSession: unknown) => {
   const { id, scope } = checkPty(rawId, rawScope);
+  const session = checkSession(rawSession);
   if (typeof cols !== "number" || typeof rows !== "number") throw new Error("a shell opens at a size");
   ptys.get(id)?.close();
-  const w = needBench().pty(scope);
+  const w = needBench().pty(scope, session);
   ptys.set(id, w);
+  ptyAt.set(id, { scope, session });
   const send = (...a: unknown[]) => {
     if (!e.sender.isDestroyed()) e.sender.send(a[0] as string, ...a.slice(1));
   };
@@ -402,6 +409,23 @@ ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
 });
 ipcMain.on("pty:close", (_e, id: unknown) => {
   if (typeof id !== "string") return;
+  ptys.get(id)?.close();
+  ptys.delete(id);
+  // What it was attached to is kept: closing a socket is not ending a shell, and
+  // the tab's x still has to name the tmux session afterwards.
+});
+// The tab's x: kill the tmux session first, then drop the socket. The other way
+// round the detach would leave the shell running with nothing naming it.
+ipcMain.handle("pty:kill", async (_e, id: unknown) => {
+  if (typeof id !== "string") throw new Error("not a terminal id");
+  const at = ptyAt.get(id);
+  ptyAt.delete(id);
+  if (at?.session) {
+    // Already gone is the outcome asked for; anything else is worth the log but never blocks the close.
+    await needBench()
+      .killPtySession(at.scope, at.session)
+      .catch((e: Error) => console.warn("pty: could not kill", at.session, e.message));
+  }
   ptys.get(id)?.close();
   ptys.delete(id);
 });

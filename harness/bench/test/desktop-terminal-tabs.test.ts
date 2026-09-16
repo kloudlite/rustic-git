@@ -8,8 +8,8 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
-import { checkPty } from "../../src/pty-ipc.ts";
-import { makeTab, scopesOf } from "../../src/renderer/components/terminal/tabs.ts";
+import { checkPty, checkSession } from "../../src/pty-ipc.ts";
+import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
 
@@ -19,23 +19,60 @@ const machine = {
   workspaces: [ws("ws-51480ba5", "rustic-git", "master", "running"), ws("ws-0000000000000001", "docs", "main", "stopped")],
 } as Machine;
 
-test("scopesOf: the bench first, a stopped workspace listed but disabled", () => {
-  const s = scopesOf(machine);
-  assert.deepEqual(s[0], { id: "bench", label: "bench", sub: "your machine in the team", kind: "bench" });
-  assert.deepEqual(s[1], { id: "ws-51480ba5", label: "rustic-git", sub: "master", kind: "workspace", disabled: false });
-  assert.deepEqual(s[2], { id: "ws-0000000000000001", label: "docs", sub: "stopped", kind: "workspace", disabled: true });
+test("scopeOfTab: the tab is the scope; a stopped workspace has nothing to attach to", () => {
+  assert.equal(scopeOfTab(machine, "ws-51480ba5"), "ws-51480ba5");
+  assert.equal(scopeOfTab(machine, "ws-0000000000000001"), "bench"); // stopped
+  assert.equal(scopeOfTab(machine, "m1"), "bench");
 });
 
-test("makeTab: the banner names the scope and the team", () => {
-  const b = makeTab(machine, "Kloudlite", "bench");
+test("session names: kl-<slug>-<n>, always a legal tmux name", () => {
+  assert.equal(sessionName("ws-51480ba5", 1), "kl-ws-51480ba5-1");
+  assert.equal(slug("Karthik@Kloudlite.io"), "karthik-kloudlite-io");
+  assert.equal(slug("---"), "tab");
+  const long = sessionName("x".repeat(80), 12);
+  assert.ok(long.length <= 48, long);
+  for (const n of [sessionName("ws-51480ba5", 1), long, sessionName("--weird--name--", 3)])
+    assert.match(n, /^[a-z0-9][a-z0-9-]{0,47}$/, n);
+});
+
+test("a listing materialises this tab's terminals and nobody else's", () => {
+  const names = ["kl-ws-51480ba5-1", "kl-ws-51480ba5-3", "kl-other-1", "kl-ws-51480ba5-x", "scratch"];
+  assert.deepEqual(sessionsOfTab(names, "ws-51480ba5"), ["kl-ws-51480ba5-1", "kl-ws-51480ba5-3"]);
+  assert.equal(sessionIndex("kl-ws-51480ba5-3", "ws-51480ba5"), 3);
+  assert.equal(sessionIndex("kl-other-1", "ws-51480ba5"), 0);
+  // The next "+" fills the gap rather than colliding with 1 or 3.
+  assert.equal(nextIndex(sessionsOfTab(names, "ws-51480ba5"), "ws-51480ba5"), 2);
+  assert.equal(nextIndex([], "ws-51480ba5"), 1);
+});
+
+test("makeTab: the banner names the scope, the tab owns it, the session is the tab's", () => {
+  const b = makeTab(machine, "Kloudlite", "m1", "bench", 1);
   assert.match(b.banner, /^kloudlite shell · bench · Kloudlite\r\n/);
   assert.match(b.banner, /workspaces resolve by their tool servers/);
   assert.equal(b.label, "bench");
+  assert.equal(b.owner, "m1");
+  assert.equal(b.session, "kl-m1-1");
 
-  const w = makeTab(machine, "Kloudlite", "ws-51480ba5");
+  const w = makeTab(machine, "Kloudlite", "ws-51480ba5", "ws-51480ba5", 2);
   assert.match(w.banner, /^kloudlite shell · rustic-git · Kloudlite\r\n/);
   assert.match(w.banner, /the workspace is the working directory/);
+  assert.equal(w.session, "kl-ws-51480ba5-2");
   assert.notEqual(w.id, b.id); // one id per tab, never reused
+});
+
+// The drawer shows the active session tab's terminals only; the rest stay
+// mounted and keep their sockets.
+test("tabs belong to the tab they were opened from", () => {
+  const all = [makeTab(machine, "K", "m1", "bench", 1), makeTab(machine, "K", "ws-51480ba5", "ws-51480ba5", 1), makeTab(machine, "K", "m1", "bench", 2)];
+  assert.deepEqual(all.filter((t) => t.owner === "m1").map((t) => t.session), ["kl-m1-1", "kl-m1-2"]);
+  assert.deepEqual(all.filter((t) => t.owner === "ws-51480ba5").map((t) => t.session), ["kl-ws-51480ba5-1"]);
+});
+
+test("pty ipc: a session name is the tool server's rule, refused before tmux sees it", () => {
+  assert.equal(checkSession(undefined), undefined);
+  assert.equal(checkSession("kl-m1-1"), "kl-m1-1");
+  for (const bad of ["-lead", "Upper", "has space", "a".repeat(49), "semi;colon", "", 7])
+    assert.throws(() => checkSession(bad), /not a session name/, String(bad));
 });
 
 test("pty ipc: only a tab id and a real scope are accepted", () => {

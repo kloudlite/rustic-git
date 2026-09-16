@@ -8,7 +8,7 @@ import { Chat, fit } from "./components/Chat";
 import { Inspector } from "./components/inspector/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
-import { makeTab, type TermTab } from "./components/terminal/tabs";
+import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionsOfTab, type TermTab } from "./components/terminal/tabs";
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
@@ -310,13 +310,41 @@ export function App() {
   // own × ends its shell (owner, 2026-09-16: "every time I'm closing shell it's closing the session").
   const [drawer, setDrawer] = createSignal(true);
 
-  const openShell = (scopeId: string) => {
-    const t = makeTab(machine(), teamName(), scopeId);
+  // The terminals of the tab the panel is showing. All stay mounted; only these
+  // are visible, so switching tabs never drops a socket.
+  const tabsHere = () => tabs().filter((t) => t.owner === selected());
+  // Which session tabs have had their scope's tmux listed. Once each: after
+  // that this window's own tabs are the truth for it.
+  const listed = new Set<string>();
+
+  /**
+   * A terminal belongs to the session tab it was opened from, and its scope is
+   * that tab's — there is nothing to pick. The first open of a tab adopts
+   * whatever tmux already holds under this tab's name (another device, an
+   * earlier run of the app) instead of forking a second shell beside it.
+   */
+  const openShell = async (owner = selected()) => {
+    const scopeId = scopeOfTab(machine(), owner);
+    setDrawer(true);
+    if (!listed.has(owner)) {
+      listed.add(owner);
+      const live = await window.harness.pty.sessions(scopeId).catch(() => []);
+      const mine = sessionsOfTab(live.map((s) => s.name), owner);
+      if (mine.length) {
+        const made = mine.map((n) => makeTab(machine(), teamName(), owner, scopeId, sessionIndex(n, owner)));
+        setTabs((ts) => [...ts, ...made]);
+        setActive(made[made.length - 1].id);
+        return;
+      }
+    }
+    const t = makeTab(machine(), teamName(), owner, scopeId, nextIndex(tabs().filter((x) => x.owner === owner).map((x) => x.session), owner));
     setTabs((ts) => [...ts, t]);
     setActive(t.id);
-    setDrawer(true);
   };
+  // The x ends the shell for good — tmux kill-session on the far side — because
+  // a person closing a terminal means it, while a dropped socket never does.
   const closeTab = (id: string) => {
+    void window.harness.pty.kill(id);
     const rest = tabs().filter((t) => t.id !== id);
     setTabs(rest);
     if (rest.length === 0) setMaximised(false);
@@ -326,9 +354,9 @@ export function App() {
     setDrawer(false);
     setMaximised(false);
   };
-  const shellShown = () => tabs().length > 0 && drawer();
+  const shellShown = () => tabsHere().length > 0 && drawer();
   /** The Shell button and ⌘J are one gesture: open a shell here, bring the drawer back, or put it away. */
-  const toggleShell = (scopeId: string) => (shellShown() ? closePanel() : tabs().length ? setDrawer(true) : openShell(scopeId));
+  const toggleShell = () => void (shellShown() ? closePanel() : tabsHere().length ? setDrawer(true) : openShell());
 
   /** Back out of one layer at a time: a file, then the environment, then a
       maximised shell, then the shell. Nothing else swallows escape. */
@@ -416,7 +444,7 @@ export function App() {
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
     { id: "composer", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
-    { id: "shell", label: shellShown() ? "Hide the shell" : tabs().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell(scope()) },
+    { id: "shell", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell() },
     { id: "env", label: envTab() ? "Close the environment" : "Open the environment", keys: KEYS.environment.keys, run: () => (setFile(undefined), setEnvTab((v) => !v)) },
     { id: "panel", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: KEYS.panel.keys, run: () => setLeftOpen((v) => !v) },
     { id: "inspector", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
@@ -474,7 +502,7 @@ export function App() {
     if (palette()) return;
     if (hit(KEYS.back) && find() !== undefined) return closeFind();
 
-    if (hit(KEYS.shell)) return (stop(), toggleShell(scope()));
+    if (hit(KEYS.shell)) return (stop(), toggleShell());
     if (hit(KEYS.environment)) return (stop(), setFile(undefined), void setEnvTab((v) => !v));
     if (hit(KEYS.inspector)) return (stop(), void setRightOpen((v) => !v));
     if (hit(KEYS.panel)) return (stop(), void setLeftOpen((v) => !v));
@@ -613,14 +641,6 @@ export function App() {
     void window.harness.pi(cmd, pi).then((r) => void (r.success === false && L.note(String(r.error))), (e: Error) => L.note(e.message));
   };
 
-  /** A shell opened by shortcut lands in the selected workspace, else on the
-      bench. A stopped workspace has nothing to attach to, so it lands there too. */
-  const scope = () => {
-    const s = selected();
-    const w = machine().workspaces.find((x) => x.id === s || x.ephemerals.some((e) => e.id === s));
-    return w && w.state !== "stopped" ? w.id : "bench";
-  };
-
   /** Dragging the drawer's top edge resizes it inside the pane it lives in. */
   const startResize = (e: PointerEvent) => {
     e.preventDefault();
@@ -747,19 +767,18 @@ export function App() {
               onDropTab={(id, index) => moveTab(id, pi(), index)}
               onSplit={panes.length < 2 && p.open.length > 1 ? splitRight : undefined}
               shell={
-                isActive() && tabs().length ? (
+                isActive() && tabsHere().length ? (
                   <div
                     class="grid min-h-0 grid-rows-[3px_minmax(0,1fr)] border-t border-line"
                     style={{ height: maximised() ? "100%" : `${height()}px`, display: drawer() ? undefined : "none" }}
                   >
                     <div class="cursor-row-resize hover:bg-accent" onPointerDown={startResize} title="Drag to resize" />
                     <TerminalPanel
-                      machine={machine()}
-                      tabs={tabs()}
+                      tabs={tabsHere()}
                       active={active()}
                       maximised={maximised()}
                       onActivate={setActive}
-                      onOpen={openShell}
+                      onOpen={() => void openShell()}
                       onCloseTab={closeTab}
                       onToggleMaximise={() => setMaximised((v) => !v)}
                       onClose={closePanel}
@@ -780,7 +799,7 @@ export function App() {
           <Inspector
             machine={machine()}
             selected={selected()}
-            onOpenShell={toggleShell}
+            onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
             onOpenFile={(path, status) => {
               setEnvTab(false);
@@ -792,7 +811,7 @@ export function App() {
 
       <StatusBar
         machine={machine()}
-        shells={tabs().length}
+        shells={tabsHere().length}
         env={environment()?.name ?? "no environment"}
       />
     </div>

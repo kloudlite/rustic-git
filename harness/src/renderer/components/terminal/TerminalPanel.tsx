@@ -1,29 +1,25 @@
 import { For, Show, createSignal } from "solid-js";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
-import { Menu, MenuItem } from "../../ui/Menu";
 import { TerminalView } from "./TerminalView";
-import { scopesOf, type TermTab } from "./tabs";
-import type { Machine } from "../../model";
+import { type TermTab } from "./tabs";
 
 /**
- * The terminal panel: several shells at once, each against a scope. Tabs stay
- * mounted while another is shown, so scrollback and a running command survive
- * switching. The panel owns no tab state — a shell is opened from the place it
- * belongs to, in the inspector — it only shows and closes them.
+ * The terminal panel: the active session tab's shells. Tabs stay mounted while
+ * another is shown, so scrollback and a running command survive switching. The
+ * panel owns no tab state and picks no scope — a terminal belongs to the tab it
+ * was opened from, and "+" opens another one there — it only shows and closes them.
  */
 export function TerminalPanel(props: {
-  machine: Machine;
   tabs: TermTab[];
   active: string;
   maximised: boolean;
   onActivate: (id: string) => void;
-  onOpen: (scopeId: string) => void;
+  onOpen: () => void;
   onCloseTab: (id: string) => void;
   onToggleMaximise: () => void;
   onClose: () => void;
 }) {
-  const [picking, setPicking] = createSignal(false);
   // Which tabs have reported a dead shell. Lifted here so the tab strip can
   // mark one while its view is hidden.
   const [exited, setExited] = createSignal<string[]>([]);
@@ -63,26 +59,8 @@ export function TerminalPanel(props: {
           )}
         </For>
 
-        <div class="relative flex items-center" data-menu-root>
-          <Button variant="icon" size="sm" icon="plus" title="New shell" onClick={() => setPicking((v) => !v)} />
-          <Menu open={picking()} onClose={() => setPicking(false)} class="max-h-72 overflow-y-auto">
-            <For each={scopesOf(props.machine)}>
-              {(s) => (
-                <MenuItem
-                  mono
-                  icon={s.kind === "bench" ? "sparkle" : "terminal"}
-                  hint={s.sub}
-                  disabled={"disabled" in s && s.disabled}
-                  onSelect={() => {
-                    props.onOpen(s.id);
-                    setPicking(false);
-                  }}
-                >
-                  {s.label}
-                </MenuItem>
-              )}
-            </For>
-          </Menu>
+        <div class="flex items-center">
+          <Button variant="icon" size="sm" icon="plus" title="New shell in this tab" onClick={() => props.onOpen()} />
         </div>
 
         <span class="flex-1" />
