@@ -188,6 +188,10 @@ pub struct SloStatus {
     pub window_long_secs: u64,
     pub last: Option<Sample>,
     pub state: SloState,
+    /// Samples inside the 30 d window an acknowledged incident window took out of every count
+    /// above. Reported rather than hidden: an exclusion moves a budget, so the screen has to be
+    /// able to say by how much.
+    pub excluded: u64,
 }
 
 /// `bad / total` divided by the error budget's own rate — 1.0 means the budget is being spent
@@ -384,11 +388,23 @@ const PREDICATES: &str = "(r.ok = 1 AND (c.mx = 0 OR r.ms <= c.mx)) AS good, \
      (r.ts > now() - toIntervalSecond(c.w_long)) AS in_long, \
      (r.ts > now() - toIntervalSecond(c.w_longc)) AS in_longc, \
      (c.w_short > 0 AND r.ts > now() - toIntervalSecond(c.w_short)) AS in_short, \
-     (c.w_shortc > 0 AND r.ts > now() - toIntervalSecond(c.w_shortc)) AS in_shortc";
+     (c.w_shortc > 0 AND r.ts > now() - toIntervalSecond(c.w_shortc)) AS in_shortc, \
+     arrayExists((f, t, ids) -> r.ts >= f AND r.ts <= t AND (empty(ids) OR has(ids, r.slo_id)), \
+         ex.xf, ex.xt, ex.xi) AS excluded";
+
+/// Every live exclusion window folded into ONE row of parallel arrays, cross-joined to the
+/// samples so `excluded` above is a per-sample boolean on the same scan. An anti-join or a
+/// correlated `NOT EXISTS` would be a second nesting level, and each one measured ~0.8 s of pure
+/// analysis on the cluster; an aggregate with no `GROUP BY` always yields its one row, so with no
+/// exclusions at all the cross join keeps every sample rather than dropping the lot.
+const EXCL_CTE: &str = "ex AS (SELECT groupArray(`from`) AS xf, groupArray(`to`) AS xt, \
+     groupArray(slo_ids) AS xi FROM kloudlite.slo_exclusions FINAL \
+     WHERE deleted = toDateTime64(0, 3))";
 
 /// The samples joined to their catalogue row, with the 400 d floor every reader here shares.
 const FROM_JOINED: &str = "FROM kloudlite.slo_results AS r FINAL \
      INNER JOIN cat AS c ON c.slo_id = r.slo_id \
+     CROSS JOIN ex \
      WHERE r.skipped = 0 AND r.ts > now() - INTERVAL 400 DAY";
 
 /// `SloBurn`'s inner query: one row per SLO with samples, `[slo_id, burning]`.
@@ -400,7 +416,11 @@ const FROM_JOINED: &str = "FROM kloudlite.slo_results AS r FINAL \
 /// rate `-1` so it can never satisfy a threshold — the same "no samples is not zero" rule `burn`
 /// holds in Rust.
 pub fn burn_sql() -> String {
-    let counts = |w: &str| format!("countIf(in_{w}) AS t_{w}, countIf(in_{w} AND good) AS g_{w}");
+    // `NOT excluded` on both halves: an acknowledged incident's samples are not evidence either
+    // way, exactly like a skipped step, so they leave the rate alone rather than counting as good.
+    let counts = |w: &str| {
+        format!("countIf(in_{w} AND NOT excluded) AS t_{w}, countIf(in_{w} AND good AND NOT excluded) AS g_{w}")
+    };
     // Inlined rather than a second nesting level that names each rate: every rate is read once,
     // and each extra subquery around this one measured ~0.8 s of pure analysis on the cluster.
     let rate =
@@ -408,7 +428,7 @@ pub fn burn_sql() -> String {
     format!(
         "SELECT slo_id, \
                 toUInt8(({rs} > 14.4 AND {rsc} > 14.4) OR ({rl} > 6 AND {rlc} > 6)) AS burning \
-         FROM (WITH {cat}, {PREDICATES} \
+         FROM (WITH {cat}, {EXCL_CTE}, {PREDICATES} \
              SELECT r.slo_id AS slo_id, c.budget AS budget, {cl}, {clc}, {cs}, {csc} \
              {FROM_JOINED} \
              GROUP BY slo_id, budget)",
@@ -427,13 +447,19 @@ pub fn burn_sql() -> String {
 /// The alias list `statuses_sql` selects, in the order `statuses` reads positionally. Named once
 /// so the reader and the statement cannot drift apart silently — a shifted column would move
 /// every attainment on the console without failing anything.
+///
+/// Every count reads `NOT excluded`; `excluded_att` is the same predicate counted rather than
+/// filtered, so the screen can say how many samples an acknowledged incident took out instead of
+/// the attainment simply moving. The newest sample is NOT filtered — "is it working right now" is
+/// a different question from "what did this month cost", and an exclusion answers only the second.
 const STATUS_COLS: &str = "slo_id, \
-     countIf(in_att) AS total_att, countIf(in_att AND good) AS good_att, \
-     countIf(in_long) AS total_long, countIf(in_long AND good) AS good_long, \
-     countIf(in_longc) AS total_longc, countIf(in_longc AND good) AS good_longc, \
-     countIf(in_short) AS total_short, countIf(in_short AND good) AS good_short, \
-     countIf(in_shortc) AS total_shortc, countIf(in_shortc AND good) AS good_shortc, \
-     argMax(ok, ts) AS last_ok, argMax(ms, ts) AS last_ms, toString(max(ts)) AS last_ts";
+     countIf(in_att AND NOT excluded) AS total_att, countIf(in_att AND good AND NOT excluded) AS good_att, \
+     countIf(in_long AND NOT excluded) AS total_long, countIf(in_long AND good AND NOT excluded) AS good_long, \
+     countIf(in_longc AND NOT excluded) AS total_longc, countIf(in_longc AND good AND NOT excluded) AS good_longc, \
+     countIf(in_short AND NOT excluded) AS total_short, countIf(in_short AND good AND NOT excluded) AS good_short, \
+     countIf(in_shortc AND NOT excluded) AS total_shortc, countIf(in_shortc AND good AND NOT excluded) AS good_shortc, \
+     argMax(ok, ts) AS last_ok, argMax(ms, ts) AS last_ms, toString(max(ts)) AS last_ts, \
+     countIf(in_att AND excluded) AS excluded_att";
 
 /// One statement for every SLO's five windows plus its newest sample. `FINAL` because a re-sent
 /// report is a second row until the parts merge, and counting it twice would move an attainment.
@@ -445,7 +471,7 @@ pub fn statuses_sql() -> String {
         "max_ms: Some(0) collides with the no-ceiling sentinel"
     );
     format!(
-        "WITH {cat}, {PREDICATES} \
+        "WITH {cat}, {EXCL_CTE}, {PREDICATES} \
          SELECT {STATUS_COLS} \
          {FROM_JOINED} \
          GROUP BY slo_id",
@@ -537,6 +563,7 @@ pub async fn statuses(h: &History) -> Result<Vec<SloStatus>, HistoryError> {
                 window_long_secs: w.1,
                 last,
                 state,
+                excluded: g(14),
             }
         })
         .collect())
@@ -755,7 +782,8 @@ mod tests {
                 "good_shortc",
                 "last_ok",
                 "last_ms",
-                "last_ts"
+                "last_ts",
+                "excluded_att"
             ]
         );
         assert!(sql.contains(STATUS_COLS), "the statement selects those columns");
@@ -772,6 +800,26 @@ mod tests {
             assert_eq!(ids[i], format!("'{}'", slo.id));
             assert_eq!(mx[i], slo.target.max_ms.unwrap_or(0).to_string(), "{}", slo.id);
         }
+    }
+
+    /// An acknowledged incident window must leave BOTH statements — a burn rate computed over
+    /// samples the attainment already excluded would page somebody about a window a superadmin
+    /// has explicitly signed off. One derived boolean on one scan, no second nesting level.
+    #[test]
+    fn both_statements_exclude_acknowledged_windows() {
+        for sql in [statuses_sql(), burn_sql()] {
+            assert_eq!(sql.matches(';').count(), 0, "one statement");
+            assert!(sql.contains("kloudlite.slo_results AS r FINAL"));
+            // The tombstone filter, and `FINAL` so a deleted window's newer row has won.
+            assert!(sql.contains("kloudlite.slo_exclusions FINAL"));
+            assert!(sql.contains("WHERE deleted = toDateTime64(0, 3)"));
+            assert!(sql.contains("AS excluded"), "the derived boolean");
+            assert!(sql.contains("AND NOT excluded"), "the counts read it");
+            // Anything that would nest: a correlated subquery over the samples.
+            assert!(!sql.contains("NOT EXISTS"), "an anti-join is a second scan: {sql}");
+        }
+        // …and the count the screen states, only in the statement that renders a budget.
+        assert!(statuses_sql().contains("countIf(in_att AND excluded) AS excluded_att"));
     }
 
     /// The catalogue used to be inlined as six 77-branch `multiIf`s reused by eight `countIf`s,
