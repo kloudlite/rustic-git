@@ -81,8 +81,19 @@ pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
     let cwd = CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| io::Error::other("root has a NUL"))?;
     let shells = candidates();
     let argv0: Vec<CString> = shells.iter().map(login_argv0).collect();
-    let term = (CString::new("TERM").unwrap(), CString::new("xterm-256color").unwrap());
-    let color = (CString::new("COLORTERM").unwrap(), CString::new("truecolor").unwrap());
+    // The environment too: `setenv` allocates, so it is built here and handed to `execve`.
+    let envp_owned: Vec<CString> = std::env::vars_os()
+        .filter(|(k, _)| k != "TERM" && k != "COLORTERM")
+        .map(|(k, v)| {
+            let mut b = k.into_encoded_bytes();
+            b.push(b'=');
+            b.extend(v.into_encoded_bytes());
+            CString::new(b).unwrap_or_default()
+        })
+        .chain([CString::new("TERM=xterm-256color").unwrap(), CString::new("COLORTERM=truecolor").unwrap()])
+        .collect();
+    let mut envp: Vec<*const libc::c_char> = envp_owned.iter().map(|e| e.as_ptr()).collect();
+    envp.push(std::ptr::null());
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -105,11 +116,9 @@ pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
             }
             libc::close(master);
             libc::chdir(cwd.as_ptr());
-            libc::setenv(term.0.as_ptr(), term.1.as_ptr(), 1);
-            libc::setenv(color.0.as_ptr(), color.1.as_ptr(), 1);
             for (shell, a0) in shells.iter().zip(&argv0) {
                 let argv = [a0.as_ptr(), std::ptr::null()];
-                libc::execvp(shell.as_ptr(), argv.as_ptr());
+                libc::execve(shell.as_ptr(), argv.as_ptr(), envp.as_ptr());
             }
             // No shell at all: 127 is what a shell itself reports for "not found".
             libc::_exit(127);
