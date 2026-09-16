@@ -10,7 +10,7 @@ import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/devic
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
-import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
+import { benchWorkspace, clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
 import { checkPty } from "./pty-ipc";
 import type WebSocket from "ws";
 
@@ -588,6 +588,7 @@ async function platform<T>(read: (api: string, token: string, team: string) => P
   }
 }
 ipcMain.handle("platform:workspaces", () => platform(listWorkspaces));
+ipcMain.handle("platform:bench", () => platform(benchWorkspace));
 ipcMain.handle("platform:environments", () => platform(listEnvironments));
 ipcMain.handle("platform:environment", (_e, id: unknown) => platform((api, token) => getEnvironment(api, token, id as string)));
 ipcMain.handle("platform:snapshots", (_e, volume: unknown) => platform((api, token) => volumeHistory(api, token, volume as string)));

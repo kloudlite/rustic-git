@@ -10,7 +10,7 @@ import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { makeTab, type TermTab } from "./components/terminal/tabs";
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
-import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
+import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace, withBench } from "./platform";
 import type { Team } from "../connect/bench";
 import { KEYS, threadIndex } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
@@ -32,11 +32,14 @@ export function App() {
   // The team's real workspaces and environments, read by main from /v1. What the API has no field
   // for — the bench's goal and plan — stays empty rather than faked.
   const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
+  // The bench is read on its own (/v1/workspaces excludes it) and leads the list, so the panel,
+  // the packages view and the shell scopes treat it as the first workspace — stopped ones included.
+  const [benchWs, setBenchWs] = createSignal<Workspace | undefined>();
   const [environments, setEnvironments] = createSignal<Environment[]>([]);
   const [snapshots, setSnapshots] = createSignal<Snapshot[]>([]);
   const [wsNote, setWsNote] = createSignal<string | undefined>(LOADING);
   const [envNote, setEnvNote] = createSignal<string | undefined>(LOADING);
-  const machine = createMemo(() => ({ ...MACHINE, owner: who(), goal: "", todos: [], workspaces: workspaces() }));
+  const machine = createMemo(() => ({ ...MACHINE, owner: who(), goal: "", todos: [], workspaces: withBench(benchWs(), workspaces()) }));
 
   // Environments belong to the team, not the machine, and WHICH one this space follows is the
   // platform's answer (`/v1/me/environments`), not a choice this window keeps: every device and
@@ -65,6 +68,8 @@ export function App() {
     try {
       await Promise.all([
         platform.workspaces().then((r) => (setWorkspaces(r.map(toWorkspace)), setWsNote(undefined)), (e) => setWsNote(ipcError(e))),
+        // A bench read that fails leaves the last one shown: the workspace list is still worth rendering.
+        platform.bench().then((b) => setBenchWs(b ? toWorkspace(b) : undefined), () => undefined),
         platform.environments().then((r) => (setEnvironments(r.map((x) => toEnvironment(x, teamId()))), setEnvNote(undefined)), (e) => setEnvNote(ipcError(e))),
         // A read that fails leaves the last known choice rather than disconnecting the window.
         platform.myEnvironment().then((id) => setConnected(id ?? ""), () => undefined),

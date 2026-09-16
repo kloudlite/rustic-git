@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ipcError, toEnvironment, toSnapshot, toWorkspace } from "../../src/renderer/platform.ts";
+import { ipcError, toEnvironment, toSnapshot, toWorkspace, withBench } from "../../src/renderer/platform.ts";
 
 test("toWorkspace: ready is running, pins split, nothing invented", () => {
   const w = toWorkspace({ id: "ws-1", name: "api", state: "creating", packages: ["jq", "nodejs@22.1"] });
@@ -40,4 +40,10 @@ test("toSnapshot: the message names it, a non-ready phase is the note", () => {
 test("ipcError strips Electron's remote-method wrapper", () => {
   assert.equal(ipcError(new Error("Error invoking remote method 'platform:workspaces': Error: Kloudlite answered 503")), "Kloudlite answered 503");
   assert.equal(ipcError(new Error("plain")), "plain");
+});
+
+test("the bench leads the workspace list, and no bench leaves it untouched", () => {
+  const ws = (id: string) => ({ id, name: id, repo: "", branch: "", state: "running" as const, packages: [], queue: [], ephemerals: [], files: [], changes: [] });
+  assert.deepEqual(withBench(ws("bench"), [ws("api"), ws("web")]).map((w) => w.id), ["bench", "api", "web"]);
+  assert.deepEqual(withBench(undefined, [ws("api")]).map((w) => w.id), ["api"]);
 });

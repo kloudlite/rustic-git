@@ -188,3 +188,19 @@ export async function setMyEnvironment(api: string, token: string, team: string,
 export async function clearMyEnvironment(api: string, token: string, team: string): Promise<void> {
   await sendJson(api, token, "DELETE", `/v1/me/environments/${segment(team)}`);
 }
+
+/**
+ * The person's bench, which `/v1/workspaces` deliberately excludes: `GET /v1/bench` names it and
+ * `GET /v1/workspaces/{id}` answers the same Workspace shape as any other, so the panel shows it
+ * with its packages and shell like a workspace. Named "bench" here — the stored name is the
+ * generated id, which means nothing to the person. No bench yet (404) is `undefined`, not an error.
+ */
+export async function benchWorkspace(api: string, token: string, team: string): Promise<ApiWorkspace | undefined> {
+  const b = await getJson(api, token, `/v1/bench?team=${segment(team)}`, null);
+  if (b === null) return undefined;
+  if (!isObj(b)) throw bad("bench");
+  const w = await getJson(api, token, `/v1/workspaces/${segment(str(b, "id", "bench"))}`, null);
+  if (w === null) return undefined;
+  if (!isObj(w)) throw bad("workspace");
+  return { ...toWorkspace(w), name: "bench" };
+}

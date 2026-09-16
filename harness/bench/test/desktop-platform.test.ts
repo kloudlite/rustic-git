@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, segment, setMyEnvironment, volumeHistory } from "../../src/connect/platform.ts";
+import { benchWorkspace, clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, segment, setMyEnvironment, volumeHistory } from "../../src/connect/platform.ts";
 
 type Answer = { status: number; body?: unknown; raw?: string };
 /** A stub api answering `GET path?query` from a fixed table; anything else is 404. */
@@ -122,6 +122,28 @@ test("my environment: the connected team's row, set and cleared on the platform"
     assert.deepEqual(s.calls.slice(2), ["PUT /v1/me/environments/acme", "DELETE /v1/me/environments/acme"]);
     assert.equal(s.auth[2], "Bearer tok");
     await assert.rejects(setMyEnvironment(s.api, "tok", "acme", "../etc"), /not a valid name/);
+  } finally {
+    s.close();
+  }
+});
+
+test("bench: named by /v1/bench, read as a workspace, shown as \"bench\"", async () => {
+  const s = await stub({
+    "GET /v1/bench?team=acme": { status: 200, body: { id: "bench-karthik", owner: "karthik", team: "acme", model: "opus", desiredState: "Running", phase: "Idle" } },
+    "GET /v1/workspaces/bench-karthik": { status: 200, body: { ...WS, id: "bench-karthik", name: "bench-karthik", state: "stopped", repo: null, branch: null, bench: { model: "opus" } } },
+  });
+  try {
+    // Stopped is still listed: the panel shows it and the person starts it from there.
+    assert.deepEqual(await benchWorkspace(s.api, "tok", "acme"), { id: "bench-karthik", name: "bench", state: "stopped", repo: undefined, branch: undefined, packages: ["jq", "nodejs@22"] });
+  } finally {
+    s.close();
+  }
+});
+
+test("bench: none yet is undefined, not a failed refresh", async () => {
+  const s = await stub({});
+  try {
+    assert.equal(await benchWorkspace(s.api, "tok", "acme"), undefined);
   } finally {
     s.close();
   }
