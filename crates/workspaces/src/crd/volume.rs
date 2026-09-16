@@ -137,6 +137,16 @@ pub struct VolumeStatus {
     pub observed_generation: Option<i64>,
     #[serde(default)]
     pub subvolume_present: bool,
+    /// What this volume actually OCCUPIES on the node that holds it — read off its btrfs qgroups
+    /// by that node's agent (`agent::usage`) on paths that already touched the disk: a cut and a
+    /// snapshot delete. Informational: nothing is enforced from it, and `spec.quotaGb` stays what
+    /// it always was, the per-volume btrfs ceiling. `None` is "nobody has stamped yet", never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_bytes: Option<u64>,
+    /// When `usedBytes` was read, RFC 3339 — how old the reading is, which matters because nothing
+    /// refreshes it on a timer: a volume nothing cuts from keeps the stamp of its last cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<String>,
     // No `lastSnapshot` and no `lastPush`: "the newest snapshot of this volume" is a query over
     // `Snapshot` CRs by the `kloudlite.io/volume` label. A second controller writing this
     // status object would prune the first one's fields — `patch_status` applies FORCED under one

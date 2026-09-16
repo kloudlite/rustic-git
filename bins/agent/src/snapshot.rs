@@ -147,10 +147,12 @@ pub async fn reconcile_snapshot(s: Arc<crd::Snapshot>, ctx: Arc<Ctx>) -> Result<
         tracing::warn!(snapshot = %name, error = %e.0, "snapshot.cut.failed");
         return Ok(Action::requeue(TICK));
     }
-    // ponytail: no `sizeBytes` — a `du -s` over a btrfs subvolume walks every inode, which is
-    // exactly the write-amplifying scan the sync-before-snapshot comment in `snapshot.rs` warns
-    // about paying for on the hot path. Add it as a background sweep (or read the qgroup, which
-    // this pool already maintains for quota) if the UI ever needs it.
+    // No `sizeBytes` on the Snapshot itself — a `du -s` over a btrfs subvolume walks every inode,
+    // exactly the write-amplifying scan the sync-before-snapshot comment warns about paying for on
+    // the hot path. What a cut DOES change is the volume's occupancy, and that is read off the
+    // qgroups this pool already maintains for quota: a push is the one verb that can only grow it,
+    // so the stamp is refreshed here rather than waiting out a sync beat.
+    crate::usage::read_and_stamp(&ctx, &s.spec.volume).await;
     let api = Api::<crd::Snapshot>::all(ctx.client.clone());
     if s.spec.transient {
         record_post_cut_generation(&ctx, &api, &name, &s.spec.volume, &s.spec.worktree).await;

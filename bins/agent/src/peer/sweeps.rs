@@ -467,6 +467,10 @@ pub(crate) async fn sweep_orphan_snap_bytes(ctx: &Arc<Ctx>, beat: &crate::listin
                 Err(e) => tracing::warn!(volume = %id, snapshot = %name, reason = "panicked", error = %e, "snapshot.drop.failed"),
             }
             dropped.push((id.clone(), name));
+            // A delete is the one event that can only SHRINK a volume's occupancy, and quota is
+            // charged from it — refresh the stamp here rather than leaving the owner paying for
+            // freed bytes until the next sync beat.
+            crate::usage::read_and_stamp(ctx, &id).await;
         }
     }
     dropped

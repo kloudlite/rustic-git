@@ -270,6 +270,18 @@
                       "subvolumePresent": {
                         "default": false,
                         "type": "boolean"
+                      },
+                      "usedAt": {
+                        "description": "When `usedBytes` was read, RFC 3339 — how old the reading is, which matters because nothing\nrefreshes it on a timer: a volume nothing cuts from keeps the stamp of its last cut.",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "usedBytes": {
+                        "description": "What this volume actually OCCUPIES on the node that holds it — read off its btrfs qgroups\nby that node's agent (`agent::usage`) on paths that already touched the disk: a cut and a\nsnapshot delete. Informational: nothing is enforced from it, and `spec.quotaGb` stays what\nit always was, the per-volume btrfs ceiling. `None` is \"nobody has stamped yet\", never zero.",
+                        "format": "uint64",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
                       }
                     },
                     "required": [

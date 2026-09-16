@@ -31,6 +31,7 @@ pub mod snapshot;
 pub mod sshkeys;
 pub mod stats;
 pub mod sync;
+pub mod usage;
 #[cfg(test)]
 mod testsupport;
 

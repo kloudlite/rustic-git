@@ -242,6 +242,9 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     observed_generation: Some(started_gen),
                     subvolume_present: true,
                     conditions: vec![],
+                    // Occupancy is `usage`'s field, under its own manager: omitted here so this
+                    // FORCED apply does not prune the stamp (see `usage`'s module doc).
+                    ..Default::default()
                 };
                 st.conditions = vec![crd::condition("Ready", true, "Converged", "volume is materialized", gen)];
                 if let Some(why) = &done.quota_unenforced {
@@ -293,6 +296,7 @@ pub async fn apply_volume(v: &crd::Volume, ctx: &Arc<Ctx>) -> Result<Action, Rec
                     restore_requested_at: restored_at.clone(),
                     subvolume_present: ctx.engine.pool.live(&v.name_any()).exists(),
                     conditions: vec![crd::condition("Ready", false, "OperationFailed", &e, gen)],
+                    ..Default::default()
                 };
                 write_volume_status(v, st, ctx).await?;
                 Ok(Action::requeue(RETRY))
