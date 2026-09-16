@@ -3,7 +3,6 @@
 use crate::LockOrRecover;
 use super::{path, Entry, FencedError, Pool};
 use crate::Result;
-use slatedb::object_store::ObjectStoreExt;
 use slatedb::Db;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -166,14 +165,13 @@ impl Pool {
         // deletes run; the same ceiling `evict` accepts. Upgrade: refuse the delete instead.
         let prefix = slatedb::object_store::path::Path::from(path(owner, name));
         let deleted = async {
-            let locs: Vec<_> = futures::TryStreamExt::try_collect(futures::TryStreamExt::map_ok(
+            // Streamed, not collected-then-serial: the store batches (or at least overlaps) the
+            // deletes, and a database prefix — an image's especially — can hold hundreds of SSTs.
+            let locations = futures::StreamExt::boxed(futures::StreamExt::map(
                 self.os.list(Some(&prefix)),
-                |m| m.location,
-            ))
-            .await?;
-            for loc in locs {
-                self.os.delete(&loc).await?;
-            }
+                |m| m.map(|m| m.location),
+            ));
+            futures::TryStreamExt::try_collect::<Vec<_>>(self.os.delete_stream(locations)).await?;
             Ok(())
         }
         .await;

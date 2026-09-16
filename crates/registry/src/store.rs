@@ -664,10 +664,6 @@ impl ImageExt for Store {
         Ok(())
     }
 
-    // ponytail: a push or page-load racing this delete can re-open the database between the
-    // evict and the file removal, leaving a db whose manifest names SSTs that are gone — a
-    // broken image rather than a deleted one. The window is one node and milliseconds wide;
-    // a delete-in-progress marker in the image db closes it if it ever bites.
     /// Wipes every database row this image owns: the bare `image` marker, `image/public`, every
     /// `image/tag/*`, every `image/pulls/*`, every `image/manifest-type/*`, every `image/blob/*` and every
     /// `image/referrer/*`. All of them start with `image`, and nothing else in this database does
@@ -696,9 +692,11 @@ impl ImageExt for Store {
     /// this runs, so by the time storage cleanup happens the image is already invisible to
     /// listings — this no longer answers "does it still list?" for `images`, only "is the bytes
     /// gone?". A crash partway through this function now just leaves orphaned rows/files for GC to
-    /// sweep at leisure, not a visible phantom. The database is EVICTED first — closed and dropped
-    /// from the pool's warm map — before its files are removed, so nothing local still holds it
-    /// open underneath the delete. Scoped by `pool_coords`, which is `img/{owner}/{name}` alone, so
+    /// sweep at leisure, not a visible phantom. The POOL does the deleting (`Pool::delete`), which
+    /// closes the handle, waits for any open still in flight, and refuses every open that starts
+    /// while the files are going — an evict-then-delete here let the marker lane's `image_db` open
+    /// land its manifest after the listing and leave a database whose SSTs were gone
+    /// (`run-fast-1789525800-a`, 2026-09-16). Scoped by `pool_coords`, which is `img/{owner}/{name}` alone, so
     /// a sibling image's storage (a different `{name}`, hence a different prefix entirely) is never
     /// touched.
     ///
@@ -712,21 +710,127 @@ impl ImageExt for Store {
     }
 
     async fn purge_image_storage(&self, owner: &str, name: &str) -> Result<()> {
-        use slatedb::object_store::ObjectStore;
         // Cache keys are `{owner}/{name}/{digest}`; without this, a manifest GET'd just before
         // delete keeps serving stale bytes for this image until byte-cap eviction reaches it.
         let cache_prefix = format!("{owner}/{name}/");
         self.manifests().retain(|k, _| !k.starts_with(&cache_prefix));
         let (o, n) = crate::pool_coords(owner, name);
-        self.pool.evict(o, &n).await;
+        self.pool.delete(o, &n).await
+    }
+}
+
+/// The ghost image: `purge_image_storage` used to `evict` and then delete the prefix itself, so
+/// the marker lane's `image_exists` → `image_db` open could land its manifest after the listing
+/// and leave a database whose SSTs were gone (`run-fast-1789525800-a`, 2026-09-16). Routing
+/// through `Pool::delete` is what closes it; this pins the behaviour from the registry side.
+#[cfg(test)]
+mod purge_tests {
+    use super::ImageExt;
+    use crate::dbstore::Store;
+    use futures::stream::BoxStream;
+    use futures::StreamExt;
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::path::Path as OsPath;
+    use slatedb::object_store::{
+        GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
+        PutOptions, PutPayload, PutResult, Result as OsResult,
+    };
+    use std::sync::Arc;
+
+    /// An in-memory store that stalls `delete_stream` — the purge's last step, once it has
+    /// already listed the prefix — so a racing open lands deterministically inside the old ghost
+    /// window. Gating the LIST instead would deadlock the open, which reads the same store.
+    /// `entered` fires once the deletes stall.
+    #[derive(Debug)]
+    struct GatedDeletes {
+        inner: InMemory,
+        gate: tokio::sync::watch::Receiver<bool>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl std::fmt::Display for GatedDeletes {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "GatedDeletes")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for GatedDeletes {
+        async fn put_opts(&self, l: &OsPath, p: PutPayload, o: PutOptions) -> OsResult<PutResult> {
+            self.inner.put_opts(l, p, o).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            l: &OsPath,
+            o: PutMultipartOptions,
+        ) -> OsResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(l, o).await
+        }
+        async fn get_opts(&self, l: &OsPath, o: GetOptions) -> OsResult<GetResult> {
+            self.inner.get_opts(l, o).await
+        }
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, OsResult<OsPath>>,
+        ) -> BoxStream<'static, OsResult<OsPath>> {
+            let deletes = self.inner.delete_stream(locations);
+            let (mut gate, entered) = (self.gate.clone(), self.entered.clone());
+            futures::stream::once(async move {
+                if *gate.borrow() {
+                    entered.notify_one();
+                    let _ = gate.wait_for(|g| !*g).await;
+                }
+                deletes
+            })
+            .flatten()
+            .boxed()
+        }
+        fn list(&self, prefix: Option<&OsPath>) -> BoxStream<'static, OsResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&OsPath>) -> OsResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(
+            &self,
+            from: &OsPath,
+            to: &OsPath,
+            o: slatedb::object_store::CopyOptions,
+        ) -> OsResult<()> {
+            self.inner.copy_opts(from, to, o).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_open_racing_a_purge_creates_no_ghost() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let os: Arc<dyn ObjectStore> = Arc::new(GatedDeletes {
+            inner: InMemory::new(),
+            gate: rx,
+            entered: entered.clone(),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(os.clone(), dir.path().into(), false).await.unwrap());
+        store.image_db("acme", "nginx").await.unwrap().put(b"image", b"1").await.unwrap();
+
+        let (o, n) = crate::pool_coords("acme", "nginx");
         let prefix = OsPath::from(crate::pool::path(o, &n));
-        // Streamed, not collected-then-serial: the store batches (or at least overlaps) the
-        // deletes, and an image's DB prefix can hold hundreds of SST objects.
-        let locations = futures::StreamExt::boxed(futures::StreamExt::map(self.os.list(Some(&prefix)), |m| {
-            m.map(|m| m.location)
-        }));
-        futures::TryStreamExt::try_collect::<Vec<_>>(self.os.delete_stream(locations)).await?;
-        Ok(())
+        assert!(os.list(Some(&prefix)).count().await > 0, "the image database must exist first");
+
+        tx.send(true).unwrap();
+        let purge = {
+            let store = store.clone();
+            tokio::spawn(async move { store.purge_image_storage("acme", "nginx").await })
+        };
+        entered.notified().await; // the purge has listed and is stalled on its deletes
+        // The lane's open, landing exactly in the old window: it must be refused, not create a
+        // fresh manifest the listing below has already walked past.
+        assert!(store.image_db("acme", "nginx").await.is_err(), "an open during a purge must fail");
+        tx.send(false).unwrap();
+        purge.await.unwrap().unwrap();
+
+        assert_eq!(os.list(Some(&prefix)).count().await, 0, "no object may survive the purge");
     }
 }
 

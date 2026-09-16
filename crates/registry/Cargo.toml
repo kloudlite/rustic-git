@@ -23,3 +23,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 form_urlencoded = { workspace = true }
 rand = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = { workspace = true }
