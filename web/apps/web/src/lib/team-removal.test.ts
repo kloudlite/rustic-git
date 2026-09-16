@@ -8,6 +8,14 @@ test("the remove dialog names the date seven days out and what stays", () => {
   expect(t).toContain("within about 5 minutes");
 });
 
+// The bench folder dies with the Bench, so the transcripts are the one thing a removal takes that
+// no snapshot can give back. Both delete confirms must say so before the person clicks.
+test("both delete confirms say the bench transcripts and sessions go too", () => {
+  for (const t of [removalConfirm("Ana", "acme", Date.UTC(2026, 8, 15, 12)), deleteNowConfirm("ana", "acme")]) {
+    expect(t).toContain("chat transcripts and sessions");
+  }
+});
+
 test("the pause dialog says nothing is deleted", () => {
   expect(pauseConfirm("Ana")).toContain("nothing is deleted; unpausing restores access but starts nothing");
 });

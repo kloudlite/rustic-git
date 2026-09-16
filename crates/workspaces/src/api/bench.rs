@@ -9,6 +9,15 @@
 //! patch — `/v1` is spec's only writer, and the agent compares it to `status.idleSince`
 //! (decision 6).
 //!
+//! There is NO delete verb here, deliberately: nobody deletes their own bench, and the only thing
+//! that deletes one is the cluster controller's GC after a member removal's grace (`api::membership`,
+//! `bins/controller/src/gc.rs`). What that delete takes belongs beside the create that stamps it:
+//! the Bench carries `BENCH_FOLDER_FINALIZER`, so the bench folder `.benches/{team}/{owner}` — the
+//! chat transcripts and sessions — is deleted with the Bench, for every delete reason
+//! (`bins/agent/src/controller/bench.rs`). The user-facing place that says so in plain words is the
+//! team removal confirm (`web/apps/web/src/lib/team-removal.ts`); a delete route added here would
+//! have to say the same thing.
+//!
 //! Image upgrades: `spec.image` tracks `KLOUDLITE_BENCH_IMAGE` (pinned per release). Every patch
 //! that starts or wakes a bench (`wake_patch`) re-stamps it when it differs, so a stopped or idle
 //! bench starts on the new image. A RUNNING pod is never replaced for an image change — the agent
