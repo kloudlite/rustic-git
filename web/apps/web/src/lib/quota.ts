@@ -1,3 +1,5 @@
+import { when } from "@/lib/time";
+
 /** The six dimensions a quota has, in the order the bar shows them. The words are the api's own
  *  field names, so a 409 naming one is directly a key here — one vocabulary, not two. */
 export const DIMS = ["workspaces", "environments", "snapshots", "diskGb", "cpu", "memoryGb"] as const;
@@ -6,8 +8,18 @@ export type QuotaDim = (typeof DIMS)[number];
 export type QuotaReport = {
   owner: string;
   limit: Record<QuotaDim, number>;
-  used: Record<QuotaDim, number>;
+  used: QuotaUsage;
+  /** Disk stated on its own, because it is the one dimension that is MEASURED rather than
+   *  counted: `usedGb` is the sum of what the volumes occupy, stamped on the sync beat, so it is
+   *  only ever true "as of `usedAt`" (absent until some volume has been stamped).
+   *  `usedGb` is the same number as `used.diskGb` — the api sends both. */
+  disk?: { usedGb: number; limitGb: number; usedAt?: string | null };
 };
+
+/** Usage carries one extra field beside the six counts: when the disk figure was measured
+ *  (`quota::Usage::disk_used_at`, the OLDEST stamp behind the sum — the whole number is only as
+ *  fresh as its stalest part). Absent when no volume has been stamped yet. */
+export type QuotaUsage = Record<QuotaDim, number> & { diskUsedAt?: string | null };
 
 export function dimLabel(d: QuotaDim): string {
   return {
@@ -32,6 +44,13 @@ export function dimUnit(d: QuotaDim): string {
 export function percent(used: number, limit: number): number {
   if (limit <= 0) return 100;
   return Math.min(100, Math.round((used / limit) * 100));
+}
+
+/** What a disk figure is worth saying next to it: when it was measured. `null` — nothing stamped
+ *  yet — reads as "not measured yet", never as "just now", because a missing stamp usually means
+ *  a volume the sync beat has not reached rather than a fresh one. */
+export function asOf(usedAt?: string | null): string {
+  return usedAt ? `as of ${when(Date.parse(usedAt))}` : "not measured yet";
 }
 
 export function atLimit(r: QuotaReport, d: QuotaDim): boolean {

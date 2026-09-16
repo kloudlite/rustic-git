@@ -10,6 +10,9 @@ const vol = (v: Partial<ApiVolumeSummary>): ApiVolumeSummary => ({
   deleted: true,
   snapshots: 1,
   last_push_at: null,
+  usedBytes: null,
+  usedAt: null,
+  quotaGb: null,
   ...v,
 });
 
@@ -55,4 +58,14 @@ test("a live delete says what it keeps, counted when the count is at hand", () =
   expect(keptSnapshotsCopy()).toBe(
     "Your snapshots stay under Snapshots; unpushed changes are deleted.",
   );
+});
+
+test("the occupied stamp rides through, unmeasured staying null rather than zero", () => {
+  const [stamped, bare] = archivedRows([
+    vol({ name: "a", usedBytes: 3 * 1024 ** 3, usedAt: "2026-09-17T00:00:00Z", quotaGb: 50, last_push_at: "2026-09-02T00:00:00Z" }),
+    vol({ name: "b", last_push_at: "2026-09-01T00:00:00Z" }),
+  ]);
+  expect(stamped.usedBytes).toBe(3 * 1024 ** 3);
+  expect(stamped.quotaGb).toBe(50);
+  expect(bare.usedBytes).toBeNull();
 });

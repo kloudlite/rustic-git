@@ -19,6 +19,12 @@ export type ArchivedRow = {
   lastPushAt: string | null;
   /** No push ever recorded what it was called; the row shows the id and says so. */
   named: boolean;
+  /** What the volume occupies, as the holding node last stamped it, against its own ceiling —
+   *  this is what quota charges for, so it is the number that explains a `diskGb` refusal.
+   *  `null` when no sync beat has stamped it yet; that is "not measured", never "empty". */
+  usedBytes: number | null;
+  usedAt: string | null;
+  quotaGb: number | null;
 };
 
 /** The rows the Snapshots section shows, newest push first.
@@ -35,6 +41,9 @@ export function archivedRows(volumes: ApiVolumeSummary[]): ArchivedRow[] {
       snapshots: v.snapshots,
       lastPushAt: v.last_push_at,
       named: v.display_name !== v.name,
+      usedBytes: v.usedBytes ?? null,
+      usedAt: v.usedAt ?? null,
+      quotaGb: v.quotaGb ?? null,
     }))
     .sort((a, b) => (b.lastPushAt ?? "").localeCompare(a.lastPushAt ?? ""));
 }

@@ -1,4 +1,4 @@
-import type { QuotaDim } from "@/lib/quota";
+import type { QuotaDim, QuotaUsage } from "@/lib/quota";
 import { auditQueryString, type AuditEntry, type AuditFilter, type AuditPage } from "@/lib/audit";
 import { FLAT, type HistoryEvent, type HistorySeries, type SeriesName } from "@/lib/history";
 import { ADMIN_BASE, adminCall, call } from "./client";
@@ -14,7 +14,9 @@ export type OwnerRow = {
   owner: string;
   isTeam: boolean;
   limit: Record<QuotaDim, number>;
-  used: Record<QuotaDim, number>;
+  /** `diskGb` here is OCCUPIED bytes rolled up to GB, not the sum of the volumes' ceilings —
+   *  `diskUsedAt` says when it was measured (`api/admin/owners.rs::fold_usage`). */
+  used: QuotaUsage;
   /** `"own"` when the owner has an explicit `Quota`, `"default"` when riding the fallback table. */
   source: "own" | "default";
   /** A `QuotaRequest` still pending for this owner. */

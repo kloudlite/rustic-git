@@ -66,7 +66,7 @@ export default async function Page() {
           value={pending.length}
           sub={`from ${new Set(pending.map((p) => p.owner)).size} owners`}
         />
-        <KpiTile label="Disk allocated" value={`${disk} GB`} sub="across every pool" />
+        <KpiTile label="Disk occupied" value={`${disk} GB`} sub="what the volumes hold, not their ceilings" />
       </KpiStrip>
       <DefaultsTable
         personDefault={personDefault.ok ? personDefault.value : null}

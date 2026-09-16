@@ -4,10 +4,10 @@ import { notFound } from "next/navigation";
 import { requireSuperadmin } from "@/lib/session";
 import * as api from "@/lib/api";
 import { AutoRefresh } from "@/components/app/auto-refresh";
-import { DIMS, dimLabel, dimUnit, requestedDiffs } from "@/lib/quota";
+import { asOf, DIMS, dimLabel, dimUnit, requestedDiffs } from "@/lib/quota";
 import { limitSource } from "@/lib/owners-sort";
 import { eventSummary } from "@/lib/history";
-import { when } from "@/lib/time";
+import { size, when } from "@/lib/time";
 import type { Tone } from "@/lib/console";
 import { Section } from "../../ui/section";
 import { KpiStrip, KpiTile, Sparkline } from "../../ui/kpi";
@@ -82,7 +82,13 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
           value={owner.used.snapshots}
           sub={`of ${owner.limit.snapshots} allowed · ${detached.length} detached`}
         />
-        <KpiTile label="Disk" value={`${owner.used.diskGb} GB`} sub={`of ${owner.limit.diskGb} GB allocated`} />
+        {/* Occupied, not allocated: the number is the volumes' own stamps summed, so the tile
+            says when it was measured rather than implying it is live. */}
+        <KpiTile
+          label="Disk"
+          value={`${owner.used.diskGb} GB`}
+          sub={`of ${owner.limit.diskGb} GB occupied · ${asOf(owner.used.diskUsedAt)}`}
+        />
         <KpiTile
           label="Requests pending"
           value={pending.length}
@@ -129,6 +135,7 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
                 <Th>Worktree</Th>
                 <Th>Kind</Th>
                 <Th numeric>Snapshots</Th>
+                <Th numeric>Disk</Th>
                 <Th>Last push</Th>
               </tr>
             </thead>
@@ -143,7 +150,15 @@ export default async function Page({ params }: { params: Promise<{ slug: string 
                     {v.deleted && <Pill tone="warn" className="ml-2">detached</Pill>}
                   </Td>
                   <Td className="text-muted-foreground">{v.kind}</Td>
+                  {/* Occupied against this volume's own ceiling. An unstamped volume shows "—":
+                      the sync beat has not reached it, which is not the same as empty. */}
                   <Td numeric>{v.snapshots}</Td>
+                  <Td numeric className={v.quotaGb != null && v.usedBytes != null && v.usedBytes >= v.quotaGb * 1024 ** 3 ? "text-warning" : undefined}>
+                    <span title={v.usedAt ? asOf(v.usedAt) : undefined}>
+                      {v.usedBytes != null ? size(v.usedBytes) : "—"}
+                      {v.quotaGb != null && ` / ${v.quotaGb} GB`}
+                    </span>
+                  </Td>
                   <Td className="text-muted-foreground">
                     {v.last_push_at ? when(new Date(v.last_push_at).getTime()) : "—"}
                   </Td>

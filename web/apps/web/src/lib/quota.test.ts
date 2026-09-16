@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { atLimit, dimFromRefusal, dimLabel, percent, requestedDiffs, tightestRatio, type QuotaReport } from "@/lib/quota";
+import { asOf, atLimit, dimFromRefusal, dimLabel, percent, requestedDiffs, tightestRatio, type QuotaReport } from "@/lib/quota";
 
 const report = (used: number, limit: number): QuotaReport => ({
   owner: "karthik",
@@ -62,4 +62,10 @@ test("requestedDiffs only lists dimensions the request touched", () => {
     { dim: "diskGb", from: 100, to: 250 },
   ]);
   expect(requestedDiffs(limit, {})).toEqual([]);
+});
+
+test("a disk figure says when it was measured, and says so when it never was", () => {
+  expect(asOf(new Date(Date.now() - 3 * 3600_000).toISOString())).toBe("as of 3 hours ago");
+  expect(asOf(null)).toBe("not measured yet");
+  expect(asOf(undefined)).toBe("not measured yet");
 });

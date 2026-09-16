@@ -9,10 +9,11 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
 import { useDialogUntilSuccess } from "@/lib/use-dialog-until-success";
-import { when } from "@/lib/time";
+import { size, when } from "@/lib/time";
 import { snapshotTime } from "@/lib/snapshot";
 import { stateSummary } from "@/lib/snapshot-state";
 import { deleteVolumeCopy, type ArchivedRow } from "@/lib/archived";
+import { asOf } from "@/lib/quota";
 import type { ApiCommitRecord } from "@/lib/api";
 import { volumeSnapshots } from "@/app/(shell)/[owner]/(org)/volume-actions";
 import { deleteWorkspaceSnapshots, restoreWorkspace } from "@/app/(shell)/[owner]/(org)/workspaces/actions";
@@ -244,6 +245,14 @@ export function ArchivedSnapshots({
               </div>
               <span className="mt-1 block text-sm2 text-muted-foreground">
                 {r.snapshots} {r.snapshots === 1 ? "snapshot" : "snapshots"}
+                {/* What it OCCUPIES against its own ceiling — the snapshots on a detached volume
+                    are the disk the owner is still charged for. Unstamped rows say nothing rather
+                    than "0 B". */}
+                {r.usedBytes != null && (
+                  <span title={asOf(r.usedAt)}>
+                    {` · ${size(r.usedBytes)}${r.quotaGb != null ? ` of ${r.quotaGb} GB` : ""}`}
+                  </span>
+                )}
                 {r.lastPushAt && ` · last push ${when(Date.parse(r.lastPushAt))}`}
                 {!r.named && " · name not recorded"}
               </span>

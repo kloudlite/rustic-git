@@ -338,6 +338,16 @@ export type ApiVolumeSummary = {
   snapshots: number;
   /** RFC3339 of the newest push; `null` while the only push is still being taken. */
   last_push_at: string | null;
+  /** What the volume OCCUPIES, as the node holding it last stamped it — what quota charges for.
+   *  camelCase on the wire, unlike the snake_case fields above (`crates/workspaces/src/api/volumes.rs`).
+   *  `null` until a sync beat has stamped it, which is NOT the same as empty: show "—", never 0. */
+  usedBytes?: number | null;
+  /** When that stamp was taken, RFC3339. The bytes ride the sync beat, so every reader says
+   *  "as of" rather than implying the number is live. */
+  usedAt?: string | null;
+  /** The volume's own btrfs ceiling — the runaway stop for this one volume, never a reservation
+   *  against the owner's quota. */
+  quotaGb?: number | null;
 };
 
 /** `kind` narrows to `workspace` or `environment`. The Environments page asks for `environment`

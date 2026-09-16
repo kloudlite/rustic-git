@@ -72,10 +72,13 @@ export function istInput(ms: number): string {
 /** The same, for the unix SECONDS that git objects carry. */
 export const whenSeconds = (seconds: number) => when(seconds * 1000);
 
-/** A file size a person reads. `null` is "not a blob", which has no size. */
+/** A file size a person reads. `null` is "not a blob", which has no size.
+ *  Volumes report GB-scale numbers (`Volume.status.usedBytes`), so the ladder does not stop at
+ *  MB — "48000.0 MB" is a number nobody reads. */
 export function size(bytes: number | null): string {
   if (bytes === null) return "";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
