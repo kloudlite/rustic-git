@@ -18,6 +18,7 @@ import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
 import { benchSessions, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
+import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
 
 export function App() {
@@ -37,10 +38,12 @@ export function App() {
   const [envNote, setEnvNote] = createSignal<string | undefined>(LOADING);
   const machine = createMemo(() => ({ ...MACHINE, owner: who(), goal: "", todos: [], workspaces: workspaces() }));
 
-  // Environments belong to the team, not the machine: the machine is connected
-  // to one of them at a time.
+  // Environments belong to the team, not the machine, and WHICH one this space follows is the
+  // platform's answer (`/v1/me/environments`), not a choice this window keeps: every device and
+  // every pod of the space reads the same row. Empty means the space follows nothing — never the
+  // first environment in the list, which would show a connection nobody asked for.
   const [connected, setConnected] = createSignal("");
-  const environment = createMemo(() => environments().find((e) => e.id === connected()) ?? environments()[0]);
+  const environment = createMemo(() => environments().find((e) => e.id === connected()));
   const envId = createMemo(() => environment()?.id);
 
   const platform = window.harness.platform;
@@ -63,6 +66,8 @@ export function App() {
       await Promise.all([
         platform.workspaces().then((r) => (setWorkspaces(r.map(toWorkspace)), setWsNote(undefined)), (e) => setWsNote(ipcError(e))),
         platform.environments().then((r) => (setEnvironments(r.map((x) => toEnvironment(x, teamId()))), setEnvNote(undefined)), (e) => setEnvNote(ipcError(e))),
+        // A read that fails leaves the last known choice rather than disconnecting the window.
+        platform.myEnvironment().then((id) => setConnected(id ?? ""), () => undefined),
       ]);
       const id = envTab() ? envId() : undefined;
       if (id) await loadEnvPage(id);
@@ -80,8 +85,16 @@ export function App() {
   // A team change reloads this page (leaving ready does), so only focus and the beat remain.
   const onFocus = () => void refresh();
   window.addEventListener("focus", onFocus);
-  const beat = setInterval(() => document.visibilityState === "visible" && void refresh(), 30_000);
-  onCleanup(() => (window.removeEventListener("focus", onFocus), clearInterval(beat)));
+  const beat = setInterval(() => document.visibilityState === "visible" && void refresh(), 10_000);
+  // A shell exits after whatever it ran — an install, a `kl` verb — so the lists it may have moved
+  // are re-read at once instead of at the next beat. The code does not matter: a failed command
+  // can still have changed half of it.
+  const offExit = window.harness.pty.onExit(() => void refresh());
+  onCleanup(() => (window.removeEventListener("focus", onFocus), clearInterval(beat), offExit()));
+
+  /** The space's environment is set on the platform first; the window shows what came back. */
+  const connectTo = (id: string) =>
+    void (id ? platform.setMyEnvironment(id) : platform.clearMyEnvironment()).then(refresh, (e) => setEnvNote(ipcError(e)));
 
   // Tabs are threads, and a thread belongs to a node: selecting the machine, a
   // workspace or an ephemeral opens its thread as a tab. There is nothing to
@@ -435,7 +448,7 @@ export function App() {
       },
     })),
     ...teams().filter((t) => t.slug !== teamId() && t.region).map((t) => ({ id: `team:${t.slug}`, label: `Switch to ${t.name || t.slug}`, run: () => switchTeam(t.slug) })),
-    ...environments().filter((e) => e.id !== environment()?.id).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => setConnected(e.id) })),
+    ...environments().filter((e) => e.id !== environment()?.id).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => connectTo(e.id) })),
   ]);
 
   const onKey = (e: KeyboardEvent) => {
@@ -484,6 +497,7 @@ export function App() {
   // The bench is live: session events and the bench's own changes land here.
   window.harness.onPi((ev) => {
     live.onEvent(ev);
+    if (shouldRefreshOn(ev)) void refresh();
     if (ev.type === "sessions") void refreshSessions().catch(() => undefined);
     // After a reconnect, every open session pages in what it missed.
     if (ev.type === "bench:resync") void refreshSessions().then(() => Promise.all(live_().map((x) => loadThread(x.id))), () => undefined);
@@ -693,7 +707,7 @@ export function App() {
             selected={selected()}
             onSelect={showThread}
             onOpenEnv={() => setEnvTab(true)}
-            onConnect={setConnected}
+            onConnect={connectTo}
           />
         </Show>
 

@@ -148,3 +148,43 @@ export async function volumeHistory(api: string, token: string, volume: string):
   if (!Array.isArray(v)) throw bad("snapshot list");
   return list(v, "snapshot", toSnapshot);
 }
+
+async function sendJson(api: string, token: string, method: "PUT" | "DELETE", path: string, body?: unknown): Promise<unknown> {
+  const r = await fetch(api + path, {
+    method,
+    headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (r.status === 401) throw (await r.body?.cancel(), expired());
+  if (!r.ok) throw (await r.body?.cancel(), new Error(`Kloudlite answered ${r.status}`));
+  if (r.status === 204) return (await r.body?.cancel(), undefined);
+  try {
+    return await r.json();
+  } catch {
+    throw bad("answer");
+  }
+}
+
+/**
+ * `GET /v1/me/environments` — one row per space the caller has chosen one for. The desktop shows
+ * the connected team's row only, so a space with none is `undefined` rather than some other team's.
+ */
+export async function myEnvironment(api: string, token: string, team: string): Promise<string | undefined> {
+  const v = await getJson(api, token, "/v1/me/environments");
+  if (!Array.isArray(v)) throw bad("space list");
+  const rows = list(v, "space", (o) => ({ team: str(o, "team", "space"), environment: str(o, "environment", "space") }));
+  return rows.find((r) => r.team.toLowerCase() === team.toLowerCase())?.environment;
+}
+
+/** `PUT /v1/me/environments/{team}` — the space follows `id` from now on. */
+export async function setMyEnvironment(api: string, token: string, team: string, id: string): Promise<void> {
+  segment(id); // the id travels in the body, but it is ours to refuse before the call
+  await sendJson(api, token, "PUT", `/v1/me/environments/${segment(team)}`, { environment: id });
+}
+
+/** `DELETE /v1/me/environments/{team}` — the space follows nothing; idempotent server-side. */
+export async function clearMyEnvironment(api: string, token: string, team: string): Promise<void> {
+  await sendJson(api, token, "DELETE", `/v1/me/environments/${segment(team)}`);
+}

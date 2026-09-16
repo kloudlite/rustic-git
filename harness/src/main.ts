@@ -10,7 +10,7 @@ import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/devic
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
-import { getEnvironment, listEnvironments, listWorkspaces, volumeHistory } from "./connect/platform";
+import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
 import { checkPty } from "./pty-ipc";
 import type WebSocket from "ws";
 
@@ -591,6 +591,12 @@ ipcMain.handle("platform:workspaces", () => platform(listWorkspaces));
 ipcMain.handle("platform:environments", () => platform(listEnvironments));
 ipcMain.handle("platform:environment", (_e, id: unknown) => platform((api, token) => getEnvironment(api, token, id as string)));
 ipcMain.handle("platform:snapshots", (_e, volume: unknown) => platform((api, token) => volumeHistory(api, token, volume as string)));
+ipcMain.handle("platform:myEnvironment", () => platform(myEnvironment));
+ipcMain.handle("platform:setMyEnvironment", (_e, id: unknown) => {
+  if (typeof id !== "string") throw new Error("not an environment");
+  return platform((api, token, team) => setMyEnvironment(api, token, team, id));
+});
+ipcMain.handle("platform:clearMyEnvironment", () => platform(clearMyEnvironment));
 ipcMain.handle("auth:api", () => apiBase());
 ipcMain.handle("auth:setApi", (_e, url: unknown) => {
   if (auth.state().phase !== "signed-out") throw new Error("sign out before changing the Kloudlite address");

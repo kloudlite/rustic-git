@@ -52,6 +52,10 @@ const harness = {
     environments: (): Promise<ApiEnvironment[]> => ipcRenderer.invoke("platform:environments"),
     environment: (id: string): Promise<ApiEnvironment> => ipcRenderer.invoke("platform:environment", id),
     snapshots: (volume: string): Promise<ApiSnapshot[]> => ipcRenderer.invoke("platform:snapshots", volume),
+    /** The connected team's space: which environment its pods follow, chosen on the platform. */
+    myEnvironment: (): Promise<string | undefined> => ipcRenderer.invoke("platform:myEnvironment"),
+    setMyEnvironment: (id: string): Promise<void> => ipcRenderer.invoke("platform:setMyEnvironment", id),
+    clearMyEnvironment: (): Promise<void> => ipcRenderer.invoke("platform:clearMyEnvironment"),
   },
   /** One shell per id, over the bench tunnel: main owns the socket, the renderer
       only names it. `onData`/`onExit` return an unsubscribe. */

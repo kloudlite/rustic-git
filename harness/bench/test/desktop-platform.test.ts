@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { getEnvironment, listEnvironments, listWorkspaces, segment, volumeHistory } from "../../src/connect/platform.ts";
+import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, segment, setMyEnvironment, volumeHistory } from "../../src/connect/platform.ts";
 
 type Answer = { status: number; body?: unknown; raw?: string };
 /** A stub api answering `GET path?query` from a fixed table; anything else is 404. */
@@ -102,6 +102,26 @@ test("path segments: validated before any request, encoded in the path", async (
     }
     assert.deepEqual(s.calls, []);
     assert.equal(segment("env-1.a_b"), "env-1.a_b");
+  } finally {
+    s.close();
+  }
+});
+
+test("my environment: the connected team's row, set and cleared on the platform", async () => {
+  const s = await stub({
+    "GET /v1/me/environments": { status: 200, body: [{ team: "other", environment: "env-9" }, { team: "Acme", environment: "env-1", region: "r1" }] },
+    "PUT /v1/me/environments/acme": { status: 200, body: { team: "acme", environment: "env-2", region: "r1" } },
+    "DELETE /v1/me/environments/acme": { status: 204 },
+  });
+  try {
+    assert.equal(await myEnvironment(s.api, "tok", "acme"), "env-1");
+    // A team with no row of its own follows nothing, never another team's environment.
+    assert.equal(await myEnvironment(s.api, "tok", "none"), undefined);
+    await setMyEnvironment(s.api, "tok", "acme", "env-2");
+    await clearMyEnvironment(s.api, "tok", "acme");
+    assert.deepEqual(s.calls.slice(2), ["PUT /v1/me/environments/acme", "DELETE /v1/me/environments/acme"]);
+    assert.equal(s.auth[2], "Bearer tok");
+    await assert.rejects(setMyEnvironment(s.api, "tok", "acme", "../etc"), /not a valid name/);
   } finally {
     s.close();
   }
