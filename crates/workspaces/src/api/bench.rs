@@ -470,8 +470,11 @@ pub(crate) async fn bench_session(
     if phase != Phase::Ready {
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": phase.as_str()}))).into_response());
     }
-    // Only a Ready condition the reconciler wrote (`Running`) proves the pod being dialled serves.
-    let serving = b.status.as_ref().is_some_and(|st| st.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True" && c.reason == "Running"));
+    // Only a Ready=True condition the reconciler wrote proves the pod being dialled serves. The
+    // reason is the WORKSPACE reconciler's (`Converged`) now that a bench is a Workspace — the
+    // legacy bench reconciler's `Running` is gone, and pinning it here answered 202 forever to a
+    // ready bench (owner, 2026-09-17 03:48 IST: "it didn't start yet").
+    let serving = b.status.as_ref().is_some_and(|st| st.conditions.iter().any(|c| c.type_ == "Ready" && c.status == "True"));
     if !serving {
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": Phase::Starting.as_str()}))).into_response());
     }

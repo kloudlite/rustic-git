@@ -156,7 +156,7 @@ fn bench_obj(owner: &str, team: &str, desired: &str, phase: Option<&str>, access
             b["status"]["idleSince"] = json!("2026-09-13T10:00:00Z");
         }
         if p == "ready" {
-            b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": "Running", "message": "",
+            b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": "Converged", "message": "",
                                                "lastTransitionTime": "2026-09-13T10:00:00Z"}]);
         }
     }
