@@ -373,7 +373,17 @@ fn reflects(doc: &Value) -> Result<()> {
             _ => return Err(anyhow!("the quota answer carries no {dim}")),
         }
     }
-    Ok(())
+    // Disk is READ OFF THE VOLUMES' stamps rather than counted from the specs, so it gets its own
+    // block: the run holds volumes, every volume costs at least the 1 GiB floor, and a zero here
+    // is exactly the under-count that floor exists to make impossible. `usedAt` is deliberately
+    // not required — a volume no sync beat has stamped yet still charges the floor, with nothing
+    // to date it by.
+    let disk = |k: &str| doc.pointer(&format!("/disk/{k}")).and_then(Value::as_u64);
+    match (disk("usedGb"), disk("limitGb")) {
+        (Some(u), Some(l)) if u >= 1 && u <= l => Ok(()),
+        (Some(u), Some(l)) => Err(anyhow!("diskGb: {u} of {l} does not reflect the volumes this run holds")),
+        _ => Err(anyhow!("the quota answer carries no occupied disk")),
+    }
 }
 
 /// `id` off a create/clone/push answer.
@@ -471,18 +481,33 @@ mod tests {
         let live = serde_json::json!({
             "used": {"workspaces": 3, "environments": 2, "snapshots": 4},
             "limit": {"workspaces": 10, "environments": 5, "snapshots": 50},
+            "disk": {"usedGb": 7, "limitGb": 200, "usedAt": "2026-09-17T04:00:00Z"},
         });
         assert!(reflects(&live).is_ok());
+        // An answer with no `disk` block at all, and one whose volumes charge nothing: both are
+        // the occupied-bytes half of the same under-count.
+        let mut flat = live.clone();
+        flat["disk"] = serde_json::json!({"usedGb": 0, "limitGb": 200});
+        assert!(reflects(&flat).is_err());
+        let mut none = live.clone();
+        none.as_object_mut().unwrap().remove("disk");
+        assert!(reflects(&none).is_err());
+        // Nothing stamped yet is not a failure: the floor still charges, and nothing dates it.
+        let mut unstamped = live.clone();
+        unstamped["disk"] = serde_json::json!({"usedGb": 1, "limitGb": 200});
+        assert!(reflects(&unstamped).is_ok());
         // Nothing counted while this run holds a workspace: the bug the id exists for.
         let zero = serde_json::json!({
             "used": {"workspaces": 0, "environments": 2, "snapshots": 4},
             "limit": {"workspaces": 10, "environments": 5, "snapshots": 50},
+            "disk": {"usedGb": 7, "limitGb": 200},
         });
         assert!(reflects(&zero).is_err());
         // Past its own limit: allocation that was handed out without a decision.
         let over = serde_json::json!({
             "used": {"workspaces": 3, "environments": 9, "snapshots": 4},
             "limit": {"workspaces": 10, "environments": 5, "snapshots": 50},
+            "disk": {"usedGb": 7, "limitGb": 200},
         });
         assert!(reflects(&over).is_err());
         assert!(reflects(&serde_json::json!({"used": {}, "limit": {}})).is_err());
@@ -560,6 +585,7 @@ mod tests {
                 axum::Json(serde_json::json!({
                     "used": {"workspaces": 1, "environments": 1, "snapshots": 1},
                     "limit": {"workspaces": 4, "environments": 4, "snapshots": 40},
+                    "disk": {"usedGb": 3, "limitGb": 200, "usedAt": "2026-09-17T04:00:00Z"},
                 }))
             }),
         );

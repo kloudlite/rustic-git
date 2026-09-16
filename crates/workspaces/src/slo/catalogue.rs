@@ -346,7 +346,7 @@ pub const CATALOGUE: &[Slo] = &[
     // The sentence, not merely the status: `quota::refuse` answers `"{dimension}: {used} of
     // {limit} in use; request more under Quota"`, and a 409 naming the wrong dimension is a gate
     // that refused for a reason nobody asked about.
-    Slo { id: "quota.refused", feature: "Workspaces", sli: "An over-quota create is refused with 409 naming the dimension, what is used and the limit", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "quota.refused", feature: "Workspaces", sli: "A verb that fills disk is refused with 409 naming diskGb, what is occupied and the limit", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     // Create is only one of the four verbs behind `guard_alloc`; restore, clone and push route
     // through the same gate and none was probed.
     Slo { id: "env.quota.refused", feature: "Workspaces", sli: "An over-quota restore, clone and push are each refused with 409", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
@@ -367,6 +367,10 @@ pub const CATALOGUE: &[Slo] = &[
     // inside the workspace, with no browser. Judged on the API's own state rather than on what the
     // command printed — a `kl` that reached nothing would print the same lines.
     Slo { id: "ws.kl.pkg.add", feature: "Workspaces", sli: "`kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package", target: bound(20_000), suite: Suite::Hourly, stage: "5 · Workspace" },
+    // Disk is charged by what a volume OCCUPIES, and the only thing that makes that true is the
+    // holding node stamping `usedBytes` on its sync beat: a stamp that stopped would charge every
+    // owner the 1 GiB floor forever and nothing else here would notice.
+    Slo { id: "vol.usage.stamped", feature: "Workspaces", sli: "200 MB written in the probe workspace through its tool server is charged to the volume: `Volume.status.usedBytes` reads at least that within two sync beats", target: bound(150_000), suite: Suite::Hourly, stage: "5 · Workspace" },
     Slo { id: "ws.kl.env.switch", feature: "Workspaces", sli: "`kl env switch` inside the probe workspace moves the person's own space to the run's environment — `GET /v1/me/environments` names it — and `kl env clear` puts it back", target: bound(10_000), suite: Suite::Hourly, stage: "6 · Environment" },
 
     // Stage 6 · environment

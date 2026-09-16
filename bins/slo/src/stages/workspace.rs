@@ -30,10 +30,9 @@ const EXEC_CEILING: Duration = Duration::from_secs(20);
 const TUNNEL_CEILING: Duration = Duration::from_secs(20);
 const PUSH_CEILING: Duration = Duration::from_secs(60);
 const CLONE_CEILING: Duration = Duration::from_secs(60);
-/// The body's own cap plus `UNDO_SLACK`: `env.quota.refused` brings the probe's quota DOWN and
-/// must put it back, and `Ctx::step`'s timeout drops the whole future, undo included.
+/// The body's own cap plus `UNDO_SLACK`: both quota ids bring the probe's quota DOWN and must put
+/// it back, and `Ctx::step`'s timeout drops the whole future, undo included.
 const QUOTA_BODY: Duration = Duration::from_secs(15);
-const QUOTA_CEILING: Duration = Duration::from_secs(20);
 const ENV_QUOTA_CEILING: Duration =
     Duration::from_secs(QUOTA_BODY.as_secs() + crate::drill::UNDO_SLACK);
 /// The catalogue's own 180 s for `ws.build.p95`: a real `docker buildx build --push`
@@ -118,11 +117,14 @@ pub async fn run(c: &mut Ctx) {
     unregistered_refused(c, &id).await;
     push(c, &id).await;
     clone(c, &id).await;
-    quota_refused(c).await;
+    quota_refused(c, &id).await;
     env_quota_refused(c, &id).await;
     build_push(c, &id).await;
     promote(c, &id).await;
     kl_pkg_add(c, &id).await;
+    // Last: it leaves 200 MB in the workspace, which teardown collects with the workspace itself,
+    // and it must not move the disk usage the two quota ids above pinch against.
+    super::quota_usage::stamped(c, &id).await;
 }
 
 /// `ws.kl.pkg.add`, hourly only: a person installs a package from inside their own workspace.
@@ -791,28 +793,62 @@ async fn clone(c: &mut Ctx, id: &str) {
     .await;
 }
 
-/// `quota.refused`: an over-quota create answers 409 and nothing is allocated.
+/// `quota.refused`: a verb that fills disk answers 409 with the sentence, and nothing is allocated.
 ///
 /// Over the DISK dimension rather than the workspace count, deliberately: the journey itself needs
 /// several workspaces (the clone, then two restores in stage 7), so a probe that leaned on the
 /// count would either exhaust the quota its own later steps need or stop refusing the day the
-/// deployment raised it. Asking for more disk than `Quota/slo-probe` allows is refused whatever
-/// else the run holds, and `guard_alloc` is the same single gate either way.
-async fn quota_refused(c: &mut Ctx) {
-    let name = format!("{}-overquota", c.prefix());
-    c.step("quota.refused", QUOTA_CEILING, move |c| {
+/// deployment raised it.
+///
+/// Since 2026-09-17 disk is charged by what the volumes OCCUPY, so asking for a huge `quota_gb`
+/// is no longer over anything — a ceiling was never a reservation. The only way to stand a verb
+/// against the disk gate is to bring the LIMIT below what the run already occupies, which is what
+/// the admin quota write here does, and the push is then refused by the same `guard_alloc` every
+/// allocating verb passes. The restore is outside the cancellable region, exactly as
+/// `env.quota.refused`'s is: a probe that left the limit PINCHED would refuse its own next run.
+async fn quota_refused(c: &mut Ctx, ws: &str) {
+    let ws = ws.to_string();
+    c.step("quota.refused", ENV_QUOTA_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let url = api(c, "/v1/workspaces");
-        let body = serde_json::json!({
-            "name": name,
-            "region": c.cfg.region,
-            "quota_gb": u32::MAX,
-            "packages": [],
-        });
-        async move { refused_over(c, reqwest::Method::POST, &url, &jwt, Some(body), "diskGb", "a create").await }
-            .boxed()
+        let push = api(c, &format!("/v1/workspaces/{ws}/push"));
+        let admin_jwt = c.admin_jwt();
+        let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
+        async move {
+            let body = serde_json::json!({ "spec": pinched_disk(c, &jwt).await?, "note": "slo probe quota.refused" });
+            super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(body))
+                .await
+                .context("could not bring the disk limit below what the run occupies")?;
+            let restore_quota = || async {
+                let back = serde_json::json!({
+                    "spec": super::experience_admin::probe_quota(),
+                    "note": "slo probe quota restore",
+                });
+                super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(back))
+                    .await
+                    .map(|_| ())
+                    .context("the probe's disk quota was left PINCHED")
+            };
+            let refused = refused_over(c, reqwest::Method::POST, &push, &jwt, Some(serde_json::json!({})), "diskGb", "a push");
+            crate::drill::undoing(QUOTA_BODY, refused, restore_quota).await
+        }
+        .boxed()
     })
     .await;
+}
+
+/// The yaml's quota with `diskGb` brought just BELOW what the owner's volumes occupy, so the next
+/// verb that fills is one over. Read from `/v1/quota`'s `disk` block — the same stamps the gate
+/// sums — rather than from a ceiling, which is no longer what disk is charged on.
+async fn pinched_disk(c: &Ctx, jwt: &str) -> Result<Value> {
+    let seen = super::get(c, &api(c, "/v1/quota"), jwt).await.context("could not read the quota")?;
+    let used = seen.pointer("/disk/usedGb").and_then(Value::as_u64);
+    let Some(used) = used.filter(|u| *u > 0) else {
+        return Err(anyhow!("the quota answer carries no occupied disk to pinch against"));
+    };
+    let mut spec = super::experience_admin::probe_quota();
+    let o = spec.as_object_mut().ok_or_else(|| anyhow!("the quota spec is not an object"))?;
+    o.insert("diskGb".into(), (used - 1).into());
+    Ok(spec)
 }
 
 /// One request that must be refused by `guard_alloc`, with the SENTENCE checked.

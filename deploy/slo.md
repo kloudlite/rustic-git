@@ -87,7 +87,7 @@ first destructive stage.
 | `key.live` | Workspaces | A registered key opens the workspace over the gateway | 99.9 % | fast | 5 · Workspace |
 | `ws.push.p95` | Workspaces | Pushing a workspace snapshot completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
 | `ws.clone.p95` | Workspaces | Cloning a workspace completes | 95 % ≤ 60000 ms | fast | 5 · Workspace |
-| `quota.refused` | Workspaces | An over-quota create is refused with 409 naming the dimension, what is used and the limit | 99.9 % | fast | 5 · Workspace |
+| `quota.refused` | Workspaces | A verb that fills disk is refused with 409 naming diskGb, what is occupied and the limit | 99.9 % | fast | 5 · Workspace |
 | `env.quota.refused` | Workspaces | An over-quota restore, clone and push are each refused with 409 | 99.9 % | fast | 5 · Workspace |
 | `bench.create` | Benches | `POST /v1/bench` answers, and a second POST names the same id | 99.9 % | fast | 5 · Workspace |
 | `bench.start.p95` | Benches | A started bench reaches phase `ready` | 95 % ≤ 90000 ms | fast | 5 · Workspace |
@@ -95,6 +95,7 @@ first destructive stage.
 | `ws.build.p95` | Workspaces | `kl container build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
 | `ws.build.promote` | Workspaces | `kl container push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
 | `ws.kl.pkg.add` | Workspaces | `kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package | 99.9 % ≤ 20000 ms | hourly | 5 · Workspace |
+| `vol.usage.stamped` | Workspaces | 200 MB written in the probe workspace through its tool server is charged to the volume: `Volume.status.usedBytes` reads at least that within two sync beats | 99.9 % ≤ 150000 ms | hourly | 5 · Workspace |
 | `ws.kl.env.switch` | Workspaces | `kl env switch` inside the probe workspace moves the person's own space to the run's environment — `GET /v1/me/environments` names it — and `kl env clear` puts it back | 99.9 % ≤ 10000 ms | hourly | 6 · Environment |
 | `env.create.p95` | Environments | Creating an environment completes | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.dns` | Environments | A service in an environment resolves a sibling by bare name and connects to it | 99.9 % | fast | 6 · Environment |
