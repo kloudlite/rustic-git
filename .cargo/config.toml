@@ -1,0 +1,5 @@
+# `ring` (rustls's crypto, pulled in by `kl`'s HTTPS client) carries C and asm and asks cc-rs for
+# `x86_64-linux-musl-gcc` when cross-building the musl `kl`; Debian's musl-tools ships the same
+# compiler as `musl-gcc`. Every musl build host installs musl-tools (dev pod, CI's image.yml).
+[env]
+CC_x86_64_unknown_linux_musl = "musl-gcc"

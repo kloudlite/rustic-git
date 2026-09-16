@@ -107,6 +107,8 @@ jobs:
       # below, its own artifact, so the flat `target/release` restore in the image job stays flat.
       # The intercept proxy rides the same invocation: its image is `scratch`, which has no glibc
       # for the same reason Alpine has none.
+      # musl-tools: `ring` (kl's TLS) compiles C for the musl target; .cargo/config.toml names musl-gcc.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - run: rustup target add x86_64-unknown-linux-musl && cargo build --release --locked -p kl -p kloudlite-intercept-proxy --target x86_64-unknown-linux-musl
       - name: glibc ceiling
         run: |
