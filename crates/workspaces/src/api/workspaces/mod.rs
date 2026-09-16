@@ -37,6 +37,16 @@ pub(crate) fn ws_volume(w: &crd::Workspace) -> Option<&str> {
 }
 
 
+/// Every listing of "my workspaces" drops benches. A bench is one object of this kind now, but it
+/// is not one of the person's workspaces: it has no name they chose, no place in the web's list,
+/// and `/v1/bench` is the whole surface for it. Applied here rather than in each caller so a new
+/// listing cannot forget — `get_ws` on a bench id still answers, which is what `kl pkg` inside the
+/// bench and the bench's own packages page need.
+pub(super) fn visible(items: Vec<crd::Workspace>) -> Vec<crd::Workspace> {
+    items.into_iter().filter(|w| !crd::is_bench(w)).collect()
+}
+
+
 /// Every volume of `owner` that has ever landed a snapshot (`spec.transient: false` — a sync
 /// point never makes a workspace/environment doc's `volume` field non-null).
 ///
@@ -228,7 +238,6 @@ pub(crate) async fn create_ws(
     Json(body): Json<NewWorkspace>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
-    let c = kube(&s)?;
     check_ws_name(&body.name)?;
     check_region(&s, &body.region).await?;
     let team = match body.team.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != owner.name) {
@@ -253,8 +262,6 @@ pub(crate) async fn create_ws(
     let quota_gb = clamp_quota(&s, body.quota_gb);
     // The object's owner is the team when one is given — a team's workspaces count against the
     // team, never against whoever happened to click create.
-    let owner_of = if team.is_empty() { owner.name.clone() } else { team.clone() };
-    guard_alloc(&s, &owner_of, !team.is_empty(), &workspace_cost(quota_gb, &crd::PodResources::default())).await?;
     let id = rid("ws");
     let source = match (&body.repo, &body.branch) {
         (None, _) => None,
@@ -282,8 +289,9 @@ pub(crate) async fn create_ws(
     // ONE object. Placement and the child `Volume` are the controllers' — the node this lands on
     // is a fact this process has no way to know yet, and a wish about a fact is how the two ever
     // disagreed about where the data is (audit H1).
-    let w = create_workspace(
-        c,
+    let w = allocate_and_create(
+        &s,
+        &owner,
         &id,
         crd::WorkspaceSpec {
             bench: None,
@@ -302,17 +310,57 @@ pub(crate) async fn create_ws(
         },
     )
     .await?;
+    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
+}
+
+
+/// The one allocating write of a Workspace: quota gate, the object, the owner's hidden builder and
+/// the two key installs. `/v1/workspaces` and `/v1/bench` both come through here so a bench is
+/// charged, keyed and placed by exactly the code an ordinary workspace is — the difference is one
+/// `spec.bench`, never a second create path.
+pub(super) async fn allocate_and_create(
+    s: &Arc<ApiState>,
+    owner: &Caller,
+    id: &str,
+    spec: crd::WorkspaceSpec,
+) -> Result<crd::Workspace, Response> {
+    let c = kube(s)?;
+    let quota_gb = spec.storage.as_ref().map_or(0, |st| st.quota_gb);
+    let mut cost = workspace_cost(quota_gb, &spec.resources);
+    // A bench is charged to the PERSON, never the team it opens in, and never against the
+    // `workspaces` count: nobody asked for it as one of their workspaces, so spending that ceiling
+    // on it would take a workspace away from every person who joins a team.
+    let (owner_of, is_team) = if spec.bench.is_some() {
+        cost.retain(|(d, _)| *d != crate::quota::Dim::Workspaces);
+        // A bench pod is two containers; `workspace_cost` sized only the workspace one.
+        let (millis, mib) = crate::model::bench_pod_capacity(&spec.resources);
+        for (d, v) in cost.iter_mut() {
+            match d {
+                crate::quota::Dim::Cpu => *v = millis.div_ceil(1000),
+                crate::quota::Dim::MemoryGb => *v = mib.div_ceil(1024),
+                _ => {}
+            }
+        }
+        (owner.name.clone(), false)
+    } else if spec.team.is_empty() {
+        (owner.name.clone(), false)
+    } else {
+        (spec.team.clone(), true)
+    };
+    guard_alloc(s, &owner_of, is_team, &cost).await?;
+    let team = spec.team.clone();
+    let w = create_workspace(c, id, spec).await?;
     // Every owner builds images through their own hidden buildkit environment, and this is the
     // moment they are known to need one. Awaited, so a create's own test can see it, but best
     // effort: a builder that fails to appear costs the owner `kl build` until the next create,
     // never the workspace they actually asked for.
-    if let Err(e) = super::environments::ensure_builder(&s, &owner.name, &team, &w.spec.region).await {
+    if let Err(e) = super::environments::ensure_builder(s, &owner.name, &team, &w.spec.region).await {
         tracing::warn!(owner = %owner.name, team = %team, status = ?e.status(), "builder.ensure.failed");
     }
     // Off the request: the wait is up to 5 s of polling for a node to claim the object, and the
     // 202 already says "accepted, not done". `list_ws` re-installs an absent key regardless.
     tokio::spawn({
-        let (s, c, owner, team, id) = (s.clone(), c.clone(), owner.clone(), team.clone(), id.clone());
+        let (s, c, owner, team, id) = (s.clone(), c.clone(), owner.clone(), team.clone(), id.to_string());
         async move { install_user_key_after_placed(&s, &c, &owner, &team, &id).await }
     });
     // The pod mounts the projected file, so a FIRST workspace whose owner has no `OwnerKeys` yet
@@ -327,7 +375,7 @@ pub(crate) async fn create_ws(
             }
         }
     });
-    Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &HashSet::new()))).into_response())
+    Ok(w)
 }
 
 
@@ -369,7 +417,7 @@ pub(crate) async fn list_ws(
     let c = kube(&s)?;
     // No "filter out the deleted ones": a deleted object is gone from the API server.
     let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.name));
+    let items = visible(mine(api.list(&owned_in(&owner, &team)).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.name)));
     let pushed = pushed_volumes(&s, c, &owner).await?;
     let list: Vec<_> = items.iter().map(|w| ws_doc(w, &pushed)).collect();
     // The retry the create's 5 s ceiling defers to: cheap, idempotent, and the only place a user
@@ -420,7 +468,7 @@ pub(crate) async fn list_for_owner(
 pub(crate) async fn ws_for_owner(s: &ApiState, owner: &str) -> Result<Vec<Workspace>, Response> {
     let c = kube(s)?;
     let api: Api<crd::Workspace> = Api::all(c.clone());
-    let items = mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string()));
+    let items = visible(mine(api.list(&owned_in(owner, "")).await.map_err(kube_err)?.items, std::slice::from_ref(&owner.to_string())));
     let pushed = pushed_volumes(s, c, owner).await?;
     Ok(items.iter().map(|w| ws_doc(w, &pushed)).collect())
 }
@@ -535,6 +583,12 @@ pub(crate) async fn delete_as(
     id: &str,
 ) -> Result<Response, Response> {
     let w = my_ws(s, owner, id).await?;
+    // Deleting a bench by hand would take the person's transcripts with it while their membership
+    // still says they have one, and the beat would simply make a fresh empty one. The GC after a
+    // removal's grace is the only thing that deletes one.
+    if crd::is_bench(&w) {
+        return Err((StatusCode::CONFLICT, Json(serde_json::json!({"error": "a bench is deleted with your membership, not by hand"}))).into_response());
+    }
     let c = kube(s)?;
     let ws: Api<crd::Workspace> = Api::all(c.clone());
     // The agent's `WORKTREE_FINALIZER` cleans up the worktree, but not this policy. The workspace-side policy goes with its ownerReference and the
@@ -620,6 +674,11 @@ pub(crate) async fn stop_as(
     id: &str,
 ) -> Result<Response, Response> {
     let w = my_ws(s, owner, id).await?;
+    // One stop for a bench, whichever route asked: `/v1/bench/stop` and this are the same handler
+    // after the facade, so the tool-token Secret is dropped either way.
+    if crd::is_bench(&w) {
+        return super::bench::stop_bench_ws(s, &w).await;
+    }
     crate::api::admin::timing::step("kube.patch.workspace", set_desired::<crd::Workspace>(kube(s)?, id, DesiredState::Stopped)).await?;
     // Every non-204 success is `res.json()`'d by the web client (web/apps/web/src/lib/api.ts) —
     // a body-less 202 throws there, so this always emits an object, `warning` present only when

@@ -4,6 +4,21 @@
 use super::*;
 
 
+/// A copy of a bench is an ORDINARY workspace: it carries the files, never the identity. One bench
+/// per (owner, team) is what `bench_id` means, and a second object claiming to be one would be
+/// invisible in every listing while quietly running a bench pod nobody can reach.
+fn copied_bench() -> Option<crd::BenchOptions> {
+    None
+}
+
+
+/// The pause DOES travel: a copy taken while the person's membership is paused must not start
+/// either, and the beat that unpauses them names every workspace of the pair.
+fn copied_access(src: Option<&crd::Workspace>) -> crd::Access {
+    src.map(|w| w.spec.access).unwrap_or_default()
+}
+
+
 #[derive(serde::Deserialize)]
 pub(crate) struct CloneBody {
     pub(crate) name: String,
@@ -63,8 +78,8 @@ pub(crate) async fn clone_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            bench: None,
-            access: Default::default(),
+            bench: copied_bench(),
+            access: copied_access(Some(&src)),
             owner: owner.name.clone(),
             // A clone lives where its source lives: same team, same namespace.
             team: src.spec.team.clone(),
@@ -224,8 +239,8 @@ pub(crate) async fn restore_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
-            bench: None,
-            access: Default::default(),
+            bench: copied_bench(),
+            access: copied_access(src.as_ref()),
             owner: owner.name.clone(),
             team: src.as_ref().map(|w| w.spec.team.clone()).unwrap_or_default(),
             name: body.name,
@@ -252,4 +267,44 @@ pub(crate) async fn restore_ws(
     .await?;
     let pushed = pushed_volumes(&s, c, &owner).await?;
     Ok((StatusCode::ACCEPTED, Json(ws_doc(&w, &pushed))).into_response())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{copied_access, copied_bench};
+    use crate::crd;
+
+    fn ws(bench: bool, access: crd::Access) -> crd::Workspace {
+        let mut w = crd::Workspace::new(
+            "bench-1",
+            crd::WorkspaceSpec {
+                bench: bench.then(|| crd::BenchOptions { model: "m".into(), wake_at: Some("t".into()) }),
+                access,
+                owner: "alice".into(),
+                team: "acme".into(),
+                name: "bench".into(),
+                region: "r1".into(),
+                image: "i".into(),
+                storage: None,
+                desired_state: crd::DesiredState::Running,
+                resources: Default::default(),
+                packages: vec![],
+                locks: vec![],
+                attached_environment: None,
+            },
+        );
+        w.metadata.labels = None;
+        w
+    }
+
+    #[test]
+    fn a_clone_or_restore_of_a_bench_is_an_ordinary_workspace_that_keeps_the_pause() {
+        let b = ws(true, crd::Access::Paused);
+        assert!(copied_bench().is_none(), "never a second bench");
+        assert_eq!(copied_access(Some(&b)), crd::Access::Paused);
+        assert_eq!(copied_access(Some(&ws(false, crd::Access::Full))), crd::Access::Full);
+        // A restore whose source is long gone has nobody to ask: full, the default.
+        assert_eq!(copied_access(None), crd::Access::Full);
+    }
 }

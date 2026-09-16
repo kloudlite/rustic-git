@@ -18,24 +18,27 @@
 //! team removal confirm (`web/apps/web/src/lib/team-removal.ts`); a delete route added here would
 //! have to say the same thing.
 //!
-//! Image upgrades: `spec.image` tracks `KLOUDLITE_BENCH_IMAGE` (pinned per release). Every patch
-//! that starts or wakes a bench (`wake_patch`) re-stamps it when it differs, so a stopped or idle
-//! bench starts on the new image. A RUNNING pod is never replaced for an image change — the agent
-//! never compares images — so a session is never killed mid-turn; the pod exits on its own idle
-//! clock and the next wake creates it from the new `spec.image`.
+//! A bench IS a Workspace (`spec.bench: Some`, `crd::is_bench` the only predicate): the routes here
+//! are a FACADE over the ordinary workspace machinery, kept byte-compatible for the shipped desktop
+//! and `kl-connect`. Nothing here writes a second kind, and the create goes through
+//! `workspaces::allocate_and_create` — the same quota gate, key install and builder every
+//! `POST /v1/workspaces` runs — so a bench can never drift into its own half-maintained path.
+//!
+//! The bench CONTAINER's image is not a spec field: the agent stamps it from the release's pinned
+//! value, so a rolled agent moves every bench with no patch from here. `spec.image` is the
+//! workspace container's, exactly as on any other workspace.
 
 use super::scope::may_allocate_for;
-use super::workspaces::{gateway_url, install_user_key_when, set_desired};
-use super::{bench_cost, caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
-use crate::crd::{self, BenchAccess, DesiredState, Phase};
-use crate::k8s::{labels, TEAM_LABEL};
+use super::workspaces::{allocate_and_create, clamp_quota, gateway_url, set_desired};
+use super::{caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
+use crate::crd::{self, Access, DesiredState, Phase};
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, Patch, PatchParams};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -66,16 +69,18 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn bench_doc(b: &crd::Bench, region: &str) -> serde_json::Value {
-    let st = b.status.clone().unwrap_or_default();
+/// Unchanged in shape from the Bench-kind days — the desktop and `kl-connect` read these exact
+/// keys — just read off the Workspace: `model` from `spec.bench`, `access` from `spec.access`.
+fn bench_doc(w: &crd::Workspace, region: &str) -> serde_json::Value {
+    let st = w.status.clone().unwrap_or_default();
     json!({
-        "id": b.metadata.name,
-        "owner": b.spec.owner,
-        "team": b.spec.team,
+        "id": w.metadata.name,
+        "owner": w.spec.owner,
+        "team": w.spec.team,
         "region": region,
-        "model": b.spec.model,
-        "desiredState": b.spec.desired_state,
-        "access": b.spec.access,
+        "model": w.spec.bench.as_ref().map(|b| b.model.clone()).unwrap_or_default(),
+        "desiredState": w.spec.desired_state,
+        "access": w.spec.access,
         "phase": st.phase.as_str(),
         "nodeName": st.node_name,
         "conditions": st.conditions,
@@ -119,18 +124,20 @@ async fn my_bench(
     headers: &HeaderMap,
     team: Option<&str>,
     first: Option<&str>,
-) -> Result<(Caller, String, String, Option<crd::Bench>), Response> {
+) -> Result<(Caller, String, String, Option<crd::Workspace>), Response> {
     let caller = caller(s, headers).await?;
     let team = team.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).unwrap_or_else(|| caller.name.clone());
     if !super::scope::in_scope(&caller, &team) {
         return Err(super::scope::scope_refusal(&caller));
     }
-    let api: Api<crd::Bench> = Api::all(kube(s)?.clone());
+    let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
+    // `is_bench`, not the id shape: `bench_id` is deterministic, but an object that landed under
+    // that name without being one (a restore, a hand edit) must not be served as the person's bench.
     let bench = api
         .get_opt(&crd::bench_id(&caller.name, &team))
         .await
         .map_err(kube_err)?
-        .filter(|b| b.spec.owner == caller.name);
+        .filter(|w| crd::is_bench(w) && w.spec.owner == caller.name);
     if !may_allocate_for(s, &caller, &team).await {
         // A paused member, or a removed one who still has a bench here, is told so; anyone else
         // gets the stranger's 404.
@@ -147,31 +154,30 @@ fn paused(team: &str) -> Response {
     err(StatusCode::FORBIDDEN, format!("your access to {team} is paused"))
 }
 
-fn configured_image() -> String {
-    std::env::var("KLOUDLITE_BENCH_IMAGE")
-        .ok()
-        .filter(|i| !i.is_empty())
-        .unwrap_or_else(|| crate::model::DEFAULT_BENCH_IMAGE.to_string())
-}
-
-/// The spec patch that starts or wakes `b`; carries `image` only when it moved, so an unchanged
-/// bench's patch stays as small as it was.
-fn wake_patch(b: &crd::Bench, image: &str, running: bool, at: &str) -> serde_json::Value {
-    let mut spec = json!({"wakeAt": at});
+/// The spec patch that starts or wakes a bench: `spec.bench.wakeAt`, plus `desiredState` when it
+/// is a start. A MERGE patch, so `spec.bench.model` survives it — nothing else here writes spec.
+fn wake_patch(running: bool, at: &str) -> serde_json::Value {
+    let mut spec = json!({"bench": {"wakeAt": at}});
     if running {
         spec["desiredState"] = json!(DesiredState::Running);
-    }
-    if b.spec.image != image {
-        spec["image"] = json!(image);
     }
     json!({"spec": spec})
 }
 
-fn bench_api(s: &ApiState) -> Result<Api<crd::Bench>, Response> {
+/// What waking or starting an existing bench costs: cpu and memory only. Its disk is charged from
+/// the moment the volume exists (`quota::usage`), so a wake must not charge it a second time.
+/// Both containers, through the one definition `quota::usage` and `k8s` also read.
+fn wake_cost(res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
+    use crate::quota::Dim;
+    let (millis, mib) = crate::model::bench_pod_capacity(res);
+    vec![(Dim::Cpu, millis.div_ceil(1000)), (Dim::MemoryGb, mib.div_ceil(1024))]
+}
+
+fn bench_api(s: &ApiState) -> Result<Api<crd::Workspace>, Response> {
     Ok(Api::all(kube(s)?.clone()))
 }
 
-fn found(b: Option<crd::Bench>) -> Result<crd::Bench, Response> {
+fn found(b: Option<crd::Workspace>) -> Result<crd::Workspace, Response> {
     b.ok_or_else(|| err(StatusCode::NOT_FOUND, "no bench"))
 }
 
@@ -226,49 +232,54 @@ pub(crate) async fn create_bench(
     let (caller, team, region, existing) =
         my_bench(&s, &headers, body.team.as_deref(), body.region.as_deref()).await?;
     let api = bench_api(&s)?;
-    if let Some(b) = existing {
+    if let Some(w) = existing {
         // Re-POSTing a stopped or idle bench starts a pod: an allocation, exactly as `start_bench`.
-        if !crd::bench_wants_pod(&b) {
-            guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
+        if !crd::wants_pod(&w) {
+            guard_alloc(&s, &caller.name, false, &wake_cost(&w.spec.resources)).await?;
         }
-        let name = b.metadata.name.clone().unwrap_or_default();
-        let patch = wake_patch(&b, &configured_image(), true, &now());
-        let b = api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
-        return Ok(Json(bench_doc(&b, &region)).into_response());
+        let name = w.metadata.name.clone().unwrap_or_default();
+        let w = api
+            .patch(&name, &PatchParams::default(), &Patch::Merge(&wake_patch(true, &now())))
+            .await
+            .map_err(kube_err)?;
+        return Ok(Json(bench_doc(&w, &region)).into_response());
     }
-    guard_alloc(&s, &caller.name, false, &bench_cost(&crd::PodResources::default())).await?;
     let id = crd::bench_id(&caller.name, &team);
-    let image = configured_image();
-    let mut b = crd::Bench::new(
+    // No `refuse_taken_name`: the name is ours, the id is derived from (owner, team), and the
+    // person never typed either — a workspace of theirs that happens to be called "bench" is not
+    // a reason to refuse them the bench the desktop is asking for.
+    let w = allocate_and_create(
+        &s,
+        &caller,
         &id,
-        crd::BenchSpec {
+        crd::WorkspaceSpec {
+            bench: Some(crd::BenchOptions {
+                model: body.model.filter(|m| !m.is_empty()).unwrap_or_else(|| crate::model::DEFAULT_BENCH_MODEL.to_string()),
+                wake_at: None,
+            }),
+            access: Access::Full,
             owner: caller.name.clone(),
             team: team.clone(),
-            image,
-            model: body.model.filter(|m| !m.is_empty()).unwrap_or_else(|| crate::model::DEFAULT_BENCH_MODEL.to_string()),
+            name: BENCH_WS_NAME.to_string(),
+            region: region.clone(),
+            image: crate::model::default_ws_image(),
+            storage: Some(crd::WorkspaceStorage { quota_gb: clamp_quota(&s, crd::DEFAULT_WS_QUOTA_GB), source: None }),
             desired_state: DesiredState::Running,
-            access: BenchAccess::Full,
-            wake_at: None,
             resources: Default::default(),
+            packages: Vec::new(),
+            locks: Vec::new(),
             attached_environment: None,
         },
-    );
-    let mut l = labels(&caller.name, "bench");
-    l.insert(TEAM_LABEL.to_string(), team.clone());
-    b.metadata.labels = Some(l);
-    b.metadata.finalizers = Some(vec![crd::BENCH_FOLDER_FINALIZER.to_string()]);
-    let b = api.create(&PostParams::default(), &b).await.map_err(kube_err)?;
-    tokio::spawn({
-        let (s, c, owner, team, id) = (s.clone(), kube(&s)?.clone(), caller.name.clone(), team, id);
-        async move {
-            install_user_key_when::<crd::Bench>(&s, &c, &owner, &team, &id, |b| {
-                b.status.as_ref().is_some_and(|st| !st.node_name.is_empty())
-            })
-            .await
-        }
-    });
-    Ok((StatusCode::CREATED, Json(bench_doc(&b, &region))).into_response())
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(bench_doc(&w, &region))).into_response())
 }
+
+
+/// `spec.name` of every bench. Never shown — no listing carries a bench — but it is what the
+/// namespace's objects and any log line call it, so it is a word rather than an id.
+const BENCH_WS_NAME: &str = "bench";
+
 
 pub(crate) async fn start_bench(
     State(s): State<Arc<ApiState>>,
@@ -278,11 +289,10 @@ pub(crate) async fn start_bench(
     let (caller, _, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     let b = found(b)?;
     let api = bench_api(&s)?;
-    if !crd::bench_wants_pod(&b) {
-        guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
+    if !crd::wants_pod(&b) {
+        guard_alloc(&s, &caller.name, false, &wake_cost(&b.spec.resources)).await?;
     }
-    let patch = wake_patch(&b, &configured_image(), true, &now());
-    api.patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&patch))
+    api.patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&wake_patch(true, &now())))
         .await
         .map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
@@ -293,13 +303,21 @@ pub(crate) async fn stop_bench(
     headers: HeaderMap,
     Query(q): Query<TeamQuery>,
 ) -> Result<Response, Response> {
-    let (caller, team, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let b = found(b)?;
-    set_desired::<crd::Bench>(kube(&s)?, &b.metadata.name.clone().unwrap_or_default(), DesiredState::Stopped).await?;
+    let (_, _, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
+    stop_bench_ws(&s, &found(b)?).await
+}
+
+
+/// The one stop a bench gets, from `/v1/bench/stop` and from `/v1/workspaces/{id}/stop` alike
+/// (`workspaces::stop_as` routes a bench here): the desired state, then the tool-token Secret.
+/// The caller has already been authorized — `my_bench` on one route, `my_ws` on the other.
+pub(crate) async fn stop_bench_ws(s: &ApiState, w: &crd::Workspace) -> Result<Response, Response> {
+    let (owner, team) = (w.spec.owner.clone(), w.spec.team.clone());
+    set_desired::<crd::Workspace>(kube(s)?, &w.metadata.name.clone().unwrap_or_default(), DesiredState::Stopped).await?;
     // Best effort: `caller` already refuses a stopped bench's tool token, so a leftover Secret
     // holds a dead credential until its 15 minutes run out.
-    if let Err(e) = delete_tool_secret(kube(&s)?, &caller.name, &team).await {
-        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
+    if let Err(e) = delete_tool_secret(kube(s)?, &owner, &team).await {
+        tracing::warn!(%owner, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
     }
     Ok(StatusCode::ACCEPTED.into_response())
 }
@@ -335,7 +353,7 @@ pub(crate) async fn mint_tool_token(
     };
     let b = found(b)?;
     // A member whose beat has not caught up still holds a Paused bench: no tools either way.
-    if b.spec.access == BenchAccess::Paused {
+    if b.spec.access == Access::Paused {
         return Err(paused(&team));
     }
     if b.spec.desired_state == DesiredState::Stopped {
@@ -383,7 +401,7 @@ pub(crate) async fn bench_session(
     let (caller, team, region, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     let b = found(b)?;
     let api = bench_api(&s)?;
-    if b.spec.access == BenchAccess::Paused {
+    if b.spec.access == Access::Paused {
         return Err(paused(&team));
     }
     if b.spec.desired_state == DesiredState::Stopped {
@@ -393,8 +411,8 @@ pub(crate) async fn bench_session(
     let phase = b.status.as_ref().map(|st| st.phase).unwrap_or_default();
     if phase == Phase::Idle {
         // Waking re-charges cpu and memory, so it is an allocation like any start.
-        guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
-        api.patch(&id, &PatchParams::default(), &Patch::Merge(&wake_patch(&b, &configured_image(), false, &now())))
+        guard_alloc(&s, &caller.name, false, &wake_cost(&b.spec.resources)).await?;
+        api.patch(&id, &PatchParams::default(), &Patch::Merge(&wake_patch(false, &now())))
             .await
             .map_err(kube_err)?;
         return Ok((StatusCode::ACCEPTED, Json(json!({"state": "waking"}))).into_response());
@@ -425,17 +443,33 @@ pub(crate) async fn bench_session(
 mod tests {
     use super::*;
 
+    /// A wake is `spec.bench.wakeAt` and nothing else; a start adds `desiredState`. It must stay a
+    /// MERGE patch of the `bench` sub-object, or every wake would blank `spec.bench.model`.
     #[test]
-    fn a_wake_on_an_old_image_moves_spec_image_and_an_unchanged_one_does_not() {
-        let b = crd::Bench::new(
-            "bench-1",
-            serde_json::from_value(json!({"owner": "alice", "team": "acme", "image": "bench:old", "desiredState": "stopped"})).unwrap(),
+    fn a_wake_writes_only_wake_at_and_a_start_adds_the_desired_state() {
+        let p = wake_patch(true, "t");
+        assert_eq!(p, json!({"spec": {"bench": {"wakeAt": "t"}, "desiredState": "running"}}));
+        let p = wake_patch(false, "t");
+        assert_eq!(p, json!({"spec": {"bench": {"wakeAt": "t"}}}));
+        assert!(p["spec"]["bench"].get("model").is_none(), "a merge patch keeps the model it does not name");
+    }
+
+    /// The doc the desktop parses: the same keys as the retired Bench kind, off a Workspace.
+    #[test]
+    fn the_bench_doc_reads_the_model_and_access_off_the_workspace() {
+        let mut w: crd::Workspace = serde_json::from_value(json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "bench-abc"},
+            "spec": {"owner": "alice", "team": "acme", "name": "bench", "region": "r1", "image": "i",
+                     "desiredState": "running", "access": "paused", "bench": {"model": "m/1"}},
+        }))
+        .unwrap();
+        w.status = Some(crd::WorkspaceStatus { phase: Phase::Ready, node_name: "node-a".into(), ..Default::default() });
+        let d = bench_doc(&w, "r1");
+        assert_eq!(
+            d,
+            json!({"id": "bench-abc", "owner": "alice", "team": "acme", "region": "r1", "model": "m/1",
+                   "desiredState": "running", "access": "paused", "phase": "ready", "nodeName": "node-a",
+                   "conditions": []})
         );
-        let p = wake_patch(&b, "bench:new", true, "t");
-        assert_eq!(p["spec"]["image"], "bench:new");
-        assert_eq!(p["spec"]["desiredState"], "running");
-        let p = wake_patch(&b, "bench:old", false, "t");
-        assert!(p["spec"].get("image").is_none() && p["spec"].get("desiredState").is_none());
-        assert_eq!(p["spec"]["wakeAt"], "t");
     }
 }

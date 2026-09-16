@@ -48,6 +48,7 @@ use kloudlite_core::settings::LiveSettings;
 use crate::settings::AgentSettings;
 use std::sync::Arc;
 
+pub mod bench_backfill;
 mod state;
 pub use state::*;
 mod requests;
@@ -316,10 +317,11 @@ mod route_tests {
 
     #[test]
     fn bench_admits_tool_checks_owner_team_state_access() {
-        let bench = |owner: &str, team: &str, desired: &str, access: &str| -> crate::crd::Bench {
+        let bench = |owner: &str, team: &str, desired: &str, access: &str| -> crate::crd::Workspace {
             serde_json::from_value(serde_json::json!({
-                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "b"},
-                "spec": {"owner": owner, "team": team, "image": "i", "desiredState": desired, "access": access}
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "b"},
+                "spec": {"owner": owner, "team": team, "name": "bench", "region": "r1", "image": "i",
+                         "desiredState": desired, "access": access, "bench": {"model": "m"}}
             }))
             .unwrap()
         };
@@ -329,6 +331,10 @@ mod route_tests {
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "stopped", "full"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "readOnly"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "paused"), "alice", "acme"));
+        // An ordinary workspace of the same owner is not this token's audience.
+        let mut plain = bench("alice", "acme", "running", "full");
+        plain.spec.bench = None;
+        assert!(!super::bench_admits_tool(&plain, "alice", "acme"));
     }
 
     #[test]
@@ -512,17 +518,6 @@ pub(crate) fn workspace_cost(quota_gb: u64, res: &crd::PodResources) -> Vec<(cra
 }
 
 
-/// What waking or creating a bench costs: cpu and memory only — no disk (its folder is on the
-/// region share) and no count (decision 3: a bench is not a quota dimension).
-pub(crate) fn bench_cost(res: &crd::PodResources) -> Vec<(crate::quota::Dim, u64)> {
-    use crate::quota::{mebibytes, millicores, Dim};
-    vec![
-        (Dim::Cpu, millicores(&res.cpu_limit).div_ceil(1000)),
-        (Dim::MemoryGb, mebibytes(&res.memory_limit).div_ceil(1024)),
-    ]
-}
-
-
 /// The same for an environment: every service gets the env unit, one definition in `k8s`.
 pub(crate) fn environment_cost(quota_gb: u64, services: usize) -> Vec<(crate::quota::Dim, u64)> {
     use crate::quota::{mebibytes, millicores, Dim};
@@ -614,7 +609,7 @@ pub(crate) async fn bench_tool_check(
     if !cli_token_live(state, &claims.parent).await {
         return Ok(Err("parent"));
     }
-    let benches: Api<crd::Bench> = Api::all(kube(state)?.clone());
+    let benches: Api<crd::Workspace> = Api::all(kube(state)?.clone());
     let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
     if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
         return Ok(Err("bench"));
@@ -630,11 +625,15 @@ pub(crate) async fn bench_tool_check(
 
 /// Whether a bench's tools may act now. One predicate so a new way to suspend a bench (pause) is
 /// one more arm here, never a second check somewhere else.
-pub(crate) fn bench_admits_tool(b: &crd::Bench, sub: &str, team: &str) -> bool {
-    b.spec.owner == sub
-        && b.spec.team == team
-        && b.spec.desired_state != crd::DesiredState::Stopped
-        && b.spec.access == crd::BenchAccess::Full
+///
+/// `is_bench` leads deliberately: the claim names a workspace id, and an ORDINARY workspace of the
+/// same owner must not answer a bench-tool token — the audience is the bench, not the person.
+pub(crate) fn bench_admits_tool(w: &crd::Workspace, sub: &str, team: &str) -> bool {
+    crd::is_bench(w)
+        && w.spec.owner == sub
+        && w.spec.team == team
+        && w.spec.desired_state != crd::DesiredState::Stopped
+        && w.spec.access == crd::Access::Full
 }
 
 /// Eight hex characters of the jti: enough to join log lines, useless as a credential.
@@ -1013,13 +1012,13 @@ mod bench_tool_check_tests {
         }
     }
 
-    /// The reason for one check, against a Bench with this spec (None = no Bench).
+    /// The reason for one check, against a bench Workspace with this spec (None = no object).
     async fn reason(c: &BenchToolClaims, method: Method, path: &str, spec: Option<serde_json::Value>) -> Result<Caller, &'static str> {
         let routes = spec
             .map(|sp| {
                 vec![crate::kube_test::get(
-                    "/apis/kloudlite.io/v1alpha1/benches/b1",
-                    serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "b1"}, "spec": sp}),
+                    "/apis/kloudlite.io/v1alpha1/workspaces/b1",
+                    serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "b1"}, "spec": sp}),
                 )]
             })
             .unwrap_or_default();
@@ -1030,7 +1029,8 @@ mod bench_tool_check_tests {
     }
 
     fn spec(owner: &str, team: &str, desired: &str, access: &str) -> Option<serde_json::Value> {
-        Some(serde_json::json!({"owner": owner, "team": team, "image": "i", "desiredState": desired, "access": access}))
+        Some(serde_json::json!({"owner": owner, "team": team, "name": "bench", "region": "r1", "image": "i",
+                                "desiredState": desired, "access": access, "bench": {"model": "m"}}))
     }
 
     #[tokio::test]
@@ -1048,6 +1048,8 @@ mod bench_tool_check_tests {
             (spec("alice", "acme", "running", "paused"), "paused"),
             (spec("bob", "acme", "running", "full"), "wrong owner"),
             (spec("alice", "t2", "running", "full"), "wrong team"),
+            // An ordinary workspace under this id is not a bench, whatever else matches.
+            (spec("alice", "acme", "running", "full").map(|mut v| { v.as_object_mut().unwrap().remove("bench"); v }), "not a bench"),
             (None, "missing"),
         ] {
             assert_eq!(reason(&claims("live"), Method::GET, "/v1/workspaces", sp).await.err(), Some("bench"), "{why}");

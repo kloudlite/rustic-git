@@ -138,7 +138,6 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     let envs: Api<crd::Environment> = Api::all(c.clone());
     let vols: Api<crd::Volume> = Api::all(c.clone());
     let snaps: Api<crd::Snapshot> = Api::all(c.clone());
-    let benches: Api<crd::Bench> = Api::all(c.clone());
     let lp = owned_by(owner);
     let team_lp = ListParams::default().labels(&format!("{TEAM_LABEL}={owner}"));
     let charged = |o: &str, team: &str| if team.is_empty() { o == owner } else { team == owner };
@@ -146,21 +145,13 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // The six listings are independent reads; serially awaited they were six round trips on a
     // path every create and every quota page runs (2026-09-12). Concurrency only — the counts are
     // still recomputed from the CRDs on every request, never cached.
-    let (ws_own, ws_team, env_own, vol_own, vol_team, snap_own, bench_own) = futures::try_join!(
+    let (ws_own, ws_team, env_own, vol_own, vol_team, snap_own) = futures::try_join!(
         ws.list(&lp),
         ws.list(&team_lp),
         envs.list(&lp),
         vols.list(&lp),
         vols.list(&team_lp),
         snaps.list(&lp),
-        async {
-            // A 404 is a region whose Bench CRD is not applied yet: no benches, not a failed
-            // create for every workspace while the api rolls ahead of the CRD.
-            match benches.list(&lp).await {
-                Err(kube::Error::Api(e)) if e.code == 404 => Ok(Vec::new()),
-                r => r.map(|l| l.items),
-            }
-        },
     )?;
 
     let (mut millis, mut mib) = (0u64, 0u64);
@@ -169,8 +160,34 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
     // late); the name decides once.
     let mut seen: HashSet<String> = HashSet::new();
 
+    // A bench's own Volume is charged HERE, off its workspace, so it is never charged to the team
+    // the bench opens in — the volume's labels say `team`, and the volume loop below would.
+    let mut bench_volumes: HashSet<String> = HashSet::new();
     for w in ws_own.items.into_iter().chain(ws_team.items) {
-        if !charged(&w.spec.owner, &w.spec.team) || !seen.insert(format!("ws/{}", w.name_any())) {
+        let bench = crd::is_bench(&w);
+        if bench {
+            if let Some(v) = w.status.as_ref().and_then(|st| st.volume_ref.clone()) {
+                bench_volumes.insert(v);
+            }
+        }
+        // A bench belongs to its PERSON however it is labelled: `spec.team` names where it opens,
+        // not who pays for it. Nobody creates a bench, so it cannot spend a team's ceilings.
+        let charged_here = if bench { w.spec.owner == owner } else { charged(&w.spec.owner, &w.spec.team) };
+        if !charged_here || !seen.insert(format!("ws/{}", w.name_any())) {
+            continue;
+        }
+        if bench {
+            // Decision 3, as amended: a bench has a volume now, so its DISK is the owner's from the
+            // moment it exists; cpu and memory only while a pod is actually wanted — asleep,
+            // stopped or paused costs nothing.
+            u.disk_gb += w.spec.storage.as_ref().map_or(0, |st| st.quota_gb);
+            let idle = w.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
+            if crd::wants_pod(&w) && !idle {
+                // BOTH containers: a bench pod runs the workspace one and the bench one.
+                let (c, m) = crate::model::bench_pod_capacity(&w.spec.resources);
+                millis += c;
+                mib += m;
+            }
             continue;
         }
         u.workspaces += 1;
@@ -201,21 +218,15 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
             }
         }
     }
-    // Decision 3: a bench is charged to its person, and only while it wants a pod — asleep or
-    // stopped costs nothing. Never to a team: the owner check is on `spec.owner`, not the label.
-    for b in bench_own {
-        let idle = b.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
-        if b.spec.owner == owner && live(b.spec.desired_state) && !idle {
-            millis += millicores(&b.spec.resources.cpu_limit);
-            mib += mebibytes(&b.spec.resources.memory_limit);
-        }
-    }
     // Detached volumes included: disk kept by snapshots after a working copy is deleted is still
     // the owner's disk, and deleting the snapshots is how they get it back.
     let mut charged_volumes: Vec<String> = Vec::new();
     let mut known_volumes: HashSet<String> = HashSet::new();
     for v in vol_own.items.into_iter().chain(vol_team.items) {
         known_volumes.insert(v.name_any());
+        if bench_volumes.contains(&v.name_any()) {
+            continue;
+        }
         if !charged(&v.spec.owner, &v.spec.team) || !seen.insert(format!("vol/{}", v.name_any())) {
             continue;
         }

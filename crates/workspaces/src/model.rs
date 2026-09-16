@@ -29,9 +29,29 @@ pub fn default_ws_image() -> String {
 /// tag would pin every workspace to whatever the image was the day it was created.
 pub const DEFAULT_WS_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-workspace";
 
-/// The bench image when `KLOUDLITE_BENCH_IMAGE` is unset. Tagged, unlike `DEFAULT_WS_IMAGE`: the
-/// api writes it into the spec, and pin.sh pins the env on the api Deployment.
+/// The bench image when `KLOUDLITE_BENCH_IMAGE` is unset. Tagged, unlike `DEFAULT_WS_IMAGE`,
+/// because the agent — not a spec — stamps it on the bench container.
 pub const DEFAULT_BENCH_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-bench:latest";
+
+/// What the `bench` container of a bench pod is sized at. FIXED, not `spec.resources`: that field
+/// sizes the `workspace` container the person actually works in, and a bench that shrank because
+/// somebody sized their workspace small would OOM mid-turn. The same value a bench pod cost on its
+/// own before it became a container beside a workspace, so no bench got cheaper or dearer in the
+/// move. `k8s` stamps this on the container and `quota` charges it — one definition, or the number
+/// that runs and the number that is billed drift apart.
+pub fn bench_container_resources() -> crate::crd::PodResources {
+    crate::crd::PodResources::default()
+}
+
+/// What a BENCH pod holds on a node: both of its containers. `(millicores, mebibytes)`, the units
+/// `quota` sums in.
+pub fn bench_pod_capacity(workspace: &crate::crd::PodResources) -> (u64, u64) {
+    let bench = bench_container_resources();
+    (
+        crate::quota::millicores(&workspace.cpu_limit) + crate::quota::millicores(&bench.cpu_limit),
+        crate::quota::mebibytes(&workspace.memory_limit) + crate::quota::mebibytes(&bench.memory_limit),
+    )
+}
 
 /// `spec.model` when a create names none; passed to the pod as `KL_MODEL`.
 pub const DEFAULT_BENCH_MODEL: &str = "deepseek/deepseek-v4-flash";
@@ -447,5 +467,26 @@ mod tests {
         for bad in ["", "data", "./data", "/data:ro", "/data:/etc:ro", "/data\0"] {
             assert!(validate_mount(&m("data", bad)).is_err(), "path {bad:?} must be refused");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod bench_capacity_tests {
+    use super::*;
+
+    /// A bench pod is TWO containers, and both are the person's. Charging only `spec.resources`
+    /// handed out a whole bench container's worth of a node per bench, for free.
+    #[test]
+    fn a_bench_pod_costs_both_of_its_containers() {
+        let ws = crate::crd::PodResources::default();
+        let (cpu, mem) = bench_pod_capacity(&ws);
+        assert_eq!(cpu, 2 * crate::quota::millicores(&ws.cpu_limit));
+        assert_eq!(mem, 2 * crate::quota::mebibytes(&ws.memory_limit));
+        // The bench container is sized independently of the workspace one.
+        let small = crate::crd::PodResources { cpu_limit: "500m".into(), memory_limit: "512Mi".into(), ..ws.clone() };
+        let (cpu, mem) = bench_pod_capacity(&small);
+        assert_eq!(cpu, 500 + crate::quota::millicores(&ws.cpu_limit));
+        assert_eq!(mem, 512 + crate::quota::mebibytes(&ws.memory_limit));
     }
 }

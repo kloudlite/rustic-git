@@ -1,5 +1,9 @@
 //! `/v1/bench` against a mocked API server and a stub directory: the person-only access rules,
 //! the team's region, the wake, and the bench's share of the person's quota.
+//!
+//! A bench is a WORKSPACE now (`spec.bench`), so every object here is one and every route is the
+//! facade over it — the statuses and bodies asserted are the ones the shipped desktop
+//! (`harness/src/connect/bench.ts`) and `kl-connect` branch on, pinned verbatim.
 
 mod common;
 use common::{admin_token_as, token};
@@ -127,29 +131,47 @@ impl T {
         token(&self.jwt, who)
     }
     fn bench_writes(&self) -> Vec<String> {
-        self.rec.calls().into_iter().filter(|c| c.contains("/benches") && !c.starts_with("GET")).collect()
+        self.rec.calls().into_iter().filter(|c| c.contains("/workspaces") && !c.starts_with("GET")).collect()
     }
 }
 
 fn bench_path(owner: &str, team: &str) -> String {
-    format!("{API}/benches/{}", bench_id(owner, team))
+    format!("{API}/workspaces/{}", bench_id(owner, team))
 }
 
 fn bench_obj(owner: &str, team: &str, desired: &str, phase: Option<&str>, access: &str) -> Value {
     let mut b = json!({
-        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
-        "metadata": {"name": bench_id(owner, team)},
-        "spec": {"owner": owner, "team": team, "image": "i", "desiredState": desired, "access": access,
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": bench_id(owner, team), "labels": {"kloudlite.io/owner": owner, "kloudlite.io/team": team}},
+        "spec": {"owner": owner, "team": team, "name": "bench", "region": "r1", "image": "i",
+                 "desiredState": desired, "access": access, "bench": {"model": "m"},
+                 "storage": {"quotaGb": 10},
                  "resources": {"cpuRequest": "1", "cpuLimit": "1", "memoryRequest": "1Gi", "memoryLimit": "1Gi"}}
     });
     if let Some(p) = phase {
-        b["status"] = json!({"phase": p, "nodeName": "node-a", "idleSince": "2026-09-13T10:00:00Z"});
+        b["status"] = json!({"phase": p, "nodeName": "node-a"});
+        // The agent clears `idleSince` the moment it starts a pod, so only a slept bench carries
+        // one — `wants_pod` is read off exactly that pair.
+        if p == "idle" {
+            b["status"]["idleSince"] = json!("2026-09-13T10:00:00Z");
+        }
         if p == "ready" {
             b["status"]["conditions"] = json!([{"type": "Ready", "status": "True", "reason": "Running", "message": "",
                                                "lastTransitionTime": "2026-09-13T10:00:00Z"}]);
         }
     }
     b
+}
+
+/// An ordinary workspace of the same owner — never a bench, whatever else matches.
+fn plain_ws(id: &str, owner: &str, team: &str) -> Value {
+    json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": id, "labels": {"kloudlite.io/owner": owner, "kloudlite.io/team": team}},
+        "spec": {"owner": owner, "team": team, "name": id, "region": "r1", "image": "i",
+                 "desiredState": "running", "storage": {"quotaGb": 20},
+                 "resources": {"cpuRequest": "1", "cpuLimit": "1", "memoryRequest": "1Gi", "memoryLimit": "1Gi"}}
+    })
 }
 
 fn list(kind: &str, items: Vec<Value>) -> Value {
@@ -160,16 +182,16 @@ fn region(id: &str) -> Route {
     get(format!("{API}/regions/{id}"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Region", "metadata": {"name": id}, "spec": {"name": id, "status": "active"}}))
 }
 
-/// What `guard_alloc` reads for `owner`: no Quota objects (the compiled-in default) and empty listings.
-fn alloc(owner: &str, benches: Vec<Value>) -> Vec<Route> {
+/// What `guard_alloc` reads for `owner`: no Quota objects (the compiled-in default) and empty
+/// listings apart from the workspaces given (a bench is one of them now).
+fn alloc(owner: &str, workspaces: Vec<Value>) -> Vec<Route> {
     vec![
         not_found(format!("{API}/quotas/{owner}")),
         not_found(format!("{API}/quotas/default-user")),
-        get(format!("{API}/workspaces"), list("Workspace", vec![])),
+        get(format!("{API}/workspaces"), list("Workspace", workspaces)),
         get(format!("{API}/environments"), list("Environment", vec![])),
         get(format!("{API}/volumes"), list("Volume", vec![])),
         get(format!("{API}/snapshots"), list("Snapshot", vec![])),
-        get(format!("{API}/benches"), list("Bench", benches)),
     ]
 }
 
@@ -186,7 +208,7 @@ async fn creating_a_bench_twice_is_one_object_and_starts_it() {
             vec![
                 not_found(path.clone()),
                 get(path.clone(), bench_obj("alice", "acme", "stopped", None, "full")),
-                post(format!("{API}/benches"), bench_obj("alice", "acme", "running", None, "full")),
+                post(format!("{API}/workspaces"), bench_obj("alice", "acme", "running", None, "full")),
                 patch(path.clone(), bench_obj("alice", "acme", "running", None, "full")),
                 region("r1"),
             ],
@@ -197,10 +219,10 @@ async fn creating_a_bench_twice_is_one_object_and_starts_it() {
     let tok = t.tok("alice");
     let (st, _) = t.call("POST", "/v1/bench", &tok, Some(json!({"team": "acme"}))).await;
     assert_eq!(st, 201);
-    assert_eq!(t.rec.sent("POST", &format!("{API}/benches")).len(), 1);
+    assert_eq!(t.rec.sent("POST", &format!("{API}/workspaces")).len(), 1);
     let (st, doc) = t.call("POST", "/v1/bench", &tok, Some(json!({"team": "acme"}))).await;
     assert_eq!(st, 200, "{doc}");
-    assert_eq!(t.rec.sent("POST", &format!("{API}/benches")).len(), 1, "no second create");
+    assert_eq!(t.rec.sent("POST", &format!("{API}/workspaces")).len(), 1, "no second create");
     let patches = t.rec.sent("PATCH", &path);
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0]["spec"]["desiredState"], "running");
@@ -254,7 +276,7 @@ async fn a_departed_member_gets_403_on_their_old_bench() {
     let paula = bench_obj("paula", "acme", "running", Some("ready"), "full");
     let t = setup(
         vec![
-            get(format!("{API}/benches"), list("Bench", vec![carol.clone(), dave.clone(), paula.clone()])),
+            get(format!("{API}/workspaces"), list("Workspace", vec![carol.clone(), dave.clone(), paula.clone()])),
             patch(bench_path("paula", "acme"), paula),
             patch(bench_path("carol", "acme"), carol),
             patch(bench_path("dave", "dave"), dave),
@@ -312,7 +334,7 @@ async fn the_region_comes_from_the_team_and_a_person_binds_their_own_once() {
             vec![
                 not_found(bench_path("alice", "acme")),
                 not_found(bench_path("alice", "alice")),
-                post(format!("{API}/benches"), bench_obj("alice", "acme", "running", None, "full")),
+                post(format!("{API}/workspaces"), bench_obj("alice", "acme", "running", None, "full")),
                 region("r1"),
                 region("r2"),
             ],
@@ -332,8 +354,11 @@ async fn the_region_comes_from_the_team_and_a_person_binds_their_own_once() {
     assert_eq!(body["error"], "team acme is in region r1");
     let (st, _) = t.call("POST", "/v1/bench", &tok, Some(json!({"team": "acme"}))).await;
     assert_eq!(st, 201);
-    let created = t.rec.sent("POST", &format!("{API}/benches")).pop().unwrap();
-    assert!(!created["spec"].to_string().contains("region"), "{created}");
+    let created = t.rec.sent("POST", &format!("{API}/workspaces")).pop().unwrap();
+    // A Workspace carries its region in spec, resolved from the team's binding, never from the body.
+    assert_eq!(created["spec"]["region"], "r1");
+    assert_eq!(created["spec"]["bench"]["model"], kloudlite_workspaces::model::DEFAULT_BENCH_MODEL);
+    assert_eq!(created["spec"]["name"], "bench");
 
     let (st, body) = t.call("POST", "/v1/bench", &tok, Some(json!({}))).await;
     assert_eq!(st, 422);
@@ -379,7 +404,7 @@ async fn a_session_wakes_an_idle_bench_waits_on_a_starting_one_and_refuses_a_sto
     assert_eq!((st, body), (StatusCode::ACCEPTED, json!({"state": "waking"})));
     let p = t.rec.sent("PATCH", &path);
     assert_eq!(p.len(), 1);
-    let at = chrono::DateTime::parse_from_rfc3339(p[0]["spec"]["wakeAt"].as_str().unwrap()).unwrap();
+    let at = chrono::DateTime::parse_from_rfc3339(p[0]["spec"]["bench"]["wakeAt"].as_str().unwrap()).unwrap();
     assert!((chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_seconds().abs() <= 5);
 
     let t = seeded(bench_obj("alice", "alice", "running", Some("starting"), "full"), vec![]);
@@ -412,6 +437,41 @@ async fn a_session_wakes_an_idle_bench_waits_on_a_starting_one_and_refuses_a_sto
     assert!(t.rec.sent("PATCH", &path).is_empty());
 }
 
+/// The shipped desktop's `ensureBench` loop branches on these four answers and nothing else
+/// (`harness/src/connect/bench.ts`), and `kl-connect` reads the same. They are pinned verbatim
+/// because the facade may be rewritten under them but never change what a released client sees.
+#[tokio::test]
+async fn the_desktops_four_answers_are_unchanged_by_the_facade() {
+    let path = bench_path("alice", "alice");
+    let dir = || Stub::new(&[], &[("alice", "r1")]);
+
+    // 1. No bench yet → 404, which is the desktop's cue to POST /v1/bench.
+    let t = setup(with(vec![not_found(path.clone()), region("r1")], alloc("alice", vec![])), dir());
+    let (st, body) = t.call("POST", "/v1/bench/session", &t.tok("alice"), None).await;
+    assert_eq!((st, body["error"].clone()), (StatusCode::NOT_FOUND, json!("no bench")));
+
+    // 2. Stopped → 409 with the exact sentence the desktop matches on before POSTing start.
+    let stopped = bench_obj("alice", "alice", "stopped", Some("idle"), "full");
+    let t = setup(vec![get(path.clone(), stopped)], dir());
+    let (st, body) = t.call("POST", "/v1/bench/session", &t.tok("alice"), None).await;
+    assert_eq!((st, body["error"].clone()), (StatusCode::CONFLICT, json!("bench is stopped; start it")));
+
+    // 3. Not ready → 202 `{state}` and nothing else, which the desktop retries for 90 s.
+    let t = setup(vec![get(path.clone(), bench_obj("alice", "alice", "running", Some("starting"), "full"))], dir());
+    let (st, body) = t.call("POST", "/v1/bench/session", &t.tok("alice"), None).await;
+    assert_eq!((st, body), (StatusCode::ACCEPTED, json!({"state": "starting"})));
+
+    // 4. Ready → 201 with exactly these four keys.
+    let t = setup(vec![get(path, bench_obj("alice", "alice", "running", Some("ready"), "full"))], dir());
+    let (st, body) = t.call("POST", "/v1/bench/session", &t.tok("alice"), None).await;
+    assert_eq!(st, 201);
+    let mut keys: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["expires_at", "gateway", "id", "token"]);
+    assert!(body["gateway"].as_str().unwrap().starts_with("wss://ws-r1.khost.dev/tunnel/"));
+    assert!(body["expires_at"].as_str().unwrap().ends_with('Z'));
+}
+
 #[tokio::test]
 async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
     let usage = |b: Value| async move {
@@ -420,9 +480,90 @@ async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
         let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
         (alice.cpu, acme.cpu)
     };
-    assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "full")).await, (1, 0));
+    // 1 vCPU for the workspace container plus the bench container's own fixed 4 — a bench pod is
+    // two containers, and charging only the first handed one out per bench for free.
+    assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "full")).await, (5, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "running", Some("idle"), "full")).await, (0, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "stopped", Some("ready"), "full")).await, (0, 0));
+    // Paused is the third way to have no pod, and the one the membership beat writes.
+    assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "paused")).await, (0, 0));
+}
+
+/// The one change to decision 3: a bench has a volume now, so its disk is the person's from the
+/// moment it exists — running, asleep or stopped — and it is still never one of their `workspaces`
+/// and never the team's.
+#[tokio::test]
+async fn a_benchs_disk_is_always_the_persons_and_its_count_is_nobodys() {
+    let bench = bench_obj("alice", "acme", "stopped", Some("idle"), "full");
+    let (client, _) = mock_client(alloc("alice", vec![bench, plain_ws("ws-1", "alice", "acme")]));
+    let alice = kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap();
+    let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
+    assert_eq!((alice.disk_gb, alice.workspaces), (10, 0), "the bench's disk, and not its count");
+    // The ordinary team workspace is the team's one count; the bench is neither counted nor
+    // charged there, however its labels read.
+    assert_eq!((acme.disk_gb, acme.workspaces), (0, 1));
+}
+
+/// The bench's own Volume must not be charged a second time — to its team, which is where its
+/// labels point.
+#[tokio::test]
+async fn a_bench_volume_is_charged_through_its_workspace_and_not_again() {
+    let mut bench = bench_obj("alice", "acme", "stopped", Some("idle"), "full");
+    bench["status"]["volumeRef"] = json!("bench-vol");
+    let vol = json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": "bench-vol", "labels": {"kloudlite.io/owner": "alice", "kloudlite.io/team": "acme"}},
+        "spec": {"owner": "alice", "team": "acme", "nodeName": "node-a", "region": "r1", "quotaGb": 10, "replicas": 1},
+    });
+    let mut routes = alloc("alice", vec![bench]);
+    routes.retain(|r| !r.path.ends_with("/volumes"));
+    routes.push(get(format!("{API}/volumes"), list("Volume", vec![vol])));
+    let (client, _) = mock_client(routes);
+    assert_eq!(kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap().disk_gb, 10);
+    assert_eq!(kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap().disk_gb, 0, "never the team's");
+}
+
+/// The facade's other half: a bench is one Workspace, but it is not one of the person's
+/// workspaces. The list drops it, the read still answers (`kl pkg` inside the bench needs it),
+/// delete refuses in the exact sentence the desktop shows, and stop is the bench stop.
+#[tokio::test]
+async fn a_bench_is_hidden_from_the_workspace_list_undeletable_and_stops_like_a_bench() {
+    let id = bench_id("alice", "acme");
+    let path = bench_path("alice", "acme");
+    let b = bench_obj("alice", "acme", "running", Some("ready"), "full");
+    let sp = secret_path("alice", "acme");
+    let t = setup(
+        vec![
+            get(format!("{API}/workspaces"), list("Workspace", vec![b.clone(), plain_ws("ws-1", "alice", "")])),
+            get(path.clone(), b.clone()),
+            get(format!("{API}/snapshots"), list("Snapshot", vec![])),
+            patch(path.clone(), b),
+            route("DELETE", sp.clone(), 200, deleted()),
+        ],
+        Stub::new(&[("alice", "acme")], &[("acme", "r1")]),
+    );
+    let tok = t.tok("alice");
+
+    let (st, body) = t.call("GET", "/v1/workspaces", &tok, None).await;
+    assert_eq!(st, 200, "{body}");
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["ws-1"], "the bench is not one of the person's workspaces");
+    let (st, body) = t.call("GET", "/v1/workspaces?team=acme", &tok, None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(!body.to_string().contains(&id), "nor in the team's list");
+
+    let (st, body) = t.call("GET", &format!("/v1/workspaces/{id}"), &tok, None).await;
+    assert_eq!((st, body["id"].clone()), (StatusCode::OK, json!(id)), "the read still answers");
+
+    let (st, body) = t.call("DELETE", &format!("/v1/workspaces/{id}"), &tok, None).await;
+    assert_eq!(st, 409);
+    assert_eq!(body["error"], "a bench is deleted with your membership, not by hand");
+    assert!(t.rec.sent("DELETE", &path).is_empty());
+
+    let (st, _) = t.call("POST", &format!("/v1/workspaces/{id}/stop"), &tok, None).await;
+    assert_eq!(st, 202);
+    assert_eq!(t.rec.sent("PATCH", &path), vec![json!({"spec": {"desiredState": "stopped"}})]);
+    assert!(t.rec.calls().contains(&format!("DELETE {sp}")), "the same handler as /v1/bench/stop");
 }
 
 #[test]
