@@ -37,6 +37,11 @@ clickhouse:
           # reclaimable page cache: with 2.6–3.8 GiB real RSS the cgroup sat at the pod limit for
           # 40 h and every query and collector INSERT near it failed 241. Track the process instead.
           memory_worker_use_cgroup: 0
+          # Explicit rather than the default max_server_memory_usage_to_ram_ratio (0.9), which
+          # against the 12 GiB pod limit leaves only ~1.2 GiB of headroom for untracked
+          # allocations now that the cgroup worker is off — too little margin between the server
+          # refusing a query and the kernel OOM-killing the pod. 10 GiB keeps ~2 GiB clear.
+          max_server_memory_usage: 10737418240     # 10 GiB (limit 12 GiB)
           mark_cache_size: 1073741824              # 1 GiB (default 5 GiB)
           index_mark_cache_size: 268435456         # 256 MiB
           merges_mutations_memory_usage_to_ram_ratio: 0.3
