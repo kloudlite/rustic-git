@@ -1,5 +1,5 @@
-//! The per-workspace Secrets: the owner's platform key, git identity and registry token
-//! (`user-key`), the pull credential, and the sshd host key with the sshd_config that names them.
+//! The per-workspace Secrets: the owner's platform key, git identity, registry token and
+//! workspace token (`user-key`), the pull credential, and the sshd host key with the sshd_config that names them.
 //! Nothing here is long-lived — every value is re-projected on the keys beat.
 
 use super::*;
@@ -33,6 +33,7 @@ pub fn user_key_secret(
     m: &crate::api::OwnerMaterial,
     authorized_keys: &str,
     registry_token: &str,
+    workspace_token: &str,
 ) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
@@ -59,6 +60,10 @@ pub fn user_key_secret(
             // just the next beat, no revocation code needed. `"*"` because authorization is
             // re-checked per registry request against the image, never trusted from the scope.
             ("registry-token".to_string(), registry_token.to_string()),
+            // The platform credential `kl` acts under from inside the pod: 24 h, re-minted on the
+            // same beat as its sibling, so a revoked owner loses it with their keys rather than
+            // through revocation code of its own. Read per call and never cached by `kl`.
+            ("workspace-token".to_string(), workspace_token.to_string()),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()
@@ -110,8 +115,8 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// where the file is written instead (`agent::controller::keys`: 0600, owned by `kl`).
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
-pub fn sshd_config(name: &str, owner: &str, registry_host: &str) -> String {
-    let set_env = format!("SetEnv {}", login_env(name, owner, registry_host).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
+pub fn sshd_config(ws_id: &str, name: &str, owner: &str, team: &str, registry_host: &str, api_url: &str) -> String {
+    let set_env = format!("SetEnv {}", login_env(ws_id, name, owner, team, registry_host, api_url).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
@@ -149,17 +154,19 @@ pub fn ws_ssh_secret(
     name: &str,
     namespace: &str,
     owner: &str,
+    team: &str,
     owner_ref: &OwnerReference,
     private_openssh: &str,
     public_line: &str,
     registry_host: &str,
+    api_url: &str,
 ) -> Secret {
     Secret {
         metadata: meta(&ws_ssh_secret_name(id), Some(namespace), owner, "workspace", owner_ref),
         string_data: Some(BTreeMap::from([
             ("ssh_host_ed25519_key".to_string(), private_openssh.to_string()),
             ("ssh_host_ed25519_key.pub".to_string(), public_line.to_string()),
-            ("sshd_config".to_string(), sshd_config(name, owner, registry_host)),
+            ("sshd_config".to_string(), sshd_config(id, name, owner, team, registry_host, api_url)),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()

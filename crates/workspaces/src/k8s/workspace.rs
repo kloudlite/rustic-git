@@ -13,14 +13,21 @@ use super::*;
 pub const BUILDKIT_HOST: &str = "tcp://builder-gate.kloudlite-system.svc:1234";
 
 
-pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<EnvVar> {
+pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, registry_host: &str, api_url: &str) -> Vec<EnvVar> {
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
-    vec![
+    let mut env = vec![
         git_ssh_command(),
         // Which workspace this shell is in: the platform rc files cd into it and the prompt
         // names it. Per pod, which is why sshd's SetEnv is generated per workspace.
         var("KL_WORKSPACE", workspace_dir(name)),
         var("KL_WORKSPACE_NAME", name.to_string()),
+        // The CR name, not the person's name for it: `kl` addresses `/v1/workspaces/{id}` with
+        // this, and two workspaces of one person in different teams share a `KL_WORKSPACE_NAME`.
+        var("KL_WORKSPACE_ID", ws_id.to_string()),
+        // The SPACE this pod runs in — the team slug, or the owner's own handle for their personal
+        // space. It is the `{team}` segment of `/v1/me/environments/{team}` and the `space` claim
+        // the workspace-token is refused against.
+        var("KL_TEAM", crate::crd::space_slug(owner, team)),
         var("GIT_CONFIG_SYSTEM", format!("{USER_KEY_PATH}/gitconfig")),
         var("BUILDKIT_HOST", BUILDKIT_HOST.to_string()),
         var("KL_OWNER", owner.to_string()),
@@ -81,7 +88,13 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
         // History is per-node write traffic on every keystroke; keeping it off NFS is why it gets
         // its own var instead of riding HOME_CACHE_DIR — it isn't a cache, it's state worth keeping.
         var("HISTFILE", format!("{HOME_STATE_DIR}/shell_history")),
-    ]
+    ];
+    // Unset rather than empty when the agent has no `WS_API_URL`, exactly as the bench pod does:
+    // `kl` then fails closed with "not in a workspace" instead of dialling an empty host.
+    if !api_url.is_empty() {
+        env.push(var("KL_API_URL", api_url.to_string()));
+    }
+    env
 }
 
 
@@ -600,7 +613,7 @@ pub fn workspace_pod(
             ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key and commits as the owner without
             // anyone configuring it. The same list feeds sshd's `SetEnv`.
-            env: Some(login_env(&spec.name, &spec.owner, ctx.registry_host)),
+            env: Some(login_env(ws_id, &spec.name, &spec.owner, &spec.team, ctx.registry_host, ctx.api_url)),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()

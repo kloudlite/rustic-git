@@ -157,12 +157,38 @@ pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/v1/volumes/{name}/snapshots/{snapshot}"),
 ];
 
+/// What `kl` calls from inside a workspace pod, and nothing else. Much narrower than a bench's
+/// audience on purpose: this credential is a FILE in every workspace of the owner, so its blast
+/// radius is exactly this list — the package set and the space environment, never a lifecycle
+/// verb and never a credential route.
+pub(crate) const WORKSPACE_TOOL_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/workspaces/{id}"),
+    // The spec spells this `PATCH /v1/workspaces/{id}/packages`; the router has no such route —
+    // `patch_ws_packages` IS the PATCH on the workspace and takes packages only. The router is
+    // the truth, and the complement test below is what keeps this table honest about it.
+    ("PATCH", "/v1/workspaces/{id}"),
+    ("POST", "/v1/workspaces/{id}/packages/update"),
+    ("GET", "/v1/environments"),
+    ("GET", "/v1/me/environments"),
+    ("PUT", "/v1/me/environments/{team}"),
+    ("DELETE", "/v1/me/environments/{team}"),
+];
+
 /// Segment match against `BENCH_TOOL_ROUTES`: a `{x}` matches one non-empty segment, anything
 /// else matches itself. `/v1/workspaces/restore` also matching `{id}` is harmless: the router
 /// still sends it to the literal route, and both are bench-tool routes.
 pub(crate) fn bench_tool_route(method: &axum::http::Method, path: &str) -> bool {
+    route_in(BENCH_TOOL_ROUTES, method, path)
+}
+
+/// The same for `kl`'s audience.
+pub(crate) fn workspace_tool_route(method: &axum::http::Method, path: &str) -> bool {
+    route_in(WORKSPACE_TOOL_ROUTES, method, path)
+}
+
+fn route_in(table: &[(&str, &str)], method: &axum::http::Method, path: &str) -> bool {
     let segs: Vec<&str> = path.split('/').collect();
-    BENCH_TOOL_ROUTES.iter().any(|(m, pat)| {
+    table.iter().any(|(m, pat)| {
         *m == method.as_str() && {
             let pats: Vec<&str> = pat.split('/').collect();
             pats.len() == segs.len()
@@ -232,6 +258,47 @@ mod route_tests {
         for p in NOT_BENCH_TOOL_ROUTES {
             assert!(!super::BENCH_TOOL_ROUTES.iter().any(|(_, b)| b == p), "{p} is in both tables");
         }
+    }
+
+    /// `WORKSPACE_TOOL_ROUTES` has no complement list of its own: it is a strict subset of the
+    /// routes that exist, and `workspace_tool` refuses everything off it with `audience` by
+    /// construction. What this holds is that every entry still NAMES a route — a rename would
+    /// otherwise leave `kl` with an audience for a path the router has not got — and that no
+    /// other route's SHAPE is admitted under any method.
+    ///
+    /// A literal path that also matches a `{id}` entry is skipped for the reason
+    /// `bench_tool_route` documents: axum sends it to the literal route, or answers 405.
+    #[test]
+    fn every_workspace_tool_route_exists_and_no_other_shape_is_admitted() {
+        use axum::http::Method;
+        let found = registered_routes();
+        for (_, p) in super::WORKSPACE_TOOL_ROUTES {
+            assert!(found.iter().any(|r| r == p), "{p} is not a route");
+        }
+        for p in found.iter().filter(|p| p.contains('{')) {
+            if super::WORKSPACE_TOOL_ROUTES.iter().any(|(_, tp)| tp == p) {
+                continue;
+            }
+            let concrete: String =
+                p.split('/').map(|s| if s.starts_with('{') { "x" } else { s }).collect::<Vec<_>>().join("/");
+            for m in [Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+                assert!(!super::workspace_tool_route(&m, &concrete), "{m} {p} admits a workspace token");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_tool_route_is_the_seven_and_the_team_segment_is_read() {
+        use axum::http::Method;
+        assert!(super::workspace_tool_route(&Method::GET, "/v1/workspaces/w1"));
+        assert!(super::workspace_tool_route(&Method::PUT, "/v1/me/environments/acme"));
+        assert!(!super::workspace_tool_route(&Method::POST, "/v1/workspaces/w1/start"));
+        assert!(!super::workspace_tool_route(&Method::DELETE, "/v1/workspaces/w1"));
+        assert!(!super::workspace_tool_route(&Method::GET, "/v1/workspaces/{id}/tools".replace("{id}", "w1").as_str()));
+        assert_eq!(super::team_segment("/v1/me/environments/acme"), Some("acme"));
+        assert_eq!(super::team_segment("/v1/me/environments"), None);
+        assert_eq!(super::team_segment("/v1/me/environments/a/b"), None);
+        assert_eq!(super::team_segment("/v1/workspaces/w1"), None);
     }
 
     #[test]
@@ -517,6 +584,9 @@ pub(crate) async fn caller_for(
             if let Some(c) = state.jwt.expired_bench_tool(tok) {
                 return Err(bench_tool_refused(&c, "expired"));
             }
+            if let Some(r) = workspace_tool(state, tok, method, path) {
+                return r;
+            }
             return caller(state, headers).await;
         }
     };
@@ -571,6 +641,59 @@ pub(crate) fn bench_admits_tool(b: &crd::Bench, sub: &str, team: &str) -> bool {
 fn bench_tool_refused(c: &kloudlite_core::jwt::BenchToolClaims, reason: &'static str) -> Response {
     let jti8 = c.jti.get(..8).unwrap_or_default();
     tracing::info!(owner = %c.sub, jti8, reason, "bench.tool.refused");
+    unauthorized()
+}
+
+
+/// The workspace-token gate. `None` means "not a workspace token at all", so the caller falls
+/// through to an ordinary login.
+///
+/// No directory call and no CR read, unlike the bench-tool gate: the pod's identity is the
+/// owner's key projection, and the keys beat rewriting `user-key` without this item — which is
+/// what a revoked key or a dropped membership already does — IS the revocation path.
+fn workspace_tool(
+    state: &ApiState,
+    tok: &str,
+    method: &axum::http::Method,
+    path: &str,
+) -> Option<Result<Caller, Response>> {
+    let claims = match state.jwt.verify_workspace_tool(tok) {
+        Ok(c) => c,
+        Err(_) => return Some(Err(workspace_tool_refused(&state.jwt.expired_workspace_tool(tok)?, "expired"))),
+    };
+    let outcome = if !workspace_tool_route(method, path) {
+        Err("audience")
+    } else if team_segment(path).is_some_and(|t| !t.eq_ignore_ascii_case(&claims.space)) {
+        Err("space")
+    } else {
+        // `scope` is the ceiling everything else reads: the existing `my_ws` and `in_scope` checks
+        // then refuse a workspace or a team this caller does not own, exactly as for a person.
+        Ok(Caller {
+            name: claims.sub.clone(),
+            superadmin: false,
+            parent: None,
+            scope: Some(claims.space.clone()),
+            jti8: Some(claims.jti.chars().take(8).collect()),
+        })
+    };
+    Some(match outcome {
+        Ok(c) => {
+            kloudlite_core::metrics::mark_via("workspace-tool");
+            Ok(c)
+        }
+        Err(reason) => Err(workspace_tool_refused(&claims, reason)),
+    })
+}
+
+/// The `{team}` segment of the two space-environment routes, the only `WORKSPACE_TOOL_ROUTES`
+/// entries that name a space in the path.
+fn team_segment(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/me/environments/").filter(|t| !t.is_empty() && !t.contains('/'))
+}
+
+fn workspace_tool_refused(c: &kloudlite_core::jwt::WorkspaceToolClaims, reason: &'static str) -> Response {
+    let jti8 = c.jti.get(..8).unwrap_or_default();
+    tracing::info!(owner = %c.sub, jti8, reason, "workspace.tool.refused");
     unauthorized()
 }
 
@@ -929,5 +1052,57 @@ mod bench_tool_check_tests {
         ] {
             assert_eq!(reason(&claims("live"), Method::GET, "/v1/workspaces", sp).await.err(), Some("bench"), "{why}");
         }
+    }
+}
+
+
+#[cfg(test)]
+mod workspace_tool_tests {
+    use super::*;
+    use axum::http::Method;
+    use kloudlite_core::jwt::Jwt;
+    use std::sync::Arc;
+
+    fn state() -> ApiState {
+        ApiState::new(Arc::new(Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap()))
+    }
+
+    /// `Some(Ok)` admitted, `Some(Err)` refused, `None` "not a workspace token" — the third is
+    /// what lets an ordinary login keep working on the same routes.
+    fn gate(s: &ApiState, tok: &str, m: Method, path: &str) -> Option<Result<Caller, axum::http::StatusCode>> {
+        super::workspace_tool(s, tok, &m, path).map(|r| r.map_err(|e| e.status()))
+    }
+
+    #[test]
+    fn the_audience_is_the_seven_routes_and_the_team_segment_must_be_the_space() {
+        let s = state();
+        let (tok, _) = s.jwt.mint_workspace_tool("alice", "acme").unwrap();
+
+        let ok = gate(&s, &tok, Method::GET, "/v1/workspaces/w1").unwrap().unwrap();
+        // The scope is the ceiling `in_scope`/`my_ws` then apply — no route of its own says who
+        // owns what.
+        assert_eq!((ok.name.as_str(), ok.scope.as_deref()), ("alice", Some("acme")));
+        assert!(ok.parent.is_none() && !ok.superadmin && ok.jti8.is_some());
+
+        assert!(gate(&s, &tok, Method::PUT, "/v1/me/environments/acme").unwrap().is_ok());
+        // Another space's environment, with a token that is otherwise perfectly good.
+        assert_eq!(gate(&s, &tok, Method::PUT, "/v1/me/environments/globex").unwrap().unwrap_err(), axum::http::StatusCode::UNAUTHORIZED);
+        // Off the audience: a lifecycle verb and a credential route are both refused here rather
+        // than by the handler, so a new route is never admitted by default.
+        assert!(gate(&s, &tok, Method::POST, "/v1/workspaces/w1/start").unwrap().is_err());
+        assert!(gate(&s, &tok, Method::POST, "/v1/workspaces/w1/ssh-session").unwrap().is_err());
+        assert!(gate(&s, &tok, Method::DELETE, "/v1/workspaces/w1").unwrap().is_err());
+    }
+
+    /// Anything that is not a workspace token falls through to `caller`, and an EXPIRED one does
+    /// not — it is refused where the reason can still be logged.
+    #[test]
+    fn only_a_workspace_token_is_gated_here() {
+        let s = state();
+        let (cli, _) = s.jwt.mint_cli("a@b.c", "A", Some("a")).unwrap();
+        assert!(gate(&s, &cli, Method::GET, "/v1/workspaces/w1").is_none());
+        assert!(gate(&s, "not-a-token", Method::GET, "/v1/workspaces/w1").is_none());
+        let (bench, _) = s.jwt.mint_bench_tool("alice", "acme", "b1", "p").unwrap();
+        assert!(gate(&s, &bench, Method::GET, "/v1/workspaces/w1").is_none());
     }
 }

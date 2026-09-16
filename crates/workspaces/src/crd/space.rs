@@ -67,6 +67,15 @@ pub fn space_name(owner: &str, team: &str) -> String {
 }
 
 
+/// The space's SLUG — what a caller names it by: the team, or the owner's own handle for their
+/// personal space, folded exactly as `ws_namespace` folds the pair. This is the `{team}` segment
+/// of `/v1/me/environments/{team}`, the workspace-token's `space` claim and a pod's `KL_TEAM`.
+pub fn space_slug(owner: &str, team: &str) -> String {
+    let owner = owner.to_lowercase();
+    if team.is_empty() || team.eq_ignore_ascii_case(&owner) { owner } else { team.to_lowercase() }
+}
+
+
 /// The `SpaceEnvironment` `/v1` writes for one choice, labels included.
 pub fn space_environment(owner: &str, team: &str, environment: &str) -> SpaceEnvironment {
     let mut s = SpaceEnvironment::new(
@@ -95,6 +104,13 @@ mod tests {
         assert_eq!(s.metadata.name.as_deref(), Some(ws_namespace("alice", "acme").as_str()));
         assert_eq!(s.metadata.labels.unwrap()[ENVIRONMENT_LABEL], "env-1");
         assert_eq!(s.spec.owner, "alice");
+    }
+
+    #[test]
+    fn a_space_slug_folds_personal_to_the_handle() {
+        assert_eq!(space_slug("Alice", ""), "alice");
+        assert_eq!(space_slug("alice", "Alice"), "alice");
+        assert_eq!(space_slug("alice", "ACME"), "acme");
     }
 
     #[test]

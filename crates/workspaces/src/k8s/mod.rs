@@ -131,6 +131,9 @@ pub struct PodContext<'a> {
     /// `registry::auth::realm()` learns it, because the agent has no route to that api-tier env.
     /// Fed to `login_env` as `KL_REGISTRY_HOST`, the credential helper's `credHelpers` key.
     pub registry_host: &'a str,
+    /// `WS_API_URL` — the api tier's external base, fed to `login_env` as `KL_API_URL` so `kl`
+    /// can reach `/v1` from inside the pod. Empty leaves the variable unset and `kl` fails closed.
+    pub api_url: &'a str,
 }
 
 

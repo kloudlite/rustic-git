@@ -306,6 +306,7 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
 pub(crate) fn test_pod_ctx() -> kloudlite_workspaces::k8s::PodContext<'static> {
     kloudlite_workspaces::k8s::PodContext {
         default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef",
+        api_url: "https://api.kloudlite.io",
         pool: "/pool",
         node_name: "node-a",
         owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {

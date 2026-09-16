@@ -90,6 +90,24 @@ pub struct BenchToolClaims {
     pub typ: String,
 }
 
+/// A day, not the bench tool's fifteen minutes: this one is a FILE in a pod, re-minted on the
+/// keys beat (`KEYS_RESYNC_SECS`, 300 s), and its revocation path is that beat rewriting the
+/// Secret without it — not the expiry.
+pub const WORKSPACE_TOOL_TTL_SECS: u64 = 86_400;
+
+/// `space` is the team slug a person's pods run in — their own handle for their personal space,
+/// exactly as `ws_namespace` folds the pair. There is no `parent`: the credential is a projection
+/// of the owner's keys, not of a login.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceToolClaims {
+    pub sub: String,
+    pub space: String,
+    pub jti: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub typ: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CliClaims {
     pub sub: String,
@@ -291,6 +309,37 @@ impl Jwt {
         (c.typ == "bench-tool" && c.exp <= now().ok()?).then_some(c)
     }
 
+    /// The 24 h token `kl` acts under from inside a workspace pod, projected into the owner's
+    /// `user-key` Secret and re-minted on the keys beat. Its own `typ`, so neither `verify` nor
+    /// `verify_any_user` ever takes it for a person.
+    pub fn mint_workspace_tool(&self, handle: &str, space: &str) -> Result<(String, WorkspaceToolClaims)> {
+        let now = now()?;
+        let claims = WorkspaceToolClaims {
+            sub: handle.to_string(),
+            space: space.to_string(),
+            jti: new_jti(),
+            iat: now,
+            exp: now + WORKSPACE_TOOL_TTL_SECS,
+            typ: "workspace-tool".into(),
+        };
+        let tok = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| err(format!("minting workspace tool token: {e}")))?;
+        Ok((tok, claims))
+    }
+
+    pub fn verify_workspace_tool(&self, token: &str) -> Result<WorkspaceToolClaims> {
+        self.verify_typed(token, "workspace-tool")
+    }
+
+    /// The claims of a correctly signed workspace-tool token that has expired, else None — so a
+    /// refusal can say `expired` without any other kind of token being logged as one.
+    pub fn expired_workspace_tool(&self, token: &str) -> Option<WorkspaceToolClaims> {
+        let mut v = Validation::new(Algorithm::HS256);
+        v.validate_exp = false;
+        let c: WorkspaceToolClaims = decode(token, &self.decoding, &v).ok()?.claims;
+        (c.typ == "workspace-tool" && c.exp <= now().ok()?).then_some(c)
+    }
+
     /// A revocable, month-long login for the CLI — a `jti` lets it be revoked without
     /// shortening the TTL for everyone.
     pub fn mint_cli(&self, email: &str, name: &str, username: Option<&str>) -> Result<(String, CliClaims)> {
@@ -481,6 +530,52 @@ mod tests {
         let (cli, _) = j.mint_cli("a@b.c", "A", Some("a")).unwrap();
         assert!(j.verify_bench_tool(&bench).is_err());
         assert!(j.verify_bench_tool(&cli).is_err());
+    }
+
+    #[test]
+    fn a_workspace_tool_token_round_trips_and_lives_a_day() {
+        let j = jwt();
+        let (tok, c) = j.mint_workspace_tool("alice", "acme").unwrap();
+        assert_eq!(c.exp - c.iat, WORKSPACE_TOOL_TTL_SECS);
+        let back = j.verify_workspace_tool(&tok).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(
+            (back.sub.as_str(), back.space.as_str(), back.typ.as_str()),
+            ("alice", "acme", "workspace-tool")
+        );
+        assert_eq!(back.jti.len(), 32);
+    }
+
+    #[test]
+    fn a_workspace_tool_token_is_neither_a_user_nor_a_bench_tool() {
+        let j = jwt();
+        let (tok, _) = j.mint_workspace_tool("alice", "acme").unwrap();
+        assert!(j.verify(&tok).is_err());
+        assert!(j.verify_any_user(&tok).is_err());
+        assert!(j.verify_bench_tool(&tok).is_err());
+        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p").unwrap();
+        assert!(j.verify_workspace_tool(&bench).is_err());
+    }
+
+    /// The expiry probe is what lets a refusal say `expired` — and it must not claim any other
+    /// kind of token, or a live session would be logged as a dead workspace token.
+    #[test]
+    fn an_expired_workspace_tool_token_is_recognised_and_nothing_else_is() {
+        let j = jwt();
+        let (live, _) = j.mint_workspace_tool("alice", "acme").unwrap();
+        assert!(j.expired_workspace_tool(&live).is_none());
+        let stale = encode(&Header::new(Algorithm::HS256), &WorkspaceToolClaims {
+            sub: "alice".into(),
+            space: "acme".into(),
+            jti: "0".repeat(32),
+            iat: 1,
+            exp: 2,
+            typ: "workspace-tool".into(),
+        }, &j.encoding).unwrap();
+        assert_eq!(j.expired_workspace_tool(&stale).unwrap().sub, "alice");
+        assert!(j.verify_workspace_tool(&stale).is_err());
+        let (cli, _) = j.mint_cli("a@b.c", "A", Some("a")).unwrap();
+        assert!(j.expired_workspace_tool(&cli).is_none());
     }
 
     #[test]

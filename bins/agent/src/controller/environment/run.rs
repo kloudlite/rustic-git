@@ -42,6 +42,7 @@ pub(crate) async fn run_environment(
         default_image: &ctx.default_image,
         system: e.spec.system.as_deref(),
         registry_host: &ctx.registry_host,
+        api_url: &ctx.api_url,
     };
     ensure_mounts(&id, &wt, &e.spec.services, ctx).await?;
     if let Some(action) = capacity_gate(e, deployments, &prev, gen, ctx).await? {

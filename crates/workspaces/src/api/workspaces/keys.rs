@@ -1,4 +1,5 @@
-//! The `user-key` Secret a workspace pod mounts — platform key, git identity, registry token —
+//! The `user-key` Secret a workspace pod mounts — platform key, git identity, registry and
+//! workspace tokens —
 //! written once the workspace is placed and re-projected on every key change and resync beat.
 
 use super::*;
@@ -99,6 +100,41 @@ pub(crate) async fn refresh_user_key_secrets(s: &ApiState, owner: &str) {
 }
 
 
+/// The space (the team slug, or the owner's own handle for their personal space) a workspace
+/// namespace belongs to.
+///
+/// `ws_namespace` HASHES the team into the name, so a team namespace cannot be read back from its
+/// own name — the personal one is computed, and a team one is recovered from an object that lives
+/// there. `None` when nothing does, which is a namespace the prune beat is about to delete.
+async fn space_of(c: &kube::Client, ns: &str, owner: &str) -> Option<String> {
+    if ns == crd::ws_namespace(owner, "") {
+        return Some(owner.to_lowercase());
+    }
+    let sel = ListParams::default().labels(&format!("{}={owner}", crate::k8s::OWNER_LABEL));
+    let from_ws = Api::<crd::Workspace>::all(c.clone())
+        .list(&sel)
+        .await
+        .ok()?
+        .items
+        .into_iter()
+        .map(|w| w.spec.team)
+        .find(|t| crd::ws_namespace(owner, t) == ns);
+    if from_ws.is_some() {
+        return from_ws.map(|t| t.to_lowercase());
+    }
+    // A space can hold a bench and no workspace: the beat projects keys for those owners too.
+    Api::<crd::Bench>::all(c.clone())
+        .list(&sel)
+        .await
+        .ok()?
+        .items
+        .into_iter()
+        .map(|b| b.spec.team)
+        .find(|t| crd::ws_namespace(owner, t) == ns)
+        .map(|t| t.to_lowercase())
+}
+
+
 pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
     let Some(store) = &s.keys else { return };
     let private = match store.user_key(owner).await {
@@ -136,7 +172,25 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
             return;
         }
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token);
+    // The pod's own platform credential, scoped to the SPACE the namespace belongs to — the token
+    // covers the owner's workspaces there, because `user-key` is per owner namespace and nothing
+    // finer would survive a beat that rewrites one Secret for every workspace in it.
+    let workspace_token = match space_of(c, ns, owner).await {
+        Some(space) => match s.jwt.mint_workspace_tool(owner, &space) {
+            Ok(t) => t.0,
+            Err(e) => {
+                tracing::warn!(%owner, error = %e, "workspace-token.mint.failed");
+                return;
+            }
+        },
+        // Fail closed rather than guess a space: an empty item is a credential `/v1` refuses,
+        // where a wrong one would be a token refused on every route with a confusing reason.
+        None => {
+            tracing::warn!(%owner, %ns, "workspace-token.space.unknown");
+            String::new()
+        }
+    };
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &workspace_token);
     for attempt in 1u32.. {
         let Err(e) = api
             .patch(

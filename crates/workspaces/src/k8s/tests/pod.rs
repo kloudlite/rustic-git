@@ -106,7 +106,7 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
         git_name: "Alice \"Al\" Liddell".into(),
         git_email: "alice@example.com".into(),
     };
-    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN");
+    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN", "WSTOKEN");
     let data = s.string_data.unwrap();
     assert_eq!(data["id_ed25519"], "PRIVATE");
     // Who may ssh in is `OwnerKeys` now; this entry only keeps an old agent's pods working
@@ -115,6 +115,8 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
     // A quote in a name must not end git's string early.
     assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
     assert_eq!(data["registry-token"], "TOKEN");
+    // The credential `kl` acts under from inside the pod, beside the one docker reads.
+    assert_eq!(data["workspace-token"], "WSTOKEN");
 }
 
 
@@ -166,7 +168,7 @@ pub(crate) fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
     );
 
     // Unset means the host kernel, not a broken pod.
-    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io" };
+    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io" };
     assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None).unwrap().spec.unwrap().runtime_class_name.is_none());
 }
 
@@ -413,9 +415,19 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
 
 #[test]
 pub(crate) fn the_login_env_redirects_every_cache_and_pins_histfile_local() {
-    let env = login_env("ws-1", "acme", "registry.kloudlite.io");
+    let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io");
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
     assert_eq!(get("HISTFILE"), format!("{HOME_STATE_DIR}/shell_history"));
+    // What `kl` addresses `/v1` with from inside the pod: the CR name (never the person's name
+    // for it), the SPACE (personal folds to the handle) and the api base.
+    assert_eq!(get("KL_WORKSPACE_ID"), "w-abc123");
+    assert_eq!(get("KL_WORKSPACE_NAME"), "ws-1");
+    assert_eq!(get("KL_TEAM"), "acme");
+    assert_eq!(get("KL_API_URL"), "https://api.kloudlite.io");
+    let team = login_env("w-abc123", "ws-1", "alice", "acme", "registry.kloudlite.io", "");
+    assert_eq!(team.iter().find(|e| e.name == "KL_TEAM").unwrap().value.as_deref(), Some("acme"));
+    // Unset, not empty, without `WS_API_URL`: `kl` fails closed rather than dialling an empty host.
+    assert!(!team.iter().any(|e| e.name == "KL_API_URL"), "an empty api url must leave the var unset");
     // Every cache lives WITH the workspace, under `{ws}/.cache/`, so a clone or a restore arrives
     // warm — and never at a tool's own `./target`, which a repository may version.
     let ws = workspace_dir("ws-1");
@@ -531,10 +543,10 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert_eq!(ak.sub_path, None);
     assert_eq!(ak.read_only, Some(true));
     // Where sshd is told to look has to be where the mount actually puts it.
-    assert!(sshd_config("dev", "acme", "registry.kloudlite.io").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
+    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
     // The mount's parent directories are the node's, not `kl`'s; without this every key is
     // refused as "bad ownership or modes".
-    assert!(sshd_config("dev", "acme", "registry.kloudlite.io").contains("StrictModes no\n"));
+    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io").contains("StrictModes no\n"));
     // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
     let prelude = &cmd[2];
     // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
@@ -599,7 +611,7 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
     // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
     // so the profile's PATH has to come from sshd itself.
-    let cfg = sshd_config("dev", "acme", "registry.kloudlite.io");
+    let cfg = sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io");
     // Exactly one SetEnv line, carrying every variable: sshd ignores a second one.
     assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
     let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
@@ -655,7 +667,7 @@ pub(crate) fn a_custom_image_keeps_its_entrypoint_and_gets_no_sshd() {
 /// The host key Secret is per workspace and dies with it — a clone gets its own.
 #[test]
 pub(crate) fn a_workspaces_host_key_lives_and_dies_with_it() {
-    let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws", "registry.kloudlite.io");
+    let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", "", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws", "registry.kloudlite.io", "https://api.kloudlite.io");
     assert_eq!(s.metadata.name.as_deref(), Some("ws-ssh-ws-1"));
     assert_eq!(s.metadata.namespace.as_deref(), Some("ws-alice"));
     assert_eq!(s.metadata.owner_references.unwrap()[0].controller, Some(true));
@@ -708,6 +720,7 @@ pub(crate) fn workspace_pod_refuses_a_name_that_is_not_a_name() {
         default_image: "img:1",
         system: None,
         registry_host: "registry.kloudlite.io",
+        api_url: "https://api.kloudlite.io",
     };
     for hostile in ["../../etc", "a; touch /pwned", "", "..", "x'\nchown 0 /", &"n".repeat(64)] {
         let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
@@ -759,6 +772,7 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
         default_image: "img:1",
         system: None,
         registry_host: "registry.kloudlite.io",
+        api_url: "https://api.kloudlite.io",
     };
     let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
         "owner": "alice", "team": "", "name": "my-ws", "region": "r1",

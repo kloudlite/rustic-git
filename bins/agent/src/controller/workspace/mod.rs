@@ -338,6 +338,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         // A workspace pod is never the builder — that shape exists only on an Environment.
         system: None,
         registry_host: &ctx.registry_host,
+        api_url: &ctx.api_url,
     };
     // The space's environment, resolved and converged before the pod: resolv.conf in place, the
     // namespace-level grant, the legacy per-pod grant collected (`controller::space`).
