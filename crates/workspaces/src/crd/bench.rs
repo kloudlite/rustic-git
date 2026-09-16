@@ -35,6 +35,7 @@ pub struct BenchSpec {
     /// `Full` for a member; `Paused` while the owner may not use it (no pod). Written only by the
     /// api's reconcile beat.
     #[serde(default)]
+    #[schemars(schema_with = "access_schema")]
     pub access: BenchAccess,
     /// RFC 3339, written by /v1 when a client asks for a tunnel to an idle bench. A pod is wanted
     /// again only while this is later than `status.idleSince`.
@@ -56,6 +57,30 @@ pub enum BenchAccess {
     /// `readOnly` is the retired departed state; stored objects still carry it and parse as this.
     #[serde(alias = "readOnly")]
     Paused,
+}
+
+
+/// The PUBLISHED schema carries a third value the Rust type does not: `readOnly`, the retired
+/// departed state. `serde(alias)` fixes the READER, but the API server validates the whole object
+/// on every write — a `/status` patch included — so a stored Bench still carrying `readOnly` would
+/// be rejected and wedge; it must stay writable until every region is confirmed to hold none, and
+/// then this goes. Deliberately NOT a third Rust variant: every reader compares against
+/// `Full`/`Paused`, and a new arm is one more place for a value to fall through to "full".
+/// The value list is read off the derived schema rather than hand-written, so a variant added to
+/// `BenchAccess` still publishes; the flattening to one `enum` is what kube does to schemars'
+/// per-variant `oneOf` anyway, so the published shape is unchanged apart from the extra value.
+pub(super) fn access_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let derived = <BenchAccess as JsonSchema>::json_schema(generator);
+    let branches = derived.get("oneOf").and_then(serde_json::Value::as_array).expect("a unit-variant enum");
+    let mut values: Vec<serde_json::Value> = branches
+        .iter()
+        .map(|b| match (b.get("const"), b.get("enum").and_then(|e| e.as_array()).and_then(|e| e.first())) {
+            (Some(v), _) | (None, Some(v)) => v.clone(),
+            _ => panic!("a unit-variant enum branch names one value"),
+        })
+        .collect();
+    values.push("readOnly".into());
+    serde_json::from_value(serde_json::json!({"type": "string", "enum": values})).expect("static schema literal")
 }
 
 
@@ -138,6 +163,8 @@ mod tests {
 
     #[test]
     fn a_stored_readonly_bench_parses_as_paused() {
+        let schema = serde_json::to_value(access_schema(&mut schemars::SchemaGenerator::default())).unwrap();
+        assert_eq!(schema["enum"], serde_json::json!(["full", "paused", "readOnly"]), "the legacy value stays writable");
         let v = serde_json::json!({"owner":"alice","team":"acme","image":"i","desiredState":"running","access":"readOnly"});
         let s: BenchSpec = serde_json::from_value(v).unwrap();
         assert_eq!(s.access, BenchAccess::Paused);

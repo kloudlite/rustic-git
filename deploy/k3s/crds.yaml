@@ -2578,12 +2578,6 @@
                   "spec": {
                     "properties": {
                       "access": {
-                        # "readOnly" is kept as a stored-value migration: serde(alias = "readOnly")
-                        # in crates/workspaces/src/crd/bench.rs maps it to Paused on read, but
-                        # schema validation runs on every write of the whole object, so a Bench
-                        # still carrying it would reject the agent's next status patch and wedge.
-                        # k3s has no stored Bench with this value today; drop it once every region
-                        # is confirmed clear.
                         "default": "full",
                         "description": "`Full` for a member; `Paused` while the owner may not use it (no pod). Written only by the\napi's reconcile beat.",
                         "enum": [
