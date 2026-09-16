@@ -34,43 +34,42 @@ function parseResize(d: Buffer | ArrayBuffer | Buffer[]): Resize | undefined {
 }
 
 /**
- * The first frame a client sends is a resize, so the shell never starts at 80x24
- * and reflows; a client that sends none gets the default rather than a hang.
- * Frames that arrived in the same TCP chunk as the resize are replayed on the
- * next-but-one tick, after the caller has attached its own handler.
- * ponytail: a caller that attaches its handler later than one setImmediate (a
- * slow resolve, not a keystroke on an open socket) loses those frames; give it a
- * real buffer if that ever bites.
+ * Frames are HELD from the upgrade until the shell is attached: the first text frame that parses
+ * as a resize answers `first` (or the default after `timeoutMs`), and everything — the resize's
+ * TCP-chunk neighbours, the bytes a probe types straight after it, a second resize — stays in
+ * `pending` until `release()` re-emits it, synchronously, to whatever handlers are attached by
+ * then. Re-emitting on a timer instead lost every byte typed before a slow workspace resolve
+ * (2026-09-16 `bench.shell.workspace`: the prompt arrived, the command never did, 30 s timeout).
  */
-export function readFirstResize(w: WebSocket, timeoutMs: number): Promise<Resize> {
-  return new Promise((resolve) => {
-    const pending: [Buffer, boolean][] = [];
-    let done = false;
-    const finish = (r: Resize) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      setImmediate(() => {
-        w.off("message", onMessage);
-        resolve(r);
-        setImmediate(() => {
-          for (const [d, binary] of pending) w.emit("message", d, binary);
-        });
-      });
-    };
-    const onMessage = (d: Buffer, binary: boolean) => {
-      if (done) return void pending.push([d, binary]);
-      const r = binary ? undefined : parseResize(d);
-      if (r) finish(r);
-      else pending.push([d, binary]);
-    };
-    const timer = setTimeout(() => finish({ cols: 80, rows: 24 }), timeoutMs);
-    w.on("message", onMessage);
-    w.once("close", () => {
-      done = true;
-      clearTimeout(timer);
-    });
+export function holdFrames(w: WebSocket, timeoutMs: number): { first: Promise<Resize>; release(): void } {
+  const pending: [Buffer, boolean][] = [];
+  let resolveFirst!: (r: Resize) => void;
+  let answered = false;
+  const answer = (r: Resize) => {
+    if (answered) return;
+    answered = true;
+    clearTimeout(timer);
+    resolveFirst(r);
+  };
+  const first = new Promise<Resize>((res) => (resolveFirst = res));
+  const onMessage = (d: Buffer, binary: boolean) => {
+    const r = binary || answered ? undefined : parseResize(d);
+    if (r) return answer(r);
+    pending.push([d, binary]);
+  };
+  const timer = setTimeout(() => answer({ cols: 80, rows: 24 }), timeoutMs);
+  w.on("message", onMessage);
+  w.once("close", () => {
+    clearTimeout(timer);
+    w.off("message", onMessage);
   });
+  return {
+    first,
+    release() {
+      w.off("message", onMessage);
+      for (const [d, binary] of pending.splice(0)) w.emit("message", d, binary);
+    },
+  };
 }
 
 /** A login shell on the bench itself, cwd $HOME. */

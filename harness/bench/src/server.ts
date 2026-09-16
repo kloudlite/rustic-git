@@ -2,7 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
-import { attachBenchShell, readFirstResize, spliceWorkspaceShell } from "./pty.ts";
+import { attachBenchShell, holdFrames, spliceWorkspaceShell } from "./pty.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -148,14 +148,23 @@ export function serve(
       w.on("error", () => undefined);
       if (scope !== undefined) {
         // 80x24 is the fallback, never the shell a client that spoke gets.
-        void readFirstResize(w, 2_000).then((first) =>
-          scope === "bench"
-            ? attachBenchShell(w, process.env, first)
-            : resolveTools(scope!).then(
-                (a) => spliceWorkspaceShell(w, a, first),
-                (e: Error) => (w.send(JSON.stringify({ error: e.message })), w.close()),
-              ),
-        );
+        const held = holdFrames(w, 2_000);
+        void held.first.then((first) => {
+          if (scope === "bench") {
+            attachBenchShell(w, process.env, first);
+            return held.release();
+          }
+          return resolveTools(scope!).then(
+            (a) => {
+              spliceWorkspaceShell(w, a, first);
+              held.release();
+            },
+            (e: Error) => {
+              w.send(JSON.stringify({ error: e.message }));
+              w.close();
+            },
+          );
+        });
         return;
       }
       if (!rpc) {

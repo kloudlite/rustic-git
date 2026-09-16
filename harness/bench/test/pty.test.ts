@@ -147,3 +147,34 @@ test("workspace scope: a resolve failure is one error frame and a close", async 
     await t.down();
   }
 });
+
+test("bytes typed right after the resize survive a slow workspace resolve", async () => {
+  // A fake tool server that echoes what it receives; the resolve takes 300 ms, longer than any
+  // tick — exactly the window that lost the probe's command on 2026-09-16.
+  const tool = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  tool.on("connection", (up) => {
+    up.on("message", (d: Buffer, binary: boolean) => {
+      if (!binary) return;
+      up.send(Buffer.from("got:" + d.toString("utf8")), { binary: true });
+      up.send(JSON.stringify({ exit: 0 }));
+      up.close();
+    });
+  });
+  await new Promise<void>((r) => tool.once("listening", () => r()));
+  const addr = `127.0.0.1:${(tool.address() as { port: number }).port}`;
+  const t = await up(() => new Promise((r) => setTimeout(() => r(addr), 300)));
+  try {
+    const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
+    const out = collect(w);
+    const closed = new Promise<void>((r) => w.once("close", () => r()));
+    await opened(w);
+    resize(w, 100, 30);
+    bin(w, "pwd\n");
+    await closed;
+    assert.equal(out.text, "got:pwd\n");
+    assert.deepEqual(out.json, [{ exit: 0 }]);
+  } finally {
+    await t.down();
+    tool.close();
+  }
+});
