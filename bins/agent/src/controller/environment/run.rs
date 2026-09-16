@@ -194,9 +194,8 @@ async fn ensure_fabric(
         if e.spec.system.as_deref() == Some(crd::BUILDER_SYSTEM) {
             ensure(&policies, &k8s::builder_gate_ingress(ns, &e.spec.owner, owner_ref), ctx).await?;
         }
-        // An environment's services are the likeliest place a private image appears, so this namespace
-        // needs the same scoped grant a workspace namespace gets — the API writes the pull credential
-        // here, and nowhere it has not been vouched for.
+        // This namespace needs the same scoped grant a workspace namespace gets — the API writes
+        // its Secrets here, and nowhere it has not been vouched for.
         ensure(
             &Api::<RoleBinding>::namespaced(ctx.client.clone(), ns),
             &k8s::api_secret_binding(ns, &e.spec.owner, API_SERVICE_ACCOUNT, API_NAMESPACE, None),

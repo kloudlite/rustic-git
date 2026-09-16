@@ -1,6 +1,6 @@
 //! Per-owner and per-environment namespaces and what caps them: the `LimitRange` (one slot per
 //! container), the `ResourceQuota` (the namespace's total), and the RoleBindings that let the api
-//! write its pull credential there. The env unit — one service's request and limit — lives here
+//! write its Secrets there. The env unit — one service's request and limit — lives here
 //! because the LimitRange and the StatefulSets must agree on it.
 
 use super::*;

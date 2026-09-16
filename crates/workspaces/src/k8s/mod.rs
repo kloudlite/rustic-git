@@ -29,7 +29,7 @@ use crate::model;
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, EnvVar, HostPathVolumeSource, LimitRange, LimitRangeItem, LimitRangeSpec, Probe, TCPSocketAction,
-    KeyToPath, LocalObjectReference, Namespace, ResourceQuota, ResourceQuotaSpec, SeccompProfile, Pod,
+    KeyToPath, Namespace, ResourceQuota, ResourceQuotaSpec, SeccompProfile, Pod,
     PodSpec, PodTemplateSpec, ResourceRequirements, Secret, SecretVolumeSource,
     SecurityContext, Service as CoreService,
     ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,

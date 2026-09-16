@@ -13,6 +13,11 @@
 
 /// `/etc/zshrc`: the platform's half of an interactive zsh in a workspace pod.
 /// The person's own `~/.config/zsh/.zshrc` (see `seed_zshrc`) runs after and wins.
+///
+/// zsh saves NO history without `SAVEHIST` — the default is 0, so every shell in a workspace
+/// started blank however long the person had been in it. `HISTFILE` itself is pod env
+/// (`k8s/workspace.rs`), on the per-node local state dir; written incrementally and shared so a
+/// second exec or a pod kill does not lose what was typed in the first.
 pub const ZSHRC: &str = "\
 [[ -o interactive ]] || return 0
 [ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"
@@ -20,6 +25,9 @@ pub const ZSHRC: &str = "\
 mkdir -p \"${XDG_CACHE_HOME:-$HOME/.cache}/zsh\"
 autoload -Uz compinit && compinit -d \"${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump\"
 zstyle \":completion:*\" menu select
+HISTSIZE=50000
+SAVEHIST=50000
+setopt appendhistory incappendhistory sharehistory histignorealldups histignorespace
 [ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh
 ";
 

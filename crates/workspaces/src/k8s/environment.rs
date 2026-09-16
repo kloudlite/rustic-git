@@ -110,9 +110,10 @@ pub fn service_statefulset(
         }],
         // Volume root, environment leaf — the same split a workspace clone's mount uses.
         volumes: Some(vec![live_worktree_volume(ctx.pool, volume, env_id)]),
-        // An environment's services are the likeliest place a private image appears — they are
-        // whatever the user named, not our default.
-        image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
+        // No `imagePullSecrets`: nothing has ever created the `registry-pull` Secret these named,
+        // so every pod start logged `FailedToRetrieveImagePullSecret` for a credential that did not
+        // exist. Our images are public (ghcr.io/kloudlite/*); a private image needs a Secret AND a
+        // writer for it, and neither is here.
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };

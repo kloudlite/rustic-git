@@ -52,14 +52,18 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
 
   onMount(() => {
     term = new Terminal({
-      fontFamily: "Lilex, ui-monospace, Menlo, monospace",
-      fontSize: 12,
-      lineHeight: 1.45,
-      cursorBlink: false,
-      cursorStyle: "block",
+      fontFamily: "Menlo, 'SF Mono', Monaco, 'Lilex', ui-monospace, monospace",
+      fontSize: 13,
+      lineHeight: 1.2,
+      letterSpacing: 0,
+      cursorBlink: true,
+      cursorStyle: "bar",
       convertEol: true,
+      macOptionIsMeta: true,
       theme: palette(),
-      scrollback: 5000,
+      scrollback: 10000,
+      smoothScrollDuration: 0,
+      // No `fastScrollModifier`: xterm 6 dropped the option (alt-scroll is built in).
     });
     fit = new FitAddon();
     term.loadAddon(fit);
@@ -90,7 +94,6 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     const end = (code: number | undefined, error?: string) => {
       if (exited) return;
       exited = true;
-      flush(); // whatever the shell said last, before the epitaph
       term.write(code === undefined ? `\r\n\x1b[2m[${error ?? "disconnected"} — reopen the shell]\x1b[0m` : `\r\n\x1b[2m[process exited with code ${code}]\x1b[0m`);
       props.onExited?.(props.tab.id);
     };
@@ -101,31 +104,14 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     term.onData((d) => window.harness.pty.write(props.tab.id, enc.encode(d)));
     term.onResize(({ cols, rows }) => window.harness.pty.resize(props.tab.id, cols, rows));
 
-    // One write per frame, not per IPC frame: a keystroke echo plus its redraw
-    // arrive as several small chunks and each write() is a repaint.
-    let pending: Uint8Array[] = [];
-    let frame: number | undefined;
-    const flush = () => {
-      frame = undefined;
-      if (!pending.length) return;
-      const n = pending.reduce((t, c) => t + c.length, 0);
-      const buf = new Uint8Array(n);
-      let at = 0;
-      for (const c of pending) {
-        buf.set(c, at);
-        at += c.length;
-      }
-      pending = [];
-      term.write(buf);
-    };
-    const offData = window.harness.pty.onData((id, data) => {
-      if (id !== props.tab.id) return;
-      pending.push(data);
-      frame ??= requestAnimationFrame(flush);
-    });
+    // Straight through: xterm.js already batches writes into its own render
+    // frame. Coalescing them ourselves split zsh's erase-and-redraw across two
+    // frames, which the owner saw as flicker on backspace.
+    const offData = window.harness.pty.onData((id, data) => id === props.tab.id && term.write(data));
     const offExit = window.harness.pty.onExit((id, code, error) => id === props.tab.id && end(code, error));
     // Enter on a dead shell closes the tab: the same key that would have run
     // the next command, since there is nothing left to run it.
+    term.onBell(() => {}); // a PTY bell is not this app's notification channel
     term.onKey(({ domEvent }) => exited && domEvent.key === "Enter" && props.onClose?.());
 
     // Debounced: a drag resizes continuously, and every fit is a reflow plus a
@@ -138,7 +124,6 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     ro.observe(host);
     onCleanup(() => {
       clearTimeout(refit);
-      if (frame !== undefined) cancelAnimationFrame(frame);
       ro.disconnect();
       offData();
       offExit();

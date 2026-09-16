@@ -1,15 +1,9 @@
 //! The per-workspace Secrets: the owner's platform key, git identity, registry token and
-//! workspace token (`user-key`), the pull credential, and the sshd host key with the sshd_config that names them.
+//! workspace token (`user-key`), and the sshd host key with the sshd_config that names them.
 //! Nothing here is long-lived — every value is re-projected on the keys beat.
 
 use super::*;
 
-
-/// The Secret name a namespace's pods pull private images with.
-///
-/// Fixed per namespace rather than per pod: a pull credential is scoped to the OWNER, not to one
-/// workload, and one Secret per pod would be N copies of the same token to rotate.
-pub const PULL_SECRET: &str = "registry-pull";
 
 
 /// The Secret holding the owner's platform-issued git key, one per workspace namespace.

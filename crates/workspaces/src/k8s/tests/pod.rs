@@ -284,18 +284,15 @@ pub(crate) fn a_workspace_pod_carries_the_owners_platform_key() {
 }
 
 
-/// A private image has to be pullable in the namespace the pod runs in. The kubelet ignores a
-/// named pull secret that does not exist, so referencing it unconditionally costs nothing for a
-/// public image and means a namespace given a credential just works.
+/// A pull secret nothing creates is a kubelet warning on every pod start, not a feature: our
+/// images are public, and a private one needs a Secret with a writer behind it.
 #[test]
-pub(crate) fn tenant_pods_reference_the_namespace_pull_secret() {
+pub(crate) fn tenant_pods_name_no_pull_secret() {
     let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
-    let refs = p.spec.unwrap().image_pull_secrets.unwrap();
-    assert_eq!(refs[0].name, PULL_SECRET);
+    assert!(p.spec.unwrap().image_pull_secrets.is_none());
 
     let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
-    let refs = d.spec.unwrap().template.spec.unwrap().image_pull_secrets.unwrap();
-    assert_eq!(refs[0].name, PULL_SECRET, "an env's services are where private images show up");
+    assert!(d.spec.unwrap().template.spec.unwrap().image_pull_secrets.is_none());
 }
 
 

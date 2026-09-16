@@ -670,9 +670,8 @@ pub fn workspace_pod(
             v
         }),
         init_containers: init.map(|c| vec![c]),
-        // Optional by design: the kubelet ignores a named pull secret that does not exist, so a
-        // public image keeps working in a namespace that has never been given a credential.
-        image_pull_secrets: Some(vec![LocalObjectReference { name: PULL_SECRET.to_string() }]),
+        // No `imagePullSecrets`: see `environment.rs` — the Secret they named has no writer, and
+        // the kubelet warned on every pod start for it.
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),
