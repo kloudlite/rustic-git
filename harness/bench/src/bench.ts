@@ -232,6 +232,10 @@ export class Bench {
    * workspace in the queue and it need to be processed there"). The workspace's OWN session does
    * it — created here if it has none — so the work happens where the hands and the history are,
    * and is visible in that workspace's tab rather than hidden inside the asking session.
+   *
+   * ponytail: one outstanding ask per workspace and no deadline — a second is refused naming the
+   * first, and a turn that never ends leaves the exchange `running` forever. The upgrade is a
+   * queue per workspace session and a deadline that fails the exchange and says so to the asker.
    */
   async ask(workspace: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string }> {
     this.refuse(true);

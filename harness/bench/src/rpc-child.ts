@@ -53,8 +53,9 @@ export class RpcChild {
     // built-in read/write/bash away and background.ts/process.ts are not loaded, because a bench
     // session has no hands in the bench pod at all (owner, 2026-09-17) — work for a workspace is
     // queued into that workspace's own session instead.
-    // The btw fork answers one question from the transcript it forked: `--no-tools`, no extensions.
-    const exts = o.fork ? [] : (o.tools ? ["workspace-tools.ts", "kloudlite.ts"] : ["kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
+    // The btw fork answers one question from the transcript it forked: `--no-tools`, and
+    // `kloudlite.ts` loaded in fork mode purely so it is told what it is and registers nothing.
+    const exts = (o.fork ? ["kloudlite.ts"] : o.tools ? ["workspace-tools.ts", "kloudlite.ts"] : ["kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
     const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : []), ...(o.fork || o.tools ? [] : ["--no-builtin-tools"])];
     // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
     // The trace of the request that started this child; every tool call of its life joins it.
@@ -62,7 +63,7 @@ export class RpcChild {
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
     // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
-    const env = { ...process.env, KL_SESSION: this.id, ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork ? { KL_FORK: "1" } : {}), ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

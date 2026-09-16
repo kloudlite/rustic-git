@@ -54,6 +54,20 @@ const answer = async (method: string, p: string, body?: unknown) => {
   if (status >= 400) return { ...text(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`), isError: true };
   return text(data ?? `${status} ok`);
 };
+/**
+ * A service as `/v1` takes it. `command`, `env` and `mounts` have no serde default on the api
+ * side, so an omitted one is a 422 rather than an empty list — `service()` fills them in.
+ */
+const SERVICE = Type.Object({
+  name: Type.String(),
+  image: Type.String(),
+  command: Type.Optional(Type.Array(Type.String(), { description: "overrides the image's entrypoint command" })),
+  env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "environment variables" })),
+  mounts: Type.Optional(Type.Array(Type.Object({ folder: Type.String({ description: "one safe segment of the environment's own volume" }), path: Type.String({ description: "where it is mounted in the container" }) }))),
+  ports: Type.Optional(Type.Array(Type.Number(), { description: "container ports siblings reach it on by name" })),
+});
+const service = (s: Record<string, any>) => ({ name: s.name, image: s.image, command: s.command ?? [], env: s.env ?? {}, mounts: s.mounts ?? [], ports: s.ports ?? [] });
+
 const q = (o: Record<string, string | undefined>) => {
   const s = new URLSearchParams(Object.entries(o).filter(([, v]) => v) as [string, string][]).toString();
   return s ? `?${s}` : "";
@@ -99,8 +113,8 @@ export const BENCH_HANDS = [
 /**
  * Registering one tool from the catalogue: the description a person reads is the
  * description the model gets, and a call that hands work to a workspace or an
- * environment is published as an exchange. `workspaces.ts` registers its
- * `kl_ws_*` tools through this too, so there is one shape for all of them.
+ * environment is published as an exchange, which is what the workspace's own
+ * queue and the session's queue both read.
  */
 export function makeReg(pi: ExtensionAPI) {
   const spec = (name: string) => TOOLS.find((t) => t.name === name)!;
@@ -116,7 +130,7 @@ export function makeReg(pi: ExtensionAPI) {
         // A call that hands work to a workspace or environment is an exchange:
         // harness-bench records it in the bench's one log, where the session's
         // queue and the workspace's queue both read it.
-        const target = /^kl_(ws|workspace|environment)_/.test(name) ? String(args.workspace ?? args.id ?? args.name ?? "") : "";
+        const target = /^kl_(workspace|environment)_/.test(name) ? String(args.workspace ?? args.id ?? args.name ?? "") : "";
         const publish = (v: unknown) => target && ctx?.ui?.setWidget("harness:exchange", [JSON.stringify(v)]);
         const id = `x-${toolCallId}`;
         publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
@@ -217,13 +231,8 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
   reg(
     "kl_environment_create",
-    {
-      name: S("environment name"),
-      region: S("region id"),
-      owner: O(S("team slug; absent = personal")),
-      services: Type.Array(Type.Object({ name: Type.String(), image: Type.String(), ports: O(Type.Array(Type.Number())) }), { description: "services to run" }),
-    },
-    (a) => answer("POST", "/v1/environments", { name: a.name, region: a.region, owner: a.owner, services: a.services }),
+    { name: S("environment name"), region: S("region id"), owner: O(S("team slug; absent = personal")), services: Type.Array(SERVICE, { description: "services to run" }) },
+    (a) => answer("POST", "/v1/environments", { name: a.name, region: a.region, owner: a.owner, services: a.services.map(service) }),
   );
   reg("kl_environment_start", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/start`));
   reg("kl_environment_stop", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/stop`));
@@ -239,13 +248,31 @@ export function tools(pi: ExtensionAPI) {
     },
     (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
   );
-  // The whole list, merge-patched: removals take their StatefulSet with them, so this is a write
-  // a person would want to have seen. Bytes stay on the volume.
-  reg("kl_environment_services", { id: S("environment id"), services: Type.Array(Type.Object({ name: Type.String(), image: Type.String(), ports: O(Type.Array(Type.Number())) }), { description: "the WHOLE services list; a service missing from it is removed" }) }, (a) => answer("PATCH", `/v1/environments/${a.id}`, { services: a.services }));
+  // PATCH takes the WHOLE list, so both of these read the environment first and pass every service
+  // they are not changing through VERBATIM. A tool that took "the list" and rebuilt each row from
+  // a narrower schema would silently drop a service's command, env or mounts — the model cannot
+  // see what it did not ask for. Removals take their StatefulSet with them; bytes stay on the volume.
+  const services = async (id: string): Promise<Record<string, any>[]> => {
+    const { status, data } = await call("GET", `/v1/environments/${encodeURIComponent(id)}`);
+    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+    return ((data as { services?: Record<string, any>[] } | null)?.services ?? []).slice();
+  };
+  const withServices = (id: string, next: Record<string, any>[]) => answer("PATCH", `/v1/environments/${encodeURIComponent(id)}`, { services: next });
+  reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a) => {
+    const have = await services(a.id);
+    const one = service(a.service);
+    return withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
+  });
+  reg("kl_environment_service_rm", { id: S("environment id"), name: S("the service to remove") }, async (a) => {
+    const have = await services(a.id);
+    const next = have.filter((s) => s.name !== a.name);
+    if (next.length === have.length) return { ...text(`${a.id} has no service ${a.name}`), isError: true };
+    return withServices(a.id, next);
+  });
   reg(
     "kl_environment_restore",
-    { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(Type.Object({ name: Type.String(), image: Type.String(), ports: O(Type.Array(Type.Number())) }), { description: "override the services the snapshot froze" })) },
-    (a) => answer("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services }),
+    { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(SERVICE, { description: "override the services the snapshot froze" })) },
+    (a) => answer("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services?.map(service) }),
   );
   reg("kl_environment_restore_in_place", { id: S("environment id"), snapshot_id: S("snapshot id of this environment's own volume") }, (a) => answer("POST", `/v1/environments/${a.id}/restore-in-place`, { snapshot_id: a.snapshot_id }));
   reg("kl_environment_delete", { id: S("environment id") }, (a) => answer("DELETE", `/v1/environments/${a.id}`));
@@ -286,6 +313,9 @@ export function tools(pi: ExtensionAPI) {
  * about somebody else. A BENCH session gets the platform, and asks.
  */
 export default function (pi: ExtensionAPI) {
+  // A `btw` fork runs `--no-tools` over a copy of a session's transcript. It registers nothing —
+  // it is loaded ONLY so it is told what it is, like every other session (owner, 2026-09-17).
+  if (process.env.KL_FORK === "1") return tellItWhereItStands(pi, "You answer one question about this bench's work, from the transcript you were forked from. You have no tools: you can change nothing, and you cannot look anything up — answer from what is in front of you, or say it is not there.");
   const inWorkspace = process.env.KL_TOOLS_WORKSPACE;
   if (inWorkspace) return ownTools(pi, inWorkspace, undefined);
   tools(pi);

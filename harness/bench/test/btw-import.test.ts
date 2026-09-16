@@ -31,7 +31,8 @@ test("btw answers from a fork, is kept under btw/, and its child is gone", async
     const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
     assert.ok(argv.includes("--no-tools"), argv.join(" "));
     assert.equal(argv.indexOf("--tools"), -1);
-    assert.deepEqual(argv.filter((_, i) => argv[i - 1] === "-e"), []);
+    // Loaded only so the fork is told what it is; `--no-tools` means it registers nothing.
+    assert.deepEqual(argv.filter((_, i) => argv[i - 1] === "-e").map((x) => path.basename(x)), ["kloudlite.ts"]);
   } finally {
     await b.stop();
   }

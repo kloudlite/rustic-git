@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
 import kloudlite, { identity, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import http from "node:http";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
@@ -105,6 +106,61 @@ test("an ask opens the workspace's own session, queues there, and the answer com
   } finally {
     await srv.close();
     await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a btw fork registers nothing and is still told what it is", async () => {
+  const restore = withEnv({ KL_FORK: "1", KL_TOOLS_WORKSPACE: undefined, KL_WORKSPACE_ID: undefined });
+  try {
+    const { pi, tools, hooks } = fakePi();
+    kloudlite(pi);
+    assert.deepEqual(tools, []);
+    const prompt = (await hooks["before_agent_start"][0]({})).systemPrompt as string;
+    assert.doesNotMatch(prompt, /\bpi\b/i);
+    assert.match(prompt, /Kloudlite harness/);
+    assert.match(prompt, /one question/);
+  } finally {
+    restore();
+  }
+});
+
+test("adding a service keeps every other service exactly as it was", async () => {
+  // The whole point: PATCH takes the whole list, and mongodb's mounts/env/command are not in the
+  // add tool's schema — they survive only by being passed through untouched.
+  const mongodb = { name: "mongodb", image: "mongo:7", command: ["mongod", "--bind_ip_all"], env: { MONGO_INITDB_ROOT_USERNAME: "root" }, mounts: [{ folder: "mongodb", path: "/data/db" }], ports: [27017] };
+  let patched: any;
+  let live: any[] = [mongodb];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      // A real api: the next GET sees what the last PATCH wrote.
+      if (req.method === "PATCH") live = (patched = JSON.parse(b)).services;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.method === "GET" ? { id: "devstack", services: live } : { ok: true }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-svc-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_FORK: undefined, KL_TOOLS_WORKSPACE: undefined, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme" });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
+    await tool("kl_environment_service_add").execute("c1", { id: "devstack", service: { name: "nats", image: "nats:2", ports: [4222] } }, undefined, undefined, undefined);
+    assert.deepEqual(patched.services[0], mongodb, "mongodb passed through verbatim");
+    // The api has no serde default for these three: an omitted one is a 422, not an empty list.
+    assert.deepEqual(patched.services[1], { name: "nats", image: "nats:2", command: [], env: {}, mounts: [], ports: [4222] });
+
+    await tool("kl_environment_service_rm").execute("c2", { id: "devstack", name: "nats" }, undefined, undefined, undefined);
+    assert.deepEqual(patched.services, [mongodb]);
+    const miss = await tool("kl_environment_service_rm").execute("c3", { id: "devstack", name: "redis" }, undefined, undefined, undefined);
+    assert.equal(miss.isError, true);
+  } finally {
+    restore();
+    srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
