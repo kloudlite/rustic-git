@@ -41,6 +41,18 @@ const ENV_QUOTA_CEILING: Duration =
 const BUILD_CEILING: Duration = Duration::from_secs(180);
 /// The catalogue's 30 s for `ws.build.promote`: a registry-side copy, no build.
 const PROMOTE_CEILING: Duration = Duration::from_secs(30);
+/// The catalogue's own targets for the two `kl` ids. An add is a PATCH the api validates and locks
+/// (a version lookup that may miss its cache), where a switch is one PUT against the cluster.
+const KL_PKG_CEILING: Duration = Duration::from_secs(20);
+const KL_ENV_CEILING: Duration = Duration::from_secs(10);
+
+/// The two ids `kl`'s own verbs own, `const` because each is skipped from more than one path.
+const KL_PKG_ID: &str = "ws.kl.pkg.add";
+pub(super) const KL_ENV_ID: &str = "ws.kl.env.switch";
+
+/// Small, in every nixpkgs, and nothing else in the journey declares it — so a run that finds it
+/// already declared is reading its own leftovers, which the teardown's workspace delete rules out.
+const KL_PACKAGE: &str = "cowsay";
 
 /// The disk a probe workspace asks for, well inside `Quota/slo-probe`'s `diskGb`.
 pub(crate) const QUOTA_GB: u64 = 1;
@@ -110,6 +122,113 @@ pub async fn run(c: &mut Ctx) {
     env_quota_refused(c, &id).await;
     build_push(c, &id).await;
     promote(c, &id).await;
+    kl_pkg_add(c, &id).await;
+}
+
+/// `ws.kl.pkg.add`, hourly only: a person installs a package from inside their own workspace.
+///
+/// The exec is the same non-login `su -c` the build step uses — `kl` carries its own credential
+/// (`/etc/kloudlite/ssh/workspace-token`) and reads its identity from the pod env, so it must work
+/// from an editor's terminal as well as from a login shell.
+///
+/// What is judged is the API's own state, not `kl`'s output: a command that printed `added` and
+/// PATCHed nothing would pass an assertion on stdout alone. The run's teardown deletes the
+/// workspace, so there is nothing to undo.
+async fn kl_pkg_add(c: &mut Ctx, id: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    if c.kube.is_none() {
+        return c.skip(KL_PKG_ID, "no kubeconfig");
+    }
+    let id = id.to_string();
+    c.step(KL_PKG_ID, KL_PKG_CEILING, move |c| {
+        let id = id.clone();
+        async move {
+            let (code, out, err) =
+                ws_exec(c, &id, &format!("kl pkg add {KL_PACKAGE}"), KL_PKG_CEILING).await?;
+            if code != 0 {
+                return Err(anyhow!("`kl pkg add` exited {code}: {} {}", out.trim(), err.trim()));
+            }
+            let doc = get(c, &api(c, &format!("/v1/workspaces/{id}")), &c.probe_jwt.clone()).await?;
+            if !declares(&doc, KL_PACKAGE) {
+                return Err(anyhow!(
+                    "the workspace does not declare {KL_PACKAGE} after `kl pkg add`, which printed {:?}",
+                    out.trim()
+                ));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `packages` names `attr`, at whatever version it is pinned to — `kl pkg add cowsay` may be
+/// stored as `cowsay` or, once the api has locked it, still as the bare entry with a lock beside
+/// it, so the comparison is on the attribute half.
+fn declares(doc: &Value, attr: &str) -> bool {
+    doc.get("packages")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().filter_map(Value::as_str).any(|e| e.split('@').next() == Some(attr)))
+}
+
+/// `ws.kl.env.switch`, hourly only: `kl env switch` from inside the workspace moves the person's
+/// space, and `kl env clear` puts it back.
+///
+/// Called from the ENVIRONMENT stage, not from this one — it is the first moment both the run's
+/// workspace and its environment exist — but catalogued under `5 · Workspace` with its sibling,
+/// because what it probes is the CLI in the pod, not the environment.
+///
+/// The check is `GET /v1/me/environments` as the probe user: `kl` printing `switched to …` says
+/// only that it reached the api, where the space row is what every pod of the space converges
+/// from. The clear is outside the assertion's failure path on purpose — a run that left the space
+/// chosen would hand stage 7 an environment nobody asked it to hold.
+pub(super) async fn kl_env_switch(c: &mut Ctx, env: &str) {
+    if c.suite != Suite::Hourly {
+        return;
+    }
+    let Some(ws) = c.state.workspace.clone() else {
+        return c.skip(KL_ENV_ID, "no workspace");
+    };
+    if c.kube.is_none() {
+        return c.skip(KL_ENV_ID, "no kubeconfig");
+    }
+    let (env, probe) = (env.to_string(), c.probe_user.clone());
+    c.step(KL_ENV_ID, KL_ENV_CEILING, move |c| {
+        let (ws, env, probe) = (ws.clone(), env.clone(), probe.clone());
+        async move {
+            let (code, out, err) =
+                ws_exec(c, &ws, &format!("kl env switch {env}"), KL_ENV_CEILING).await?;
+            if code != 0 {
+                return Err(anyhow!("`kl env switch` exited {code}: {} {}", out.trim(), err.trim()));
+            }
+            let me = get(c, &api(c, "/v1/me/environments"), &c.probe_jwt.clone()).await?;
+            let chosen = follows(&me, &probe) == Some(env.clone());
+            // Cleared whatever the check decided: the space is shared with the rest of the run.
+            let (ccode, _, cerr) = ws_exec(c, &ws, "kl env clear", KL_ENV_CEILING).await?;
+            if !chosen {
+                return Err(anyhow!("the probe's own space does not follow {env} after `kl env switch`"));
+            }
+            if ccode != 0 {
+                return Err(anyhow!("`kl env clear` exited {ccode}: {}", cerr.trim()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// The environment `team`'s space follows, from `GET /v1/me/environments` — a row per space the
+/// caller has, so the personal one is the row whose `team` is their handle.
+fn follows(me: &Value, team: &str) -> Option<String> {
+    me.as_array()?
+        .iter()
+        .find(|s| s.get("team").and_then(Value::as_str) == Some(team))?
+        .get("environment")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// `ws.create.p95`: the create AND the wait for `ready`, because "creating a workspace completes"
@@ -722,7 +841,7 @@ async fn refused_over(
     Ok(())
 }
 
-/// `ws.build.p95`, hourly only: `kl build` from inside the probe workspace,
+/// `ws.build.p95`, hourly only: `kl container build` from inside the probe workspace,
 /// dispatched to the owner's hidden builder through the gate, and the pushed manifest read back
 /// over `/v2` with the probe's own registry credential.
 ///
@@ -732,7 +851,7 @@ async fn refused_over(
 /// own finding, reported as a skip rather than folded into the sample as a pass.
 ///
 /// The build script deliberately does NOT source `/etc/profile.d/kl-build.sh`: `ws_exec` is not a
-/// login shell (see its own doc), and `kl build` has to make its own buildx builder and credential
+/// login shell (see its own doc), and `kl container build` has to make its own buildx builder and credential
 /// config for exactly that kind of exec — an editor's terminal, a CI hook.
 async fn build_push(c: &mut Ctx, id: &str) {
     if c.suite != Suite::Hourly {
@@ -791,7 +910,7 @@ async fn build_push(c: &mut Ctx, id: &str) {
     .await;
 }
 
-/// The script the step runs, in the workspace, as the person — `kl build` from a NON-login exec,
+/// The script the step runs, in the workspace, as the person — `kl container build` from a NON-login exec,
 /// with none of `kl-build.sh`'s setup: that `kl` creates its own builder and credential config
 /// is the clause the spec calls self-sufficiency, and this is where it is held. `kl` carries the
 /// bootstrap retry the script used to (150 s of `buildx inspect --bootstrap`), still inside the
@@ -800,22 +919,22 @@ fn build_script(run_id: &str) -> String {
     format!(
         "mkdir -p /tmp/d\n\
 printf 'FROM alpine:3.20\\nRUN echo slo > /slo\\n' > /tmp/d/Dockerfile\n\
-kl build -t slo-build:{run_id} /tmp/d"
+kl container build -t slo-build:{run_id} /tmp/d"
     )
 }
 
-/// `kl push` from the same workspace, then the promoted tag's digest read back through buildx's
+/// `kl container push` from the same workspace, then the promoted tag's digest read back through buildx's
 /// own imagetools so the copy is verified by a second, independent reader.
 fn promote_script(run_id: &str) -> String {
     format!(
-        "kl push slo-build:{run_id} slo-build:{run_id}-promoted\n\
+        "kl container push slo-build:{run_id} slo-build:{run_id}-promoted\n\
 docker buildx imagetools inspect $KL_REGISTRY_HOST/$KL_OWNER/slo-build:{run_id}-promoted --format '{{{{json .Manifest.Digest}}}}'"
     )
 }
 
 /// `ws.build.promote`, hourly only, right after the build so the source tag exists. Skipped —
 /// never failed — when the build step itself did not pass, since a missing source says nothing
-/// about `kl push`.
+/// about `kl container push`.
 async fn promote(c: &mut Ctx, id: &str) {
     if c.suite != Suite::Hourly {
         return;
@@ -829,7 +948,7 @@ async fn promote(c: &mut Ctx, id: &str) {
         async move {
             let (code, out, err) = ws_exec(c, &id, &promote_script(&run_id), PROMOTE_CEILING).await?;
             if code != 0 {
-                return Err(anyhow!("kl push failed ({code}): {} {}", out.trim(), err.trim()));
+                return Err(anyhow!("`kl container push` failed ({code}): {} {}", out.trim(), err.trim()));
             }
             if !out.contains("\"sha256:") {
                 return Err(anyhow!("the promoted tag's digest did not read back: {}", out.trim()));
@@ -937,16 +1056,29 @@ mod tests {
     /// The ProxyCommand IS the gateway path: without it ssh would dial the workspace directly,
     /// which nothing routes, and the step would measure a DNS failure. The session goes down to the
     #[test]
-    fn the_build_script_runs_kl_build_without_sourcing_the_login_setup() {
+    fn the_build_script_runs_kl_container_build_without_sourcing_the_login_setup() {
         let s = build_script("hourly-1");
-        assert!(s.contains("kl build -t slo-build:hourly-1 /tmp/d"), "{s}");
+        assert!(s.contains("kl container build -t slo-build:hourly-1 /tmp/d"), "{s}");
         assert!(!s.contains("kl-build.sh"), "{s}");
+    }
+
+    /// Both judgements are on the API's answer, not on what `kl` printed: a pinned entry keeps its
+    /// attribute, and only the caller's OWN space row answers the switch.
+    #[test]
+    fn the_kl_ids_judge_the_api_answer() {
+        let doc = serde_json::json!({"packages": ["jq", "cowsay@3.04"]});
+        assert!(declares(&doc, "cowsay"));
+        assert!(!declares(&doc, "nodejs"));
+        assert!(!declares(&serde_json::json!({}), "cowsay"));
+        let me = serde_json::json!([{"team": "slo-other", "environment": "e9"}, {"team": "slo-probe", "environment": "e1"}]);
+        assert_eq!(follows(&me, "slo-probe").as_deref(), Some("e1"));
+        assert_eq!(follows(&me, "nobody"), None);
     }
 
     #[test]
     fn the_promote_script_reads_the_new_tag_back_through_imagetools() {
         let s = promote_script("hourly-1");
-        assert!(s.contains("kl push slo-build:hourly-1 slo-build:hourly-1-promoted"), "{s}");
+        assert!(s.contains("kl container push slo-build:hourly-1 slo-build:hourly-1-promoted"), "{s}");
         assert!(s.contains("imagetools inspect"), "{s}");
     }
 

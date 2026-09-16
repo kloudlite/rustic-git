@@ -71,6 +71,16 @@ pub async fn run(c: &mut Ctx) {
     if c.walks("builder.hidden") {
         builder_hidden(c).await;
     }
+    // Catalogued under `5 · Workspace` with its sibling, walked here: `ws.kl.env.switch` is the
+    // first id that needs BOTH the run's workspace and its environment, and stage 5 has only one
+    // of the two. Skipped by name rather than left unfiled — a missing id reads as passed.
+    if c.walks(super::workspace::KL_ENV_ID) {
+        match c.state.environment.clone() {
+            Some(env) => super::workspace::kl_env_switch(c, &env).await,
+            None if c.suite == Suite::Hourly => c.skip(super::workspace::KL_ENV_ID, "no environment"),
+            None => {}
+        }
+    }
 }
 
 async fn fast(c: &mut Ctx) {

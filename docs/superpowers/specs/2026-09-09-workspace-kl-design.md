@@ -1,5 +1,7 @@
 # `kl` inside a workspace: build and push with one tool
 
+**Superseded for the command tree by** `2026-09-16-kl-cli-and-shell-prompt-design.md`: `kl build`/`kl push` are `kl container build`/`kl container push`, and `kl` also carries `pkg` and `env`.
+
 **Date:** 2026-09-09
 **Status:** approved for planning
 **Builds on:** `2026-09-09-workspace-image-builds-design.md` (the hidden builder, the gate, the

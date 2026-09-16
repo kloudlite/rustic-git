@@ -355,11 +355,17 @@ workspace pod itself, one layer further from a person. It runs under gvisor as r
 gvisor's own capability emulation, never the host's, is what its `add` list is sized to. The push
 credential is `registry-token` in the workspace's `user-key` Secret, read by
 `docker-credential-kl` so `docker buildx build --push` never sees a raw token on the command line; the tool a
-person runs is `kl` (`bins/kl`, a musl binary in the workspace image, `clap` only): `kl build -t
-hello:1 .` builds on the builder and pushes as `{registry}/{owner}/hello:1`, and `kl push hello:1
-hello:latest` copies an image the registry already holds — a registry-side `buildx imagetools
-create`, because there is no local image store for a push to read from. `kl` makes its own buildx
-builder and credential config, so it works from any exec, not only a login shell; `kl-connect`
+person runs is `kl` (`bins/kl`, a musl binary in the workspace image, `clap` only): `kl container
+build -t hello:1 .` builds on the builder and pushes as `{registry}/{owner}/hello:1`, and `kl
+container push hello:1 hello:latest` copies an image the registry already holds — a registry-side
+`buildx imagetools create`, because there is no local image store for a push to read from. `kl`
+makes its own buildx builder and credential config, so it works from any exec, not only a login
+shell. Beside `container` it carries the two verbs that used to need a browser — `kl pkg
+list|add|rm|update` (the workspace's own `spec.packages`, validated and locked by `/v1`) and `kl
+env list|current|switch|clear` (the person's SPACE environment in this team, so switching moves
+every workspace they have in it) — both over `/v1` with the `workspace-token` from the `user-key`
+Secret, whose audience is `WORKSPACE_TOOL_ROUTES` and nothing else; `kl ide serve` is the third,
+hidden (`clap` `hide`) because nobody runs it by hand. `kl-connect`
 (`bins/kl-connect`) is the laptop CLI and shares nothing with it;
 it is minted alongside every other key projection and re-minted on the same beat
 (`refresh_user_key_secrets`, `KEYS_RESYNC_SECS`), so a rotated or revoked credential reaches a

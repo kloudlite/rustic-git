@@ -8,6 +8,6 @@ if [ -n "${BUILDKIT_HOST:-}" ] && [ -n "${KL_REGISTRY_HOST:-}" ] && command -v d
   [ -e "$HOME/.docker/config.json" ] || printf '{"credHelpers":{"%s":"kl"}}\n' "$KL_REGISTRY_HOST" > "$HOME/.docker/config.json"
   # No `docker buildx create` here: with the remote driver that dials the builder gate, which starts
   # the owner's buildkitd on demand — up to builder_start_secs of a LOGIN SHELL blocked on it (the
-  # 2026-09-16 bench.shell.workspace probe timed out at 30 s on exactly this). `kl build` makes
-  # the builder itself, idempotently, the first time somebody builds (docker::ensure_builder).
+  # 2026-09-16 bench.shell.workspace probe timed out at 30 s on exactly this). `kl container build`
+  # makes the builder itself, idempotently, the first time somebody builds (docker::ensure_builder).
 fi

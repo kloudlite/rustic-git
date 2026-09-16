@@ -92,8 +92,10 @@ first destructive stage.
 | `bench.create` | Benches | `POST /v1/bench` answers, and a second POST names the same id | 99.9 % | fast | 5 · Workspace |
 | `bench.start.p95` | Benches | A started bench reaches phase `ready` | 95 % ≤ 90000 ms | fast | 5 · Workspace |
 | `bench.tunnel` | Benches | A bench token opens the tunnel and `/healthz` answers through it | 99.9 % ≤ 20000 ms | fast | 5 · Workspace |
-| `ws.build.p95` | Workspaces | `kl build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
-| `ws.build.promote` | Workspaces | `kl push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
+| `ws.build.p95` | Workspaces | `kl container build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
+| `ws.build.promote` | Workspaces | `kl container push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
+| `ws.kl.pkg.add` | Workspaces | `kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package | 99.9 % ≤ 20000 ms | hourly | 5 · Workspace |
+| `ws.kl.env.switch` | Workspaces | `kl env switch` inside the probe workspace moves the person's own space to the run's environment — `GET /v1/me/environments` names it — and `kl env clear` puts it back | 99.9 % ≤ 10000 ms | hourly | 5 · Workspace |
 | `env.create.p95` | Environments | Creating an environment completes | 95 % ≤ 120000 ms | fast | 6 · Environment |
 | `env.dns` | Environments | A service in an environment resolves a sibling by bare name and connects to it | 99.9 % | fast | 6 · Environment |
 | `env.attach` | Environments | Choosing an environment for a space takes effect in its workspace | 99.9 % ≤ 10000 ms | fast | 6 · Environment |

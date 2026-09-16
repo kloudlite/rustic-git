@@ -491,7 +491,10 @@ async fn shell_workspace(c: &mut Ctx) {
         async move {
             let (_child, port) = forward(c).await?;
             let (out, code) = pty_shell(port, &ws, "pwd; exit 0\n").await?;
-            judge_shell(&out, &want, code)
+            judge_shell(&out, &want, code)?;
+            // The PROMPT is the product here: starship's character is what says the splice landed
+            // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
+            judge_shell(&out, "❯", code)
         }
         .boxed()
     })
