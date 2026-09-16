@@ -552,6 +552,9 @@ export function App() {
     if (hit(KEYS.prevThread)) return (stop(), cycleThread(-1));
     if (hit(KEYS.nextThread)) return (stop(), cycleThread(1));
     if (hit(KEYS.close)) return (stop(), closeCurrent());
+    // The composer's own hint promises "esc to interrupt": a running turn is
+    // stopped first; only an idle session treats Escape as back.
+    if (hit(KEYS.back) && L().busy()) return (stop(), void pi({ type: "abort" }));
     if (hit(KEYS.back)) return void back();
     if (hit(KEYS.composer)) {
       stop();
@@ -672,7 +675,6 @@ export function App() {
     c.value = "";
     fit(c);
     c.dispatchEvent(new Event("input", { bubbles: true }));
-    L.sent(text, atts.map((i) => i.n));
     const cmd: Record<string, unknown> = { type: "prompt", message: text || "(see image)" };
     if (images.length) cmd.images = images;
     // Sent while it runs: a follow-up waits for the turn to end; a steer is
