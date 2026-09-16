@@ -519,3 +519,19 @@ fn the_decommission_stamp_produces_draining_then_drained() {
     // An unchanged stamp is not a second drain.
     assert!(node_events(Some(&drained), &drained, "eu").is_empty());
 }
+
+/// A bench is private to its person, and no admin surface — this table included — ever sees one.
+/// `crd::is_bench`, never the name or a label: a restored object can carry either.
+#[test]
+fn a_bench_workspace_writes_no_history_at_all() {
+    let mut b = ws("uid-b", "1", Phase::Ready);
+    b.spec.bench = Some(crd::BenchOptions { model: "m".into(), wake_at: None });
+    assert!(workspace_events(None, &b, "eu").is_empty(), "not even a create");
+    let mut later = b.clone();
+    later.metadata.resource_version = Some("2".into());
+    later.status = Some(crd::WorkspaceStatus { phase: Phase::Stopped, ..Default::default() });
+    assert!(workspace_events(Some(&b), &later, "eu").is_empty(), "no transition either");
+    assert!(workspace_deleted(&b, "eu").is_empty());
+    // The ordinary workspace beside it still does, so this is a filter and not a switched-off table.
+    assert_eq!(workspace_events(None, &ws("uid-1", "1", Phase::Ready), "eu").len(), 1);
+}

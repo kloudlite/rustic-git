@@ -1,5 +1,5 @@
-//! The removal GC: the ONE thing that deletes a departed team member's Bench, team Workspaces and
-//! SpaceEnvironment choice.
+//! The removal GC: the ONE thing that deletes a departed team member's team Workspaces — their
+//! bench is one of them (`crd::is_bench`) — and their SpaceEnvironment choice.
 //!
 //! The api's keys beat (`api::membership`) only MARKS a removed pair with
 //! `kloudlite.io/delete-after` (removed-at + 7 days, or now for an admin's delete-now); this pass
@@ -7,12 +7,12 @@
 //! region's lease, and a re-add undoes a removal by clearing an annotation instead of racing a
 //! delete. Every ~60 s, leader only:
 //!
-//! - list the three kinds; ANY listing failure skips the whole pass (keep-biased — a partial view
+//! - list the two kinds; ANY listing failure skips the whole pass (keep-biased — a partial view
 //!   is never a reason to act);
 //! - an object is due only if `delete-after` was applied by the api's `kloudlite-membership`
 //!   manager (the admission policy `kloudlite-removal-stamps-are-the-apis` is the real fence) and
-//!   parses to a time already past; a Bench also waits for the agent's `kloudlite.io/bench-folder`
-//!   finalizer, without which its on-disk folder would be stranded;
+//!   parses to a time already past — a bench waits for no folder finalizer any more, its data
+//!   lives in its own volume and goes with the ordinary workspace finalizers;
 //! - the api's keys beat Lease (`kloudlite-keys-beat`) older than two beats, missing or unreadable
 //!   holds every delete (`gc.held_beat_stale`): the slack assumes that beat is clearing re-adds;
 //! - the regional `ClusterSettings.memberRemovalDeletes` off (the default) logs `gc.would_delete`
@@ -30,7 +30,7 @@ use k8s_openapi::jiff::Timestamp;
 use kloudlite_workspaces::api::membership::{system_annotation, DELETE_AFTER, GC_DELETE_SLACK_SECS, GC_TICK_SECS};
 use kloudlite_workspaces::{crd, k8s};
 use kube::api::{Api, DeleteParams, Preconditions};
-use kube::{Resource, ResourceExt};
+use kube::Resource;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,21 +111,23 @@ async fn beat_alive(ctx: &Ctx, now: i64) -> bool {
 
 pub async fn pass(ctx: &Ctx, now: i64) {
     let c = &ctx.client;
-    let listed = async { Ok::<_, kube::Error>((list::<crd::Bench>(c).await?, list::<crd::Workspace>(c).await?, list::<crd::SpaceEnvironment>(c).await?)) };
-    let (benches, workspaces, spaces) = match listed.await {
+    let listed = async { Ok::<_, kube::Error>((list::<crd::Workspace>(c).await?, list::<crd::SpaceEnvironment>(c).await?)) };
+    let (workspaces, spaces) = match listed.await {
         Ok(l) => l,
         Err(error) => return tracing::warn!(%error, "gc.listing.failed"),
     };
+    // Benches first, then the rest, then the space choice: the order the removal shipped with, so
+    // the person's tool session goes before the workspaces it could have reached.
     let mut todo = Vec::new();
-    for b in &benches {
-        let Some(d) = due(b, "Bench", &b.spec.owner, &b.spec.team, now) else { continue };
-        if b.finalizers().iter().any(|f| f == crd::BENCH_FOLDER_FINALIZER) {
-            todo.push(d);
-        } else {
-            tracing::warn!(name = %d.name, owner = %d.owner, team = %d.team, "gc.bench_waits_finalizer");
-        }
-    }
-    todo.extend(workspaces.iter().filter_map(|w| Some(Due { env: crd::attached_environment(w), ..due(w, "Workspace", &w.spec.owner, &w.spec.team, now)? })));
+    let of = |bench: bool| {
+        workspaces
+            .iter()
+            .filter(move |w| crd::is_bench(w) == bench)
+            .filter_map(|w| Some(Due { env: crd::attached_environment(w), ..due(w, "Workspace", &w.spec.owner, &w.spec.team, now)? }))
+            .collect::<Vec<_>>()
+    };
+    todo.extend(of(true));
+    todo.extend(of(false));
     todo.extend(spaces.iter().filter_map(|s| due(s, "SpaceEnvironment", &s.spec.owner, &s.spec.team, now)));
 
     let on = ctx.settings.load().member_removal_deletes;
@@ -145,7 +147,6 @@ pub async fn pass(ctx: &Ctx, now: i64) {
         }
         let dp = DeleteParams { preconditions: Some(Preconditions { uid: d.uid.clone(), resource_version: d.rv.clone() }), ..Default::default() };
         let res = match d.kind {
-            "Bench" => Api::<crd::Bench>::all(c.clone()).delete(&d.name, &dp).await.map(|_| ()),
             "Workspace" => Api::<crd::Workspace>::all(c.clone()).delete(&d.name, &dp).await.map(|_| ()),
             _ => Api::<crd::SpaceEnvironment>::all(c.clone()).delete(&d.name, &dp).await.map(|_| ()),
         };
@@ -197,14 +198,12 @@ mod tests {
         m
     }
 
-    fn bench(name: &str, after: Option<&str>, finalizer: bool) -> Value {
-        let mut m = meta(name, after, true);
-        if finalizer {
-            m["finalizers"] = json!([crd::BENCH_FOLDER_FINALIZER]);
-        }
-        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": m,
-               "spec": {"owner": "bob", "team": "acme", "image": "i", "desiredState": "stopped", "access": "paused",
-                        "resources": {"cpuRequest": "1", "cpuLimit": "1", "memoryRequest": "1Gi", "memoryLimit": "1Gi"}}})
+    /// A bench: a Workspace with `spec.bench`, deleted through the ordinary workspace finalizers
+    /// (its data is in its own volume now), so no folder finalizer is waited on.
+    fn bench(name: &str, after: Option<&str>) -> Value {
+        json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": meta(name, after, true),
+               "spec": {"owner": "bob", "team": "acme", "name": "bench", "region": "r", "image": "i",
+                        "desiredState": "stopped", "access": "paused", "bench": {"model": "m"}}})
     }
 
     fn ws(name: &str, after: Option<&str>, system: bool) -> Value {
@@ -234,13 +233,15 @@ mod tests {
 
     fn cluster() -> Vec<Route> {
         vec![
-            list("Bench", "benches", vec![bench("b-due", Some(PAST), true), bench("b-later", Some(FUTURE), true), bench("b-nofin", Some(PAST), false), bench("b-plain", None, true)]),
-            list("Workspace", "workspaces", vec![ws("w-due", Some(PAST), true), ws("w-foreign", Some(PAST), false)]),
+            list("Workspace", "workspaces", vec![
+                ws("w-due", Some(PAST), true), ws("w-foreign", Some(PAST), false),
+                bench("b-due", Some(PAST)), bench("b-later", Some(FUTURE)), bench("b-plain", None),
+            ]),
             list("SpaceEnvironment", "spaceenvironments", vec![space(Some(PAST))]),
             get(LEASE, json!({"apiVersion": "coordination.k8s.io/v1", "kind": "Lease", "metadata": {"name": "kloudlite-controller", "namespace": "kube-system", "resourceVersion": "1"},
                               "spec": {"holderIdentity": "ctl-test", "leaseTransitions": 4}})),
             beat(Timestamp::now().as_second()),
-            ok_delete(format!("{API}/benches/b-due")),
+            ok_delete(format!("{API}/workspaces/b-due")),
             ok_delete(format!("{API}/workspaces/w-due")),
             ok_delete(format!("{API}/spaceenvironments/{}", crd::space_name("bob", "acme"))),
         ]
@@ -268,19 +269,20 @@ mod tests {
         assert_eq!(
             deletes(&rec),
             vec![
-                format!("DELETE {API}/benches/b-due"),
+                // Benches first, then the other workspaces, then the space choice.
+                format!("DELETE {API}/workspaces/b-due"),
                 format!("DELETE {API}/workspaces/w-due"),
                 format!("DELETE {policy}"),
                 format!("DELETE {API}/spaceenvironments/{}", crd::space_name("bob", "acme")),
             ],
-            "not due, no finalizer, unmarked and foreign-marked objects are kept"
+            "not due, unmarked and foreign-marked objects are kept"
         );
         let pre = &rec.sent("DELETE", &format!("{API}/workspaces/w-due"))[0]["preconditions"];
         assert_eq!((pre["uid"].as_str(), pre["resourceVersion"].as_str()), (Some("uid-w-due"), Some("7")));
     }
 
     #[tokio::test]
-    async fn only_the_three_kinds_are_ever_listed_or_touched() {
+    async fn only_the_two_kinds_are_ever_listed_or_touched() {
         let rec = run_pass(cluster(), true, true).await;
         for c in rec.calls() {
             assert!(!["/snapshots", "/volumes", "/environments"].iter().any(|k| c.contains(k)), "{c}");
@@ -296,9 +298,9 @@ mod tests {
     #[tokio::test]
     async fn a_listing_failure_skips_the_whole_pass() {
         let mut routes = cluster();
-        routes[1] = Route { method: "GET", path: format!("{API}/workspaces"), status: 500, body: json!({}) };
+        routes[0] = Route { method: "GET", path: format!("{API}/workspaces"), status: 500, body: json!({}) };
         let rec = run_pass(routes, true, true).await;
-        assert!(deletes(&rec).is_empty(), "the due bench is kept too: {:?}", rec.calls());
+        assert!(deletes(&rec).is_empty(), "the due space choice is kept too: {:?}", rec.calls());
     }
 
     #[tokio::test]
@@ -313,9 +315,8 @@ mod tests {
         let at = |secs: i64| Timestamp::from_second(now - secs).unwrap().to_string();
         let routes = |secs: i64| {
             let mut r = cluster();
-            r[0] = list("Bench", "benches", vec![]);
-            r[1] = list("Workspace", "workspaces", vec![ws("w-due", Some(&at(secs)), true)]);
-            r[2] = list("SpaceEnvironment", "spaceenvironments", vec![]);
+            r[0] = list("Workspace", "workspaces", vec![ws("w-due", Some(&at(secs)), true)]);
+            r[1] = list("SpaceEnvironment", "spaceenvironments", vec![]);
             r
         };
         let rec = run_pass(routes(DELETE_SLACK_SECS - 30), true, true).await;
@@ -328,11 +329,11 @@ mod tests {
     async fn a_stale_or_missing_keys_beat_holds_every_delete() {
         let now = Timestamp::now().as_second();
         let mut routes = cluster();
-        routes[4] = beat(now - 2 * KEYS_RESYNC_SECS as i64 - 30);
+        routes[3] = beat(now - 2 * KEYS_RESYNC_SECS as i64 - 30);
         let rec = run_pass(routes, true, true).await;
         assert!(deletes(&rec).is_empty(), "stale: {:?}", rec.calls());
         let mut routes = cluster();
-        routes.remove(4);
+        routes.remove(3);
         let rec = run_pass(routes, true, true).await;
         assert!(deletes(&rec).is_empty(), "missing: {:?}", rec.calls());
     }
@@ -349,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn a_conflict_is_skipped_and_the_rest_still_run() {
         let mut routes = cluster();
-        routes[5] = kube_test::conflict("DELETE", format!("{API}/benches/b-due"));
+        routes[4] = kube_test::conflict("DELETE", format!("{API}/workspaces/b-due"));
         let rec = run_pass(routes, true, true).await;
         assert_eq!(deletes(&rec).len(), 4, "{:?}", rec.calls());
     }

@@ -234,6 +234,11 @@ pub fn workspace_events(
     next: &crd::Workspace,
     region: &str,
 ) -> Vec<EventRow> {
+    // A bench is private to its person and no admin surface reads one, so it writes no history
+    // either — `crd::is_bench`, never the name or a label (a restored object can carry either).
+    if crd::is_bench(next) {
+        return Vec::new();
+    }
     let (uid, rv) = uid_rv(next);
     let ts = transition_at(next, prev.is_none());
     let mut rows = parent_rows(
@@ -732,7 +737,10 @@ pub fn deleted_event<K: ResourceExt>(obj: &K, kind: &str, owner: &str, region: &
 }
 
 pub fn workspace_deleted(o: &crd::Workspace, region: &str) -> Vec<EventRow> {
-    vec![deleted_event(o, "workspace", &o.spec.owner, region)]
+    match crd::is_bench(o) {
+        true => Vec::new(),
+        false => vec![deleted_event(o, "workspace", &o.spec.owner, region)],
+    }
 }
 
 pub fn environment_deleted(o: &crd::Environment, region: &str) -> Vec<EventRow> {

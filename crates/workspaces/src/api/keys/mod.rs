@@ -105,7 +105,7 @@ pub async fn project_all(s: &ApiState) {
     // something a lost list can make safe.
     // Pruning needs the Workspace list to have SUCCEEDED: a failed list would make every
     // projection look stale, and this beat must never delete on a guess.
-    let (specs, mut listed) = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
+    let (specs, listed) = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => (l.items.into_iter().map(|w| w.spec).collect::<Vec<_>>(), true),
         Err(e) => {
             tracing::warn!(kind = "Workspace", error = %e, "listing.failed");
@@ -122,19 +122,10 @@ pub async fn project_all(s: &ApiState) {
             .entry(k8s::keys_owner(w).to_string())
             .or_insert_with(|| (w.owner.clone(), w.team.clone(), w.region.clone()));
     }
-    let mut pairs: Vec<(String, String)> =
+    // A bench-only person is covered by the same list: a bench IS a Workspace, so their namespace
+    // and `user-key` Secret (whose 24h registry token this beat renews) come from the one source.
+    let pairs: Vec<(String, String)> =
         specs.into_iter().map(|w| (w.owner, w.team)).collect();
-    // A bench-only person has a namespace and a `user-key` Secret too: the create's one-shot install
-    // can race the agent making the namespace, and the 24h registry token needs this beat to renew.
-    // A failed list is a smaller set, so it also turns pruning off; a 404 is no Bench CRD.
-    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => pairs.extend(l.items.into_iter().map(|b| (b.spec.owner, b.spec.team))),
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => {
-            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
-            listed = false;
-        }
-    }
     let existing = match Api::<crd::OwnerKeys>::all(c.clone()).list(&Default::default()).await {
         Ok(l) => l.items.iter().filter_map(|o| o.metadata.name.clone()).collect(),
         Err(e) => {
@@ -217,7 +208,7 @@ mod tests {
             "metadata": {"name": "r1-gone", "creationTimestamp": "2020-01-01T00:00:00Z"},
             "spec": {"owner": "gone", "region": "r1"},
         }]));
-        for failing in ["workspaces", "environments", "benches"] {
+        for failing in ["workspaces", "environments"] {
             let route = |p: &str, kind: &str| {
                 let path = format!("/apis/kloudlite.io/v1alpha1/{p}");
                 if p == failing {
@@ -230,7 +221,6 @@ mod tests {
                 crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", bindings.clone()),
                 route("workspaces", "WorkspaceList"),
                 route("environments", "EnvironmentList"),
-                route("benches", "BenchList"),
             ]);
             let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
             let mut s = ApiState::new(jwt);
@@ -257,7 +247,6 @@ mod tests {
                 crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerbindings", list("OwnerBindingList", serde_json::json!([binding("gone"), binding("bob")]))),
                 crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", serde_json::json!([]))),
                 crate::kube_test::get("/apis/kloudlite.io/v1alpha1/environments", list("EnvironmentList", serde_json::json!([]))),
-                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", serde_json::json!([]))),
             ]);
             let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
             let mut s = ApiState::new(jwt);
@@ -279,7 +268,6 @@ mod tests {
         let (client, rec) = crate::kube_test::mock_client(vec![
             crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([ns("ws-gone"), ns("ws-bob"), ns("ws-acme")]))),
             crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
             crate::kube_test::get("/api/v1/namespaces/ws-acme/pods", list("PodList", "v1", serde_json::json!([]))),
         ]);
         let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
@@ -309,7 +297,6 @@ mod tests {
                     ])),
                 ),
                 crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
-                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
                 crate::kube_test::get("/api/v1/namespaces/ws-run-hourly-1-g0-team/pods", list("PodList", "v1", serde_json::json!([]))),
                 crate::kube_test::get("/api/v1/namespaces/ws-run-hourly-2-team/pods", list("PodList", "v1", serde_json::json!([pod.clone()]))),
                 crate::kube_test::get("/api/v1/namespaces/ws-gone/pods", list("PodList", "v1", serde_json::json!([]))),
@@ -495,38 +482,31 @@ mod tests {
     /// Residual C1: a bench-only owner is projected and their namespaces refreshed on the beat; a
     /// failed Bench list prunes nothing.
     #[tokio::test]
-    async fn the_beat_refreshes_a_bench_only_owner_and_a_failed_bench_list_prunes_nothing() {
+    async fn the_beat_refreshes_a_bench_only_owner() {
         let list = |kind: &str, items: serde_json::Value| serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": items});
-        let bench = list("BenchList", serde_json::json!([{
-            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "bench-1"},
-            "spec": {"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"},
+        let ws = list("WorkspaceList", serde_json::json!([{
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": crd::bench_id("alice", "acme")},
+            "spec": {"owner": "alice", "team": "acme", "name": "bench", "region": "r1", "image": "i", "desiredState": "running", "bench": {"model": "m"}},
         }]));
         let stale = list("OwnerKeysList", serde_json::json!([{"apiVersion": "kloudlite.io/v1alpha1", "kind": "OwnerKeys", "metadata": {"name": "gone"}, "spec": {"generation": 1, "authorizedKeys": ""}}]));
         let ns = serde_json::json!({"apiVersion": "v1", "kind": "NamespaceList", "metadata": {}, "items": []});
-        let run = |bench_route: crate::kube_test::Route| {
-            let (client, rec) = crate::kube_test::mock_client(vec![
-                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", serde_json::json!([]))),
-                crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerkeys", stale.clone()),
-                crate::kube_test::get("/api/v1/namespaces", ns.clone()),
-                bench_route,
-            ]);
-            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
-            let mut s = ApiState::new(jwt);
-            s.kube = Some(client);
-            (s, rec)
-        };
-        let (s, rec) = run(crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", bench.clone()));
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", ws),
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/ownerkeys", stale),
+            crate::kube_test::get("/api/v1/namespaces", ns.clone()),
+            crate::kube_test::get("/api/v1/namespaces", ns),
+        ]);
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let mut s = ApiState::new(jwt);
+        s.kube = Some(client);
         project_all(&s).await;
-        // alice and acme: one namespace refresh each.
+        // alice and acme: one namespace refresh each — a bench-only owner comes off the one
+        // Workspace list like anybody else.
         assert_eq!(rec.calls().iter().filter(|c| *c == "GET /api/v1/namespaces").count(), 2, "{:?}", rec.calls());
         assert!(rec.calls().contains(&"DELETE /apis/kloudlite.io/v1alpha1/ownerkeys/gone".to_string()));
-
-        let (s, rec) = run(crate::kube_test::Route { method: "GET", path: "/apis/kloudlite.io/v1alpha1/benches".into(), status: 500, body: serde_json::json!({}) });
-        project_all(&s).await;
-        assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
     }
 
-    /// C1: a `wt-` namespace holding only an idle bench (no pod, no workspace) is never pruned.
+    /// C1: a `wt-` namespace holding only an idle bench (no pod, no other workspace) is never pruned.
     #[tokio::test]
     async fn a_namespace_a_bench_resolves_to_is_never_pruned() {
         let ns = crd::ws_namespace("alice", "acme");
@@ -535,11 +515,10 @@ mod tests {
             crate::kube_test::get("/api/v1/namespaces", list("NamespaceList", "v1", serde_json::json!([
                 {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns, "creationTimestamp": "2020-01-01T00:00:00Z"}}
             ]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([]))),
-            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/benches", list("BenchList", "kloudlite.io/v1alpha1", serde_json::json!([{
-                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "metadata": {"name": "bench-1"},
-                "spec": {"owner": "alice", "team": "acme", "image": "i", "desiredState": "running"},
-                "status": {"phase": "idle", "nodeName": "node-a"},
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list("WorkspaceList", "kloudlite.io/v1alpha1", serde_json::json!([{
+                "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": crd::bench_id("alice", "acme")},
+                "spec": {"owner": "alice", "team": "acme", "name": "bench", "region": "r1", "image": "i", "desiredState": "running", "bench": {"model": "m"}},
+                "status": {"phase": "idle"},
             }]))),
             crate::kube_test::get(format!("/api/v1/namespaces/{ns}/pods"), list("PodList", "v1", serde_json::json!([]))),
         ]);
@@ -548,7 +527,6 @@ mod tests {
         s.kube = Some(client);
         prune_namespaces(&s).await;
         assert!(!rec.calls().iter().any(|c| c.starts_with("DELETE")), "{:?}", rec.calls());
-        assert!(rec.calls().contains(&"GET /apis/kloudlite.io/v1alpha1/benches".to_string()), "{:?}", rec.calls());
     }
 
     /// The back-fill: `ensure_builder` used to run only from `create_ws`, so every owner whose

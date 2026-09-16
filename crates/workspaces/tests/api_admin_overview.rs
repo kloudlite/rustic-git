@@ -267,3 +267,25 @@ async fn audit_row(keys: &Arc<kloudlite_storage::store::Store>, actor: &str, act
     };
     kloudlite_workspaces::audit::record(&keys.os, &entry).await.unwrap();
 }
+
+/// A bench is a Workspace now, and no admin surface counts one: it is private to its person and
+/// nobody asked for it as a workspace. Its DISK still counts, through its Volume, like any other.
+#[tokio::test]
+async fn a_bench_workspace_is_not_counted_in_the_fleet_numbers() {
+    let mut bench = ws_obj("bench-abc", "ann", "r1");
+    bench["spec"]["bench"] = json!({"model": "m"});
+    let routes = base_routes(vec![region_obj("r1")], vec![], vec![ws_obj("w1", "ann", "r1"), bench], vec![]);
+    let s = admin_server(routes, Some(keys_store().await)).await;
+    let text = reqwest::Client::new()
+        .get(format!("{}/admin/overview", s.base))
+        .bearer_auth(admin_token(&s.jwt))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("not json: {text}"));
+    assert_eq!(body["fleet"]["workspaces"], 1, "the bench is not one: {text}");
+    assert_eq!(body["fleet"]["perRegion"]["r1"]["workspaces"], 1);
+}

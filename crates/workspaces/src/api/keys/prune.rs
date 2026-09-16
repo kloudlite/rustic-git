@@ -113,6 +113,8 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             return;
         }
     };
+    // A bench holds its namespace even with no pod (idle or stopped): the `user-key` Secret and
+    // its ingress policy live there, and the bench is in this very list.
     let keep: BTreeSet<String> = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         // `ws_namespace` and not a hand-rolled name: the agent builds the namespace with this
         // exact function, so a second spelling here would prune what it just made.
@@ -122,17 +124,6 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
             return;
         }
     };
-    // A bench holds its namespace even with no pod (idle or stopped): the `user-key` Secret and its
-    // ingress policy live there. Same keep-bias; a 404 is a cluster without the Bench CRD.
-    let mut keep = keep;
-    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => keep.extend(l.items.iter().map(|b| crd::ws_namespace(&b.spec.owner, &b.spec.team))),
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => {
-            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
-            return;
-        }
-    }
     let now = chrono::Utc::now().timestamp();
     let seen: Vec<(String, i64)> = listed
         .iter()
@@ -180,8 +171,8 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
 /// Which of `seen` — `(name, spec.owner, age in seconds)` for every `OwnerBinding` — belongs to a
 /// dead TEAM. The claiming agent creates one per (region, owner) and nothing deleted one, so by
 /// 2026-09-16 109 of 116 were probe teams gone for days, each re-applied by every agent on every
-/// Quota event. The rule is `stale_namespaces`' for a `ws-` team namespace: no Workspace, Bench or
-/// Environment names the owner (`keep`, lowercased — `binding_name` folds case), older than a beat,
+/// Quota event. The rule is `stale_namespaces`' for a `ws-` team namespace: no Workspace (a bench
+/// is one) or Environment names the owner (`keep`, lowercased — `binding_name` folds case), older than a beat,
 /// and the directory answered that the owner is not a person (a team, or gone — the leak's teams
 /// were deleted); a person, or anyone it could not answer for, is kept. A claim that races the
 /// delete is healed by the agent: `namespace_ready` recreates a missing binding.
@@ -190,8 +181,8 @@ pub(crate) async fn prune_namespaces(s: &ApiState) {
 /// gate that WRITES — it recreates a missing binding on every miss, so a claim that raced this
 /// prune is healed on the spot rather than stalling a workspace in `ensure_ssh`'s 60 s retry. The
 /// two rules cannot ping-pong only because of `keep`: an owner that reaches that line still holds a
-/// Bench, Workspace or Environment, and `keep` spares exactly those owners, so a binding the agent
-/// would recreate is never a candidate here. Loosen `keep` — or stop building it from all three
+/// Workspace or Environment, and `keep` spares exactly those owners, so a binding the agent
+/// would recreate is never a candidate here. Loosen `keep` — or stop building it from both
 /// kinds — and the beat deletes what the agent recreates, every beat, forever. Change the two
 /// together.
 ///
@@ -235,14 +226,6 @@ pub(crate) async fn prune_bindings(s: &ApiState) {
         Ok(l) => keep.extend(l.items.into_iter().map(|e| e.spec.owner.to_lowercase())),
         Err(e) => {
             tracing::warn!(kind = "Environment", error = %e, "listing.failed");
-            return;
-        }
-    }
-    match Api::<crd::Bench>::all(c.clone()).list(&Default::default()).await {
-        Ok(l) => keep.extend(l.items.into_iter().map(|b| b.spec.owner.to_lowercase())),
-        Err(kube::Error::Api(e)) if e.code == 404 => {}
-        Err(e) => {
-            tracing::warn!(kind = "Bench", error = %e, "listing.failed");
             return;
         }
     }
@@ -299,6 +282,8 @@ pub(crate) async fn prune_builders(s: &ApiState) {
             return;
         }
     };
+    // A bench holds its namespace even with no pod (idle or stopped): the `user-key` Secret and
+    // its ingress policy live there, and the bench is in this very list.
     let keep: BTreeSet<String> = match Api::<crd::Workspace>::all(c.clone()).list(&Default::default()).await {
         // `keys_owner`, not a hand-rolled team-else-owner: `ensure_builder` picks the slug the
         // same way, and a second spelling here would prune what a create just made.

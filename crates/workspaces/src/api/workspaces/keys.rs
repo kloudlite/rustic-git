@@ -111,25 +111,14 @@ async fn space_of(c: &kube::Client, ns: &str, owner: &str) -> Option<String> {
         return Some(owner.to_lowercase());
     }
     let sel = ListParams::default().labels(&format!("{}={owner}", crate::k8s::OWNER_LABEL));
-    let from_ws = Api::<crd::Workspace>::all(c.clone())
+    // Workspaces only: a bench is one of them, and carries the same `OWNER_LABEL`.
+    Api::<crd::Workspace>::all(c.clone())
         .list(&sel)
         .await
         .ok()?
         .items
         .into_iter()
         .map(|w| w.spec.team)
-        .find(|t| crd::ws_namespace(owner, t) == ns);
-    if from_ws.is_some() {
-        return from_ws.map(|t| t.to_lowercase());
-    }
-    // A space can hold a bench and no workspace: the beat projects keys for those owners too.
-    Api::<crd::Bench>::all(c.clone())
-        .list(&sel)
-        .await
-        .ok()?
-        .items
-        .into_iter()
-        .map(|b| b.spec.team)
         .find(|t| crd::ws_namespace(owner, t) == ns)
         .map(|t| t.to_lowercase())
 }

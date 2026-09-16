@@ -147,7 +147,9 @@ async fn firing_signals(s: &Arc<ApiState>) -> Result<Vec<AttentionItem>, String>
 /// `owners::owner_rows` is built on (`owners::fleet`), never a second listing.
 fn fleet_numbers(f: &owners::Fleet) -> FleetNumbers {
     let mut per_region: std::collections::BTreeMap<String, RegionFleet> = std::collections::BTreeMap::new();
-    for w in &f.ws {
+    // Benches are excluded everywhere an admin surface counts workspaces: a bench is private to
+    // its person and nobody asked for it as a workspace.
+    for w in f.ws.iter().filter(|w| !crd::is_bench(w)) {
         let r = per_region.entry(w.spec.region.clone()).or_default();
         r.workspaces += 1;
     }
@@ -187,7 +189,7 @@ fn fleet_numbers(f: &owners::Fleet) -> FleetNumbers {
 
     FleetNumbers {
         owners: f.owners.len() as i64,
-        workspaces: f.ws.len() as i64,
+        workspaces: f.ws.iter().filter(|w| !crd::is_bench(w)).count() as i64,
         environments: f.envs.len() as i64,
         snapshots: f.snaps.iter().filter(|s| s.is_snapshot()).count() as i64,
         disk_gb_total: f.vols.iter().map(|v| v.spec.quota_gb as i64).sum(),

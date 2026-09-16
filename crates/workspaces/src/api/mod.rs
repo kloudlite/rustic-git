@@ -48,7 +48,6 @@ use kloudlite_core::settings::LiveSettings;
 use crate::settings::AgentSettings;
 use std::sync::Arc;
 
-pub mod bench_backfill;
 mod state;
 pub use state::*;
 mod requests;

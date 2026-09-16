@@ -202,14 +202,16 @@ async fn write_quota_without_a_note_is_422() {
 
 #[tokio::test]
 async fn removals_lists_only_system_stamped_pairs() {
+    // A bench is a Workspace now, so the pair's objects come off that one list.
     let stamped = json!({
-        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench",
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": "b1", "annotations": {"kloudlite.io/removed-at": "2020-01-01T00:00:00Z"},
                      "managedFields": [{"manager": "kloudlite-membership", "operation": "Apply", "fieldsType": "FieldsV1",
                                         "fieldsV1": {"f:metadata": {"f:annotations": {"f:kloudlite.io/removed-at": {}}}}}]},
-        "spec": {"owner": "bob", "team": "acme", "image": "i", "desiredState": "stopped", "access": "paused"}
+        "spec": {"owner": "bob", "team": "acme", "name": "bench", "region": "r1", "image": "i", "desiredState": "stopped",
+                 "access": "paused", "bench": {"model": "m"}}
     });
-    let s = admin_server(vec![get(format!("{API}/benches"), list_of("Bench", vec![stamped]))]).await;
+    let s = admin_server(vec![get(format!("{API}/workspaces"), list_of("Workspace", vec![stamped]))]).await;
     let body: Value = reqwest::Client::new()
         .get(format!("{}/admin/owners/removals", s.base))
         .bearer_auth(admin_token(&s.jwt))

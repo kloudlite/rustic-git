@@ -109,9 +109,31 @@ fn fold_usage(
     let mut out: HashMap<String, crate::quota::Usage> = HashMap::new();
 
     let charged = |owner: &str, team: &str| if team.is_empty() { owner.to_string() } else { team.to_string() };
+    // A bench's Volume is charged off its workspace below, never in the volume loop, which would
+    // bill the team the bench opens in (`quota::usage` splits it the same way).
+    let mut bench_volumes: std::collections::HashSet<String> = Default::default();
     for w in ws {
-        let key = charged(&w.spec.owner, &w.spec.team);
+        // A bench belongs to the PERSON however it is labelled, and spends no `workspaces` slot:
+        // nobody creates one. Same rules as `quota::usage` — a number here that differs from the
+        // gate's is a grant made off the wrong figure.
+        let bench = crd::is_bench(w);
+        let key = if bench { w.spec.owner.clone() } else { charged(&w.spec.owner, &w.spec.team) };
         let u = out.entry(key.clone()).or_default();
+        if bench {
+            if let Some(v) = w.status.as_ref().and_then(|st| st.volume_ref.clone()) {
+                bench_volumes.insert(v);
+            }
+            // Disk from the moment it exists; cpu and memory only while a pod is actually wanted,
+            // and then for BOTH containers of the bench pod.
+            u.disk_gb += w.spec.storage.as_ref().map_or(0, |st| st.quota_gb);
+            let idle = w.status.as_ref().is_some_and(|st| st.phase == crd::Phase::Idle);
+            if crd::wants_pod(w) && !idle {
+                let (c, m) = crate::model::bench_pod_capacity(&w.spec.resources);
+                *millis.entry(key.clone()).or_default() += c;
+                *mib.entry(key).or_default() += m;
+            }
+            continue;
+        }
         u.workspaces += 1;
         if w.spec.desired_state == crd::DesiredState::Running {
             *millis.entry(key.clone()).or_default() += crate::quota::millicores(&w.spec.resources.cpu_limit);
@@ -133,6 +155,9 @@ fn fold_usage(
     }
     let mut volume_charge: HashMap<String, String> = HashMap::new();
     for v in vols {
+        if bench_volumes.contains(&kube::ResourceExt::name_any(&**v)) {
+            continue;
+        }
         let key = charged(&v.spec.owner, &v.spec.team);
         out.entry(key.clone()).or_default().disk_gb += v.spec.quota_gb;
         volume_charge.insert(kube::ResourceExt::name_any(&**v), key);

@@ -8,16 +8,16 @@
 //! |---------------------------|--------------|----------------------------------|
 //! | error / unreachable       | any          | Keep — write nothing, stamp nothing |
 //! | member (active or paused) | present      | Clear every removal annotation   |
-//! | active member             | none, paused | Unpause the bench                |
-//! | paused member             | none         | Pause the bench, NEVER stamp     |
-//! | not a member / team gone  | none         | Stamp `removed-at` + `delete-after`, pause the bench |
+//! | active member             | none, paused | Unpause every workspace of the pair |
+//! | paused member             | none         | Pause every workspace, NEVER stamp |
+//! | not a member / team gone  | none         | Stamp `removed-at` + `delete-after`, pause every workspace |
 //! | not a member / team gone  | < grace      | Keep                             |
 //! | not a member / team gone  | ≥ grace, or `delete-now` | Due — mark any object still lacking `delete-after` |
 //!
 //! This module DELETES NOTHING. It only marks: `kloudlite.io/delete-after` (removed-at + grace, or
 //! now for an admin's delete-now) is the whole hand-off, and the cluster controller's GC
 //! (`bins/controller/src/gc.rs`, elected leader only, gated on the regional `memberRemovalDeletes`)
-//! is the one thing that deletes a due Bench, team Workspace or SpaceEnvironment. The split keeps
+//! is the one thing that deletes a due team Workspace (the bench is one of them) or SpaceEnvironment. The split keeps
 //! the irreversible step in the process that holds the region's lease, and lets a re-add undo a
 //! removal by clearing an annotation rather than racing a delete.
 //!
@@ -90,7 +90,7 @@ pub fn decide(judged: &Result<Judged, String>, stamped_at: Option<i64>, delete_n
 
 
 pub(super) struct Objects {
-    pub(super) benches: Vec<crd::Bench>,
+    /// A bench is one of these (`crd::is_bench`), not a kind of its own any more.
     pub(super) workspaces: Vec<crd::Workspace>,
     pub(super) spaces: Vec<crd::SpaceEnvironment>,
 }
@@ -108,7 +108,7 @@ where
 }
 
 pub(super) async fn list_all(c: &kube::Client) -> Result<Objects, String> {
-    Ok(Objects { benches: list(c).await?, workspaces: list(c).await?, spaces: list(c).await? })
+    Ok(Objects { workspaces: list(c).await?, spaces: list(c).await? })
 }
 
 pub(super) fn norm(x: &str) -> String {
@@ -122,10 +122,9 @@ pub(super) fn team_pair(owner: &str, team: &str) -> bool {
 }
 
 pub(super) fn pairs(o: &Objects) -> BTreeSet<(String, String)> {
-    let b = o.benches.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let w = o.workspaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
     let s = o.spaces.iter().map(|x| (&x.spec.owner, &x.spec.team));
-    b.chain(w).chain(s).filter(|(o, t)| team_pair(o, t)).map(|(o, t)| (norm(o), norm(t))).collect()
+    w.chain(s).filter(|(o, t)| team_pair(o, t)).map(|(o, t)| (norm(o), norm(t))).collect()
 }
 
 /// The annotation, only when `kloudlite-membership` owns it in `managedFields`.
@@ -185,10 +184,9 @@ pub async fn reconcile_pair(s: &ApiState, owner: &str, team: &str) {
 /// Every object of one normalised pair.
 pub(super) fn metas_of<'a>(o: &'a Objects, owner: &str, team: &str) -> Vec<&'a kube::core::ObjectMeta> {
     let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
-    let b = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
     let w = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
     let s = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).map(|x| &x.metadata);
-    b.chain(w).chain(s).collect()
+    w.chain(s).collect()
 }
 
 /// Latest wins, and an unparsable or foreign stamp is no stamp: all only ever push a delete later.
@@ -226,14 +224,15 @@ pub(super) fn removals(o: &Objects) -> Vec<Removal> {
 async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects, owner: &str, team: &str) -> Result<(), String> {
     let metas = metas_of(o, owner, team);
     let mine = |o_: &str, t: &str| norm(o_) == owner && norm(t) == team;
-    let benches: Vec<_> = o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
     let workspaces: Vec<_> = o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
     let spaces: Vec<_> = o.spaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)).collect();
     let ann = |m: &kube::core::ObjectMeta, k: &str| m.annotations.as_ref().and_then(|a| a.get(k)).cloned();
     let stamped_at = latest_stamp(&metas);
     let delete_now = stamped_at.is_some() && metas.iter().any(|m| system_annotation(m, DELETE_NOW).is_some());
-    let full: Vec<_> = benches.iter().filter(|b| b.spec.access == crd::BenchAccess::Full).collect();
-    let paused = !benches.is_empty() && full.is_empty();
+    // Access is on every workspace of the pair now, so "currently paused" is the whole pair's
+    // answer rather than the bench's alone.
+    let full: Vec<_> = workspaces.iter().filter(|w| w.spec.access == crd::Access::Full).collect();
+    let paused = !workspaces.is_empty() && full.is_empty();
 
     // ponytail: one uncached directory call per pair per beat (plus one per delete); cache per beat if pairs reach thousands.
     let judged = dir.membership(team, owner).await;
@@ -241,46 +240,43 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
     let verdict = decide(&judged, stamped_at, delete_now, now, paused);
     let judged = judged?;
 
-    let bapi: Api<crd::Bench> = Api::all(c.clone());
     let wapi: Api<crd::Workspace> = Api::all(c.clone());
     let sapi: Api<crd::SpaceEnvironment> = Api::all(c.clone());
-    let access = |a: crd::BenchAccess| json!({"spec": {"access": a}});
+    let access = |a: crd::Access| json!({"spec": {"access": a}});
     match verdict {
         // During the grace a bench someone set back to Full has no tools either.
         Verdict::Keep if matches!(judged, Judged::NotMember | Judged::TeamGone) => {
-            let mut written = false;
-            for b in &full {
-                written |= write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
+            let mut bench_written = false;
+            for w in &full {
+                let ok = write(&wapi, &w.name_any(), access(crd::Access::Paused), "membership.workspace.paused").await;
+                bench_written |= ok && crd::is_bench(w);
             }
             // Same as `pause`: an already-minted tool token dies with the access, not 15 minutes later.
-            if written {
+            if bench_written {
                 drop_tool_secret(c, owner, team).await;
             }
         }
         // A paused member's pair is re-converged on every beat, so a workspace started since the
         // pause stops again; every write is skipped when its object is already there.
         Verdict::Pause | Verdict::Keep if judged == Judged::Member(MemberState::Paused) => {
-            pause(c, &bapi, &benches, &workspaces, owner, team).await;
+            pause(c, &workspaces, owner, team).await;
         }
         Verdict::Keep => {}
         Verdict::Pause => {}
         // Starts nothing: the person starts what they want.
         Verdict::Unpause => {
-            for b in &benches {
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "member.unpause.applied").await;
+            for w in workspaces.iter().filter(|w| w.spec.access != crd::Access::Full) {
+                write(&wapi, &w.name_any(), access(crd::Access::Full), "member.unpause.applied").await;
             }
         }
         Verdict::Clear => {
             // A member back from a removal gets their tools back too; nothing is started.
-            for b in benches.iter().filter(|b| b.spec.access != crd::BenchAccess::Full && judged == Judged::Member(MemberState::Active)) {
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Full), "member.unpause.applied").await;
+            for w in workspaces.iter().filter(|w| w.spec.access != crd::Access::Full && judged == Judged::Member(MemberState::Active)) {
+                write(&wapi, &w.name_any(), access(crd::Access::Full), "member.unpause.applied").await;
             }
             let p = json!({"metadata": {"annotations": {REMOVED_AT: null, DELETE_NOW: null, DELETE_AFTER: null}}});
             let has = |m: &kube::core::ObjectMeta| [REMOVED_AT, DELETE_NOW, DELETE_AFTER].iter().any(|k| ann(m, k).is_some());
             let mut ok = false;
-            for x in benches.iter().filter(|x| has(&x.metadata)) {
-                ok |= write(&bapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
-            }
             for x in workspaces.iter().filter(|x| has(&x.metadata)) {
                 ok |= write(&wapi, &x.name_any(), p.clone(), "membership.stamp.cleared").await;
             }
@@ -294,7 +290,7 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
             // Removed → re-added → paused inside one beat (the pause route's own `reconcile_pair`
             // hits exactly this): clearing the stamps is only half of it, the pause still applies.
             if judged == Judged::Member(MemberState::Paused) {
-                pause(c, &bapi, &benches, &workspaces, owner, team).await;
+                pause(c, &workspaces, owner, team).await;
             }
         }
         Verdict::Stamp => {
@@ -303,13 +299,10 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
             // Every object of the pair carries the stamp, so whichever goes first (the controller's GC,
             // a 409, the person deleting their own bench) never restarts the grace or drops delete-now.
             let v = json!({REMOVED_AT: at.to_rfc3339(), DELETE_AFTER: (at + MEMBER_REMOVAL_GRACE).to_rfc3339()});
-            for b in &benches {
-                ok |= stamp(&bapi, &b.name_any(), v.clone()).await;
-                // The pause as its own merge patch so the membership manager never owns `spec.access`.
-                write(&bapi, &b.name_any(), access(crd::BenchAccess::Paused), "membership.bench.paused").await;
-            }
             for w in &workspaces {
                 ok |= stamp(&wapi, &w.name_any(), v.clone()).await;
+                // The pause as its own merge patch so the membership manager never owns `spec.access`.
+                write(&wapi, &w.name_any(), access(crd::Access::Paused), "membership.workspace.paused").await;
             }
             for x in &spaces {
                 ok |= stamp(&sapi, &x.name_any(), v.clone()).await;
@@ -334,9 +327,6 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
                 v[DELETE_NOW] = json!("true");
             }
             let unmarked = |m: &kube::core::ObjectMeta| system_annotation(m, DELETE_AFTER).is_none();
-            for x in benches.iter().filter(|x| unmarked(&x.metadata)) {
-                stamp(&bapi, &x.name_any(), v.clone()).await;
-            }
             for x in workspaces.iter().filter(|x| unmarked(&x.metadata)) {
                 stamp(&wapi, &x.name_any(), v.clone()).await;
             }
@@ -348,21 +338,20 @@ async fn judge(s: &ApiState, c: &kube::Client, dir: &dyn Directory, o: &Objects,
     Ok(())
 }
 
-/// Bench access + desiredState, each team Workspace's desiredState, and the tool-token Secret —
-/// nothing else is written or deleted.
-async fn pause(c: &kube::Client, bapi: &Api<crd::Bench>, benches: &[&crd::Bench], workspaces: &[&crd::Workspace], owner: &str, team: &str) {
-    use crd::{BenchAccess, DesiredState};
+/// `access` + `desiredState` on EVERY workspace of the pair — the bench is one of them — and the
+/// tool-token Secret. Nothing else is written or deleted.
+///
+/// The desiredState half is the stop route's own merge patch (`workspaces::set_desired`), so the
+/// agent cuts the stop sync point exactly as for a person's stop; both fields ride in one patch
+/// because a paused workspace wants both and two patches would be two reconciles.
+async fn pause(c: &kube::Client, workspaces: &[&crd::Workspace], owner: &str, team: &str) {
+    use crd::{Access, DesiredState};
+    let api: Api<crd::Workspace> = Api::all(c.clone());
     let mut bench_written = false;
-    for b in benches.iter().filter(|b| b.spec.access != BenchAccess::Paused || b.spec.desired_state != DesiredState::Stopped) {
-        let p = json!({"spec": {"access": BenchAccess::Paused, "desiredState": DesiredState::Stopped}});
-        bench_written |= write(bapi, &b.name_any(), p, "member.pause.applied").await;
-    }
-    for w in workspaces.iter().filter(|w| w.spec.desired_state != DesiredState::Stopped) {
-        // The stop route's own path, so the agent cuts the stop sync point exactly as for a person's stop.
-        match super::workspaces::set_desired::<crd::Workspace>(c, &w.name_any(), DesiredState::Stopped).await {
-            Ok(()) => tracing::info!(%owner, %team, name = %w.name_any(), "member.pause.applied"),
-            Err(r) => tracing::warn!(%owner, %team, name = %w.name_any(), status = %r.status(), "membership.write.failed"),
-        }
+    for w in workspaces.iter().filter(|w| w.spec.access != Access::Paused || w.spec.desired_state != DesiredState::Stopped) {
+        let p = json!({"spec": {"access": Access::Paused, "desiredState": DesiredState::Stopped}});
+        let ok = write(&api, &w.name_any(), p, "member.pause.applied").await;
+        bench_written |= ok && crd::is_bench(w);
     }
     // Already-minted tool tokens die now, not when their 15 minutes run out.
     if bench_written {

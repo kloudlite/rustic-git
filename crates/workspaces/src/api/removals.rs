@@ -103,11 +103,6 @@ pub(crate) async fn delete_now(s: &ApiState, c: &Caller, team: &str, owner: &str
     let now = chrono::Utc::now().to_rfc3339();
     let mark = |m: &kube::core::ObjectMeta| system_annotation(m, REMOVED_AT).map(|at| json!({REMOVED_AT: at, DELETE_NOW: "true", DELETE_AFTER: now}));
     let mut marked = false;
-    for x in o.benches.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)) {
-        if let Some(a) = mark(&x.metadata) {
-            marked |= stamp(&Api::<crd::Bench>::all(k.clone()), &x.name_any(), a).await;
-        }
-    }
     for x in o.workspaces.iter().filter(|x| mine(&x.spec.owner, &x.spec.team)) {
         if let Some(a) = mark(&x.metadata) {
             marked |= stamp(&Api::<crd::Workspace>::all(k.clone()), &x.name_any(), a).await;
