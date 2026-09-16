@@ -31,6 +31,14 @@ const harness = {
   benchImport: (sessions: { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]): Promise<{ added: string[]; files: number }> =>
     ipcRenderer.invoke("bench:import", sessions),
 
+  /** Model provider keys, as pi stores them in the bench. A key only ever goes
+      in: `list` says whether one is configured, never what it is. */
+  providers: {
+    list: (): Promise<{ id: string; label: string; configured: boolean }[]> => ipcRenderer.invoke("bench:providers", "list"),
+    save: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke("bench:providers", "save", id, apiKey),
+    remove: (id: string): Promise<void> => ipcRenderer.invoke("bench:providers", "remove", id),
+  },
+
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */
   /** The desktop login. The renderer sees only the state — the token never leaves main. */
   auth: {

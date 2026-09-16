@@ -2,6 +2,7 @@ import http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
+import { listProviders, removeProvider, setProvider } from "./providers.ts";
 import { holdFrames, SESSION_RE, spliceWorkspaceShell, toolSessions } from "./pty.ts";
 
 /**
@@ -93,6 +94,18 @@ export function serve(
         if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await thread(`w-${p[1]}`));
         if (p.length === 5 && p[2] === "eph" && p[4] === "session" && m === "POST") return send(res, 200, await bench.openEphemeral(p[1], p[3]));
         if (p.length === 5 && p[2] === "eph" && p[4] === "messages" && m === "GET") return send(res, 200, await thread(`e-${p[3]}`));
+      }
+      if (p[0] === "providers") {
+        if (p.length === 1 && m === "GET") return send(res, 200, listProviders());
+        // The key travels in the body and goes nowhere else: never a path segment, never logged, never read back.
+        if (p.length === 2 && m === "PUT") {
+          setProvider(p[1], (await body(req)).apiKey);
+          return send(res, 204);
+        }
+        if (p.length === 2 && m === "DELETE") {
+          removeProvider(p[1]);
+          return send(res, 204);
+        }
       }
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());

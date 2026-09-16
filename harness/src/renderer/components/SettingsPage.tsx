@@ -3,7 +3,7 @@ import { Icon } from "../ui/Icon";
 import { Button } from "../ui/Button";
 import { Kbd } from "../ui/parts";
 import { KEYS } from "../keys";
-import { PROVIDERS, type Machine, type Plugin, type Provider } from "../model";
+import { PROVIDERS, type Machine, type Plugin } from "../model";
 import { TOOLS } from "../../../pi/catalog";
 
 /**
@@ -107,18 +107,7 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
           </Show>
 
           <Show when={page() === "providers"}>
-          <Section id="providers" title="Providers" hint="a key connects one; its models become choices above">
-            <For each={PROVIDERS.filter((p) => hit(p.name, ...p.models))}>
-              {(p) => (
-                <Row name={p.name} detail={p.note ?? PROVIDER_NOTE[p.state](p)} off={p.state !== "connected"} bad={p.state === "unreachable"}>
-                  <span class={`size-1.5 rounded-full ${PROVIDER_DOT[p.state]}`} />
-                  <Show when={p.state === "no-key"} fallback={<Button variant="ghost" size="sm">{p.state === "connected" ? "Replace key" : "Retry"}</Button>}>
-                    <Button size="sm">Add key</Button>
-                  </Show>
-                </Row>
-              )}
-            </For>
-          </Section>
+            <ModelProviders hit={hit} />
           </Show>
 
           <Show when={page() === "tools"}>
@@ -249,13 +238,6 @@ const MARKET: Listing[] = [
 
 const EFFECT: Record<string, string> = { read: "bg-active text-muted", write: "bg-warning-wash text-warning", destroy: "bg-danger-wash text-danger" };
 
-const PROVIDER_DOT: Record<Provider["state"], string> = { connected: "bg-success", "no-key": "bg-subtle", unreachable: "bg-danger" };
-const PROVIDER_NOTE: Record<Provider["state"], (p: Provider) => string> = {
-  connected: (p) => `${p.models.length} models`,
-  "no-key": () => "no key on this machine",
-  unreachable: () => "unreachable",
-};
-
 const MCP_DOT: Record<string, string> = { connected: "bg-success", starting: "bg-warning", failed: "bg-danger", off: "bg-subtle" };
 
 function Section(props: { id: string; title: string; hint?: string; action?: any; children: any }) {
@@ -292,5 +274,63 @@ function Switch(props: { on: boolean }) {
     <button role="switch" aria-checked={props.on} class="relative h-3.5 w-6 shrink-0 rounded-full bg-active transition-colors aria-checked:bg-accent" title={props.on ? "Disable" : "Enable"}>
       <span class="absolute top-0.5 left-0.5 size-2.5 rounded-full bg-fg transition-transform" classList={{ "translate-x-2.5": props.on }} />
     </button>
+  );
+}
+
+/**
+ * The keys pi signs in with, listed from the bench's own auth file. A key is
+ * write-only here — the listing says CONFIGURED or not and never carries a
+ * value, so nothing on this page can leak one back out — and pi re-reads the
+ * file when it changes, so an open session picks a new key up on its next
+ * turn without a restart.
+ */
+function ModelProviders(props: { hit: (...s: (string | undefined)[]) => boolean }) {
+  const [rows, setRows] = createSignal<{ id: string; label: string; configured: boolean }[]>([]);
+  const [error, setError] = createSignal("");
+  const [busy, setBusy] = createSignal("");
+  const [keys, setKeys] = createSignal<Record<string, string>>({});
+  const load = () => window.harness.providers.list().then(setRows, (e: Error) => setError(e.message));
+  void load();
+  const run = async (id: string, fn: () => Promise<void>) => {
+    setBusy(id);
+    setError("");
+    try {
+      await fn();
+      setKeys({ ...keys(), [id]: "" });
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <Section id="providers" title="Model providers" hint="a key signs the machine in; an open thread uses a new one from its next turn">
+      <Show when={error()}>{(e) => <div class="mb-2 text-xs text-danger">{e()}</div>}</Show>
+      <For each={rows().filter((p) => props.hit(p.label, p.id))}>
+        {(p) => (
+          <Row name={p.label} from={p.id} detail={p.configured ? "key configured on this bench" : "no key on this bench"} off={!p.configured}>
+            <span class={`rounded-sm px-1.5 font-mono text-2xs ${p.configured ? "bg-success-wash text-success" : "bg-active text-muted"}`}>{p.configured ? "configured" : "not set"}</span>
+            <input
+              type="password"
+              class="h-6.5 w-56 rounded-[2px] border border-input-line bg-input px-1.5 font-mono text-sm text-fg outline-none placeholder:text-subtle focus:border-focus"
+              placeholder={p.configured ? "replace key" : "API key"}
+              autocomplete="off"
+              value={keys()[p.id] ?? ""}
+              onInput={(e) => setKeys({ ...keys(), [p.id]: e.currentTarget.value })}
+            />
+            <Button size="sm" disabled={busy() === p.id || !(keys()[p.id] ?? "").trim()} onClick={() => void run(p.id, () => window.harness.providers.save(p.id, keys()[p.id]))}>
+              Save
+            </Button>
+            <Show when={p.configured}>
+              <Button variant="danger" size="sm" disabled={busy() === p.id} onClick={() => void run(p.id, () => window.harness.providers.remove(p.id))}>
+                Remove
+              </Button>
+            </Show>
+          </Row>
+        )}
+      </For>
+    </Section>
   );
 }

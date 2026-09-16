@@ -674,3 +674,19 @@ void app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+// Model provider keys — the desktop's window onto the auth file pi reads in
+// the bench. Its own handler rather than the allow-listed generic route, so a
+// key travels this one path only; nothing comes back out, the listing carries
+// `configured` and never a value (masked or otherwise).
+const PROVIDER_ID = /^[a-z0-9-]+$/;
+ipcMain.handle("bench:providers", (_e, action: unknown, id?: unknown, apiKey?: unknown) => {
+  if (action === "list") return needBench().rest("GET", "/providers");
+  if (typeof id !== "string" || !PROVIDER_ID.test(id)) throw new Error("not a provider id");
+  if (action === "save") {
+    if (typeof apiKey !== "string" || !apiKey.trim()) throw new Error("apiKey required");
+    return needBench().rest("PUT", `/providers/${id}`, { apiKey });
+  }
+  if (action === "remove") return needBench().rest("DELETE", `/providers/${id}`);
+  throw new Error(`not a provider action: ${String(action)}`);
+});
