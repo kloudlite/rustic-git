@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { SloRun, SloRunDetail, SloStatus, SloStep } from "@/lib/api";
-import { msLabel, progressOf, runTone, targetMs, treeOf, type StageNode, type StageState } from "@/lib/slo";
+import { msLabel, progressOf, runStateLabel, runTone, targetMs, treeOf, type StageNode, type StageState } from "@/lib/slo";
 import { cn } from "@/lib/utils";
 import { Pill } from "../ui/pill";
 
@@ -43,6 +43,10 @@ export function Glyph({ state, className }: { state: StageState; className?: str
 
 /** Every row of the tree shares this grid, which is what puts the stage numbers, the counts and
  *  the milliseconds each in one column down the whole panel. */
+/** `crates/workspaces/src/slo/catalogue.rs::HOURLY_GROUPS`. Four, and the header says of how many
+ *  because "group 3" alone reads as a rank. */
+const HOURLY_GROUPS = 4;
+
 const ROW = "grid grid-cols-[2.25rem_minmax(0,1fr)_5rem_7rem] items-baseline gap-3 px-4";
 
 /** Elapsed since an instant, ticking every second. The first value is computed during render, on
@@ -163,6 +167,9 @@ export function RunTree({
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-border px-4 py-2.5">
         <Pill tone="info">{run.suite}</Pill>
         <span className="font-mono text-caption text-muted-foreground">{run.run_id}</span>
+        {/* Only the hourly suite is grouped, and then the journey above is already this group's
+            own slice — so the stage count beside it is honest without a second filter here. */}
+        {run.group != null && <span className="text-caption text-muted-foreground">group {run.group} of {HOURLY_GROUPS}</span>}
         <span className="text-caption text-muted-foreground">
           stage {stageNo < 0 ? tree.length : stageNo + 1} of {tree.length}
         </span>
@@ -173,7 +180,7 @@ export function RunTree({
         <span className="text-sm2 font-medium tabular-nums">
           {run.state === "running" ? <Elapsed since={run.started} /> : msLabel(run.duration_ms)}
         </span>
-        <Pill tone={runTone(run.state)}>{run.state}</Pill>
+        <Pill tone={runTone(run.state)}>{runStateLabel(run.state)}</Pill>
       </div>
       <ul>
         {tree.map((s) => (

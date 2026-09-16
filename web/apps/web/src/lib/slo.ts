@@ -1,4 +1,4 @@
-import type { SloJourneyStage, SloRunState, SloStatus, SloStep } from "@/lib/api";
+import type { SloJourneyStage, SloRun, SloRunState, SloStatus, SloStep } from "@/lib/api";
 import type { Tone } from "@/lib/console";
 
 /** How much of the error budget is left, as the console words it. Both numbers from the api are
@@ -67,7 +67,84 @@ export function groupByFeature(slos: SloStatus[]): { feature: string; slos: SloS
 }
 
 export function runTone(state: SloRunState): Tone {
-  return state === "failed" ? "critical" : state === "passed" ? "ok" : "info";
+  if (state === "failed") return "critical";
+  if (state === "passed") return "ok";
+  // A run that stood aside measured nothing and broke nothing; a lost one is a pod that went away
+  // mid-journey, which is a thing to look at rather than a failure to page on.
+  if (state === "yielded") return "neutral";
+  if (state === "lost") return "warn";
+  return "info";
+}
+
+/** The glyph vocabulary is the stage one — a run needs no second set of circles. Yielded is the
+ *  hollow dot (nothing happened), lost is the dashed one (it stopped mid-way). */
+export function runGlyph(state: SloRunState): StageState {
+  if (state === "running" || state === "failed" || state === "skipped") return state;
+  return state === "yielded" ? "pending" : state === "lost" ? "skipped" : "passed";
+}
+
+/** The operator's words for the two states that are not self-explanatory: a run that stood aside
+ *  for a sibling, and one whose pod stopped reporting. */
+export function runStateLabel(state: SloRunState): string {
+  return state === "yielded" ? "stood aside" : state === "lost" ? "lost — no heartbeat for 30 min" : state;
+}
+
+/** Sibling group runs of one suite start within this of each other — the probe's own rule, and the
+ *  only thing that makes four rows one Job. */
+const SIBLING_WINDOW_SECS = 900;
+
+/** One launch of the probe. The hourly suite is four parallel group runs now, and an operator
+ *  asking "did the hourly pass" means the four together; the api deliberately does not group, so
+ *  the folding lives here, the only reader that draws jobs. */
+export type SloJob = {
+  key: string;
+  suite: string;
+  region: string;
+  started: string;
+  runs: SloRun[];
+  state: SloRunState;
+};
+
+/** Failed beats everything: one group's failure is the job's. Then still-running, then lost (a
+ *  group whose pod went away while the others finished), then all-yielded. Skipped counts as a
+ *  pass here, exactly as the probe's own roll-up does. */
+function jobState(runs: SloRun[]): SloRunState {
+  if (runs.some((r) => r.state === "failed")) return "failed";
+  if (runs.some((r) => r.state === "running")) return "running";
+  if (runs.some((r) => r.state === "lost")) return "lost";
+  if (runs.every((r) => r.state === "yielded")) return "yielded";
+  return "passed";
+}
+
+export function jobsOf(runs: SloRun[]): SloJob[] {
+  const jobs: SloJob[] = [];
+  for (const r of runs) {
+    const at = new Date(r.started).getTime();
+    const sibling =
+      r.group == null
+        ? undefined
+        : jobs.find(
+            (j) =>
+              j.suite === r.suite &&
+              j.runs[0].group != null &&
+              Math.abs(new Date(j.started).getTime() - at) <= SIBLING_WINDOW_SECS * 1_000,
+          );
+    if (sibling) {
+      sibling.runs.push(r);
+      // The job started when its earliest group did, whatever order the api answered in.
+      if (at < new Date(sibling.started).getTime()) sibling.started = r.started;
+      sibling.state = jobState(sibling.runs);
+    } else {
+      jobs.push({ key: r.run_id, suite: r.suite, region: r.region, started: r.started, runs: [r], state: r.state });
+    }
+  }
+  for (const j of jobs) j.runs.sort((a, b) => (a.group ?? 0) - (b.group ?? 0));
+  return jobs;
+}
+
+/** Groups that will report nothing more, over the groups the job has. */
+export function jobDone(job: SloJob): { done: number; total: number } {
+  return { done: job.runs.filter((r) => r.state !== "running").length, total: job.runs.length };
 }
 
 /** A duration, in the largest unit that still says something: a step is milliseconds, a stage is

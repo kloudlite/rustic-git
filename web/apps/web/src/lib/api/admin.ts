@@ -400,7 +400,9 @@ export function removeSuperadmin(user: string, token: string, note: string) {
 // None of these structs carry `rename_all`, so every field below is the wire name verbatim.
 
 // `skipped`: a run that measured SOME ids and skipped others — not a pass (2026-09-12).
-export type SloRunState = "running" | "passed" | "failed" | "yielded" | "skipped";
+// `lost`: a READ-side state the api derives from a stale heartbeat — no row is rewritten, so a
+// late report still wins and the run goes back to running.
+export type SloRunState = "running" | "passed" | "failed" | "yielded" | "skipped" | "lost";
 
 /** One row of `slo_runs`. `finished` is `null` while the run is in flight, and `duration_ms` is
  *  then the elapsed time so far — the probe recomputes it on every report. */
@@ -420,6 +422,9 @@ export type SloRun = {
   /** The row's own heartbeat, written on every report. A `running` row whose `updated` has gone
    *  stale belongs to a pod that is gone — which is how the probe tells one from a slow run. */
   updated?: string | null;
+  /** The hourly suite runs as four parallel group runs (`hourly-{ts}-g{n}`); every other suite is
+   *  ungrouped and has none. */
+  group?: number | null;
 };
 
 /** A `skipped` step is stored but counts neither way — the probe could not attempt it. */
@@ -473,7 +478,7 @@ export type SloJourney = {
 
 export type SloOverview = {
   slos: SloStatus[];
-  running: SloRun | null;
+  running: SloRun[];
   runs: SloRun[];
   journey: SloJourney;
   generated: string;

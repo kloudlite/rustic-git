@@ -779,7 +779,8 @@ const SLOS: SloStatus[] = CATALOGUE.map(([id, feature, sli, target, suite, ,]) =
  *  remaining step is SKIPPED rather than absent — that is what the probe reports, and it is the
  *  difference between "the registry broke the run" and "the run stopped for no stated reason". */
 function walk(through: string, startedMins: number, suites: string[], failAt?: string): SloStep[] {
-  const order = [...STAGES, "12 · Weekly", "13 · Monthly"];
+  // Experience is the hourly suite’s own stage; it walks the fast journey and then this one.
+  const order = [...STAGES, "14 · Experience", "12 · Weekly", "13 · Monthly"];
   const out: SloStep[] = [];
   let t = now - startedMins * 60_000;
   let broke = "";
@@ -816,11 +817,67 @@ const WEEKLY_STEPS = walk("12 · Weekly", 190, ["fast", "weekly"]);
 
 const total = (steps: SloStep[]) => steps.reduce((a, s) => a + s.ms + 300, 0);
 
-/** The probe's own shape: the suite it ran and the unix second it started at. */
-const runId = (suite: string, startedMins: number) => `${suite}-${Math.floor((now - startedMins * 60_000) / 1000)}`;
+/** The probe's own shape: the suite it ran, the unix second it started at, and — for the hourly
+ *  suite, which runs as four parallel group runs — which group this pod walked. */
+const runId = (suite: string, startedMins: number, group?: number) =>
+  `${suite}-${Math.floor((now - startedMins * 60_000) / 1000)}${group == null ? "" : `-g${group}`}`;
 
-const run = (suite: string, state: SloRun["state"], at: string, startedMins: number, steps: SloStep[]): SloRun => ({
-  run_id: runId(suite, startedMins),
+/** `crates/workspaces/src/slo/catalogue.rs::group_of`, mirrored from `deploy/slo.md`'s ids rather
+ *  than imported — the fixture holds no Rust, and the row-for-row test keeps the ids themselves
+ *  honest. */
+const BENCH_GROUP_IDS = [
+  "bench.create",
+  "bench.start.p95",
+  "bench.tunnel",
+  "bench.idle.wake",
+  "bench.session.roundtrip",
+  "bench.exchange.both_views",
+  "bench.two_clients",
+  "bench.tool.token",
+  "bench.tool.audience",
+  "bench.tool.revoked",
+];
+const INTERCEPT_GROUP_IDS = [
+  "env.space.bench",
+  "env.intercept",
+  "env.intercept.proxy.up",
+  "env.intercept.delivered",
+  "env.intercept.remap",
+  "env.intercept.peer",
+  "env.intercept.bench",
+  "env.intercept.proxy.restart",
+  "env.intercept.release",
+  "env.intercept.fallback",
+  "env.intercept.refused",
+  "env.intercept.udp.refused",
+  "env.intercept.tools.refused",
+];
+const groupOf = (id: string): number =>
+  BENCH_GROUP_IDS.includes(id) ? 3 : id === "ws.seed.failed" || id === "team.member.paused" ? 2 : INTERCEPT_GROUP_IDS.includes(id) ? 1 : 0;
+
+/** The api slices a group run's journey the same way: every other group's ids dropped, a stage
+ *  that lost all of its own dropped with them, and a stage that never had any (boot, teardown)
+ *  kept — every pod boots and every pod tears down. */
+const journeyForGroup = (group: number): SloJourneyStage[] =>
+  JOURNEY.hourly
+    .map((st) => ({ name: st.name, ids: st.ids.filter((id) => groupOf(id) === group), was: st.ids.length }))
+    .filter((st) => st.was === 0 || st.ids.length > 0)
+    .map(({ name, ids }) => ({ name, ids }));
+
+/** One group's share of an hourly walk. */
+const groupSteps = (through: string, startedMins: number, group: number) =>
+  walk(through, startedMins, ["fast", "hourly"]).filter((st) => groupOf(st.slo_id) === group);
+
+const run = (
+  suite: string,
+  state: SloRun["state"],
+  at: string,
+  startedMins: number,
+  steps: SloStep[],
+  group?: number,
+): SloRun => ({
+  run_id: runId(suite, startedMins, group),
+  group: group ?? null,
   suite,
   region: "centralindia-k3s",
   started: mins(startedMins),
@@ -839,11 +896,27 @@ const FAILED_RUN = run("fast", "failed", "4 · Registry", 74, FAILED_STEPS);
 const WEEKLY_RUN = run("weekly", "passed", "12 · Weekly", 190, WEEKLY_STEPS);
 const FAST_RUNS: SloRun[] = [12, 27, 42, 57].map((m) => run("fast", "passed", "11 · Teardown", m, PASSED_STEPS));
 
-const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...FAST_RUNS, FAILED_RUN, WEEKLY_RUN];
+/** The hourly suite as it really runs: four parallel group runs the console folds into one job.
+ *  g2 stood aside (its sibling was already walking that owner's journey) and so measured nothing;
+ *  g0 and g3 are still going, which is the state the JobCard exists to draw. */
+const HOURLY_GROUP_STEPS: [number, SloStep[], string, SloRun["state"]][] = [
+  [0, groupSteps("6 · Environment", 8, 0), "6 · Environment", "running"],
+  [1, groupSteps("14 · Experience", 8, 1), "11 · Teardown", "passed"],
+  [2, [], "0 · Boot", "yielded"],
+  [3, groupSteps("5 · Workspace", 8, 3), "5 · Workspace", "running"],
+];
+const HOURLY_RUNS: SloRun[] = HOURLY_GROUP_STEPS.map(([g, steps, at, state]) =>
+  run("hourly", state, at, 8, steps, g),
+);
+/** A run whose pod went away: the row still says `running` in the table the probe writes, and the
+ *  api calls it `lost` because nothing has reported for half an hour. */
+const LOST_RUN = run("fast", "lost", "7 · Lifecycle", 96, RUNNING_STEPS);
+
+const SLO_RUNS: SloRun[] = [RUNNING_RUN, ...HOURLY_RUNS, ...FAST_RUNS, FAILED_RUN, LOST_RUN, WEEKLY_RUN];
 
 const SLO_OVERVIEW: SloOverview = {
   slos: SLOS,
-  running: RUNNING_RUN,
+  running: [RUNNING_RUN, ...HOURLY_RUNS.filter((r) => r.state === "running")],
   runs: SLO_RUNS,
   journey: JOURNEY,
   generated: new Date(now).toISOString(),
@@ -854,10 +927,16 @@ const SLO_DETAILS: Record<string, SloRunDetail> = Object.fromEntries(
     [RUNNING_RUN, RUNNING_STEPS] as const,
     [FAILED_RUN, FAILED_STEPS] as const,
     [WEEKLY_RUN, WEEKLY_STEPS] as const,
+    [LOST_RUN, RUNNING_STEPS] as const,
     ...FAST_RUNS.map((r) => [r, PASSED_STEPS] as const),
+    ...HOURLY_RUNS.map((r, i) => [r, HOURLY_GROUP_STEPS[i][1]] as const),
   ].map(([r, steps]) => [
     r.run_id,
-    { ...r, steps, journey: JOURNEY[r.suite as keyof SloJourney] ?? JOURNEY.fast },
+    {
+      ...r,
+      steps,
+      journey: r.group != null ? journeyForGroup(r.group) : (JOURNEY[r.suite as keyof SloJourney] ?? JOURNEY.fast),
+    },
   ]),
 );
 

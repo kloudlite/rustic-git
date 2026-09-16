@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { SloStatus, SloStep } from "@/lib/api";
-import { budgetLabel, burnLabel, groupByFeature, msLabel, progressOf, targetMs, treeOf, windowLabel } from "@/lib/slo";
+import type { SloRun, SloStatus, SloStep } from "@/lib/api";
+import { budgetLabel, burnLabel, groupByFeature, jobDone, jobsOf, msLabel, progressOf, runStateLabel, runTone, targetMs, treeOf, windowLabel } from "@/lib/slo";
 
 const slo = (id: string, feature: string, state: SloStatus["state"]): SloStatus => ({
   id,
@@ -136,5 +136,87 @@ describe("progressOf", () => {
   test("counts steps done over steps the journey holds", () => {
     expect(progressOf(treeOf(JOURNEY, []))).toEqual({ done: 0, total: 5 });
     expect(progressOf(treeOf(JOURNEY, [step("id.signin", "1 · Identity")]))).toEqual({ done: 1, total: 5 });
+  });
+});
+
+// The hourly suite is four parallel group runs; "did the hourly pass" is a question about the
+// four together, and the api deliberately hands back a flat list.
+const runOf = (run_id: string, suite: string, started: string, state: SloRun["state"], group: number | null): SloRun => ({
+  run_id,
+  suite,
+  region: "centralindia-k3s",
+  started,
+  finished: state === "running" ? null : started,
+  state,
+  stage: "5 · Workspace",
+  steps_total: 10,
+  steps_failed: state === "failed" ? 1 : 0,
+  failed_step: state === "failed" ? "reg.push.ok" : "",
+  failed_detail: "",
+  duration_ms: 1_000,
+  group,
+});
+
+describe("jobsOf", () => {
+  const at = (mins: number) => new Date(Date.UTC(2026, 8, 16, 10, mins)).toISOString();
+
+  test("folds four sibling group runs into one job", () => {
+    const jobs = jobsOf([0, 1, 2, 3].map((g) => runOf(`hourly-1-g${g}`, "hourly", at(g), "passed", g)));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].runs.map((r) => r.group)).toEqual([0, 1, 2, 3]);
+    // The job started when its earliest group did, whatever order the api answered in.
+    expect(jobs[0].started).toBe(at(0));
+    expect(jobs[0].state).toBe("passed");
+  });
+
+  test("splits two hourly starts twenty minutes apart", () => {
+    const jobs = jobsOf([
+      runOf("hourly-1-g0", "hourly", at(0), "passed", 0),
+      runOf("hourly-2-g0", "hourly", at(20), "passed", 0),
+    ]);
+    expect(jobs).toHaveLength(2);
+  });
+
+  test("an ungrouped run is a job of one, never folded into a neighbour", () => {
+    const jobs = jobsOf([runOf("fast-1", "fast", at(0), "passed", null), runOf("fast-2", "fast", at(1), "passed", null)]);
+    expect(jobs).toHaveLength(2);
+  });
+
+  test("one group's failure is the job's, and a running group outranks a lost one", () => {
+    const states: SloRun["state"][] = ["passed", "yielded", "lost", "failed"];
+    const jobs = jobsOf(states.map((st, g) => runOf(`hourly-1-g${g}`, "hourly", at(g), st, g)));
+    expect(jobs[0].state).toBe("failed");
+    const noFail = jobsOf(
+      (["running", "yielded", "lost", "passed"] as SloRun["state"][]).map((st, g) =>
+        runOf(`hourly-1-g${g}`, "hourly", at(g), st, g),
+      ),
+    );
+    expect(noFail[0].state).toBe("running");
+    expect(jobsOf([runOf("h-g0", "hourly", at(0), "lost", 0), runOf("h-g1", "hourly", at(1), "passed", 1)])[0].state).toBe("lost");
+    // All four stood aside: the job stood aside, it did not pass.
+    expect(jobsOf([0, 1].map((g) => runOf(`h-g${g}`, "hourly", at(g), "yielded", g)))[0].state).toBe("yielded");
+    // A skipped group counts as a pass, exactly as the probe's own roll-up does.
+    expect(jobsOf([runOf("h-g0", "hourly", at(0), "skipped", 0), runOf("h-g1", "hourly", at(1), "passed", 1)])[0].state).toBe("passed");
+  });
+
+  test("done counts the groups that will report nothing more", () => {
+    const job = jobsOf(
+      (["running", "passed", "yielded", "running"] as SloRun["state"][]).map((st, g) =>
+        runOf(`h-g${g}`, "hourly", at(g), st, g),
+      ),
+    )[0];
+    expect(jobDone(job)).toEqual({ done: 2, total: 4 });
+  });
+});
+
+describe("runTone and its words", () => {
+  test("standing aside is not a failure, and a lost pod is a warning", () => {
+    expect(runTone("yielded")).toBe("neutral");
+    expect(runTone("lost")).toBe("warn");
+    expect(runTone("failed")).toBe("critical");
+    expect(runTone("running")).toBe("info");
+    expect(runStateLabel("yielded")).toBe("stood aside");
+    expect(runStateLabel("lost")).toBe("lost — no heartbeat for 30 min");
+    expect(runStateLabel("passed")).toBe("passed");
   });
 });

@@ -6,6 +6,7 @@ import { AutoRefresh } from "@/components/app/auto-refresh";
 import { when } from "@/lib/time";
 import { deltaLabel, eventSummary } from "@/lib/history";
 import { summaryLine } from "@/lib/request-queue";
+import { jobsOf, runStateLabel } from "@/lib/slo";
 import { PageHeader } from "./page-header";
 import { regionCapacity } from "./overview";
 import { AttentionFeed } from "./attention-feed";
@@ -51,7 +52,8 @@ export default async function OverviewPage() {
   // The SLO area degrades on its own like every history read: no ClickHouse is a dash on the
   // tile, never a zero that would read as "nothing is burning".
   const sloBurning = slo.ok ? slo.value.slos.filter((s) => s.state === "burning" || s.state === "breaching").length : null;
-  const lastRun = slo.ok ? slo.value.runs.find((r) => r.state !== "running") : undefined;
+  // The hourly suite is four parallel group runs, so the last thing that FINISHED is a job.
+  const lastRun = slo.ok ? jobsOf(slo.value.runs.filter((r) => r.state !== "running"))[0] : undefined;
 
   // Three more series per region. Regions are a handful, so this is one more round of parallelism
   // rather than a nested waterfall — awaiting them one at a time would cost 3n round trips.
@@ -99,7 +101,7 @@ export default async function OverviewPage() {
         <KpiTile
           label="SLO"
           value={sloBurning ?? "—"}
-          sub={lastRun ? `last run ${lastRun.state} ${when(new Date(lastRun.started).getTime())}` : slo.ok ? "no probe run has reported yet" : "history unavailable"}
+          sub={lastRun ? `last job ${runStateLabel(lastRun.state)} ${when(new Date(lastRun.started).getTime())}` : slo.ok ? "no probe run has reported yet" : "history unavailable"}
           href="/superadmin/slo"
         />
       </KpiStrip>
