@@ -9,11 +9,13 @@ import type { TermTab } from "./tabs";
  * One terminal. The emulator is xterm.js — the one VS Code and every other
  * Electron terminal uses — so ANSI, selection, links and reflow are its problem.
  *
- * `write` and `onData` below are the whole seam to the session: when the
- * transport lands it replaces the local echo and nothing else here changes.
+ * The shell itself is a PTY on the bench (or, for a workspace scope, spliced
+ * through to its tool server): main owns the socket, this view only names the
+ * tab. One socket, one shell, one life — an exit or a dropped tunnel ends the
+ * tab rather than reconnecting to something that is gone.
  * A tab stays mounted while another is shown, so its scrollback survives.
  */
-export function TerminalView(props: { tab: TermTab; visible: boolean }) {
+export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onClose?: () => void }) {
   let host!: HTMLDivElement;
   let term: Terminal;
   let fit: FitAddon;
@@ -63,32 +65,43 @@ export function TerminalView(props: { tab: TermTab; visible: boolean }) {
     term.open(host);
     fit.fit();
 
-    const prompt = () => term.write("\r\n\x1b[34m$\x1b[0m ");
     term.writeln(props.tab.banner);
-    prompt();
+    const enc = new TextEncoder();
+    let exited = false;
 
-    let line = "";
-    term.onData((d) => {
-      if (d === "\r") {
-        term.write("\r\n");
-        if (line.trim()) term.writeln("\x1b[2m" + line.trim() + ": no session transport yet\x1b[0m");
-        line = "";
-        prompt();
-      } else if (d === "\u007f") {
-        if (line) {
-          line = line.slice(0, -1);
-          term.write("\b \b");
-        }
-      } else if (d >= " ") {
-        line += d;
-        term.write(d);
-      }
+    const end = (code: number | undefined, error?: string) => {
+      if (exited) return;
+      exited = true;
+      term.write(code === undefined ? `\r\n\x1b[2m[${error ?? "disconnected"} — reopen the shell]\x1b[0m` : `\r\n\x1b[2m[process exited with code ${code}]\x1b[0m`);
+      props.onExited?.(props.tab.id);
+    };
+
+    void window.harness.pty
+      .open(props.tab.id, props.tab.scope, term.cols, term.rows)
+      .catch((e: Error) => end(undefined, e.message));
+    term.onData((d) => window.harness.pty.write(props.tab.id, enc.encode(d)));
+    term.onResize(({ cols, rows }) => window.harness.pty.resize(props.tab.id, cols, rows));
+
+    const offData = window.harness.pty.onData((id, data) => id === props.tab.id && term.write(data));
+    const offExit = window.harness.pty.onExit((id, code, error) => id === props.tab.id && end(code, error));
+    // Enter on a dead shell closes the tab: the same key that would have run
+    // the next command, since there is nothing left to run it.
+    term.onKey(({ domEvent }) => exited && domEvent.key === "Enter" && props.onClose?.());
+
+    // Debounced: a drag resizes continuously, and every fit is a reflow plus a
+    // resize frame to the shell.
+    let refit: ReturnType<typeof setTimeout> | undefined;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(refit);
+      refit = setTimeout(() => props.visible && fit.fit(), 50);
     });
-
-    const ro = new ResizeObserver(() => props.visible && fit.fit());
     ro.observe(host);
     onCleanup(() => {
+      clearTimeout(refit);
       ro.disconnect();
+      offData();
+      offExit();
+      window.harness.pty.close(props.tab.id);
       term.dispose();
     });
   });

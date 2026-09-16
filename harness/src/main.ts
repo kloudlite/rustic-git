@@ -11,6 +11,8 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { getEnvironment, listEnvironments, listWorkspaces, volumeHistory } from "./connect/platform";
+import { checkPty } from "./pty-ipc";
+import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
 // `quit`: quit is asynchronous and whenReady below would still open a window first.
@@ -337,6 +339,65 @@ ipcMain.handle("bench:import", async (_e, rows: unknown) => {
 });
 app.on("before-quit", () => disconnect());
 
+// One socket per shell, owned here: the renderer names a shell by id and never
+// sees the socket. Nothing is queued — a write to a shell that is gone is
+// dropped, exactly as typing into a closed terminal is.
+const ptys = new Map<string, WebSocket>();
+
+function closePtys() {
+  for (const w of ptys.values()) w.close();
+  ptys.clear();
+}
+
+ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown, rows: unknown) => {
+  const { id, scope } = checkPty(rawId, rawScope);
+  if (typeof cols !== "number" || typeof rows !== "number") throw new Error("a shell opens at a size");
+  ptys.get(id)?.close();
+  const w = needBench().pty(scope);
+  ptys.set(id, w);
+  const send = (...a: unknown[]) => {
+    if (!e.sender.isDestroyed()) e.sender.send(a[0] as string, ...a.slice(1));
+  };
+  let ended = false;
+  const exit = (code: number | undefined, error?: string) => {
+    if (ended) return;
+    ended = true;
+    send("pty:exit", id, code, error);
+  };
+  // The first frame is the size, so the shell never starts at 80x24 and reflows.
+  w.on("open", () => w.send(JSON.stringify({ resize: { cols, rows } })));
+  w.on("message", (d: Buffer, isBinary: boolean) => {
+    if (isBinary) return send("pty:data", id, new Uint8Array(d));
+    let ev: { exit?: unknown; error?: unknown };
+    try {
+      ev = JSON.parse(d.toString()) as typeof ev;
+    } catch {
+      return;
+    }
+    if (typeof ev.exit === "number") exit(ev.exit);
+    else if (typeof ev.error === "string") exit(undefined, ev.error);
+  });
+  w.on("error", () => undefined); // close follows
+  w.on("close", () => {
+    // A socket that closed without saying why took the shell with it.
+    exit(undefined, "disconnected");
+    if (ptys.get(id) === w) ptys.delete(id);
+  });
+});
+ipcMain.on("pty:write", (_e, id: unknown, data: unknown) => {
+  const w = typeof id === "string" ? ptys.get(id) : undefined;
+  if (w && data instanceof Uint8Array) w.send(Buffer.from(data), { binary: true });
+});
+ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
+  const w = typeof id === "string" ? ptys.get(id) : undefined;
+  if (w && typeof cols === "number" && typeof rows === "number") w.send(JSON.stringify({ resize: { cols, rows } }));
+});
+ipcMain.on("pty:close", (_e, id: unknown) => {
+  if (typeof id !== "string") return;
+  ptys.get(id)?.close();
+  ptys.delete(id);
+});
+
 ipcMain.handle("set-theme", (_e, mode: unknown) => {
   if (mode !== "system" && mode !== "light" && mode !== "dark") throw new Error("unknown theme");
   nativeTheme.themeSource = mode;
@@ -346,6 +407,7 @@ ipcMain.handle("set-theme", (_e, mode: unknown) => {
 let closeTunnel: (() => void) | undefined;
 let stopToolToken: (() => void) | undefined;
 function disconnect() {
+  closePtys();
   stopToolToken?.();
   stopToolToken = undefined;
   bench?.close();
@@ -362,6 +424,9 @@ const emitAuth = (s: AuthState) => {
   // One re-validation timer, alive only while ready: leaving ready (sign-out, expiry) clears it.
   if (s.phase === "ready") revalidateTimer ??= setInterval(() => void revalidate(), 5 * 60_000);
   else if (revalidateTimer) (clearInterval(revalidateTimer), (revalidateTimer = undefined));
+  // A shell only exists while the login does; leaving `ready` reloads the page
+  // under it, and a socket nobody can reach is a shell running for nobody.
+  if (s.phase !== "ready") closePtys();
   if (!mainWin || mainWin.isDestroyed()) return;
   // Leaving `ready` reloads the window: App registers listeners for the life of the page, so a
   // fresh page is the honest way back to the login screen.

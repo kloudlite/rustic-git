@@ -294,7 +294,7 @@ export function App() {
   const [height, setHeight] = createSignal(300);
 
   const openShell = (scopeId: string) => {
-    const t = makeTab(machine(), environment()?.name ?? "no environment", scopeId);
+    const t = makeTab(machine(), teamName(), scopeId);
     setTabs((ts) => [...ts, t]);
     setActive(t.id);
   };
@@ -593,11 +593,12 @@ export function App() {
     void window.harness.pi(cmd, pi).then((r) => void (r.success === false && L.note(String(r.error))), (e: Error) => L.note(e.message));
   };
 
-  /** A shell opened by shortcut lands where the selection is, else the machine. */
+  /** A shell opened by shortcut lands in the selected workspace, else on the
+      bench. A stopped workspace has nothing to attach to, so it lands there too. */
   const scope = () => {
     const s = selected();
-    const ws = machine().workspaces;
-    return ws.find((w) => w.id === s || w.ephemerals.some((e) => e.id === s)) ? s : "machine";
+    const w = machine().workspaces.find((x) => x.id === s || x.ephemerals.some((e) => e.id === s));
+    return w && w.state !== "stopped" ? w.id : "bench";
   };
 
   /** Dragging the drawer's top edge resizes it inside the pane it lives in. */

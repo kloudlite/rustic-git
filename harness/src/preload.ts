@@ -53,6 +53,24 @@ const harness = {
     environment: (id: string): Promise<ApiEnvironment> => ipcRenderer.invoke("platform:environment", id),
     snapshots: (volume: string): Promise<ApiSnapshot[]> => ipcRenderer.invoke("platform:snapshots", volume),
   },
+  /** One shell per id, over the bench tunnel: main owns the socket, the renderer
+      only names it. `onData`/`onExit` return an unsubscribe. */
+  pty: {
+    open: (id: string, scope: string, cols: number, rows: number): Promise<void> => ipcRenderer.invoke("pty:open", id, scope, cols, rows),
+    write: (id: string, data: Uint8Array): void => ipcRenderer.send("pty:write", id, data),
+    resize: (id: string, cols: number, rows: number): void => ipcRenderer.send("pty:resize", id, cols, rows),
+    close: (id: string): void => ipcRenderer.send("pty:close", id),
+    onData: (cb: (id: string, data: Uint8Array) => void): (() => void) => {
+      const fn = (_e: unknown, id: string, data: Uint8Array) => cb(id, data);
+      ipcRenderer.on("pty:data", fn);
+      return () => void ipcRenderer.removeListener("pty:data", fn);
+    },
+    onExit: (cb: (id: string, code: number | undefined, error?: string) => void): (() => void) => {
+      const fn = (_e: unknown, id: string, code: number | undefined, error?: string) => cb(id, code, error);
+      ipcRenderer.on("pty:exit", fn);
+      return () => void ipcRenderer.removeListener("pty:exit", fn);
+    },
+  },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
 };
 

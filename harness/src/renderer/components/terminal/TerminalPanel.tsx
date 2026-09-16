@@ -1,4 +1,4 @@
-import { For, createSignal } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import { Icon } from "../../ui/Icon";
 import { Button } from "../../ui/Button";
 import { Menu, MenuItem } from "../../ui/Menu";
@@ -24,6 +24,10 @@ export function TerminalPanel(props: {
   onClose: () => void;
 }) {
   const [picking, setPicking] = createSignal(false);
+  // Which tabs have reported a dead shell. Lifted here so the tab strip can
+  // mark one while its view is hidden.
+  const [exited, setExited] = createSignal<string[]>([]);
+  const markExited = (id: string) => setExited((e) => (e.includes(id) ? e : [...e, id]));
 
   return (
     <section class="grid h-full min-h-0 grid-rows-[30px_minmax(0,1fr)] bg-bg">
@@ -36,10 +40,15 @@ export function TerminalPanel(props: {
               onClick={() => props.onActivate(t.id)}
               class="group flex max-w-44 items-center gap-1.5 border-r border-line-subtle px-3 text-xs text-muted
                      hover:text-fg aria-selected:bg-raised aria-selected:text-fg"
-              title={t.scope === "machine" ? "machine scope" : t.label}
+              title={t.scope === "bench" ? "the bench" : t.label}
             >
-              <Icon name="terminal" size={11} class={t.scope === "machine" ? "text-accent" : "text-subtle"} />
+              <Icon name="terminal" size={11} class={t.scope === "bench" ? "text-accent" : "text-subtle"} />
               <span class="min-w-0 truncate font-mono">{t.label}</span>
+              <Show when={exited().includes(t.id)}>
+                <span class="text-subtle" title="the shell exited">
+                  •
+                </span>
+              </Show>
               <span
                 class="invisible -mr-1 rounded-sm p-0.5 group-hover:visible hover:bg-line"
                 title="Close"
@@ -61,8 +70,9 @@ export function TerminalPanel(props: {
               {(s) => (
                 <MenuItem
                   mono
-                  icon={s.kind === "machine" ? "sparkle" : "terminal"}
+                  icon={s.kind === "bench" ? "sparkle" : "terminal"}
                   hint={s.sub}
+                  disabled={"disabled" in s && s.disabled}
                   onSelect={() => {
                     props.onOpen(s.id);
                     setPicking(false);
@@ -89,7 +99,7 @@ export function TerminalPanel(props: {
       </header>
 
       <div class="relative min-h-0 pl-4">
-        <For each={props.tabs}>{(t) => <TerminalView tab={t} visible={t.id === props.active} />}</For>
+        <For each={props.tabs}>{(t) => <TerminalView tab={t} visible={t.id === props.active} onExited={markExited} onClose={() => props.onCloseTab(t.id)} />}</For>
       </div>
     </section>
   );

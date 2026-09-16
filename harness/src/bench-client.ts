@@ -78,6 +78,16 @@ export class BenchClient {
     return new WebSocket(this.base.replace(/^http/, "ws") + p, { headers: this.tunnel() });
   }
 
+  /**
+   * One WebSocket per shell, through the same tunnel and headers as every other
+   * bench socket. The caller owns it: this class neither tracks nor closes it —
+   * a shell's life is its socket's, and /events dropping kills it anyway.
+   */
+  pty(scope: string): WebSocket {
+    if (!this.up) throw new Error(OFFLINE);
+    return this.ws(`/pty?scope=${encodeURIComponent(scope)}`);
+  }
+
   start(): void {
     if (this.closed) return;
     const w = this.ws("/events");

@@ -6,22 +6,28 @@ export type TermTab = { id: string; label: string; scope: string; banner: string
 let seq = 0;
 
 /**
- * A scope is the machine itself — where it runs, with the connected environment
- * reachable and no working copy — or one workspace. An agent's copy is never a
- * scope: nobody works in one but the agent.
+ * A scope is the bench — the person's own machine in the team, where the
+ * agents run — or one of their workspaces, reached through its tool server.
+ * A stopped workspace is listed but not openable: there is no pod to attach
+ * to, and the workspace page is where it is started.
  */
 export function scopesOf(machine: Machine) {
   return [
-    { id: "machine", label: "machine", sub: "no working copy", kind: "machine" as const },
-    ...machine.workspaces.map((w) => ({ id: w.id, label: w.name, sub: w.branch, kind: "workspace" as const })),
+    { id: "bench", label: "bench", sub: "your machine in the team", kind: "bench" as const },
+    ...machine.workspaces.map((w) => ({
+      id: w.id,
+      label: w.name,
+      sub: w.state === "stopped" ? "stopped" : w.branch,
+      kind: "workspace" as const,
+      disabled: w.state === "stopped",
+    })),
   ];
 }
 
-export function makeTab(machine: Machine, env: string, scopeId: string): TermTab {
+export function makeTab(machine: Machine, team: string, scopeId: string): TermTab {
   const ws = machine.workspaces.find((w) => w.id === scopeId);
-  const banner = ws
-    ? `kloudlite shell · ${ws.name} · ${env}\r\n\x1b[2mthe workspace is the working directory; services resolve by name\x1b[0m`
-    : `kloudlite shell · ${machine.owner.split("@")[0]} · ${env}\r\n\x1b[2mmachine scope: no working copy, the environment is reachable\x1b[0m`;
+  const name = ws?.name ?? "bench";
+  const dim = ws ? "the workspace is the working directory" : "your machine in the team; workspaces resolve by their tool servers";
 
-  return { id: `t${++seq}`, label: ws?.name ?? "machine", scope: scopeId, banner };
+  return { id: `t${++seq}`, label: name, scope: scopeId, banner: `kloudlite shell · ${name} · ${team}\r\n\x1b[2m${dim}\x1b[0m` };
 }
