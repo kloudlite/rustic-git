@@ -137,14 +137,17 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
         }
     };
     let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token);
-    if let Err(e) = api
-        .patch(
-            crate::k8s::USER_KEY_SECRET,
-            &kube::api::PatchParams::apply("kloudlite-api").force(),
-            &kube::api::Patch::Apply(&secret),
-        )
-        .await
-    {
+    for attempt in 1u32.. {
+        let Err(e) = api
+            .patch(
+                crate::k8s::USER_KEY_SECRET,
+                &kube::api::PatchParams::apply("kloudlite-api").force(),
+                &kube::api::Patch::Apply(&secret),
+            )
+            .await
+        else {
+            return;
+        };
         // Refused in a namespace being torn down, or one so new the controller has not bound
         // `api-secrets` in it yet: expected, and the next beat or claim writes it. Only a refusal
         // the namespace cannot explain is worth a warning.
@@ -154,34 +157,72 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
         };
         if matches!(code, 403 | 404) {
             let read = Api::<k8s_openapi::api::core::v1::Namespace>::all(c.clone()).get_opt(ns).await;
-            if install_refusal_expected(read.as_ref().map(Option::as_ref).ok(), k8s_openapi::jiff::Timestamp::now().as_second()) {
-                tracing::info!(%owner, namespace = %ns, code, "key.install.deferred");
-                return;
+            match install_refusal(read.as_ref().map(Option::as_ref).ok(), k8s_openapi::jiff::Timestamp::now().as_second()) {
+                // The RBAC cache trails the RoleBinding by seconds, not minutes: on 2026-09-16
+                // 12:58 the namespace, its bindings and this apply all landed in the same second,
+                // and deferring to the 300 s beat left a bench waiting 118 s for its key. A few
+                // in-call retries close that gap; past them the beat is still the backstop.
+                Refusal::Young => match retry_backoff(attempt) {
+                    Some(d) => {
+                        tracing::info!(%owner, namespace = %ns, code, attempt, "key.install.retried");
+                        tokio::time::sleep(d).await;
+                        continue;
+                    }
+                    None => {
+                        tracing::info!(%owner, namespace = %ns, code, "key.install.deferred");
+                        return;
+                    }
+                },
+                // Terminating or gone: nothing a retry can change.
+                Refusal::Settled => {
+                    tracing::info!(%owner, namespace = %ns, code, "key.install.deferred");
+                    return;
+                }
+                Refusal::Fault => {}
             }
         }
         tracing::warn!(%owner, error = %e, "key.install.failed");
+        return;
     }
+}
+
+/// Why a 403/404 on the `user-key` apply happened, as far as the namespace explains it.
+enum Refusal {
+    /// Nothing about the namespace explains the refusal — a real fault, worth a warning.
+    Fault,
+    /// Terminating or gone: expected, and waiting changes nothing.
+    Settled,
+    /// Live but younger than one keys beat: its RoleBinding is still on the way, so a retry lands.
+    Young,
+}
+
+/// 1 s, 3 s, 9 s — three retries, ~13 s in all, which covers the RBAC cache lag seen on
+/// 2026-09-16 12:58 without holding a create open anywhere near the 300 s beat.
+fn retry_backoff(attempt: u32) -> Option<std::time::Duration> {
+    (attempt <= 3).then(|| std::time::Duration::from_secs(3u64.pow(attempt - 1)))
 }
 
 /// Whether a 403/404 on the `user-key` write is the namespace's lifecycle rather than a fault: gone,
 /// terminating, or younger than one keys beat (its RoleBinding is still on the way). `read` is the
 /// namespace GET: `None` when that read FAILED, which explains nothing and so still warns;
 /// `Some(None)` is a 404, gone.
-fn install_refusal_expected(read: Option<Option<&k8s_openapi::api::core::v1::Namespace>>, now_secs: i64) -> bool {
-    let Some(read) = read else { return false };
-    let Some(ns) = read else { return true };
+fn install_refusal(read: Option<Option<&k8s_openapi::api::core::v1::Namespace>>, now_secs: i64) -> Refusal {
+    let Some(read) = read else { return Refusal::Fault };
+    let Some(ns) = read else { return Refusal::Settled };
     if ns.metadata.deletion_timestamp.is_some() {
-        return true;
+        return Refusal::Settled;
     }
-    ns.metadata
+    let young = ns
+        .metadata
         .creation_timestamp
         .as_ref()
-        .is_some_and(|t| now_secs - t.0.as_second() < crate::api::keys::KEYS_RESYNC_SECS as i64)
+        .is_some_and(|t| now_secs - t.0.as_second() < crate::api::keys::KEYS_RESYNC_SECS as i64);
+    if young { Refusal::Young } else { Refusal::Fault }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::install_refusal_expected;
+    use super::{Refusal, install_refusal, retry_backoff};
     use k8s_openapi::api::core::v1::Namespace;
 
     fn ns(age: i64, now: i64, terminating: bool) -> Namespace {
@@ -196,10 +237,17 @@ mod tests {
     #[test]
     fn only_a_settled_live_namespace_makes_a_refused_install_a_fault() {
         let now = 2_000_000_000;
-        assert!(!install_refusal_expected(None, now), "a failed namespace read explains nothing");
-        assert!(install_refusal_expected(Some(None), now), "gone");
-        assert!(install_refusal_expected(Some(Some(&ns(3600, now, true))), now), "terminating");
-        assert!(install_refusal_expected(Some(Some(&ns(10, now, false))), now), "binding still on the way");
-        assert!(!install_refusal_expected(Some(Some(&ns(3600, now, false))), now), "an old live namespace refusing is real");
+        assert!(matches!(install_refusal(None, now), Refusal::Fault), "a failed namespace read explains nothing");
+        assert!(matches!(install_refusal(Some(None), now), Refusal::Settled), "gone");
+        assert!(matches!(install_refusal(Some(Some(&ns(3600, now, true))), now), Refusal::Settled), "terminating");
+        assert!(matches!(install_refusal(Some(Some(&ns(10, now, false))), now), Refusal::Young), "binding still on the way");
+        assert!(matches!(install_refusal(Some(Some(&ns(3600, now, false))), now), Refusal::Fault), "an old live namespace refusing is real");
+    }
+
+    /// Three retries, ~13 s in all — a young namespace is waited on, never waited out.
+    #[test]
+    fn the_retry_schedule_is_one_three_nine_and_then_the_beat() {
+        let secs: Vec<_> = (1..=4).map(|a| retry_backoff(a).map(|d| d.as_secs())).collect();
+        assert_eq!(secs, vec![Some(1), Some(3), Some(9), None]);
     }
 }

@@ -217,7 +217,16 @@ async fn apply_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, Reconc
         prev.conditions.extend(c);
     }
 
-    if Api::<Secret>::namespaced(ctx.client.clone(), &ns).get_opt(k8s::USER_KEY_SECRET).await?.is_none() {
+    // A 403 here is "the namespace's RoleBinding is not visible to us yet", not a fault — the same
+    // RBAC cache lag that deferred the api's key install on 2026-09-16 12:58 — so it reads exactly
+    // like an absent Secret: park and come back in `TICK`, never `error_policy`'s minute. Every
+    // other error still propagates.
+    let key_secret = match Api::<Secret>::namespaced(ctx.client.clone(), &ns).get_opt(k8s::USER_KEY_SECRET).await {
+        Ok(s) => s,
+        Err(kube::Error::Api(e)) if e.code == 403 => None,
+        Err(e) => return Err(e.into()),
+    };
+    if key_secret.is_none() {
         let c = cond("Ready", false, "KeysNotReady", "the user-key Secret is not in the namespace yet");
         write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
         return Ok(Action::requeue(TICK));
