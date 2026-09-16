@@ -36,6 +36,7 @@ pub(crate) fn state_is(v: &Value, want: &str) -> bool {
 pub mod admin;
 pub mod bench;
 pub mod bench_tool;
+pub mod bench_ws;
 pub mod controller;
 pub mod edge;
 pub mod env_intercept;

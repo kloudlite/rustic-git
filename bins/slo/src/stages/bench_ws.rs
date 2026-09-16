@@ -1,0 +1,152 @@
+//! What a bench gained by BECOMING a Workspace
+//! (`docs/superpowers/specs/2026-09-16-bench-is-a-workspace-design.md`): its transcripts live in a
+//! replicated volume that the ordinary push verb cuts, and the ordinary package list is editable
+//! from its own shell. Both are the workspace machinery — `POST /v1/workspaces/{bench}/push` and
+//! `kl pkg` — reached through the facade's id, which is the point: a bench that needed its own
+//! push or its own package path would be the half-maintained second kind this plan deleted.
+//!
+//! Walked LAST in group 3, after `bench_tool::run` has restarted the bench: a package edit
+//! recreates the pod, so nothing in this group may run after it, and group 0's tool round trip
+//! waits for the whole group anyway.
+//!
+//! `bench.migrated` (weekly) is a hard skip. The legacy folder is
+//! `{pool}/homes/.benches/{team}/{owner}` on the region's NFS export, which only the privileged
+//! agent DaemonSet mounts — a workspace pod sees `{pool}/homes/{owner}` and nothing beside it —
+//! so seeding one would mean execing into the agent pod, which the probe's role documents it
+//! never does (`deploy/k3s/slo-rbac.yaml`: "only ever execs into pods it created"). Restore the id
+//! with a seeding path, not with a wider grant.
+
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use futures::FutureExt;
+use serde_json::{json, Value};
+
+use super::bench::{forward, pty_shell, wait_phase};
+use super::{api, call, get, poll_json, post};
+use crate::ctx::Ctx;
+
+/// `bench.push.p95`: target 60 s.
+const PUSH_CEILING: Duration = Duration::from_secs(90);
+/// `bench.pkg.add`: target 20 s — the id is about the spec landing, never about nix building it.
+const PKG_CEILING: Duration = Duration::from_secs(30);
+/// Cheap, tiny and nothing else in the suite declares it, so a leftover is visible rather than
+/// indistinguishable from a real package somebody wanted.
+const PKG: &str = "cowsay";
+
+pub const NO_LEGACY_SEED: &str =
+    "no way to seed a legacy bench folder: it lives on the homes export, which only the agent pod mounts";
+
+/// The bench's own id, which is also its Volume's name (`ws_volume` falls back to the workspace
+/// name until a push publishes a pointer, exactly as `stages::workspace` relies on).
+async fn bench_id(c: &Ctx) -> Result<String> {
+    let doc = get(c, &api(c, "/v1/bench"), &c.probe_jwt).await?;
+    Ok(doc.get("id").and_then(Value::as_str).context("GET /v1/bench answered no id")?.to_string())
+}
+
+pub async fn run(c: &mut Ctx) {
+    let id = match bench_id(c).await {
+        Ok(id) => id,
+        Err(e) => {
+            let why = format!("the bench could not be read: {}", super::clip(&format!("{e:#}")));
+            c.skip("bench.push.p95", &why);
+            return c.skip("bench.pkg.add", &why);
+        }
+    };
+    push(c, &id).await;
+    pkg_add(c, &id).await;
+}
+
+/// `bench.push.p95`: the bench's transcripts are cut by the ordinary push and the ordinary history
+/// lists the cut. A `working` row is not a push anybody could restore from, so the row must be
+/// `ready` — the same judgement `ws.push.p95` makes, through `row_ready`.
+async fn push(c: &mut Ctx, id: &str) {
+    let id = id.to_string();
+    c.step("bench.push.p95", PUSH_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/v1/workspaces/{id}/push"));
+        let history = api(c, &format!("/v1/volumes/{id}/history"));
+        async move {
+            let doc = post(c, &url, &jwt, json!({})).await.context("could not push the bench")?;
+            let snap = doc.get("id").and_then(Value::as_str).context("the push answered no snapshot id")?.to_string();
+            poll_json(c, &history, &jwt, PUSH_CEILING, |v| super::workspace::row_ready(v, &snap))
+                .await
+                .context("the bench's snapshot never turned ready")
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `bench.pkg.add`: `kl pkg add` in the bench's own shell — the workspace container's zsh behind
+/// `/pty?scope=bench` — reaching `/v1` with the projected `workspace-token` and landing in
+/// `spec.packages`. The wait is on the SPEC, never on `PackagesReady`: a nix build is minutes and
+/// is `ws.packages.add`'s sample, not this one's.
+async fn pkg_add(c: &mut Ctx, id: &str) {
+    let ws = api(c, &format!("/v1/workspaces/{id}"));
+    let landed = c
+        .step("bench.pkg.add", PKG_CEILING, move |c| {
+            let jwt = c.probe_jwt.clone();
+            let ws = ws.clone();
+            async move {
+                let (_child, port) = forward(c).await?;
+                let (out, code) = pty_shell(port, "bench", &format!("kl pkg add {PKG}; exit $?\n")).await?;
+                if code != 0 {
+                    bail!("`kl pkg add {PKG}` in the bench shell exited {code}: {}", super::clip(&out));
+                }
+                poll_json(c, &ws, &jwt, PKG_CEILING, |v| declares(v, PKG)).await.context("the package never reached the bench's spec")
+            }
+            .boxed()
+        })
+        .await;
+    if !landed {
+        return;
+    }
+    // Untimed teardown: the bench is long-lived, so a package left behind would be rebuilt into
+    // every later run's profile. Through `/v1` rather than the shell — the pod is being recreated
+    // for the package that just landed, and a second shell would race the kubelet.
+    let removed = async {
+        let body = json!({ "packages": [] });
+        // `patch_ws_packages` IS the PATCH on the workspace and takes packages only; there is no
+        // `/packages` route (`api::mod`'s note on the spelling).
+        call(c, reqwest::Method::PATCH, &api(c, &format!("/v1/workspaces/{id}")), &c.probe_jwt, Some(body)).await?;
+        wait_phase(c, "ready", Duration::from_secs(180)).await
+    };
+    if let Err(e) = removed.await {
+        tracing::warn!(error = %format!("{e:#}"), "slo.bench_ws.pkg.teardown");
+    }
+}
+
+/// Whether a `/v1/workspaces/{id}` doc declares `want`, pinned or not (`attr@version`).
+fn declares(v: &Value, want: &str) -> bool {
+    v.get("packages").and_then(Value::as_array).is_some_and(|ps| {
+        ps.iter().filter_map(Value::as_str).any(|p| p == want || p.split('@').next() == Some(want))
+    })
+}
+
+/// The weekly drill. See the module doc: it cannot be seeded from here, so it is a stated skip
+/// rather than a hole in the catalogue.
+pub fn weekly(c: &mut Ctx) {
+    c.skip("bench.migrated", NO_LEGACY_SEED);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kloudlite_workspaces::slo::catalogue::find;
+
+    #[test]
+    fn the_package_judgement_reads_pins_and_the_ceilings_cover_the_targets() {
+        assert!(declares(&json!({"packages": ["jq", "cowsay"]}), PKG));
+        assert!(declares(&json!({"packages": ["cowsay@3.04"]}), PKG), "a pinned entry still declares the attr");
+        assert!(!declares(&json!({"packages": ["cowsay-extra"]}), PKG));
+        assert!(!declares(&json!({"packages": []}), PKG));
+        assert!(!declares(&json!({}), PKG));
+        for (id, cap) in [("bench.push.p95", PUSH_CEILING), ("bench.pkg.add", PKG_CEILING)] {
+            let slo = find(id).expect(id);
+            assert!(cap.as_millis() >= slo.target.max_ms.unwrap() as u128, "{id}");
+            assert_eq!(crate::suite::group_of(id), 3, "{id}");
+        }
+        assert!(find("bench.migrated").is_some());
+    }
+}

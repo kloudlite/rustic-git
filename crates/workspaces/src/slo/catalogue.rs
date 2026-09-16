@@ -162,7 +162,7 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 11] = [
+const BENCH_IDS: [&str; 13] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -174,6 +174,8 @@ const BENCH_IDS: [&str; 11] = [
     "bench.tool.audience",
     "bench.tool.revoked",
     "bench.shell.roundtrip",
+    "bench.push.p95",
+    "bench.pkg.add",
 ];
 
 /// Group 1: every id the intercept journey owns. It is also the skip list a probe run that cannot
@@ -612,6 +614,11 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // A bench IS a Workspace now, so its transcripts are cut by the ordinary push and its package
+    // list is edited from its own shell. Both are group 3's, walked last: a package edit recreates
+    // the pod.
+    Slo { id: "bench.push.p95", feature: "Benches", sli: "`POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready", target: p95(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.pkg.add", feature: "Benches", sli: "`kl pkg add` in the bench shell lands in the bench's `spec.packages`", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -649,6 +656,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "bench.migrated", feature: "Benches", sli: "A legacy bench folder seeded beside a fresh bench is copied into its `.bench/` on first start and renamed `.migrated-*`", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
@@ -750,7 +758,8 @@ mod tests {
                    "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
                    "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
-                   "bench.shell.roundtrip", "bench.shell.workspace"] {
+                   "bench.shell.roundtrip", "bench.shell.workspace",
+                   "bench.push.p95", "bench.pkg.add", "bench.migrated"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }

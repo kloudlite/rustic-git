@@ -100,6 +100,8 @@ pub const IDS: &[&str] = &[
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
+    "bench.push.p95",
+    "bench.pkg.add",
     "bench.workspace.tool_roundtrip",
     "bench.shell.workspace",
     "feed.experience",
@@ -197,6 +199,10 @@ pub async fn run(c: &mut Ctx) {
             // One call: the pod's token, its audience, then its revocation and the stop.
             "bench.tool.token" => super::bench_tool::run(c).await,
             "bench.tool.audience" | "bench.tool.revoked" => {}
+            // Last in group 3: the package edit recreates the bench pod, so nothing in this group
+            // may run after it. One call reports both ids.
+            "bench.push.p95" => super::bench_ws::run(c).await,
+            "bench.pkg.add" => {}
             // A grouped run walks the bench journey in group 3; this dial would reset its idle
             // wait, so it waits for that group to finish first.
             "bench.workspace.tool_roundtrip" if c.group.is_some() => {

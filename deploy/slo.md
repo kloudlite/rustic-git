@@ -240,6 +240,8 @@ first destructive stage.
 | `bench.shell.roundtrip` | Benches | A shell opened on the bench through `/pty` echoes a marker and exits 0 | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
 | `bench.shell.workspace` | Benches | A shell opened through the bench into the run's workspace starts in the workspace directory | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `bench.workspace.tool_roundtrip` | Benches | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` | 99.9 % ≤ 180000 ms | hourly | 14 · Experience |
+| `bench.push.p95` | Benches | `POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready | 95 % ≤ 60000 ms | hourly | 14 · Experience |
+| `bench.pkg.add` | Benches | `kl pkg add` in the bench shell lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |
 | `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |
 | `ws.cold.profile` | Workspaces | A cold package profile builds successfully | 99.9 % | weekly | 12 · Weekly |
@@ -265,6 +267,7 @@ first destructive stage.
 | `agent.janitor` | Workspaces | No snapshot record of this run outlives the volume it names | 99.9 % | weekly | 12 · Weekly |
 | `srv.lanes` | Control plane | Pulls of an image reach its pull counter, which is the server lane beat writing it back | 99.9 % | weekly | 12 · Weekly |
 | `bench.survives.reschedule` | Benches | After the pod is deleted every session reopens and processes read `lost` | 99.9 % ≤ 180000 ms | weekly | 12 · Weekly |
+| `bench.migrated` | Benches | A legacy bench folder seeded beside a fresh bench is copied into its `.bench/` on first start and renamed `.migrated-*` | 99.9 % | weekly | 12 · Weekly |
 | `bak.tarball.age` | Backups | The latest backup tarball is recent | 99.9 % | monthly | 13 · Monthly |
 | `bak.daily.slots` | Backups | Every daily backup slot is present | 99.9 % | monthly | 13 · Monthly |
 | `bak.versioning` | Backups | Backup versioning is enabled and retains history | 99.9 % | monthly | 13 · Monthly |

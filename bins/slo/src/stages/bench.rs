@@ -43,6 +43,8 @@ const TUNNEL_CEILING: Duration = Duration::from_secs(30);
 const WAKE_CEILING: Duration = Duration::from_secs(540);
 /// How long past `benchIdleSecs` the pod gets to be gone.
 const IDLE_GRACE: Duration = Duration::from_secs(60);
+/// How long `status.idleSince` gets to land after the pod is gone: one reconcile pass writes both.
+const IDLE_STAMP: Duration = Duration::from_secs(30);
 /// A start's wait, from `kl-connect bench`'s own `BENCH_START_WAIT`.
 const START_WAIT: Duration = Duration::from_secs(90);
 /// `bench.session.roundtrip`: target 60 s.
@@ -74,6 +76,31 @@ async fn phase(c: &Ctx) -> Result<String> {
     Ok(doc.get("phase").and_then(Value::as_str).unwrap_or_default().to_string())
 }
 
+/// The `bench` container's readiness as the pod reports it; `None` while there is no status for
+/// it yet. The agent reads the same field.
+fn bench_ready(pod: &Pod) -> Option<bool> {
+    pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == kloudlite_workspaces::k8s::BENCH_CONTAINER).map(|c| c.ready)
+}
+
+/// One `POST /v1/bench/session`, polled to 201: 202 is the wake being asked for, not a failure.
+async fn wake(c: &Ctx) -> Result<()> {
+    let url = bench_url(c, "/session");
+    let start = Instant::now();
+    loop {
+        let (status, body) = raw(c, reqwest::Method::POST, &url, &c.probe_jwt, None, &[]).await?;
+        if status == reqwest::StatusCode::CREATED {
+            return Ok(());
+        }
+        if status != reqwest::StatusCode::ACCEPTED {
+            bail!("POST /v1/bench/session answered {status}: {}", super::clip(&body));
+        }
+        if start.elapsed() >= START_WAIT {
+            bail!("the bench never woke: /v1/bench/session still answers 202 {}", super::clip(&body));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
@@ -89,7 +116,7 @@ pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()>
 }
 
 /// `kl-connect bench` on an ephemeral port; the child dies with the handle.
-async fn forward(c: &Ctx) -> Result<(Child, u16)> {
+pub(crate) async fn forward(c: &Ctx) -> Result<(Child, u16)> {
     let dir = c.tmp.join("kl-bench");
     std::fs::create_dir_all(&dir)?;
     let cfg = json!({"api": c.cfg.api_url, "token": c.probe_jwt, "expires_at": "2099-01-01T00:00:00Z", "username": c.cfg.probe_user});
@@ -239,30 +266,54 @@ pub async fn hourly(c: &mut Ctx) {
                 drop(child);
                 let owner = c.cfg.probe_user.clone();
                 let pods: Api<Pod> = Api::namespaced(k.clone(), &crd::ws_namespace(&owner, &owner));
-                // One budget for both waits: idle, then the pod gone.
+                // One budget for the whole chain: readiness false, then the pod gone, then idle.
                 let deadline = Instant::now() + Duration::from_secs(idle) + IDLE_GRACE;
-                if let Err(e) = wait_phase(c, "idle", deadline.saturating_duration_since(Instant::now())).await {
-                    // What decides the next one: `clients > 0` is a socket something left open (a
-                    // sibling group's dial), `busy` a turn or process still running, and an old
-                    // `idleSince` a bench that should have exited. Plain HTTP resets no clock.
-                    let health = async { anyhow::Ok(through(forward(c).await?.1, "/healthz").await?.1) }.await;
-                    let health = health.unwrap_or_else(|e| format!("unreadable: {e:#}"));
-                    bail!("{e:#}; /healthz {}", super::clip(&health));
-                }
-                tracing::info!(check = "phase.idle", "slo.bench.idle");
-                while pods.get_opt(kloudlite_workspaces::k8s::BENCH_POD).await?.is_some() {
+                // The idle SIGNAL is the `bench` container's readiness, not the pod's exit code —
+                // `harness-bench` keeps serving now that the pod's restartPolicy is the
+                // workspace's `Always` (bins/agent/src/controller/workspace/bench.rs). So the
+                // chain is asserted in the order the agent walks it: readiness false is what it
+                // believes, deleting the pod is what it does, `status.idleSince` (the facade's
+                // `idle` phase) is what it records.
+                let mut saw_not_ready = false;
+                loop {
+                    match pods.get_opt(kloudlite_workspaces::k8s::BENCH_POD).await? {
+                        None => break,
+                        Some(pod) => {
+                            if bench_ready(&pod) == Some(false) && !saw_not_ready {
+                                saw_not_ready = true;
+                                tracing::info!(check = "bench.notready", "slo.bench.idle");
+                            }
+                        }
+                    }
                     if Instant::now() >= deadline {
-                        bail!("the bench is idle and its pod still exists");
+                        // What decides this: `clients > 0` is a socket something left open (a
+                        // sibling group's dial), `busy` a turn or process still running. Plain
+                        // HTTP resets no clock.
+                        let health = async { anyhow::Ok(through(forward(c).await?.1, "/healthz").await?.1) }.await;
+                        let health = health.unwrap_or_else(|e| format!("unreadable: {e:#}"));
+                        let what = if saw_not_ready { "the bench container went unready and its pod still exists" } else { "the bench container never went unready" };
+                        bail!("{what}; /healthz {}", super::clip(&health));
                     }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
+                if !saw_not_ready {
+                    bail!("the bench pod went away without the `bench` container ever reporting unready");
+                }
                 tracing::info!(check = "pod.absent", "slo.bench.idle");
+                // Its own small window, not what is left of `deadline`: the agent stamps
+                // `status.idleSince` in the same pass that deletes the pod, and a loop that ran
+                // close to its deadline would report a stamp that never had time to land.
+                wait_phase(c, "idle", IDLE_STAMP).await.context("the pod is gone but the bench is not idle")?;
+                tracing::info!(check = "phase.idle", "slo.bench.idle");
+                // The wake is `/v1/bench/session`, the call every client makes: on an idle bench it
+                // patches `wakeAt` and answers 202, and the client re-asks until 201.
+                wake(c).await?;
+                wait_phase(c, "ready", START_WAIT).await?;
                 let (_child, port) = forward(c).await?;
                 let (status, _) = through(port, "/healthz").await?;
                 if status != 200 {
-                    bail!("a new connection did not wake the bench: /healthz {status}");
+                    bail!("a woken bench answered /healthz {status}");
                 }
-                wait_phase(c, "ready", START_WAIT).await?;
                 if let Some(before) = before {
                     let after = history(port).await?;
                     diff_history(&before, &after)?;
@@ -421,7 +472,7 @@ async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
 /// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
 /// goes as binary frames, output comes back as binary frames, and the server ends with one text
 /// control frame. Returns what the shell printed and its exit code.
-async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(String, i64)> {
+pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(String, i64)> {
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/pty?scope={scope}")).await.context("pty socket")?;
     ws.send(Message::text(json!({"resize": {"cols": 100, "rows": 30}}).to_string())).await?;
     ws.send(Message::binary(input.as_bytes().to_vec())).await?;
