@@ -23,12 +23,10 @@ pub type Refusal = (StatusCode, &'static str);
 
 pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Result<Target, Refusal> {
     let ws = workspace(client, ws_id).await?;
-    // A bench is a Workspace now, so the two paths would otherwise address each other's objects:
-    // an ssh ticket naming a bench would dial port 22 of a pod that runs no sshd. Each ticket
-    // kind answers for its own kind only, and the other is "no such object" as it always was.
-    if crd::is_bench(&ws) {
-        return Err((StatusCode::NOT_FOUND, "no such object"));
-    }
+    // No `is_bench` refusal here on purpose: a bench IS a workspace, its pod runs the same sshd in
+    // the same workspace container, and `kl-connect ws ssh|ide <bench>` is meant to reach it. The
+    // separation that matters is between TICKET KINDS, not object kinds — a bench-session ticket
+    // never reaches this function, and an ssh ticket never reaches `resolve_bench`'s port.
     // A removed member is stamped on the Workspace itself, and only a stamp the membership
     // manager wrote counts — the same provenance the api's beat decides from. It is the fallback
     // for the window before that beat has paused the workspace.

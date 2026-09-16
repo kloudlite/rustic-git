@@ -656,7 +656,6 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "bench.migrated", feature: "Benches", sli: "A legacy bench folder seeded beside a fresh bench is copied into its `.bench/` on first start and renamed `.migrated-*`", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
     Slo { id: "bak.tarball.age", feature: "Backups", sli: "The latest backup tarball is recent", target: avail(99.9), suite: Suite::Monthly, stage: "13 · Monthly" },
@@ -759,7 +758,7 @@ mod tests {
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
                    "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
                    "bench.shell.roundtrip", "bench.shell.workspace",
-                   "bench.push.p95", "bench.pkg.add", "bench.migrated"] {
+                   "bench.push.p95", "bench.pkg.add"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }

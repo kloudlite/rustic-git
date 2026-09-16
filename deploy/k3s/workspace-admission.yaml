@@ -75,10 +75,12 @@ spec:
     # opaque. ponytail: the fix is `{pool}/vol/{owner}/{id}`, at which point this line becomes
     # the same comparison the two below already make.
     #
-    # The bench folder (`k8s::bench_folder`, `{pool}/homes/.benches/{team}/{owner}`) is admitted
-    # EXACTLY, both segments from the pod's own labels (`k8s::bench_pod` stamps both). `.benches`
-    # is not an owner handle, so the `homes/{owner}` rule never admitted it, and a prefix on
-    # `homes/.benches/` would admit every other person's bench folder.
+    # The LEGACY bench folder (`k8s::bench_folder`, `{pool}/homes/.benches/{team}/{owner}`) is
+    # admitted EXACTLY, both segments from the pod's own labels. No pod builder mounts it any more
+    # — a bench is a Workspace and its `.bench` lives inside the worktree — and the one-time move
+    # of an old folder is the privileged agent's, not a pod's; the rule stays only until the
+    # legacy folders are swept. `.benches` is not an owner handle, so the `homes/{owner}` rule
+    # never admitted it, and a prefix on `homes/.benches/` would admit every other person's.
     - expression: >-
         has(object.metadata.labels) && 'kloudlite.io/owner' in object.metadata.labels
           && (has(object.spec.volumes) ? object.spec.volumes : [])

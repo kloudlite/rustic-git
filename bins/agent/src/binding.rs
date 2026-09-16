@@ -54,7 +54,11 @@ async fn teams_in_use(ctx: &Arc<Ctx>, owner: &str) -> Result<BTreeSet<String>, R
         // `.status.nodeName` selectable, and a cluster still on an older CRD would hand back every
         // node's workspaces — which would have this node build namespaces for someone else's.
         if w.status.as_ref().map(|s| s.node_name.as_str()) == Some(ctx.node.as_str()) {
-            teams.insert(w.spec.team.clone());
+            // A team that IS the owner's own handle is the personal space, folded here exactly as
+            // `ws_namespace` folds it. Without the fold the same namespace is ensured twice, and
+            // the second pass reads `team` as non-empty and sizes the person's `ResourceQuota`
+            // from the TEAM defaults — the hard stop for cpu and memory, silently widened.
+            teams.insert(if w.spec.team.eq_ignore_ascii_case(owner) { String::new() } else { w.spec.team.clone() });
         }
     }
     Ok(teams)

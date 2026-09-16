@@ -462,9 +462,6 @@ spec:
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
               value: "4"
-            # The image a new Bench spec names; rewritten by deploy/pin.sh.
-            - name: KLOUDLITE_BENCH_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-bench:b684f6504e3c650b399f5ded824781d32ed1111f@sha256:e8c0032d50e50d13718a29ca142fef46cd304814eed8f7e3de9d21770d707bde
             - name: KLOUDLITE_S3_URL
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.

@@ -82,7 +82,10 @@ if (!readOnly) {
   fs.writeFileSync(path.join(dir, ".health"), ""); // the probe appends; start each process from empty
   bench.writable.probe();
 }
-const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir, idleMs);
+// `--idle-secs 0` is "never signal idle" — a laptop bench nobody wants put to sleep — not "sleep
+// the instant the last client leaves". Unreachable through admin settings (range 60-86400), but
+// `WS_BENCH_IDLE_SECS=0` reaches it.
+const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir, idleMs === 0 ? Infinity : idleMs);
 const srv = await serve(bench, Number(a.port), a.host, idle);
 console.log(`harness-bench listening on ${a.host}:${srv.port} (${readOnly ? "read-only" : "running"}) dir=${dir}`);
 

@@ -288,18 +288,23 @@ async fn a_bench_token_opens_a_tunnel_to_the_bench_port() {
     assert_eq!(back.into_data(), b"ping".as_slice());
 }
 
+/// A bench pod runs the same sshd as any other workspace pod, so an SSH ticket naming a bench
+/// reaches it — at the SSH port. What stays separate is the ticket kinds: this one is resolved on
+/// the ssh path, and the bench port (`bench_port` below) is never dialled with it.
 #[tokio::test]
-async fn a_workspace_token_cannot_open_a_bench_with_the_same_id() {
-    // The object named "bench-1" IS a bench workspace, so an ssh-session token naming it must
-    // still fail at resolve, and the echo listener behind it must never see a connection.
+async fn an_ssh_token_on_a_bench_reaches_its_sshd_and_not_the_bench_port() {
+    use futures::{SinkExt, StreamExt};
     let port = echo().await;
     let base = serve_with(
-        vec![get(BENCH, bench("ready", Some("ws-alice/bench")))],
+        vec![get(BENCH, bench("ready", Some("ws-alice/bench"))), get(BENCH_POD, pod(Some("127.0.0.1")))],
         port,
-        22,
+        // Nothing listens here: a connection to the bench port would fail the round trip below.
+        1,
     )
     .await;
-    assert_eq!(connect(&base, "bench-1", &token("bench-1", REGION)).await.err(), Some(404));
+    let mut sock = connect(&base, "bench-1", &token("bench-1", REGION)).await.expect("upgrade");
+    sock.send(tungstenite::Message::binary(b"ping".to_vec())).await.unwrap();
+    assert_eq!(sock.next().await.unwrap().unwrap().into_data(), b"ping".as_slice());
 }
 
 #[tokio::test]

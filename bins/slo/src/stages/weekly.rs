@@ -84,7 +84,6 @@ pub async fn run(c: &mut Ctx) {
     // The 2026-09-06 coverage review's twelve, in `weekly_gaps`.
     super::weekly_gaps::run(c, cold.as_deref()).await;
     super::bench::weekly(c).await;
-    super::bench_ws::weekly(c);
 }
 
 /// `settings.revert`: the undo beside `settings.live`'s save.
@@ -859,7 +858,6 @@ mod tests {
                 "srv.lanes",
                 "gw.caps",
                 "bench.survives.reschedule",
-                "bench.migrated",
             ]
         );
         // A missing precondition is a skip, never a second count of a failure recorded elsewhere.

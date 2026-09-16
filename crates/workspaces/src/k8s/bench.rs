@@ -102,6 +102,10 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
             VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
+            // The same `/etc/resolv.conf` the workspace container mounts: the bench runs the
+            // person's tools, so it must resolve an attached environment's services by bare name
+            // exactly as their shell does. The volume IS the file, so no subPath.
+            VolumeMount { name: "attach".into(), mount_path: "/etc/resolv.conf".into(), read_only: Some(true), ..Default::default() },
         ]),
         resources: Some(quantities(&crate::model::bench_container_resources())),
         security_context: Some(security),
@@ -112,6 +116,18 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         readiness_probe: Some(Probe {
             exec: Some(ExecAction { command: Some(vec!["harness-bench".to_string(), "--ping".to_string()]) }),
             period_seconds: Some(5),
+            timeout_seconds: Some(3),
+            ..Default::default()
+        }),
+        // Readiness alone cannot tell "asleep" from "never came up": the kubelet collapses every
+        // non-zero `--ping` exit to `ready=false`, and the agent would call a bench that runs but
+        // never serves idle after 15 s, delete its pod and hide the fault behind a normal phase.
+        // `started` flips once, on the first successful ping, and is the agent's gate on believing
+        // idleness at all. 24 x 5 s is the budget from `running` to first serve.
+        startup_probe: Some(Probe {
+            exec: Some(ExecAction { command: Some(vec!["harness-bench".to_string(), "--ping".to_string()]) }),
+            period_seconds: Some(5),
+            failure_threshold: Some(24),
             timeout_seconds: Some(3),
             ..Default::default()
         }),

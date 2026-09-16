@@ -267,7 +267,11 @@ async fn a_team_bench_with_no_workspace_in_that_team_gets_its_namespace() {
     let bench = |team: &str, node: &str| serde_json::json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
         "metadata": {"name": crd::bench_id("alice", team)},
-        "spec": {"owner": "alice", "team": if team == "alice" { "" } else { team }, "name": "bench", "region": "r1",
+        // The handle verbatim for the personal one, never `""`: `/v1` writes `""` today, but a
+        // bench created before that fix carries the handle, and `teams_in_use` must fold it — an
+        // unfolded `"alice"` reads as a TEAM and sizes the person's ResourceQuota from
+        // `default-team` (148 cpu instead of 40), which no route below answers.
+        "spec": {"owner": "alice", "team": team, "name": "bench", "region": "r1",
                  "image": "i", "desiredState": "running", "bench": {"model": "m"}},
         "status": {"phase": "idle", "nodeName": node},
     });
@@ -292,7 +296,7 @@ async fn a_team_bench_with_no_workspace_in_that_team_gets_its_namespace() {
     let ns_patch = |ns: String| format!("PATCH /api/v1/namespaces/{ns}");
     assert!(calls.contains(&ns_patch(crd::ws_namespace("alice", "acme"))), "{calls:?}");
     assert!(!calls.contains(&ns_patch(crd::ws_namespace("alice", "elsewhere"))), "{calls:?}");
-    // A personal bench (team == owner) is the personal namespace, not a team quota pass.
-    assert!(!calls.iter().any(|c| c.contains("/quotas/default-team") && c.contains("alice")), "{calls:?}");
+    // A personal bench (team == owner) is the personal namespace and the PERSON's default quota.
+    assert!(calls.contains(&"GET /apis/kloudlite.io/v1alpha1/quotas/default-user".to_string()), "{calls:?}");
     assert_eq!(calls.iter().filter(|c| **c == ns_patch("ws-alice".into())).count(), 1, "{calls:?}");
 }

@@ -93,6 +93,27 @@ test("with nobody connected and nothing running it marks .idle and keeps serving
   }
 });
 
+test("--idle-secs 0 never signals idle, and a stale mark from the last pod goes at startup", async () => {
+  const { dir, term } = scratch();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, ".idle"), "2020-01-01T00:00:00.000Z");
+  const a = run(["--dir", dir, "--port", "0", "--idle-secs", "0"], { TERMINATION_LOG: term });
+  try {
+    const port = portOf(await a.line(/\(running\)/));
+    const mark = path.join(dir, ".idle");
+    await until(() => !fs.existsSync(mark), 5_000, "the previous pod's mark to go");
+    // Well past several idle beats: with 0 read as "sleep at once" the mark would be back by now.
+    await new Promise((r) => setTimeout(r, 4_000));
+    assert.equal(fs.existsSync(mark), false, "0 is a bench that never sleeps");
+    assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0, "and it stays ready");
+
+    a.c.kill("SIGTERM");
+    assert.equal(await exited(a.c), 0);
+  } finally {
+    cleanup(dir, [a.c]);
+  }
+});
+
 test("a connected WebSocket holds an idle bench out of idle", async () => {
   const { dir, term } = scratch();
   const a = run(["--dir", dir, "--port", "0", "--idle-secs", "1"], { TERMINATION_LOG: term });

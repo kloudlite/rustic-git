@@ -71,7 +71,10 @@ pub(crate) fn bench_verdict(pod: &Pod, now: Timestamp) -> BenchVerdict {
     // Idle is the READINESS channel, and only while the container is actually RUNNING: a crash
     // loop is `ready=false` too, and treating that as idleness would delete the pod, hide the
     // crash behind an `Idle` phase and start it again on the next wake with nothing said.
-    if c.ready || !c.state.as_ref().is_some_and(|s| s.running.is_some()) {
+    // `started` is the startup probe's one-way flip: false means the container has never served,
+    // and reading that as idleness would delete the pod of a bench that is merely slow — or
+    // wedged — and hide the fault behind a phase that looks normal.
+    if c.ready || !c.state.as_ref().is_some_and(|s| s.running.is_some()) || c.started != Some(true) {
         return BenchVerdict::Serving;
     }
     let Some(at) = not_ready_since(pod) else { return BenchVerdict::Serving };
@@ -93,13 +96,17 @@ pub(crate) async fn park_bench(w: &crd::Workspace, prev: crd::WorkspaceStatus, g
     } else {
         (crd::Phase::Idle, crd::BENCH_IDLE, "no client and nothing running for benchIdleSecs; the next connection starts it")
     };
-    let st = crd::WorkspaceStatus {
-        phase,
-        observed_generation: Some(gen),
-        pod_ref: None,
-        conditions: ws_conditions(&prev, crd::condition("Ready", false, reason, message, gen)),
-        ..prev
-    };
+    // `Replicated` is recomputed here, not merely kept: idle is a bench's NORMAL resting state, and
+    // `kept_conditions` would carry the running pass's `False/Running` forever — so the volume
+    // decision sweep reads "waiting for a replica", never releases the volume, and a node holding
+    // any idle bench can never be drained nor its bench recovered after a node death.
+    let mut conditions = ws_conditions(&prev, crd::condition("Ready", false, reason, message, gen));
+    if let Some(id) = prev.volume_ref.clone() {
+        let replicated =
+            super::super::replicated_condition(ctx, &id, &w.name_any(), super::replicas_of(ctx, &id), &prev.conditions, gen).await?;
+        conditions = super::replaced(&conditions, replicated);
+    }
+    let st = crd::WorkspaceStatus { phase, observed_generation: Some(gen), pod_ref: None, conditions, ..prev };
     write_ws_status(w, st, ctx).await?;
     Ok(Action::await_change())
 }
@@ -200,6 +207,11 @@ mod tests {
 
     /// `ready`, the container's state, and an optional last exit.
     fn pod(ready: bool, running: bool, exit: Option<i32>) -> Pod {
+        started_pod(ready, running, exit, true)
+    }
+
+    /// The same, with `started` (the startup probe's flip) spelled out.
+    fn started_pod(ready: bool, running: bool, exit: Option<i32>, started: bool) -> Pod {
         let state = if running { serde_json::json!({"running": {"startedAt": AT}}) } else { serde_json::json!({"waiting": {"reason": "CrashLoopBackOff"}}) };
         serde_json::from_value(serde_json::json!({
             "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bench-1"},
@@ -208,7 +220,7 @@ mod tests {
                 "phase": "Running",
                 "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }, "lastTransitionTime": AT}],
                 "containerStatuses": [{
-                    "name": k8s::BENCH_CONTAINER, "ready": ready, "restartCount": 0, "image": "b", "imageID": "",
+                    "name": k8s::BENCH_CONTAINER, "ready": ready, "started": started, "restartCount": 0, "image": "b", "imageID": "",
                     "state": state,
                     "lastState": exit.map(|code| serde_json::json!({"terminated": {"exitCode": code, "message": "node-b", "finishedAt": AT}})).unwrap_or(serde_json::Value::Null),
                 }],
@@ -229,5 +241,12 @@ mod tests {
         // The lock wins even once the kubelet has it running again: the restart is the backoff,
         // not a recovery, and the person needs the holder's name either way.
         assert_eq!(bench_verdict(&pod(false, true, Some(EXIT_LOCKED)), long_after), BenchVerdict::Locked("node-b".into()));
+        // A container that has never served is starting (or wedged), never asleep — whatever the
+        // readiness clock says. The kubelet collapses every non-zero `--ping` to `ready=false`.
+        assert_eq!(
+            bench_verdict(&started_pod(false, true, None, false), long_after),
+            BenchVerdict::Serving,
+            "never started is not idleness"
+        );
     }
 }

@@ -32,7 +32,16 @@ export class Idle {
     this.busy = busy;
     this.afterMs = afterMs;
     this.now = now;
-    if (dir) this.mark = path.join(dir, ".idle");
+    if (dir) {
+      this.mark = path.join(dir, ".idle");
+      // A mark from the PREVIOUS pod is not this one's state: `marked` starts false, so nothing
+      // below would ever clear it, and a woken bench would read as asleep to any file reader.
+      try {
+        fs.rmSync(this.mark, { force: true });
+      } catch {
+        /* same reasoning as the writes below */
+      }
+    }
     this.check();
   }
 

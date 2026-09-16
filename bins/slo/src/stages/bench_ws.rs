@@ -9,12 +9,13 @@
 //! recreates the pod, so nothing in this group may run after it, and group 0's tool round trip
 //! waits for the whole group anyway.
 //!
-//! `bench.migrated` (weekly) is a hard skip. The legacy folder is
+//! There is deliberately NO id for the one-time legacy folder migration. The legacy folder is
 //! `{pool}/homes/.benches/{team}/{owner}` on the region's NFS export, which only the privileged
-//! agent DaemonSet mounts — a workspace pod sees `{pool}/homes/{owner}` and nothing beside it —
-//! so seeding one would mean execing into the agent pod, which the probe's role documents it
-//! never does (`deploy/k3s/slo-rbac.yaml`: "only ever execs into pods it created"). Restore the id
-//! with a seeding path, not with a wider grant.
+//! agent DaemonSet mounts — a workspace pod sees `{pool}/homes/{owner}` and nothing beside it — so
+//! seeding one would mean execing into the agent pod, which the probe's role documents it never
+//! does (`deploy/k3s/slo-rbac.yaml`: "only ever execs into pods it created"). A permanently
+//! skipped id reads as a pass on the console, which is worse than a stated gap: add the id back
+//! WITH a seeding path, never before one.
 
 use std::time::Duration;
 
@@ -33,9 +34,6 @@ const PKG_CEILING: Duration = Duration::from_secs(30);
 /// Cheap, tiny and nothing else in the suite declares it, so a leftover is visible rather than
 /// indistinguishable from a real package somebody wanted.
 const PKG: &str = "cowsay";
-
-pub const NO_LEGACY_SEED: &str =
-    "no way to seed a legacy bench folder: it lives on the homes export, which only the agent pod mounts";
 
 /// The bench's own id, which is also its Volume's name (`ws_volume` falls back to the workspace
 /// name until a push publishes a pointer, exactly as `stages::workspace` relies on).
@@ -124,12 +122,6 @@ fn declares(v: &Value, want: &str) -> bool {
     })
 }
 
-/// The weekly drill. See the module doc: it cannot be seeded from here, so it is a stated skip
-/// rather than a hole in the catalogue.
-pub fn weekly(c: &mut Ctx) {
-    c.skip("bench.migrated", NO_LEGACY_SEED);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +139,5 @@ mod tests {
             assert!(cap.as_millis() >= slo.target.max_ms.unwrap() as u128, "{id}");
             assert_eq!(crate::suite::group_of(id), 3, "{id}");
         }
-        assert!(find("bench.migrated").is_some());
     }
 }

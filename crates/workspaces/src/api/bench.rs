@@ -76,7 +76,7 @@ fn bench_doc(w: &crd::Workspace, region: &str) -> serde_json::Value {
     json!({
         "id": w.metadata.name,
         "owner": w.spec.owner,
-        "team": w.spec.team,
+        "team": crd::space_slug(&w.spec.owner, &w.spec.team),
         "region": region,
         "model": w.spec.bench.as_ref().map(|b| b.model.clone()).unwrap_or_default(),
         "desiredState": w.spec.desired_state,
@@ -259,7 +259,11 @@ pub(crate) async fn create_bench(
             }),
             access: Access::Full,
             owner: caller.name.clone(),
-            team: team.clone(),
+            // A PERSONAL bench carries `""` exactly as every personal workspace does. The handle
+            // in `spec.team` folds to the same namespace, but the agent's `OwnerBinding` pass
+            // reads a non-empty team as "this is a TEAM namespace" and would size the person's
+            // `ResourceQuota` from the team defaults (~3.7x their own).
+            team: if team.eq_ignore_ascii_case(&caller.name) { String::new() } else { team.clone() },
             name: BENCH_WS_NAME.to_string(),
             region: region.clone(),
             image: crate::model::default_ws_image(),

@@ -379,6 +379,35 @@ async fn the_region_comes_from_the_team_and_a_person_binds_their_own_once() {
     assert_eq!(body["gateway"], format!("wss://ws-r1.khost.dev/tunnel/{id}"));
 }
 
+/// C1: a PERSONAL bench carries `spec.team = ""`, exactly as every personal workspace does. The
+/// handle folds to the same namespace, but the agent's `OwnerBinding` pass reads a non-empty team
+/// as "this is a TEAM namespace" and would size the person's `ResourceQuota` from the team
+/// defaults. The `team` the desktop reads back is still the handle — `bench_doc` folds it.
+#[tokio::test]
+async fn a_personal_bench_is_written_with_an_empty_team() {
+    let personal = || {
+        let mut o = bench_obj("alice", "alice", "running", None, "full");
+        o["spec"]["team"] = json!("");
+        o
+    };
+    let t = setup(
+        with(
+            vec![not_found(bench_path("alice", "alice")), post(format!("{API}/workspaces"), personal()), region("r1")],
+            alloc("alice", vec![]),
+        ),
+        Stub::new(&[], &[("alice", "r1")]),
+    );
+
+    let (st, body) = t.call("POST", "/v1/bench", &t.tok("alice"), Some(json!({"region": "r1"}))).await;
+
+    assert_eq!(st, 201, "{body}");
+    let created = t.rec.sent("POST", &format!("{API}/workspaces")).pop().unwrap();
+    assert_eq!(created["spec"]["team"], "", "{created}");
+    // The id is still keyed by (owner, handle) — only the spec field folds.
+    assert_eq!(created["metadata"]["name"], bench_id("alice", "alice"));
+    assert_eq!(body["team"], "alice", "byte-compatible with the shipped desktop: {body}");
+}
+
 #[tokio::test]
 async fn a_superadmin_claim_does_not_open_someone_elses_bench() {
     let bobs = bench_obj("bob", "acme", "running", Some("ready"), "full");

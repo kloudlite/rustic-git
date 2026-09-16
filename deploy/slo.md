@@ -267,7 +267,6 @@ first destructive stage.
 | `agent.janitor` | Workspaces | No snapshot record of this run outlives the volume it names | 99.9 % | weekly | 12 · Weekly |
 | `srv.lanes` | Control plane | Pulls of an image reach its pull counter, which is the server lane beat writing it back | 99.9 % | weekly | 12 · Weekly |
 | `bench.survives.reschedule` | Benches | After the pod is deleted every session reopens and processes read `lost` | 99.9 % ≤ 180000 ms | weekly | 12 · Weekly |
-| `bench.migrated` | Benches | A legacy bench folder seeded beside a fresh bench is copied into its `.bench/` on first start and renamed `.migrated-*` | 99.9 % | weekly | 12 · Weekly |
 | `bak.tarball.age` | Backups | The latest backup tarball is recent | 99.9 % | monthly | 13 · Monthly |
 | `bak.daily.slots` | Backups | Every daily backup slot is present | 99.9 % | monthly | 13 · Monthly |
 | `bak.versioning` | Backups | Backup versioning is enabled and retains history | 99.9 % | monthly | 13 · Monthly |

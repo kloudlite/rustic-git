@@ -40,7 +40,9 @@ fn bench_pod(ready: bool, running: bool, exit: Option<i32>, since: &str) -> serd
             "phase": "Running", "podIP": "10.1.2.3",
             "conditions": [{"type": "Ready", "status": if ready { "True" } else { "False" }, "lastTransitionTime": since}],
             "containerStatuses": [{
-                "name": "bench", "ready": ready, "restartCount": 0, "image": "b", "imageID": "",
+                // `started` is the startup probe's flip; `bench_pod` is the already-serving shape,
+                // and the never-started one is built inline by its own test below.
+                "name": "bench", "ready": ready, "started": true, "restartCount": 0, "image": "b", "imageID": "",
                 "state": state,
                 "lastState": exit.map(|c| serde_json::json!({"terminated": {"exitCode": c, "message": "node-b", "finishedAt": since}})).unwrap_or(serde_json::Value::Null),
             }],
@@ -91,6 +93,26 @@ async fn a_running_bench_gets_one_pod_with_both_containers() {
     assert!(env.iter().any(|e| e["name"] == "KL_BENCH_IDLE_SECS" && e["value"] == idle_secs.as_str()), "{env:?}");
     assert_eq!(sent[0]["metadata"]["labels"]["kloudlite.io/kind"], "bench");
     assert_eq!(last_status(&rec)["phase"], "ready");
+}
+
+/// A container that has never passed its startup probe is STARTING, never asleep — otherwise a
+/// bench that runs but cannot serve is declared idle after 15 s, its pod deleted, and the fault
+/// hidden behind a phase that reads as normal on every wake.
+#[tokio::test]
+async fn a_bench_that_never_started_is_not_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut pod = bench_pod(false, true, None, &rfc3339_ago(600));
+    pod["status"]["containerStatuses"][0]["started"] = serde_json::json!(false);
+    let mut routes = ssh_routes();
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
+    routes.push(kloudlite_workspaces::kube_test::get(POD, pod));
+    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+
+    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
+
+    assert!(rec.sent("DELETE", POD).is_empty(), "{:?}", rec.calls());
+    assert_ne!(last_status(&rec)["phase"], "idle", "{}", last_status(&rec));
 }
 
 /// The idle channel is READINESS now, not a pod exit: the container keeps serving, `--ping` says
@@ -195,4 +217,34 @@ async fn a_legacy_bench_folder_is_migrated_into_the_volume_before_the_pod() {
     assert!(!tmp.path().join("homes/.benches/alice/alice").exists(), "the legacy folder is renamed aside");
     assert!(wrote_cond(&rec, "FolderMigrated", "True", "Migrated"), "{:?}", rec.sent("PATCH", WS_STATUS));
     assert_eq!(rec.sent("POST", PODS).len(), 1, "the pod still starts in the same pass");
+}
+
+
+/// I2: idle is a bench's NORMAL resting state, so the park pass must RECOMPUTE `Replicated` rather
+/// than keep the running pass's `False/Running`. Kept, the volume decision sweep reads "waiting for
+/// a replica" forever: the bench never comes back after a node death and the node can never drain.
+#[tokio::test]
+async fn an_idle_bench_recomputes_replicated_so_its_volume_can_be_released() {
+    let idle = serde_json::json!({
+        "phase": "idle", "nodeName": "node-a", "volumeRef": "vol-1",
+        "idleSince": rfc3339_ago(600),
+        "conditions": [{"type": "Replicated", "status": "False", "reason": "Running",
+                        "message": "running here; its live edits are on this node only",
+                        "lastTransitionTime": AT}],
+    });
+    for (held, status, reason) in
+        [("stop-ws-1-3", "True", "Replicated"), ("sync-ws-1-old", "False", "AwaitingReplica")]
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut routes = vec![delete_pod()];
+        routes.extend(super::the_stop_before_teardown_snapshot::replicated_routes(held));
+        let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
+
+        kloudlite_agent::controller::apply_workspace(&bench_ws(serde_json::json!({}), idle.clone()), &ctx)
+            .await
+            .unwrap();
+
+        let st = last_status(&rec);
+        assert!(has_cond(&st, "Replicated", status, reason), "{held}: {st}");
+    }
 }
