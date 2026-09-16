@@ -81,7 +81,8 @@ struct Journeys {
 #[derive(serde::Serialize)]
 struct Overview {
     slos: Vec<slo::SloStatus>,
-    running: Option<slo::Run>,
+    /// Every run in flight, not "the" run: the hourly suite is four group runs at once.
+    running: Vec<slo::Run>,
     runs: Vec<slo::Run>,
     /// The walk each suite makes, served with the page rather than looked up per run: it is
     /// compiled into the binary and the console needs it to render a run that has no steps yet.
@@ -89,7 +90,7 @@ struct Overview {
     generated: String,
 }
 
-/// `GET /admin/slo`: the whole page in one call — every SLO's state, the run in flight, and the
+/// `GET /admin/slo`: the whole page in one call — every SLO's state, the runs in flight, and the
 /// twenty newest runs. One request rather than three, because the console polls it.
 pub(crate) async fn overview(State(s): State<Arc<ApiState>>) -> Result<Response, Response> {
     let h = history_or_503(&s)?;
@@ -138,6 +139,15 @@ struct RunDetail {
     journey: Vec<JourneyStage>,
 }
 
+/// The journey THIS run walked. A group run walked one slice of the hourly journey, so the whole
+/// journey would render it as having skipped three quarters of its stages.
+fn run_journey(suite: Suite, group: Option<u8>) -> Vec<JourneyStage> {
+    catalogue::journey_for_group(suite, group.unwrap_or(0))
+        .into_iter()
+        .map(|(name, ids)| JourneyStage { name, ids })
+        .collect()
+}
+
 pub(crate) async fn run_detail(
     State(s): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -148,7 +158,8 @@ pub(crate) async fn run_detail(
         .map_err(bad_gateway)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "no such run").into_response())?;
     let suite = Suite::parse(&run.suite).unwrap_or(Suite::Fast);
-    Ok(Json(RunDetail { run, steps, journey: journey_of(suite) }).into_response())
+    let journey = run_journey(suite, run.group);
+    Ok(Json(RunDetail { run, steps, journey }).into_response())
 }
 
 // ── the three reads the probe itself makes (stage 10, "edge and pipeline") ───
@@ -313,4 +324,22 @@ pub async fn bootstrap(State(state): State<Arc<ApiState>>, Json(body): Json<Boot
         tracing::info!(username = %u.username, superadmin = u.superadmin, "slo.bootstrap.ensured");
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A group run's detail carries its own slice: `-g3` is the bench pod, and rendering it against
+    /// the whole hourly journey would read as a run that skipped every other stage.
+    #[test]
+    fn a_group_runs_journey_is_its_own_slice() {
+        let ids: Vec<&str> =
+            run_journey(Suite::Hourly, Some(3)).into_iter().flat_map(|s| s.ids).collect();
+        assert!(!ids.is_empty());
+        assert!(ids.iter().all(|id| id.starts_with("bench.")), "{ids:?}");
+        assert!(!ids.contains(&"bench.workspace.tool_roundtrip"), "group 0 walks that one");
+        // An ungrouped run — every fast run, and a hand-run hourly — still gets the whole journey.
+        assert_eq!(run_journey(Suite::Hourly, None).len(), journey_of(Suite::Hourly).len());
+    }
 }

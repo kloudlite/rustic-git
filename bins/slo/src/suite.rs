@@ -103,44 +103,9 @@ pub const ROLLOUT_IN_FLIGHT: &str = "a rollout is in flight";
 /// that WAITED for its twin would only hold the tenant longer.
 pub const SAME_SUITE_IN_FLIGHT: &str = "another run of this suite is in flight";
 
-/// The hourly suite is an Indexed Job of this many pods, each walking one GROUP of the journey as
-/// its own run (`hourly-{ts}-g{n}`), filing only that group's ids.
-///
-/// The partition is by id, and state decides it rather than the stage list: Experience reads stage
-/// 2's repo and key and revokes that key, stage 15 grants between stage 5's workspace and stage
-/// 6's environment, and stage 7 stops that environment — so all of that stays in one pod (0). What
-/// moves out shares nothing with it: the intercept journey stands up its own team (1), the seed
-/// failure its own workspace (2), and every step on the owner's bench (3), because
-/// `bench.idle.wake` needs every client gone for `benchIdleSecs` and stage 5's stop/start of that
-/// same bench would reset it. A pod with no index (a hand run) walks everything, as before.
-pub const HOURLY_GROUPS: u8 = 4;
-
-/// Group 3. Not `bench.workspace.tool_roundtrip`: it runs in group 0's workspace, so group 0 walks
-/// it after waiting for this group to finish (`wait_for_group`).
-const BENCH_IDS: [&str; 10] = [
-    "bench.create",
-    "bench.start.p95",
-    "bench.tunnel",
-    "bench.idle.wake",
-    "bench.session.roundtrip",
-    "bench.exchange.both_views",
-    "bench.two_clients",
-    "bench.tool.token",
-    "bench.tool.audience",
-    "bench.tool.revoked",
-];
-
-pub fn group_of(id: &str) -> u8 {
-    if BENCH_IDS.contains(&id) {
-        3
-    } else if id == "ws.seed.failed" || id == "team.member.paused" {
-        2
-    } else if stages::env_intercept::INTERCEPT_IDS.contains(&id) {
-        1
-    } else {
-        0
-    }
-}
+/// The hourly journey's partition into groups lives in the catalogue, beside the journey itself —
+/// the admin console slices a group run's journey with the same `group_of` this pod walked by.
+pub use kloudlite_workspaces::slo::catalogue::{group_of, HOURLY_GROUPS};
 
 impl Ctx {
     /// Whether this pod walks `id`: always, unless it is one group of a grouped hourly run.
@@ -592,8 +557,9 @@ mod tests {
         assert_eq!(c.failed(), 0, "a skip is not a failure");
     }
 
-    /// The four hourly groups together file every hourly id exactly once, and each files only its
-    /// own: a missing id reads as passed, and a sibling's id skipped here would overwrite its sample.
+    /// The WALKER honours the partition: each group files only its own ids and the four together
+    /// file every hourly id exactly once. The partition itself is the catalogue's own test; this
+    /// one is here because only the probe can walk a journey.
     #[tokio::test]
     async fn the_hourly_groups_partition_the_journey() {
         let mut want: Vec<String> =

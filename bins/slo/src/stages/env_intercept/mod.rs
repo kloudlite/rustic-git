@@ -38,23 +38,9 @@ use crate::ctx::Ctx;
 mod delivery;
 mod refusals;
 
-/// Every id this journey owns. It is the skip list a run that cannot get here files, and a missing
-/// id reads as passed — so it must name all of them, not only the ones a given path reaches.
-pub(crate) const INTERCEPT_IDS: [&str; 13] = [
-    "env.space.bench",
-    "env.intercept",
-    "env.intercept.proxy.up",
-    "env.intercept.delivered",
-    "env.intercept.remap",
-    "env.intercept.peer",
-    "env.intercept.bench",
-    "env.intercept.proxy.restart",
-    "env.intercept.release",
-    "env.intercept.fallback",
-    "env.intercept.refused",
-    "env.intercept.udp.refused",
-    "env.intercept.tools.refused",
-];
+/// Every id this journey owns, and group 1 of the hourly Job with it — one list, in the
+/// catalogue, because the console partitions a group run's journey by the same ids.
+pub(crate) use kloudlite_workspaces::slo::catalogue::INTERCEPT_IDS;
 
 /// The service the workspace takes over. A SECOND service, not `SERVICE`: an intercept scales the
 /// real StatefulSet to 0, so intercepting the only service would leave the namespace with no pod

@@ -45,6 +45,10 @@ pub enum RunState {
     /// so `run-job.sh` printed "hourly passed" for a run that proved nothing. A skipped step is
     /// no sample, and a run made of no samples cannot be evidence the fleet is well.
     Skipped,
+    /// A READ-side state only, never stored: a `running` row whose heartbeat went stale. The probe
+    /// pod was killed before it could file a terminal state, so nothing will ever rewrite the row —
+    /// and a late heartbeat still wins, because the row itself is untouched.
+    Lost,
 }
 
 impl RunState {
@@ -55,6 +59,7 @@ impl RunState {
             RunState::Failed => "failed",
             RunState::Yielded => "yielded",
             RunState::Skipped => "skipped",
+            RunState::Lost => "lost",
         }
     }
 
@@ -145,6 +150,9 @@ pub struct Run {
     /// whose pod was killed and never filed a terminal state, and served alongside the row so a
     /// reader can tell that from a run that is simply slow.
     pub updated: Option<DateTime<Utc>>,
+    /// The hourly group this run walked, from its `-g{n}` id — the console slices the journey by
+    /// it. Parsed in Rust rather than in SQL: the id is the probe's own naming, not a column.
+    pub group: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -543,10 +551,15 @@ pub async fn statuses(h: &History) -> Result<Vec<SloStatus>, HistoryError> {
 }
 
 /// The columns every `Run` read selects, in the order `parse_run` expects.
-const RUN_COLS: &str = "run_id, suite, region, toString(started), toString(finished), state, \
-     stage, steps_total, steps_failed, failed_step, failed_detail, \
-     if(finished IS NULL, 0, dateDiff('millisecond', started, finished)) AS duration_ms, \
-     toString(updated)";
+const RUN_COLS: &str = "r.run_id, r.suite, r.region, toString(r.started), toString(r.finished), \
+     if(r.state = 'running' AND r.updated < now() - INTERVAL 30 MINUTE, 'lost', r.state) AS state, \
+     r.stage, r.steps_total, r.steps_failed, r.failed_step, r.failed_detail, \
+     if(r.finished IS NULL, 0, dateDiff('millisecond', r.started, r.finished)) AS duration_ms, \
+     toString(r.updated)";
+
+/// Every run read goes through this alias: `state` is selected as an expression OVER the column of
+/// the same name, and only a qualified `r.state` inside it (and in a WHERE) is unambiguous.
+const RUNS_FROM: &str = "FROM kloudlite.slo_runs AS r FINAL";
 
 fn parse_run(r: &[serde_json::Value]) -> Run {
     let finished = text(r.get(4));
@@ -566,7 +579,13 @@ fn parse_run(r: &[serde_json::Value]) -> Run {
         failed_detail: text(r.get(10)),
         duration_ms: num(r.get(11)),
         updated: (!updated.is_empty()).then(|| ts(&updated)),
+        group: run_group(&text(r.first())),
     }
+}
+
+/// The hourly group of a run id (`hourly-1789-g3` -> 3); `None` for every ungrouped run.
+fn run_group(run_id: &str) -> Option<u8> {
+    run_id.rsplit_once("-g")?.1.parse().ok()
 }
 
 /// Newest first. `suite` is the one caller-shaped value and it is matched against the three names
@@ -581,28 +600,28 @@ pub async fn runs(h: &History, suite: Option<&str>, limit: usize) -> Result<Vec<
 
 fn runs_sql(suite: Option<&str>, limit: usize) -> String {
     let filter = match suite {
-        Some(s @ ("fast" | "hourly" | "weekly" | "monthly")) => format!("WHERE suite = '{s}'"),
+        Some(s @ ("fast" | "hourly" | "weekly" | "monthly")) => format!("WHERE r.suite = '{s}'"),
         // An unknown suite filters everything out rather than silently listing all of them.
         Some(_) => "WHERE 1 = 0".to_string(),
         None => String::new(),
     };
     let limit = limit.clamp(1, 100);
     format!(
-        "SELECT {RUN_COLS} FROM kloudlite.slo_runs FINAL {filter} ORDER BY started DESC LIMIT {limit}"
+        "SELECT {RUN_COLS} {RUNS_FROM} {filter} ORDER BY r.started DESC LIMIT {limit}"
     )
 }
 
-/// The run in flight, if any. A crashed probe leaves its row `running` forever, so the newest one
-/// wins — `SloProbeMissing` is what notices that it never finished, not this.
-pub async fn running(h: &History) -> Result<Option<Run>, HistoryError> {
-    Ok(h.query(&running_sql()).await?.first().map(|r| parse_run(r)))
+/// Every run in flight, oldest first. The hourly suite is an Indexed Job of four pods, each its own
+/// run, so there is no such thing as "the" run in flight — a reader that took one would have shown
+/// three of four hourly groups as not running at all. A crashed probe leaves its row `running`
+/// forever and `RUN_COLS` reads that back as `lost`; `SloProbeMissing` is what notices that it
+/// never finished, not this.
+pub async fn running(h: &History) -> Result<Vec<Run>, HistoryError> {
+    Ok(h.query(&running_sql()).await?.iter().map(|r| parse_run(r)).collect())
 }
 
 fn running_sql() -> String {
-    format!(
-        "SELECT {RUN_COLS} FROM kloudlite.slo_runs FINAL WHERE state = 'running' \
-         ORDER BY started DESC LIMIT 1"
-    )
+    format!("SELECT {RUN_COLS} {RUNS_FROM} WHERE r.state = 'running' ORDER BY r.started")
 }
 
 /// One run and its steps in probe order (`ts`), or `None` when no such run exists.
@@ -642,7 +661,7 @@ pub async fn run_steps(
 fn run_steps_sql(run_id: &str) -> Option<(String, String)> {
     let id = super::series::ident(run_id)?;
     Some((
-        format!("SELECT {RUN_COLS} FROM kloudlite.slo_runs FINAL WHERE run_id = '{id}'"),
+        format!("SELECT {RUN_COLS} {RUNS_FROM} WHERE r.run_id = '{id}'"),
         format!(
             "SELECT slo_id, toString(ts), ok, ms, skipped, detail, stage \
              FROM kloudlite.slo_results FINAL WHERE run_id = '{id}' ORDER BY ts"
@@ -683,19 +702,27 @@ mod tests {
     #[test]
     fn run_reads_are_final_and_ident_checked() {
         for sql in [runs_sql(None, 20), runs_sql(Some("fast"), 1_000), running_sql()] {
-            assert!(sql.contains("kloudlite.slo_runs FINAL"));
+            assert!(sql.contains("kloudlite.slo_runs AS r FINAL"));
+            // A run whose heartbeat went stale reads as `lost` — computed here, never stored.
+            assert!(sql.contains("'lost', r.state) AS state"));
             // The console shows a run's duration, and a NULL `finished` must read as 0 rather
             // than blowing up the subtraction.
             assert!(sql.contains("dateDiff('millisecond'"));
         }
-        assert!(runs_sql(Some("fast"), 20).contains("WHERE suite = 'fast'"));
+        assert!(runs_sql(Some("fast"), 20).contains("WHERE r.suite = 'fast'"));
         // An unknown suite filters everything out rather than silently listing every run.
         assert!(runs_sql(Some("nope'; DROP"), 20).contains("WHERE 1 = 0"));
         assert!(runs_sql(None, 1_000).ends_with("LIMIT 100"));
-        assert!(running_sql().contains("state = 'running'"));
+        assert!(running_sql().contains("WHERE r.state = 'running'"));
+        // Every run in flight, not the newest one: the hourly suite runs four at a time.
+        assert!(!running_sql().contains("LIMIT"), "the runs in flight are not capped at one");
+
+        assert_eq!(run_group("hourly-1-g3"), Some(3));
+        assert_eq!(run_group("fast-1"), None);
+        assert_eq!(run_group("hourly-1"), None);
 
         let (run, steps) = run_steps_sql("fast-42").unwrap();
-        assert!(run.contains("WHERE run_id = 'fast-42'"));
+        assert!(run.contains("WHERE r.run_id = 'fast-42'"));
         assert!(steps.contains("kloudlite.slo_results FINAL"));
         assert!(steps.contains("WHERE run_id = 'fast-42' ORDER BY ts"));
         // Anything that is not an identifier never reaches a statement at all.

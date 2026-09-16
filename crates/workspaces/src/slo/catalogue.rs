@@ -145,6 +145,86 @@ pub fn journey(suite: Suite) -> Vec<(&'static str, Vec<&'static str>)> {
         .collect()
 }
 
+/// The hourly suite is an Indexed Job of this many pods, each walking one GROUP of the journey as
+/// its own run (`hourly-{ts}-g{n}`), filing only that group's ids.
+///
+/// The partition is by id, and state decides it rather than the stage list: Experience reads stage
+/// 2's repo and key and revokes that key, stage 15 grants between stage 5's workspace and stage
+/// 6's environment, and stage 7 stops that environment — so all of that stays in one pod (0). What
+/// moves out shares nothing with it: the intercept journey stands up its own team (1), the seed
+/// failure its own workspace (2), and every step on the owner's bench (3), because
+/// `bench.idle.wake` needs every client gone for `benchIdleSecs` and stage 5's stop/start of that
+/// same bench would reset it. A pod with no index (a hand run) walks everything, as before.
+///
+/// It lives here, beside the journey, because the console has to slice a group run's journey the
+/// same way the probe walked it: the partition is a fact about the catalogue, not about the binary.
+pub const HOURLY_GROUPS: u8 = 4;
+
+/// Group 3. Not `bench.workspace.tool_roundtrip`: it runs in group 0's workspace, so group 0 walks
+/// it after waiting for this group to finish (`suite::wait_for_group`).
+const BENCH_IDS: [&str; 10] = [
+    "bench.create",
+    "bench.start.p95",
+    "bench.tunnel",
+    "bench.idle.wake",
+    "bench.session.roundtrip",
+    "bench.exchange.both_views",
+    "bench.two_clients",
+    "bench.tool.token",
+    "bench.tool.audience",
+    "bench.tool.revoked",
+];
+
+/// Group 1: every id the intercept journey owns. It is also the skip list a probe run that cannot
+/// get there files, and a missing id reads as passed — so it must name all of them, not only the
+/// ones a given path reaches.
+pub const INTERCEPT_IDS: [&str; 13] = [
+    "env.space.bench",
+    "env.intercept",
+    "env.intercept.proxy.up",
+    "env.intercept.delivered",
+    "env.intercept.remap",
+    "env.intercept.peer",
+    "env.intercept.bench",
+    "env.intercept.proxy.restart",
+    "env.intercept.release",
+    "env.intercept.fallback",
+    "env.intercept.refused",
+    "env.intercept.udp.refused",
+    "env.intercept.tools.refused",
+];
+
+/// The hourly group that walks `id`.
+pub fn group_of(id: &str) -> u8 {
+    if BENCH_IDS.contains(&id) {
+        3
+    } else if id == "ws.seed.failed" || id == "team.member.paused" {
+        2
+    } else if INTERCEPT_IDS.contains(&id) {
+        1
+    } else {
+        0
+    }
+}
+
+/// The journey ONE group walks: the suite's journey with every other group's ids dropped, and a
+/// stage that lost all of its own ids dropped with them. A stage that carries no ids at all (Boot,
+/// Teardown) is kept — every pod boots, and the parent always runs teardown. Any suite but hourly
+/// is ungrouped and walks the whole journey.
+pub fn journey_for_group(suite: Suite, group: u8) -> Vec<(&'static str, Vec<&'static str>)> {
+    let full = journey(suite);
+    if suite != Suite::Hourly {
+        return full;
+    }
+    full.into_iter()
+        .filter_map(|(name, ids)| {
+            let stageless = ids.is_empty();
+            let mine: Vec<&str> = ids.into_iter().filter(|id| group_of(id) == group).collect();
+            (stageless || !mine.is_empty()).then_some((name, mine))
+        })
+        .collect()
+}
+
 /// Whether a run of `suite` produces samples for a row marked `of`.
 ///
 /// A stage is NOT a suite: stage 2 carries fast ids and two hourly ones, so the walk has to ask
@@ -591,6 +671,37 @@ pub const CATALOGUE: &[Slo] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The four hourly groups together cover every hourly id exactly once, and each covers only
+    /// its own: an id in no group would never be walked and read as passed, and one in two groups
+    /// would have a sibling's skip overwrite its real sample.
+    #[test]
+    fn the_hourly_groups_partition_the_journey() {
+        let mut want: Vec<&str> = journey(Suite::Hourly).into_iter().flat_map(|(_, ids)| ids).collect();
+        let mut seen: Vec<&str> = (0..HOURLY_GROUPS)
+            .flat_map(|g| {
+                let stages = journey_for_group(Suite::Hourly, g);
+                assert!(stages.iter().any(|(_, ids)| !ids.is_empty()), "group {g} walks nothing");
+                stages.into_iter().flat_map(move |(_, ids)| {
+                    assert!(ids.iter().all(|id| group_of(id) == g), "group {g} holds a sibling's id");
+                    ids
+                })
+            })
+            .collect();
+        want.sort_unstable();
+        seen.sort_unstable();
+        assert_eq!(seen, want, "the groups do not cover the hourly catalogue exactly once");
+        // Every stage of the journey still renders, ids or not — a run that died at boot must not
+        // read as a run that never started.
+        let names: Vec<&str> = journey_for_group(Suite::Hourly, 3).into_iter().map(|(n, _)| n).collect();
+        assert!(names.contains(&"0 · Boot") && names.contains(&"11 · Teardown"));
+        // …but a stage none of whose ids are this group's is dropped, so the console counts the
+        // stages this pod actually walked rather than three quarters of skips.
+        assert!(!names.contains(&"1 · Identity"), "group 3 walks no Identity id");
+        assert!(names.len() < journey(Suite::Hourly).len());
+        // Only hourly is grouped; asking for a group of another suite is the whole journey.
+        assert_eq!(journey_for_group(Suite::Fast, 3), journey(Suite::Fast));
+    }
 
     #[test]
     fn the_catalogue_matches_deploy_slo_md() {
