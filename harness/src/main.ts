@@ -344,6 +344,14 @@ app.on("before-quit", () => disconnect());
 // dropped, exactly as typing into a closed terminal is.
 const ptys = new Map<string, WebSocket>();
 
+// A shell that is still connecting cannot take bytes yet (`ws.send` throws), and one that is
+// closing has nobody to give them to: both are "not open", and the open handler already sends
+// the size, so nothing typed or resized in that gap needs keeping.
+function openPty(id: string): WebSocket | undefined {
+  const w = ptys.get(id);
+  return w && w.readyState === w.OPEN ? w : undefined;
+}
+
 function closePtys() {
   for (const w of ptys.values()) w.close();
   ptys.clear();
@@ -385,11 +393,11 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
   });
 });
 ipcMain.on("pty:write", (_e, id: unknown, data: unknown) => {
-  const w = typeof id === "string" ? ptys.get(id) : undefined;
+  const w = typeof id === "string" ? openPty(id) : undefined;
   if (w && data instanceof Uint8Array) w.send(Buffer.from(data), { binary: true });
 });
 ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
-  const w = typeof id === "string" ? ptys.get(id) : undefined;
+  const w = typeof id === "string" ? openPty(id) : undefined;
   if (w && typeof cols === "number" && typeof rows === "number") w.send(JSON.stringify({ resize: { cols, rows } }));
 });
 ipcMain.on("pty:close", (_e, id: unknown) => {
