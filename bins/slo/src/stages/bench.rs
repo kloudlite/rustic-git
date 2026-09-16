@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use super::{api, call, get, post, raw};
+use super::{api, call, get, poll_json, post, raw};
 use crate::ctx::Ctx;
 
 // Ceilings, each at least its catalogue target (`stages/workspace.rs`'s rule): a step that runs
@@ -51,8 +51,21 @@ const START_WAIT: Duration = Duration::from_secs(90);
 const ROUNDTRIP_CEILING: Duration = Duration::from_secs(60);
 /// `bench.shell.roundtrip`: target 15 s.
 const SHELL_CEILING: Duration = Duration::from_secs(20);
-/// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first.
-const SHELL_WS_CEILING: Duration = Duration::from_secs(30);
+/// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first,
+/// and the id now walks a named session twice plus its listing and its kill.
+const SHELL_WS_CEILING: Duration = Duration::from_secs(45);
+/// `ws.terminal.persists`: dominated by the one continuum save it has to wait out plus a stop and
+/// a start of the bench workspace.
+const TERMINAL_CEILING: Duration = Duration::from_secs(600);
+/// tmux-continuum saves on its own interval (`@continuum-save-interval 1`) and nothing outside the
+/// session can ask for a save, so one interval is the shortest wait that makes a restore provable.
+const CONTINUUM_SAVE: Duration = Duration::from_secs(75);
+/// A detached PTY is quiet once the attach redraw and the typed line have landed; there is no exit
+/// frame on this path, because exiting the shell would kill the session the probe is measuring.
+const PTY_SETTLE: Duration = Duration::from_secs(2);
+/// Half the stop and half the start of `ws.terminal.persists`, and then the wait for the tool
+/// server to have restored its sessions.
+const TERMINAL_POLL: Duration = Duration::from_secs(150);
 
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
@@ -496,6 +509,71 @@ pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(St
     bail!("the shell closed without an exit frame; output {}", super::clip(&out))
 }
 
+/// One NAMED terminal, attached and then DETACHED: the socket is closed after `PTY_SETTLE` of
+/// quiet instead of waiting for an exit frame, because typing `exit` would kill the tmux session
+/// this whole path exists to keep. Returns everything the socket saw — on a reattach that is
+/// tmux's own redraw of the pane, which is what carries the earlier marker.
+pub(crate) async fn pty_attach(port: u16, scope: &str, session: &str, input: &str) -> Result<String> {
+    let url = format!("ws://127.0.0.1:{port}/pty?scope={scope}&session={session}");
+    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.context("pty socket")?;
+    ws.send(Message::text(json!({"resize": {"cols": 100, "rows": 30}}).to_string())).await?;
+    if !input.is_empty() {
+        ws.send(Message::binary(input.as_bytes().to_vec())).await?;
+    }
+    let mut out = String::new();
+    loop {
+        let Ok(next) = tokio::time::timeout(PTY_SETTLE, ws.next()).await else { break };
+        let Some(msg) = next else { break };
+        match msg.context("pty frame")? {
+            Message::Binary(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            Message::Text(t) => {
+                let v: Value = serde_json::from_str(&t).with_context(|| format!("pty control frame {}", super::clip(&t)))?;
+                if let Some(e) = v["error"].as_str() {
+                    bail!("the shell did not start: {e}");
+                }
+                // An exit frame here means the session ended under the probe, which the caller's
+                // assertion on the marker will report far better than a bare code would.
+                break;
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    let _ = ws.close(None).await;
+    Ok(out)
+}
+
+/// A tmux session name the tool server will accept (`[a-z0-9][a-z0-9-]{0,47}`) built from the run
+/// id, so two runs never share a session and teardown can name it.
+fn session_name(prefix: &str, run_id: &str) -> String {
+    let tail: String = run_id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' }).collect();
+    format!("{prefix}{tail}").chars().take(48).collect()
+}
+
+/// Whether the bench's `GET /pty/sessions` listing names `session`. A body that is not the
+/// listing is "not listed" for the delete's sake and a failure for the restore's, which is why
+/// both callers say which they mean rather than this deciding for them.
+fn lists_session(body: &str, session: &str) -> bool {
+    serde_json::from_str::<Vec<Value>>(body).is_ok_and(|rows| rows.iter().any(|r| r["name"] == session))
+}
+
+/// `DELETE /pty/sessions/{name}?scope=`, then the listing must no longer name it. Also the
+/// teardown for both terminal ids: a session left behind outlives the run.
+async fn kill_session(port: u16, scope: &str, session: &str) -> Result<()> {
+    let (status, body) = through_with(port, reqwest::Method::DELETE, &format!("/pty/sessions/{session}?scope={scope}"), None).await?;
+    if status != 204 && status != 200 {
+        bail!("DELETE /pty/sessions/{session} answered {status}: {}", super::clip(&body));
+    }
+    let (status, body) = through(port, &format!("/pty/sessions?scope={scope}")).await?;
+    if status != 200 {
+        bail!("GET /pty/sessions answered {status}: {}", super::clip(&body));
+    }
+    if lists_session(&body, session) {
+        bail!("the killed session {session} is still listed: {}", super::clip(&body));
+    }
+    Ok(())
+}
+
 /// The shell ran what it was given and left cleanly. `want` is looked for in the OUTPUT, and the
 /// PTY echoes the typed line back too — which is why both probes send a line that does not itself
 /// contain what is asserted.
@@ -531,6 +609,7 @@ async fn shell_workspace(c: &mut Ctx) {
         Ok(ws) => ws,
         Err(why) => return c.skip(SHELL_WS, why),
     };
+    let ws2 = ws.clone();
     // The bench resolves the tool server with its pod token, exactly as the tool round trip does,
     // so the same login has to be live for this step.
     let login = match super::bench_tool::arm(c).await {
@@ -541,18 +620,50 @@ async fn shell_workspace(c: &mut Ctx) {
     // probe holds the id — so the judgement is "pwd printed a path under the workspaces root",
     // which `/bin/sh` at `$HOME` would not (2026-09-16 21:19 hourly: the id-built path never matched).
     let want = format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR);
-    c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
-        async move {
+    let session = session_name("probe-", &c.run_id);
+    let marker = format!("MARK-{}", c.run_id);
+    let (sess, mark) = (session.clone(), marker.clone());
+    let killed = c
+        .step(SHELL_WS, SHELL_WS_CEILING, move |c| {
+            async move {
+                let (_child, port) = forward(c).await?;
+                let (out, code) = pty_shell(port, &ws, "pwd; exit 0\n").await?;
+                judge_shell(&out, &want, code)?;
+                // The PROMPT is the product here: starship's character is what says the splice landed
+                // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
+                judge_shell(&out, "❯", code)?;
+                // A NAMED session is a tmux session, and the whole point of one is that closing the
+                // socket detaches instead of ending it. `printf` builds the marker so the echoed
+                // command line cannot pass the reattach assertion on its own.
+                let first = pty_attach(port, &ws, &sess, &format!("printf 'MARK-%s\\n' {}\n", c.run_id)).await?;
+                if !first.contains(&mark) {
+                    bail!("the named session never printed {mark}: {}", super::clip(&first));
+                }
+                // Same name, second socket: what comes back is tmux's redraw of the pane the first
+                // one left behind, so the marker being there IS the reattach.
+                let again = pty_attach(port, &ws, &sess, "").await?;
+                if !again.contains(&mark) {
+                    bail!("reattaching to {sess} redrew nothing carrying {mark}: {}", super::clip(&again));
+                }
+                if !again.contains('❯') {
+                    bail!("the reattached session shows no prompt: {}", super::clip(&again));
+                }
+                kill_session(port, &ws, &sess).await
+            }
+            .boxed()
+        })
+        .await;
+    // Untimed: a session the step failed before killing would outlive the run in a workspace the
+    // next run reuses.
+    if !killed {
+        let sweep = async {
             let (_child, port) = forward(c).await?;
-            let (out, code) = pty_shell(port, &ws, "pwd; exit 0\n").await?;
-            judge_shell(&out, &want, code)?;
-            // The PROMPT is the product here: starship's character is what says the splice landed
-            // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
-            judge_shell(&out, "❯", code)
+            kill_session(port, &ws2, &session).await
+        };
+        if let Err(e) = sweep.await {
+            tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.session.teardown");
         }
-        .boxed()
-    })
-    .await;
+    }
     if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
         tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.login.revoke");
     }
@@ -889,6 +1000,96 @@ fn diff_history(before: &[(String, Option<u64>)], after: &[(String, Option<u64>)
 
 pub async fn weekly(c: &mut Ctx) {
     c.skip("bench.survives.reschedule", NO_DELETE_GRANT);
+    terminal_persists(c).await;
+}
+
+const TERMINAL: &str = "ws.terminal.persists";
+
+/// `ws.terminal.persists`: a named terminal survives the pod going away and coming back.
+///
+/// The subject is the BENCH's own workspace container, not a workspace stood up for this: the bench
+/// is an ordinary Workspace (`bench_ws`), `/pty?scope=bench` reaches its tool server through the
+/// same splice every other terminal uses, and standing up a second workspace here would measure a
+/// create the weekly suite already measures elsewhere. Stop and start are `/v1/workspaces/{id}`'s,
+/// so no pod-delete grant is needed — `bench.survives.reschedule` is skipped for want of one.
+///
+/// The wait is the one unavoidable cost: tmux-continuum saves on its own minute interval and
+/// nothing outside the session can ask it to save, so a restart inside that window would prove
+/// nothing about a restore. Weekly is where a wait like that belongs.
+async fn terminal_persists(c: &mut Ctx) {
+    let id = match get(c, &bench_url(c, ""), &c.probe_jwt).await.ok().and_then(|d| d.get("id").and_then(Value::as_str).map(str::to_string)) {
+        Some(id) => id,
+        None => return c.skip(TERMINAL, "the bench could not be read"),
+    };
+    // Stub-or-unreachable is a precondition, exactly as it is for the session ids: a bench that
+    // was never there is no sample of whether a terminal survived one.
+    let health = async {
+        let (_child, port) = forward(c).await?;
+        anyhow::Ok(through(port, "/healthz").await?.1)
+    }
+    .await;
+    match health {
+        Err(e) => return c.skip(TERMINAL, &format!("the bench could not be reached: {e:#}")),
+        Ok(h) if is_stub(&h) => return c.skip(TERMINAL, STUB),
+        Ok(_) => {}
+    }
+    let session = session_name("kl-persist-", &c.run_id);
+    let marker = format!("MARK-{}", c.run_id);
+    let (sess, mark) = (session.clone(), marker.clone());
+    let kept = c
+        .step(TERMINAL, TERMINAL_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let (stop, start) = (api(c, &format!("/v1/workspaces/{id}/stop")), api(c, &format!("/v1/workspaces/{id}/start")));
+        let doc = api(c, &format!("/v1/workspaces/{id}"));
+        async move {
+            let (child, port) = forward(c).await?;
+            let first = pty_attach(port, "bench", &sess, &format!("printf 'MARK-%s\\n' {}\n", c.run_id)).await?;
+            if !first.contains(&mark) {
+                bail!("the named session never printed {mark}: {}", super::clip(&first));
+            }
+            tokio::time::sleep(CONTINUUM_SAVE).await;
+            // The tunnel is the bench pod's; it goes with the stop, and the reads afterwards open
+            // their own.
+            drop(child);
+            post(c, &stop, &jwt, Value::Null).await.context("could not stop the bench")?;
+            poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("stopped")).await.context("the bench never stopped")?;
+            post(c, &start, &jwt, Value::Null).await.context("could not start the bench")?;
+            poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("ready")).await.context("the bench never came back ready")?;
+            // Polled, not read once: `kl ide serve` restores the saved sessions at its own start,
+            // which is after the workspace reports ready.
+            let (_child, port) = forward(c).await?;
+            let listed = Instant::now();
+            loop {
+                let (status, body) = through(port, "/pty/sessions?scope=bench").await?;
+                if status == 200 && lists_session(&body, &sess) {
+                    break;
+                }
+                if listed.elapsed() >= TERMINAL_POLL {
+                    bail!("{sess} was never listed again after the restart ({status}): {}", super::clip(&body));
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            // Listed is not restored: the pane contents are what the person left behind.
+            let again = pty_attach(port, "bench", &sess, "").await?;
+            if !again.contains(&mark) {
+                bail!("{sess} came back without {mark} in it: {}", super::clip(&again));
+            }
+            kill_session(port, "bench", &sess).await
+        }
+        .boxed()
+    })
+    .await;
+    if !kept {
+        // Untimed: the bench is long-lived, so a session this run opened and failed before killing
+        // would still be there — and still holding its marker — on the next weekly run.
+        let sweep = async {
+            let (_child, port) = forward(c).await?;
+            kill_session(port, "bench", &session).await
+        };
+        if let Err(e) = sweep.await {
+            tracing::warn!(error = %format!("{e:#}"), "slo.bench.terminal.teardown");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1096,6 +1297,26 @@ mod tests {
         assert!(no_model.lock().unwrap().is_some(), "a missing key must be recorded for the demote");
     }
 
+    /// The tool server enforces `[a-z0-9][a-z0-9-]{0,47}` and refuses anything else, so a run id
+    /// with a dot or an upper-case letter in it must never reach the wire as typed.
+    #[test]
+    fn session_names_and_listings_read() {
+        assert_eq!(session_name("probe-", "hourly-1789355813"), "probe-hourly-1789355813");
+        assert_eq!(session_name("probe-", "Weekly.2026_09"), "probe-weekly-2026-09");
+        let long = session_name("kl-persist-", &"9".repeat(80));
+        assert_eq!(long.len(), 48);
+        let name = session_name("probe-", "hourly-1");
+        assert!(name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()));
+        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+
+        let rows = json!([{"name": "probe-hourly-1", "windows": 1, "attached": 0}]).to_string();
+        assert!(lists_session(&rows, "probe-hourly-1"));
+        assert!(!lists_session(&rows, "probe-hourly-2"));
+        assert!(!lists_session("[]", "probe-hourly-1"));
+        // Not the listing at all is "not listed": the delete's read-back says so itself.
+        assert!(!lists_session("bench unreachable", "probe-hourly-1"));
+    }
+
     #[tokio::test]
     async fn a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped() {
         let mut c = crate::testkit::ctx().await;
@@ -1103,7 +1324,8 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        assert_eq!(c.steps.len(), 8);
+        // Nine now: `ws.terminal.persists` files its own skip when there is no bench to read.
+        assert_eq!(c.steps.len(), 9);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
         assert_eq!(run_state(true, false, &c.steps), RunState::Skipped);

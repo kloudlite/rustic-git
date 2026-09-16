@@ -612,7 +612,7 @@ pub const CATALOGUE: &[Slo] = &[
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
     // thread file.
     Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // A bench IS a Workspace now, so its transcripts are cut by the ordinary push and its package
     // list is edited from its own shell. Both are group 3's, walked last: a package edit recreates
@@ -655,6 +655,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "ws.terminal.persists", feature: "Workspaces", sli: "A named terminal in a workspace survives a stop and a start: it is listed again and reattaching redraws what was in it", target: avail(99.0), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
