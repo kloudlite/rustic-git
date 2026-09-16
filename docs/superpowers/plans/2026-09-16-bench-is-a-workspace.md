@@ -169,7 +169,8 @@ Workspaces), `janitor.rs` (attach keep-set from Workspaces), `controller/workspa
       Workspace with `OWNER_LABEL`).
 - [ ] History: `watch.rs` mappers and `events.rs` skip `is_bench`; test that a bench workspace
       produces no row. Admin owners/overview counts exclude benches; test.
-- [ ] Backfill (`bench.backfill`, admin role boot, idempotent, one pass per boot + every 10 min
+- [x] ~~Backfill~~ DROPPED (owner, 2026-09-16 22:50 IST: "no need of backfills, delete existing benches and create new"); Task 10 retires legacy objects by hand. Original text kept for the record:
+- [ ] ~~Backfill (`bench.backfill`, admin role boot, idempotent, one pass per boot + every 10 min
       until zero legacy objects): for each legacy `Bench`: if no Workspace named `bench_id`
       exists → create it (owner, team, region from directory or the legacy pod's node region,
       `access`, `desiredState`, `model`), remove `BENCH_FOLDER_FINALIZER` from the legacy Bench,
