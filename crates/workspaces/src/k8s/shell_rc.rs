@@ -18,6 +18,10 @@
 /// started blank however long the person had been in it. `HISTFILE` itself is pod env
 /// (`k8s/workspace.rs`), on the per-node local state dir; written incrementally and shared so a
 /// second exec or a pod kill does not lose what was typed in the first.
+/// `_kl_rehash`: zsh caches command lookups, so a package `kl pkg add` just installed is
+/// "command not found" in every shell that was already open until `rehash` — and with tmux every
+/// shell is one that was already open. One `readlink` per prompt catches the profile symlink
+/// moving and rehashes only then (owner, 2026-09-17 04:12 IST: "installed package is not accessible").
 pub const ZSHRC: &str = "\
 [[ -o interactive ]] || return 0
 [ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"
@@ -28,6 +32,9 @@ zstyle \":completion:*\" menu select
 HISTSIZE=50000
 SAVEHIST=50000
 setopt appendhistory incappendhistory sharehistory histignorealldups histignorespace
+_kl_profile=$(readlink /nix/profile/current 2>/dev/null)
+_kl_rehash() { local p=$(readlink /nix/profile/current 2>/dev/null); [[ $p != $_kl_profile ]] && { _kl_profile=$p; rehash; }; }
+precmd_functions+=(_kl_rehash)
 [ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh
 ";
 

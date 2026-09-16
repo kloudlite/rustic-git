@@ -801,5 +801,10 @@ pub(crate) fn a_non_bench_pod_never_mounts_the_bench_tool_secret() {
 /// files cannot fail the seed.
 #[test]
 pub(crate) fn the_prelude_is_byte_identical_to_the_snapshot_before_shell_rc() {
+    // `PRELUDE_SNAPSHOT_REGEN=1 cargo test …` rewrites the snapshot: a deliberate act, reviewed
+    // as a diff of the .txt, never a silent pass.
+    if std::env::var_os("PRELUDE_SNAPSHOT_REGEN").is_some() {
+        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/k8s/tests/prelude-snapshot.txt"), prelude("api")).unwrap();
+    }
     assert_eq!(prelude("api"), include_str!("prelude-snapshot.txt"));
 }

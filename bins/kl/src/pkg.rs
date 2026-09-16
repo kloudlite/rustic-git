@@ -48,7 +48,7 @@ fn line(doc: &Value, entry: &str, verb: &str) {
     }
 }
 
-const REBUILD: &str = "the workspace rebuilds its profile; new binaries appear in a fresh shell";
+const REBUILD: &str = "the workspace rebuilds its profile (about 30 s); new binaries appear at your next prompt";
 
 fn ws_path(id: &str) -> String {
     format!("/v1/workspaces/{id}")
