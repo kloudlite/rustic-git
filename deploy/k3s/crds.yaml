@@ -588,6 +588,27 @@
                         "default": "",
                         "description": "The team this workspace is made in, or empty for the owner's personal namespace. A\nworkspace's Kubernetes namespace is one per (team, owner) pair — see `ws_namespace` — so\nthe same person's work in two teams never shares a namespace, a NetworkPolicy or a Secret.",
                         "type": "string"
+                      },
+                      "trees": {
+                        "description": "The subagent trees asked for on this workspace, written ONLY by `/v1` — the agent's\nadmission policy forbids it writing spec, and `status.trees` is its half of the pair.\nA tree is a writable nested btrfs subvolume at `{ws}/.agents/{name}`, so it costs no\nquota (bytes on a volume the owner already pays for) and never travels: `btrfs send`\nskips nested subvolumes, which is why a replica or a restore starts with none.",
+                        "items": {
+                          "description": "One asked-for tree. There is no `from`: a tree is cut from the workspace's own working\ndirectory and there is nothing else to cut from — a second source would be a clone, which is a\ndifferent verb with a different cost.",
+                          "properties": {
+                            "created": {
+                              "description": "RFC 3339, stamped by `/v1` at the ask. Creation order is what gives each tree its port\nblock (spec §4.6), so it is written once and never touched again.",
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "created",
+                            "name"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
                       }
                     },
                     "required": [
@@ -745,6 +766,35 @@
                         "description": "The pod's SSH public host key, reported by the node once sshd's key exists. The CLI pins\nit in `known_hosts`, so an absent one means \"no session yet\", never \"trust on first use\".",
                         "nullable": true,
                         "type": "string"
+                      },
+                      "trees": {
+                        "description": "The trees the node has actually cut, reported rather than wished for. A row with no\nmatching `spec.trees` entry is one the agent still has to delete; a spec entry with no row\nhere is one it still has to cut.",
+                        "items": {
+                          "description": "What the node has actually cut, written only by the agent through `/status`.",
+                          "properties": {
+                            "name": {
+                              "type": "string"
+                            },
+                            "path": {
+                              "type": "string"
+                            },
+                            "ready": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "description": "Why it is not ready, when it is not. A snapshot failure is retried on the next pass —\nthis is what the person reads in the meantime, never a reason to give up on the ask.",
+                              "nullable": true,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "name",
+                            "path",
+                            "ready"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
                       },
                       "volumeRef": {
                         "description": "The child `Volume`, reported rather than wished for: the reconciler creates it and then\nsays so here.",
@@ -2542,6 +2592,13 @@
                         "format": "double",
                         "nullable": true,
                         "type": "number"
+                      },
+                      "treesPerWorkspace": {
+                        "description": "How many live subagent trees one workspace may hold. 1..=32. Read by `/v1`, not the agent:\nthe agent cuts whatever spec names, and the ceiling is a refusal at the ask.",
+                        "format": "uint32",
+                        "minimum": 0.0,
+                        "nullable": true,
+                        "type": "integer"
                       }
                     },
                     "type": "object"

@@ -93,8 +93,8 @@ use me::{attach_gone, clear_my_environment, list_my_environments, set_my_environ
 use push::{push_env, push_ws};
 use volumes::{delete_snapshot, delete_volume, list_volumes, volume_history, volume_refs};
 use workspaces::{
-    clone_ws, create_ws, delete_ws, get_ws, list_ws, patch_ws_packages, restore_ws,
-    ssh_session, start_ws, stop_ws, update_ws_packages, ws_tools,
+    clone_ws, create_ws, cut_tree, delete_ws, drop_tree, get_ws, list_ws, patch_ws_packages,
+    restore_ws, ssh_session, start_ws, stop_ws, update_ws_packages, ws_tools,
 };
 
 
@@ -128,6 +128,8 @@ pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/v1/workspaces/{id}"),
     ("GET", "/v1/workspaces/{id}/tools"),
     ("POST", "/v1/workspaces/{id}/packages/update"),
+    ("POST", "/v1/workspaces/{id}/trees"),
+    ("DELETE", "/v1/workspaces/{id}/trees/{name}"),
     ("POST", "/v1/workspaces/{id}/clone"),
     ("POST", "/v1/workspaces/{id}/push"),
     ("POST", "/v1/workspaces/{id}/start"),
@@ -405,6 +407,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/workspaces/{id}", get(get_ws).delete(delete_ws).patch(patch_ws_packages))
         .route("/v1/workspaces/{id}/tools", get(ws_tools))
         .route("/v1/workspaces/{id}/packages/update", post(update_ws_packages))
+        .route("/v1/workspaces/{id}/trees", post(cut_tree))
+        .route("/v1/workspaces/{id}/trees/{name}", axum::routing::delete(drop_tree))
         .route("/v1/workspaces/{id}/clone", post(clone_ws))
         .route("/v1/workspaces/{id}/push", post(push_ws))
         .route("/v1/workspaces/{id}/start", post(start_ws))

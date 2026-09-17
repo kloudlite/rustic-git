@@ -299,6 +299,9 @@ pub(crate) async fn create_bench(
         &caller,
         &id,
         crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
             bench: Some(crd::BenchOptions {
                 model: body.model.filter(|m| !m.is_empty()).unwrap_or_else(|| crate::model::DEFAULT_BENCH_MODEL.to_string()),
                 wake_at: None,

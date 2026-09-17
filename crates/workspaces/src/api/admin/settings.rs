@@ -311,6 +311,7 @@ pub(crate) fn validate_cluster_patch(patch: &crd::ClusterSettingsSpec) -> Result
     range!(nix_timeout_secs, 60u64, 7200u64);
     range!(default_replicas, 1u32, 5u32);
     range!(quota_gb_ceiling, 10u32, 5000u32);
+    range!(trees_per_workspace, 1u32, 32u32);
     range!(trace_sample_ratio, 0.0f64, 1.0f64);
     range!(trace_probe_rate, 0.0f64, 1000.0f64);
     range!(trace_probe_burst, 1.0f64, 10000.0f64);
@@ -357,6 +358,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     over!(base_packages);
     over!(default_replicas);
     over!(quota_gb_ceiling);
+    over!(trees_per_workspace);
     over!(default_image);
     over!(intercept_proxy_image);
     over!(git_init_image);

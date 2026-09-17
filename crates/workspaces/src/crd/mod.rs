@@ -362,6 +362,7 @@ mod tests {
     #[test]
     fn workspace_spec_carries_packages_and_omits_it_when_empty() {
         let mut spec = WorkspaceSpec {
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
             owner: "o".into(),
@@ -520,6 +521,7 @@ mod tests {
     #[test]
     fn of_workspace_copies_the_spec_and_falls_back_to_the_default_quota() {
         let mut w = Workspace::new("ws-1", WorkspaceSpec {
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
             owner: "o".into(), team: String::new(), name: "n".into(), region: "r".into(),

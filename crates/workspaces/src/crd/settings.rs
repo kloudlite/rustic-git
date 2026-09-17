@@ -48,6 +48,9 @@ pub mod defaults {
     pub fn quota_gb_ceiling() -> u32 {
         500
     }
+    pub fn trees_per_workspace() -> u32 {
+        crate::crd::TREES_PER_WORKSPACE
+    }
     pub fn git_init_image() -> String {
         // Matches the agent's own pre-settings fallback (`bins/agent/src/controller/mod.rs`) —
         // this is a required init container image, not an optional one, so the built-in default
@@ -117,6 +120,10 @@ pub struct ClusterSettingsSpec {
     /// Ceiling `clamp_quota` enforces on a requested quota. 10..=5000 GiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_gb_ceiling: Option<u32>,
+    /// How many live subagent trees one workspace may hold. 1..=32. Read by `/v1`, not the agent:
+    /// the agent cuts whatever spec names, and the ceiling is a refusal at the ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trees_per_workspace: Option<u32>,
     /// Tenant workspace pod image. **Boot** — the agent reads this at pod-template render
     /// time, not per reconcile; a change rolls `kloudlite-agent` (Task 5). `None` = keep
     /// today's env value, so an admin who never opens this row cannot blank a required image.
@@ -192,6 +199,7 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("basePackages", kloudlite_core::settings::Mark::Live, &[]),
     ("defaultReplicas", kloudlite_core::settings::Mark::Live, &[]),
     ("quotaGbCeiling", kloudlite_core::settings::Mark::Live, &[]),
+    ("treesPerWorkspace", kloudlite_core::settings::Mark::Live, &[]),
     ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("interceptProxyImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),

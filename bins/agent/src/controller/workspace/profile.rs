@@ -493,6 +493,7 @@ mod inputs_tests {
         crd::Workspace::new(
             "ws-1",
             crd::WorkspaceSpec {
+                trees: Vec::new(),
                 bench: None,
                 access: Default::default(),
                 owner: "alice".into(),

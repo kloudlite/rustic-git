@@ -26,6 +26,7 @@ fn ws(uid: &str, rv: &str, phase: Phase) -> crd::Workspace {
     let mut w = crd::Workspace::new(
         "ws-abc",
         crd::WorkspaceSpec {
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
             owner: "acme".into(),

@@ -339,6 +339,7 @@ mod tests {
             let mut b = crd::Workspace::new(
                 "b",
                 crd::WorkspaceSpec {
+                    trees: Vec::new(),
                     owner: "p".into(),
                     team: "t".into(),
                     name: "bench".into(),

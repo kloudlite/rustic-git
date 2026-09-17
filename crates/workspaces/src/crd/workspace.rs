@@ -93,7 +93,68 @@ pub struct WorkspaceSpec {
     #[serde(default)]
     #[schemars(schema_with = "access_schema")]
     pub access: Access,
+    /// The subagent trees asked for on this workspace, written ONLY by `/v1` — the agent's
+    /// admission policy forbids it writing spec, and `status.trees` is its half of the pair.
+    /// A tree is a writable nested btrfs subvolume at `{ws}/.agents/{name}`, so it costs no
+    /// quota (bytes on a volume the owner already pays for) and never travels: `btrfs send`
+    /// skips nested subvolumes, which is why a replica or a restore starts with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trees: Vec<TreeSpec>,
 }
+
+
+/// One asked-for tree. There is no `from`: a tree is cut from the workspace's own working
+/// directory and there is nothing else to cut from — a second source would be a clone, which is a
+/// different verb with a different cost.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeSpec {
+    pub name: String,
+    /// RFC 3339, stamped by `/v1` at the ask. Creation order is what gives each tree its port
+    /// block (spec §4.6), so it is written once and never touched again.
+    pub created: String,
+}
+
+
+/// What the node has actually cut, written only by the agent through `/status`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeStatus {
+    pub name: String,
+    pub path: String,
+    pub ready: bool,
+    /// Why it is not ready, when it is not. A snapshot failure is retried on the next pass —
+    /// this is what the person reads in the meantime, never a reason to give up on the ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+
+/// The one charset a tree name may use: it becomes a directory under `.agents/` and a segment of a
+/// URL, so `.`, `/` and the empty string are all path traversal wearing a name.
+pub fn tree_name_ok(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+
+/// The directory nested tree subvolumes live in, relative to the workspace root. In the global
+/// gitignore, and excluded from the main tree's own confinement — the one place under its root
+/// the main session may not look.
+pub const TREES_DIR: &str = ".agents";
+
+
+/// Where a tree lives inside the pod. One function so `/v1`'s answer, the agent's snapshot
+/// destination and the tool server's root cannot drift.
+pub fn tree_path(ws: &str, name: &str) -> String {
+    format!("{}/{ws}/{TREES_DIR}/{name}", crate::k8s::WORKSPACES_DIR)
+}
+
+
+/// The compiled-in ceiling on live trees per workspace, the floor under
+/// `ClusterSettings.trees_per_workspace`. Eight: a person reviewing eight parallel agents' diffs
+/// is already past what anyone reads, and each one costs a build's worth of CPU in a pod sized
+/// for one.
+pub const TREES_PER_WORKSPACE: u32 = 8;
 
 
 /// The bench-only half of a workspace's spec.
@@ -223,6 +284,11 @@ pub struct WorkspaceStatus {
     /// Bench only: the `finishedAt` of the pod that exited idle; cleared when a pod is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_since: Option<String>,
+    /// The trees the node has actually cut, reported rather than wished for. A row with no
+    /// matching `spec.trees` entry is one the agent still has to delete; a spec entry with no row
+    /// here is one it still has to cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trees: Vec<TreeStatus>,
 }
 
 

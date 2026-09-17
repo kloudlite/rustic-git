@@ -48,6 +48,7 @@ pub(super) fn svc(folder: &str, path: &str) -> model::Service {
 
 pub(super) fn ws_spec() -> WorkspaceSpec {
     WorkspaceSpec {
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
         team: String::new(),

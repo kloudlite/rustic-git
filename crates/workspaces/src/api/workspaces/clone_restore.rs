@@ -78,6 +78,9 @@ pub(crate) async fn clone_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
             bench: copied_bench(),
             access: copied_access(Some(&src)),
             owner: owner.name.clone(),
@@ -239,6 +242,9 @@ pub(crate) async fn restore_ws(
         c,
         &new_id,
         crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
             bench: copied_bench(),
             access: copied_access(src.as_ref()),
             owner: owner.name.clone(),
@@ -279,6 +285,9 @@ mod tests {
         let mut w = crd::Workspace::new(
             "bench-1",
             crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
                 bench: bench.then(|| crd::BenchOptions { model: "m".into(), wake_at: Some("t".into()) }),
                 access,
                 owner: "alice".into(),

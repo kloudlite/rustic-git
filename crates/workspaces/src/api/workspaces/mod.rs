@@ -28,6 +28,8 @@ mod packages;
 pub(crate) use packages::*;
 mod clone_restore;
 pub(crate) use clone_restore::*;
+mod trees;
+pub(crate) use trees::*;
 
 
 /// The child `Volume`'s name, from STATUS alone: the reconciler creates the Volume and then
@@ -312,6 +314,9 @@ pub(crate) async fn create_ws(
         &owner,
         &id,
         crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
             owner: owner.name.clone(),
@@ -783,6 +788,9 @@ mod tests {
         crd::Workspace::new(
             "ws-1",
             crd::WorkspaceSpec {
+            // A clone, a restore and a bench all start with no trees: a tree is a nested subvolume
+            // that `btrfs send` never carried, so there is nothing for a new object to inherit.
+            trees: Vec::new(),
             bench: None,
             access: Default::default(),
                 owner: "karthik".into(),

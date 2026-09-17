@@ -23,6 +23,9 @@ pub struct AgentSettings {
     pub base_packages: String,
     pub default_replicas: u32,
     pub quota_gb_ceiling: u32,
+    /// Read by `/v1` alone (the agent cuts what spec names); it lives here because the api's
+    /// `LiveSettings<AgentSettings>` handle is the one place a `ClusterSettings` value resolves.
+    pub trees_per_workspace: u32,
     /// Boot-marked (`CLUSTER_SETTING_META`) — read once at `Ctx` construction, not per reconcile.
     pub default_image: String,
     /// Boot-marked too: the forwarder image an intercepted service's proxy pod runs.
@@ -65,6 +68,9 @@ impl AgentSettings {
             base_packages: std::env::var("WS_BASE_PACKAGES").unwrap_or_else(|_| crd::defaults::base_packages()),
             default_replicas: crd::DEFAULT_REPLICAS,
             quota_gb_ceiling: crd::defaults::quota_gb_ceiling(),
+            // No env: a ceiling `/v1` refuses on, not boot wiring — `ClusterSettings` is its one
+            // override, and the compiled-in number is the floor under it.
+            trees_per_workspace: crd::defaults::trees_per_workspace(),
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
             intercept_proxy_image: std::env::var("WS_INTERCEPT_PROXY_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
@@ -107,6 +113,7 @@ impl AgentSettings {
         over!(base_packages);
         over!(default_replicas);
         over!(quota_gb_ceiling);
+        over!(trees_per_workspace);
         over!(default_image);
         over!(intercept_proxy_image);
         over!(git_init_image);

@@ -167,7 +167,9 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join(".cache/x")).unwrap();
         let sh = |args: &[&str]| {
-            let o = std::process::Command::new("git").args(args).current_dir(&root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
+            // `-c commit.gpgsign=false`: a developer whose global config signs every commit would
+            // otherwise fail this fixture on gpg-agent rather than on anything it tests.
+            let o = std::process::Command::new("git").args(["-c", "commit.gpgsign=false"]).args(args).current_dir(&root).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t").env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t").output().unwrap();
             assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         };
         sh(&["init", "-q", "-b", "main"]);
