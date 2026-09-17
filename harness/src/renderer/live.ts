@@ -210,6 +210,25 @@ export function setStatusNote(text: string | undefined, ms = 6000) {
   if (text) statusTimer = setTimeout(() => setStatusNote_(undefined), ms);
 }
 
+/**
+ * How long a drop is allowed to last before the desktop calls it an outage. The `/events` socket is
+ * reconnected in under a second, and painting "bench offline" for that flicker made a healthy
+ * desktop look broken ~25 times an hour. A real outage still shows, 3 s late.
+ */
+export const OFFLINE_AFTER_MS = 3000;
+let offlineTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * `true` takes effect at once and cancels a pending "offline"; `false` waits, so a reconnect inside
+ * the window is never seen. Exported for the test: the timing is the whole behaviour.
+ */
+export function noteConnected(up: boolean, apply: (v: boolean) => void = setConnected, ms = OFFLINE_AFTER_MS): void {
+  clearTimeout(offlineTimer);
+  offlineTimer = undefined;
+  if (up) return void apply(true);
+  offlineTimer = setTimeout(() => (offlineTimer = undefined, apply(false)), ms);
+}
+
 /** Whether /events is up; false until main says otherwise. Offline, every thread reads and nothing sends. */
 const [connected, setConnected] = createSignal(false);
 const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({ ok: true });
@@ -647,7 +666,7 @@ export function thread(id: string) {
 export function onEvent(ev: Ev & { pi?: string }) {
   switch (ev.type) {
     case "bench":
-      return void setConnected(ev.connected === true);
+      return void noteConnected(ev.connected === true);
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
     case "proposal": {
@@ -738,7 +757,19 @@ export function usage(tokens: number, cost?: number, context?: number): string {
  * entry came out looking like a file (owner, 2026-09-18).
  */
 export type FsEntry = { name: string; kind?: "dir" | "file" | "symlink"; ignored?: boolean; git?: string; size?: number; target?: string };
-export type FsChanges = { changes: { path: string; status?: string; add?: number; del?: number }[]; repo: boolean };
+/**
+ * `/fs/changes`, in the tool server's own words (`crates/ide/src/fs/git.rs:12,19`): two porcelain
+ * columns per change, plus where the head is. It sends no `status`, no `add` and no `del` — reading
+ * those is why the CHANGES tab was empty for a workspace with real changes (owner, 2026-09-18).
+ */
+export type FsChanges = {
+  repo: boolean;
+  branch?: string;
+  head?: string;
+  ahead?: number;
+  behind?: number;
+  changes: { path: string; index?: string; worktree?: string; renamed_from?: string }[];
+};
 
 const fsCache = new Map<string, unknown>();
 async function fsGet<T>(scope: string, what: string, params: Record<string, string> = {}): Promise<T | undefined> {

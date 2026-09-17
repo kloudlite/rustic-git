@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isCardAnswer, isCommandLine } from "../../src/renderer/live.ts";
-import { argLine, benchSessions, cloneLabel, displayModel, exchangeText, hidden, ignoredKey, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, turnMeta } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, changeLetter, cloneLabel, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -270,18 +270,13 @@ test("a tree row is a directory when the tool server says so, and noise is tucke
   assert.equal(isDir({ kind: "symlink" }), false, "a symlink opens as a file, not as a folder");
   assert.equal(isDir({}), false, "no kind at all is not a folder");
 
-  // The server's own flag decides first.
-  assert.equal(hidden({ name: "src", ignored: true }), true);
-  assert.equal(hidden({ name: "src" }), false);
-  // And with no flag, the names a workspace's global gitignore covers.
+  // An ignored entry is DIMMED where it sits, never grouped away ("why showing ignored separately").
+  assert.equal(dimmed({ name: "src", ignored: true }), true);
+  assert.equal(dimmed({ name: "src" }), false);
   for (const noisy of [".git", ".cache", "graft", ".direnv", "node_modules", ".pnpm-store", "dist", "target"])
-    assert.equal(hidden({ name: noisy }), true, noisy);
-  for (const real of ["src", "Cargo.toml", "README.md", ".github"]) assert.equal(hidden({ name: real }), false, real);
-
-  // The "N ignored" fold has its own key, and it can never collide with a path.
-  assert.equal(ignoredKey(undefined), "/ignored/");
-  assert.equal(ignoredKey("src"), "src/ignored/");
-  assert.notEqual(ignoredKey("src"), "src");
+    assert.equal(dimmed({ name: noisy }), true, noisy);
+  for (const real of ["src", "Cargo.toml", "README.md", ".github"]) assert.equal(dimmed({ name: real }), false, real);
+  assert.equal(rowTone(undefined, true), "text-subtle", "ignored is dim whatever else it is");
 });
 
 /**
@@ -313,4 +308,43 @@ test("the open set is the panel's, and survives a refetch of the rows", () => {
   // Toggling closes exactly one path and leaves its children's keys alone.
   toggle("src");
   assert.deepEqual([...open].sort(), ["src/renderer"]);
+});
+
+/**
+ * "why status like added, modified, deleted etc are not shown?" — the tool server sends two
+ * porcelain columns per change (`crates/ide/src/fs/git.rs:12`) and no `status` field at all, so the
+ * CHANGES tab read `undefined` and showed nothing (owner, 2026-09-18).
+ */
+test("a change's letter is the worktree column, else the index's", () => {
+  assert.equal(changeLetter({ path: "a", worktree: "M", index: "." }), "M");
+  assert.equal(changeLetter({ path: "a", worktree: ".", index: "A" }), "A", "staged and unchanged since: the index says it");
+  assert.equal(changeLetter({ path: "a", worktree: "?", index: "?" }), "?", "untracked");
+  assert.equal(changeLetter({ path: "a", worktree: "D", index: "." }), "D");
+  assert.equal(changeLetter({ path: "a" }), "M", "a change with neither column is still a change");
+  // What a row shows at its end: `?` reads as U, as source control writes it.
+  assert.equal(statusBadge("?"), "U");
+  assert.equal(statusBadge("M"), "M");
+  assert.equal(statusBadge(undefined), undefined);
+  // And the tints are the CHANGES list's own tokens.
+  assert.equal(rowTone("A"), "text-created");
+  assert.equal(rowTone("M"), "text-modified");
+  assert.match(rowTone("D"), /text-deleted line-through/);
+});
+
+/**
+ * A deleted file is not on disk, so no listing can show it: the changes say where it was, and the
+ * row is drawn there, struck through.
+ */
+test("deleted files are put back into the listing they belong to", () => {
+  const changes = [
+    { path: "src/gone.ts", worktree: "D", index: "." },
+    { path: "src/deep/also-gone.ts", worktree: "D", index: "." },
+    { path: "README.md", worktree: "D", index: "." },
+    { path: "src/kept.ts", worktree: "M", index: "." },
+  ];
+  assert.deepEqual(deletedIn(changes, "src").map((d) => d.name), ["gone.ts"], "only this directory's own");
+  assert.deepEqual(deletedIn(changes, "src/deep").map((d) => d.name), ["also-gone.ts"]);
+  assert.deepEqual(deletedIn(changes, undefined).map((d) => d.name), ["README.md"], "the root's own");
+  assert.deepEqual(deletedIn(changes, "src")[0].letter, "D");
+  assert.deepEqual(deletedIn([], "src"), []);
 });

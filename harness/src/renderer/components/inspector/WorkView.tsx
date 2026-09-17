@@ -5,6 +5,7 @@ import { Icon } from "../../ui/Icon";
 import { Empty } from "../../ui/parts";
 import { FileTree } from "./FileTree";
 import { FsTree } from "./FsTree";
+import { changeLetter } from "../../rows";
 import { ChangeList } from "./ChangeList";
 import { PackageList } from "./PackageList";
 import type { Package, Change, FileNode } from "../../model";
@@ -50,9 +51,13 @@ export function WorkView(props: {
       if (!next.delete(path)) next.add(path);
       return next;
     });
+  /**
+   * The tool server's two porcelain columns become the one letter this app draws. It sends no
+   * counts, so the +/− beside a row is only what a view with its own data (the fixtures) carries.
+   */
   const changes = (): Change[] =>
     diff()?.changes?.length
-      ? diff()!.changes.map((c) => ({ path: c.path, status: (c.status ?? "M") as Change["status"], add: c.add ?? 0, del: c.del ?? 0 }))
+      ? diff()!.changes.map((c) => ({ path: c.path, status: changeLetter(c) as Change["status"], add: 0, del: 0 }))
       : props.changes;
   const sum = () => totals(changes());
 
@@ -80,7 +85,15 @@ export function WorkView(props: {
           <Show when={changes().length === 0} fallback={<ChangeList changes={changes()} onOpen={props.onOpenFile} />}>
             {/* A workspace that is not a git repository has nothing to differ FROM: saying
                 "nothing differs from ." was the tool server's `repo: false` read as a branch. */}
-            <Empty>{diff() && diff()!.repo === false ? "Not a git repository." : `Nothing differs from ${props.against}.`}</Empty>
+            {/* A clean tree is not an empty answer: say where it stands, so a person who has just
+                committed sees that the commit is why there is nothing here (owner, 2026-09-18). */}
+            <Empty>
+              {diff() && diff()!.repo === false
+                ? "Not a git repository."
+                : diff()?.head
+                  ? `No uncommitted changes · ${diff()!.branch ?? props.against} at ${diff()!.head!.slice(0, 7)}`
+                  : `Nothing differs from ${props.against}.`}
+            </Empty>
           </Show>
         </Fold>
         <Fold title="Files" meta={<span class="text-subtle">{props.against}</span>}>
@@ -88,7 +101,7 @@ export function WorkView(props: {
             {/* A workspace reads its own tree from its tool server; a view with none (the fixtures,
                 an ephemeral's source) keeps the static one. */}
             <Show when={props.scope} fallback={<Show when={props.files.length} fallback={<Empty>No files.</Empty>}><FileTree nodes={props.files} onOpen={props.onOpenFile} /></Show>}>
-              {(scope) => <FsTree scope={scope()} open={open()} onToggle={toggle} onOpen={props.onOpenFile} />}
+              {(scope) => <FsTree scope={scope()} open={open()} changes={diff()?.changes} onToggle={toggle} onOpen={props.onOpenFile} />}
             </Show>
           </div>
         </Fold>

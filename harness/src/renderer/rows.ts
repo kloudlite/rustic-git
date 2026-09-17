@@ -347,14 +347,54 @@ export function procName(row: { name?: string; command?: string }): string {
  */
 export const isDir = (e: { kind?: string }): boolean => e.kind === "dir";
 
-/** What a workspace's own ignore rules cover, for a tool server that did not say so itself. */
+/**
+ * What a workspace's own ignore rules cover, for a tool server that did not say so itself. An
+ * ignored entry is DIMMED where it sits; it is never grouped or hidden ("why showing ignored
+ * separately" — owner, 2026-09-18).
+ */
 const NOISE = new Set([".git", ".cache", "graft", ".direnv", "node_modules", ".pnpm-store", "dist", "target", ".venv"]);
-
-/** Tucked under the "N ignored" line rather than listed: the server's own flag first, names after. */
-export const hidden = (e: { name: string; ignored?: boolean }): boolean => e.ignored === true || NOISE.has(e.name);
+export const dimmed = (e: { name: string; ignored?: boolean }): boolean => e.ignored === true || NOISE.has(e.name);
 
 /**
- * The open-set key for a directory's "N ignored" fold. It cannot collide with a path: a path never
- * ends in a slash, and this always does.
+ * A change, as the tool server writes it (`crates/ide/src/fs/git.rs:12`): two columns, the index
+ * and the worktree, each a git porcelain letter, plus `renamed_from`. It does NOT send a `status`
+ * field — reading one is why the CHANGES tab was empty for a workspace with real changes
+ * (owner, 2026-09-18).
  */
-export const ignoredKey = (path?: string): string => `${path ?? ""}/ignored/`;
+export type FsChange = { path: string; index?: string; worktree?: string; renamed_from?: string };
+
+/** One letter for a row: the worktree column when it says something, else the index's. */
+export function changeLetter(c: FsChange): string {
+  const worktree = (c.worktree ?? ".").trim();
+  const index = (c.index ?? ".").trim();
+  const said = worktree && worktree !== "." ? worktree : index;
+  return said && said !== "." ? said.toUpperCase() : "M";
+}
+
+/** What each letter means for colour, in the tokens the CHANGES list already uses. */
+export const STATUS_TONE: Record<string, string> = {
+  M: "text-modified",
+  A: "text-created",
+  D: "text-deleted line-through",
+  R: "text-accent",
+  "?": "text-created/70",
+  U: "text-warning",
+};
+
+/** The tone for one row: ignored is dim whatever else it is, then the git letter's own. */
+export const rowTone = (letter: string | undefined, ignored?: boolean): string =>
+  ignored ? "text-subtle" : letter ? (STATUS_TONE[letter] ?? "") : "";
+
+/** The badge a row shows at its end: `?` reads as `U` for untracked, as source control does. */
+export const statusBadge = (letter: string | undefined): string | undefined => (letter === "?" ? "U" : letter || undefined);
+
+/**
+ * Paths a listing must show that the tree cannot: a DELETED file is not on disk, so it is
+ * synthesised into its own directory's listing from what `/fs/changes` says (owner, 2026-09-18).
+ */
+export function deletedIn(changes: readonly FsChange[], dir?: string): { name: string; letter: string }[] {
+  const prefix = dir ? `${dir}/` : "";
+  return changes
+    .filter((c) => changeLetter(c) === "D" && c.path.startsWith(prefix) && !c.path.slice(prefix.length).includes("/"))
+    .map((c) => ({ name: c.path.slice(prefix.length), letter: "D" }));
+}

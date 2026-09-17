@@ -257,15 +257,22 @@ test("a live question replaces the input, and the transcript keeps only the reco
 test("the files tree draws folders as folders, and keeps its open state outside the rows", () => {
   const src = fs.readFileSync(path.resolve("src/renderer/components/inspector/FsTree.tsx"), "utf8");
   // A directory row: chevron in the gutter, folder icon beside it — the PLAN tree's grammar.
-  assert.match(src, /<Show when=\{dir\(\)\}>\s*<Icon name=\{open\(\) \? "chevronDown" : "chevronRight"\}/);
-  assert.match(src, /<Icon name=\{dir\(\) \? "folder" : "file"\}/);
-  assert.match(src, /class=\{`h-5\.5/, "the same row height as every other tree");
+  assert.match(src, /<Show when=\{p\.dir\}>\s*<Icon name=\{open\(\) \? "chevronDown" : "chevronRight"\}/);
+  assert.match(src, /<Icon name=\{p\.dir \? "folder" : "file"\}/);
+  assert.match(src, /class="h-5\.5"/, "the same row height as every other tree");
   // Open state is the panel's, keyed by path: no row object carries it.
   assert.match(src, /open: Set<string>/);
   assert.match(src, /props\.open\.has\(here\(\)\)/);
+  assert.match(src, /isDir\(e\)/, "a row is a directory because the tool server said `kind: dir`");
   assert.ok(!/createSignal\(!!\w+\.open\)/.test(src), "a row must not hold its own open flag");
+  // Every entry stays in its place, directories first, ignored merely dimmed — nothing grouped.
+  assert.ok(!/ignored<\/span>|N ignored/.test(src), "no ignored fold");
+  assert.match(src, /isDir\(a\) === isDir\(b\) \? a\.name\.localeCompare\(b\.name\) : isDir\(a\) \? -1 : 1/);
+  assert.match(src, /rowTone\(p\.letter, p\.ignored\)/, "the name is tinted by its git state");
+  assert.match(src, /statusBadge\(p\.letter\)/, "and carries the one-letter badge");
+  assert.match(src, /deletedIn\(props\.changes \?\? \[\], props\.path\)/, "a deleted file is drawn where it was");
   // And the panel owns the set, so a refetch cannot shut a fold.
   const view = fs.readFileSync(path.resolve("src/renderer/components/inspector/WorkView.tsx"), "utf8");
   assert.match(view, /const \[open, setOpen\] = createSignal\(new Set<string>\(\)\)/);
-  assert.match(view, /<FsTree scope=\{scope\(\)\} open=\{open\(\)\} onToggle=\{toggle\}/);
+  assert.match(view, /<FsTree scope=\{scope\(\)\} open=\{open\(\)\} changes=\{diff\(\)\?\.changes\} onToggle=\{toggle\}/);
 });
