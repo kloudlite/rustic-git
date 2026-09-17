@@ -414,3 +414,18 @@ running", the `☐ header` question card with "Type something" and "Chat about t
 sends the question back to the model as a normal prompt), and `shift+tab` cycling the mode
 (build → plan → accept-edits). Keep opencode's rails, header and palette (§16b) where the two
 differ in chrome; take Claude Code's row grammar and status behaviour.
+
+## 22. Agents are subagents with their own workspace (owner, 2026-09-17 16:35 IST)
+
+- **Default = own workspace.** An agent runs in its own ephemeral clone of the caller's workspace
+  (complete code, same packages) — `isolated` is the default, `shared: true` is the opt-in for a
+  read-only or tiny task in the caller's own workspace.
+- **Finish, push, discard.** The agent's identity: "You have your own copy of the workspace. Do
+  the task there. When done, commit on a branch named after you and push it (or open a pull
+  request through the tools), then report with the branch or pull. Your copy is deleted after
+  your report." The bench deletes the clone when the agent reports `DONE`/`DONE_WITH_CONCERNS`
+  (after the report is delivered); `BLOCKED`/`NEEDS_CONTEXT` keep the clone until the caller
+  answers or closes it; `ask_close` deletes it any time.
+- **Direct line, no queue.** Caller ↔ agent messages are immediate (steer when mid-turn, prompt
+  otherwise); no FIFO, no fork triage; exchanges are recorded only for the panel.
+- The caller's report row shows the branch/pull the agent left behind so the person can take it.
