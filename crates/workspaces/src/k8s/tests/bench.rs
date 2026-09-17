@@ -109,6 +109,13 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     assert_eq!(get("KL_WORKSPACE").as_deref(), Some(workspace_dir("bench").as_str()));
     assert_eq!(get("KL_MODEL").as_deref(), Some("sonnet"));
     assert_eq!(get("KL_BENCH_IDLE_SECS").as_deref(), Some("420"));
+    // pi's state directory, inside the bench's own volume: its default is `$HOME/.pi/agent` and
+    // this container has no home, so without this every provider key on the fleet disappears with
+    // the mount (2026-09-18). Under `.bench/`, so the keys travel with the bench.
+    assert_eq!(
+        get("PI_CODING_AGENT_DIR").as_deref(),
+        Some(format!("{}/.bench/pi", workspace_dir("bench")).as_str())
+    );
     // The pod's own address, from the downward API: the bench dials the shell sidecar beside it at
     // `{KL_POD_IP}:7790`, and without it the splice would look for a terminal on loopback and find
     // none (harness 067661a8).

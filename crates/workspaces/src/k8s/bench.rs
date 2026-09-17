@@ -57,6 +57,15 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         var("KL_MODEL", model),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
         var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
+        // Where pi keeps `auth.json` (the person's provider keys), its settings and everything
+        // else it writes. Its default is `$HOME/.pi/agent`, and the sessions container HAS NO HOME
+        // MOUNT since 2026-09-17 (spec §2.2) — so every bench on the fleet lost its keys at once
+        // and every session answered "No API key found for deepseek" (hourly 00:25, 2026-09-18).
+        //
+        // `.bench/` is exactly where bench state belongs (spec §3.2 item 5): the harness's own
+        // store, inside the bench's volume, so the keys are snapshotted, replicated and moved with
+        // the bench like its transcripts — and read by the harness, never by a tool.
+        var("PI_CODING_AGENT_DIR", format!("{dir}/{}/pi", crate::k8s::BENCH_SUBDIR)),
         // The PATH to the tool token, never the token: env shows up in `ps e`, crash dumps and
         // child processes, and a file the api refreshes in place stays current without a restart.
         var("KL_TOOL_TOKEN_FILE", format!("{BENCH_TOOL_PATH}/token")),
