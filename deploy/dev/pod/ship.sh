@@ -110,7 +110,7 @@ mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
 ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/release/kl"
 # Same CTX: the bench image needs the harness sources CI's context carries, none of which
 # .dockerignore admits from anywhere but these exact paths (deploy/bench/, harness/{package*,bench,pi}).
-cp -r deploy/bench "$CTX/deploy/"
+cp -r deploy/bench deploy/shell-image "$CTX/deploy/"
 mkdir -p "$CTX/harness"
 cp harness/package.json harness/package-lock.json "$CTX/harness/"
 cp -r harness/bench harness/pi harness/skills "$CTX/harness/"
@@ -126,6 +126,11 @@ done
 echo "==> kloudlite-bench:$SHA"
 buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX/deploy/bench" \
   --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-bench:$SHA,ghcr.io/kloudlite/kloudlite-bench:latest\",push=true" \
+  --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
+echo "==> kloudlite-shell:$SHA"
+# The shell sidecar: kl (the musl artifact already linked above), the shared rc files, ttyd from the profile.
+buildctl build --frontend dockerfile.v0 --local context="$CTX" --local dockerfile="$CTX/deploy/shell-image" \
+  --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-shell:$SHA,ghcr.io/kloudlite/kloudlite-shell:latest\",push=true" \
   --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
 # The web image too, from `web/` as its own context (its Dockerfile runs bun install + next build
 # inside the build, so nothing from the pod's node_modules leaks in). CI's web.yml still builds it
