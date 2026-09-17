@@ -160,6 +160,11 @@ export class Bench {
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
 
+  /**
+   * The bench goes; what it started stays. A background process runs on the WORKSPACE's tool
+   * server, and it belongs to the workspace — an idle exit, a pod recreate or a restart says
+   * nothing about it. The revive sweep re-adopts them on the next start.
+   */
   async stop(): Promise<void> {
     clearInterval(this.procPoll);
     this.procPoll = undefined;
@@ -1009,11 +1014,13 @@ export class Bench {
     if (items.length && !stop) throw new Error(`in flight: ${items.join(", ")}`);
     const c = this.children.get(id);
     if (c?.running()) {
-      // Commands and processes run in their own process groups: stop them
-      // through pi before pi goes, or they outlive the session.
+      // The session's own turn stops. Its PROCESSES do not: a process belongs to the WORKSPACE, not
+      // to whichever session started it, and killing them here is what stopped the owner's dev
+      // server between turns with exit 143 (2026-09-17). Only `stop: true` — a person asking for it
+      // in as many words — reaches them.
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background")))
         await c.send({ type: "prompt", message: t.state === "background" && t.n !== undefined ? `/cancel #${t.n}` : `/cancel ${t.id}` }).catch(() => undefined);
-      for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await this.killProc(id, p.id).catch(() => undefined);
+      if (stop) for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await this.killProc(id, p.id).catch(() => undefined);
       await c.send({ type: "abort" }).catch(() => undefined);
       c.stop();
     }

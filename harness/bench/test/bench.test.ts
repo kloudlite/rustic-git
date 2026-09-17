@@ -257,3 +257,46 @@ test("a new session tells every window to forget what it cached about the old on
     await b.stop();
   }
 });
+
+/**
+ * A background process belongs to the WORKSPACE, not to the bench session that started it. The
+ * bench stopping — an idle exit, a pod recreate, a restart — killed the owner's dev server with
+ * exit 143 "between turns" (2026-09-17): `remove()` and shutdown both reached for the process
+ * group. Only a person saying "stop its processes" may.
+ */
+test("processes outlive the bench; only an explicit stop kills them", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-procs-live-"));
+  const killed: string[] = [];
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    // Every kill goes through the tool server; recording the calls is recording the kills.
+    resolveTools: async () => "127.0.0.1:1",
+  });
+  const original = bench.killProc.bind(bench);
+  bench.killProc = async (session: string, id: string) => void killed.push(`${session}:${id}`);
+  try {
+    await bench.start();
+    const session = bench.sessions.all().find((s) => !s.archived)!.id;
+    bench.procs.snapshot(session, [{ id: "p1", cmd: "npm run dev", title: "dev server", started: Date.now() }]);
+
+    // The bench going down says nothing about it.
+    await bench.stop();
+    assert.deepEqual(killed, [], "a restart, an idle exit or a pod recreate kills nothing");
+
+    await bench.start();
+    // Deleting the session without asking to stop its work is refused, as it always was.
+    await assert.rejects(() => bench.remove(session, false), /in flight/);
+    assert.deepEqual(killed, [], "a refused delete kills nothing either");
+
+    // Only this: a person deleting a session AND saying stop its processes.
+    await bench.remove(session, true);
+    assert.deepEqual(killed, [`${session}:p1`]);
+  } finally {
+    bench.killProc = original;
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
