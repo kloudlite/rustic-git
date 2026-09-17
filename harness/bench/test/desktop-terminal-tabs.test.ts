@@ -8,7 +8,7 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
-import { checkPty, readTtydFrame } from "../../src/pty-ipc.ts";
+import { checkPty, checkWatch, readTtydFrame } from "../../src/pty-ipc.ts";
 import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
@@ -79,6 +79,17 @@ test("pty ipc: only a tab id and a real scope are accepted", () => {
   for (const bad of [["x1", "bench"], ["t1", "machine"], ["t1", "ws-51480ba5"], ["t1", "../events"], [1, "bench"], ["t1", 2]] as [unknown, unknown][]) {
     assert.throws(() => checkPty(bad[0], bad[1]), /not a (terminal id|shell scope)/);
   }
+});
+
+/**
+ * The file-system watch is named by the WORKSPACE it follows — one per workspace, no tab and no id.
+ * It was opened through the shell's own check, which wants a `t3`-shaped id, so every open threw
+ * "not a terminal id" on the owner's desktop and the Files tab heard nothing (2026-09-18).
+ */
+test("watch ipc: a workspace scope opens one; a terminal id is not a scope", () => {
+  assert.equal(checkWatch("ws-0123456789abcdef"), "ws-0123456789abcdef");
+  assert.equal(checkWatch("bench"), "bench");
+  for (const bad of ["t3", "machine", "ws-51480ba5", "../events", 1, undefined]) assert.throws(() => checkWatch(bad), /not a shell scope/, String(bad));
 });
 
 test("BenchClient.pty: refused while offline, a shell from the pod's shell sidecar once connected", async (t) => {

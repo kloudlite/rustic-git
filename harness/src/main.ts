@@ -11,7 +11,7 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listRepos, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
-import { checkPty, readTtydFrame } from "./pty-ipc";
+import { checkPty, checkWatch, readTtydFrame } from "./pty-ipc";
 import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
@@ -458,7 +458,7 @@ function stopWatch(scope: string) {
 }
 
 ipcMain.handle("watch:open", (e, rawScope: unknown) => {
-  const { scope } = checkPty("w", rawScope);
+  const scope = checkWatch(rawScope);
   if (watches.has(scope)) return;
   const held: { w?: WebSocket; timer?: NodeJS.Timeout; backoff: number; closed?: boolean } = { backoff: 1_000 };
   watches.set(scope, held);
@@ -609,10 +609,13 @@ function authDeps(): Deps {
           await ensureBench(c.api, c.token, team, step);
           // Not fatal: without a tool token the bench still works and its tools say to sign in.
           await mintToolToken(c.api, c.token, team).catch((e) => (e.name === "Expired" ? Promise.reject(e) : console.error(`bench tool token: ${e.message}`)));
-          stopToolToken = keepToolToken(c.api, c.token, team, () => auth.expired());
+          // A 401 on a BENCH route says nothing about the login: the tunnel token is single-use,
+          // the bench token changes with the pod, and a recreated bench may not know a route yet.
+          // These re-mint on their own beat; the login only ends if the identity endpoint agrees.
+          stopToolToken = keepToolToken(c.api, c.token, team, () => void benchRefused(c, "tool token"));
           const t = await openTunnel(
             () => mintSession(c.api, c.token, team),
-            (e) => (e.name === "Expired" ? auth.expired() : console.error(`bench tunnel: ${e.message}`)),
+            (e) => (e.name === "Expired" ? void benchRefused(c, (e as { route?: string }).route || "tunnel") : console.error(`bench tunnel: ${e.message}`)),
           );
           closeTunnel = t.close;
           // The nonce stays in this process: handed to the client, never to IPC, disk or a log.
@@ -692,8 +695,40 @@ ipcMain.handle("auth:chooseTeam", (_e, slug: unknown) => {
 });
 // Slug, name and region only: the list the controller last read, never a fresh fetch per call.
 ipcMain.handle("auth:teams", () => auth.teams());
+/**
+ * A 401 is not proof the login is over. The api rolls, and a request in flight across a roll is
+ * answered 401 by a pod that has not loaded its keys yet; `/v1/bench/*` answers 401 for a bench
+ * being recreated. Signing out on the first one is what signed the owner out every time (four api
+ * rolls and five bench recreates in one night).
+ *
+ * So a 401 asks the identity endpoint ONCE — the same `validate()` the focus re-check uses — and
+ * only a 401 THERE ends the login. Anything else is transient: the caller sees the error, the beat
+ * carries on, and the credential stays.
+ */
+/**
+ * A bench route refused us. It is re-minted by the caller's own beat, so this only says so in the
+ * footer — and checks the login once, quietly, in case the refusal really was a revoked token.
+ */
+async function benchRefused(c: Credential, route: string) {
+  console.error(`auth: 401 from bench ${route}`);
+  toRenderer({ type: "status", text: "bench refused the connection; retrying" });
+  if (!(await stillValid(c))) auth.expired();
+}
+
+let checking: Promise<"ok" | "expired"> | undefined;
+async function stillValid(c: Credential): Promise<boolean> {
+  // One check at a time: a burst of 401s from one roll must not become a burst of identity calls.
+  checking ??= validate(c).finally(() => (checking = undefined));
+  try {
+    return (await checking) === "ok";
+  } catch {
+    // Unreachable is not revoked — the same rule the focus re-check follows.
+    return true;
+  }
+}
+
 // The /v1 reads, one fixed route each, scoped to the connected team; ids are validated and encoded
-// in connect/platform. A 401 ends the login exactly as the re-check does.
+// in connect/platform.
 async function platform<T>(read: (api: string, token: string, team: string) => Promise<T>): Promise<T> {
   const s = auth.state();
   const c = s.phase === "ready" ? store.load() : undefined;
@@ -701,7 +736,7 @@ async function platform<T>(read: (api: string, token: string, team: string) => P
   try {
     return await read(c.api, c.token, s.team);
   } catch (e) {
-    if (e instanceof Error && e.name === "Expired") auth.expired();
+    if (e instanceof Error && e.name === "Expired" && !(await stillValid(c))) auth.expired();
     throw e;
   }
 }

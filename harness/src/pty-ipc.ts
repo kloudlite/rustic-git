@@ -14,6 +14,15 @@ export function checkScope(scope: unknown): string {
   return scope;
 }
 
+/**
+ * What the file-system watch will accept. A watch is named by the WORKSPACE it follows and nothing
+ * else — there is one per workspace, no tab and no id — so reusing the shell's check refused every
+ * open with "not a terminal id" and the Files tab never heard a thing (owner, 2026-09-18).
+ */
+export function checkWatch(scope: unknown): string {
+  return checkScope(scope);
+}
+
 /** Throws with the reason; returns the pair when both are a shell's. */
 export function checkPty(id: unknown, scope: unknown): { id: string; scope: string } {
   if (typeof id !== "string" || !ID.test(id)) throw new Error("not a terminal id");
