@@ -147,3 +147,30 @@ progress via `process logs`), `kl_container_push {from, to}` → `kl container p
 {owner?}` → new `kl container images` (registry `/v2/_catalog` + tags with the registry token)
 wrapped as a tool. Every write here is a proposal per §9 except the local git operations and the
 build itself (it writes only to the registry under the person's own name).
+
+## 11. Behave like a user (owner, 2026-09-17 15:05 IST: "the tools are exposing lot of internal
+functionality … it checked the quota before creating … it should behave like user. keep the
+skills simple.")
+
+- **Tool surface = what a person does.** Keep: workspaces (list, create, start, stop, snapshot,
+  snapshots, restore, clone, delete, ask, progress), own packages (list, add, rm), environment
+  (current, switch, clear, list, get, create, delete, service add/rm, intercept, snapshot,
+  snapshots, restore), repos (list, create, branches, pulls, pull, pull create/merge/close,
+  clone), containers (build, push, images), capabilities, own hands. **Remove** from the model:
+  `kl_quota`, `kl_regions`, `kl_volumes`, `kl_volume_history`, `kl_volume_delete`, `kl_builder`,
+  `kl_whoami`, `kl_requests`, `kl_request_create`, `kl_workspace_packages_update`,
+  `kl_pkg_update`, `kl_compare`, `kl_commit`, `kl_environment_restore_in_place` (folded:
+  `kl_environment_restore {id, snapshot}` restores in place; a new env from a snapshot is
+  `kl_environment_create {from_snapshot}`), `kl_workspace_restore` likewise folded into
+  `kl_workspace_create {from_snapshot}`. Snapshots are named "snapshot", never volume/history.
+- **No parameters a person would not type.** `region` and `owner` disappear from create tools:
+  the extension fills region from its own workspace doc and owner from the space (`KL_TEAM`).
+  Ids stay accepted, names are accepted too and resolved by list.
+- **No pre-checks.** Identity: "Do what was asked, directly. Do not check quota, regions,
+  or current state first. If a call fails, say the error in one line and stop." Errors from the
+  platform are surfaced verbatim (the 409 sentence is already written for people).
+- **The prompt says only what the model must know.** Identity is cut to: who it is; its own
+  machine is the default; other workspaces are asked; new component = new workspace; never
+  behind the tools; never an unasked write; no pre-checks; brevity + caveman. Everything
+  operational (proposals, rendering, tags) is mechanism, not prompt text, except the one line
+  about `[ask]` tags a workspace session needs.
