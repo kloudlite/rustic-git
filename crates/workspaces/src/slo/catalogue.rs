@@ -162,12 +162,13 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 13] = [
+const BENCH_IDS: [&str; 14] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
     "bench.idle.wake",
     "bench.session.roundtrip",
+    "bench.tools.no_fs",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.tool.token",
@@ -552,6 +553,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "env.clone", feature: "Environments", sli: "A stopped environment clones with all services ready", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "env.restore.inplace", feature: "Environments", sli: "Restore in place brings a service's data back", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "env.stop.start", feature: "Environments", sli: "Stop then start round trip", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "env.services.patched", feature: "Environments", sli: "A service added with `PATCH /v1/environments/{id}` comes up, and one removed has its StatefulSet deleted", target: p95(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "vol.history", feature: "Workspace lifecycle", sli: "History lists pushes newest first with their messages; refs answer", target: bound(1_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "quota.view", feature: "Admin", sli: "`GET /v1/quota` reflects the objects the run holds", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "request.approve", feature: "Admin", sli: "An approved quota request raises the quota and unblocks the refused create", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -610,6 +612,7 @@ pub const CATALOGUE: &[Slo] = &[
     // reads; a region that raises the knob raises the probe's ceiling with it.
     Slo { id: "bench.idle.wake", feature: "Benches", sli: "With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged", target: bound(480_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.session.roundtrip", feature: "Benches", sli: "A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages`", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.tools.no_fs", feature: "Benches", sli: "A bench session's tool list has no `bash`/`read`/`write` and has `kl_workspace_ask`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.exchange.both_views", feature: "Benches", sli: "An exchange reads back by `?session=` and by `?workspace=`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.two_clients", feature: "Benches", sli: "Two WebSockets on one session see the same events in the same order", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.token", feature: "Benches", sli: "The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },

@@ -71,8 +71,9 @@ pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
 /// but they need the same bench, so they skip with the same reasons.
-const SESSION_IDS: [&str; 6] = [
+const SESSION_IDS: [&str; 7] = [
     "bench.session.roundtrip",
+    "bench.tools.no_fs",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.shell.roundtrip",
@@ -392,6 +393,9 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.shell.roundtrip") {
         shell_roundtrip(c).await;
     }
+    if c.walks("bench.tools.no_fs") {
+        no_fs(c).await;
+    }
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
@@ -463,6 +467,52 @@ async fn sessions(c: &mut Ctx) {
         }
     };
     drop_sessions(c, sid.into_iter().chain(thread)).await;
+}
+
+/// `bench.tools.no_fs`: a bench session has no hands in the bench pod.
+///
+/// Its own session rather than the round trip's, because this needs no model: the tenant holding no
+/// provider key skips every prompted id, and "the model ran with a shell" is exactly the regression
+/// that must still be caught on that run. Read from the bench itself — pi's RPC has no tool listing,
+/// so `GET /sessions/{id}/tools` answers from the argv its child is spawned with.
+async fn no_fs(c: &mut Ctx) {
+    c.step("bench.tools.no_fs", Duration::from_secs(30), move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            let (status, body) = through(port, &format!("/sessions/{sid}/tools")).await?;
+            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
+            if status != 200 {
+                bail!("GET /sessions/{sid}/tools answered {status}: {}", super::clip(&body));
+            }
+            judge_tools(&body)
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// No hands in the pod, and the one tool that gets work done in a workspace.
+fn judge_tools(body: &str) -> Result<()> {
+    let tools: Vec<String> = serde_json::from_str::<Value>(body)?["tools"]
+        .as_array()
+        .context("no `tools` array")?
+        .iter()
+        .map(|t| t.as_str().unwrap_or_default().to_string())
+        .collect();
+    for gone in ["bash", "read", "write"] {
+        if tools.iter().any(|t| t == gone) {
+            bail!("a bench session still has `{gone}`: {}", tools.join(", "));
+        }
+    }
+    if !tools.iter().any(|t| t == "kl_workspace_ask") {
+        bail!("a bench session has no `kl_workspace_ask`: {}", tools.join(", "));
+    }
+    Ok(())
 }
 
 /// Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
@@ -1324,8 +1374,9 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        // Nine now: `ws.terminal.persists` files its own skip when there is no bench to read.
-        assert_eq!(c.steps.len(), 9);
+        // Ten now: `ws.terminal.persists` files its own skip when there is no bench to read, and
+        // `bench.tools.no_fs` is one of `SESSION_IDS`.
+        assert_eq!(c.steps.len(), 10);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
         assert_eq!(run_state(true, false, &c.steps), RunState::Skipped);

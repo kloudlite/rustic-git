@@ -86,7 +86,7 @@ pub use workspaces::keys_changed;
 use environments::{
     get_builder, get_my_builder, list_builders, start_builder, stop_builder,
     clear_intercept, clone_env, create_env, delete_env, get_env, list_env, restore_env,
-    restore_env_in_place, set_intercept, start_env, stop_env,
+    patch_env_services, restore_env_in_place, set_intercept, start_env, stop_env,
 };
 use bench::{bench_session, bench_teams, create_bench, get_bench, mint_tool_token, revoke_tool_token, start_bench, stop_bench};
 use me::{attach_gone, clear_my_environment, list_my_environments, set_my_environment};
@@ -141,6 +141,7 @@ pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
     ("POST", "/v1/environments"),
     ("POST", "/v1/environments/restore"),
     ("GET", "/v1/environments/{id}"),
+    ("PATCH", "/v1/environments/{id}"),
     ("DELETE", "/v1/environments/{id}"),
     ("POST", "/v1/environments/{id}/start"),
     ("POST", "/v1/environments/{id}/stop"),
@@ -416,7 +417,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/v1/environments", post(create_env).get(list_env))
         // Before `/{id}`: `restore` is a verb, not an environment id.
         .route("/v1/environments/restore", post(restore_env))
-        .route("/v1/environments/{id}", get(get_env).delete(delete_env))
+        .route("/v1/environments/{id}", get(get_env).delete(delete_env).patch(patch_env_services))
         .route("/v1/environments/{id}/start", post(start_env))
         .route("/v1/environments/{id}/stop", post(stop_env))
         .route("/v1/environments/{id}/clone", post(clone_env))

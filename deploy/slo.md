@@ -196,6 +196,7 @@ first destructive stage.
 | `env.clone` | Environments | A stopped environment clones with all services ready | 95 % ≤ 180000 ms | hourly | 14 · Experience |
 | `env.restore.inplace` | Environments | Restore in place brings a service's data back | 99.9 % | hourly | 14 · Experience |
 | `env.stop.start` | Environments | Stop then start round trip | 95 % ≤ 120000 ms | hourly | 14 · Experience |
+| `env.services.patched` | Environments | A service added with `PATCH /v1/environments/{id}` comes up, and one removed has its StatefulSet deleted | 95 % ≤ 180000 ms | hourly | 14 · Experience |
 | `vol.history` | Workspace lifecycle | History lists pushes newest first with their messages; refs answer | 99.9 % ≤ 1000 ms | hourly | 14 · Experience |
 | `quota.view` | Admin | `GET /v1/quota` reflects the objects the run holds | 99.9 % | hourly | 14 · Experience |
 | `request.approve` | Admin | An approved quota request raises the quota and unblocks the refused create | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
@@ -233,6 +234,7 @@ first destructive stage.
 | `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
 | `bench.session.roundtrip` | Benches | A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages` | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
+| `bench.tools.no_fs` | Benches | A bench session's tool list has no `bash`/`read`/`write` and has `kl_workspace_ask` | 99.9 % | hourly | 14 · Experience |
 | `bench.exchange.both_views` | Benches | An exchange reads back by `?session=` and by `?workspace=` | 99.9 % | hourly | 14 · Experience |
 | `bench.two_clients` | Benches | Two WebSockets on one session see the same events in the same order | 99.9 % | hourly | 14 · Experience |
 | `bench.tool.token` | Benches | The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |

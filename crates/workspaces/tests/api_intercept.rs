@@ -337,3 +337,70 @@ async fn a_stale_write_is_refused_rather_than_winning() {
     assert!(body.contains("changed while this was being written"), "{body}");
     assert_eq!(patched(&s).len(), 3, "it re-read and re-decided, then gave up");
 }
+
+// ── `PATCH /v1/environments/{id}` `{services}` ────────────────────────────
+
+/// The intercept routes plus the reads `guard_alloc` makes — usage is computed from the CRDs on
+/// every request, so a route that allocates lists them where an intercept never does.
+fn patch_routes(intercepts: Value) -> Vec<Route> {
+    let mut r = routes(intercepts, attached_running());
+    r.extend([
+        empty("Workspace", "workspaces"),
+        empty("Environment", "environments"),
+        empty("Volume", "volumes"),
+        kloudlite_workspaces::kube_test::not_found(format!("{API}/quotas/karthik")),
+        kloudlite_workspaces::kube_test::not_found(format!("{API}/quotas/default-user")),
+    ]);
+    r
+}
+
+async fn patch_services(s: &Server, services: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .patch(format!("{}/v1/environments/env-1", s.base))
+        .bearer_auth(token(&s.jwt))
+        .json(&json!({ "services": services }))
+        .send()
+        .await
+        .unwrap()
+}
+
+fn svc(name: &str) -> Value {
+    json!({"name": name, "image": "nginx", "command": [], "env": {}, "mounts": [], "ports": [8080]})
+}
+
+/// The merge patch carries the WHOLE list, added and removed both — the array is replaced, which is
+/// what makes one call both verbs.
+#[tokio::test]
+async fn the_services_patch_writes_the_whole_list() {
+    let s = server(patch_routes(json!([]))).await;
+    assert_eq!(patch_services(&s, json!([svc("api"), svc("cache")])).await.status(), 200);
+    let sent = patched(&s);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let names: Vec<&str> = sent[0]["spec"]["services"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["api", "cache"]);
+    assert!(sent[0]["spec"].get("intercepts").is_none(), "one field only: {}", sent[0]);
+}
+
+/// A mount that could walk out of the environment's subvolume is refused here exactly as it is at
+/// create: this route is the third caller-authored services list, so it is a trust boundary too.
+#[tokio::test]
+async fn a_traversing_mount_is_refused_and_nothing_is_written() {
+    let s = server(patch_routes(json!([]))).await;
+    let mut bad = svc("api");
+    bad["mounts"] = json!([{"folder": "../etc", "path": "/data"}]);
+    assert_eq!(patch_services(&s, json!([bad])).await.status(), 400);
+    assert!(patched(&s).is_empty(), "nothing written");
+}
+
+/// Removing a service an intercept names would leave a wish pointing at nothing and a workspace
+/// serving traffic for a service that no longer exists. The person releases it first.
+#[tokio::test]
+async fn removing_an_intercepted_service_is_409_naming_the_holder() {
+    let held = json!([{"service": "api", "workspace": "ws-1", "ports": []}]);
+    let s = server(patch_routes(held)).await;
+    let r = patch_services(&s, json!([svc("cache")])).await;
+    assert_eq!(r.status(), 409);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("ws-1") && body.contains("api"), "{body}");
+    assert!(patched(&s).is_empty(), "nothing written");
+}

@@ -52,7 +52,12 @@ pub(crate) async fn run_environment(
     // three states below, and the rendering is a straight read of that decision.
     let (wishes, plan) = intercept_plan(e, &prev, ctx).await;
     let rendered = apply_services(e, ns, &id, &pod_ctx, deployments, &prev, &wishes, &plan, owner_ref, ctx).await?;
-    let service_status = read_services_back(e, deployments, &prev, &plan, &rendered).await?;
+    // ONE list of this namespace's StatefulSets for the whole pass: what phase 4b prunes, and what
+    // phase 5a reads each service's readiness back from.
+    let sets: std::collections::HashMap<String, StatefulSet> =
+        deployments.list(&kube::api::ListParams::default()).await?.items.into_iter().map(|d| (d.name_any(), d)).collect();
+    prune_services(e, ns, &sets, deployments, ctx).await?;
+    let service_status = read_services_back(e, &sets, &prev, &plan, &rendered).await?;
     let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
@@ -417,11 +422,44 @@ async fn apply_services(
     Ok(rendered)
 }
 
+/// Phase 4b: a service that left `spec.services` leaves the cluster with it.
+///
+/// `PATCH /v1/environments/{id}` can shorten the list and nothing else removes what an earlier spec
+/// rendered — the ownerReference collects these only when the whole Environment goes. The mount
+/// FOLDER under the environment's subvolume is deliberately never touched: bytes stay until the
+/// volume does, so re-adding a service finds its data where it left it.
+///
+/// The ClusterIP goes before the StatefulSet: a failure between them leaves the StatefulSet listed,
+/// so the next pass prunes the pair again rather than leaving a Service nothing lists any more.
+async fn prune_services(
+    e: &crd::Environment,
+    ns: &str,
+    sets: &std::collections::HashMap<String, StatefulSet>,
+    deployments: &Api<StatefulSet>,
+    ctx: &Arc<Ctx>,
+) -> Result<(), ReconcileErr> {
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    for (name, set) in sets {
+        // Only what this controller renders for a service: `kind: intercept` is the proxy's, swept
+        // by `converge_intercepts` on its own terms, and anything unlabelled is not ours to delete.
+        if set.labels().get(k8s::KIND_LABEL).map(String::as_str) != Some("environment")
+            || e.spec.services.iter().any(|svc| svc.name == *name)
+        {
+            continue;
+        }
+        delete_ignoring_404(&services, name).await?;
+        forget_applied(ctx, "Service", ns, name);
+        delete_ignoring_404(deployments, name).await?;
+        forget_applied(ctx, "StatefulSet", ns, name);
+    }
+    Ok(())
+}
+
 /// Phase 5a: what the StatefulSets actually say, per service, with the intercept that is in
 /// force and the outage clock carried as the plan decided.
 async fn read_services_back(
     e: &crd::Environment,
-    deployments: &Api<StatefulSet>,
+    sets: &std::collections::HashMap<String, StatefulSet>,
     prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
     // What phase 4 settled for each service — absent for one it decided nothing about (a `Keep`,
@@ -433,9 +471,6 @@ async fn read_services_back(
     // ready the instant its object existed — so `kubectl wait --for=condition=Ready
     // environment` returned before anything was listening, and the only thing that noticed was a
     // connectivity check failing two steps later.
-    // ONE list of this namespace's StatefulSets for the whole pass, in place of a GET per service.
-    let sets: std::collections::HashMap<String, StatefulSet> =
-        deployments.list(&kube::api::ListParams::default()).await?.items.into_iter().map(|d| (d.name_any(), d)).collect();
     let mut service_status = Vec::with_capacity(e.spec.services.len());
     for svc in &e.spec.services {
         // What is actually IN FORCE, never the wish: a stopped workspace leaves its intercept in

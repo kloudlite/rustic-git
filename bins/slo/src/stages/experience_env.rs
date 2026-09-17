@@ -28,6 +28,7 @@ const MULTI_CEILING: Duration = Duration::from_secs(180);
 const CLONE_CEILING: Duration = Duration::from_secs(180);
 const RESTORE_CEILING: Duration = Duration::from_secs(180);
 const STOP_START_CEILING: Duration = Duration::from_secs(150);
+const PATCH_CEILING: Duration = Duration::from_secs(180);
 /// The catalogue asks for 1 s. The ceiling is five, so a slow read is a breach with a duration
 /// rather than a timeout with none.
 const HISTORY_CEILING: Duration = Duration::from_secs(5);
@@ -49,9 +50,12 @@ const QUOTA_GB: u64 = 1;
 const REDIS: &str = "redis";
 const WEB: &str = "web";
 const SERVICES: [&str; 2] = [REDIS, WEB];
+/// The third service `env.services.patched` adds and takes away again. Never in `SERVICES`: every
+/// other step here waits on that pair, and this one puts the environment back as it found it.
+const EXTRA: &str = "cache";
 
 /// Every environment id after the create, in journey order.
-const AFTER_MULTI: [&str; 3] = ["env.clone", "env.restore.inplace", "env.stop.start"];
+const AFTER_MULTI: [&str; 4] = ["env.clone", "env.restore.inplace", "env.stop.start", "env.services.patched"];
 
 /// The four environment ids, walked as one journey on one environment.
 pub async fn environments(c: &mut Ctx) {
@@ -75,27 +79,29 @@ pub async fn environments(c: &mut Ctx) {
     // first act is to start it again, so a clone that failed leaves a state the restore would
     // measure instead of the restore.
     if !clone(c, &env).await {
-        c.skip("env.restore.inplace", "the clone left the environment mid-flight");
-        c.skip("env.stop.start", "the clone left the environment mid-flight");
+        for id in ["env.restore.inplace", "env.stop.start", "env.services.patched"] {
+            c.skip(id, "the clone left the environment mid-flight");
+        }
         return;
     }
     // A restore that failed leaves the environment mid-flight — services scaled down, a wish
     // written — and stopping THAT measures the restore, not the stop.
     if restore_in_place(c, &env).await {
         stop_start(c, &env).await;
+        // Last, and on the same environment: it ends with the service list it started with, so
+        // nothing downstream sees the extra one — there is nothing downstream, which is the point.
+        patched(c, &env).await;
     } else {
         c.skip("env.stop.start", "the environment was left mid-restore");
+        c.skip("env.services.patched", "the environment was left mid-restore");
     }
 }
 
-/// `env.services.multi`: two services, both ready, and one resolving the other by bare name.
-async fn multi(c: &mut Ctx) -> Option<String> {
-    let name = format!("{}-e2", c.prefix());
-    let body = serde_json::json!({
-        "name": name,
-        "region": c.cfg.region,
-        "quota_gb": QUOTA_GB,
-        "services": [{
+/// The environment's two services, as `create` sends them and as `patched` re-sends them: the PATCH
+/// carries the WHOLE list, so the list has to live in one place or a patch silently drops a service.
+fn base_services() -> Vec<Value> {
+    vec![
+        serde_json::json!({
             "name": REDIS,
             "image": "redis:7-alpine",
             "command": [],
@@ -105,7 +111,8 @@ async fn multi(c: &mut Ctx) -> Option<String> {
             // coming back.
             "mounts": [{ "folder": "redis", "path": "/data" }],
             "ports": [6379],
-        }, {
+        }),
+        serde_json::json!({
             "name": WEB,
             "image": "alpine:3.20",
             // BusyBox `sleep` takes a number, not `infinity` — a container that exits immediately
@@ -117,7 +124,85 @@ async fn multi(c: &mut Ctx) -> Option<String> {
             // (`k8s::service_clusterip`), so the port is what makes `web` resolvable. Nothing
             // listens on it; the record is the point.
             "ports": [8080],
-        }],
+        }),
+    ]
+}
+
+/// `env.services.patched`: a service added to a live environment through `PATCH
+/// /v1/environments/{id}` comes up, and one removed the same way has its StatefulSet deleted.
+///
+/// The removal half is the one nothing else covers: an ownerReference only collects a service's
+/// objects when the whole Environment goes, so a spec that shortened and a cluster that did not is
+/// an environment paying for a service nobody asked for, indefinitely.
+async fn patched(c: &mut Ctx, env: &str) {
+    let env = env.to_string();
+    c.step("env.services.patched", PATCH_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let url = api(c, &format!("/v1/environments/{env}"));
+        async move {
+            let mut services = base_services();
+            services.push(serde_json::json!({
+                "name": EXTRA, "image": "redis:7-alpine", "command": [], "env": {}, "mounts": [], "ports": [6379],
+            }));
+            patch_services(c, &url, &jwt, services.clone()).await.context("could not add the service")?;
+            sts_ready(c, &env, EXTRA, PATCH_CEILING).await?;
+            // Exactly the list it started with: the removal is the same call, one service shorter.
+            services.pop();
+            patch_services(c, &url, &jwt, services).await.context("could not remove the service")?;
+            sts_gone(c, &env, EXTRA, PATCH_CEILING).await
+        }
+        .boxed()
+    })
+    .await;
+}
+
+async fn patch_services(c: &Ctx, url: &str, jwt: &str, services: Vec<Value>) -> Result<()> {
+    super::call(c, reqwest::Method::PATCH, url, jwt, Some(serde_json::json!({ "services": services }))).await.map(|_| ())
+}
+
+/// One named StatefulSet with a ready replica, within `cap`.
+async fn sts_ready(c: &Ctx, env: &str, name: &str, cap: Duration) -> Result<()> {
+    let sts = env_sets(c, env)?;
+    let start = std::time::Instant::now();
+    loop {
+        if sts.get(name).await.ok().and_then(|s| s.status).and_then(|st| st.ready_replicas).unwrap_or(0) >= 1 {
+            return Ok(());
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("`{name}` had no ready replica after {} ms", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The other half: the object is gone, not merely scaled to zero.
+async fn sts_gone(c: &Ctx, env: &str, name: &str, cap: Duration) -> Result<()> {
+    let sts = env_sets(c, env)?;
+    let start = std::time::Instant::now();
+    loop {
+        if matches!(sts.get_opt(name).await, Ok(None)) {
+            return Ok(());
+        }
+        if start.elapsed() >= cap {
+            return Err(anyhow!("`{name}`'s StatefulSet was still there {} ms after it left the spec", cap.as_millis()));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+fn env_sets(c: &Ctx, env: &str) -> Result<kube::Api<StatefulSet>> {
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    Ok(kube::Api::namespaced(k.clone(), &kloudlite_workspaces::crd::env_namespace(env)))
+}
+
+/// `env.services.multi`: two services, both ready, and one resolving the other by bare name.
+async fn multi(c: &mut Ctx) -> Option<String> {
+    let name = format!("{}-e2", c.prefix());
+    let body = serde_json::json!({
+        "name": name,
+        "region": c.cfg.region,
+        "quota_gb": QUOTA_GB,
+        "services": base_services(),
     });
     let ok = c
         .step("env.services.multi", MULTI_CEILING, move |c| {

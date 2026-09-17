@@ -69,6 +69,7 @@ pub const IDS: &[&str] = &[
     "env.clone",
     "env.restore.inplace",
     "env.stop.start",
+    "env.services.patched",
     "env.space.cleared",
     "vol.history",
     "vol.list",
@@ -94,6 +95,7 @@ pub const IDS: &[&str] = &[
     "admin.reads",
     "bench.idle.wake",
     "bench.session.roundtrip",
+    "bench.tools.no_fs",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.shell.roundtrip",
@@ -151,7 +153,7 @@ pub async fn run(c: &mut Ctx) {
             // chain (a clone of an environment that never came up is not a measurement) stays in
             // one place; they report in this same order.
             "env.services.multi" => experience_env::environments(c).await,
-            "env.clone" | "env.restore.inplace" | "env.stop.start" => {}
+            "env.clone" | "env.restore.inplace" | "env.stop.start" | "env.services.patched" => {}
             "vol.history" => experience_env::history(c).await,
             "quota.view" => experience_env::quota_view(c).await,
             "request.approve" => super::experience_admin::request_approve(c).await,
@@ -211,7 +213,7 @@ pub async fn run(c: &mut Ctx) {
             }
             // Both shells are filed by the calls above: the bench shell with the session journey,
             // the workspace shell beside the tool round trip, in the group that owns the workspace.
-            "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
+            "bench.session.roundtrip" | "bench.tools.no_fs" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             "bench.shell.roundtrip" | "bench.shell.workspace" => {}
             _ => c.skip(id, "not implemented yet"),
         }

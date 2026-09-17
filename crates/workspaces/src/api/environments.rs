@@ -83,12 +83,66 @@ fn default_env_quota() -> u64 {
     crd::DEFAULT_ENV_QUOTA_GB
 }
 
-/// The trust boundary for services: create and restore are the only routes that accept
-/// caller-authored ones (`clone_env` copies an already-validated doc, and nothing updates services
-/// in place), so a mount that gets past here is treated as trusted by a root agent from then on —
-/// and a name that gets past here is what the controller applies, every requeue, forever.
+/// The trust boundary for services: create, restore and `patch_env_services` are the routes that
+/// accept caller-authored ones (`clone_env` copies an already-validated doc), so a mount that gets
+/// past here is treated as trusted by a root agent from then on — and a name that gets past here
+/// is what the controller applies, every requeue, forever.
 fn check_services(services: &[Service]) -> Result<(), Response> {
     crate::model::validate_services(services).map_err(|e| (StatusCode::BAD_REQUEST, e).into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ServicesBody {
+    services: Vec<Service>,
+}
+
+/// Change an environment's service list in place. A merge patch on `spec.services` alone, for the
+/// same reason `patch_ws_packages` is one: this handler was sent one field and must not claim
+/// ownership of a spec the caller never wrote. A merge patch REPLACES the array, which is the
+/// intent — the body is the whole list the caller wants, added and removed both.
+///
+/// The controller prunes what left the list (`run.rs`'s `prune_services`); the mount folders on the
+/// volume are never touched, so re-adding a service finds its data where it left it.
+pub(crate) async fn patch_env_services(
+    State(s): State<Arc<ApiState>>,
+    headers: axum::http::HeaderMap,
+    method: axum::http::Method,
+    uri: axum::extract::OriginalUri,
+    Path(id): Path<String>,
+    Json(body): Json<ServicesBody>,
+) -> Result<Response, Response> {
+    let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
+    let e = find_env(&s, &caller_id, &id).await?;
+    check_services(&body.services)?;
+    let names: HashSet<&str> = body.services.iter().map(|svc| svc.name.as_str()).collect();
+    // An intercept names a service by name; removing the service under one would leave a wish
+    // pointing at nothing and a workspace serving traffic for a service that no longer exists.
+    // The person releases it first, deliberately — this route never discards what they asked for.
+    if let Some(i) = e.spec.intercepts.iter().find(|i| !names.contains(i.service.as_str())) {
+        let msg = format!(
+            "{} is intercepted by {}; release the intercept before removing the service",
+            i.service, i.workspace
+        );
+        return Err((StatusCode::CONFLICT, msg).into_response());
+    }
+    // Only what is ADDED is new allocation; removals free. And only the cpu/memory of those
+    // services: the environment slot is already spent and its subvolume already allocated, so
+    // charging `environment_cost`'s `Environments`/`DiskGb` would refuse a service to an owner
+    // who is merely at their environment limit — which every owner of their last environment is.
+    let added = body.services.len().saturating_sub(e.spec.services.len());
+    if added > 0 {
+        use crate::quota::Dim;
+        let want: Vec<_> = environment_cost(added)
+            .into_iter()
+            .filter(|(d, _)| matches!(d, Dim::Cpu | Dim::MemoryGb))
+            .collect();
+        guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id.name, &want).await?;
+    }
+    let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
+    let patch = serde_json::json!({"spec": {"services": body.services}});
+    let e = api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
+    let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
+    Ok(Json(env_doc(&e, &pushed)).into_response())
 }
 
 /// The one place an `Environment` is written; `create_workspace`'s twin.

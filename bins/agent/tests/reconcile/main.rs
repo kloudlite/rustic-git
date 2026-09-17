@@ -30,6 +30,7 @@ mod snapshot_model_clone_restore_task_6b;
 mod starts_spread_the_owner_gives_a_movable;
 mod filter_foreign_snapshots_against_the_nod;
 mod intercept_proxy;
+mod services_pruned;
 mod the_agent_decides_from_stores;
 mod bench;
 mod agent_writes_no_space_policies;
