@@ -494,10 +494,10 @@ export function App() {
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
     // Suggested: what a person does next. Session: what they do to this conversation.
-    { id: "mode", group: "Suggested", label: `Switch to ${live.mode() === "build" ? "Plan" : "Build"} mode`, keys: KEYS.mode.keys, run: () => {
-      const next = live.mode() === "build" ? "plan" : "build";
+    { id: "mode", group: "Suggested", label: `Mode: ${live.mode()} (cycle)`, keys: KEYS.mode.keys, run: () => {
+      const next = live.MODES[(live.MODES.indexOf(live.mode()) + 1) % live.MODES.length];
       live.setMode(next);
-      void pi({ type: "prompt", message: `/mode ${next}` })?.catch(() => undefined);
+      void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
     } },
     { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: KEYS.level.keys, run: () => {
       const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
@@ -560,10 +560,12 @@ export function App() {
     // pi itself, so a plan cannot quietly become a change (§16b's `tab`).
     if (hit(KEYS.mode)) {
       stop();
-      const next = live.mode() === "build" ? "plan" : "build";
+      // build → plan → accept-edits → build, as Claude Code's shift+tab cycles.
+      const next = live.MODES[(live.MODES.indexOf(live.mode()) + 1) % live.MODES.length];
       live.setMode(next);
-      // The extension owns which tools are live; the desktop asks for the mode by name.
-      void pi({ type: "prompt", message: `/mode ${next}` })?.catch(() => undefined);
+      // The extension owns which tools are live; accept-edits is the desktop's own answer policy,
+      // so pi is told plan or build and nothing else.
+      void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
       return;
     }
     // How hard the model thinks, cycled: pi's own `set_thinking_level`.

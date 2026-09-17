@@ -119,7 +119,7 @@ export function Chat(props: {
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
   const elapsed = () => Math.max(0, Math.round((now() - (L().turn()?.since ?? now())) / 1000));
-  const mode = () => (live.mode() === "plan" ? "Plan" : "Build");
+  const mode = () => (live.mode() === "plan" ? "Plan" : live.mode() === "accept-edits" ? "Accept edits" : "Build");
   // The model's name: pi's status line while it is up, otherwise the session's own row — a window
   // opened after the child started saw no `started` event and read "not started" as the model.
   const modelName = () => displayModel(L().status().split(" · ")[0] || thread()?.model || props.machine.model);
@@ -389,7 +389,10 @@ export function Chat(props: {
               {(seg) => (
                 <Show when={seg.kind === "one"} fallback={<ToolGroup rows={(seg as { rows: Action[] }).rows} />}>
                 {(() => { const b = (seg as { row: Message }).row; return (
-                <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} />}>
+                <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} onChat={(t) => {
+                  const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+                  if (c) (c.value = t, fit(c), c.focus());
+                }} />}>
                 <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
                       answer is plain text beside it; the two turns are told apart by shape. */}
@@ -615,7 +618,9 @@ export function Chat(props: {
             </Show>
             {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
             <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono">
-              <span class="text-accent">{mode()}</span>
+              {/* Claude Code puts the mode where the eye already is, with the way to change it. */}
+              <span class="text-accent">{live.mode() === "accept-edits" ? "⏵⏵ accept edits on" : mode()}</span>
+              <span class="shrink-0 text-subtle">(⇧tab to cycle)</span>
               <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()}<Show when={live.levelKnown()}> · {live.level()}</Show></span>
             </div>
           </div>
@@ -780,27 +785,43 @@ function Time(props: { at: string }) {
  * as a dialog over the thread: the person says yes or no in the transcript, and the answer stays
  * there as the record of what was agreed to. Nothing changes on the platform until they do.
  */
-function Question(props: { q: QuestionRow; session: string }) {
+function Question(props: { q: QuestionRow; session: string; onChat?: (text: string) => void }) {
   const answered = () => props.q.answer;
-  // Numbered options, arrows to move, enter to take one — opencode's shape, and the shape a person
-  // already knows from every terminal prompt. Nothing changes until one is chosen.
-  // A proposal has two answers; a `question` tool brings its own, which are the person's words.
+  // Claude Code's shape (§21): a `☐ header` card, numbered options with descriptions, then two
+  // ways out of the choices — say something of your own, or talk about the question itself.
   const OPTIONS = () =>
     props.q.ask?.options?.length
       ? props.q.ask.options.map((o) => ({ key: o.label, label: o.label, hint: o.description }))
       : [{ key: "yes", label: "Yes", hint: "do it now" }, { key: "no", label: "No", hint: "leave it alone" }];
   const [pick, setPick] = createSignal(0);
+  const [typing, setTyping] = createSignal(false);
+  const [own, setOwn] = createSignal("");
   const answer = (a: string) => live.answerProposal(props.session, props.q.id, a);
+  const rows = () => OPTIONS().length + 2;
+  const take = (i: number) => {
+    if (i < OPTIONS().length) return answer(OPTIONS()[i].key);
+    if (i === OPTIONS().length) return setTyping(true);
+    // "Chat about this": the question goes back as an ordinary prompt, and the card is done with.
+    answer("no");
+    props.onChat?.(props.q.summary);
+  };
   return (
-    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono">
+    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono"
+      tabindex={0}
+      onKeyDown={(e) => {
+        if (answered()) return;
+        if (e.key === "ArrowDown") return (e.preventDefault(), setPick((p) => (p + 1) % rows()));
+        if (e.key === "ArrowUp") return (e.preventDefault(), setPick((p) => (p - 1 + rows()) % rows()));
+        if (e.key === "Enter" && !typing()) return (e.preventDefault(), take(pick()));
+        if (e.key === "Escape") return (e.preventDefault(), answer("no"));
+      }}
+    >
       <div class="flex items-baseline gap-2">
-        <span class="shrink-0 text-accent">?</span>
-        <span class="min-w-0 flex-1 text-fg">
-          <Show when={props.q.ask?.header}>{(h) => <span class="text-subtle">{h()} · </span>}</Show>
-          {props.q.summary}
-        </span>
+        <span class="shrink-0 text-accent">☐</span>
+        <span class="min-w-0 flex-1 text-fg-strong">{props.q.ask?.header ?? "Confirm"}</span>
         <Time at={props.q.at} />
       </div>
+      <div class="pl-5 text-fg">{props.q.summary}</div>
       <Show when={props.q.args && Object.keys(props.q.args).length}>
         <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5">
           <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
@@ -817,23 +838,42 @@ function Question(props: { q: QuestionRow; session: string }) {
         <div class="flex flex-col pl-5">
           <For each={OPTIONS()}>
             {(o, i) => (
-              <button
-                class="flex items-baseline gap-2 text-left"
-                classList={{ "text-fg": pick() === i(), "text-muted": pick() !== i() }}
-                onMouseEnter={() => setPick(i())}
-                onClick={() => answer(o.key)}
-              >
+              <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === i(), "text-muted": pick() !== i() }} onMouseEnter={() => setPick(i())} onClick={() => take(i())}>
                 <span class="shrink-0 text-subtle">{i() + 1}.</span>
                 <span class="shrink-0">{o.label}</span>
                 <span class="min-w-0 truncate text-subtle">{o.hint}</span>
               </button>
             )}
           </For>
-          <div class="flex items-baseline gap-2 text-subtle">
-            <span class="shrink-0">{OPTIONS().length + 1}.</span>
-            <span>Type your own answer</span>
-          </div>
-          <div class="pt-1 text-subtle">↑↓ select&nbsp; enter submit&nbsp; esc dismiss</div>
+          <Show
+            when={typing()}
+            fallback={
+              <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === OPTIONS().length, "text-muted": pick() !== OPTIONS().length }} onMouseEnter={() => setPick(OPTIONS().length)} onClick={() => setTyping(true)}>
+                <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.</span>
+                <span>Type something.</span>
+              </button>
+            }
+          >
+            <div class="flex items-baseline gap-2">
+              <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.</span>
+              <input
+                autofocus
+                class="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-subtle"
+                placeholder="your answer"
+                value={own()}
+                onInput={(e) => setOwn(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && own().trim()) return (e.preventDefault(), e.stopPropagation(), answer(own().trim()));
+                  if (e.key === "Escape") return (e.preventDefault(), e.stopPropagation(), setTyping(false));
+                }}
+              />
+            </div>
+          </Show>
+          <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === OPTIONS().length + 1, "text-muted": pick() !== OPTIONS().length + 1 }} onMouseEnter={() => setPick(OPTIONS().length + 1)} onClick={() => take(OPTIONS().length + 1)}>
+            <span class="shrink-0 text-subtle">{OPTIONS().length + 2}.</span>
+            <span>Chat about this</span>
+          </button>
+          <div class="pt-1 text-subtle">Enter to select · ↑/↓ to navigate · Esc to cancel</div>
         </div>
       </Show>
     </div>
@@ -897,6 +937,7 @@ function ToolGroup(props: { rows: Action[] }) {
     </div>
   );
 }
+
 
 function Hint(props: { keys: string; children: string }) {
   return (

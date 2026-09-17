@@ -80,9 +80,18 @@ export const planOf = (session: string) =>
  * PLAN is read-only tools plus `plan`: a person who wants a plan before anything changes should be
  * able to have one without trusting the model not to change anything.
  */
-export type Mode = "build" | "plan";
+/**
+ * Three modes, cycled with shift+tab as Claude Code does (§21). ACCEPT-EDITS answers the
+ * proposals for this machine's own files by itself — write and edit, nothing else. A platform
+ * write is never auto-answered: somebody else's workspace, an environment, a deletion is a
+ * decision, not an edit.
+ */
+export type Mode = "build" | "plan" | "accept-edits";
+export const MODES: Mode[] = ["build", "plan", "accept-edits"];
 const [mode, setMode] = createSignal<Mode>("build");
 export { mode, setMode };
+/** What accept-edits may answer for the person. Everything else still asks. */
+export const AUTO_YES = ["write", "edit"];
 export const LEVELS = ["low", "medium", "high"] as const;
 const [level, setLevel] = createSignal<(typeof LEVELS)[number]>("low");
 export { level, setLevel };
@@ -433,7 +442,10 @@ export function onEvent(ev: Ev & { pi?: string }) {
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
     case "proposal": {
       const row = ev.row as { id: string; session: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: string; question?: unknown };
-      if (row?.session) thread(row.session).proposal(row);
+      if (!row?.session) return;
+      thread(row.session).proposal(row);
+      // In accept-edits, a change to this machine's own files is answered without asking.
+      if (!row.answer && mode() === "accept-edits" && AUTO_YES.includes(row.tool)) answerProposal(row.session, row.id, "yes");
       return;
     }
     case "queue_order":

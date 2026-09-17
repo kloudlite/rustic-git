@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
 import { displayModel, procsOf, sessionOf } from "../../src/renderer/rows.ts";
-import { onEvent, planOf } from "../../src/renderer/live.ts";
+import { AUTO_YES, MODES, onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
 import { elapsed, segments, timing, verb } from "../../src/renderer/components/results/group.ts";
@@ -211,4 +211,17 @@ test("what the harness delivers reads as a row, not as something the person type
   assert.deepEqual(notification("[harness] write the plan"), { verb: "Harness", detail: "write the plan" });
   // A person's own message is a person's own message.
   assert.equal(notification("add nats to the env"), undefined);
+});
+
+test("shift+tab cycles the three modes, and only own-file edits are answered for the person", () => {
+  assert.deepEqual(MODES, ["build", "plan", "accept-edits"]);
+  const next = (m: (typeof MODES)[number]) => MODES[(MODES.indexOf(m) + 1) % MODES.length];
+  assert.equal(next("build"), "plan");
+  assert.equal(next("plan"), "accept-edits");
+  assert.equal(next("accept-edits"), "build", "and round again");
+  // Accept-edits is about THIS machine's files. A platform write is a decision, not an edit.
+  assert.deepEqual(AUTO_YES, ["write", "edit"]);
+  for (const never of ["kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "bash", "ask"]) {
+    assert.ok(!AUTO_YES.includes(never), `${never} must still ask`);
+  }
 });
