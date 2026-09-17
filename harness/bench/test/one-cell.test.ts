@@ -37,3 +37,38 @@ test("the cell is a token, and .prose is set in it", () => {
   // A heading is bold, not bigger.
   assert.match(css, /\.prose h1, \.prose h2, \.prose h3, \.prose h4 \{ font-size: var\(--cell\)/);
 });
+
+/**
+ * opencode's One Dark, transcribed (`one-dark.json`). These are the values a diff is drawn with,
+ * so a hunk in the bench and a hunk in opencode are the same green — checked against the source
+ * rather than trusted to a hand copy.
+ */
+test("the one-dark diff palette is transcribed exactly, both themes", () => {
+  const css = fs.readFileSync(path.resolve("src/renderer/styles/app.css"), "utf8");
+  for (const [name, dark, light] of [
+    ["diff-added-bg", "#2c382b", "#eafbe9"],
+    ["diff-removed-bg", "#3a2d2f", "#fce9e8"],
+    ["diff-highlight-added", "#aad482", "#489447"],
+    ["diff-highlight-removed", "#e8828b", "#d65145"],
+    ["diff-line-number", "#9398a2", "#666666"],
+    ["diff-added-line-number-bg", "#283427", "#e1f3df"],
+    ["diff-removed-line-number-bg", "#36292b", "#f5e2e1"],
+    ["diff-hunk-header", "#56b6c2", "#0184bc"],
+  ] as const) {
+    assert.ok(css.includes(`--${name}: ${dark};`), `${name} is missing its One Dark value`);
+    assert.ok(css.includes(`--${name}: ${light};`), `${name} is missing its One Light value`);
+  }
+});
+
+test("every duration this pane animates at is a token", () => {
+  const css = fs.readFileSync(path.resolve("src/renderer/styles/app.css"), "utf8");
+  for (const [name, value] of [
+    ["--motion-body", "350ms"],
+    ["--motion-shell", "320ms"],
+    ["--motion-shimmer", "1200ms"],
+    ["--motion-progress", "1200ms"],
+    ["--motion-copied", "2000ms"],
+  ]) assert.ok(css.includes(`${name}: ${value};`), `${name} is missing`);
+  // An infinite animation must never be left to run at 1ms: that is a strobe, not less motion.
+  assert.match(css, /animation-iteration-count: 1 !important;/);
+});

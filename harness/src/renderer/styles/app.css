@@ -85,6 +85,17 @@
   --created: #a1c181;
   --deleted: #d07277;
 
+  /* opencode's One Dark (`one-dark.json:3`), transcribed: the diff colours it draws with, so a
+     hunk here and a hunk there are the same green and the same red. */
+  --diff-added-bg: #2c382b;
+  --diff-removed-bg: #3a2d2f;
+  --diff-highlight-added: #aad482;
+  --diff-highlight-removed: #e8828b;
+  --diff-line-number: #9398a2;
+  --diff-added-line-number-bg: #283427;
+  --diff-removed-line-number-bg: #36292b;
+  --diff-hunk-header: #56b6c2;
+
   --syn-keyword: #b477cf;
   --syn-string: #a1c181;
   --syn-function: #73ade9;
@@ -164,6 +175,16 @@
   --modified: #dec184;
   --created: #669f59;
   --deleted: #d36151;
+
+  /* One Light, the same table's other half (`one-dark.json:29`). */
+  --diff-added-bg: #eafbe9;
+  --diff-removed-bg: #fce9e8;
+  --diff-highlight-added: #489447;
+  --diff-highlight-removed: #d65145;
+  --diff-line-number: #666666;
+  --diff-added-line-number-bg: #e1f3df;
+  --diff-removed-line-number-bg: #f5e2e1;
+  --diff-hunk-header: #0184bc;
 
   --syn-keyword: #a449ab;
   --syn-string: #669f59;
@@ -316,6 +337,12 @@
   --color-modified: var(--modified);
   --color-created: var(--created);
   --color-deleted: var(--deleted);
+  --color-diff-added-bg: var(--diff-added-bg);
+  --color-diff-removed-bg: var(--diff-removed-bg);
+  --color-diff-added-line: var(--diff-added-line-number-bg);
+  --color-diff-removed-line: var(--diff-removed-line-number-bg);
+  --color-diff-line-number: var(--diff-line-number);
+  --color-diff-hunk: var(--diff-hunk-header);
 
   /* type: a step per role. The app is dense, so the ramp is short and tight. */
   /* VS Code's own stacks: the workbench is the system face at 13px, the
@@ -331,6 +358,14 @@
      short enough never to be waited on. Transform and opacity only — anything
      that animates a size or a position property lays the page out per frame. */
   --motion: 140ms;
+  /* Every other duration this pane animates at, from opencode's own inventory (contract §8), in
+     one place: a number that is written down twice is a number that drifts. */
+  --motion-body: 350ms;        /* a tool body opening (spring, visualDuration 0.35) */
+  --motion-shell: 320ms;       /* a shell submessage arriving */
+  --motion-shimmer: 1200ms;    /* the title that is still moving */
+  --motion-progress: 1200ms;   /* the progress indicator's own loop */
+  --motion-copied: 2000ms;     /* how long a copy button says it copied */
+  --ease-emphasis: cubic-bezier(0.16, 1, 0.3, 1);
   --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
   --font-mono: "IBM Plex Mono", Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", monospace;
   /* No 10px anywhere: VS Code's smallest UI text is 11px (badges, status bar). */
@@ -475,6 +510,9 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
    other half of that rule, for anything the classes do not reach. */
 .pane, .pane * { font-size: var(--cell); line-height: var(--cell-lh); }
 
+/* A tool's output never takes the window: 240px and then it scrolls (`message-part.css:356`). */
+.tool-output { max-height: 240px; overflow-y: auto; }
+
 /* opencode's TextShimmer (`ui/src/components/text-shimmer.css`), at its own constants: a title that
    is still moving says "not finished" where a static one says nothing. Reduced motion takes the
    colour and drops the movement. */
@@ -485,7 +523,7 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: shimmer 1200ms linear infinite;
+  animation: shimmer var(--motion-shimmer) linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   .shimmer { animation: none; background: none; color: var(--fg); }

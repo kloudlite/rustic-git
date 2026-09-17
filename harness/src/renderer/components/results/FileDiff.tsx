@@ -41,16 +41,16 @@ export function FileDiff(props: { file: DiffFile; open?: boolean }) {
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40" />
       </button>
       <Show when={open()}>
-        <div class="overflow-x-auto rounded-[2px] bg-codeblock py-1 [tab-size:4]">
+        <div class="tool-output overflow-x-auto rounded-[2px] bg-codeblock py-1 [tab-size:4]">
           <For each={props.file.lines}>
             {(l) => (
               <Show
                 when={l.kind !== "sep"}
                 /* Between hunks the line info IS the separator (`hunkSeparators: "line-info-basic"`). */
-                fallback={<div class="my-0.5 border-t border-line px-2 text-subtle">{l.text}</div>}
+                fallback={<div class="my-0.5 border-t border-line px-2 text-diff-hunk">{l.text}</div>}
               >
-                <div class="flex" classList={{ "bg-success-wash": l.kind === "add", "bg-danger-wash": l.kind === "del" }}>
-                  <span class="shrink-0 pr-2 pl-2 text-right text-line-number tabular-nums select-none" style={{ width: `${width() + 1}ch` }}>
+                <div class="flex" classList={{ "bg-diff-added-bg": l.kind === "add", "bg-diff-removed-bg": l.kind === "del" }}>
+                  <span class="shrink-0 pr-2 pl-2 text-right text-diff-line-number tabular-nums select-none" style={{ width: `${width() + 1}ch` }}>
                     {l.new ?? l.old ?? ""}
                   </span>
                   <span class="w-4 shrink-0 text-center select-none" classList={{ "text-created": l.kind === "add", "text-deleted": l.kind === "del", "text-subtle": l.kind === "context" }}>
