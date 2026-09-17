@@ -62,6 +62,25 @@ pub(crate) async fn ensure_profile(
         }
     };
     if still_running {
+        // A build that has been "Building" longer than any build can legitimately take is not
+        // building: `rust` is an attribute SET in nixpkgs, and a workspace that asked for it sat
+        // at `PackagesReady=False/Building — taking the profile through nix` indefinitely, with
+        // nothing to read and nothing to act on (fleet, 2026-09-17). `/v1` refuses that name now,
+        // but a spec can reach the agent by other paths, so the agent gives up on its own.
+        if let Some(stalled) = stalled_for(prev, crate::nix::build_timeout(&ctx.settings) * 2) {
+            let held = ctx.running.lock().unwrap_or_else(|p| p.into_inner()).remove(&key);
+            if let Some((_, h)) = held {
+                h.abort();
+            }
+            let msg = format!(
+                "the profile did not build within {}s: {}",
+                stalled.as_secs(),
+                building_names(w)
+            );
+            // `await_change`: only a spec edit can help, and retrying a name nix cannot evaluate
+            // is how this became an endless loop in the first place.
+            return profile_failed(w, id, gen, prev, ctx, ("Failed", &msg), Action::await_change()).await;
+        }
         let st = packages_status(prev, prev.packages.clone(), "Building", "taking the profile through nix", false, gen);
         write_ws_status_tracking(w, st, prev, ctx).await?;
         return Ok(Some(Action::requeue(TICK)));
@@ -161,6 +180,32 @@ pub(crate) async fn ensure_profile(
     let st = packages_status(prev, prev.packages.clone(), "Building", "taking the profile through nix", crate::nix::profile_exists(&ctx.profiles_dir, id), gen);
     write_ws_status_tracking(w, st, prev, ctx).await?;
     Ok(Some(Action::requeue(TICK)))
+}
+
+/// How long `Building` may stand before it is a stall rather than a build: twice the node's own
+/// nix timeout, so a build that is legitimately slow (a cold substituter, a big closure) always
+/// wins, and one whose child is wedged or whose expression can never evaluate is bounded.
+///
+/// `Some(bound)` = this has gone on too long. The clock is the CONDITION's own transition time,
+/// not this process's uptime: an agent restart mid-build must not reset the patience, and a
+/// replayed pass reads the same instant.
+fn stalled_for(prev: &crd::WorkspaceStatus, bound: std::time::Duration) -> Option<std::time::Duration> {
+    let c = prev.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY)?;
+    if c.reason != "Building" {
+        return None;
+    }
+    // Seconds off the object's own stamp, the same clock `backoff_for` below reads.
+    let age = k8s_openapi::jiff::Timestamp::now().as_second() - c.last_transition_time.0.as_second();
+    (age > 0 && age as u64 > bound.as_secs()).then_some(bound)
+}
+
+/// What the person asked for, for the message a stall leaves behind: the name is the only thing
+/// they can act on, so it is named rather than described.
+fn building_names(w: &crd::Workspace) -> String {
+    match w.spec.packages.is_empty() {
+        true => "the base package set".to_string(),
+        false => w.spec.packages.join(", "),
+    }
 }
 
 /// Everything a build is keyed and rendered from: the pinned nixpkgs, the bare list the
@@ -419,7 +464,7 @@ pub(crate) fn packages_status(
 mod inputs_tests {
     use super::*;
 
-    fn ws(packages: &[&str], locks: Vec<crd::Lock>) -> crd::Workspace {
+    pub(super) fn ws(packages: &[&str], locks: Vec<crd::Lock>) -> crd::Workspace {
         crd::Workspace::new(
             "ws-1",
             crd::WorkspaceSpec {
@@ -475,3 +520,42 @@ mod inputs_tests {
     }
 }
 
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    fn building(reason: &str, seconds_ago: i64) -> crd::WorkspaceStatus {
+        let at = k8s_openapi::jiff::Timestamp::now().as_second() - seconds_ago;
+        let mut c = crd::condition(crd::PACKAGES_READY, false, reason, "taking the profile through nix", 1);
+        c.last_transition_time = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            k8s_openapi::jiff::Timestamp::from_second(at).expect("a timestamp"),
+        );
+        crd::WorkspaceStatus { conditions: vec![c], ..Default::default() }
+    }
+
+    /// The 2026-09-17 workspace: `rust` is an attribute set, the build can never finish, and
+    /// `Building` stood forever. Twice the node's nix timeout is the patience; past it the pass
+    /// gives up and says what was asked for.
+    #[test]
+    fn building_past_twice_the_nix_timeout_is_a_stall() {
+        let bound = std::time::Duration::from_secs(600);
+        assert_eq!(stalled_for(&building("Building", 601), bound), Some(bound));
+        assert_eq!(stalled_for(&building("Building", 599), bound), None, "a slow build is still a build");
+        // Only a build is stalled: a failure has its own backoff, and a success is not waiting.
+        assert_eq!(stalled_for(&building("BuildFailed", 10_000), bound), None);
+        assert_eq!(stalled_for(&building("Built", 10_000), bound), None);
+        // A clock that reads backwards (a node whose time jumped) is not a verdict.
+        assert_eq!(stalled_for(&building("Building", -10_000), bound), None);
+        assert_eq!(stalled_for(&crd::WorkspaceStatus::default(), bound), None);
+    }
+
+    /// The message names what the person asked for, because the name is the only thing they can
+    /// change — a workspace with no list of its own says so rather than naming nothing.
+    #[test]
+    fn the_stall_message_names_the_packages() {
+        let w = super::inputs_tests::ws(&["rust", "jq"], vec![]);
+        assert_eq!(building_names(&w), "rust, jq");
+        assert_eq!(building_names(&super::inputs_tests::ws(&[], vec![])), "the base package set");
+    }
+}

@@ -86,6 +86,11 @@ pub enum Refusal {
     Unavailable,
     /// The version exists but nobody built a binary for it; `cached` names releases that have one.
     NotCached { entry: String, cached: Vec<String> },
+    /// The attribute is not a package at all — no index has ever published a version of it. In
+    /// nixpkgs that is usually an attribute SET (`rust`, `python3Packages`): there is nothing to
+    /// build, so the agent used to sit at `PackagesReady=False/Building` forever on a workspace
+    /// `/v1` had happily accepted (fleet, 2026-09-17). `nearest` is what to type instead.
+    NotAPackage { attr: String, nearest: Vec<String> },
 }
 
 
@@ -111,6 +116,14 @@ impl std::fmt::Display for Refusal {
                 f,
                 "{entry} has no cached build in cache.nixos.org; nearest cached: {}",
                 cached.join(", ")
+            ),
+            Refusal::NotAPackage { attr, nearest } if nearest.is_empty() => {
+                write!(f, "{attr} is not a package anyone published")
+            }
+            Refusal::NotAPackage { attr, nearest } => write!(
+                f,
+                "{attr} is not a package: no index publishes a version of it; did you mean {}?",
+                nearest.join(", ")
             ),
         }
     }
@@ -321,6 +334,43 @@ impl Resolver {
             );
         }
         Ok(out)
+    }
+
+    /// Every UNPINNED attribute in `packages` is a real package, or the first one that is not is
+    /// refused naming what to type instead.
+    ///
+    /// Pinned entries are resolved (`lock_all`) and therefore already checked; a bare attr was
+    /// never checked at all, so `rust` — an attribute SET in nixpkgs, with no derivation behind it
+    /// — was written into a spec the agent can only try to build, forever. An index that ANSWERS
+    /// and knows no version of the name is the verdict; an index that cannot answer is not, so a
+    /// whole-index outage lets the write through exactly as `lock_all` keeps working through one.
+    pub async fn check_plain(&self, packages: &[String]) -> Result<(), Refusal> {
+        for p in packages.iter().filter(|p| !p.contains('@')) {
+            let (nixhub, mirror) = (self.nixhub.versions(p).await, self.mirror.versions(p).await);
+            // Either index naming a version is proof enough; both silent while at least one could
+            // speak is the refusal.
+            if nixhub.as_deref().is_ok_and(|v| !v.is_empty()) || mirror.as_deref().is_ok_and(|v| !v.is_empty()) {
+                continue;
+            }
+            if nixhub.is_err() && mirror.is_err() {
+                tracing::warn!(attr = %p, "package existence unchecked: every index is down");
+                continue;
+            }
+            return Err(Refusal::NotAPackage {
+                attr: p.clone(),
+                nearest: self.similar(p).await,
+            });
+        }
+        Ok(())
+    }
+
+    /// Names close to `attr`, from whichever index holds an attribute list. Never fails: a
+    /// refusal with no suggestion is still the right refusal.
+    async fn similar(&self, attr: &str) -> Vec<String> {
+        match self.mirror.similar(attr).await {
+            Ok(v) if !v.is_empty() => v,
+            _ => self.nixhub.similar(attr).await.unwrap_or_default(),
+        }
     }
 
     async fn cached(&self, attr: &str, req: &VersionReq) -> Option<Lock> {

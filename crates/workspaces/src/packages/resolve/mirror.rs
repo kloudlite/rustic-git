@@ -114,4 +114,24 @@ impl Index for Mirror {
         rows.sort_by_key(|a| std::cmp::Reverse(numeric(&a.version)));
         Ok(rows.into_iter().map(|r| r.version).collect())
     }
+
+    /// The index IS the attribute list, so this is the one source that can answer "did you mean".
+    /// Names that start with what was typed first (`rust` → `rustc`, `rustup`), then names that
+    /// merely contain it, three at most — a suggestion, never a guess the write acts on.
+    async fn similar(&self, attr: &str) -> Result<Vec<String>, String> {
+        let Some(index) = self.index().await? else {
+            return Ok(Vec::new());
+        };
+        Ok(nearest_attrs(index.keys().map(String::as_str), attr))
+    }
+}
+
+
+/// Shared with the tests and with any future index that holds names: prefix matches first, then
+/// containments, each group shortest-first so the plainest name leads.
+pub(super) fn nearest_attrs<'a>(names: impl Iterator<Item = &'a str>, attr: &str) -> Vec<String> {
+    let mut hits: Vec<&str> = names.filter(|n| *n != attr && n.contains(attr)).collect();
+    hits.sort_by_key(|n| (!n.starts_with(attr), n.len(), *n));
+    hits.truncate(3);
+    hits.into_iter().map(str::to_string).collect()
 }

@@ -34,6 +34,11 @@ impl FakeIndex {
         match attr {
             "nodejs" => vec![format!("20.20.{patch}"), "20.19.0".into(), "18.4.0".into()],
             "python3" => vec!["3.11.9".into(), "3.10.1".into()],
+            // Real derivations near a name that is only an attribute SET: `rust` itself has no
+            // versions here because nobody publishes one, which is exactly the fleet's answer.
+            "rustc" => vec!["1.75.0".into()],
+            "rustup" => vec!["1.27.1".into()],
+            "jq" => vec!["1.7".into()],
             _ => vec![],
         }
     }
@@ -72,6 +77,17 @@ impl Index for FakeIndex {
             return Err("index down".into());
         }
         Ok(self.versions_of(attr))
+    }
+
+    async fn similar(&self, attr: &str) -> Result<Vec<String>, String> {
+        if self.0.lock().unwrap().down {
+            return Err("index down".into());
+        }
+        Ok(["nodejs", "python3", "rustc", "rustup", "jq"]
+            .into_iter()
+            .filter(|n| *n != attr && n.contains(attr))
+            .map(str::to_string)
+            .collect())
     }
 }
 
@@ -194,10 +210,14 @@ async fn create_locks_the_pinned_entry_and_leaves_the_bare_one_alone() {
     assert_eq!(locks[0]["version"], "20.20.0");
 }
 
+/// A bare list asks the index about EXISTENCE now (`versions`), and about nothing else: the
+/// resolve path — the one that costs a lock write — is still only for `@` entries. It used to ask
+/// nothing at all, which is how `rust` reached a spec the agent could only build forever.
 #[tokio::test]
-async fn a_list_with_no_pin_never_asks_the_index() {
+async fn a_list_with_no_pin_is_checked_but_never_resolved() {
     let s = server(base_routes()).await;
-    assert_eq!(create(&s, json!(["jq", "hello"])).await.status(), 202);
+    assert_eq!(create(&s, json!(["jq", "nodejs"])).await.status(), 202);
+    // `calls` counts `resolve` only (see `FakeIndex::resolve`), so this is "nothing was locked".
     assert_eq!(s.fake.lock().unwrap().calls, 0);
 }
 
@@ -370,4 +390,40 @@ async fn a_restore_carries_the_frozen_locks_and_resolves_only_what_the_body_adde
     assert_eq!(locks[0], held, "the frozen lock is what a restore restores");
     assert_eq!(locks[1]["entry"], "python3@3.11");
     assert_eq!(s.fake.lock().unwrap().calls, 1);
+}
+
+
+/// The 2026-09-17 workspace: `rust` is an attribute SET in nixpkgs — no derivation, nothing to
+/// build — and `/v1` wrote it happily, leaving the agent at `PackagesReady=False/Building`
+/// forever. An unpinned name is checked against the same indexes a pin is, and nothing is written.
+#[tokio::test]
+async fn a_name_that_is_not_a_package_is_refused_with_what_to_type_instead() {
+    let s = server(base_routes()).await;
+    let r = create(&s, json!(["rust"])).await;
+    assert_eq!(r.status(), 422);
+    let body: Value = r.json().await.unwrap();
+    let said = body["error"].as_str().unwrap_or_default().to_string();
+    assert!(said.contains("rust is not a package"), "{said}");
+    assert!(said.contains("rustc") && said.contains("rustup"), "the nearest real names: {said}");
+    assert!(s.rec.sent("POST", &format!("{API}/workspaces")).is_empty(), "a refusal writes nothing");
+}
+
+/// And the name that IS a package goes through, unpinned, with no lock written for it.
+#[tokio::test]
+async fn an_unpinned_name_that_is_a_package_is_written() {
+    let s = server(base_routes()).await;
+    assert_eq!(create(&s, json!(["rustc", "jq"])).await.status(), 202);
+    let sent = s.rec.sent("POST", &format!("{API}/workspaces"));
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["spec"]["packages"], json!(["rustc", "jq"]));
+    // Absent, not empty: `locks` is skipped when it has nothing in it.
+    assert!(sent[0]["spec"]["locks"].as_array().is_none_or(|l| l.is_empty()), "{}", sent[0]);
+}
+
+/// A dev deployment with no index configured still writes a bare list, exactly as it did before
+/// any of this existed — the check is the index's, and there is no index.
+#[tokio::test]
+async fn a_bare_list_still_writes_with_no_index_configured() {
+    let s = server_with(base_routes(), false).await;
+    assert_eq!(create(&s, json!(["rust"])).await.status(), 202);
 }

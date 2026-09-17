@@ -82,6 +82,10 @@ impl Index for FakeIndex {
         self.enter()?;
         Ok(self.versions.get(attr).cloned().unwrap_or_default())
     }
+    async fn similar(&self, attr: &str) -> Result<Vec<String>, String> {
+        self.enter()?;
+        Ok(super::mirror::nearest_attrs(self.versions.keys().map(String::as_str), attr))
+    }
 }
 
 fn at(s: &str) -> DateTime<Utc> {
@@ -551,4 +555,51 @@ fn a_nixhub_body_without_our_system_is_unknown_but_a_broken_one_is_an_error() {
         (l.entry.as_str(), l.rev.as_str(), l.store_path.as_str()),
         ("nodejs@20", "389ed85", "/nix/store/o")
     );
+}
+
+
+// ---------------------------------------------------------------------------- unpinned attrs
+
+/// The 2026-09-17 workspace: `rust` is an attribute SET in nixpkgs, `/v1` took it, and the agent
+/// sat at `Building` forever because there is no derivation to build. No index publishes a
+/// version of it, so it is refused — with the names that ARE packages.
+#[tokio::test]
+async fn an_attr_no_index_publishes_is_refused_with_the_nearest_names() {
+    let index = || {
+        Arc::new(
+            FakeIndex::default()
+                .knows("rustc", &["1.75.0"])
+                .knows("rustup", &["1.27.1"])
+                .knows("rust-analyzer", &["2024-01-01"]),
+        )
+    };
+    let r = resolver(index(), index());
+
+    let out = r.check_plain(&["rust".to_string()]).await.expect_err("an attribute set is not a package");
+    let Refusal::NotAPackage { attr, nearest } = out.clone() else { panic!("{out:?}") };
+    assert_eq!(attr, "rust");
+    // Prefix matches first, shortest first: what a person most likely meant.
+    assert_eq!(nearest, ["rustc", "rustup", "rust-analyzer"]);
+    let said = out.to_string();
+    assert!(said.contains("not a package") && said.contains("rustc"), "{said}");
+
+    // And the name that IS a package passes, with nothing else in the list to hide behind.
+    assert!(r.check_plain(&["rustc".to_string()]).await.is_ok());
+    // A pinned entry is `lock_all`'s to check; this one only looks at bare attrs.
+    assert!(r.check_plain(&["nodejs@20".to_string()]).await.is_ok());
+}
+
+/// Every index down is not a verdict: the write goes through, exactly as `lock_all` keeps its
+/// locks through an outage. Refusing here would make a nixhub blip stop every create on the fleet.
+#[tokio::test]
+async fn an_index_outage_never_refuses_a_name() {
+    let r = resolver(Arc::new(FakeIndex::down()), Arc::new(FakeIndex::down()));
+    assert!(r.check_plain(&["rust".to_string()]).await.is_ok());
+}
+
+/// One index answering is enough: the mirror knows it, nixhub is down, the name stands.
+#[tokio::test]
+async fn one_index_that_knows_the_name_is_enough() {
+    let r = resolver(Arc::new(FakeIndex::down()), Arc::new(FakeIndex::default().knows("rustc", &["1.75.0"])));
+    assert!(r.check_plain(&["rustc".to_string()]).await.is_ok());
 }

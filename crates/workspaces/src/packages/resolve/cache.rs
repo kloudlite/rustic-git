@@ -15,6 +15,14 @@ pub trait Index: Send + Sync {
     async fn resolve(&self, attr: &str, version: &VersionReq) -> Result<Option<Lock>, String>;
     /// Every known version string for `attr`, newest first (for the 422's "nearest").
     async fn versions(&self, attr: &str) -> Result<Vec<String>, String>;
+    /// Attribute names close to `attr`, for the refusal of a name that is not a package at all
+    /// (`rust` is an attribute SET in nixpkgs, not a derivation — there is nothing to build, and
+    /// the agent used to sit on it forever). Defaulted to "I have no names to offer": only an
+    /// index that actually holds the attribute list has any, and a suggestion is a courtesy on
+    /// top of the refusal, never the refusal itself.
+    async fn similar(&self, _attr: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// Whether the binary cache holds a store path. `has` is one HEAD of the narinfo; an answer

@@ -176,7 +176,9 @@ pub(super) fn bad_packages(e: crate::packages::PackageError) -> Response {
 pub(super) fn refuse(r: Refusal) -> Response {
     let code = match r {
         Refusal::Malformed(_) => StatusCode::BAD_REQUEST,
-        Refusal::Unknown { .. } | Refusal::NotCached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Refusal::Unknown { .. } | Refusal::NotCached { .. } | Refusal::NotAPackage { .. } => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
         Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     (code, Json(serde_json::json!({"error": r.to_string()}))).into_response()
@@ -186,20 +188,30 @@ pub(super) fn refuse(r: Refusal) -> Response {
 /// Locks for `packages`, run BEFORE the quota gate and the CR write in every handler that writes
 /// a package list — a refusal must leave nothing behind.
 ///
-/// A list with no `@` entry never touches the resolver, which is what keeps a dev deployment with
-/// no index configured working exactly as it did before pins existed.
+/// A list with no entry at all never touches the resolver, which is what keeps a dev deployment
+/// with no index configured working exactly as it did before pins existed. A list that HAS entries
+/// is checked even when none of them is pinned: `rust` is an attribute set, not a derivation, and
+/// `/v1` accepting it left a workspace at `PackagesReady=False/Building` for good.
 pub(super) async fn lock_for(
     s: &ApiState,
     packages: &[String],
     prev: &[crd::Lock],
     refresh: bool,
 ) -> Result<Vec<crd::Lock>, Response> {
-    if !packages.iter().any(|p| p.contains('@')) {
+    if packages.is_empty() {
         return Ok(Vec::new());
     }
     let Some(r) = s.resolver.as_ref() else {
-        return Err(refuse(Refusal::Unavailable));
+        // Only a PIN needs the resolver to be there at all; a bare list still writes, as it did
+        // before pins existed and as every dev deployment without an index relies on.
+        return match packages.iter().any(|p| p.contains('@')) {
+            true => Err(refuse(Refusal::Unavailable)),
+            false => Ok(Vec::new()),
+        };
     };
+    // Before the locks: an unbuildable NAME is refused whether or not anything else in the list
+    // pins a version, and a refusal must leave nothing written.
+    r.check_plain(packages).await.map_err(refuse)?;
     r.lock_all(packages, prev, refresh).await.map_err(refuse)
 }
 
