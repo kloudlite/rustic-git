@@ -372,6 +372,16 @@ Rules:
    (a workspace that goes quiet is nudged then expired) and `bench.restart.keeps_asks` (an open ask
    survives a bench restart) hold this.
 
+
+### 3.10 The person is never in the dark (owner, 05:50 IST 18 Sep)
+
+The plan and the tasks are always shown and always current: every state change — an exchange
+transition, a process or job event, a proposal opened or answered, an agent dispatched or
+reporting — updates the plan and the tasks ledger in the same write and emits the event the panels
+draw from. A session with an open handoff shows it in the footer with its age. A discarded or
+replaced plan clears completely: no stale ticks, no leftover items, no "1/1 done" with nothing
+listed. Empty states say what is happening.
+
 ## 4. Subagents work in trees, not workspaces
 
 ### 4.1 Decisions
