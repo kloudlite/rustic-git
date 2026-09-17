@@ -4,7 +4,7 @@ import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
 import { ResultCard, pickRenderer } from "./results";
 import { grepBlock, plainBlock, readBlock, type CodeBlock } from "./results/code";
-import { toolLine } from "./results/toolline";
+import { diagnostics, toolError, toolLine } from "./results/toolline";
 import { FileDiff } from "./results/FileDiff";
 import { editFile, patchFiles } from "./results/diff";
 import { defaultOpen } from "./results/opencode-map";
@@ -73,7 +73,7 @@ export function ToolCall(props: { a: Action }) {
           <span class="w-4 shrink-0 text-subtle">⎿</span>
           <div class="min-w-0 flex-1" classList={{ "border-l border-line pl-3": !railed() }}>
           <Show when={failed()} fallback={<Body a={a()} />}>
-            <Fail text={a().output ?? ""} />
+            <Fail tool={a().tool} text={a().output ?? ""} />
           </Show>
           </div>
         </div>
@@ -94,7 +94,9 @@ const short = (g: Record<string, unknown>) => {
 };
 
 /** The failure, and only the failure: the message the tool gave, in red. */
-function Fail(props: { text: string }) {
+function Fail(props: { tool?: string; text: string }) {
+  const card = () => toolError(props.tool, props.text);
+  const [copied, setCopied] = createSignal(false);
   const msg = () => {
     const t = props.text.trim();
     // A platform answer is `status: body`; the body may be JSON with a message.
@@ -113,7 +115,56 @@ function Fail(props: { text: string }) {
     }
     return t.split("\n").slice(-6).join("\n");
   };
-  return <pre class="m-0 py-1 whitespace-pre-wrap wrap-words font-[inherit] text-danger">{msg() || "failed"}</pre>;
+  return (
+    <div data-component="tool-error-card" class="my-1 flex flex-col gap-0.5 border-l-2 border-danger pl-2">
+      {/* What failed and in one word how (`tool-error-card.tsx:66`); the detail is underneath. */}
+      <div class="flex items-baseline gap-2">
+        <span class="shrink-0 text-danger">⊘ {card().title}</span>
+        <span class="min-w-0 flex-1 truncate text-muted">{card().subtitle}</span>
+        <button
+          class="shrink-0 text-subtle hover:text-fg"
+          onClick={() => { void navigator.clipboard.writeText(props.text); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
+        >
+          {copied() ? "Copied" : "Copy error"}
+        </button>
+      </div>
+      <pre class="m-0 whitespace-pre-wrap wrap-words font-[inherit] text-danger">{msg() || "failed"}</pre>
+    </div>
+  );
+}
+
+/** The errors a tool reported, at most three — a wall of them is how the edit stops being read. */
+function Diagnostics(props: { text?: string }) {
+  const rows = createMemo(() => diagnostics(props.text));
+  return (
+    <For each={rows()}>
+      {(d) => (
+        <div class="flex min-w-0 items-baseline gap-2 text-danger">
+          <span class="shrink-0">Error</span>
+          <span class="shrink-0 tabular-nums">[{d.line}:{d.char}]</span>
+          <span class="min-w-0 truncate" title={d.message}>{d.message}</span>
+        </div>
+      )}
+    </For>
+  );
+}
+
+/** The plan, as the to-do list it is: `[✓]` done, `[•]` doing, `[ ]` still to do. */
+function Todos(props: { set: { text: string; state?: string }[]; doing?: string; done?: string }) {
+  const mark = (t: { text: string; state?: string }) =>
+    t.state === "done" || t.text === props.done ? "✓" : t.state === "doing" || t.text === props.doing ? "•" : " ";
+  return (
+    <div class="py-1">
+      <For each={props.set}>
+        {(t) => (
+          <div class="flex min-w-0 gap-2" classList={{ "text-warning": mark(t) === "•", "text-muted": mark(t) !== "•" }}>
+            <span class="shrink-0 select-none">[{mark(t)}]</span>
+            <span class="min-w-0 wrap-words" classList={{ "line-through": mark(t) === "✓" }}>{t.text}</span>
+          </div>
+        )}
+      </For>
+    </div>
+  );
 }
 
 function Body(props: { a: Action }) {
@@ -129,6 +180,7 @@ function Body(props: { a: Action }) {
           bash: () => <Shell cmd={String(g().command ?? g().cmd ?? "")} out={plainBlock(a().output ?? "").lines.map((l) => l.text).join("\n")} />,
           read: () => <Code path={String(g().path ?? "")} text={a().output ?? ""} from={Number(g().offset ?? 1)} block={readBlock(a().output ?? "")} />,
           write: () => <Code path={String(g().path ?? "")} text={String(g().content ?? "")} from={1} />,
+          plan: () => <Todos set={((g().set as { text: string; state?: string }[] | string[]) ?? []).map((t) => (typeof t === "string" ? { text: t } : t))} doing={g().doing as string} done={g().done as string} />,
           edit: () => <Edits path={String(g().path ?? "")} edits={(g().edits as { oldText: string; newText: string }[]) ?? []} result={a().output} />,
           // A patch is many files at once; each is its own accordion, and a delete stays shut.
           patch: () => <Patch text={String(g().patch ?? g().diff ?? a().output ?? "")} />,
@@ -219,6 +271,7 @@ function Edits(props: { path: string; edits: { oldText: string; newText: string 
   return (
     <div class="my-1 flex flex-col gap-2">
       <FileDiff file={editFile(props.path, props.edits)} />
+      <Diagnostics text={props.result} />
       <Show when={props.result && !/^Successfully/.test(props.result)}><div class="text-subtle">{props.result}</div></Show>
     </div>
   );

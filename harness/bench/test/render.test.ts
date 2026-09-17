@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { TEXT_RENDER_IMMEDIATE, next, paced, step } from "../../src/renderer/components/results/paced.ts";
 import { badge, editFile, patchFiles, split } from "../../src/renderer/components/results/diff.ts";
+import { diagnostics, toolError, toolLine } from "../../src/renderer/components/results/toolline.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -103,4 +104,33 @@ test("an edit becomes one hunk per replacement", () => {
   assert.equal(f.lines.filter((l) => l.kind === "sep").length, 1, "a separator between the two, not before the first");
   assert.deepEqual(split("a/b.ts"), { dir: "a/", name: "b.ts" });
   assert.deepEqual(split("b.ts"), { dir: "", name: "b.ts" });
+});
+
+test("a tool failure reads as title, one-word subtitle, body", () => {
+  const e = toolError("edit", "Error: edit File not found: /a/b.ts\nlook elsewhere");
+  assert.equal(e.title, "edit");
+  assert.equal(e.subtitle, "File not found");
+  assert.equal(e.body, "/a/b.ts\nlook elsewhere");
+  assert.equal(toolError("bash", "it broke").subtitle, "Failed", "no `: ` means Failed");
+  assert.equal(toolError(undefined, "x").title, "Tool");
+});
+
+test("diagnostics are errors only, at most three", () => {
+  const out = [
+    "src/a.ts:12:4: error: expected `;`",
+    "src/a.ts:13:1: warning: unused",
+    "src/b.ts:1:1: error: nope",
+    "src/c.ts:2:2: error: nope",
+    "src/d.ts:3:3: error: dropped",
+  ].join("\n");
+  const d = diagnostics(out);
+  assert.equal(d.length, 3);
+  assert.deepEqual(d[0], { path: "src/a.ts", line: 12, char: 4, message: "expected `;`" });
+  assert.deepEqual(diagnostics("all fine"), []);
+});
+
+test("an unknown tool gets opencode's generic line", () => {
+  const l = toolLine("clickstack_sql", { query: "select 1", limit: 10, rows: true });
+  assert.equal(l.verb, "Called `clickstack_sql`");
+  assert.equal(l.arg, "select 1 limit=10 rows=true");
 });

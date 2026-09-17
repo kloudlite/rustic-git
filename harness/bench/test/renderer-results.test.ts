@@ -113,8 +113,10 @@ test("a tool call is one muted line: glyph, verb, argument, what came back", () 
   assert.equal(line("read", { path: "/home/kl/workspaces/api/path/to/file.tsx" }, "   1\tx"), "→ Read path/to/file.tsx (1 line)");
   assert.equal(line("bash", { command: "npm test" }, "ok\n[exit 0]"), "$ npm test (exit 0)");
   assert.equal(line("ask", { to: "svelte-frontend", task: "run the tests" }), "⇢ ask svelte-frontend: run the tests (queued)");
-  assert.equal(line("ask", { to: "agent", name: "audit" }, undefined, { pending: true, secs: 12 }), "◐ Agent — audit (running 12s)");
-  assert.equal(line("ask", { to: "agent", name: "audit" }), "✓ Agent — audit (started)");
+  assert.equal(line("ask", { to: "agent", name: "audit" }, undefined, { pending: true, secs: 12 }), "◐ Audit Task (running 12s)");
+  assert.equal(line("ask", { to: "agent", name: "audit" }), "✓ Audit Task (started)");
+  // `{Agent} Task — {description}` is opencode's own subagent grammar (`index.tsx:2317`).
+  assert.equal(line("ask", { to: "agent", name: "audit", task: "check the routes" }), "✓ Audit Task — check the routes (started)");
   // A failure keeps its exit code, and a running command says so rather than lying about one.
   assert.equal(line("bash", { command: "npm test" }, "boom\n[exit 1]"), "$ npm test (exit 1)");
   assert.equal(line("bash", { command: "npm run dev" }, undefined, { pending: true }), "$ npm run dev (running)");
