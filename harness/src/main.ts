@@ -11,7 +11,7 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
-import { checkPty } from "./pty-ipc";
+import { checkPty, readTtydFrame } from "./pty-ipc";
 import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
@@ -400,23 +400,18 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
    * ttyd's frames, one byte of opcode then the payload (spec §2.3): `0` output, `1` the title,
    * `2` its preferences, which we ignore — the terminal is themed by this app. The bench splices
    * them through unchanged, so this is where they are read.
+   *
+   * The opcode is read the SAME WAY whichever kind of websocket frame carried it: ttyd 1.7 sends
+   * output as a binary frame and the title and preferences as TEXT ones, and a text frame passed
+   * through whole printed `1/nix/profile/current/bin/zsh -l (ws)2{ "disableLeaveAlert"…` into the
+   * terminal (owner, on the fleet, 2026-09-18). An opcode this app does not know is dropped, never
+   * written: whatever ttyd adds next must not land in the person's scrollback.
    */
   w.on("message", (d: Buffer, isBinary: boolean) => {
-    if (isBinary) return send("pty:data", id, new Uint8Array(d));
-    const text = d.toString();
-    const opcode = text.slice(0, 1);
-    if (opcode === "0") return send("pty:data", id, new Uint8Array(Buffer.from(text.slice(1), "utf8")));
-    if (opcode === "1") return send("pty:title", id, text.slice(1));
-    if (opcode === "2") return; // ttyd's own preferences: this app has its own
-    // The bench's own control frames: it speaks these before the shell is attached.
-    let ev: { exit?: unknown; error?: unknown };
-    try {
-      ev = JSON.parse(text) as typeof ev;
-    } catch {
-      return;
-    }
-    if (typeof ev.exit === "number") exit(ev.exit);
-    else if (typeof ev.error === "string") exit(undefined, ev.error);
+    const frame = readTtydFrame(d, isBinary);
+    if (frame.kind === "data") return send("pty:data", id, new Uint8Array(frame.data));
+    if (frame.kind === "title") return send("pty:title", id, frame.title);
+    if (frame.kind === "exit") return exit(frame.code, frame.error);
   });
   w.on("error", () => undefined); // close follows
   w.on("close", () => {

@@ -138,3 +138,42 @@ test("a bad scope is refused at the handshake, and there is no session to name",
     await t.down();
   }
 });
+
+/**
+ * ttyd 1.7 does not pick one frame kind: output arrives BINARY, the title and the preferences
+ * arrive as TEXT. The opcode is the first byte either way — a text frame passed through whole
+ * printed `1/nix/profile/current/bin/zsh -l (ws)2{ "disableLeaveAlert"…` into the owner's terminal
+ * (2026-09-18). This holds the splice honest end to end: what the desktop reads is what ttyd sent.
+ */
+test("a title and preferences arrive as text frames, output as binary, and the auth frame is text", async (t0) => {
+  const wss = new WebSocketServer({ host: "127.0.0.1", port: SHELL_PORT });
+  const listening = await new Promise<boolean>((r) => (wss.once("listening", () => r(true)), wss.once("error", () => r(false))));
+  if (!listening) return void t0.skip(`127.0.0.1:${SHELL_PORT} is busy on this machine`);
+  // What ttyd itself does: text for `1`/`2`, binary for `0`.
+  const first: { text: string; binary: boolean }[] = [];
+  wss.on("connection", (up) => {
+    up.on("message", (d: Buffer, binary: boolean) => first.push({ text: d.toString(), binary }));
+    up.send(`1/nix/profile/current/bin/zsh -l (ws)`);
+    up.send(`2${JSON.stringify({ disableLeaveAlert: true, fontFamily: "IBM Plex Mono", fontSize: 13 })}`);
+    up.send(Buffer.from("0hello from the shell", "utf8"), { binary: true });
+  });
+  const t = await up(async () => "127.0.0.1:7788");
+  const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
+  try {
+    await opened(w);
+    const got = collect(w);
+    resize(w, 90, 20);
+    await until(() => got.text.includes("hello from the shell"), 5_000, "the shell's output");
+    // The title is a title, not scrollback; the preferences are dropped.
+    assert.equal(got.title, "/nix/profile/current/bin/zsh -l (ws)");
+    assert.ok(!got.text.includes("disableLeaveAlert"), got.text);
+    assert.ok(!got.text.includes("(ws)"), "a text frame must never reach the terminal whole");
+    // And ttyd's opening frame is TEXT, as 1.7 requires: a binary one is ignored by it.
+    assert.equal(first[0]?.binary, false);
+    assert.deepEqual(JSON.parse(first[0].text), { AuthToken: "", columns: 90, rows: 20 });
+  } finally {
+    w.close();
+    await t.down();
+    wss.close();
+  }
+});

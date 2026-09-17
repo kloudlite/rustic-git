@@ -8,7 +8,7 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
-import { checkPty } from "../../src/pty-ipc.ts";
+import { checkPty, readTtydFrame } from "../../src/pty-ipc.ts";
 import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
@@ -132,4 +132,35 @@ test("BenchClient.pty: refused while offline, a shell from the pod's shell sidec
     await srv.close();
     tools.close();
   }
+});
+
+/**
+ * What the desktop does with each ttyd frame. The owner's terminal printed
+ * `1/nix/profile/current/bin/zsh -l (ws)2{ "disableLeaveAlert": true, … }` before the shell ended
+ * (2026-09-18): ttyd 1.7 sends the title and the preferences as TEXT frames, and they were passed
+ * through whole because only binary frames were being stripped.
+ */
+test("ttyd frames: the opcode is the first byte, text or binary, and an unknown one is dropped", () => {
+  const text = (s: string) => readTtydFrame(Buffer.from(s, "utf8"), false);
+  const binary = (s: string) => readTtydFrame(Buffer.from(s, "utf8"), true);
+
+  // Output, either way it arrives.
+  const asBinary = binary("0hello");
+  assert.equal(asBinary.kind, "data");
+  assert.equal(Buffer.from((asBinary as { data: Uint8Array }).data).toString(), "hello");
+  const asText = text("0hello");
+  assert.equal(asText.kind, "data");
+  assert.equal(Buffer.from((asText as { data: Uint8Array }).data).toString(), "hello");
+
+  // A TEXT title is a title, not scrollback.
+  assert.deepEqual(text("1/nix/profile/current/bin/zsh -l (ws)"), { kind: "title", title: "/nix/profile/current/bin/zsh -l (ws)" });
+  // ttyd's preferences are this app's business, not the terminal's.
+  assert.deepEqual(text(`2${JSON.stringify({ disableLeaveAlert: true, fontFamily: "IBM Plex Mono", fontSize: 13 })}`), { kind: "ignore" });
+  // The bench's own control frames still reach the exit path.
+  assert.deepEqual(text(JSON.stringify({ exit: 3 })), { kind: "exit", code: 3 });
+  assert.deepEqual(text(JSON.stringify({ error: "shell 10.42.3.190:7790 did not answer" })), { kind: "exit", error: "shell 10.42.3.190:7790 did not answer" });
+  // Anything else is dropped rather than printed: an opcode ttyd adds later must not land in a
+  // person's scrollback.
+  for (const odd of ["9whatever", "", "not json at all"]) assert.deepEqual(text(odd), { kind: "ignore" }, odd);
+  assert.deepEqual(binary(JSON.stringify({ exit: 0 })), { kind: "ignore" }, "a binary frame is never control JSON");
 });

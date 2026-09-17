@@ -19,3 +19,37 @@ export function checkPty(id: unknown, scope: unknown): { id: string; scope: stri
   if (typeof id !== "string" || !ID.test(id)) throw new Error("not a terminal id");
   return { id, scope: checkScope(scope) };
 }
+
+/**
+ * One ttyd frame, read. The opcode is the FIRST BYTE whichever kind of websocket frame carried it:
+ * ttyd 1.7 sends output binary and the title and preferences as text, and a text frame passed
+ * through whole printed `1/nix/profile/current/bin/zsh -l (ws)2{ "disableLeaveAlert"…` into the
+ * owner's terminal (2026-09-18).
+ *
+ * An opcode this app does not know is `ignore`, never terminal output: whatever ttyd adds next must
+ * not land in a person's scrollback. A whole-JSON text frame with no opcode is the BENCH's own
+ * control channel, which it speaks before the shell is attached.
+ */
+export type TtydFrame =
+  | { kind: "data"; data: Uint8Array }
+  | { kind: "title"; title: string }
+  | { kind: "exit"; code?: number; error?: string }
+  | { kind: "ignore" };
+
+export function readTtydFrame(d: Uint8Array, isBinary: boolean): TtydFrame {
+  if (d.length === 0) return { kind: "ignore" };
+  const opcode = String.fromCharCode(d[0]);
+  const body = d.subarray(1);
+  if (opcode === "0") return { kind: "data", data: body };
+  if (opcode === "1") return { kind: "title", title: Buffer.from(body).toString("utf8") };
+  if (opcode === "2") return { kind: "ignore" }; // ttyd's own preferences: this app has its own
+  if (isBinary) return { kind: "ignore" };
+  try {
+    const ev = JSON.parse(Buffer.from(d).toString("utf8")) as { exit?: unknown; error?: unknown };
+    if (typeof ev.exit === "number") return { kind: "exit", code: ev.exit };
+    if (typeof ev.error === "string") return { kind: "exit", error: ev.error };
+  } catch {
+    /* an opcode nobody here knows */
+  }
+  return { kind: "ignore" };
+}
