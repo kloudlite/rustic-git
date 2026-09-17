@@ -368,3 +368,50 @@ fn a_swap_leaves_no_worktree_shaped_leftovers() {
         assert!(n.starts_with('.'), "{n} must be skipped by the worktree scanners");
     }
 }
+
+
+/// The listing filters by SUBVOLUME, not by directory entry, and a missing `.agents` is an empty
+/// list rather than an error. Both matter off btrfs too: a replica's `.agents/{name}` is a plain
+/// directory `btrfs send` left behind, and reading it as a tree would have the owning node's
+/// reconcile delete a tree that node never held.
+#[test]
+fn tree_names_reads_subvolumes_only_and_tolerates_no_agents_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = engine(Pool::new(tmp.path()));
+    assert_eq!(e.tree_names("v1", "ws-1").unwrap(), Vec::<String>::new(), "no .agents at all");
+    let agents = tmp.path().join("vol/v1/live/ws-1/.agents");
+    std::fs::create_dir_all(agents.join("left-behind")).unwrap();
+    std::fs::write(agents.join("a-file"), "x").unwrap();
+    assert_eq!(
+        e.tree_names("v1", "ws-1").unwrap(),
+        Vec::<String>::new(),
+        "a plain directory is not a tree — that is what a replica holds"
+    );
+}
+
+/// The round trip on real btrfs: a tree is a nested subvolume of the worktree, it is listed by
+/// name, and dropping the WORKTREE takes it with it (btrfs refuses to delete a parent that still
+/// has children, which is the whole reason `drop_worktree` sweeps them first).
+#[test]
+#[ignore = "needs root and a btrfs-capable kernel"]
+fn a_tree_is_a_nested_subvolume_and_the_worktree_drop_takes_it() {
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    e.checkout("v1", None, "ws-1").unwrap();
+    e.cut_tree("v1", "ws-1", "fix-auth").unwrap();
+    assert_eq!(e.tree_names("v1", "ws-1").unwrap(), vec!["fix-auth".to_string()]);
+    // Level-triggered: cutting the same name again is the state being asked for, never a second
+    // snapshot over a subagent's work.
+    std::fs::write(lb.pool.worktree("v1", "ws-1").join(".agents/fix-auth/mine"), "x").unwrap();
+    e.cut_tree("v1", "ws-1", "fix-auth").unwrap();
+    assert!(lb.pool.worktree("v1", "ws-1").join(".agents/fix-auth/mine").exists(), "the tree was not re-cut over");
+
+    e.drop_tree("v1", "ws-1", "fix-auth").unwrap();
+    assert_eq!(e.tree_names("v1", "ws-1").unwrap(), Vec::<String>::new());
+
+    // And the finalizer's path: a live tree must not wedge the worktree delete.
+    e.cut_tree("v1", "ws-1", "other").unwrap();
+    e.drop_worktree("v1", "ws-1").unwrap();
+    assert!(!lb.pool.worktree("v1", "ws-1").exists());
+}

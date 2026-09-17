@@ -41,6 +41,8 @@ mod replicas;
 mod home;
 mod seed;
 mod bench;
+mod trees;
+pub use trees::{tree_actions, TreeAction};
 use bench::{bench_verdict_action, migrate_bench, park_bench};
 pub(crate) use profile::*;
 pub use conditions::*;
@@ -421,7 +423,10 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             gen,
         ));
     }
-    let (phase, pod_ref) = match w.spec.desired_state {
+    // The third member is the tree rows: the Running arm is the only one that looks at the disk,
+    // and an arm that did not must never claim a tree is gone, so every other one hands back what
+    // status already carried.
+    let (phase, pod_ref, trees) = match w.spec.desired_state {
         DesiredState::Running => {
             // The seed rides on the VOLUME's source: what the disk was asked to be made from is
             // the one place that answers "does this need cloning", legacy objects included.
@@ -573,11 +578,15 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
                 write_ws_status(w, st, ctx).await?;
                 return Ok(Action::requeue(TICK));
             }
+            // The tree step runs HERE and nowhere earlier: a tree is a snapshot of a live working
+            // directory, so there is nothing to cut until the pod that owns it is up. Its rows go
+            // into the same status write as the phase below.
+            let trees = trees::reconcile_trees(w, &id, ctx).await?;
             // `ready`, not `running`: this string is deserialized into `model::WsState` by the
             // `/v1` projection, which spells the running state `Ready`. An unknown phase does not
             // error — it falls back to `Creating`, so a healthy workspace showed "Creating" in the
             // UI forever. `phase_names_the_doc_enum` pins the vocabulary.
-            (crd::Phase::Ready, Some(format!("{ns}/{pod_name}")))
+            (crd::Phase::Ready, Some(format!("{ns}/{pod_name}")), trees)
         }
         // Handled at the top of this function, before the Volume and namespace gates — stopping IS
         // deleting the pod, and it must not depend on either being healthy.
@@ -603,6 +612,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         volume_ref: Some(id),
         pod_ref,
         conditions,
+        trees,
         ..prev
     };
     write_ws_status(w, st, ctx).await?;

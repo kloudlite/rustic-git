@@ -169,7 +169,98 @@ impl Engine {
         if !path.exists() {
             return Ok(());
         }
+        // Subagent trees are NESTED subvolumes inside this one, and btrfs refuses to delete a
+        // subvolume that still has children. Here rather than in the delete path's caller because
+        // every caller of this — the finalizer, a takeover, a rescue — hits the same wall, and a
+        // guard in one of them leaves the others wedged on a workspace somebody once ran an agent
+        // in.
+        for name in self.tree_names(volume, ws)? {
+            self.drop_subvolume(&self.tree_dir(volume, ws).join(name))?;
+        }
         run(&["btrfs", "subvolume", "delete", path.to_str().unwrap()])
+    }
+
+    /// `{pool}/vol/{volume}/live/{ws}/.agents` — where this worktree's subagent trees live.
+    fn tree_dir(&self, volume: &str, ws: &str) -> std::path::PathBuf {
+        self.pool.worktree(volume, ws).join(crate::crd::TREES_DIR)
+    }
+
+    /// The tree names actually on disk: the SUBVOLUMES under `.agents/`, never every entry. A
+    /// plain directory there is somebody's mistake to look at, not this code's to delete — and a
+    /// replica's `.agents/{name}` is exactly such a directory, since `btrfs send` left the nested
+    /// subvolume behind and only its mount point travelled.
+    ///
+    /// A missing `.agents` is an empty list, not an error: most workspaces never hold a tree.
+    pub fn tree_names(&self, volume: &str, ws: &str) -> Result<Vec<String>, EngErr> {
+        let dir = self.tree_dir(volume, ws);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(EngErr::io(e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(EngErr::io)?;
+            if is_subvolume(&entry.path()) {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// The reconcile step's read of the same listing, under the volume lock so it cannot observe
+    /// a cut half-made by this node's own other pass.
+    pub fn list_trees(&self, volume: &str, ws: &str) -> Result<Vec<String>, EngErr> {
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        self.tree_names(volume, ws)
+    }
+
+    /// Cut one tree: a WRITABLE snapshot of the worktree, nested inside it.
+    ///
+    /// Nested is the design, not an accident of layout — `btrfs send` skips a nested subvolume, so
+    /// this is what keeps a tree out of every push, sync point and replica without a single
+    /// exclusion rule anywhere else.
+    ///
+    /// The `.agents` directory is created first, owned by the pod's uid so the tool server (which
+    /// runs as that uid and cannot make subvolumes) can read and write inside the trees it is
+    /// handed. The snapshot itself keeps the source's ownership, so nothing is chowned after it.
+    pub fn cut_tree(&self, volume: &str, ws: &str, name: &str) -> Result<(), EngErr> {
+        if !crate::crd::tree_name_ok(name) {
+            return Err(EngErr::other(format!("{name}: not a tree name")));
+        }
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        let dir = self.tree_dir(volume, ws);
+        std::fs::create_dir_all(&dir).map_err(EngErr::io)?;
+        if unsafe { libc::geteuid() } == 0 {
+            std::os::unix::fs::chown(&dir, Some(crate::k8s::SSH_UID as u32), Some(crate::k8s::SSH_UID as u32))
+                .map_err(EngErr::io)?;
+        }
+        let dst = dir.join(name);
+        // Level-triggered like every other create here: an existing tree is the state being asked
+        // for, and re-snapshotting over it would replace a subagent's work with the main tree's.
+        if dst.exists() {
+            return Ok(());
+        }
+        run(&["btrfs", "subvolume", "snapshot", path_str(&self.pool.worktree(volume, ws))?, path_str(&dst)?])
+    }
+
+    /// Delete one tree. Ok-on-absent, same convergence shape as `drop_worktree`.
+    pub fn drop_tree(&self, volume: &str, ws: &str, name: &str) -> Result<(), EngErr> {
+        if !crate::crd::tree_name_ok(name) {
+            return Err(EngErr::other(format!("{name}: not a tree name")));
+        }
+        let _lock = ws_lock(&self.pool, volume).map_err(EngErr::other)?;
+        self.drop_subvolume(&self.tree_dir(volume, ws).join(name))
+    }
+
+    /// `btrfs subvolume delete` on a path that may not be one. Shared by the tree deletes and by
+    /// `drop_worktree`'s nested pass, which must not take the volume lock a second time.
+    fn drop_subvolume(&self, path: &std::path::Path) -> Result<(), EngErr> {
+        if !is_subvolume(path) {
+            return Ok(());
+        }
+        run(&["btrfs", "subvolume", "delete", path_str(path)?])
     }
 
     /// Move a pre-snapshot-model volume from the old layout — `{pool}/vol/{volume}/live` IS the

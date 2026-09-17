@@ -526,7 +526,11 @@ pub(crate) fn the_prelude_appends_the_global_git_ignore_once() {
     let prelude = prelude("ws-1");
     assert!(prelude.contains("grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore"), "{prelude}");
     let shipped = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/workspace-image/gitignore-global")).unwrap();
-    assert_eq!(shipped, "# kloudlite: derived state the platform places inside a workspace directory\n.cache/\ngraft/\n.direnv/\n.bench/\n");
+    assert_eq!(shipped, "# kloudlite: derived state the platform places inside a workspace directory\n.cache/\ngraft/\n.direnv/\n.bench/\n.agents/\n");
+    // The last line is not a hand-written string: subagent trees are nested subvolumes the node
+    // agent puts under this exact name, and an un-ignored one shows up in every `git status` the
+    // moment somebody dispatches an agent.
+    assert!(shipped.lines().any(|l| l == format!("{}/", crate::crd::TREES_DIR)), "{shipped}");
 }
 
 

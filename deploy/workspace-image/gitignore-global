@@ -3,3 +3,4 @@
 graft/
 .direnv/
 .bench/
+.agents/

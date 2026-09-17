@@ -34,6 +34,7 @@ mod services_pruned;
 mod the_agent_decides_from_stores;
 mod bench;
 mod agent_writes_no_space_policies;
+mod trees;
 #[allow(unused_imports)]
 use attachment::*;
 #[allow(unused_imports)]

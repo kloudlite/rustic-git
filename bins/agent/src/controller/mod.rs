@@ -31,6 +31,7 @@ pub use environment::{decide_intercept, Intercepting};
 pub(crate) use environment::{stopped_condition, write_env_status};
 pub(crate) mod workspace;
 pub use workspace::{apply_workspace, cleanup_workspace_worktree, reconcile_environment, reconcile_workspace};
+pub use workspace::{tree_actions, TreeAction};
 // pub so the inode invariant is assertable from the integration suite — see reconcile.rs.
 pub use workspace::write_resolv_conf;
 // pub so kept_conditions' keep-list is assertable from the integration suite — see reconcile.rs.
