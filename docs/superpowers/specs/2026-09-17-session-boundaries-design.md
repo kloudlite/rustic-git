@@ -282,6 +282,15 @@ taught about the folder structure on the container. actually instruct to avoid."
 - **The bench session has no directory at all** and its identity says so in the same words:
   "You have no working directory. Name a workspace."
 
+
+### 3.6 Every mutation asks, files included (owner, 04:00 IST 18 Sep)
+
+The Yes/No card gates every change, not only platform writes: in a workspace or agent session
+`write`, `edit`, `patch`, `exec` and a `process` start propose like `kl_*` does, with the same
+three answers (yes · yes and don't ask again for this tool this session · no). Modes: **build** —
+everything mutating asks; **accept-edits** — file tools run unasked, commands still ask; **plan** —
+mutating tools refused. Reads never ask. The "don't ask again" memory is per session and per tool.
+
 ## 4. Subagents work in trees, not workspaces
 
 ### 4.1 Decisions
