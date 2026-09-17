@@ -66,6 +66,14 @@ one set of rules. These are the owner's rulings and are not up for re-litigation
     asks show as the sender's queue from exchange events; processes that exit are noticed by a
     10 s poll while any row runs.
 
+13. **Twelve tools always on** (read write edit bash grep find ls process ask plan skill
+    tool_search, plus memory); every `kl_*` platform tool sits behind `tool_search`, inactive until
+    found. Six product skills under `harness/skills/`; the identity names them in one line.
+14. **Agents** (`ask {to:"agent"}`): fresh session, one task, reports once; `isolated: true` gives
+    it an ephemeral CLONE of the workspace for parallel or risky work, closed with `ask_close`.
+    A fork orders the inbox; the bench keeps every session's plan current from events.
+15. **Memory**: the person's knowledge under `{bench}/.bench/memory/`, index in every identity.
+
 ## Incident record (why these rules exist)
 
 - 2026-09-17 05:00 IST: asked "add nats to the env" with no matching tool, the model read
@@ -76,7 +84,8 @@ one set of rules. These are the owner's rulings and are not up for re-litigation
 - 06:38–06:42: with no tool for "HTTP service", it grepped strings out of the `kl` binary and
   its own session logs; for "what's happening" it grepped another workspace's transcript off disk.
 - 06:41: "create a backend with golang" was queued into the running frontend workspace.
-- 12:45: a roll landed the single gateway replica on session-1, a node with no Cloudflare A
+- 12:45: a roll landed the single gateway replica (in-memory caps → exactly one; now pinned by
+  nodeAffinity to the DNS nodes session-0/env-0) on session-1, a node with no Cloudflare A
   record — every tunnel 521 for 25 min. `gateway.yaml` now runs one replica per pool node.
 
 ## Where things live
