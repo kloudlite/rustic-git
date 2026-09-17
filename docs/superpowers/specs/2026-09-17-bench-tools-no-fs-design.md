@@ -202,3 +202,19 @@ Claude Code's shape, mapped onto the harness:
   queued rows (›) in order and move into the transcript when taken; tool rows collapse to one line
   with a chevron, expanded on click; an agent shows as a row with its name, state and elapsed,
   its report folded under it; a question card blocks the status line until answered.
+
+## 13. Twelve tools, the rest deferred (owner, 2026-09-17 15:40 IST: "43 tools is huge … plan
+things so simple … add skill/toolsearch")
+
+- **Always on (12):** read, write, edit, bash, grep, find, ls, process (own machine); `ask`
+  (a workspace's session or a fresh agent: `{to: <workspace|"agent">, task, name?}` — replaces
+  kl_workspace_ask + kl_agent); `plan`; `skill {name}`; `tool_search {query}`.
+- **Deferred:** every `kl_*` platform tool stays registered but INACTIVE (`pi.setActiveTools`);
+  `tool_search` matches the catalogue by name/summary, answers the matched tools' names and
+  parameters, and activates them for the rest of the session. Nothing else changes about them
+  (proposals, cards, waits).
+- **Skills:** short markdown under `harness/skills/` — `workspaces`, `environments`,
+  `snapshots`, `repos`, `images`, `agents` — each a screen of product words: what the thing is,
+  the verbs, one example. `skill` returns the text; the identity lists their names in one line.
+- Identity shrinks by the tool paragraphs: it names the skills and says "tool_search finds the
+  tool for a platform verb".
