@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Architecture, CONTRACTS_BOUNCE, readContractsLine } from "./architecture.ts";
+import { Architecture, CONTRACTS_BOUNCE, onReply } from "./architecture.ts";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
@@ -400,13 +400,9 @@ export class Bench {
     if (!queue.length) this.asked.delete(id);
     // What this reply changed about the architecture (§24). A reply that forgot to say is asked
     // ONCE — the work is done either way, and nagging twice would be its own conversation.
-    const contracts = readContractsLine(answer);
-    if (contracts.rows.length) this.write(() => this.architecture.mergeContracts(contracts.rows));
-    // Only a WORK REPLY is bounced — one that carries §18's own status word. A workspace answering
-    // a person's question in its own tab is a conversation, not a report, and must not be nagged.
-    // The status word leads, after whatever routing tag the reply carried.
-    const isReport = /^(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\b/.test(answer.trim().replace(/^\[reply [^\]]+\]\s*/, ""));
-    if (isReport && !contracts.said && !this.bounced.has(a.exchange)) {
+    const told = onReply(answer, this.bounced.has(a.exchange));
+    if (told.rows.length) this.write(() => this.architecture.mergeContracts(told.rows));
+    if (told.nudge) {
       // Asked once, and the work still settles: holding the answer back would make a missing line
       // into a stuck ask, which is worse than a line nobody wrote.
       this.bounced.add(a.exchange);

@@ -141,3 +141,14 @@ export function readContractsLine(reply: string): { said: boolean; rows: Contrac
 
 /** What the harness says back when a reply forgot the line. Said once, never twice. */
 export const CONTRACTS_BOUNCE = "[harness] add the contracts: line — `none`, or one item per line as `METHOD /path — request → response — owner`";
+
+/**
+ * What to do with a reply: the contracts it named, and whether to ask for the line. Only a §18 WORK
+ * REPLY is asked — a workspace answering a person in its own tab is a conversation, not a report —
+ * and it is asked once, because a missing line must never turn into a stuck ask.
+ */
+export function onReply(answer: string, alreadyBounced: boolean): { rows: Contract[]; nudge: boolean } {
+  const { said, rows } = readContractsLine(answer);
+  const isReport = /^(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\b/.test(answer.trim().replace(/^\[reply [^\]]+\]\s*/, ""));
+  return { rows, nudge: isReport && !said && !alreadyBounced };
+}

@@ -3,11 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Architecture, CONTRACTS_BOUNCE, parseContract, readContractsLine } from "../src/architecture.ts";
+import { Architecture, onReply, parseContract, readContractsLine } from "../src/architecture.ts";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
-import { until } from "./wait.ts";
 
 /**
  * The space's architecture, as one living document (§24): what runs where, what talks to what, and
@@ -133,35 +132,25 @@ test("a reply's contracts line is read, and 'none' says nothing changed", () => 
   assert.equal(readContractsLine("contracts: PUT /orders/{id} — {status} → {order} — api").rows.length, 1);
 });
 
-test("a work reply's contracts reach the document, and a reply without one is asked once", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-contracts-"));
-  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
-  try {
-    await bench.start();
-    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
-    // Two asks to the same workspace, answered one after the other.
-    const first = await bench.ask("api", "add the orders endpoint", asker);
-    await bench.deliverForTest(first.session, [`[reply ${first.exchange}] DONE — orders is in.`, "", "contracts:", "- POST /orders — {items} → {id} — api"].join("\n"));
-    assert.deepEqual(
-      bench.architecture.contracts().map((c) => `${c.method} ${c.path}`),
-      ["POST /orders"],
-      "what the reply said is in the table",
-    );
+test("what a reply does to the document, and when the line is asked for", () => {
+  const report = ["[reply ask-1] DONE — orders is in.", "", "contracts:", "- POST /orders — {items} → {id} — api"].join("\n");
+  const first = onReply(report, false);
+  assert.deepEqual(first.rows.map((c) => `${c.method} ${c.path}`), ["POST /orders"]);
+  assert.equal(first.nudge, false, "it said what changed");
 
-    const second = await bench.ask("api", "rename it", asker);
-    await bench.deliverForTest(second.session, `[reply ${second.exchange}] DONE — renamed.`);
-    await until(
-      async () => ((await bench.messages(second.session)).messages as { content: string }[]).some((m) => String(m.content).includes("add the contracts: line")),
-      5_000,
-      "the one nudge",
-    );
+  // A report with no line is asked — once.
+  assert.equal(onReply("[reply ask-2] DONE — renamed.", false).nudge, true);
+  assert.equal(onReply("[reply ask-2] DONE — renamed.", true).nudge, false, "asked once, never twice");
+  // `none` is an answer.
+  assert.equal(onReply("DONE — nothing to report.\n\ncontracts: none", false).nudge, false);
+  // A conversation is not a report: a workspace answering a person is never nagged.
+  assert.equal(onReply("the tests pass on my branch", false).nudge, false);
+  assert.equal(onReply("echo [ask ask-3 from karthik] run the tests", false).nudge, false);
 
-    // And once only: a third report without the line is not nagged again for the same ask.
-    await bench.deliverForTest(second.session, `[reply ${second.exchange}] DONE — still nothing.`);
-    const again = (await bench.messages(second.session)).messages as { role: string; content: string }[];
-    assert.equal(again.filter((m) => String(m.content).includes("add the contracts: line")).length, 1);
-  } finally {
-    await bench.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  // And the rows it named reach the table, deduped by endpoint.
+  const a = fresh();
+  a.mergeContracts(first.rows);
+  a.mergeContracts(onReply("DONE\n\ncontracts:\n- POST /orders — {items, coupon} → {id} — api", false).rows);
+  assert.equal(a.contracts().length, 1);
+  assert.equal(a.contracts()[0].shape, "{items, coupon} → {id}");
 });
