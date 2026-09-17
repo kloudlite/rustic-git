@@ -8,6 +8,7 @@ import { diagnostics, toolError, toolLine } from "./results/toolline";
 import { FileDiff } from "./results/FileDiff";
 import { editFile, patchFiles } from "./results/diff";
 import { defaultOpen } from "./results/opencode-map";
+import { Spinner } from "./Motion";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -51,9 +52,12 @@ export function ToolCall(props: { a: Action }) {
     <div class="flex flex-col font-mono" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
       {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
       <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
-        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-success"}`} classList={{ "animate-pulse": a().pending }}>⏺</span>
+        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-success"}`}>
+          <Show when={a().pending} fallback="⏺"><Spinner /></Show>
+        </span>
         <span class="min-w-0 flex-1 truncate text-muted">
-          <Show when={line().verb}><span class="text-fg">{line().verb} </span></Show>
+          {/* A title that is still moving says "not finished" (`text-shimmer.css`, 1200 ms). */}
+          <Show when={line().verb}><span class="text-fg" classList={{ shimmer: a().pending }}>{line().verb} </span></Show>
           {line().arg}
           <Show when={line().count}>{(c) => <span class="text-subtle"> ({c()})</span>}</Show>
         </span>
@@ -69,7 +73,7 @@ export function ToolCall(props: { a: Action }) {
         </div>
       </Show>
       <Show when={open()}>
-        <div class="flex min-w-0">
+        <div class="springy flex min-w-0">
           <span class="w-4 shrink-0 text-subtle">⎿</span>
           <div class="min-w-0 flex-1" classList={{ "border-l border-line pl-3": !railed() }}>
           <Show when={failed()} fallback={<Body a={a()} />}>

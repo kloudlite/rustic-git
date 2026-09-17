@@ -528,3 +528,62 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
 @media (prefers-reduced-motion: reduce) {
   .shimmer { animation: none; background: none; color: var(--fg); }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Motion, at opencode's own constants (contract §8). Every rule here names the
+   file it came from, and every one of them answers reduced motion.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* The working indicator: 5×5 dots, each on its own keyframe staggered in 12.5 % steps over
+   1200 ms (`session-progress-indicator-v2.css:1-14`). One keyframe with an animation-delay per
+   dot says the same thing as twenty-five generated keyframes and is twenty-five times less CSS.
+   ponytail: a delay is not a per-dot curve; if a dot ever needs its own shape, generate them. */
+[data-component="session-progress-indicator-v2"] { color: var(--subtle); display: block; flex-shrink: 0; }
+[data-component="session-progress-indicator-v2"] [data-dot] {
+  fill: currentColor;
+  opacity: 0.2;
+  animation: working-dot var(--motion-progress) ease-out infinite both;
+}
+@keyframes working-dot {
+  0%, 25% { opacity: 0.2; }
+  37.5% { opacity: 1; }
+  50% { opacity: 0.5; }
+  62.5%, 100% { opacity: 0.2; }
+}
+/* The stagger: an eighth of the loop per ring out from the middle. */
+[data-component="session-progress-indicator-v2"] [data-dot="12"] { animation-delay: 0ms; }
+[data-component="session-progress-indicator-v2"] [data-dot="6"],
+[data-component="session-progress-indicator-v2"] [data-dot="7"],
+[data-component="session-progress-indicator-v2"] [data-dot="8"],
+[data-component="session-progress-indicator-v2"] [data-dot="11"],
+[data-component="session-progress-indicator-v2"] [data-dot="13"],
+[data-component="session-progress-indicator-v2"] [data-dot="16"],
+[data-component="session-progress-indicator-v2"] [data-dot="17"],
+[data-component="session-progress-indicator-v2"] [data-dot="18"] { animation-delay: 150ms; }
+@media (prefers-reduced-motion: reduce) {
+  [data-component="session-progress-indicator-v2"] [data-dot] { animation: none; }
+  [data-component="session-progress-indicator-v2"] [data-dot="12"] { opacity: 1; }
+}
+
+/* A collapsible body and a row arriving: opencode springs these
+   (`basic-tool.tsx:47`, visualDuration 0.35, bounce 0). A spring with no bounce reads as an
+   emphasised ease, which is what CSS can do without a physics loop.
+   ponytail: no overshoot; if a bounce is ever wanted this needs the Web Animations API. */
+.springy { animation: spring-in var(--motion-body) var(--ease-emphasis) both; }
+@keyframes spring-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+/* A shell submessage arriving (`message-part.tsx:102-106`): opacity and blur, 320 ms. */
+.arrive { animation: arrive var(--motion-shell) var(--ease-emphasis) both; }
+@keyframes arrive { from { opacity: 0; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
+
+/* A count that just changed (`tool-status-title.tsx:31`): it settles after 600 ms. */
+.tick { animation: tick 600ms var(--ease-emphasis) both; }
+@keyframes tick { from { opacity: 0.4; transform: translateY(-1px); } to { opacity: 1; transform: none; } }
+
+/* The composer's caret is a block, as it is in a terminal and in opencode's own prompt. Chromium
+   takes `caret-shape`; anywhere it is not understood this is an ordinary bar, which is no loss. */
+textarea[data-composer] { caret-shape: block; caret-color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .springy, .arrive, .tick { animation: none; opacity: 1; filter: none; transform: none; }
+}

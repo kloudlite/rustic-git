@@ -18,6 +18,7 @@ import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
 import { modeLine, modeParts, modelOfThread } from "../rows";
 import { KEYS } from "../keys";
+import { Spinner, Ticker, WorkingDots } from "./Motion";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
 
@@ -123,9 +124,11 @@ export function Chat(props: {
   };
   const parts = () => modeParts(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
   const [pick, setPick] = createSignal(0);
+  /** Whether escape has shut the command list; typing opens it again. */
+  const [closed, setClosed] = createSignal(false);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
-    return m ? props.commands.filter((c) => c.name.startsWith(m[1].toLowerCase())) : [];
+    return m && !closed() ? props.commands.filter((c) => c.name.startsWith(m[1].toLowerCase())) : [];
   });
   const accept = (t: HTMLTextAreaElement, i = pick()) => {
     const c = matches()[i];
@@ -501,18 +504,21 @@ export function Chat(props: {
         {/* One box: the caret and the keys that drive it belong together, and a
             hint row floating underneath read as a second, unrelated thing. */}
         <div class="relative min-w-0 bg-bg px-6 pt-1 pb-3.5" classList={{ hidden: onFile() || thread()?.kind === "btw" }}>
+          {/* The commands, as opencode lists them: full width ABOVE the composer, two columns on
+              the cell grid, the selected row a solid accent bar with dark text — no border, no
+              rounding, nothing floating. Ten rows, then it scrolls; the `/` stays in the input. */}
           <Show when={matches().length}>
-            <div class="absolute right-6 bottom-full left-6 z-20 mb-1 max-h-64 overflow-y-auto rounded-md border border-widget-line bg-overlay py-1 shadow-overlay">
+            <div data-slot="slash-menu" class="pane mb-1 max-h-[200px] min-w-0 overflow-y-auto font-mono">
               <For each={matches()}>
                 {(c, i) => (
                   <button
-                    class="flex h-5.5 w-full items-center gap-3 px-3 text-left font-mono"
-                    classList={{ "bg-selected text-selected-fg": i() === pick(), "text-fg": i() !== pick() }}
+                    class="flex w-full items-baseline gap-4 px-6 text-left"
+                    classList={{ "bg-accent text-bg": i() === pick(), "text-fg": i() !== pick() }}
                     onMouseMove={() => setPick(i())}
                     onMouseDown={(e) => { e.preventDefault(); accept(e.currentTarget.closest("main")!.querySelector<HTMLTextAreaElement>("textarea[data-composer]")!, i()); }}
                   >
                     <span class="w-28 shrink-0">{c.name}</span>
-                    <span class="min-w-0 truncate font-ui" classList={{ "text-muted": i() !== pick() }}>{c.help}</span>
+                    <span class="min-w-0 flex-1 truncate" classList={{ "text-muted": i() !== pick() }}>{c.help}</span>
                   </button>
                 )}
               </For>
@@ -542,9 +548,9 @@ export function Chat(props: {
               </Show>
               <For each={dockOpen() || L().queue.length <= 1 ? L().queue : []}>
                 {(q) => (
-                  <div class="group/q flex flex-col">
+                  <div class="group/q arrive flex flex-col">
                     <div class="flex items-start gap-2 text-muted">
-                      <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>QUEUED</span>
+                      <span class="arrive shrink-0 rounded-[2px] bg-fg/10 px-1 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>QUEUED</span>
                       <span class="min-w-0 flex-1 truncate">{q.text}</span>
                       <button class="shrink-0 text-subtle opacity-0 group-hover/q:opacity-100 hover:text-fg" onClick={() => live.sendNow(L().id, q.text)}>Send now</button>
                       <button
@@ -592,7 +598,7 @@ export function Chat(props: {
                 rows="1"
                 class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 outline-none placeholder:text-subtle"
                 placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
-                onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), (hist = -1))}
+                onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), setClosed(false), (hist = -1))}
                 onKeyDown={(e) => {
                   // Completion first: while suggestions show, ↑/↓ move, ⇥ and ↩
                   // take one (↩ sends only when the word is already complete).
@@ -603,6 +609,8 @@ export function Chat(props: {
                     if (e.key === "Tab") return (e.preventDefault(), void accept(t));
                     if (e.key === "Escape") {
                       e.preventDefault();
+                      // Escape closes the list first: the `/` a person typed is theirs to keep.
+                      if (!closed()) return setClosed(true);
                       // While a turn runs, escape means STOP — but only on the second press
                       // (`prompt/index.tsx:408`); the counter forgets after two seconds.
                       if (L().busy()) {
@@ -712,9 +720,10 @@ export function Chat(props: {
                   </span>
                 )}
               </Show>
-              <span class="animate-pulse text-accent">✳</span>
+              <Spinner class="text-accent" />
+              <WorkingDots class="shrink-0" />
               <span class="text-muted">{verbAt(elapsed())}…</span>
-              <span class="tabular-nums">({spinnerMeta(elapsed(), L().turn()?.tokens)})</span>
+              <Ticker class="tabular-nums" value={`(${spinnerMeta(elapsed(), L().turn()?.tokens)})`} />
               {/* `esc interrupt`, then `esc again to interrupt` once it has been pressed once. */}
               <span classList={{ "text-accent": escapes() > 0 }}>esc <span class="text-subtle" classList={{ "text-accent": escapes() > 0 }}>{escapes() > 0 ? "again to interrupt" : "interrupt"}</span></span>
             </Show>
@@ -1068,6 +1077,7 @@ function ProgressCircle(props: { pct: number }) {
       <circle
         cx="8" cy="8" r={r} fill="none" stroke="currentColor" stroke-width="2"
         stroke-dasharray={`${(c * Math.min(100, props.pct)) / 100} ${c}`}
+        style={{ transition: "stroke-dasharray var(--motion-body) var(--ease-emphasis)" }}
         transform="rotate(-90 8 8)"
         class={props.pct >= 90 ? "text-danger" : props.pct >= 70 ? "text-warning" : "text-accent"}
       />

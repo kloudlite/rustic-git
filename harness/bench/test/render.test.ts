@@ -5,6 +5,8 @@ import { badge, editFile, patchFiles, split } from "../../src/renderer/component
 import { diagnostics, toolError, toolLine } from "../../src/renderer/components/results/toolline.ts";
 import { usage } from "../../src/renderer/live.ts";
 import { KEYS, LEADER, keyHint, leaderIndex, underLeader } from "../../src/renderer/keys.ts";
+import { playDemo, wantsDemo } from "../../src/renderer/demo.ts";
+import { SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL } from "../../src/renderer/motion.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -157,4 +159,24 @@ test("opencode's leader is an alias layer over our own keys", () => {
   assert.ok(KEYS.panel.match(ev("b", { metaKey: true })));
   assert.equal(keyHint(KEYS.panel), "⌘B  ^X B");
   assert.equal(keyHint(KEYS.shell), "⌘J", "a binding with no alias reads as itself");
+});
+
+test("the demo turn plays pi's own events, in order, and can be stopped", async () => {
+  const seen: Record<string, unknown>[] = [];
+  const stop = playDemo("s-1", (ev) => seen.push(ev));
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(seen[0].type, "agent_start");
+  assert.equal(seen[0].session, "s-1", "every step is addressed to the thread it plays in");
+  stop();
+  const after = seen.length;
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(seen.length, after, "a stopped demo sends nothing more");
+  assert.ok(wantsDemo("?motion-demo"));
+  assert.ok(!wantsDemo("?other=1"));
+});
+
+test("the spinner is opencode's own braille, at its own tick", () => {
+  assert.deepEqual(SPINNER_FRAMES, ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+  assert.equal(SPINNER_MS, 80);
+  assert.equal(SPINNER_STILL, "⋯", "with animations off opencode shows a still mark, not a frozen frame");
 });

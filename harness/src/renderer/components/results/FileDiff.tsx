@@ -41,7 +41,7 @@ export function FileDiff(props: { file: DiffFile; open?: boolean }) {
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40" />
       </button>
       <Show when={open()}>
-        <div class="tool-output overflow-x-auto rounded-[2px] bg-codeblock py-1 [tab-size:4]">
+        <div class="springy tool-output overflow-x-auto rounded-[2px] bg-codeblock py-1 [tab-size:4]">
           <For each={props.file.lines}>
             {(l) => (
               <Show

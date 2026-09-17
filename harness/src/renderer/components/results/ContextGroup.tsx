@@ -1,6 +1,7 @@
 import { For, Show, createSignal } from "solid-js";
 import { Icon } from "../../ui/Icon";
 import { contextCounts, contextSummary, trigger } from "./opencode-map";
+import { Spinner, Ticker } from "../Motion";
 import type { Message } from "../../model";
 
 type Action = Extract<Message, { role: "action" }>;
@@ -19,11 +20,12 @@ export function ContextGroup(props: { rows: Action[] }) {
     <div data-component="context-group" class="flex flex-col">
       <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
         <span class={`w-4 shrink-0 ${pending() ? "text-accent" : "text-success"}`}>
-          <Show when={!pending()} fallback={<Icon name="spinner" size={13} class="animate-spin" />}>⏺</Show>
+          <Show when={!pending()} fallback={<Spinner />}>⏺</Show>
         </span>
         <span class="shrink-0 text-fg" classList={{ shimmer: pending() }}>{pending() ? "Exploring" : "Explored"}</span>
         {/* The counts, in the contract's own order: reads, searches, lists. */}
-        <span class="min-w-0 flex-1 truncate text-muted">{counts().join(", ")}</span>
+        {/* The count ticks over as each call lands, the way `Exploring → Explored` settles. */}
+        <Ticker class="min-w-0 flex-1 truncate text-muted" value={counts().join(", ")} />
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
       <Show when={open()}>

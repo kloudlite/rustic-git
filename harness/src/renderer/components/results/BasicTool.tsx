@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createSignal, type JSX } from "solid-js";
 import { Icon } from "../../ui/Icon";
+import { Spinner } from "../Motion";
 
 /**
  * The row chassis every tool uses, transcribed from opencode's `basic-tool.tsx:196`: an icon, a
@@ -33,7 +34,7 @@ export function BasicTool(props: {
         onClick={() => canOpen() && setOpen((v) => !v)}
       >
         <span class={`w-4 shrink-0 ${props.failed ? "text-danger" : props.pending ? "text-accent" : "text-success"}`}>
-          <Show when={!props.pending} fallback={<Icon name="spinner" size={13} class="animate-spin" />}>⏺</Show>
+          <Show when={!props.pending} fallback={<Spinner />}>⏺</Show>
         </span>
         <span data-slot="basic-tool-tool-info-main" class="flex min-w-0 flex-1 items-baseline gap-2">
           {/* The title shimmers while it runs — a word that is still moving says "not finished". */}
@@ -54,7 +55,7 @@ export function BasicTool(props: {
         </Show>
       </button>
       <Show when={open() && props.children}>
-        <div class="flex min-w-0">
+        <div class="springy flex min-w-0">
           <span class="w-4 shrink-0 text-subtle">⎿</span>
           <div class="min-w-0 flex-1">{props.children}</div>
         </div>

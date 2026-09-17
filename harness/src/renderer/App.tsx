@@ -12,6 +12,7 @@ import { makeTab, nextIndex, reconcile as reconcileTabs, scopeOfTab, sessionInde
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
+import { playDemo, wantsDemo } from "./demo";
 import { KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
@@ -517,6 +518,7 @@ export function App() {
     { id: "go", group: "Suggested", label: "Go to…", keys: keyHint(KEYS.quickOpen), run: () => setPalette("go") },
     { id: "settings", group: "Suggested", label: "Settings", keys: keyHint(KEYS.settings), run: () => openSettings() },
     { id: "bg", group: "Session", label: "Send the running command to the background", keys: keyHint(KEYS.background), run: () => void pi({ type: "prompt", message: "/bg" }) },
+    { id: "motionDemo", group: "Session", label: "Replay demo turn (to watch the animations)", run: () => playDemo(cur(), (ev) => live.onEvent({ ...ev, pi: cur() } as never)) },
     { id: "abort", group: "Session", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", group: "Session", label: "New session", run: newSession },
     { id: "benchImport", group: "Session", label: "Import this laptop's sessions into the bench", run: () => {
@@ -646,6 +648,9 @@ export function App() {
   document.addEventListener("keydown", onKey);
   onCleanup(() => document.removeEventListener("keydown", onKey));
   onMount(() => composer()?.focus());
+  // `?motion-demo` plays the canned turn once, so every animation can be seen (and shot) without
+  // spending a model turn on it.
+  onMount(() => void (wantsDemo(location.search) && setTimeout(() => playDemo(cur(), (ev) => live.onEvent({ ...ev, pi: cur() } as never)), 400)));
 
   // The bench is live: session events and the bench's own changes land here.
   window.harness.onPi((ev) => {

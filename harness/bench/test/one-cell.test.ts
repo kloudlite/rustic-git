@@ -87,3 +87,25 @@ test("the composer carries exactly one status row, and the footer says where you
   assert.match(src, /border-l-2 border-accent bg-input/);
   assert.match(src, /class="flex items-start px-4 pt-3 pb-1\.5 font-mono"/);
 });
+
+/**
+ * Every animation answers `prefers-reduced-motion`, and every looping one stops rather than running
+ * a thousand times a second. A strobe is not less motion.
+ */
+test("motion is tokenised, cited and reduced-motion safe", () => {
+  const css = fs.readFileSync(path.resolve("src/renderer/styles/app.css"), "utf8");
+  for (const cls of ["working-dot", "spring-in", "arrive", "tick"]) assert.ok(css.includes(`@keyframes ${cls}`), `${cls} is missing`);
+  // The dot grid pins its middle dot when motion is reduced, as its own stylesheet does.
+  assert.match(css, /\[data-dot="12"\] \{ opacity: 1; \}/);
+  assert.match(css, /\.springy, \.arrive, \.tick \{ animation: none;/);
+  // The composer's caret is a block.
+  assert.match(css, /textarea\[data-composer\] \{ caret-shape: block;/);
+});
+
+test("the command list is a full-width list above the composer, not a floating panel", () => {
+  const src = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.match(src, /data-slot="slash-menu"/);
+  assert.ok(!/data-slot="slash-menu"[\s\S]{0,200}rounded-md/.test(src), "no rounding, no border, nothing floating");
+  // The selected row is a solid accent bar with dark text, spanning the full width.
+  assert.match(src, /"bg-accent text-bg": i\(\) === pick\(\)/);
+});
