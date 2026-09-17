@@ -380,3 +380,131 @@ test("an ask by name resolves to the workspace's id before anything is spawned",
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-N1 (CRITICAL, safety). Asked for an agent in `t-three` — an empty workspace — the bench cut the
+ * agent's tree in the PERSON'S `backend` instead, and briefed it "Workspace backend holds a checked
+ * out Go module. Your tree is a writable copy…". An agent was handed hands in a workspace nobody
+ * named. The binding is the mechanism, not the wording: the tree is cut in EXACTLY the workspace
+ * the caller named, or the ask fails and no tree is cut at all.
+ */
+test("an agent's tree is cut in the workspace that was named, and no other", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-bind-"));
+  const trees: string[] = [];
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    // Two workspaces: the empty one that was asked for, and the person's real one beside it.
+    listWorkspaces: async () => [
+      { id: "ws-three", name: "t-three" },
+      { id: "ws-632cf9f23d9f2fbf", name: "backend" },
+    ],
+    platform: async (method, p) => {
+      const m = /^\/v1\/workspaces\/([^/]+)\/trees$/.exec(p);
+      if (method === "POST" && m) trees.push(decodeURIComponent(m[1]));
+      return { status: 200, data: {} };
+    },
+    resolveTools: async () => "127.0.0.1:1",
+  });
+  try {
+    await bench.start();
+    const from = bench.sessions.all().find((s) => !s.archived)!.id;
+    // The tree never becomes servable here (no tool server), so the ask fails — what matters is
+    // WHERE it tried: the named workspace, never a substitute.
+    await bench.agent("t-three", "add a test", "a1", from).catch(() => undefined);
+    assert.ok(trees.length > 0, "a tree was attempted");
+    assert.deepEqual([...new Set(trees)], ["ws-three"], "only the workspace that was named");
+    assert.ok(!trees.includes("ws-632cf9f23d9f2fbf"), "never the person's own workspace");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A workspace that does not exist fails the ask with a plain sentence, and cuts nothing. */
+test("an agent named for a workspace that is not there cuts no tree", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-bind2-"));
+  const trees: string[] = [];
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    listWorkspaces: async () => [{ id: "ws-632cf9f23d9f2fbf", name: "backend" }],
+    platform: async (method, p) => {
+      const m = /^\/v1\/workspaces\/([^/]+)\/trees$/.exec(p);
+      if (method === "POST" && m) trees.push(decodeURIComponent(m[1]));
+      return { status: 200, data: {} };
+    },
+  });
+  try {
+    await bench.start();
+    const from = bench.sessions.all().find((s) => !s.archived)!.id;
+    const e = await bench.agent("t-nope", "add a test", "a2", from).then(() => undefined, (x: Error) => x);
+    assert.ok(e, "the ask fails");
+    assert.match(e!.message, /no workspace t-nope/, "and says so plainly");
+    assert.deepEqual(trees, [], "nothing was cut anywhere");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * R-N1's mechanism: a WORKSPACE session's agent is bound to that session's own workspace, whatever
+ * the model asked for. This is the path the re-route came through — the tool call carried a
+ * workspace of the model's choosing and nothing tied it to the caller.
+ */
+test("a workspace session's agent cannot be pointed at another workspace", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-bind3-"));
+  const trees: string[] = [];
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    listWorkspaces: async () => [
+      { id: "ws-three", name: "t-three" },
+      { id: "ws-632cf9f23d9f2fbf", name: "backend" },
+    ],
+    platform: async (method, p) => {
+      const m = /^\/v1\/workspaces\/([^/]+)\/trees$/.exec(p);
+      if (method === "POST" && m) trees.push(decodeURIComponent(m[1]));
+      return { status: 200, data: {} };
+    },
+    resolveTools: async () => "127.0.0.1:1",
+  });
+  try {
+    await bench.start();
+    // A session that IS the `t-three` workspace asks for an agent, naming `backend`.
+    const ws = await bench.openWorkspace("ws-three");
+    const e = await bench.agent("backend", "write a test", "a3", ws.id).then(() => undefined, (x: Error) => x);
+    assert.ok(e, "refused");
+    assert.match(e!.message, /an agent works in this workspace/);
+    assert.deepEqual(trees, [], "and no tree was cut in the workspace it tried to reach");
+
+    // Naming its OWN workspace is the ordinary case: it is not refused. (Cutting the tree needs a
+    // tool server that answers, which is the first test's ground; here the point is the guard.)
+    assert.equal(ws.workspace, "ws-three");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A bench session has no workspace of its own, so it must name one — and gets what it named. */
+test("a bench session must name a workspace for its agent", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-bind4-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, listWorkspaces: async () => [{ id: "ws-three", name: "t-three" }] });
+  try {
+    await bench.start();
+    const from = bench.sessions.all().find((s) => !s.archived)!.id;
+    const e = await bench.agent("", "do a thing", "a5", from).then(() => undefined, (x: Error) => x);
+    assert.match(e!.message, /which workspace/);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

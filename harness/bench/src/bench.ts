@@ -1249,7 +1249,24 @@ export class Bench {
   async agent(to: string, task: string, name: string, from: string, model?: string): Promise<{ session: string; exchange: string; name: string; tree: string }> {
     this.refuse(true);
     if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
-    if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    const caller = this.sessions.get(from);
+    if (!caller) throw new Error(`no session ${from}`);
+    /**
+     * An agent works in the CALLER's workspace, full stop. Asked for an agent in an empty
+     * workspace, the bench cut its tree in the person's own `backend` instead and briefed it to
+     * write there — hands in a workspace nobody named (api-test-report R-N1). The binding is here,
+     * not in the wording of a prompt: a workspace session's agent is bound to that session's own
+     * workspace whatever the model asked for, and a bench session — which has no workspace of its
+     * own — must name one and gets exactly the one it named.
+     */
+    if (caller.workspace) {
+      if (to && to.trim() && to.trim() !== caller.workspace && to.trim() !== caller.name) {
+        throw new Error(`an agent works in this workspace (${caller.name || caller.workspace}), not ${to.trim()}; ask that workspace instead`);
+      }
+      to = caller.workspace;
+    } else if (!to || !to.trim()) {
+      throw new Error("which workspace should the agent work in? name one");
+    }
     // The workspace it works in is an ID before any child exists — an agent bound to a name has no
     // hands (owner, 2026-09-17).
     const { id: workspace } = await this.resolveWorkspace(to);
