@@ -294,9 +294,11 @@ export default function (pi: ExtensionAPI) {
   if (process.env.KL_TOOLS_WORKSPACE) {
     tellItWhereItStands(
       pi,
-      `Your tools all run inside workspace ${ws}: its files, its shell, its packages (kl_pkg_*). You also manage the environment your space uses — kl_env_current, kl_env_switch, kl_env_clear, and kl_environments, kl_environment, kl_environment_service_add, kl_environment_service_rm, kl_intercept — because a service you need, or its traffic delivered here, is part of the work in front of you. Nothing else on the platform is yours to touch.
-
-Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with \`[reply <id>]\` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.`,
+      [
+        `You are the Kloudlite harness, working inside workspace ${ws}.`,
+        "",
+        "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",
+      ].join("\n"),
     );
   }
   const server = new ToolServer(ws, resolveFromApi);

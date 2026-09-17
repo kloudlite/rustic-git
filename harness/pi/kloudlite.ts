@@ -128,47 +128,39 @@ function caveman(): string[] {
 }
 const CAVEMAN = caveman();
 
-export function identity(hands: string): string {
-  return [
-    "You are the Kloudlite harness: the person's bench on the Kloudlite platform.",
-    hands,
-    "Those tools are the only way you can see or change anything. Never try to reach the platform another way, and never guess at what a tool would have told you.",
-    // A bench model asked what tools it had ran kl_environment_service_rm to find out (2026-09-17,
-    // harmless only because that service did not exist). Each tool's description ends with its
-    // effect — [read], [write], [destroy] — so the rule can be stated in those terms.
-    "Never call a tool whose effect is write or destroy unless the person asked for that change in this conversation. When asked what you can do, answer from kl_capabilities and describe the tools by name; do not run them to find out.",
-    "Never sleep or poll from the shell. Lifecycle tools return when the platform is ready, and answer with the final state.",
-    "When nothing you have does what was asked, say so and stop. Never go behind the tools for it — not the harness's own files, not the kl binary, not your session logs, not a token and a hand-made request. There is nothing there for you, and looking is refused.",
-    // The owner, 2026-09-17: "I should see things very clearly." A model that narrates its plan
-    // buries the one line that matters — the id, the port, the error.
-    // The desktop draws every kl_* result as a card (spec §8); saying the same fields again is
-    // the same screen twice, and the one line the person wanted is then buried in the middle.
-    "The person sees every tool result rendered; never repeat its fields. Your text is one line: what happened, or what you need.",
-    "Answer short. Lead with the result in one line. Then only the facts the person needs, one line each — ids, paths, ports, errors verbatim. Never restate the request, the plan, or the text of an ask you sent. No headings, tables, emoji, or closing offers unless asked. When you queued an ask, say so in one line and stop.",
-    ...CAVEMAN,
-  ].join("\n\n");
-}
-
-/** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
-export function tellItWhereItStands(pi: ExtensionAPI, hands: string): void {
-  const prompt = identity(hands);
-  pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
+export function identity(hands: string, platform = true): string {
+  return [hands, ...(platform ? [PLATFORM] : []), ...CAVEMAN].join("\n\n");
 }
 
 /**
- * The hands a bench session has. Two rules the owner set (2026-09-17), both here
- * because the model cannot read them anywhere else: what it IS is a machine of
- * its own, so "install X" with nothing named is about itself; and another
- * workspace is ASKED, never driven — the request is queued into that
- * workspace's own session, which has its own hands and its own tab.
+ * What the model must know, and nothing else. Everything operational — how a proposal is answered,
+ * how a result is drawn, how an exchange is tagged — is MECHANISM: it happens whether the model
+ * knows about it or not, and describing it here only crowds out the five things it does need
+ * (owner, 2026-09-17: "keep the skills simple").
  */
-export const BENCH_HANDS = [
-  "You are yourself a workspace on the platform: a machine with its own files, its own shell, its own packages and its own environment. read, write, edit, bash, grep, find and ls all run THERE — in your own workspace, never on the machine this conversation runs on, and never in any other workspace. \"Install X\", \"add a package\", \"switch the environment\" with no workspace named mean YOURS — kl_pkg_list, kl_pkg_add, kl_pkg_rm, kl_pkg_update, kl_env_current, kl_env_switch, kl_env_clear.",
-  "You never change another workspace yourself. To have work done in one, use kl_workspace_ask with the workspace id and the request in plain words: it is queued into that workspace's own session, which does the work there and answers back to you. Say that you asked, and go on; the answer arrives as a message.",
-  "A new component — a backend, a service, a separate project — gets its OWN workspace (kl_workspace_create, then kl_workspace_ask), unless the person names an existing workspace to put it in. Never add an unrelated component to a workspace because the code you touched last lives there.",
-  "To see how a workspace is getting on, use kl_workspace_progress.",
-  "The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.",
-].join("\n\n");
+const PLATFORM = [
+  "You have workspaces, environments, snapshots, repos and images, and tools for each.",
+  "- A workspace is a machine with packages and a shell. This one is yours: \"install X\" or \"switch environment\" means here.",
+  "- Another workspace is asked, not touched: kl_workspace_ask. Something new (a backend, a service, a project) gets a new workspace.",
+  "- An environment runs services (databases, queues, web). Add or remove a service, snapshot it, restore a snapshot, intercept a service to a workspace.",
+  "- Snapshots: take one, list them, restore or clone from one.",
+  "- Repos: clone into your workspace and work there; open pull requests with the tools.",
+  "- Images: build and push from your workspace.",
+  "",
+  "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
+  "Only the tools reach the platform. Never change anything the person did not ask for.",
+  "Answer in one line, then only the facts needed.",
+].join("\n");
+
+/** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
+export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = true): void {
+  const prompt = identity(hands, platform);
+  pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
+}
+
+/** The opening line: which machine this session is. Everything after it is the same for both. */
+export const BENCH_HANDS = "You are the Kloudlite harness, the person's bench.";
+
 
 /**
  * Registering one tool from the catalogue: the description a person reads is the
@@ -203,7 +195,9 @@ export function makeReg(pi: ExtensionAPI) {
         const publish = (v: unknown) => target && ctx?.ui?.setWidget("harness:exchange", [JSON.stringify(v)]);
         const id = `x-${toolCallId}`;
         publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
-        const r = await run(args, signal);
+        // A tool that throws — a name two things answer to, a repo that is not owner/name — answers
+        // with the sentence, not with a stack: the model can read a sentence and act on it.
+        const r = await run(args, signal).catch((e: Error) => ({ ...text(e.message), isError: true }));
         publish({ id: `${id}-in`, workspace: target, dir: "in", text: r.content.map((c) => c.text).join("").slice(0, 2000), state: r.isError ? "failed" : "done", ref: id });
         publish({ id, state: r.isError ? "failed" : "done" });
         return r;
@@ -256,6 +250,7 @@ async function propose(id: string, tool: string, args: Record<string, any>, ctx:
     return false;
   }
 }
+
 
 /** Where harness-bench listens for its own extension; a test points this elsewhere. */
 const BENCH_URL = () => process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789";
@@ -315,7 +310,6 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
     if (next.length === have.length) return { ...text(`none of ${a.packages.join(", ")} is installed here`), isError: true };
     return setPackages(next);
   });
-  reg("kl_pkg_update", {}, () => answer("POST", `/v1/workspaces/${encodeURIComponent(own)}/packages/update`));
   if (!space) return;
   // A person's space follows ONE environment; this machine and every workspace in it resolve its services by bare name.
   reg("kl_env_current", {}, () => answer("GET", "/v1/me/environments"));
@@ -367,9 +361,6 @@ function repoTools(reg: ReturnType<typeof makeReg>) {
   reg("kl_pull_merge", { repo: R, number: Type.Number(), method: O(S("fast-forward (default), squash, merge or rebase")) }, (a) =>
     answer("POST", at(a.repo, `/pulls/${Number(a.number)}/merge${q({ strategy: a.method })}`)));
   reg("kl_pull_close", { repo: R, number: Type.Number() }, (a) => answer("POST", at(a.repo, `/pulls/${Number(a.number)}/close`)));
-  reg("kl_compare", { repo: R, base: S("branch to compare against"), head: S("branch with the change") }, (a) => answer("GET", at(a.repo, `/compare${q({ base: a.base, head: a.head })}`)));
-  reg("kl_commit", { repo: R, branch: S("branch to commit onto"), message: S("commit message"), patch: S("a unified diff") }, (a) =>
-    answer("POST", at(a.repo, "/commits"), { branch: a.branch, message: a.message, patch: a.patch }));
 }
 
 function environmentTools(reg: ReturnType<typeof makeReg>) {
@@ -427,6 +418,22 @@ const RESTING = new Set(["running", "stopped", "error", "failed", "deleted"]);
 export function tools(pi: ExtensionAPI) {
   const reg = makeReg(pi);
   const S = (d: string) => Type.String({ description: d });
+  const WS = S("workspace, by name or id");
+  const ENV = S("environment, by name or id");
+  /**
+   * An object's snapshots, as a person thinks of them: what they said, and when. The volume behind
+   * them is the platform's business — a person takes a snapshot of their workspace, not of a volume —
+   * so it is resolved here and never named in the answer.
+   */
+  const snapshotsOf = async (kind: "workspaces" | "environments", id: string) => {
+    const vols = await call("GET", "/v1/volumes");
+    const vol = (vols.data as { name?: string; volume?: string }[] | null)?.find((v) => v.name === id)?.volume;
+    if (!vol) return text("no snapshots yet");
+    const h = await call("GET", `/v1/volumes/${encodeURIComponent(vol)}/history`);
+    if (h.status >= 400) return { ...text(`${h.status}: ${typeof h.data === "string" ? h.data : JSON.stringify(h.data)}`), isError: true };
+    const rows = (Array.isArray(h.data) ? h.data : []) as { id: string; message?: string; createdAt?: string; phase?: string }[];
+    return text(rows.length ? rows.map((r) => ({ snapshot: r.id, message: r.message || undefined, taken: r.createdAt, state: r.phase })) : "no snapshots yet");
+  };
   /**
    * A lifecycle verb: do it, then wait for it. The answer is the FINAL document, so the model has
    * no reason to poll and nothing to guess; a wait that runs out says what state it is still in
@@ -438,6 +445,42 @@ export function tools(pi: ExtensionAPI) {
     const state = String((r.data as any)?.state ?? "");
     return text(r.settled ? r.data : `still ${state || "working"} after ${Math.round(r.waitedMs / 1000)}s\n${JSON.stringify(r.data, null, 2)}`);
   };
+  /**
+   * The two things a person never types. Where their work runs is where THIS machine runs, and
+   * whose it is is the space they are in — asking the model for a region id or an owner slug is
+   * asking it to look them up first, which is exactly the "checked the quota before creating"
+   * the owner objected to.
+   */
+  let ownRegion: string | undefined;
+  const region = async (): Promise<string | undefined> => {
+    const own = process.env.KL_WORKSPACE_ID;
+    if (ownRegion || !own) return ownRegion;
+    const r = await call("GET", `/v1/workspaces/${encodeURIComponent(own)}`);
+    return (ownRegion = (r.data as { region?: string } | null)?.region);
+  };
+  /** A team space owns what is made in it; a personal one is the caller's own, which /v1 defaults to. */
+  const owner = () => {
+    const space = process.env.KL_TEAM;
+    return space && space !== process.env.KL_OWNER ? space : undefined;
+  };
+  /**
+   * An id, or the NAME a person calls it. Every listing already carries both, so a name costs one
+   * GET and saves the model a lookup it would otherwise do out loud. Ambiguity is refused rather
+   * than guessed — two workspaces called "api" is exactly when picking one is wrong.
+   */
+  const resolve = async (kind: "workspaces" | "environments", idOrName: string): Promise<string> => {
+    const r = await call("GET", `/v1/${kind}`);
+    const rows = (Array.isArray(r.data) ? r.data : []) as { id?: string; name?: string }[];
+    if (rows.some((x) => x.id === idOrName)) return idOrName;
+    const hit = rows.filter((x) => x.name === idOrName);
+    if (hit.length === 1) return hit[0].id!;
+    if (hit.length > 1) throw new Error(`${hit.length} ${kind} are called ${idOrName}; name it by id (${hit.map((x) => x.id).join(", ")})`);
+    // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours.
+    return idOrName;
+  };
+  const ws = (a: Record<string, any>) => resolve("workspaces", String(a.id));
+  const env = (a: Record<string, any>) => resolve("environments", String(a.id));
+
   /** The id a create answered with, or the one it was given. */
   const idOf = (started: { data: unknown }, fallback = "") => String((started.data as any)?.id ?? fallback);
   /**
@@ -476,86 +519,56 @@ export function tools(pi: ExtensionAPI) {
     "kl_workspace_create",
     {
       name: S("workspace name"),
-      region: S("region id"),
-      team: O(S("team slug; absent = personal")),
-      repo: O(S("repository to seed from, e.g. kloudlite/rustic-git")),
+      repo: O(S("repository to start from, e.g. kloudlite/rustic-git")),
       branch: O(S("branch to check out")),
-      quota_gb: O(Type.Number({ description: "disk quota in GB (default 20)" })),
       packages: O(Type.Array(Type.String(), { description: "packages: attr or attr@version" })),
+      from_snapshot: O(S("a snapshot id to start from instead of an empty workspace")),
     },
     async (a, signal) => {
-      const started = await call("POST", "/v1/workspaces", { name: a.name, region: a.region, team: a.team, repo: a.repo, branch: a.branch, quota_gb: a.quota_gb ?? 20, packages: a.packages });
+      // One verb for a person: "make me a workspace", from nothing or from a snapshot they named.
+      const started = a.from_snapshot
+        ? await call("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.from_snapshot, packages: a.packages })
+        : await call("POST", "/v1/workspaces", { name: a.name, region: await region(), team: owner(), repo: a.repo, branch: a.branch, quota_gb: 20, packages: a.packages });
       return after("workspaces", started, idOf(started), CAP.create, signal);
     },
   );
-  reg("kl_workspace_start", { id: S("workspace id") }, async (a, signal) => after("workspaces", await call("POST", `/v1/workspaces/${a.id}/start`), a.id, CAP.start, signal));
-  reg("kl_workspace_stop", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/stop`));
-  reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, async (a, signal) => afterPush("workspaces", await call("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }), a.id, signal));
-  reg("kl_workspace_clone", { id: S("source workspace id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/workspaces/${a.id}/clone`, { name: a.name }));
-  reg("kl_workspace_packages_update", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/packages/update`));
-  reg(
-    "kl_workspace_restore",
-    { name: S("name for the restored workspace"), snapshot_id: S("snapshot id to restore"), image: O(S("override the snapshot's image")), packages: O(Type.Array(Type.String(), { description: "override the snapshot's packages" })), quota_gb: O(Type.Number({ description: "override the snapshot's disk quota" })) },
-    async (a, signal) => {
-      const started = await call("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb });
-      return after("workspaces", started, idOf(started), CAP.restore, signal);
-    },
-  );
-  reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
+  reg("kl_workspace_start", { id: WS }, async (a, signal) => { const id = await ws(a); return after("workspaces", await call("POST", `/v1/workspaces/${id}/start`), id, CAP.start, signal); });
+  reg("kl_workspace_stop", { id: WS }, async (a) => answer("POST", `/v1/workspaces/${await ws(a)}/stop`));
+  reg("kl_workspace_snapshot", { id: WS, message: O(S("what this snapshot is")) }, async (a, signal) => {
+    const id = await ws(a);
+    return afterPush("workspaces", await call("POST", `/v1/workspaces/${id}/push`, { message: a.message }), id, signal);
+  });
+  reg("kl_workspace_snapshots", { id: WS }, async (a) => snapshotsOf("workspaces", await ws(a)));
+  reg("kl_workspace_clone", { id: WS, name: S("name for the clone") }, async (a) => answer("POST", `/v1/workspaces/${await ws(a)}/clone`, { name: a.name }));
+  reg("kl_workspace_delete", { id: WS }, async (a) => answer("DELETE", `/v1/workspaces/${await ws(a)}`));
 
   // environments
   environmentTools(reg);
   reg(
     "kl_environment_create",
-    { name: S("environment name"), region: S("region id"), owner: O(S("team slug; absent = personal")), services: Type.Array(SERVICE, { description: "services to run" }) },
+    { name: S("environment name"), services: O(Type.Array(SERVICE, { description: "services to run" })), from_snapshot: O(S("a snapshot id to start from instead of a services list")) },
     async (a, signal) => {
-      const started = await call("POST", "/v1/environments", { name: a.name, region: a.region, owner: a.owner, services: a.services.map(service) });
+      const started = a.from_snapshot
+        ? await call("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.from_snapshot, owner: owner(), region: await region(), services: a.services?.map(service) })
+        : await call("POST", "/v1/environments", { name: a.name, region: await region(), owner: owner(), services: (a.services ?? []).map(service) });
       return after("environments", started, idOf(started), CAP.create, signal);
     },
   );
-  reg("kl_environment_start", { id: S("environment id") }, async (a, signal) => after("environments", await call("POST", `/v1/environments/${a.id}/start`), a.id, CAP.start, signal));
-  reg("kl_environment_stop", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/stop`));
-  reg("kl_environment_push", { id: S("environment id"), message: O(S("what this snapshot is")) }, async (a, signal) => afterPush("environments", await call("POST", `/v1/environments/${a.id}/push`, { message: a.message }), a.id, signal));
-  reg("kl_environment_clone", { id: S("source environment id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/environments/${a.id}/clone`, { name: a.name }));
-  reg(
-    "kl_environment_restore",
-    { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(SERVICE, { description: "override the services the snapshot froze" })) },
-    async (a, signal) => {
-      const started = await call("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services?.map(service) });
-      return after("environments", started, idOf(started), CAP.restore, signal);
-    },
-  );
-  reg("kl_environment_restore_in_place", { id: S("environment id"), snapshot_id: S("snapshot id of this environment's own volume") }, async (a, signal) =>
-    after("environments", await call("POST", `/v1/environments/${a.id}/restore-in-place`, { snapshot_id: a.snapshot_id }), a.id, CAP.restore, signal));
-  reg("kl_environment_delete", { id: S("environment id") }, (a) => answer("DELETE", `/v1/environments/${a.id}`));
-
-  // platform
-  reg("kl_regions", {}, () => answer("GET", "/v1/regions"));
-  reg("kl_quota", {}, () => answer("GET", "/v1/quota"));
-  reg("kl_volumes", { name: O(S("a volume name, for its history")) }, (a) => answer("GET", a.name ? `/v1/volumes/${a.name}/history` : "/v1/volumes"));
-  reg("kl_builder", {}, () => answer("GET", "/v1/builders/me"));
-  reg("kl_volume_history", { name: S("volume name") }, (a) => answer("GET", `/v1/volumes/${a.name}/history`));
-  reg("kl_volume_delete", { name: S("volume name; it must be detached") }, (a) => answer("DELETE", `/v1/volumes/${a.name}`));
-  reg("kl_requests", {}, () => answer("GET", "/v1/requests"));
-  // Anything that has to be GRANTED is a request; one pending per owner per kind.
-  reg(
-    "kl_request_create",
-    {
-      kind: Type.Union([Type.Literal("quota"), Type.Literal("access"), Type.Literal("region"), Type.Literal("other")], { description: "what is being asked for" }),
-      reason: O(S("why, in the person's words")),
-      owner: O(S("team slug; absent = your own")),
-      quota: O(Type.Object({ workspaces: O(Type.Number()), environments: O(Type.Number()), snapshots: O(Type.Number()), diskGb: O(Type.Number()), cpu: O(Type.Number()), memoryGb: O(Type.Number()) }, { description: "kind=quota: the ceilings asked for" })),
-      access: O(Type.Object({ team: Type.String(), role: Type.String() }, { description: "kind=access: team and role" })),
-      region: O(Type.Object({ region: Type.String() }, { description: "kind=region: the region asked for" })),
-      other: O(Type.Object({ title: Type.String(), body: Type.String() }, { description: "kind=other: what is being asked" })),
-    },
-    (a) => answer("POST", "/v1/requests", { kind: a.kind, reason: a.reason, owner: a.owner, quota: a.quota, access: a.access, region: a.region, other: a.other }),
-  );
-  // Claims only, unverified: the api is what verifies; the token itself never reaches the model.
-  reg("kl_whoami", {}, async () => {
-    const claims = JSON.parse(Buffer.from(token().token.split(".")[1] ?? "", "base64url").toString() || "{}") as { sub?: string; team?: string; exp?: number };
-    return text({ username: claims.sub, team: claims.team, expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : undefined });
+  reg("kl_environment_start", { id: ENV }, async (a, signal) => { const id = await env(a); return after("environments", await call("POST", `/v1/environments/${id}/start`), id, CAP.start, signal); });
+  reg("kl_environment_stop", { id: ENV }, async (a) => answer("POST", `/v1/environments/${await env(a)}/stop`));
+  reg("kl_environment_snapshot", { id: ENV, message: O(S("what this snapshot is")) }, async (a, signal) => {
+    const id = await env(a);
+    return afterPush("environments", await call("POST", `/v1/environments/${id}/push`, { message: a.message }), id, signal);
   });
+  reg("kl_environment_snapshots", { id: ENV }, async (a) => snapshotsOf("environments", await env(a)));
+  reg("kl_environment_clone", { id: ENV, name: S("name for the clone") }, async (a) => answer("POST", `/v1/environments/${await env(a)}/clone`, { name: a.name }));
+  // Restore means "put it back": into the environment the person named, not into a new one.
+  reg("kl_environment_restore", { id: ENV, snapshot: S("snapshot id to go back to") }, async (a, signal) => {
+    const id = await env(a);
+    return after("environments", await call("POST", `/v1/environments/${id}/restore-in-place`, { snapshot_id: a.snapshot }), id, CAP.restore, signal);
+  });
+  reg("kl_environment_delete", { id: ENV }, async (a) => answer("DELETE", `/v1/environments/${await env(a)}`));
+
   repoTools(reg);
   progressTool(reg);
   capabilities(reg);
@@ -570,7 +583,8 @@ export function tools(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   // A `btw` fork runs `--no-tools` over a copy of a session's transcript. It registers nothing —
   // it is loaded ONLY so it is told what it is, like every other session (owner, 2026-09-17).
-  if (process.env.KL_FORK === "1") return tellItWhereItStands(pi, "You answer one question about this bench's work, from the transcript you were forked from. You have no tools: you can change nothing, and you cannot look anything up — answer from what is in front of you, or say it is not there.");
+  // A fork has no tools at all, so the list of what the tools do would be a list of lies.
+  if (process.env.KL_FORK === "1") return tellItWhereItStands(pi, "You are the Kloudlite harness. You answer one question about this bench's work, from the transcript you were forked from. You have no tools: you can change nothing, and you cannot look anything up — answer from what is in front of you, or say it is not there.", false);
   // The mode is which machine's session this is: a workspace names it, the bench is its own
   // (`KL_WORKSPACE_ID`, whose tool server `workspace-tools.ts` is pointed at by address).
   const inWorkspace = process.env.KL_TOOLS_WORKSPACE;

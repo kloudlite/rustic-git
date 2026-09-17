@@ -29,15 +29,12 @@ export const WORKSPACE_TOOLS = [
   "read,write,edit,bash,grep,find,ls,process",
   // code and containers, in this machine
   "kl_repo_clone,kl_container_build,kl_container_push,kl_images",
-  // and the repositories themselves, over /v1
-  "kl_repos,kl_repo_create,kl_repo_branches,kl_pulls,kl_pull,kl_pull_create,kl_pull_merge,kl_pull_close,kl_compare,kl_commit",
-  // its own machine
-  "kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update",
-  // and its space's environment: the person debugging here is the one who needs a service added
-  // or its traffic pointed at this workspace (owner, 2026-09-17).
+  // and everything a person does with the platform from inside a workspace
   "kl_capabilities,kl_workspace_progress",
+  "kl_pkg_list,kl_pkg_add,kl_pkg_rm",
   "kl_env_current,kl_env_switch,kl_env_clear",
   "kl_environments,kl_environment,kl_environment_service_add,kl_environment_service_rm,kl_intercept",
+  "kl_repos,kl_repo_create,kl_repo_branches,kl_pulls,kl_pull,kl_pull_create,kl_pull_merge,kl_pull_close",
 ].join(",");
 
 /** The built-in tools `--no-builtin-tools` takes away, and the same seven names `workspace-tools.ts`

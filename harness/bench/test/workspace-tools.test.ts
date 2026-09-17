@@ -215,23 +215,6 @@ test("a 401 maps to the sign-in sentence", async () => {
   }
 });
 
-test("whoami never returns the token", async () => {
-  const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
-  const tok = `${b64({ alg: "HS256" })}.${b64({ sub: "ada", team: "acme", exp: 4102444800 })}.sig`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-tok-"));
-  const restore = withToken(path.join(dir, "token"), tok, "http://127.0.0.1:1");
-  const tools: Record<string, { execute: (...a: unknown[]) => Promise<{ content: { text: string }[] }> }> = {};
-  kloudlite({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
-  try {
-    const out = (await tools.kl_whoami.execute("c1", {}, undefined, undefined, undefined)).content[0].text;
-    assert.deepEqual(JSON.parse(out), { username: "ada", team: "acme", expires_at: "2100-01-01T00:00:00.000Z" });
-    assert.ok(!out.includes(tok) && !out.includes("sig"));
-  } finally {
-    restore();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("a background command and the process tool are the tool server's own process calls", () => {
   assert.deepEqual(toIde("bash", { command: "npm run dev", background: true }), { tool: "exec", args: { cmd: "npm run dev", detach: true } });
   assert.deepEqual(toIde("process", { action: "start", command: "vite" }), { tool: "exec", args: { cmd: "vite", detach: true } });

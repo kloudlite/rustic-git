@@ -65,8 +65,8 @@ test("a bench session registers exactly the catalogue; a workspace session only 
   }
 });
 
-test("the system prompt is the harness's own, not the agent CLI's", async () => {
-  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
+test("the system prompt is the harness's own, and says only what the model must know", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
   try {
     const { pi, hooks } = fakePi();
     kloudlite(pi);
@@ -78,29 +78,24 @@ test("the system prompt is the harness's own, not the agent CLI's", async () => 
     assert.equal(prompt, identity(BENCH_HANDS));
     assert.doesNotMatch(prompt, /\bpi\b/i);
     assert.doesNotMatch(prompt, /\/opt\/harness/);
-    assert.match(prompt, /Kloudlite harness/);
-    assert.match(prompt, /kl_workspace_ask/);
-    assert.match(prompt, /kl_pkg_add/);
-    // The rule the fleet needed: a model asked what it could do ran a destroy to find out.
-    assert.match(prompt, /Never call a tool whose effect is write or destroy unless the person asked/);
-    assert.match(prompt, /answer from kl_capabilities and describe the tools by name; do not run them to find out/);
-    assert.match(prompt, /Never go behind the tools for it/);
-    assert.match(prompt, /Never sleep or poll from the shell/);
-    // A new component gets its own workspace: one was installed into a running svelte frontend.
-    assert.match(prompt, /gets its OWN workspace \(kl_workspace_create, then kl_workspace_ask\)/);
-    assert.match(prompt, /use kl_workspace_progress/);
-    // Short answers, because the owner reads the id and the error, not the plan.
-    assert.match(prompt, /Answer short\. Lead with the result in one line\./);
-    assert.match(identity("its own hands here"), /Answer short/);
-    // A card already shows the fields; the model's line is what happened, not the card again.
-    assert.match(prompt, /never repeat its fields/);
-    // The caveman rules are embedded verbatim from the vendored file, not paraphrased.
+    assert.match(prompt, /^You are the Kloudlite harness, the person's bench\./);
+
+    // What it must know: the five things, in the person's words.
+    for (const rule of [
+      /A workspace is a machine with packages and a shell/,
+      /Another workspace is asked, not touched: kl_workspace_ask/,
+      /Something new \(a backend, a service, a project\) gets a new workspace/,
+      /Do what is asked, directly\. No checks first\./,
+      /Only the tools reach the platform\. Never change anything the person did not ask for\./,
+      /Answer in one line, then only the facts needed\./,
+    ]) assert.match(prompt, rule);
+
+    // Mechanism is NOT prompt text: it happens whether the model knows about it or not.
+    const before = prompt.slice(0, prompt.indexOf("Speak in the caveman style"));
+    for (const word of ["proposal", "render", "exchange", "widget", "quota", "region"]) assert.ok(!new RegExp(word, "i").test(before), `${word} is mechanism, not prompt: ${before}`);
+    // The style still rides along.
     assert.match(prompt, /Speak in the caveman style below\. Chat text only/);
-    assert.match(prompt, /Respond terse like smart caveman\. All technical substance stay\./);
-    assert.match(prompt, /Never drop not\/never\/no\/only\/except/);
-    // Every mode is told it: a workspace session's writes land on somebody's real machine too.
-    assert.match(identity("its own hands here"), /Never call a tool whose effect is write or destroy/);
-    assert.match(identity("its own hands here"), /Never go behind the tools/);
+    assert.match(prompt, /Respond terse like smart caveman\./);
   } finally {
     restore();
   }
@@ -150,6 +145,8 @@ test("a btw fork registers nothing and is still told what it is", async () => {
     assert.doesNotMatch(prompt, /\bpi\b/i);
     assert.match(prompt, /Kloudlite harness/);
     assert.match(prompt, /one question/);
+    // It has no tools, so it is not told what the tools do — that list would be a list of lies.
+    assert.ok(!prompt.includes("kl_workspace_ask"), prompt);
   } finally {
     restore();
   }
@@ -442,4 +439,106 @@ test("settle waits for the platform instead of the model sleeping", async () => 
   asks = 0;
   r = await settle(async () => (asks++, { status: 200, data: { state: "creating" } }), done, 60_000, ac.signal, 2_000, now, sleep);
   assert.deepEqual([asks, r.settled], [1, false]);
+});
+
+/** A fake /v1 that records every call, for the tools that now fill in what a person would not type. */
+function fakeApi(routes: (m: string, url: string, body: any) => unknown) {
+  const seen: { m: string; url: string; body: any }[] = [];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      const body = b ? JSON.parse(b) : undefined;
+      seen.push({ m: req.method!, url: req.url!, body });
+      if (req.url!.startsWith("/proposals")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        return void res.end(JSON.stringify({ answer: "yes" }));
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(routes(req.method!, req.url!, body) ?? {}));
+    });
+  });
+  return { srv, seen, listen: async () => (await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r)), `http://127.0.0.1:${(srv.address() as { port: number }).port}`) };
+}
+
+test("a create fills in the region and the owner, and takes a name where an id is expected", async () => {
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "centralindia-k3s" };
+    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-abc123", name: "svelte-frontend", state: "running" }, { id: "ws-def456", name: "api", state: "running" }, { id: "ws-ghi789", name: "api", state: "stopped" }];
+    if (url === "/v1/workspaces" && m === "POST") return { id: "ws-new", state: "running" };
+    if (url.startsWith("/v1/workspaces/ws-")) return { id: "ws-abc123", state: "running" };
+    return {};
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-user-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
+    assert.equal(tool("kl_workspace_create").parameters?.properties?.region, undefined, "a person does not type a region");
+    assert.equal(tool("kl_workspace_create").parameters?.properties?.owner, undefined, "nor an owner");
+
+    await tool("kl_workspace_create").execute("c1", { name: "svelte-backend", packages: ["go"] }, undefined, undefined, undefined);
+    const created = api.seen.find((x) => x.m === "POST" && x.url === "/v1/workspaces")!;
+    // Region from this machine's own document; owner from the space it is in.
+    assert.equal(created.body.region, "centralindia-k3s");
+    assert.equal(created.body.team, "acme");
+    assert.equal(created.body.name, "svelte-backend");
+
+    // A name is as good as an id, and the id is what goes on the wire.
+    api.seen.length = 0;
+    await tool("kl_workspace_stop").execute("c2", { id: "svelte-frontend" }, undefined, undefined, undefined);
+    assert.ok(api.seen.some((x) => x.url === "/v1/workspaces/ws-abc123/stop"), JSON.stringify(api.seen));
+    // An id still works, and costs the same one listing.
+    api.seen.length = 0;
+    await tool("kl_workspace_stop").execute("c3", { id: "ws-def456" }, undefined, undefined, undefined);
+    assert.ok(api.seen.some((x) => x.url === "/v1/workspaces/ws-def456/stop"));
+    // Two of a name is refused, never guessed.
+    const clash = await tool("kl_workspace_stop").execute("c4", { id: "api" }, undefined, undefined, undefined);
+    assert.equal(clash.isError, true);
+    assert.match(clash.content[0].text, /2 workspaces are called api; name it by id \(ws-def456, ws-ghi789\)/);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a snapshot is a snapshot: create from one, list them, and never the word volume", async () => {
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "r1" };
+    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-1", name: "api", state: "running" }];
+    if (url === "/v1/volumes") return [{ name: "ws-1", volume: "vol-9", kind: "workspace" }];
+    if (url === "/v1/volumes/vol-9/history") return [{ id: "snap-2", message: "before the refactor", createdAt: "2026-09-17T10:00:00Z", phase: "Ready" }];
+    if (url === "/v1/workspaces/restore") return { id: "ws-new", state: "running" };
+    return { id: "ws-new", state: "running" };
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-snap-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
+
+    // from_snapshot is the same verb, not a second one.
+    await tool("kl_workspace_create").execute("c1", { name: "api-copy", from_snapshot: "snap-2" }, undefined, undefined, undefined);
+    const r = api.seen.find((x) => x.m === "POST" && x.url === "/v1/workspaces/restore")!;
+    assert.deepEqual([r.body.name, r.body.snapshot_id], ["api-copy", "snap-2"]);
+    assert.ok(!api.seen.some((x) => x.m === "POST" && x.url === "/v1/workspaces"), "an empty workspace was not created as well");
+
+    const listed = await tool("kl_workspace_snapshots").execute("c2", { id: "api" }, undefined, undefined, undefined);
+    const out = listed.content[0].text as string;
+    assert.match(out, /snap-2/);
+    assert.match(out, /before the refactor/);
+    // The volume is the platform's business; a person snapshots their workspace.
+    assert.ok(!/volume/i.test(out), out);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
