@@ -138,12 +138,15 @@ export function serve(
         if (p.length === 1 && m === "POST") {
           const b = await body(req);
           if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
-          return send(res, 202, await bench.agent(String(b.workspace ?? ""), String(b.task ?? ""), String(b.name ?? ""), b.from));
+          return send(res, 202, await bench.agent(String(b.workspace ?? ""), String(b.task ?? ""), String(b.name ?? ""), b.from, b.clone ? String(b.clone) : undefined));
         }
         // Closing one is removing its session: an agent's transcript is its own and goes with it.
+        // Its clone, if it had one, is scratch — the caller keeps whatever it wanted from it.
         if (p.length === 2 && m === "DELETE") {
-          await bench.remove(`e-${p[1]}`, true);
-          return send(res, 204);
+          const clone = bench.cloneOf(p[1]);
+          await bench.remove(`e-${p[1]}`, true).catch(() => undefined);
+          bench.forgetClone(p[1]);
+          return send(res, 200, { closed: p[1], clone });
         }
       }
       // The person's memory. A workspace session has no bench filesystem, so it saves through here

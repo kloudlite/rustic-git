@@ -161,7 +161,7 @@ const PLATFORM = [
   "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
-  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent.",
+  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent; parallel or risky changes → isolated agents.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer.",
@@ -283,7 +283,7 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  * platform tool stays REGISTERED — the proposals, the cards and the waits are unchanged — but
  * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
  */
-export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "plan", "skill", "tool_search", "memory"];
+export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory"];
 
 /** The six skills, read from beside the extension: product words, not tool lists. */
 const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
@@ -372,24 +372,38 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       task: Type.String({ description: "the whole brief, in one message: what to do and what to answer with" }),
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
+      isolated: Type.Optional(Type.Boolean({ description: "give the agent its own clone of that workspace: for parallel or risky changes" })),
     },
     async (a) => {
       // One verb, two shapes: a workspace REMEMBERS (its own session, a teammate), an agent starts
       // clean and is thrown away. A person says "ask X to…" for both, so the tool is one.
       if (a.to === "agent") {
         const name = `${slug(a.name ?? a.task.split(/\s+/).slice(0, 3).join("-"))}-${Math.random().toString(36).slice(2, 8)}`;
-        const r = await benchCall("POST", "/agents", { task: a.task, workspace: a.workspace ?? own, name, from: process.env.KL_SESSION });
+        const where = a.workspace ?? own;
+        // ISOLATED: its own copy of the machine, so two agents changing files at once cannot
+        // trip over each other and a refactor that goes wrong is thrown away with the clone.
+        let clone: string | undefined;
+        if (a.isolated && where) {
+          const made = await call("POST", `/v1/workspaces/${encodeURIComponent(where)}/clone`, { name: `${where}-eph-${Math.random().toString(36).slice(2, 8)}` });
+          if (made.status >= 400) return { ...text(`${made.status}: ${typeof made.data === "string" ? made.data : JSON.stringify(made.data)}`), isError: true };
+          clone = String((made.data as { id?: string } | null)?.id ?? "");
+        }
+        const r = await benchCall("POST", "/agents", { task: a.task, workspace: where, clone, name, from: process.env.KL_SESSION });
         if (!r.ok) return { ...text(String(r.data?.error ?? "the bench could not start it")), isError: true };
-        return text(`agent ${name} started`);
+        return text(`agent ${name} started${clone ? ` in clone ${clone}` : ""}`);
       }
       const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: a.task, from: process.env.KL_SESSION });
       if (!r.ok) return { ...text(String(r.data?.error ?? `the bench answered about ${a.to}`)), isError: true };
       return text(`queued in ${a.to}'s session; its reply arrives here`);
     },
   );
-  reg("kl_agent_close", { name: Type.String({ description: "the agent's name" }) }, async (a) => {
+  reg("ask_close", { name: Type.String({ description: "the agent's name" }) }, async (a) => {
     const r = await benchCall("DELETE", `/agents/${encodeURIComponent(a.name)}`);
-    return r.ok ? text(`agent ${a.name} closed`) : { ...text(String(r.data?.error ?? "no such agent")), isError: true };
+    if (!r.ok) return { ...text(String(r.data?.error ?? "no such agent")), isError: true };
+    // A clone is the agent's scratch: it goes with the agent, and nobody is asked about it.
+    const clone = r.data?.clone as string | undefined;
+    if (clone) await call("DELETE", `/v1/workspaces/${encodeURIComponent(clone)}`);
+    return text(`agent ${a.name} closed${clone ? `; clone ${clone} deleted` : ""}`);
   });
 }
 
@@ -723,7 +737,7 @@ export function tools(pi: ExtensionAPI) {
   memoryTools(reg);
   capabilities(reg);
   // Thirteen to start with; the rest are one `tool_search` away.
-  pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
+  pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
 }
 
 /**
@@ -752,7 +766,7 @@ export default function (pi: ExtensionAPI) {
     searchTools(reg, pi);
     memoryTools(reg);
     capabilities(reg);
-    return pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
+    return pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
   }
   tools(pi);
   const own = process.env.KL_WORKSPACE_ID;

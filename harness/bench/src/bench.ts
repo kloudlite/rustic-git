@@ -587,11 +587,14 @@ export class Bench {
    *
    * Several run at once because each has its own session; the caller carries on meanwhile.
    */
-  async agent(workspace: string, task: string, name: string, from: string): Promise<{ session: string; exchange: string; name: string }> {
+  async agent(workspace: string, task: string, name: string, from: string, clone?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
     this.refuse(true);
     if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
     if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
-    const s = await this.openEphemeral(workspace, name);
+    // An ISOLATED agent works in a clone of the caller's machine: `openEphemeral` targets whatever
+    // workspace it is given, so the session's tools run on the CLONE's tool server, not the caller's.
+    const s = await this.openEphemeral(clone ?? workspace, name);
+    if (clone) this.clones.set(name, { clone, from });
     const exchange = `agent-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: task, state: "queued" }));
     this.emit({ type: "exchange", row });
@@ -608,7 +611,21 @@ export class Bench {
       this.transitionAsk({ exchange, from, workspace: name }, "failed");
       throw e;
     }
-    return { session: s.id, exchange, name };
+    return { session: s.id, exchange, name, clone };
+  }
+
+  /** Which agents are working in a clone, so closing one — or its caller — takes the clone with it. */
+  private clones = new Map<string, { clone: string; from: string }>();
+  /** The clone an agent is working in, if any: the desktop says "in clone <name>" and the close deletes it. */
+  cloneOf(name: string): string | undefined {
+    return this.clones.get(name)?.clone;
+  }
+  /** Agents whose caller is this session: removing a session closes what it started. */
+  agentsOf(session: string): string[] {
+    return [...this.clones.entries()].filter(([, v]) => v.from === session).map(([name]) => name);
+  }
+  forgetClone(name: string): void {
+    this.clones.delete(name);
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */

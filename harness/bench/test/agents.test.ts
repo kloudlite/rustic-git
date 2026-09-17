@@ -40,7 +40,7 @@ test("an agent runs in its own ephemeral session and reports back to whoever sta
     assert.ok(back.some((m) => String(m.content).startsWith("[from agent audit-1]")), JSON.stringify(back));
 
     // Closing one takes its transcript with it.
-    assert.equal((await fetch(`${t.base}/agents/audit-1`, { method: "DELETE" })).status, 204);
+    assert.deepEqual(await (await fetch(`${t.base}/agents/audit-1`, { method: "DELETE" })).json(), { closed: "audit-1" });
     assert.equal(t.bench.sessions.get("e-audit-1"), undefined);
 
     // A caller that is not a live session cannot start one.
@@ -97,6 +97,33 @@ test("the plan is kept per session, ticked by text, and published to the desktop
 
     // What a window that opened late reads.
     assert.deepEqual((await (await fetch(`${t.base}/plans`)).json()), [{ session, items: t.bench.plans.get(session) }]);
+  } finally {
+    await t.down();
+  }
+});
+
+test("an isolated agent works in a clone, and closing it says which clone to delete", async () => {
+  const t = await up("bench-iso-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    // The extension clones first and hands the clone's id here; the session then targets the CLONE's
+    // tool server, which is what keeps two agents changing files at once out of each other's way.
+    const r = await post(t.base, "/agents", { task: "upgrade to svelte 5", workspace: "svelte-app", clone: "svelte-app-eph-9f2a", name: "upgrade-1", from: caller });
+    assert.equal(r.status, 202);
+    const started = (await r.json()) as { session: string; name: string; clone?: string };
+    assert.deepEqual([started.session, started.name, started.clone], ["e-upgrade-1", "upgrade-1", "svelte-app-eph-9f2a"]);
+    assert.equal(t.bench.sessions.get("e-upgrade-1")!.target, "upgrade-1");
+    assert.equal(t.bench.sessions.get("e-upgrade-1")!.workspace, "svelte-app-eph-9f2a", "its session lives under the clone");
+    assert.equal(t.bench.cloneOf("upgrade-1"), "svelte-app-eph-9f2a");
+
+    // Two at once, each in its own clone.
+    await post(t.base, "/agents", { task: "audit the routes", workspace: "svelte-app", clone: "svelte-app-eph-77bb", name: "audit-2", from: caller });
+    assert.deepEqual(t.bench.agentsOf(caller).sort(), ["audit-2", "upgrade-1"]);
+
+    // Closing one names its clone, which is the agent's scratch and goes with it.
+    assert.deepEqual(await (await fetch(`${t.base}/agents/upgrade-1`, { method: "DELETE" })).json(), { closed: "upgrade-1", clone: "svelte-app-eph-9f2a" });
+    assert.equal(t.bench.cloneOf("upgrade-1"), undefined);
+    assert.deepEqual(t.bench.agentsOf(caller), ["audit-2"]);
   } finally {
     await t.down();
   }
