@@ -59,6 +59,19 @@ const BACK_DOORS: RegExp[] = [
   /https?:\/\/[^\s"'`/]*\.[^\s"'`/]*\/v1\//,
 ];
 
+/**
+ * A command that only waits. The lifecycle tools poll the platform themselves now, so a model that
+ * sleeps is burning a turn to learn nothing — it was doing `sleep 20; echo waited` after every
+ * create (the fleet, 2026-09-17). A sleep INSIDE real work (`npm test; sleep 1; curl …`) is not
+ * this: only a command whose every step is a timer or an echo is refused.
+ */
+const WAITING = "refused: tools wait for you; ask the tool again instead of sleeping";
+export function onlyWaits(cmd: string): boolean {
+  const steps = cmd.split(/&&|\|\||;/).map((x) => x.trim()).filter(Boolean);
+  if (!steps.length || !steps.some((x) => /^(sleep|timeout)\b/.test(x))) return false;
+  return steps.every((x) => /^(sleep|timeout)\b/.test(x) || /^echo\b/.test(x) || /^(true|:)$/.test(x) || /^date\b/.test(x));
+}
+
 /** The reason a command or path is refused, or undefined when there is none. */
 export function forbidden(s: unknown): string | undefined {
   const t = Array.isArray(s) ? s.join(" ") : typeof s === "string" ? s : "";
@@ -70,7 +83,8 @@ export function forbidden(s: unknown): string | undefined {
     /* no api url configured: nothing to name */
   }
   if (host && t.includes(host)) return REFUSAL;
-  return BACK_DOORS.some((re) => re.test(t)) ? REFUSAL : undefined;
+  if (BACK_DOORS.some((re) => re.test(t))) return REFUSAL;
+  return onlyWaits(t) ? WAITING : undefined;
 }
 
 /** Everything a call could reach with: what a shell would run, and what a path-taking tool would open. */

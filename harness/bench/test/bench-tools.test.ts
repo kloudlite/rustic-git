@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
-import kloudlite, { identity, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import kloudlite, { identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
 import { WORKSPACE_TOOLS } from "../src/rpc-child.ts";
@@ -83,6 +83,7 @@ test("the system prompt is the harness's own, not the agent CLI's", async () => 
     assert.match(prompt, /Never call a tool whose effect is write or destroy unless the person asked/);
     assert.match(prompt, /answer from kl_capabilities and describe the tools by name; do not run them to find out/);
     assert.match(prompt, /Never go behind the tools for it/);
+    assert.match(prompt, /Never sleep or poll from the shell/);
     // A new component gets its own workspace: one was installed into a running svelte frontend.
     assert.match(prompt, /gets its OWN workspace \(kl_workspace_create, then kl_workspace_ask\)/);
     assert.match(prompt, /use kl_workspace_progress/);
@@ -165,7 +166,9 @@ test("adding a service keeps every other service exactly as it was", async () =>
       // A real api: the next GET sees what the last PATCH wrote.
       if (req.method === "PATCH") live = (patched = JSON.parse(b)).services;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(req.method === "GET" ? { id: "devstack", services: live } : { ok: true }));
+      // The GET is both the read before the patch and the wait after it: every service ready, so
+      // the add settles at once rather than polling out its cap.
+      res.end(JSON.stringify(req.method === "GET" ? { id: "devstack", state: "running", services: live, service_status: live.map((x: any) => ({ name: x.name, ready: true })) } : { ok: true }));
     });
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
@@ -387,4 +390,46 @@ test("a process that exits on its own is noticed within a poll", async () => {
     srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("settle waits for the platform instead of the model sleeping", async () => {
+  const done = (d: any) => d?.state === "running";
+  const slept: number[] = [];
+  let clock = 0;
+  const sleep = async (ms: number) => void (slept.push(ms), (clock += ms));
+  const now = () => clock;
+
+  // Ready first ask: nothing is waited at all.
+  let asks = 0;
+  let r = await settle(async () => (asks++, { status: 200, data: { state: "running" } }), done, 10_000, undefined, 2_000, now, sleep);
+  assert.deepEqual([asks, slept.length, r.settled], [1, 0, true]);
+
+  // Ready on the third: two waits, and the final document is what comes back.
+  asks = 0;
+  slept.length = 0;
+  clock = 0;
+  r = await settle(async () => ({ status: 200, data: { state: ++asks < 3 ? "creating" : "running", id: "api" } }), done, 10_000, undefined, 2_000, now, sleep);
+  assert.deepEqual([asks, slept, r.settled], [3, [2_000, 2_000], true]);
+  assert.deepEqual(r.data, { state: "running", id: "api" });
+
+  // The cap: it stops, says how long it waited, and still hands back what it saw — not an error.
+  asks = 0;
+  slept.length = 0;
+  clock = 0;
+  r = await settle(async () => (asks++, { status: 200, data: { state: "creating" } }), done, 5_000, undefined, 2_000, now, sleep);
+  assert.equal(r.settled, false);
+  assert.equal(r.waitedMs, 4_000);
+  assert.deepEqual(r.data, { state: "creating" });
+
+  // A refusal is an answer: asking again cannot change it.
+  asks = 0;
+  r = await settle(async () => (asks++, { status: 404, data: "no such workspace" }), done, 10_000, undefined, 2_000, now, sleep);
+  assert.deepEqual([asks, r.settled], [1, false]);
+
+  // An aborted tool call stops at the next look, never mid-sleep forever.
+  const ac = new AbortController();
+  ac.abort();
+  asks = 0;
+  r = await settle(async () => (asks++, { status: 200, data: { state: "creating" } }), done, 60_000, ac.signal, 2_000, now, sleep);
+  assert.deepEqual([asks, r.settled], [1, false]);
 });

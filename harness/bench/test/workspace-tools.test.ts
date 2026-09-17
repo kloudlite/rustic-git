@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, onlyWaits, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -346,5 +346,15 @@ test("a refused command never reaches the tool server", async () => {
     }
   } finally {
     for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+});
+
+test("a command that only waits is refused; a sleep inside real work is not", () => {
+  for (const no of ["sleep 20", "  sleep 30; echo waited", "sleep 5 && echo done", "timeout 60 sleep 60", "sleep 2; date"]) {
+    assert.equal(onlyWaits(no), true, no);
+    assert.equal(forbidden(no), "refused: tools wait for you; ask the tool again instead of sleeping", no);
+  }
+  for (const ok of ["npm test", "npm run dev & sleep 2; curl localhost:3000", "sleep 1 && npm test", "echo hi", "kl pkg list"]) {
+    assert.equal(forbidden(ok), undefined, ok);
   }
 });

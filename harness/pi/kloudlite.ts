@@ -70,6 +70,33 @@ const SERVICE = Type.Object({
 });
 const service = (s: Record<string, any>) => ({ name: s.name, image: s.image, command: s.command ?? [], env: s.env ?? {}, mounts: s.mounts ?? [], ports: s.ports ?? [] });
 
+/**
+ * Wait for the platform, so the model does not. A create, a start, a restore and a push all answer
+ * 202 and finish later; with no way to wait, a model runs `bash "sleep 20; echo waited"` and then
+ * guesses (the fleet, 2026-09-17). This polls the route's own GET until `done` says so, honouring
+ * the abort the tool call carries, and answers what it last saw either way — a tool that timed out
+ * still hands back the real document, never an error and never a lie.
+ */
+export async function settle(
+  get: () => Promise<{ status: number; data: unknown }>,
+  done: (d: any) => boolean,
+  capMs: number,
+  signal?: AbortSignal,
+  everyMs = 2_000,
+  now: () => number = Date.now,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<{ data: unknown; waitedMs: number; settled: boolean }> {
+  const began = now();
+  for (;;) {
+    const r = await get();
+    const waitedMs = now() - began;
+    // A refusal is an answer: nothing is going to change by asking again.
+    if (r.status >= 400 || done(r.data)) return { data: r.data, waitedMs, settled: r.status < 400 };
+    if (signal?.aborted || waitedMs + everyMs > capMs) return { data: r.data, waitedMs, settled: false };
+    await sleep(everyMs);
+  }
+}
+
 const q = (o: Record<string, string | undefined>) => {
   const s = new URLSearchParams(Object.entries(o).filter(([, v]) => v) as [string, string][]).toString();
   return s ? `?${s}` : "";
@@ -110,6 +137,7 @@ export function identity(hands: string): string {
     // harmless only because that service did not exist). Each tool's description ends with its
     // effect — [read], [write], [destroy] — so the rule can be stated in those terms.
     "Never call a tool whose effect is write or destroy unless the person asked for that change in this conversation. When asked what you can do, answer from kl_capabilities and describe the tools by name; do not run them to find out.",
+    "Never sleep or poll from the shell. Lifecycle tools return when the platform is ready, and answer with the final state.",
     "When nothing you have does what was asked, say so and stop. Never go behind the tools for it — not the harness's own files, not the kl binary, not your session logs, not a token and a hand-made request. There is nothing there for you, and looking is refused.",
     // The owner, 2026-09-17: "I should see things very clearly." A model that narrates its plan
     // buries the one line that matters — the id, the port, the error.
@@ -279,6 +307,10 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
  * Creating, stopping, cloning, restoring and deleting an environment stay with the bench: those
  * are about the space, not about the work in front of one workspace.
  */
+/** A service is up, or the environment itself has stopped moving and it never will be. */
+const RESTING_ENV = new Set(["stopped", "error", "failed", "deleted"]);
+const SERVICE_CAP = 180_000;
+
 function environmentTools(reg: ReturnType<typeof makeReg>) {
   const S = (d: string) => Type.String({ description: d });
   const O = <T>(t: T) => Type.Optional(t as any);
@@ -304,10 +336,19 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
     return ((data as { services?: Record<string, any>[] } | null)?.services ?? []).slice();
   };
   const withServices = (id: string, next: Record<string, any>[]) => answer("PATCH", `/v1/environments/${encodeURIComponent(id)}`, { services: next });
-  reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a) => {
+  reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a, signal) => {
     const have = await services(a.id);
     const one = service(a.service);
-    return withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
+    const r = await withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
+    if (r.isError) return r;
+    // The service has to actually come up: waiting here is why nobody sleeps in a shell.
+    const w = await settle(
+      () => call("GET", `/v1/environments/${encodeURIComponent(a.id)}`),
+      (d) => (d?.service_status ?? []).some((x: { name: string; ready?: boolean }) => x.name === one.name && x.ready) || RESTING_ENV.has(String(d?.state ?? "")),
+      SERVICE_CAP,
+      signal,
+    );
+    return text(w.settled ? w.data : `${one.name} not ready after ${Math.round(w.waitedMs / 1000)}s\n${JSON.stringify(w.data, null, 2)}`);
   });
   reg("kl_environment_service_rm", { id: S("environment id"), name: S("the service to remove") }, async (a) => {
     const have = await services(a.id);
@@ -317,9 +358,43 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
   });
 }
 
+/** Per-verb ceilings: long enough for a real create on a cold node, short enough to answer. */
+const CAP = { create: 180_000, start: 180_000, restore: 180_000, push: 120_000 };
+/** A workspace or environment that has stopped moving: running, stopped, or broken. */
+const RESTING = new Set(["running", "stopped", "error", "failed", "deleted"]);
+
 export function tools(pi: ExtensionAPI) {
   const reg = makeReg(pi);
   const S = (d: string) => Type.String({ description: d });
+  /**
+   * A lifecycle verb: do it, then wait for it. The answer is the FINAL document, so the model has
+   * no reason to poll and nothing to guess; a wait that runs out says what state it is still in
+   * and hands back that document, which is a fact rather than a failure.
+   */
+  const after = async (kind: "workspaces" | "environments", started: { status: number; data: unknown }, id: string, cap: number, signal?: AbortSignal) => {
+    if (started.status >= 400) return { ...text(`${started.status}: ${typeof started.data === "string" ? started.data : JSON.stringify(started.data)}`), isError: true };
+    const r = await settle(() => call("GET", `/v1/${kind}/${encodeURIComponent(id)}`), (d) => RESTING.has(String(d?.state ?? "")), cap, signal);
+    const state = String((r.data as any)?.state ?? "");
+    return text(r.settled ? r.data : `still ${state || "working"} after ${Math.round(r.waitedMs / 1000)}s\n${JSON.stringify(r.data, null, 2)}`);
+  };
+  /** The id a create answered with, or the one it was given. */
+  const idOf = (started: { data: unknown }, fallback = "") => String((started.data as any)?.id ?? fallback);
+  /**
+   * A push answers `{id, phase}` and the cut happens after. The snapshot is only findable through
+   * its volume, and `/v1` hands the volume name back in the listing, not in the parent's document —
+   * so that is resolved once and then only the history is polled.
+   */
+  const afterPush = async (kind: "workspaces" | "environments", started: { status: number; data: unknown }, parent: string, signal?: AbortSignal) => {
+    if (started.status >= 400) return { ...text(`${started.status}: ${typeof started.data === "string" ? started.data : JSON.stringify(started.data)}`), isError: true };
+    const snap = idOf(started);
+    const vols = await call("GET", "/v1/volumes");
+    const vol = (vols.data as { name?: string; volume?: string }[] | null)?.find((v) => v.name === parent)?.volume;
+    if (!vol || !snap) return text(started.data ?? "pushed");
+    const ready = (rows: any) => Array.isArray(rows) && rows.some((r) => r.id === snap && String(r.phase).toLowerCase() === "ready");
+    const r = await settle(() => call("GET", `/v1/volumes/${encodeURIComponent(vol)}/history`), ready, CAP.push, signal);
+    const row = (r.data as any[] | undefined)?.find?.((x) => x.id === snap);
+    return text(r.settled && ready(r.data) ? { snapshot: snap, volume: vol, phase: "Ready", message: row?.message } : `snapshot ${snap} still ${row?.phase ?? "being cut"} after ${Math.round(r.waitedMs / 1000)}s`);
+  };
   const O = <T>(t: T) => Type.Optional(t as any);
 
   // workspaces. Another workspace is ASKED, never driven: the request goes to the bench's own
@@ -347,17 +422,23 @@ export function tools(pi: ExtensionAPI) {
       quota_gb: O(Type.Number({ description: "disk quota in GB (default 20)" })),
       packages: O(Type.Array(Type.String(), { description: "packages: attr or attr@version" })),
     },
-    (a) => answer("POST", "/v1/workspaces", { name: a.name, region: a.region, team: a.team, repo: a.repo, branch: a.branch, quota_gb: a.quota_gb ?? 20, packages: a.packages }),
+    async (a, signal) => {
+      const started = await call("POST", "/v1/workspaces", { name: a.name, region: a.region, team: a.team, repo: a.repo, branch: a.branch, quota_gb: a.quota_gb ?? 20, packages: a.packages });
+      return after("workspaces", started, idOf(started), CAP.create, signal);
+    },
   );
-  reg("kl_workspace_start", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/start`));
+  reg("kl_workspace_start", { id: S("workspace id") }, async (a, signal) => after("workspaces", await call("POST", `/v1/workspaces/${a.id}/start`), a.id, CAP.start, signal));
   reg("kl_workspace_stop", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/stop`));
-  reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }));
+  reg("kl_workspace_push", { id: S("workspace id"), message: O(S("what this snapshot is")) }, async (a, signal) => afterPush("workspaces", await call("POST", `/v1/workspaces/${a.id}/push`, { message: a.message }), a.id, signal));
   reg("kl_workspace_clone", { id: S("source workspace id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/workspaces/${a.id}/clone`, { name: a.name }));
   reg("kl_workspace_packages_update", { id: S("workspace id") }, (a) => answer("POST", `/v1/workspaces/${a.id}/packages/update`));
   reg(
     "kl_workspace_restore",
     { name: S("name for the restored workspace"), snapshot_id: S("snapshot id to restore"), image: O(S("override the snapshot's image")), packages: O(Type.Array(Type.String(), { description: "override the snapshot's packages" })), quota_gb: O(Type.Number({ description: "override the snapshot's disk quota" })) },
-    (a) => answer("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb }),
+    async (a, signal) => {
+      const started = await call("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb });
+      return after("workspaces", started, idOf(started), CAP.restore, signal);
+    },
   );
   reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
 
@@ -366,18 +447,25 @@ export function tools(pi: ExtensionAPI) {
   reg(
     "kl_environment_create",
     { name: S("environment name"), region: S("region id"), owner: O(S("team slug; absent = personal")), services: Type.Array(SERVICE, { description: "services to run" }) },
-    (a) => answer("POST", "/v1/environments", { name: a.name, region: a.region, owner: a.owner, services: a.services.map(service) }),
+    async (a, signal) => {
+      const started = await call("POST", "/v1/environments", { name: a.name, region: a.region, owner: a.owner, services: a.services.map(service) });
+      return after("environments", started, idOf(started), CAP.create, signal);
+    },
   );
-  reg("kl_environment_start", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/start`));
+  reg("kl_environment_start", { id: S("environment id") }, async (a, signal) => after("environments", await call("POST", `/v1/environments/${a.id}/start`), a.id, CAP.start, signal));
   reg("kl_environment_stop", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/stop`));
-  reg("kl_environment_push", { id: S("environment id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/environments/${a.id}/push`, { message: a.message }));
+  reg("kl_environment_push", { id: S("environment id"), message: O(S("what this snapshot is")) }, async (a, signal) => afterPush("environments", await call("POST", `/v1/environments/${a.id}/push`, { message: a.message }), a.id, signal));
   reg("kl_environment_clone", { id: S("source environment id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/environments/${a.id}/clone`, { name: a.name }));
   reg(
     "kl_environment_restore",
     { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(SERVICE, { description: "override the services the snapshot froze" })) },
-    (a) => answer("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services?.map(service) }),
+    async (a, signal) => {
+      const started = await call("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.snapshot_id, owner: a.owner, region: a.region, services: a.services?.map(service) });
+      return after("environments", started, idOf(started), CAP.restore, signal);
+    },
   );
-  reg("kl_environment_restore_in_place", { id: S("environment id"), snapshot_id: S("snapshot id of this environment's own volume") }, (a) => answer("POST", `/v1/environments/${a.id}/restore-in-place`, { snapshot_id: a.snapshot_id }));
+  reg("kl_environment_restore_in_place", { id: S("environment id"), snapshot_id: S("snapshot id of this environment's own volume") }, async (a, signal) =>
+    after("environments", await call("POST", `/v1/environments/${a.id}/restore-in-place`, { snapshot_id: a.snapshot_id }), a.id, CAP.restore, signal));
   reg("kl_environment_delete", { id: S("environment id") }, (a) => answer("DELETE", `/v1/environments/${a.id}`));
 
   // platform
