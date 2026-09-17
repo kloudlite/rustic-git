@@ -9,7 +9,14 @@ deprived of exec tool too. it should use workspace ide tools directly".
 
 ## Design
 
-1. **A bench session has no hands in the bench pod.** pi is spawned with `--no-builtin-tools`;
+1. **A bench session's only hands are its own workspace's** (owner, 06:10 IST: "bench session
+   should not have access to any ide-tools of other workspaces other than itself"). It loads
+   `workspace-tools.ts` pointed at its OWN workspace container's tool server
+   (`KL_TOOLS_ADDRESS=127.0.0.1:7788`, the same server its shell splices to), so read/write/edit/
+   bash/grep/find/ls act in `/home/kl/workspaces/bench` — never in the bench container, never in
+   another workspace. pi's builtins stay off (`--no-builtin-tools`), because they would run in the
+   bench container.
+   **Nothing else runs in the bench container.** pi is spawned with `--no-builtin-tools`;
    `background.ts` and `process.ts` (both bench-pod `bash`) are not loaded for a bench session.
    The `btw` fork runs with `--no-tools`. Workspace sessions are unchanged (`--tools` allow-list
    on their own workspace).
