@@ -385,3 +385,32 @@ them serially — issue all, await all), and the desktop folds consecutive tool 
 into a group row with a count, the running verb, the group's elapsed time, and the sub-rows;
 the group collapses to its one line when done. Identity: "Independent commands go in one turn,
 together; they run at the same time."
+
+## 21. Observed in Claude Code v2.1.274 (tmux, 2026-09-17 15:30 IST) — behaviour AND render to clone
+
+The person's message: `❯ text`; a message queued mid-turn is shown indented under it as it is
+taken (`  also tell me the git branch`).
+While working, ONE status line that changes: `Reading 1 file, listing 1 directory, running 1
+shell command…` (a live summary of the parallel calls, with `⎿ index.ts` sub-line), then the
+spinner line `✳ Embellishing… (3s · ↓ 123 tokens · thought for 1s)` — a rotating whimsical verb,
+elapsed, tokens, thinking time. When done the summary collapses to past tense: `Read 1 file,
+listed 1 directory, ran 1 shell command`.
+Assistant rows start with `⏺`; a tool row is `⏺ Update(index.ts)` / `⏺ Explore(Count functions in
+index.ts)` with a `⎿` result line (`Added 1 line` + the diff with line numbers and `+`;
+`Backgrounded agent (↓ to manage · ctrl+o to expand)`); long results are folded to a line with
+`… +N lines (ctrl+o to expand)`. Turn footer: `✻ Crunched for 9s · done 3:33 PM` (+ `· 1 shell
+still running` while a background task lives). Notifications land as their own `⏺` rows when they
+arrive: `⏺ Agent "Count functions in index.ts" finished · 5s`, `⏺ Background command "Background
+sleep task" completed (exit code 0)`, `⏺ User answered Claude's questions:` `⎿ · Next file name:
+alpha or beta? → alpha`. The question card: `☐ File name` header, the question, numbered options
+with descriptions, `3. Type something.`, `4. Chat about this`, `Enter to select · ↑/↓ to navigate
+· Esc to cancel`. Composer `❯` between two full-width rules; footer `⏵⏵ accept edits on (shift+tab
+to cycle) · esc to interrupt · ← for agents`; a right-aligned `○ low · /effort` chip; the todo
+list appears as a `⏺ Todo:` row.
+The harness clones: the live parallel summary line + past-tense collapse, the spinner line with
+verb/elapsed/tokens/thinking, `⏺`/`⎿` rows for tools and notifications (agent finished,
+background finished, question answered), `… +N lines` folds, the turn footer with "N still
+running", the `☐ header` question card with "Type something" and "Chat about this" (the latter
+sends the question back to the model as a normal prompt), and `shift+tab` cycling the mode
+(build → plan → accept-edits). Keep opencode's rails, header and palette (§16b) where the two
+differ in chrome; take Claude Code's row grammar and status behaviour.
