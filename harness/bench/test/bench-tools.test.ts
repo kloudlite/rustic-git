@@ -1345,3 +1345,37 @@ test("a lifecycle verb never reports a settled state as still going", async () =
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * `kl_workspace_progress` reported "nothing outstanding / nothing yet" for a workspace that had
+ * just been asked for work and had already written files (transcripts, 2026-09-18): the bench keys
+ * a thread and its exchanges by the workspace ID, and the tool was handed the name.
+ */
+test("progress asked by name reads the workspace's own thread", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url!.startsWith("/v1/workspaces")) return void res.end(JSON.stringify([{ id: "ws-632cf9f23d9f", name: "backend" }]));
+    if (req.url!.startsWith("/exchanges")) return void res.end(JSON.stringify([{ dir: "out", state: "running", text: "write the service" }]));
+    res.end(JSON.stringify({ total: 1, messages: [{ role: "assistant", content: [{ type: "toolCall", name: "write" }] }] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-prog-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "backend" }, undefined, undefined, undefined)).content[0].text as string;
+    assert.ok(seen.includes("/exchanges?workspace=ws-632cf9f23d9f"), seen.join(" "));
+    assert.ok(seen.includes("/workspaces/ws-632cf9f23d9f/messages?limit=10"), seen.join(" "));
+    assert.match(out, /running: write the service/);
+    assert.doesNotMatch(out, /nothing yet/);
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

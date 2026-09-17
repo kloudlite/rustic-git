@@ -705,7 +705,10 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
   // `id`, like every other kl_workspace* tool: two keys for the same thing had the model calling
   // `kl_workspace {"workspace": …}` twenty times (transcripts, 2026-09-18).
   reg("kl_workspace_progress", { id: Type.String({ description: "workspace id or name" }) }, async (a) => {
-    const id = encodeURIComponent(a.id);
+    // The bench keys a workspace's thread and its exchanges by the workspace ID. Asked by NAME —
+    // which is what a person says and what this tool now takes — both reads answered nothing, so a
+    // workspace mid-task reported "nothing outstanding / nothing yet" (transcripts, 2026-09-18).
+    const id = encodeURIComponent(await resolveNamed("workspaces", String(a.id)).catch(() => String(a.id)));
     const [x, m] = await Promise.all([benchCall("GET", `/exchanges?workspace=${id}`), benchCall("GET", `/workspaces/${id}/messages?limit=10`)]);
     if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
     const asks = (x.data as { dir: string; state: string; text: string }[]).filter((e) => e.dir === "out").map((e) => `  ${e.state}: ${String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").slice(0, 160)}`);
