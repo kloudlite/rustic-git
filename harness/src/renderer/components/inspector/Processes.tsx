@@ -18,8 +18,10 @@ export function Processes(props: { onOpen: (id: string) => void; session: string
     const s = Math.max(0, Math.round(((p.ended ?? tick()) - p.started) / 1000));
     return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   };
-  // This session's, not the bench's whole table: a workspace's dev server is not the bench's.
-  const mine = () => procsOf(live.procs, props.session);
+  // This session's, and what is RUNNING: an ended process has its row in the transcript, and a
+  // panel that keeps yesterday's exits is a panel nobody reads (owner, 2026-09-17).
+  const KEEP_ENDED_MS = 10_000;
+  const mine = () => procsOf(live.procs, props.session).filter((p) => !p.ended || tick() - p.ended < KEEP_ENDED_MS);
   const running = () => mine().filter((p) => !p.ended).length;
   return (
     <Show when={mine().length}>

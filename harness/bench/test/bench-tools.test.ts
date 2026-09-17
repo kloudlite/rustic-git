@@ -394,13 +394,25 @@ test("a process that exits on its own is noticed within a poll", async () => {
     (bench as any).foldRow(ws.id, { type: "extension_ui_request", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "npm run dev", command: "npm run dev", started: Date.now() }])] });
     assert.equal(bench.procs.all().find((p) => p.id === "p1")!.ended, undefined);
 
+    // A pi exit says NOTHING about it: the process runs on the tool server, not inside pi. The
+    // owner watched a live dev server marked "lost 13m" because a restart used to mark it so.
+    (bench as any).foldRow(ws.id, { type: "exit", code: 0 });
+    assert.equal(bench.procs.all().find((p) => p.id === "p1")!.ended, undefined, "a pi exit is not a process exit");
+
     // It dies between tool calls: nothing would ever say so without the poll.
     live = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "exited", exit_code: 1 }];
     await (bench as any).sweepProcs();
     const row = bench.procs.all().find((p) => p.id === "p1")!;
     assert.notEqual(row.ended, undefined, "ended");
     assert.equal(row.code, 1, "with the code the tool server gave");
+    assert.equal(row.lost, undefined, "it said how it ended, so it is not lost");
     assert.ok(seen.length, "and the desktop is told");
+
+    // Gone from the tool server's list without ever reporting an exit: THAT is lost.
+    (bench as any).foldRow(ws.id, { type: "extension_ui_request", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p2", name: "vite", command: "npm run dev", started: Date.now() }])] });
+    live = [];
+    await (bench as any).sweepProcs();
+    assert.equal(bench.procs.all().find((p) => p.id === "p2")!.lost, true);
   } finally {
     await bench.stop();
     srv.close();

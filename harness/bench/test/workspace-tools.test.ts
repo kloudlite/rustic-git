@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, shellNote, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, procTitle, shellNote, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -378,4 +378,15 @@ test("a kl CLI verb in the shell is allowed, and points at the tool that does it
   assert.equal(shellNote("./scripts/klingon.sh"), undefined);
   assert.equal(shellNote("kl ide serve"), undefined);
   assert.equal(forbidden("kl env switch devstack"), undefined, "allowed, not refused");
+});
+
+test("a process row reads as a name, not an argv", () => {
+  // What the model gives, when it gives one.
+  assert.equal(procTitle("npm run dev", "svelte dev server"), "svelte dev server");
+  // Otherwise: where it runs and what it runs, with the `cd` that a shell needs and a person does not.
+  assert.equal(procTitle("cd /home/kl/workspaces/svelte-app && npm run dev"), "svelte-app: npm run dev");
+  assert.equal(procTitle("cd api/ ; go run ./cmd/server"), "api: go run ./cmd/server");
+  assert.equal(procTitle("npm run dev"), "npm run dev");
+  assert.equal(procTitle("  cargo watch -x test  "), "cargo watch -x test");
+  assert.equal(procTitle("cd x && " + "a".repeat(200)).length, 60, "a row is a row, not a paragraph");
 });

@@ -107,6 +107,20 @@ export type IdeCall = { tool: string; args: Record<string, any> };
 /** Tool-server calls whose effect the `/procs` table has to be re-read after. */
 const PROCESS_TOOLS = new Set(["process_kill", "process_write", "process_list"]);
 
+/**
+ * What a person should see instead of an argv. The model may give a title; otherwise the command
+ * is read: the directory it runs in and the program it runs — "svelte-app: npm run dev" — because
+ * "cd /home/kl/workspaces/svelte-app && npm run dev" tells a person nothing they wanted.
+ */
+export function procTitle(cmd: string, title?: string): string {
+  if (title?.trim()) return title.trim().slice(0, 60);
+  const c = String(cmd).trim();
+  const cd = /^cd\s+([^\s;&|]+)\s*(?:&&|;)\s*(.*)$/s.exec(c);
+  const where = cd ? cd[1].replace(/\/+$/, "").split("/").filter(Boolean).pop() : "";
+  const what = (cd ? cd[2] : c).trim().split("\n")[0];
+  return (where ? `${where}: ${what}` : what).slice(0, 60);
+}
+
 /** A row of the bench's `/procs` table, as `harness:procs` carries it (ledger.ts's `ProcRow`). */
 type ProcLine = { id: string; name: string; command: string; started: number; ended?: number; code?: number | null };
 
@@ -115,14 +129,16 @@ type ProcLine = { id: string; name: string; command: string; started: number; en
  * bench folds it straight into the table the desktop's Processes panel draws. The tool server is
  * the truth: this publishes its whole list, so a process that exited between calls settles too.
  */
+/** Titles this session gave its own processes, by id: the tool server keeps the command, not the name. */
+const titles = new Map<string, string>();
+
 async function publishProcs(server: ToolServer, ctx: { ui?: { setWidget?: (k: string, lines: string[]) => void } } | undefined, signal?: AbortSignal) {
   if (!ctx?.ui?.setWidget) return;
   try {
     const r = await server.call({ tool: "process_list", args: {} }, signal);
     const rows: ProcLine[] = ((r.body?.processes ?? []) as { id: string; cmd: string; started_at?: string; state?: string; exit_code?: number | null }[]).map((x) => ({
       id: x.id,
-      // The command IS the name here: the tool server names nothing, and a dev server is known by its argv.
-      name: String(x.cmd).slice(0, 40),
+      name: procTitle(String(x.cmd), titles.get(x.id)),
       command: String(x.cmd),
       started: Date.parse(x.started_at ?? "") || Date.now(),
       ...(x.state === "exited" ? { ended: Date.now(), code: x.exit_code ?? null } : {}),
@@ -330,6 +346,8 @@ export default function (pi: ExtensionAPI) {
         try {
           const c = toIde(name, p);
           const r = await server.call(c, signal);
+          // The title belongs to the id the tool server just minted.
+          if (c.args.detach && r.body?.id) titles.set(String(r.body.id), procTitle(String(p.command ?? ""), p.title));
           // A CLI verb that a tool covers: the work is done, and the model is told where the tool is.
           const note = name === "bash" || (name === "process" && p.action === "start") ? shellNote(String(p.command ?? "")) : undefined;
           // The harness's own table of what is running: mirrored from the tool server after every
@@ -359,6 +377,7 @@ export default function (pi: ExtensionAPI) {
       action: StringEnum(["start", "list", "logs", "stop", "write"]),
       command: Type.Optional(Type.String({ description: "action=start" })),
       id: Type.Optional(Type.String({ description: "the process, for logs/stop/write" })),
+      title: Type.Optional(Type.String({ description: "short name people will see, e.g. \"svelte dev server\"" })),
       since: Type.Optional(Type.Number({ description: "action=logs: the byte offset to read from (0 = the start)" })),
       data: Type.Optional(Type.String({ description: "action=write" })),
       signal: Type.Optional(StringEnum(["TERM", "KILL"])),

@@ -99,10 +99,12 @@ test("a killed bench reschedules: sessions reopen, the running task and process 
   const tasks = (await j(bBase, "GET", "/tasks")).body as { id: string; state: string }[];
   assert.equal(tasks.find((t) => t.id === "t1")?.state, "lost", "the running task reads lost");
 
+  // The PROCESS is not lost by a reschedule: it runs on a workspace's tool server, which the new
+  // instance asks. Only a tool server that cannot be reached for three sweeps loses its rows.
   const procs = (await j(bBase, "GET", "/procs")).body as { id: string; lost?: boolean; ended?: number }[];
   const p1 = procs.find((p) => p.id === "p1");
-  assert.equal(p1?.lost, true, "the process reads lost: true");
-  assert.equal(typeof p1?.ended, "number", "and a numeric ended");
+  assert.ok(p1, "the row survives the move");
+  assert.equal(p1?.ended, undefined, "and is not ended by the move alone");
 
   // The new instance holds the lock: a third would exit 75 naming it.
   c = run(["--dir", dir, "--port", "0"], { TERMINATION_LOG: term });

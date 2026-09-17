@@ -1,4 +1,4 @@
-import { Show, createSignal, onCleanup } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import * as live from "../live";
@@ -10,6 +10,29 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
+  /**
+   * A PROCESS keeps its output on the tool server that runs it, not in the tool result the bench
+   * saw — which is why this said "(no output)" for a dev server that had printed plenty. Followed
+   * from a byte offset while it runs, so the view grows rather than re-reading.
+   */
+  const [log, setLog] = createSignal("");
+  let since = 0;
+  let following = false;
+  createEffect(() => {
+    if (props.task.tool !== "Process") return;
+    void tick();
+    if (following) return;
+    following = true;
+    void window.harness
+      .bench<{ stdout: string; stderr: string; next: number }>("GET", `/procs/${encodeURIComponent(props.task.id)}/output?since=${since}`)
+      .then((r) => {
+        since = r.next ?? since;
+        const add = [r.stdout, r.stderr].filter(Boolean).join("");
+        if (add) setLog((t) => (t + add).slice(-200_000));
+      })
+      .catch(() => undefined)
+      .finally(() => (following = false));
+  });
   const secs = () => Math.max(0, Math.round(((props.task.ended ?? tick()) - props.task.started) / 1000));
   const active = () => props.task.state === "running" || props.task.state === "background";
   return (
@@ -28,7 +51,7 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
         </Show>
       </header>
       <pre class="m-0 min-h-0 flex-1 overflow-auto px-6 py-4 font-mono text-sm leading-6 whitespace-pre-wrap text-muted select-text">
-        {props.task.output || (active() ? "waiting for output…" : "(no output)")}
+        {(props.task.tool === "Process" ? log() : props.task.output) || (active() ? "waiting for output…" : "(no output)")}
       </pre>
     </div>
   );

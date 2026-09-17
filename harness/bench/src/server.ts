@@ -20,7 +20,7 @@ const MAX_BODY = 64 * 1024 * 1024;
 /** Split and decode a path; a bad escape or an id that could walk out of a folder (`..%2F`) is a 400, never a crash or a read elsewhere. */
 function segments(pathname: string): string[] {
   const p = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if ((p[0] === "sessions" || p[0] === "workspaces" || p[0] === "proposals" || p[0] === "agents") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
+  if ((p[0] === "sessions" || p[0] === "workspaces" || p[0] === "proposals" || p[0] === "agents" || p[0] === "procs") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
     throw new Error(`bad id ${JSON.stringify(p[1])}`);
   return p;
 }
@@ -149,6 +149,8 @@ export function serve(
       if (m === "GET" && u.pathname === "/plans") return send(res, 200, bench.plans.all());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
+      // A process's log, followed from a byte offset: the desktop's detail view reads this while it runs.
+      if (p[0] === "procs" && p.length === 3 && p[2] === "output" && m === "GET") return send(res, 200, await bench.procOutput(p[1], Number(u.searchParams.get("since")) || 0));
       if (m === "POST" && u.pathname === "/import") {
         const b = await body(req);
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));

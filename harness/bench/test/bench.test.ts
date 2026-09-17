@@ -178,15 +178,21 @@ test("a prompt is refused while the folder is not writable", async () => {
   }
 });
 
-test("a pi that exits loses its session's open process rows, so the bench can idle", async () => {
+test("a process nobody can ask about is lost, so the bench can idle — but a pi exit alone is not that", async () => {
   const b = mk();
   try {
     await b.start();
     await filed(b);
     b.procs.snapshot("s-1", [{ id: "p1", name: "vite", command: "npm run dev", pid: process.pid, started: 1 }]);
     assert.equal(b.busy(), true);
+
+    // Its pi goes. The process runs on a tool server, not inside pi, so the row stands.
     await assert.rejects(b.rpc("s-1", { type: "prompt", message: "crash" }));
-    await until(() => b.procs.all().find((p) => p.id === "p1")!.lost === true, 5_000, "p1 lost");
+    assert.equal(b.procs.all().find((p) => p.id === "p1")!.ended, undefined);
+
+    // Three sweeps with nothing answering: gone, with nobody able to say how it ended.
+    for (let i = 0; i < 3; i++) await (b as unknown as { sweepProcs: () => Promise<void> }).sweepProcs();
+    assert.equal(b.procs.all().find((p) => p.id === "p1")!.lost, true);
     assert.equal(b.busy(), false);
   } finally {
     await b.stop();

@@ -26,6 +26,7 @@ const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
 /** How often a session with something running is asked what is still running. */
 const PROC_POLL_MS = 10_000;
+const UNREACHABLE_SWEEPS = 3;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 // A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
@@ -59,6 +60,8 @@ export class Bench {
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
   private procPoll?: ReturnType<typeof setInterval>;
+  /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
+  private unreachable = new Map<string, number>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
   private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; answer?: "yes" | "no"; wake: (() => void)[] }>();
 
@@ -96,7 +99,9 @@ export class Bench {
     if (this.opts.readOnly) return;
     // A new process holds none of the old one's children.
     for (const row of this.write(() => this.tasks.markLost()) ?? []) this.emit({ type: "task", row });
-    if (this.write(() => this.procs.markLost())?.length) this.emit({ type: "procs", rows: this.procs.all() });
+    // A process runs on the WORKSPACE's tool server, not inside pi: a bench restart says nothing
+    // about it (the owner watched a live dev server marked "lost 13m"). The poll re-syncs instead.
+    this.pollProcs();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
@@ -186,7 +191,7 @@ export class Bench {
       this.asked.delete(id);
       // Only this session's pi went; the others still hold their commands.
       for (const row of this.write(() => this.tasks.markLost(id)) ?? []) this.emit({ type: "task", row });
-      if (this.write(() => this.procs.markLost(id))?.length) this.emit({ type: "procs", rows: this.procs.all() });
+      // Same here: this session's pi went, its processes did not.
     }
     if (ev.type === "tool_execution_start") {
       const name = ev.toolName as string;
@@ -336,13 +341,27 @@ export class Bench {
     }
     for (const session of sessions) {
       const live = await this.listProcs(session).catch(() => undefined);
-      if (!live) continue;
+      if (!live) {
+        // A tool server that cannot be asked is not an answer — but a row nobody can ever verify
+        // would hold the bench awake forever, so after `UNREACHABLE_SWEEPS` it is lost, which is
+        // exactly what it is: gone, with nobody able to say how it ended.
+        const n = (this.unreachable.get(session) ?? 0) + 1;
+        this.unreachable.set(session, n);
+        if (n < UNREACHABLE_SWEEPS) continue;
+        this.unreachable.delete(session);
+        let gone = false;
+        for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) gone = !!this.write(() => this.procs.transitionEnded(session, p.id, null, true)) || gone;
+        if (gone) this.emit({ type: "procs", rows: this.procs.all() });
+        continue;
+      }
+      this.unreachable.delete(session);
       let moved = false;
       for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) {
         const now = live.find((x) => x.id === p.id);
         // Gone from the tool server's list, or exited in it: either way it is over.
         if (now && now.state !== "exited") continue;
-        moved = !!this.write(() => this.procs.transitionEnded(session, p.id, now?.exit_code ?? null)) || moved;
+        // Gone from the tool server's own list without ever reporting an exit: THAT is lost.
+        moved = !!this.write(() => this.procs.transitionEnded(session, p.id, now?.exit_code ?? null, !now)) || moved;
       }
       if (moved) this.emit({ type: "procs", rows: this.procs.all() });
     }
@@ -353,6 +372,16 @@ export class Bench {
     const r = await fetch(`http://${at}/tools/process_list`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     if (!r.ok) throw new Error(`process_list: ${r.status}`);
     return ((await r.json()) as { processes?: { id: string; state?: string; exit_code?: number | null }[] }).processes ?? [];
+  }
+
+  /** A process's output, from the tool server that is running it: the desktop's log view reads this. */
+  async procOutput(id: string, since: number): Promise<{ stdout: string; stderr: string; next: number; state?: string; exit_code?: number | null }> {
+    const row = this.procs.all().find((p) => p.id === id);
+    if (!row) throw new Error(`no process ${id}`);
+    const at = await this.toolsAddress(row.session);
+    const r = await fetch(`http://${at}/tools/process_output`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since }) });
+    if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
+    return (await r.json()) as { stdout: string; stderr: string; next: number };
   }
 
   /** Where a session's tools run: its workspace, or for a bench session its own container. */
