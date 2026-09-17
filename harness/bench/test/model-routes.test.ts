@@ -235,3 +235,28 @@ test("a provider error on a turn is surfaced, never silence", async () => {
   }
 });
 
+/**
+ * D5. Slash text arriving over the RPC socket was forwarded to the model verbatim: `/model`,
+ * `/clear` and `/help` each burned a turn explaining the bench has no slash commands, and `/help`
+ * enumerated the internal tool names to the person. No slash line reaches pi.
+ */
+test("a slash line over rpc never reaches the model", async () => {
+  const b = await startBench();
+  try {
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    const log = path.join(b.cmds, `commands-${session}.json`);
+    await until(() => fs.existsSync(log), 5_000, "the child to start");
+    const r = (await b.bench.rpc(session, { type: "prompt", message: "/help" })) as { success?: boolean; error?: string };
+    assert.equal(r.success, false, "refused, not forwarded");
+    assert.match(String(r.error), /does not take slash commands/);
+    const sent = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string; message?: string }[];
+    assert.ok(!sent.some((c) => typeof c.message === "string" && c.message.startsWith("/")), "nothing starting with / was sent to pi");
+    // `/clear` and `/compact` are the two the bench honours itself.
+    await b.bench.rpc(session, { type: "prompt", message: "/compact" });
+    const after = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string; message?: string }[];
+    assert.ok(after.some((c) => c.type === "compact"), "/compact is honoured as the command it is");
+    assert.ok(!after.some((c) => c.message === "/compact"), "and never said to the model");
+  } finally {
+    await b.down();
+  }
+});

@@ -1350,6 +1350,29 @@ export class Bench {
       await this.killProc(id, stop[1]);
       return { type: "response", command: "prompt", success: true } as PiEvent;
     }
+    /**
+     * A slash line is a COMMAND, not something to say to a model. Over the rpc socket — a second
+     * device, a script, anything that is not this desktop's composer — `/model`, `/clear` and
+     * `/help` were forwarded verbatim: each burned a model turn explaining the bench has no slash
+     * commands, and `/help` named the internal tool set to the person (api-test-report D5).
+     *
+     * The two the bench can honour are honoured; everything else is refused here. Nothing reaches
+     * pi either way, so no slash line is ever in its context or its session file.
+     */
+    if ((cmd.type === "prompt" || cmd.type === "steer" || cmd.type === "follow_up") && msg.startsWith("/")) {
+      const verb = msg.split(/\s+/)[0].toLowerCase();
+      if (verb === "/clear") {
+        const r = await this.rpc(id, { type: "new_session" });
+        return r;
+      }
+      if (verb === "/compact") return this.rpc(id, { type: "compact" });
+      return {
+        type: "response",
+        command: cmd.type,
+        success: false,
+        error: `${verb} is a desktop command; the bench does not take slash commands. Say what you want in words.`,
+      } as PiEvent;
+    }
     if (cmd.type === "prompt" && msg && !msg.startsWith("/") && s.name === `session ${s.seq}`) {
       this.write(() => this.sessions.update(id, { name: msg.replace(/\s+/g, " ").slice(0, 40), lastActive: Date.now() }));
       this.emit({ type: "sessions" });
