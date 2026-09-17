@@ -180,11 +180,20 @@ left comes from `@pierre/diffs`' own worker bundle, inside the dependency, not f
 
 | ours | where it goes now | still to do |
 |---|---|---|
-| proposals (`role: "question"`) | their `question` tool part for the ANSWERED record; a live one is a permission dock beside the composer | wire the dock's allow/deny to `POST /proposals/:id` |
+| proposals (`role: "question"`) | ANSWERED: their `question` tool part in the transcript. LIVE: their `DockPrompt` permission dock above the composer (`opencode/PermissionDock.tsx`), answering `POST /proposals/:id` | their three-way answer is once/always/reject; ours is yes/no, and "always" switches this session to accept-edits |
 | asks and agents (`ask`) | a `task` part, `metadata.agent` = the agent's name or the workspace it was sent to | their task card links to a child session; ours has no child session id |
 | `kl_*` platform answers | a synthetic `text` part with the answer as a fenced `json` block | our `WorkspaceCard`/`QuotaCard`/`EnvironmentCard` have no part type; either register a harness part or keep the block |
 | process rows, memory, plan panel | the inspector, which stays ours | nothing — deliberate |
 | exchanges (asks in flight) | the queue dock above the composer, ours | fold into their followup dock when the composer lands |
+
+## The composer's cursor
+
+Their prompt is a terminal input: it sets `input.cursorColor = theme.text` while live and
+`theme.backgroundElement` when disabled (`packages/tui/src/component/prompt/index.tsx:252-253`) and
+leaves the style to the terminal's block. Nothing in their code blinks it. Chromium's `caret-shape:
+block` is not that cursor, so `opencode/BoxCursor.tsx` draws it: a mirror of the textarea in the
+same metrics, with the character at the caret in reverse video — a block in the TEXT colour, steady,
+hidden when the composer is not focused. The browser's own caret is `caret-transparent` beneath it.
 
 ## Theme, fonts and keys
 

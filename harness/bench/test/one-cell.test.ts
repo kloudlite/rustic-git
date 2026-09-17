@@ -111,3 +111,31 @@ test("the command list is a full-width list above the composer, not a floating p
   // The selected row is a solid accent bar with dark text, spanning the full width.
   assert.match(src, /"bg-accent text-bg": i\(\) === pick\(\)/);
 });
+
+/**
+ * The composer's caret is opencode's block cursor, drawn rather than styled: Chromium's
+ * `caret-shape` is not that cursor. Their prompt paints it in the TEXT colour and never blinks it
+ * (`packages/tui/src/component/prompt/index.tsx:252-253`), so neither do we.
+ */
+test("the composer draws a steady block cursor in the text colour", () => {
+  const src = fs.readFileSync(path.resolve("src/renderer/opencode/BoxCursor.tsx"), "utf8");
+  assert.match(src, /bg-fg text-bg/, "live: the text token, reverse video — not the accent");
+  assert.match(src, /bg-line text-bg/, "disabled: the panel tone, as theirs does");
+  const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
+  assert.ok(!/animate|blink|keyframes/i.test(code), "steady: nothing in their code blinks it");
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.match(chat, /caret-transparent/, "the browser's own caret is hidden under the block");
+  assert.match(chat, /<BoxCursor input=\{composerEl\(\)\}/);
+});
+
+test("a waiting tool is opencode's permission dock, not a transcript row", () => {
+  const dock = fs.readFileSync(path.resolve("src/renderer/opencode/PermissionDock.tsx"), "utf8");
+  assert.match(dock, /DockPrompt/);
+  assert.match(dock, /kind="permission"/);
+  for (const label of ["Deny", "Allow always", "Allow once"]) assert.ok(dock.includes(label), `${label} is missing`);
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.match(chat, /<PermissionDock/);
+  // The answer goes to the bench's own route, never to opencode's SDK.
+  assert.match(chat, /live\.answerProposal\(L\(\)\.id, q\(\)\.id, answer === "reject" \? "no" : "yes"\)/);
+  assert.ok(!/opencode.*sdk.*client/i.test(dock));
+});

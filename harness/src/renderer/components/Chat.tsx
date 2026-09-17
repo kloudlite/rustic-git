@@ -12,6 +12,8 @@ import { TaskView } from "./TaskView";
 import { spinnerMeta, verbAt } from "./results/summary";
 import { modeLine, modeParts, modelOfThread } from "../rows";
 import { OpencodePane } from "../opencode/Pane";
+import { BoxCursor } from "../opencode/BoxCursor";
+import { PermissionDock } from "../opencode/PermissionDock";
 import { KEYS } from "../keys";
 import { Spinner } from "@opencode-ai/ui/spinner";
 import { SessionProgressIndicatorV2 } from "@opencode-ai/session-ui/v2/session-progress-indicator-v2";
@@ -71,6 +73,10 @@ export function Chat(props: {
   const [escapes, setEscapes] = createSignal(0);
   let escTimer: ReturnType<typeof setTimeout> | undefined;
   const [dockOpen, setDockOpen] = createSignal(true);
+  /** The composer element itself, so the block cursor can follow its caret. */
+  const [composerEl, setComposerEl] = createSignal<HTMLTextAreaElement>();
+  /** The proposal this session is waiting on, if any: the newest unanswered question row. */
+  const pending = () => [...blocks()].reverse().find((b): b is QuestionRow => b.role === "question" && !(b as QuestionRow).answer);
   onCleanup(() => clearTimeout(escTimer));
   // The live state behind this thread: the bench's, a side session's, or an
   // idle one for a recorded thread (nothing arrives on it, so it stays quiet).
@@ -429,6 +435,22 @@ export function Chat(props: {
               <Icon name="chevronDown" size={12} /> Jump to latest
             </button>
           </Show>
+          {/* A tool waiting to run is opencode's permission dock, above the composer — not a row in
+              the transcript. The answered record stays in the transcript, where their `question`
+              part draws it (adapter.ts). */}
+          <Show when={pending()}>
+            {(q) => (
+              <PermissionDock
+                summary={q().summary}
+                tool={q().tool}
+                patterns={q().args?.path ? [String(q().args!.path)] : undefined}
+                onDecide={(answer) => {
+                  if (answer === "always") live.setMode("accept-edits");
+                  live.answerProposal(L().id, q().id, answer === "reject" ? "no" : "yes");
+                }}
+              />
+            )}
+          </Show>
           {/* What this session is waiting on: lines pi still holds, and asks a workspace has not
               answered yet. The asks were only ever in the bench's exchange log, so nothing showed
               them — a person could not tell a queued ask from a lost one. */}
@@ -489,11 +511,15 @@ export function Chat(props: {
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
+              {/* The caret is opencode's block, drawn over the input (see opencode/BoxCursor.tsx). */}
+              <div class="relative min-w-0 flex-1">
+              <BoxCursor input={composerEl()} text={typed()} disabled={thread()?.kind === "machine" && !thread()?.pi} />
               <textarea
+                ref={setComposerEl}
                 data-composer
                 disabled={thread()?.kind === "machine" && !thread()?.pi}
                 rows="1"
-                class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 outline-none placeholder:text-subtle"
+                class="relative max-h-60 min-h-5 w-full resize-none border-0 bg-transparent p-0 caret-transparent outline-none placeholder:text-subtle"
                 placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
                 onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), setClosed(false), (hist = -1))}
                 onKeyDown={(e) => {
@@ -560,6 +586,7 @@ export function Chat(props: {
                   });
                 }}
               />
+              </div>
             </div>
             {/* What is attached, as thumbnails the way an editor shows a pasted
                 image: small, removable, sent with the next message. */}
