@@ -4,22 +4,18 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { mode } from "../../theme";
-import { connected } from "../../live";
 import type { TermTab } from "./tabs";
-import { banner as dropBanner, step, type Reconnect } from "./reconnect";
 
 /**
  * One terminal. The emulator is xterm.js — the one VS Code and every other
  * Electron terminal uses — so ANSI, selection, links and reflow are its problem.
  *
- * The shell itself is a tmux session on the bench (or, for a workspace scope,
- * spliced through to its tool server): main owns the socket, this view only
- * names the tab and its session. A dropped socket is not a dead shell — tmux
- * still holds it — so the view reattaches by itself (`reconnect.ts`) and only
- * a real exit, or the tab's x, ends anything.
- * A tab stays mounted while another is shown, so its scrollback survives.
+ * The shell is the pod's `shell` sidecar, running ttyd with the person's home and nothing else
+ * (spec §2.3): main owns the socket and this view only names the tab. The socket IS the shell —
+ * there is no tmux behind it, so a dropped connection is a finished shell and a new tab is a new
+ * one. A tab stays mounted while another is shown, so its scrollback survives.
  */
-export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onEnded?: () => void }) {
+export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?: (id: string) => void; onEnded?: () => void; onTitle?: (id: string, title: string) => void }) {
   let host!: HTMLDivElement;
   let term: Terminal;
   let fit: FitAddon;
@@ -94,64 +90,44 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     term.writeln(props.tab.banner);
     const enc = new TextEncoder();
     let exited = false;
-    // Undefined while the shell is attached; a Reconnect while it is not.
-    let drop: Reconnect | undefined;
 
-    // A shell that ended took its tmux session with it, and a tab is a session:
-    // the tab goes too, without a kill and without waiting for Enter (owner,
-    // 2026-09-17: the tabs are a one-to-one map of the sessions).
-    const end = () => {
+    /**
+     * The shell is over. There is nothing to reattach to — the socket was the shell — so the view
+     * says so once, stops taking input, and leaves the scrollback to be read (spec §2.3).
+     */
+    const end = (why?: string) => {
       if (exited) return;
       exited = true;
+      term.write(`\r\n\x1b[2m[shell ended — open a new one]${why ? ` (${why})` : ""}\x1b[0m\r\n`);
+      term.options.disableStdin = true;
       props.onExited?.(props.tab.id);
-      props.onEnded?.();
     };
 
-    const dial = () =>
-      void window.harness.pty
-        .open(props.tab.id, props.tab.scope, term.cols, term.rows, props.tab.session)
-        .catch((e: Error) => feed({ type: "drop", now: Date.now() }, e.message));
-
-    /** One door into the state machine, so the banner and the dial stay in step with it. */
-    const feed = (ev: Parameters<typeof step>[1], why?: string) => {
-      const was = drop;
-      const r = step(drop, ev);
-      drop = r.state;
-      if (drop && drop !== was && (!was || was.gaveUp !== drop.gaveUp)) term.write(`\r\n\x1b[2m${dropBanner(drop)}${why ? ` (${why})` : ""}\x1b[0m\r\n`);
-      if (r.open) dial();
-    };
-
-    dial();
+    void window.harness.pty.open(props.tab.id, props.tab.scope, term.cols, term.rows).catch((e: Error) => end(e.message));
     term.onData((d) => window.harness.pty.write(props.tab.id, enc.encode(d)));
     term.onResize(({ cols, rows }) => window.harness.pty.resize(props.tab.id, cols, rows));
-
-    // One beat for the whole machine: cheap, and a second's granularity is well
-    // under the shortest backoff.
-    const beat = setInterval(() => drop && feed({ type: "tick", now: Date.now(), connected: connected() }), 1_000);
 
     // Straight through: xterm.js already batches writes into its own render
     // frame. Coalescing them ourselves split zsh's erase-and-redraw across two
     // frames, which the owner saw as flicker on backspace.
     const offData = window.harness.pty.onData((id, data) => {
       if (id !== props.tab.id) return;
-      // Bytes are the only proof the reattach worked; tmux redraws the pane on attach.
-      if (drop) feed({ type: "data" });
       term.write(data);
     });
     const offExit = window.harness.pty.onExit((id, code, error) => {
       if (id !== props.tab.id) return;
-      // A shell that exited is gone for good; a socket that dropped is not —
-      // tmux still holds the session, so that one is reattached, not mourned.
-      if (typeof code === "number") return end();
-      feed({ type: "drop", now: Date.now() }, error);
+      // Exit or drop, it is the same thing now: the socket was the shell.
+      end(typeof code === "number" ? undefined : error);
     });
-    // Enter on a dead shell closes the tab; on one that gave up reconnecting it
-    // tries again — the same key that would have run the next command.
+    // What the shell calls itself (ttyd's `1` frame): the tab shows it.
+    const offTitle = window.harness.pty.onTitle((id, title) => {
+      if (id !== props.tab.id) return;
+      props.onTitle?.(props.tab.id, title.trim());
+    });
     term.onBell(() => {}); // a PTY bell is not this app's notification channel
+    // Enter on a finished shell closes the tab: the same key that would have run the next command.
     term.onKey(({ domEvent }) => {
-      if (domEvent.key !== "Enter") return;
-      if (exited) props.onEnded?.();
-      else if (drop?.gaveUp) feed({ type: "retry", now: Date.now() });
+      if (domEvent.key === "Enter" && exited) props.onEnded?.();
     });
 
     // Debounced: a drag resizes continuously, and every fit is a reflow plus a
@@ -163,11 +139,11 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     });
     ro.observe(host);
     onCleanup(() => {
-      clearInterval(beat);
       clearTimeout(refit);
       ro.disconnect();
       offData();
       offExit();
+      offTitle();
       window.harness.pty.close(props.tab.id);
       webgl?.dispose();
       term.dispose();

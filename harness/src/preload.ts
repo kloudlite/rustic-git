@@ -67,14 +67,14 @@ const harness = {
     setMyEnvironment: (id: string): Promise<void> => ipcRenderer.invoke("platform:setMyEnvironment", id),
     clearMyEnvironment: (): Promise<void> => ipcRenderer.invoke("platform:clearMyEnvironment"),
   },
-  /** One shell per id, over the bench tunnel: main owns the socket, the renderer
-      only names it. `onData`/`onExit` return an unsubscribe. */
+  /**
+   * One shell per id, over the bench tunnel: main owns the socket, the renderer only names it.
+   * The far end is the pod's `shell` sidecar running ttyd (spec §2.3) — a socket IS the shell, so
+   * there is no session list and no kill: closing it ends it, and a new tab is a new shell.
+   * `onData`/`onExit`/`onTitle` return an unsubscribe.
+   */
   pty: {
-    open: (id: string, scope: string, cols: number, rows: number, session?: string): Promise<void> => ipcRenderer.invoke("pty:open", id, scope, cols, rows, session),
-    /** What tmux already holds in that scope, so a tab reattaches instead of forking. */
-    sessions: (scope: string): Promise<{ name: string; windows: number; attached: number; created: number }[]> => ipcRenderer.invoke("pty:sessions", scope),
-    /** Ends the shell for good (tmux kill-session), not just this device's view of it. */
-    kill: (id: string): Promise<void> => ipcRenderer.invoke("pty:kill", id),
+    open: (id: string, scope: string, cols: number, rows: number): Promise<void> => ipcRenderer.invoke("pty:open", id, scope, cols, rows),
     write: (id: string, data: Uint8Array): void => ipcRenderer.send("pty:write", id, data),
     resize: (id: string, cols: number, rows: number): void => ipcRenderer.send("pty:resize", id, cols, rows),
     close: (id: string): void => ipcRenderer.send("pty:close", id),
@@ -87,6 +87,12 @@ const harness = {
       const fn = (_e: unknown, id: string, code: number | undefined, error?: string) => cb(id, code, error);
       ipcRenderer.on("pty:exit", fn);
       return () => void ipcRenderer.removeListener("pty:exit", fn);
+    },
+    /** ttyd's `1` frame: what the shell calls itself, which the tab shows. */
+    onTitle: (cb: (id: string, title: string) => void): (() => void) => {
+      const fn = (_e: unknown, id: string, title: string) => cb(id, title);
+      ipcRenderer.on("pty:title", fn);
+      return () => void ipcRenderer.removeListener("pty:title", fn);
     },
   },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),

@@ -11,7 +11,7 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
-import { checkPty, checkScope, checkSession } from "./pty-ipc";
+import { checkPty } from "./pty-ipc";
 import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
@@ -350,7 +350,6 @@ const ptys = new Map<string, WebSocket>();
 const sizes = new Map<string, { cols: number; rows: number }>();
 // What each shell is attached to, kept past the socket: the tab's x has to
 // name the tmux session to kill, and by then its socket may already be gone.
-const ptyAt = new Map<string, { scope: string; session?: string }>();
 
 // A shell that is still connecting cannot take bytes yet (`ws.send` throws), and one that is
 // closing has nobody to give them to: both are "not open", and the open handler already sends
@@ -365,11 +364,9 @@ function closePtys() {
   ptys.clear();
 }
 
-ipcMain.handle("pty:sessions", (_e, rawScope: unknown) => needBench().ptySessions(checkScope(rawScope)));
 
-ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown, rows: unknown, rawSession: unknown) => {
+ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown, rows: unknown) => {
   const { id, scope } = checkPty(rawId, rawScope);
-  const session = checkSession(rawSession);
   if (typeof cols !== "number" || typeof rows !== "number") throw new Error("a shell opens at a size");
   // One socket per tab id, always: a second `pty:open` for the same id used to leave the first
   // socket's `message` handler attached, so every byte the shell wrote arrived twice and the
@@ -379,9 +376,8 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
     old.removeAllListeners();
     old.close();
   }
-  const w = needBench().pty(scope, session);
+  const w = needBench().pty(scope);
   ptys.set(id, w);
-  ptyAt.set(id, { scope, session });
   const send = (...a: unknown[]) => {
     if (!e.sender.isDestroyed()) e.sender.send(a[0] as string, ...a.slice(1));
   };
@@ -400,11 +396,22 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
     const at = sizes.get(id) ?? { cols, rows };
     w.send(JSON.stringify({ resize: at }));
   });
+  /**
+   * ttyd's frames, one byte of opcode then the payload (spec §2.3): `0` output, `1` the title,
+   * `2` its preferences, which we ignore — the terminal is themed by this app. The bench splices
+   * them through unchanged, so this is where they are read.
+   */
   w.on("message", (d: Buffer, isBinary: boolean) => {
     if (isBinary) return send("pty:data", id, new Uint8Array(d));
+    const text = d.toString();
+    const opcode = text.slice(0, 1);
+    if (opcode === "0") return send("pty:data", id, new Uint8Array(Buffer.from(text.slice(1), "utf8")));
+    if (opcode === "1") return send("pty:title", id, text.slice(1));
+    if (opcode === "2") return; // ttyd's own preferences: this app has its own
+    // The bench's own control frames: it speaks these before the shell is attached.
     let ev: { exit?: unknown; error?: unknown };
     try {
-      ev = JSON.parse(d.toString()) as typeof ev;
+      ev = JSON.parse(text) as typeof ev;
     } catch {
       return;
     }
@@ -420,38 +427,23 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
 });
 ipcMain.on("pty:write", (_e, id: unknown, data: unknown) => {
   const w = typeof id === "string" ? openPty(id) : undefined;
-  if (w && data instanceof Uint8Array) w.send(Buffer.from(data), { binary: true });
+  // ttyd takes input as a TEXT frame led by `0`; a binary frame is not its protocol.
+  if (w && data instanceof Uint8Array) w.send(`0${Buffer.from(data).toString("utf8")}`);
 });
 ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
   if (typeof id !== "string" || typeof cols !== "number" || typeof rows !== "number") return;
   sizes.set(id, { cols, rows });
   const w = openPty(id);
-  if (w) w.send(JSON.stringify({ resize: { cols, rows } }));
+  // `1` then the size, as ttyd names it: columns and rows, not cols and rows.
+  if (w) w.send(`1${JSON.stringify({ columns: cols, rows })}`);
 });
 ipcMain.on("pty:close", (_e, id: unknown) => {
   if (typeof id !== "string") return;
   ptys.get(id)?.close();
   ptys.delete(id);
-  // What it was attached to is kept: closing a socket is not ending a shell, and
-  // the tab's x still has to name the tmux session afterwards.
-});
-// The tab's x: kill the tmux session first, then drop the socket. The other way
-// round the detach would leave the shell running with nothing naming it.
-ipcMain.handle("pty:kill", async (_e, id: unknown) => {
-  if (typeof id !== "string") throw new Error("not a terminal id");
-  const at = ptyAt.get(id);
-  ptyAt.delete(id);
-  if (at?.session) {
-    // Already gone is the outcome asked for; anything else is worth the log but never blocks the close.
-    await needBench()
-      .killPtySession(at.scope, at.session)
-      .catch((e: Error) => console.warn("pty: could not kill", at.session, e.message));
-  }
-  ptys.get(id)?.close();
-  ptys.delete(id);
+  // Closing the socket IS ending the shell: there is nothing behind it to outlive it (spec §2.3).
   sizes.delete(id);
 });
-
 /**
  * Whether the SYSTEM asks for less motion. A Chromium renderer inside Electron answers
  * `prefers-reduced-motion: reduce` even with the OS setting off (measured over CDP on the owner's

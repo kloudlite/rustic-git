@@ -1,45 +1,37 @@
 import WebSocket from "ws";
 
 /**
- * The bench's shells. One socket, one pipe: a closed socket ends this attachment,
- * and whether the shell outlives it is the far end's business — a `session=` name
- * puts it in tmux there, no name is today's bare shell. Binary frames are raw PTY bytes both ways; text frames are control
- * JSON (`{"resize":{"cols":N,"rows":N}}` in, `{"exit":N}` / `{"error":"…"}` out).
+ * The person's shell, spliced. Every pod carries a `shell` sidecar running `ttyd` on 7790 with the
+ * home mounted and nothing else (spec §2): the terminal is a socket to THAT, never a PTY forked in
+ * a container that holds code or a token. The tool server's own `/stream/pty` is retired with this.
  *
- * Two scopes, one protocol, one mechanism: both splice this socket onto a tool
- * server's `/stream/pty` and forward frames unchanged, so the far end owns the
- * PTY and we own nothing but the pipe. `bench` is the workspace container beside
- * us on 127.0.0.1 (the bench IS a workspace pod now, so its shell is the
- * person's zsh with their Nix profile, not a shell forked in this container).
+ * ttyd's protocol is one byte of opcode then the payload, subprotocol `tty`:
+ *
+ * | direction | opcode | payload |
+ * |---|---|---|
+ * | client → | `0` | input bytes |
+ * | client → | `1` | `{"columns":N,"rows":N}` |
+ * | client → | (first frame) | `{"AuthToken":"","columns":N,"rows":N}` |
+ * | → client | `0` | output bytes |
+ * | → client | `1` | the title |
+ * | → client | `2` | ttyd's preferences JSON |
+ *
+ * Frames cross unchanged: the shell is the far end's, and this owns nothing but the pipe. A dropped
+ * socket is a finished shell — there is no session table, no replay and no reattach (§2.3).
  */
 export type Resize = { cols: number; rows: number };
 
 const OPEN_MS = 5_000;
+/** ttyd's own subprotocol name; it refuses a socket that does not ask for it. */
+export const TTYD_SUBPROTOCOL = "tty";
+/** The shell sidecar's port, in every pod (spec §2.2). */
+export const SHELL_PORT = 7790;
 
-/**
- * A terminal session name. The desktop mints it, the tool server validates it too, and we refuse
- * it here as well: it lands in a URL and then in a `tmux -L kl` argument, so a leading dash (an
- * option to tmux) is out even though the charset would allow it.
- */
-export const SESSION_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
+/** `10.42.3.190:7788` → `10.42.3.190:7790`: same pod, the sidecar beside the tool server. */
+export const shellAddress = (address: string): string => `${address.replace(/:\d+$/, "")}:${SHELL_PORT}`;
 
-/** Proxy the tool server's session listing/kill; an unreachable pod is a 502, not a crash. */
-export async function toolSessions(address: string, method: "GET" | "DELETE", name?: string): Promise<{ code: number; body?: unknown }> {
-  let r: Response;
-  try {
-    // Bounded like the WS dial (OPEN_MS): a hung tool server must not hang the bench's request.
-    r = await fetch(`http://${address}/stream/pty/sessions${name === undefined ? "" : `/${name}`}`, { method, signal: AbortSignal.timeout(OPEN_MS) });
-  } catch (e) {
-    return { code: 502, body: { error: `workspace ${address} did not answer: ${(e as Error).message}` } };
-  }
-  const text = await r.text();
-  if (!text) return { code: r.status };
-  try {
-    return { code: r.status, body: JSON.parse(text) as unknown };
-  } catch {
-    return { code: 502, body: { error: `workspace ${address} answered ${r.status} with non-JSON` } };
-  }
-}
+/** ttyd's first client frame: an empty token (the NetworkPolicy is the fence, §2.3) and the size. */
+export const authFrame = (first: Resize): string => JSON.stringify({ AuthToken: "", columns: first.cols, rows: first.rows });
 
 /** Never throw out of a send: a socket the peer already closed is the normal end of a shell, not an error. */
 function send(w: WebSocket, data: string | Buffer, binary?: boolean): void {
@@ -98,10 +90,13 @@ export function holdFrames(w: WebSocket, timeoutMs: number): { first: Promise<Re
   };
 }
 
-/** Splice this socket onto a workspace tool server's PTY route; frames cross unchanged, either close closes the other. */
-export function spliceWorkspaceShell(w: WebSocket, address: string, first: Resize, session?: string): void {
-  // The name names a tmux session on the far end; without one the tool server gives today's bare shell.
-  const up = new WebSocket(`ws://${address}/stream/pty${session === undefined ? "" : `?session=${session}`}`);
+/**
+ * Splice this socket onto a pod's ttyd. The desktop speaks the same protocol on its side, so the
+ * frames cross UNCHANGED in both directions and neither end re-encodes what the other typed; the
+ * one thing added here is ttyd's opening frame, built from the size the client asked for.
+ */
+export function spliceShell(w: WebSocket, address: string, first: Resize): void {
+  const up = new WebSocket(`ws://${shellAddress(address)}/ws`, [TTYD_SUBPROTOCOL]);
   let open = false;
   const queue: [Buffer, boolean][] = [];
   const timer = setTimeout(() => {
@@ -109,14 +104,14 @@ export function spliceWorkspaceShell(w: WebSocket, address: string, first: Resiz
   }, OPEN_MS);
   const fail = () => {
     clearTimeout(timer);
-    send(w, JSON.stringify({ error: `workspace ${address} did not answer` }));
+    send(w, JSON.stringify({ error: `shell ${shellAddress(address)} did not answer` }));
     w.close();
     up.terminate();
   };
   up.on("open", () => {
     open = true;
     clearTimeout(timer);
-    up.send(JSON.stringify({ resize: first }));
+    up.send(authFrame(first));
     for (const [d, binary] of queue) up.send(d, { binary });
     queue.length = 0;
   });

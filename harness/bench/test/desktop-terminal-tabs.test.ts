@@ -8,8 +8,8 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
-import { checkPty, checkSession } from "../../src/pty-ipc.ts";
-import { makeTab, nextIndex, reconcile, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, YOUNG_MS, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
+import { checkPty } from "../../src/pty-ipc.ts";
+import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
 
@@ -48,14 +48,15 @@ test("a listing materialises this tab's terminals and nobody else's", () => {
 test("makeTab: the banner names the scope, the tab owns it, the session is the tab's", () => {
   const b = makeTab(machine, "Kloudlite", "m1", "bench", 1);
   assert.match(b.banner, /^kloudlite shell · bench · Kloudlite\r\n/);
-  assert.match(b.banner, /workspaces resolve by their tool servers/);
+  // The banner says what the shell IS: the person's home in that pod, with no code in it (§2.1).
+  assert.match(b.banner, /the person's home in the bench pod/);
   assert.equal(b.label, "bench");
   assert.equal(b.owner, "m1");
   assert.equal(b.session, "kl-m1-1");
 
   const w = makeTab(machine, "Kloudlite", "ws-51480ba5", "ws-51480ba5", 2);
   assert.match(w.banner, /^kloudlite shell · rustic-git · Kloudlite\r\n/);
-  assert.match(w.banner, /the workspace is the working directory/);
+  assert.match(w.banner, /the person's home in this workspace's pod — the code is not mounted here/);
   assert.equal(w.session, "kl-ws-51480ba5-2");
   assert.notEqual(w.id, b.id); // one id per tab, never reused
 });
@@ -68,42 +69,9 @@ test("tabs belong to the tab they were opened from", () => {
   assert.deepEqual(all.filter((t) => t.owner === "ws-51480ba5").map((t) => t.session), ["kl-ws-51480ba5-1"]);
 });
 
-// The tabs and the scope's tmux sessions are one list, both ways.
+// A tab names a shell; the socket IS that shell (spec §2.3).
 const tab = (id: string, session: string, at: number, owner = "m1") => ({ id, session, owner, label: "bench", scope: "bench", banner: "", at }) as TermTab;
 const NOW = 1_000_000;
-const OLD = NOW - YOUNG_MS - 1;
-
-test("reconcile: a session opened elsewhere gets a tab", () => {
-  const r = reconcile([tab("t1", "kl-m1-1", OLD)], ["kl-m1-1", "kl-m1-2", "kl-other-1", "scratch"], "m1", NOW);
-  assert.deepEqual(r, { add: ["kl-m1-2"], remove: [] });
-});
-
-test("reconcile: a session killed elsewhere takes its tab", () => {
-  const r = reconcile([tab("t1", "kl-m1-1", OLD), tab("t2", "kl-m1-2", OLD)], ["kl-m1-2"], "m1", NOW);
-  assert.deepEqual(r, { add: [], remove: ["t1"] });
-});
-
-test("reconcile: one tab per session, never two", () => {
-  // Both the duplicate tab and a second tab for a held session are refused.
-  const r = reconcile([tab("t1", "kl-m1-1", OLD), tab("t2", "kl-m1-1", OLD)], ["kl-m1-1"], "m1", NOW);
-  assert.deepEqual(r, { add: [], remove: ["t2"] });
-});
-
-test("reconcile: a tab younger than the grace is spared an unlisted session", () => {
-  const young = [tab("t1", "kl-m1-1", NOW - 1_000)];
-  assert.deepEqual(reconcile(young, [], "m1", NOW), { add: [], remove: [] });
-  // …and once it is old enough with nothing behind it, it goes.
-  assert.deepEqual(reconcile([tab("t1", "kl-m1-1", OLD)], [], "m1", NOW), { add: [], remove: ["t1"] });
-  // Another tab's terminals are never touched.
-  assert.deepEqual(reconcile([tab("t9", "kl-ws-51480ba5-1", OLD, "ws-51480ba5")], [], "m1", NOW), { add: [], remove: [] });
-});
-
-test("pty ipc: a session name is the tool server's rule, refused before tmux sees it", () => {
-  assert.equal(checkSession(undefined), undefined);
-  assert.equal(checkSession("kl-m1-1"), "kl-m1-1");
-  for (const bad of ["-lead", "Upper", "has space", "a".repeat(49), "semi;colon", "", 7])
-    assert.throws(() => checkSession(bad), /not a session name/, String(bad));
-});
 
 test("pty ipc: only a tab id and a real scope are accepted", () => {
   assert.deepEqual(checkPty("t3", "bench"), { id: "t3", scope: "bench" });
@@ -113,17 +81,20 @@ test("pty ipc: only a tab id and a real scope are accepted", () => {
   }
 });
 
-test("BenchClient.pty: refused while offline, a shell from the pod's tool server once connected", async (t) => {
-  // The bench scope splices to the workspace container beside it; stand that container in here.
-  const tools = new WebSocketServer({ host: "127.0.0.1", port: 7788 });
+test("BenchClient.pty: refused while offline, a shell from the pod's shell sidecar once connected", async (t) => {
+  // The bench scope splices to the `shell` sidecar in its own pod; stand that container in here,
+  // speaking ttyd: `0` input, `0` output (spec §2.3).
+  const tools = new WebSocketServer({ host: "127.0.0.1", port: 7790 });
   const listening = await new Promise<boolean>((r) => (tools.once("listening", () => r(true)), tools.once("error", () => r(false))));
-  if (!listening) return void t.skip("127.0.0.1:7788 is busy on this machine");
+  if (!listening) return void t.skip("127.0.0.1:7790 is busy on this machine");
   tools.on("connection", (up) => {
-    up.on("message", (d: Buffer, binary: boolean) => {
-      if (!binary) return;
-      const line = d.toString("utf8");
-      if (line.startsWith("exit ")) return void (up.send(JSON.stringify({ exit: Number(line.slice(5)) })), up.close());
-      up.send(Buffer.from("kl-ok"), { binary: true });
+    up.on("message", (d: Buffer) => {
+      const frame = d.toString("utf8");
+      // The first frame is ttyd's auth JSON; after that `0` is what was typed.
+      if (!frame.startsWith("0")) return;
+      const line = frame.slice(1);
+      if (line.startsWith("exit")) return void up.close();
+      up.send(`0kl-ok`);
     });
   });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "desk-pty-"));
@@ -139,15 +110,22 @@ test("BenchClient.pty: refused while offline, a shell from the pod's tool server
     const w = c.pty("bench");
     let out = "";
     const json: Record<string, unknown>[] = [];
-    w.on("message", (d: Buffer, binary: boolean) => (binary ? (out += d.toString()) : json.push(JSON.parse(d.toString()))));
+    w.on("message", (d: Buffer, binary: boolean) => {
+      const text = d.toString();
+      if (!binary && text.startsWith("0")) return void (out += text.slice(1));
+      if (!binary && /^[12]/.test(text)) return; // ttyd's title and preferences
+      if (binary) return void (out += text);
+      json.push(JSON.parse(text) as Record<string, unknown>);
+    });
     await new Promise((r, j) => (w.once("open", r), w.once("error", j)));
     w.send(JSON.stringify({ resize: { cols: 100, rows: 30 } }));
-    w.send(Buffer.from("printf kl-%s ok\n"), { binary: true });
+    w.send("0printf kl-%s ok\n");
     await until(() => out.includes("kl-ok"), 10_000, "the shell's output");
+    // A shell that ends just closes: ttyd has no exit frame, and nothing reattaches (spec §2.3).
     const closed = new Promise((r) => w.once("close", r));
-    w.send(Buffer.from("exit 3\n"), { binary: true });
+    w.send("0exit\n");
     await closed;
-    assert.deepEqual(json, [{ exit: 3 }]);
+    assert.deepEqual(json, [], "no control frames of our own once the shell is attached");
   } finally {
     c.close();
     await bench.stop();

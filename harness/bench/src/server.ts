@@ -3,7 +3,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
 import { listProviders, removeProvider, setProvider } from "./providers.ts";
-import { holdFrames, SESSION_RE, spliceWorkspaceShell, toolSessions } from "./pty.ts";
+import { holdFrames, spliceShell } from "./pty.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -29,6 +29,14 @@ const SCOPE_RE = /^ws-[0-9a-f]{16}$/;
 
 /** The tool server in this pod's workspace container; same pod, so no NetworkPolicy and no token. */
 const LOCAL_TOOLS = "127.0.0.1:7788";
+/**
+ * This pod's own address, for its own shell sidecar. The sessions container cannot fork a shell —
+ * that is the whole point of §3 — so the bench's terminal is the `shell` container beside it, and
+ * a sidecar is reached on the POD IP, not on loopback's tool-server port. `KL_POD_IP` comes from
+ * the downward API (`status.podIP`); with none set, loopback is the honest fallback for a bench
+ * running on somebody's laptop.
+ */
+const ownPod = (): string => `${process.env.KL_POD_IP ?? "127.0.0.1"}:7788`;
 
 export function serve(
   bench: Bench,
@@ -224,18 +232,6 @@ export function serve(
         const b = await body(req);
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));
       }
-      // The two session routes are plain proxies of the tool server's own, scope-resolved like /pty.
-      if (p[0] === "pty" && p[1] === "sessions" && (p.length === 2 || p.length === 3)) {
-        const scope = u.searchParams.get("scope") ?? "";
-        if (scope !== "bench" && !SCOPE_RE.test(scope)) return send(res, 400, { error: `bad scope ${JSON.stringify(scope)}` });
-        const name = p[2];
-        if (name !== undefined && !SESSION_RE.test(name)) return send(res, 400, { error: `bad session ${JSON.stringify(name)}` });
-        if ((p.length === 2 && m === "GET") || (p.length === 3 && m === "DELETE")) {
-          const addr = scope === "bench" ? LOCAL_TOOLS : await resolveTools(scope);
-          const r = await toolSessions(addr, m as "GET" | "DELETE", name);
-          return send(res, r.code, r.body);
-        }
-      }
       /**
        * A workspace's own files, read-only, proxied from its tool server's `/fs/*`
        * (`crates/ide/src/fs/`): the console renders a workspace from these, and nothing here
@@ -294,14 +290,13 @@ export function serve(
       return void socket.destroy();
     }
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
-    let scope: string | undefined, session: string | undefined;
+    let scope: string | undefined;
     if (p.length === 1 && p[0] === "pty") {
       scope = u.searchParams.get("scope") ?? "";
       // A scope that is neither the bench nor a workspace id is refused before anything is opened or dialled.
       if (scope !== "bench" && !SCOPE_RE.test(scope)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
-      session = u.searchParams.get("session") ?? undefined;
-      // Refused at the handshake like the scope: a bad name must never reach the far end's tmux argv.
-      if (session !== undefined && !SESSION_RE.test(session)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+      // No session name: a terminal is a live socket to the pod's shell and nothing more. tmux
+      // sessions and their reattach went with the tool server's PTY (spec §2.3).
     }
     if (!rpc && scope === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
@@ -314,14 +309,16 @@ export function serve(
         // 80x24 is the fallback, never the shell a client that spoke gets.
         const held = holdFrames(w, 2_000);
         void held.first.then((first) => {
-          // The bench runs in the workspace pod: its own shell is that pod's tool server, one hop over loopback.
+          // The bench's own shell is the sidecar in ITS pod, reached by the pod IP the downward
+          // API gives us: the sessions container has no shell of its own to fork (spec §2.2).
           if (scope === "bench") {
-            spliceWorkspaceShell(w, LOCAL_TOOLS, first, session);
+            spliceShell(w, ownPod(), first);
             return held.release();
           }
           return resolveTools(scope!).then(
             (a) => {
-              spliceWorkspaceShell(w, a, first, session);
+              // The tool server's address, with the port swapped: same pod, the shell beside it.
+              spliceShell(w, a, first);
               held.release();
             },
             (e: Error) => {

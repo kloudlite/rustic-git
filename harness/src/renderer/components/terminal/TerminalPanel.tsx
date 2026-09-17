@@ -26,6 +26,8 @@ export function TerminalPanel(props: {
   // mark one while its view is hidden.
   const [exited, setExited] = createSignal<string[]>([]);
   const markExited = (id: string) => setExited((e) => (e.includes(id) ? e : [...e, id]));
+  /** What the shell calls itself (ttyd's `1` frame), per tab: the strip shows it beside the label. */
+  const [titles, setTitles] = createSignal<Record<string, string>>({});
 
   return (
     <section class="grid h-full min-h-0 grid-rows-[30px_minmax(0,1fr)] bg-bg">
@@ -41,7 +43,8 @@ export function TerminalPanel(props: {
               title={t.scope === "bench" ? "the bench" : t.label}
             >
               <Icon name="terminal" size={11} class={t.scope === "bench" ? "text-accent" : "text-subtle"} />
-              <span class="min-w-0 truncate font-mono">{t.label}</span>
+              {/* The shell's own title when it says one, the pod's name until then. */}
+              <span class="min-w-0 truncate font-mono">{titles()[t.id] || t.label}</span>
               <Show when={exited().includes(t.id)}>
                 <span class="text-subtle" title="the shell exited">
                   •
@@ -79,7 +82,17 @@ export function TerminalPanel(props: {
       </header>
 
       <div class="relative min-h-0 pl-4">
-        <For each={props.tabs}>{(t) => <TerminalView tab={t} visible={t.id === props.active} onExited={markExited} onEnded={() => props.onEnded(t.id)} />}</For>
+        <For each={props.tabs}>
+          {(t) => (
+            <TerminalView
+              tab={t}
+              visible={t.id === props.active}
+              onExited={markExited}
+              onEnded={() => props.onEnded(t.id)}
+              onTitle={(id, title) => setTitles((m) => ({ ...m, [id]: title }))}
+            />
+          )}
+        </For>
       </div>
     </section>
   );

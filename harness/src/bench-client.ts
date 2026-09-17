@@ -134,19 +134,10 @@ export class BenchClient {
    */
   pty(scope: string, session?: string): WebSocket {
     if (!this.up) throw new Error(OFFLINE);
-    const q = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
-    return this.ws(`/pty?scope=${encodeURIComponent(scope)}${q}`);
+    // No session name: the socket IS the shell, in the pod's `shell` sidecar (spec §2.3).
+    return this.ws(`/pty?scope=${encodeURIComponent(scope)}`);
   }
 
-  /** What tmux holds in that scope, so a tab reattaches what is already running rather than opening a second shell. */
-  ptySessions(scope: string): Promise<PtySession[]> {
-    return this.rest<PtySession[]>("GET", `/pty/sessions?scope=${encodeURIComponent(scope)}`);
-  }
-
-  /** Ending a terminal is the person's choice and nothing else's: only the tab's x reaches here. */
-  killPtySession(scope: string, name: string): Promise<void> {
-    return this.rest("DELETE", `/pty/sessions/${encodeURIComponent(name)}?scope=${encodeURIComponent(scope)}`).then(() => undefined);
-  }
 
   start(): void {
     if (this.closed) return;

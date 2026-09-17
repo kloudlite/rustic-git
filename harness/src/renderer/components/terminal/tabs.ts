@@ -1,22 +1,21 @@
 import type { Machine } from "../../model";
 
 /**
- * One terminal. `owner` is the session tab it was opened from — the drawer
- * shows only the active tab's terminals — and `session` is its tmux session
- * inside the scope, so the same tab on another device reattaches the same
- * shells rather than forking new ones.
+ * One terminal. `owner` is the session tab it was opened from — the drawer shows only the active
+ * tab's terminals — and `session` names it within that tab. It is a LABEL now, not a handle: the
+ * shell lives in the pod's `shell` sidecar for exactly as long as the socket does (spec §2.3), so
+ * nothing on another device reattaches it.
  */
 export type TermTab = { id: string; label: string; scope: string; owner: string; session: string; banner: string; at: number };
 
 let seq = 0;
 
-/** The tool server's own rule (`[a-z0-9-]{1,48}`, no leading dash), so a name is refused here and never reaches tmux's argv. */
+/** Kept for the label's shape: lowercase, dashes, nothing that could be read as an argument. */
 export const SESSION_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 /**
- * A tab id is arbitrary (a workspace id, an email-shaped thread id); a tmux
- * session name is not. Lowercase, anything else a dash, no run of dashes and
- * no dash at either end — and short enough that `kl-<slug>-<n>` still fits 48.
+ * A tab id is arbitrary (a workspace id, an email-shaped thread id); a shell's label is not.
+ * Lowercase, anything else a dash, no run of dashes and no dash at either end.
  */
 export function slug(ownerTabId: string): string {
   const s = ownerTabId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/g, "");
@@ -39,37 +38,13 @@ export function sessionIndex(name: string, ownerTabId: string): number {
   return name.startsWith(pre) && /^\d+$/.test(name.slice(pre.length)) ? Number(name.slice(pre.length)) : 0;
 }
 
-/** The first index this tab is not already using, live tabs and listed sessions alike. */
+/** The first index this tab is not already using. A tab is a socket now: nothing else holds one. */
 export function nextIndex(taken: string[], ownerTabId: string): number {
   const pre = `kl-${slug(ownerTabId)}-`;
   const used = new Set(sessionsOfTab(taken, ownerTabId).map((n) => Number(n.slice(pre.length))));
   let n = 1;
   while (used.has(n)) n++;
   return n;
-}
-
-/** A tab younger than this is spared the reconcile: its session may not be listed yet. */
-export const YOUNG_MS = 10_000;
-
-/**
- * The tabs and the scope's tmux sessions are one list, in both directions
- * (owner, 2026-09-17: "close the tab here, the session there should close and
- * vice versa"). Pure so the ordering rules are testable: a session nobody holds
- * gets a tab, a tab whose session is gone goes, and a session is never held
- * twice. `live` is the whole listing; only this tab's names are its business.
- */
-export function reconcile(tabs: TermTab[], live: string[], ownerTabId: string, now: number): { add: string[]; remove: string[] } {
-  const mine = sessionsOfTab(live, ownerTabId);
-  const here = tabs.filter((t) => t.owner === ownerTabId);
-  const held = new Set<string>();
-  const remove: string[] = [];
-  for (const t of here) {
-    // A duplicate is dropped whatever the listing says: one tab per session.
-    if (held.has(t.session)) remove.push(t.id);
-    else if (!mine.includes(t.session) && now - t.at >= YOUNG_MS) remove.push(t.id);
-    else held.add(t.session);
-  }
-  return { add: mine.filter((n) => !held.has(n)), remove };
 }
 
 /**
@@ -84,7 +59,8 @@ export function scopeOfTab(machine: Machine, ownerTabId: string): string {
 export function makeTab(machine: Machine, team: string, ownerTabId: string, scopeId: string, n: number): TermTab {
   const ws = machine.workspaces.find((w) => w.id === scopeId);
   const name = ws?.name ?? "bench";
-  const dim = ws ? "the workspace is the working directory" : "your machine in the team; workspaces resolve by their tool servers";
+  // What this shell IS, said once: the person's home in that pod, with none of the code in it.
+  const dim = ws ? "the person's home in this workspace's pod — the code is not mounted here" : "the person's home in the bench pod";
 
   return {
     id: `t${++seq}`,
