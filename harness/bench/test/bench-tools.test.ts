@@ -854,3 +854,26 @@ test("in a workspace, tool_search offers only what is registered — and it is c
     restore();
   }
 });
+
+/**
+ * Only handing work to somebody else is an exchange. A platform call is not: the owner's queue
+ * showed `kl_workspace_create {"name":"backend-rust","packages":["rust"]}` as though a workspace
+ * were working on it (2026-09-17).
+ */
+test("a platform call publishes no exchange; an ask does", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const widgets: [string, string[]][] = [];
+    const run = (n: string, a: any) =>
+      (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, {
+        ui: { setWidget: (k: string, v: string[]) => widgets.push([k, v]) },
+      });
+    await run("kl_workspaces", {}).catch(() => undefined);
+    assert.deepEqual(widgets.filter(([k]) => k === "harness:exchange"), [], "a platform call is a tool row, not an exchange");
+  } finally {
+    restore();
+  }
+});

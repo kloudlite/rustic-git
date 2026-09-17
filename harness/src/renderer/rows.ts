@@ -233,3 +233,23 @@ export function argLine(args: Record<string, unknown> = {}, summary = ""): strin
   // Nothing worth showing: the summary minus its own verb, which is already the header.
   return said.length ? said.join(" · ") : summary.replace(/^[A-Z][a-z]+( [a-z]+)? /, "");
 }
+
+/**
+ * What an exchange row SAYS: who it is with, and the first line of the task. The owner saw
+ * `› sent  backend-rust  kl_workspace_create {"name":"backend-rust","packages":["rust"]}` — a
+ * platform call published as an exchange, with its arguments as the text (2026-09-17). Platform
+ * calls are no longer exchanges at all; this keeps the rows readable whatever reaches them.
+ */
+export function exchangeText(text: string): string {
+  const said = String(text ?? "")
+    .replace(/^\[ask \S+ from [^\]]*\] /, "")
+    .replace(/^\[reply [^\]]+\]\s*/, "")
+    .trim();
+  // A tool call that somehow reached the log reads as its verb, never as its JSON.
+  const call = /^([a-z_]+)\s+\{[\s\S]*\}$/.exec(said);
+  if (call) {
+    const verb = call[1].replace(/^kl_/, "").replace(/_/g, " ");
+    return verb.charAt(0).toUpperCase() + verb.slice(1);
+  }
+  return said.split("\n")[0].slice(0, 120);
+}

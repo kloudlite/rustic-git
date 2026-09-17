@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -118,4 +118,13 @@ test("two sessions of one workspace see the same processes; another workspace se
   // A row written before the ledger carried a workspace still belongs to the session that made it.
   assert.deepEqual(procsOf([{ id: "old", session: "s-1", cmd: "x" }], "s-1", "bench").map((p) => p.id), ["old"]);
   assert.deepEqual(procsOf([{ id: "old", session: "s-1", cmd: "x" }], "w-ws-api", "ws-api"), []);
+});
+
+test("an exchange row reads as who and what, never as a tool call's JSON", () => {
+  assert.equal(exchangeText("[ask ask-3 from karthik] run the tests"), "run the tests");
+  assert.equal(exchangeText("[reply ask-3] DONE — it passes"), "DONE — it passes");
+  // A platform call is no longer an exchange at all; if one reaches the log it still reads.
+  assert.equal(exchangeText('kl_workspace_create {"name":"backend-rust","packages":["rust"]}'), "Workspace create");
+  // Long tasks are one line.
+  assert.equal(exchangeText("first line\nsecond line"), "first line");
 });

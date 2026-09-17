@@ -16,7 +16,7 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { argLine, modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
+import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
 import { BoxCursor } from "./BoxCursor";
@@ -591,7 +591,7 @@ export function Chat(props: {
                     <span class="w-5 shrink-0 text-subtle">›</span>
                     <span class="shrink-0 text-subtle">{a.state}</span>
                     <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-muted">{a.workspace}</span>
-                    <span class="min-w-0 flex-1 truncate">{a.text.replace(/^\[ask \S+ from [^\]]*\] /, "")}</span>
+                    <span class="min-w-0 flex-1 truncate">{exchangeText(a.text)}</span>
                   </div>
                 )}
               </For>

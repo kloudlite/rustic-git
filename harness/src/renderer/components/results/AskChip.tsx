@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { exchangesOf } from "../../live";
+import { exchangeText } from "../../rows";
 import { Card, Dot, Pill } from "./parts";
 
 /**
@@ -21,7 +22,7 @@ export function AskChip(props: { workspace: string }) {
                   <Dot state={e.state} />
                   <Pill>{e.workspace}</Pill>
                   <span class="shrink-0 text-muted">{e.state}</span>
-                  <span class="min-w-0 flex-1 truncate text-fg" title={e.text}>{e.text.replace(/^\[ask \S+ from [^\]]*\] /, "")}</span>
+                  <span class="min-w-0 flex-1 truncate text-fg" title={e.text}>{exchangeText(e.text)}</span>
                 </div>
                 <Show when={reply()}>{(r) => <div class="ml-5 border-l border-line pl-3 text-muted">{r().text}</div>}</Show>
               </div>

@@ -220,19 +220,13 @@ export function makeReg(pi: ExtensionAPI) {
           const ok = await propose(`p-${toolCallId}`, name, args, ctx, signal);
           if (!ok) return text("declined by the person");
         }
-        // A call that hands work to a workspace or environment is an exchange:
-        // harness-bench records it in the bench's one log, where the session's
-        // queue and the workspace's queue both read it.
-        const target = /^kl_(workspace|environment)_/.test(name) ? String(args.workspace ?? args.id ?? args.name ?? "") : "";
-        const publish = (v: unknown) => target && ctx?.ui?.setWidget("harness:exchange", [JSON.stringify(v)]);
-        const id = `x-${toolCallId}`;
-        publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
+        // An EXCHANGE is one session handing work to another — an ask, an info ask, an agent.
+        // A platform call is not one: publishing every `kl_workspace_create` here put
+        // `kl_workspace_create {"name":"backend-rust","packages":["rust"]}` in the queue as though
+        // somebody were waiting on it (owner, 2026-09-17). The call renders as its own tool row.
         // A tool that throws — a name two things answer to, a repo that is not owner/name — answers
         // with the sentence, not with a stack: the model can read a sentence and act on it.
-        const r = await run(args, signal, ctx).catch((e: Error) => ({ ...text(e.message), isError: true }));
-        publish({ id: `${id}-in`, workspace: target, dir: "in", text: r.content.map((c) => c.text).join("").slice(0, 2000), state: r.isError ? "failed" : "done", ref: id });
-        publish({ id, state: r.isError ? "failed" : "done" });
-        return r;
+        return await run(args, signal, ctx).catch((e: Error) => ({ ...text(e.message), isError: true }));
       },
     });
   };
