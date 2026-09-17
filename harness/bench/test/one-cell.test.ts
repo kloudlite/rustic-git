@@ -166,12 +166,10 @@ test("the status line shows exactly one working indicator", () => {
 test("repositories come from the platform, never the fixture", () => {
   const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
   assert.ok(!/\bREPOS\b/.test(app), "the demo fixture is not what the panel lists");
-  assert.match(app, /platform\.repos\(\)/, "the team's repos are fetched");
-  assert.match(app, /repos=\{repos\(\)\}/, "and rendered from that fetch");
-  // A failed read says so; it must never fall back to rows nobody has.
-  const fetchLine = /platform\.repos\(\)[^\n]*/.exec(app)?.[0] ?? "";
-  assert.match(fetchLine, /setStatusNote/, "an error shows in the footer");
-  assert.ok(!/REPOS/.test(fetchLine), "and adds no fixture rows");
+  assert.match(app, /repos=\{repos\(\)\}/, "the panel renders the fetched list, never a fixture");
+  // `/v1/repos` authenticates with a SESSION JWT and refuses the desktop's CLI token, so calling it
+  // on the refresh beat 401'd once a beat — and every 401 used to sign the person out.
+  assert.ok(!/platform\.repos\(\)/.test(app), "a route that always 401s is not polled");
 
   const panel = fs.readFileSync(path.resolve("src/renderer/components/TeamPanel.tsx"), "utf8");
   // The two fields the listing does not have, and which the old panel drew.

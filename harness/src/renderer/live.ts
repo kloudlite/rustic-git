@@ -705,6 +705,10 @@ export function onEvent(ev: Ev & { pi?: string }) {
   switch (ev.type) {
     case "bench":
       return void noteConnected(ev.connected === true);
+    // Main saying something transient — a bench route that refused and is being re-minted. It is a
+    // fact about the DESKTOP, so it goes to the composer footer and never into the transcript.
+    case "status":
+      return void setStatusNote(typeof ev.text === "string" ? ev.text : undefined);
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
     case "proposal": {

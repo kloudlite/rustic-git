@@ -13,12 +13,37 @@
  */
 export type Session = { id: string; token: string; gateway: string; expires_at: string };
 
+/**
+ * The SESSION JWT was rejected. Only this ends a login — and only after `validate()` has confirmed
+ * it against the identity endpoint, because the api rolling mid-request answers 401 too.
+ * `route` is carried so the log can name what refused; it never carries a token.
+ */
 export class Expired extends Error {
-  constructor() {
+  readonly route: string;
+  constructor(route = "") {
     super("your login has expired or was revoked");
     this.name = "Expired";
+    this.route = route;
   }
 }
+
+/**
+ * A BENCH-scope 401: a single-use tunnel token, a bench token that changed with the pod, or a route
+ * a freshly recreated bench does not know yet. None of these says anything about the person's
+ * login, and treating them as expiry is what signed the owner out every time the pod was recreated
+ * (four api rolls and five bench recreates in one night). Re-mint and retry; never sign out.
+ */
+export class Refused extends Error {
+  readonly route: string;
+  constructor(route = "") {
+    super("bench refused the connection; retrying");
+    this.name = "Refused";
+    this.route = route;
+  }
+}
+
+/** One line per 401, naming the route and NEVER the token, so the source is visible in the log. */
+export const note401 = (scope: string, route: string) => console.error(`auth: 401 from ${scope} ${route}`);
 
 export class BadGateway extends Error {
   constructor(reason: string) {
@@ -58,7 +83,7 @@ async function call(api: string, token: string, method: string, path: string, bo
     redirect: "error",
     signal,
   });
-  if (r.status === 401) throw new Expired();
+  if (r.status === 401) throw (note401("api", path), new Expired(path));
   const text = await r.text();
   let parsed: Answer["body"] = {};
   try {
@@ -88,7 +113,7 @@ export type Team = { slug: string; name: string; region: string; personal: boole
 /** `GET /v1/bench/teams`: Personal first, then the person's own teams only (`crates/workspaces/src/api/bench.rs`). */
 export async function listTeams(api: string, token: string, signal?: AbortSignal): Promise<Team[]> {
   const r = await fetch(`${api}/v1/bench/teams`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal });
-  if (r.status === 401) throw new Expired();
+  if (r.status === 401) throw (note401("api", "/v1/bench/teams"), new Expired("/v1/bench/teams"));
   if (!r.ok) throw new Error(`Kloudlite answered ${r.status} listing your teams`);
   const list = (await r.json()) as unknown;
   if (!Array.isArray(list)) throw new Error("Kloudlite answered an unreadable team list");

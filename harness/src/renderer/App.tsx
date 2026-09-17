@@ -71,8 +71,11 @@ export function App() {
       await Promise.all([
         platform.workspaces().then((r) => (setWorkspaces(r.map(toWorkspace)), setWsNote(undefined)), (e) => setWsNote(ipcError(e))),
         platform.environments().then((r) => (setEnvironments(r.map((x) => toEnvironment(x, teamId()))), setEnvNote(undefined)), (e) => setEnvNote(ipcError(e))),
-        // Same beat as the workspaces, and cleared on a team switch by the same refresh.
-        platform.repos().then((r) => setRepos(r.map((x) => toRepo(x, teamId()))), (e) => live.setStatusNote(`repositories: ${ipcError(e)}`)),
+        // NOT on the beat: `/v1/repos` authenticates with `caller()`, a SESSION JWT only, and the
+        // desktop holds a CLI token — `identify` refuses those deliberately (`crates/api/src/lib.rs`
+        // :541), so every call 401s. Polling it signed the owner out once a beat. The panel stays
+        // empty until the api accepts a CLI login there (`identify_or_cli`, as /v1/workspaces does).
+        // ponytail: one route away — re-enable this line when it does.
         // A read that fails leaves the last known choice rather than disconnecting the window.
         platform.myEnvironment().then((id) => setConnected(id ?? ""), () => undefined),
       ]);

@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listWorkspaces, myEnvironment, segment, setMyEnvironment, volumeHistory } from "../../src/connect/platform.ts";
 
@@ -122,6 +124,86 @@ test("my environment: the connected team's row, set and cleared on the platform"
     assert.deepEqual(s.calls.slice(2), ["PUT /v1/me/environments/acme", "DELETE /v1/me/environments/acme"]);
     assert.equal(s.auth[2], "Bearer tok");
     await assert.rejects(setMyEnvironment(s.api, "tok", "acme", "../etc"), /not a valid name/);
+  } finally {
+    s.close();
+  }
+});
+
+/**
+ * The owner was signed out every time the api rolled or the bench pod was recreated: ANY 401 ran
+ * `auth.expired()`. A 401 is not proof a login is over — a pod answering mid-roll, a single-use
+ * tunnel token, a bench route a recreated pod does not know yet all answer 401 — so the decision
+ * is now: ask the identity endpoint ONCE, and only a 401 there ends the login.
+ *
+ * `stillValid` is that rule. It is reproduced here against the same `/v1/cli/tokens` the focus
+ * re-check uses, because main's own copy is not importable from a test.
+ */
+async function stillValid(api: string, token: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${api}/v1/cli/tokens`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) });
+    await r.body?.cancel();
+    if (r.status === 401) return false;
+    if (!r.ok) return true; // not reachable is not revoked
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+test("an api 401 with a valid session does not sign out", async () => {
+  const s = await stub({
+    "GET /v1/workspaces?team=acme": { status: 401, body: { error: "no" } },
+    "GET /v1/cli/tokens": { status: 200, body: [] },
+  });
+  try {
+    await assert.rejects(() => listWorkspaces(s.api, "tok", "acme"), (e: Error) => e.name === "Expired");
+    // The 401 names its route, and never the token.
+    assert.equal((await listWorkspaces(s.api, "tok", "acme").catch((e) => e)).route, "/v1/workspaces?team=acme");
+    assert.equal(await stillValid(s.api, "tok"), true, "the session is good: a roll refused us, not a revoke");
+  } finally {
+    s.close();
+  }
+});
+
+test("an api 401 with a rejected session does sign out", async () => {
+  const s = await stub({
+    "GET /v1/workspaces?team=acme": { status: 401, body: { error: "no" } },
+    "GET /v1/cli/tokens": { status: 401, body: { error: "revoked" } },
+  });
+  try {
+    await assert.rejects(() => listWorkspaces(s.api, "tok", "acme"), (e: Error) => e.name === "Expired");
+    assert.equal(await stillValid(s.api, "tok"), false, "the identity endpoint agrees: this login is over");
+  } finally {
+    s.close();
+  }
+});
+
+test("an unreachable identity endpoint is not a revoked login", async () => {
+  // Nothing listening: unreachable must never sign anybody out.
+  assert.equal(await stillValid("http://127.0.0.1:1", "tok"), true);
+});
+
+/**
+ * A BENCH-route 401 never signs anybody out. `mintSession` runs on EVERY tunnel connection, not
+ * once — so with `/events` reconnecting every 79–136 s the desktop minted a session that often, and
+ * one 401 among them ended the login. That is the loop the api saw as a new `parent8` every ~40 s
+ * while logging zero 401s of its own.
+ */
+test("a bench route's 401 is a refusal to retry, not an expiry", async () => {
+  const s = await stub({ "POST /v1/bench/session?team=acme": { status: 401, body: { error: "no" } } });
+  try {
+    const { mintSession } = await import("../../src/connect/bench.ts");
+    const e = await mintSession(s.api, "tok", "acme").then(() => undefined, (x: Error) => x);
+    assert.ok(e, "the mint fails");
+    // It still reports as Expired from the api's own call helper — what changed is what main DOES
+    // with it: `benchRefused` re-mints and only checks the login, rather than ending it outright.
+    assert.equal((e as Error & { route?: string }).route, "/v1/bench/session?team=acme", "the route is named for the log");
+    const main = fs.readFileSync(path.resolve("src/main.ts"), "utf8");
+    assert.match(main, /keepToolToken\(.*benchRefused/, "the tool-token beat refuses, it does not expire");
+    assert.match(main, /benchRefused\(c, \(e as \{ route\?: string \}\)\.route/, "and so does the tunnel");
+    assert.ok(!/onExpired.*auth\.expired|\(\) => auth\.expired\(\)/.test(main), "no bench path signs out directly any more");
+    // Only a rejected session JWT ends the login, and only after the identity endpoint says so.
+    assert.match(main, /e\.name === "Expired" && !\(await stillValid\(c\)\)/);
   } finally {
     s.close();
   }

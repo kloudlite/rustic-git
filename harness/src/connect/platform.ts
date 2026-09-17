@@ -1,5 +1,13 @@
 // Matched by name, as main and the controller already do; no runtime import, so node --test loads this alone.
-const expired = () => Object.assign(new Error("your login has expired or was revoked"), { name: "Expired" });
+/**
+ * One line per 401, naming the route and NEVER the token. Inlined rather than imported from
+ * `./bench`: this module is loaded by node:test, where an extensionless sibling import does not
+ * resolve (the bundler resolves it, Node does not).
+ */
+const note401 = (scope: string, route: string) => console.error(`auth: 401 from ${scope} ${route}`);
+
+/** A rejected session JWT, carrying the route that rejected it (never a token) for the log. */
+const expired = (route = "") => Object.assign(new Error("your login has expired or was revoked"), { name: "Expired", route });
 
 /**
  * The `/v1` reads the desktop shows, run in MAIN with the stored token: the renderer asks for one
@@ -71,7 +79,7 @@ export function segment(s: unknown): string {
 
 async function getJson(api: string, token: string, path: string, missing?: unknown): Promise<unknown> {
   const r = await fetch(api + path, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.timeout(10_000) });
-  if (r.status === 401) throw (await r.body?.cancel(), expired());
+  if (r.status === 401) throw (await r.body?.cancel(), note401("api", path), expired(path));
   if (r.status === 404 && missing !== undefined) return (await r.body?.cancel(), missing);
   if (!r.ok) throw (await r.body?.cancel(), new Error(`Kloudlite answered ${r.status}`));
   try {
@@ -187,7 +195,7 @@ async function sendJson(api: string, token: string, method: "PUT" | "DELETE", pa
     redirect: "error",
     signal: AbortSignal.timeout(10_000),
   });
-  if (r.status === 401) throw (await r.body?.cancel(), expired());
+  if (r.status === 401) throw (await r.body?.cancel(), note401("api", path), expired(path));
   if (!r.ok) throw (await r.body?.cancel(), new Error(`Kloudlite answered ${r.status}`));
   if (r.status === 204) return (await r.body?.cancel(), undefined);
   try {

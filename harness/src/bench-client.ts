@@ -246,6 +246,9 @@ export class BenchClient {
     } catch {
       data = null;
     }
+    // Every 401 names its route (never a token): the desktop log had no 401 line at all, so the
+    // source of a sign-out loop could not be read off it (coordinator, 2026-09-18).
+    if (text.status === 401) console.error(`auth: 401 from bench ${method} ${p}`);
     if (text.status >= 400) throw new Error((data as { error?: string } | null)?.error ?? `bench answered ${text.status}`);
     if (method === "GET" && p === "/sessions") {
       this.cache.sessions = data as unknown[];
