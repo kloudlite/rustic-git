@@ -128,7 +128,8 @@ export function serve(
         }
         if (p.length === 2 && m === "POST") {
           const b = await body(req);
-          if (b.answer !== "yes" && b.answer !== "no") return send(res, 400, { error: "answer is yes or no" });
+          // yes / no for a proposal; a question's answer is the person's own words.
+          if (typeof b.answer !== "string" || !b.answer.trim()) return send(res, 400, { error: "answer is yes, no, or what the person chose" });
           return send(res, 200, bench.answerProposal(p[1], b.answer));
         }
       }

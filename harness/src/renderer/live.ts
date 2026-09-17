@@ -109,7 +109,7 @@ export { connected, setConnected, writable };
  * A person's answer to a proposal. The bench is holding the tool call until this lands; the answer
  * is also said out loud in the thread, so the transcript reads as the conversation it was.
  */
-export function answerProposal(session: string, id: string, answer: "yes" | "no") {
+export function answerProposal(session: string, id: string, answer: string) {
   thread(session).proposal({ id, tool: "", summary: "", answer });
   thread(session).sent(answer);
   void window.harness.bench("POST", `/proposals/${id}`, { answer }).catch((e: Error) => thread(session).note(e.message));
@@ -220,10 +220,10 @@ function makeThread(id: string) {
    * A tool asking to run. It sits in the transcript as a question and stays there once answered —
    * the record of what was agreed to is the conversation itself.
    */
-  function proposal(row: { id: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: "yes" | "no" }) {
+  function proposal(row: { id: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: string; question?: unknown }) {
     const i = messages.findIndex((m) => m.role === "question" && (m as { id: string }).id === row.id);
     if (i >= 0) return void setMessages(i, { answer: row.answer } as never);
-    push({ role: "question", id: row.id, tool: row.tool, summary: row.summary, args: row.args, at: now() });
+    push({ role: "question", id: row.id, tool: row.tool, summary: row.summary, args: row.args, ask: row.question as never, at: now() });
   }
 
   /** A line from the harness itself, on the rail, the way a shell answers a builtin. */
@@ -301,12 +301,15 @@ function makeThread(id: string) {
         setStatus(`${ev.model as string} · ${ev.host as string}${ev.resumed ? " · resumed" : ""}${ev.forked ? " · read-only fork" : ""}`);
         return;
       case "exit":
+        // ONE line about an exit: the status bar carries it, and the transcript gets the note.
+        // Both the exit and the stderr that preceded it used to write their own row (owner, 2026-09-17).
         setStatus(`pi exited (${String(ev.code)})${ev.stderr ? `: ${String(ev.stderr).slice(0, 300)}` : ""}`);
         if (ev.stderr) note(`pi exited (${String(ev.code)}): ${String(ev.stderr)}`);
         setBusy(false);
         return;
       case "stderr":
-        // Only a failure to start is worth surfacing; pi is chatty on stderr.
+        // Only a failure to START is worth surfacing, and only in the status: the exit above says
+        // it in the transcript, once.
         if (/error|missing|api key|not found/i.test(ev.text as string)) setStatus((ev.text as string).trim().slice(0, 120));
         return;
       case "queue_update": {
@@ -429,7 +432,7 @@ export function onEvent(ev: Ev & { pi?: string }) {
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
     case "proposal": {
-      const row = ev.row as { id: string; session: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: "yes" | "no" };
+      const row = ev.row as { id: string; session: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: string; question?: unknown };
       if (row?.session) thread(row.session).proposal(row);
       return;
     }

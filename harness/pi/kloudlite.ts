@@ -289,7 +289,7 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  * platform tool stays REGISTERED — the proposals, the cards and the waits are unchanged — but
  * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
  */
-export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory"];
+export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"];
 
 /** What Plan mode leaves on: everything that reads, plus the plan itself. */
 export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "kl_capabilities", "kl_workspace_progress"];
@@ -329,6 +329,32 @@ function describeTool(pi: ExtensionAPI, name: string): string {
  * What the person told us, kept for every session afterwards. The bench owns the files — a
  * workspace session has no bench filesystem — so this is one call through the same door.
  */
+/**
+ * Asking the PERSON. Not every unknown is a thing to guess at: when two ways forward are both
+ * reasonable and only they can choose, the question is the work. It rides the proposal channel —
+ * the desktop already draws a card and holds the tool until somebody answers — and the answer
+ * comes back both as the tool's result and as their own row in the transcript.
+ */
+export function questionTool(reg: ReturnType<typeof makeReg>) {
+  reg(
+    "question",
+    {
+      header: Type.String({ description: "two or three words: what this is about" }),
+      question: Type.String({ description: "the question itself, in one sentence" }),
+      options: Type.Array(Type.Object({ label: Type.String(), description: Type.String({ description: "one line: what choosing it means" }) }), { description: "two to four ways forward" }),
+      multi: Type.Optional(Type.Boolean({ description: "more than one may be chosen" })),
+    },
+    async (a, signal, ctx) => {
+      const id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool: "question", args: a, summary: a.question, question: { header: a.header, options: a.options, multi: a.multi } })]);
+      const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal }).catch(() => undefined);
+      const answer = r?.ok ? ((await r.json()) as { answer?: string }).answer : undefined;
+      // No answer is an answer: it says stop and ask them properly, not pick one and carry on.
+      return answer && answer !== "no" ? text(answer) : { ...text("the person did not answer; ask them in your reply instead of choosing"), isError: true };
+    },
+  );
+}
+
 export function memoryTools(reg: ReturnType<typeof makeReg>) {
   reg(
     "memory",
@@ -778,6 +804,7 @@ export function tools(pi: ExtensionAPI) {
   if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, process.env.KL_WORKSPACE_ID);
   searchTools(reg, pi);
   memoryTools(reg);
+  questionTool(reg);
   capabilities(reg);
   modeCommand(pi, PLAN_TOOLS);
   startWith(pi);
@@ -819,6 +846,7 @@ export default function (pi: ExtensionAPI) {
     if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
     searchTools(reg, pi);
     memoryTools(reg);
+    questionTool(reg);
     capabilities(reg);
     modeCommand(pi, PLAN_TOOLS);
     return startWith(pi);

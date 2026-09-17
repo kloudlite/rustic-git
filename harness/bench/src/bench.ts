@@ -78,7 +78,7 @@ export class Bench {
   /** Debounce per session: a burst of arrivals is one ordering, not one per message. */
   private triaging = new Map<string, ReturnType<typeof setTimeout>>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
-  private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; answer?: "yes" | "no"; wake: (() => void)[] }>();
+  private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -250,9 +250,9 @@ export class Bench {
         }
         if (ev.widgetKey === "harness:proposal" && line) {
           // A tool asking to run: recorded here, drawn by the desktop, answered by a person.
-          const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string };
-          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, args: p.args, wake: [] });
-          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary } });
+          const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string; question?: unknown };
+          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, args: p.args, question: p.question, wake: [] });
+          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary, question: p.question } });
         }
         if (ev.widgetKey === "harness:procs") {
           const rows = (line ? JSON.parse(line) : []) as Omit<ProcRow, "session">[];
@@ -595,12 +595,12 @@ export class Bench {
    * The extension's side of a proposal: wait until a person answers, or until the cap. An unanswered
    * question is a NO — the whole point is that nothing changes without somebody saying yes.
    */
-  waitProposal(id: string, capMs: number, signal?: AbortSignal): Promise<"yes" | "no"> {
+  waitProposal(id: string, capMs: number, signal?: AbortSignal): Promise<string> {
     const p = this.proposals.get(id);
     if (!p) return Promise.resolve("no");
     if (p.answer) return Promise.resolve(p.answer);
     return new Promise((resolve) => {
-      const done = (a: "yes" | "no") => {
+      const done = (a: string) => {
         clearTimeout(timer);
         this.proposals.get(id)?.wake.splice(0);
         resolve(a);
@@ -614,20 +614,22 @@ export class Bench {
   }
 
   /** A person's answer. Idempotent: the first answer stands, and a second changes nothing. */
-  answerProposal(id: string, answer: "yes" | "no"): { id: string; answer: "yes" | "no" } {
+  answerProposal(id: string, answer: string): { id: string; answer: string } {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`no proposal ${id}`);
     p.answer ??= answer;
     // A no means the item the turn was on is not happening: the plan says so, with the reason.
     if (p.answer === "no") this.plan(p.session, { type: "declined" });
+    // A question's answer is the person SPEAKING: it belongs in the transcript as their own row.
+    if (p.tool === "question" && p.answer !== "no") void this.send(p.session, p.answer).catch(() => undefined);
     this.emit({ type: "proposal", row: { id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
     for (const w of p.wake.splice(0)) w();
     return { id, answer: p.answer };
   }
 
   /** What is still being asked, for a window that opened after the question did. */
-  openProposals(): { id: string; session: string; tool: string; args: unknown; summary: string }[] {
-    return [...this.proposals.entries()].filter(([, p]) => !p.answer).map(([id, p]) => ({ id, session: p.session, tool: p.tool, args: p.args, summary: p.summary }));
+  openProposals(): { id: string; session: string; tool: string; args: unknown; summary: string; question?: unknown }[] {
+    return [...this.proposals.entries()].filter(([, p]) => !p.answer).map(([id, p]) => ({ id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, question: p.question }));
   }
 
   /**

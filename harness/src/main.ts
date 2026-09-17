@@ -288,7 +288,7 @@ ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
 // The bench's own surface, method + path allow-listed: the renderer never
 // reaches anything else through this.
 const SID = "(bench|btw-\\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)";
-const BENCH_ROUTES = new RegExp(
+export const BENCH_ROUTES = new RegExp(
   `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/(btw|tools)$|^GET /(tasks|procs|proposals|plans|healthz)$|^GET /procs/[\\w.-]+/output(\\?since=\\d+)?$|^POST /proposals/[\\w.-]+$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^GET /memory$|^DELETE /memory/[\\w.-]+$|^GET /memory/[\\w.-]+$|^POST /import$|^POST /workspaces/[a-z0-9-]+(/eph/[a-z0-9-]+)?/session$`,
 );
 ipcMain.handle("bench", async (_e, method: unknown, p: unknown, body: unknown) => {

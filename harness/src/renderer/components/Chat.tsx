@@ -385,7 +385,6 @@ export function Chat(props: {
             <For each={sittings()}>
               {(sit, si) => (
                 <Show when={isOpen(si())} fallback={<Folded messages={sit} onOpen={() => setOpened((o) => new Set(o).add(si()))} />}>
-                  <Show when={si() > 0}><SittingRule messages={sit} /></Show>
             <For each={sit}>
               {(b) => (
                 <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} />}>
@@ -762,23 +761,7 @@ function Folded(props: { messages: Message[]; onOpen: () => void }) {
   );
 }
 
-/** Where an opened sitting begins, so the gap before it still reads. */
-function SittingRule(props: { messages: Message[] }) {
-  return (
-    <div class="flex items-center gap-3 pt-2 font-ui text-subtle">
-      <span class="h-px flex-1 bg-line-subtle" />
-      <span class="tabular-nums">{when(props.messages)}</span>
-      <span class="h-px flex-1 bg-line-subtle" />
-    </div>
-  );
-}
-
-/** Size the composer to its text: collapse first, so it shrinks as well as grows. */
-export function fit(t: HTMLTextAreaElement) {
-  t.style.height = "0";
-  t.style.height = t.value ? `${t.scrollHeight}px` : "";
-}
-
+/** The time on a person's own row, right-aligned and quiet — the only clock the pane shows. */
 function Time(props: { at: string }) {
   return (
     <span class="shrink-0 pl-6 text-right leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
@@ -796,17 +779,21 @@ function Question(props: { q: QuestionRow; session: string }) {
   const answered = () => props.q.answer;
   // Numbered options, arrows to move, enter to take one — opencode's shape, and the shape a person
   // already knows from every terminal prompt. Nothing changes until one is chosen.
-  const OPTIONS = [
-    { key: "yes", label: "Yes", hint: "do it now" },
-    { key: "no", label: "No", hint: "leave it alone" },
-  ] as const;
+  // A proposal has two answers; a `question` tool brings its own, which are the person's words.
+  const OPTIONS = () =>
+    props.q.ask?.options?.length
+      ? props.q.ask.options.map((o) => ({ key: o.label, label: o.label, hint: o.description }))
+      : [{ key: "yes", label: "Yes", hint: "do it now" }, { key: "no", label: "No", hint: "leave it alone" }];
   const [pick, setPick] = createSignal(0);
-  const answer = (a: "yes" | "no") => live.answerProposal(props.session, props.q.id, a);
+  const answer = (a: string) => live.answerProposal(props.session, props.q.id, a);
   return (
     <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono">
       <div class="flex items-baseline gap-2">
         <span class="shrink-0 text-accent">?</span>
-        <span class="min-w-0 flex-1 text-fg">{props.q.summary}</span>
+        <span class="min-w-0 flex-1 text-fg">
+          <Show when={props.q.ask?.header}>{(h) => <span class="text-subtle">{h()} · </span>}</Show>
+          {props.q.summary}
+        </span>
         <Time at={props.q.at} />
       </div>
       <Show when={props.q.args && Object.keys(props.q.args).length}>
@@ -821,9 +808,9 @@ function Question(props: { q: QuestionRow; session: string }) {
           </For>
         </div>
       </Show>
-      <Show when={!answered()} fallback={<div class="pl-5 text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}>
+      <Show when={!answered()} fallback={<div class="pl-5 text-subtle">you said {answered()}</div>}>
         <div class="flex flex-col pl-5">
-          <For each={OPTIONS}>
+          <For each={OPTIONS()}>
             {(o, i) => (
               <button
                 class="flex items-baseline gap-2 text-left"
@@ -838,7 +825,7 @@ function Question(props: { q: QuestionRow; session: string }) {
             )}
           </For>
           <div class="flex items-baseline gap-2 text-subtle">
-            <span class="shrink-0">3.</span>
+            <span class="shrink-0">{OPTIONS().length + 1}.</span>
             <span>Type your own answer</span>
           </div>
           <div class="pt-1 text-subtle">↑↓ select&nbsp; enter submit&nbsp; esc dismiss</div>
@@ -846,6 +833,11 @@ function Question(props: { q: QuestionRow; session: string }) {
       </Show>
     </div>
   );
+}
+
+export function fit(t: HTMLTextAreaElement) {
+  t.style.height = "0";
+  t.style.height = t.value ? `${t.scrollHeight}px` : "";
 }
 
 function Hint(props: { keys: string; children: string }) {

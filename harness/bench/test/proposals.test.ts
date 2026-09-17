@@ -66,9 +66,11 @@ test("yes runs it, no declines it, and an unanswered question is a no", async ()
     propose(bench, session, "p-3");
     assert.deepEqual(await wait("p-3", 30), { answer: "no" });
 
-    // A question nobody asked, and an answer that is neither yes nor no.
+    // A question nobody asked.
     assert.deepEqual(await wait("p-nope"), { answer: "no" });
-    assert.equal((await fetch(`${base}/proposals/p-2`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "maybe" }) })).status, 400);
+    // An empty answer is not an answer; a `question` tool's answer is the person's own words, so
+    // anything they actually said is taken (§17.6).
+    assert.equal((await fetch(`${base}/proposals/p-2`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "" }) })).status, 400);
   } finally {
     await srv.close();
     await bench.stop();
@@ -94,5 +96,36 @@ test("a waiting client that goes away stops waiting, and the question stays open
     await srv.close();
     await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a question to the person carries its own options, and the answer is their own row", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-question-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const srv = await serve(bench, 0);
+  const t = { bench, base: `http://127.0.0.1:${srv.port}`, down: async () => (await srv.close(), await bench.stop(), fs.rmSync(dir, { recursive: true, force: true })) };
+  try {
+    await bench.start();
+    const session = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    const asked: any[] = [];
+    t.bench.onEvent((ev) => ev.type === "proposal" && asked.push(ev.row));
+    // What `question` publishes: the same channel a proposal uses, with the options the model wrote.
+    (t.bench as any).foldRow(session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "q-1", tool: "question", args: {}, summary: "Which database?", question: { header: "Storage", options: [{ label: "postgres", description: "you already run one" }, { label: "mongodb", description: "the services expect it" }] } })],
+    });
+    assert.equal(asked[0].tool, "question");
+    assert.deepEqual((asked[0].question as { options: { label: string }[] }).options.map((o) => o.label), ["postgres", "mongodb"]);
+
+    // The person's answer is their own words, not a yes/no — and it is said in the transcript.
+    const waited = fetch(`${t.base}/proposals/q-1/wait`).then((r) => r.json() as Promise<{ answer: string }>);
+    await new Promise((r) => setTimeout(r, 30));
+    await fetch(`${t.base}/proposals/q-1`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "postgres" }) });
+    assert.deepEqual(await waited, { answer: "postgres" });
+    await until(async () => ((await t.bench.messages(session)).messages as { content: string }[]).some((m) => String(m.content) === "postgres"), 5_000, "their row");
+  } finally {
+    await t.down();
   }
 });
