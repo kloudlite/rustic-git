@@ -201,7 +201,12 @@ export class Bench {
     }
     // These answer only {cancelled} (rpc.md): the new file has to be asked for.
     if (ev.type === "response" && (ev.command === "new_session" || ev.command === "switch_session") && ev.success) {
+      // A fresh session has a fresh FILE: until the row knows it, the next read of this session
+      // replays the old transcript and `/clear` looks like it did nothing (owner, 2026-09-17).
+      // The row is corrected below when get_state answers; the event is what makes every window
+      // drop what it cached.
       void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
+      this.emit({ type: "cleared", session: id });
     }
     if (ev.type === "agent_start") {
       this.turnCalls.set(id, { calls: 0 });

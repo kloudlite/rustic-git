@@ -50,3 +50,23 @@ export function threadIndex(e: KeyboardEvent): number | undefined {
 }
 
 export const HINTS: Binding[] = Object.values(KEYS).filter((b) => "hint" in b && b.hint);
+
+
+/**
+ * Whether an app shortcut may act at all. A terminal is a program that owns the keyboard: while
+ * its element has focus, every unmodified key belongs to the shell — the owner typed `c` and zsh
+ * went into `bck-i-search`, because an app handler on `document` acted on a key xterm was also
+ * delivering (2026-09-17).
+ *
+ * The exceptions are the chords a terminal cannot mean: ⌘/^ with a letter, and shift+tab. Plain
+ * Escape, plain Enter, plain arrows and every bare letter go to the PTY and nowhere else.
+ */
+export function mayAct(e: { key?: string; metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean }, inTerminal: boolean): boolean {
+  if (!inTerminal) return true;
+  if (e.metaKey || e.ctrlKey) return true;
+  return e.key === "Tab" && !!e.shiftKey;
+}
+
+/** Is the keyboard inside a terminal? xterm focuses its own textarea inside `.xterm`. */
+export const inTerminal = (target: unknown): boolean =>
+  !!target && typeof (target as { closest?: unknown }).closest === "function" && !!(target as Element).closest(".xterm");

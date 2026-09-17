@@ -131,6 +131,11 @@ export class BenchClient {
         this.cache.sessions = ev.sessions;
         this.save();
       }
+      // A session that started afresh: what this window cached about it is a different session's.
+      if (ev.type === "cleared" && typeof ev.session === "string") {
+        delete this.cache.messages[ev.session];
+        this.save();
+      }
       if (ev.type === "exchange" && ev.row) {
         this.cache.exchanges = [...this.cache.exchanges, ev.row].slice(-KEEP_EXCHANGES);
         this.save();

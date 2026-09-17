@@ -44,15 +44,6 @@ export function MachineView(props: { machine: Machine; session: string; onOpenSh
         </Show>
       </Show>
       <Show when={tab() === "overview"}>
-      <Heading class="mt-1 border-t-0" actions={<Button variant="ghost" size="sm" icon="terminal" title="Open a shell on this machine (⌘J)" onClick={() => props.onOpenShell("machine")}>Shell</Button>}>
-        Goal
-      </Heading>
-      <p class="m-0 px-5 pt-1 pb-3 leading-[20px] wrap-words">
-        <Show when={props.machine.goal} fallback={<span class="text-subtle">No goal yet. The first message sets it.</span>}>
-          {props.machine.goal}
-        </Show>
-      </p>
-
       {/* What this session has spent: opencode's Context block, from pi's own usage. */}
       <Show when={live.thread(props.session).spend().tokens}>
         <Heading>Context</Heading>
@@ -65,8 +56,11 @@ export function MachineView(props: { machine: Machine; session: string; onOpenSh
         </div>
       </Show>
 
-      {/* Progress is the plan's own headline, not a section of its own. */}
-      <Heading meta={`${done()}/${total()} done`}>Plan</Heading>
+      {/* The goal already reads as the pane's own header (`# <session>`); a second copy of it here
+          said "No goal yet" at somebody who was looking straight at it. The shell button moves. */}
+      <Heading class="mt-1 border-t-0" meta={`${done()}/${total()} done`} actions={<Button variant="ghost" size="sm" icon="terminal" title="Open a shell on this machine (⌘J)" onClick={() => props.onOpenShell("machine")}>Shell</Button>}>
+        Plan
+      </Heading>
       {/* progressBar.background: a 2px rule, the way the workbench shows progress. */}
       <div class="mx-5 mt-1.5 mb-2.5 h-0.5 bg-active">
         <div class="h-full bg-focus" style={{ width: `${pct()}%` }} />

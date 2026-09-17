@@ -367,7 +367,14 @@ ipcMain.handle("pty:open", (e, rawId: unknown, rawScope: unknown, cols: unknown,
   const { id, scope } = checkPty(rawId, rawScope);
   const session = checkSession(rawSession);
   if (typeof cols !== "number" || typeof rows !== "number") throw new Error("a shell opens at a size");
-  ptys.get(id)?.close();
+  // One socket per tab id, always: a second `pty:open` for the same id used to leave the first
+  // socket's `message` handler attached, so every byte the shell wrote arrived twice and the
+  // cursor walked forward on the prompt line.
+  const old = ptys.get(id);
+  if (old) {
+    old.removeAllListeners();
+    old.close();
+  }
   const w = needBench().pty(scope, session);
   ptys.set(id, w);
   ptyAt.set(id, { scope, session });

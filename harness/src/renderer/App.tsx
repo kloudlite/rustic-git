@@ -12,7 +12,7 @@ import { makeTab, nextIndex, reconcile as reconcileTabs, scopeOfTab, sessionInde
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
-import { KEYS, threadIndex } from "./keys";
+import { KEYS, inTerminal, mayAct, threadIndex } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
@@ -547,6 +547,9 @@ export function App() {
   ]);
 
   const onKey = (e: KeyboardEvent) => {
+    // A terminal owns the keyboard while it has focus: nothing here may take a key from it except
+    // a chord it cannot mean. Everything else reaches the PTY, once, through xterm alone.
+    if (!mayAct(e, inTerminal(e.target))) return;
     const hit = (b: { match: (e: KeyboardEvent) => boolean }) => b.match(e);
     const stop = () => e.preventDefault();
 
@@ -642,7 +645,19 @@ export function App() {
   // what is not listed here (/bg, /cancel, /skill:…) goes through.
   // `local` entries never reach the bench, so they run offline; the rest are refused first, not echoed.
   const SLASH: Record<string, { help: string; local?: true; run: (arg: string) => void }> = {
-    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => void pi({ type: "new_session" })?.then((r) => r && L().replay([])) },
+    // Abort first: pi refuses a new session mid-turn, and a refusal nobody sees reads as "/clear
+    // does nothing" (owner, 2026-09-17). The transcript is emptied only once pi says it happened.
+    "/clear": { help: "start this session afresh; the old one stays on disk", run: () => {
+      const L = live.thread(cur());
+      void (L.busy() ? pi({ type: "abort" })?.catch(() => undefined) : Promise.resolve())
+        ?.then(() => pi({ type: "new_session" }))
+        ?.then((r) => {
+          if (r?.success === false) return L.note(`clear refused: ${String(r.error ?? "pi would not start a new session")}`);
+          L.replay([]);
+          L.note("new session");
+        })
+        ?.catch((e: Error) => L.note(e.message));
+    } },
     "/new": { help: "open another session beside this one", run: newSession },
     "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
     "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },

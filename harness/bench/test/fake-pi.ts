@@ -15,7 +15,7 @@ function main() {
 const argv = process.argv.slice(2);
 const flag = (n: string) => (argv.includes(n) ? argv[argv.indexOf(n) + 1] : undefined);
 const dir = flag("--session-dir") ?? ".";
-const file = flag("--session") ?? path.join(dir, `fake-${process.pid}-${Date.now()}.jsonl`);
+let file = flag("--session") ?? path.join(dir, `fake-${process.pid}-${Date.now()}.jsonl`);
 if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: path.basename(file, ".jsonl"), timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\n");
 // A test that wants this process's argv (e.g. to check `--tools`) sets this
 // env var to a path; writing it here never touches the RPC stream, so it
@@ -38,6 +38,8 @@ process.stdin.on("data", (d) => {
     if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM, compacted });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
+    // A new session is a new FILE: the harness has to follow the child to it.
+    else if (cmd.type === "new_session") { file = path.join(dir, `fake-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jsonl`); fs.writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: path.basename(file, ".jsonl"), timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\n"); messages.length = 0; ok({ cancelled: false }); }
     else if (cmd.type === "compact") { compacted.push(String(cmd.customInstructions ?? "")); ok({ summary: "…", tokensBefore: 100, estimatedTokensAfter: 20 }); }
     // Enough of pi's queue for the harness's own triage: what is held, and putting it back.
     else if (cmd.type === "clear_queue") { const held = { steering: steering.splice(0), followUp: queued.splice(0) }; ok(held); }

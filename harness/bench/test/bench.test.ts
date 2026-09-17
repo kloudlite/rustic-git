@@ -235,3 +235,25 @@ test("opening a long thread reads the newest page, not the whole history", async
     await b.stop();
   }
 });
+
+test("a new session tells every window to forget what it cached about the old one", async () => {
+  const b = mk();
+  try {
+    await b.start();
+    await filed(b);
+    const id = b.sessions.all().find((s) => !s.archived)!.id;
+    await b.rpc(id, { type: "prompt", message: "something" });
+    const before = b.sessions.get(id)!.file;
+
+    const said: unknown[] = [];
+    b.onEvent((ev) => ev.type === "cleared" && said.push(ev));
+    // What `/clear` sends. The fake answers with a NEW file, as pi does.
+    await b.rpc(id, { type: "new_session" });
+    await until(() => said.length > 0, 5_000, "the cleared event");
+    assert.deepEqual(said, [{ type: "cleared", session: id }]);
+    // And the row follows the child to its new file, so the next read is not the old transcript.
+    await until(() => b.sessions.get(id)!.file !== before, 5_000, "the row's new file");
+  } finally {
+    await b.stop();
+  }
+});
