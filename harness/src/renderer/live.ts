@@ -56,6 +56,22 @@ export const exchangesOf = (workspace: string) => exchanges.filter((e) => e.work
  *
  * `info-*` rows and done ones are included: the Queue is what was asked, not only what is pending.
  */
+/**
+ * What this session is WAITING ON, for the footer: "waiting on backend · 2m". An open handoff that
+ * only exists in a panel somebody has to open is a person kept in the dark (owner, 2026-09-18), and
+ * the composer is where they are already looking.
+ */
+export const waitingFor = (session: string, now = Date.now()): string | undefined => {
+  const open = exchanges
+    .filter((e) => e.session === session && e.dir === "out" && (e.state === "queued" || e.state === "running"))
+    .sort((a, b) => a.ts - b.ts);
+  if (!open.length) return undefined;
+  const mins = Math.max(0, Math.round((now - open[0].ts) / 60_000));
+  const age = mins < 1 ? "just now" : `${mins}m`;
+  const name = wsNames()[open[0].workspace] ?? open[0].workspace;
+  return open.length === 1 ? `waiting on ${name} · ${age}` : `waiting on ${open.length} · oldest ${name} · ${age}`;
+};
+
 export const queueOf = (session: string) =>
   exchanges
     .filter((e) => e.session === session && e.dir === "out")

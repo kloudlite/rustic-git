@@ -2043,3 +2043,59 @@ test("a job with nothing to say for an hour stops claiming to be running", async
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * D6 (api-test-report): `ask-1` sat running for 240 s because the workspace raised two `write`
+ * cards and blocked. An ask dispatched by the bench has nobody standing at the card — the person is
+ * watching the session that asked. It surfaces there now, and counts against that ask.
+ */
+test("a card raised while working on an ask surfaces to whoever asked", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-card-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    (bench as never as { foldRow: (id: string, ev: unknown) => void }).foldRow(a.session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-1", tool: "write", args: { path: "hello.go" }, summary: "Write hello.go in api" })],
+    });
+
+    // It is on the ASK, so the card's wait is visible where the person is looking.
+    const rows = bench.exchanges.bySession(asker);
+    const note = rows.find((e) => e.ref === a.exchange && e.text.includes("waiting for approval"));
+    assert.ok(note, JSON.stringify(rows.map((r) => r.text)));
+    assert.match(note!.text, /Write hello\.go in api/);
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "running", "and the ask is still open, not settled by a card");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * D8 (api-test-report): the second identical ask stayed queued for the whole run and then re-raised
+ * the same two write cards — the model itself noted "duplicate still queued will redo same two
+ * writes". Rule 6 joins it instead.
+ */
+test("the report's duplicate ask joins the open one instead of redoing its writes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-d8-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const words = "hang";
+    const one = await bench.ask("api", words, asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === one.exchange && e.state === "running"), 5_000, "the ask running");
+    const two = await bench.ask("api", words, asker);
+    assert.equal(two.exchange, one.exchange);
+    assert.equal(bench.exchanges.bySession(asker).filter((e) => e.dir === "out").length, 1, "one exchange, so one set of writes");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -786,6 +786,17 @@ export function Chat(props: {
                   </>
                 )}
               </Show>
+              {/* What this session is waiting on, where they are already looking: an open handoff
+                  that lives only in a panel somebody has to open is a person kept in the dark
+                  (owner, 2026-09-18). The clock above already ticks, so the age stays current. */}
+              <Show when={thread()?.pi && live.waitingFor(thread()!.pi!, now())}>
+                {(w) => (
+                  <>
+                    <span class="shrink-0 text-subtle">·</span>
+                    <span class="min-w-0 truncate text-accent">{w()}</span>
+                  </>
+                )}
+              </Show>
               {/* A segment that does not apply is absent, never a dash (spec §1.3). */}
               <For each={[parts().thinking, parts().effort].filter(Boolean)}>
                 {(seg) => (

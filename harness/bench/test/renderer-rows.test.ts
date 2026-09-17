@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isCardAnswer, isCommandLine } from "../../src/renderer/live.ts";
+import { isCardAnswer, isCommandLine, seedExchanges, setWorkspaceNames, waitingFor } from "../../src/renderer/live.ts";
 import { COMMITTED_TONE, STATUS_TONE, argLine, benchSessions, changeLetter, cloneLabel, committedPaths, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
@@ -369,4 +369,30 @@ test("a committed path is tinted softer than an uncommitted one", () => {
   assert.equal(rowTone(undefined, false, false), "");
   // Ignored is dim whatever else is true of it.
   assert.equal(rowTone("M", true, true), "text-subtle");
+});
+
+/**
+ * §3.10: what a session is waiting on belongs where the person is already looking. An open handoff
+ * that lives only in a panel somebody has to open is a person kept in the dark (owner, 2026-09-18).
+ */
+test("the footer says what a session is waiting on, and for how long", () => {
+  const now = 1_789_600_000_000;
+  // One open handoff: who, and how long it has been out.
+  seedExchanges([{ ts: now - 120_000, id: "ask-1", session: "s-foot", workspace: "ws-1", dir: "out", text: "add a version endpoint", state: "running" }] as never);
+  setWorkspaceNames([{ id: "ws-1", name: "backend" }, { id: "ws-2", name: "frontend" }]);
+  assert.equal(waitingFor("s-foot", now), "waiting on backend · 2m");
+
+  // Several: the count, and the age of the OLDEST — that is the one the person is waiting on.
+  seedExchanges([{ ts: now - 300_000, id: "ask-2", session: "s-foot", workspace: "ws-2", dir: "out", text: "b", state: "queued" }] as never);
+  assert.equal(waitingFor("s-foot", now), "waiting on 2 · oldest frontend · 5m");
+
+  // A session with nothing out says nothing at all — never "waiting on nothing".
+  assert.equal(waitingFor("s-none", now), undefined);
+  // Nor does one whose asks have all landed.
+  seedExchanges([{ ts: now, id: "ask-3", session: "s-done", workspace: "ws-1", dir: "out", text: "done one", state: "done" }] as never);
+  assert.equal(waitingFor("s-done", now), undefined);
+
+  // Just asked reads as such, not as "0m".
+  seedExchanges([{ ts: now - 5_000, id: "ask-4", session: "s-new", workspace: "ws-1", dir: "out", text: "x", state: "queued" }] as never);
+  assert.equal(waitingFor("s-new", now), "waiting on backend · just now");
 });

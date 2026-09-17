@@ -73,7 +73,11 @@ export function MachineView(props: { machine: Machine; session: string; onOpenSh
           </div>
         )}
       </Show>
-      <Show when={total() === 0}><Empty>Nothing planned yet.</Empty></Show>
+      {/* An empty panel says WHICH empty it is: nothing planned, or everything handed out and the
+          first answer not back yet (owner, 2026-09-18: "user should never be kept in dark"). */}
+      <Show when={total() === 0}>
+        <Empty>{openCount() ? `Waiting on the first reply · ${openCount()} outstanding.` : "Nothing planned yet."}</Empty>
+      </Show>
       <div class="pb-4">
         <PlanTree todos={props.machine.todos} />
       </div>

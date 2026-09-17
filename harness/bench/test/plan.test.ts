@@ -190,3 +190,35 @@ test("a message to another session carries no boilerplate", () => {
   assert.equal(terse("I'll be blunt: this needs a decision"), "this needs a decision");
   assert.equal(terse("status: running"), "running");
 });
+
+/**
+ * D7 (api-test-report): a finished item went back to todo. The harness tags an item it owns with
+ * the exchange it belongs to; a model repeating its plan with the same words dropped the tag and
+ * the state, so the work was un-done in the panel and its reply could never find the item again.
+ */
+test("a model rewriting its plan does not undo what the harness recorded", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-d7-"));
+  try {
+    const plans = new Plans(dir);
+    // The harness records the handoff, then the answer.
+    let items = reduce(plans.get("s-1"), { type: "asked", exchange: "ask-1", to: "backend", task: "add a version endpoint" })!;
+    plans.set("s-1", items);
+    items = reduce(plans.get("s-1"), { type: "answered", exchange: "ask-1" })!;
+    plans.set("s-1", items);
+    assert.equal(plans.get("s-1")[0].state, "done");
+
+    // The model now writes its own plan back, in its own words, with that step among them.
+    plans.set("s-1", [{ text: itemText(plans.get("s-1")[0]) }, { text: "ship it" }]);
+    assert.equal(plans.get("s-1")[0].state, "done", "what was done stays done");
+    // And the harness can still find it by its exchange, which is what the tag is for.
+    assert.equal(reduce(plans.get("s-1"), { type: "answered", exchange: "ask-1" }), undefined, "already answered, so nothing moves");
+    const failed = reduce(plans.get("s-1"), { type: "ask_failed", exchange: "ask-1", task: "backend" });
+    assert.ok(failed, "the item is still addressable by its exchange after a model's set");
+
+    // A state the model names explicitly is still the model's to set.
+    plans.set("s-1", [{ text: itemText(plans.get("s-1")[0]), state: "todo" }]);
+    assert.equal(plans.get("s-1")[0].state, "todo");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

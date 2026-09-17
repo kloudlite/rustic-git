@@ -473,6 +473,18 @@ export class Bench {
           const key = taken ? proposalKey(id, p.id) : p.id;
           if (!this.proposals.has(key)) this.proposals.set(key, { session: id, raw: p.id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
           this.emit({ type: "proposal", row: { id: key, session: id, tool: p.tool, args: p.args, summary: p.summary, preview: p.preview, question: p.question } });
+          /**
+           * A card raised while this session is working on somebody's ASK has nobody standing at
+           * it: the person is watching the session that asked, not this one. `ask-1` sat running
+           * for 240 s behind two write cards, and only moved when they were answered by hand
+           * (api-test-report D6). So the asking session is told, and the card's own age counts
+           * against the ask rather than looking like silence.
+           */
+          for (const a of this.asked.get(id) ?? []) {
+            this.tell(a.from, `[${a.name ?? a.workspace} ${a.exchange}] waiting for your approval: ${p.summary}`);
+            const row = this.write(() => this.exchanges.record({ id: `${a.exchange}-card-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: `waiting for approval: ${p.summary}`, state: "note", ref: a.exchange }));
+            this.emit({ type: "exchange", row });
+          }
         }
         if (ev.widgetKey === "harness:procs") {
           const ws = this.workspaceOf(id);

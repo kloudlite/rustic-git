@@ -107,9 +107,20 @@ export class Plans {
     const before = this.rows[session] ?? [];
     // An item with no text is not an item: the owner's plans.json held `{"text":"","state":"done"}`
     // and the panel drew "1/1 done" over an empty row (2026-09-17).
+    /**
+     * A model rewriting its plan must not undo what the HARNESS recorded. `reduce` tags an item it
+     * owns with the exchange it belongs to (a NUL and the id, invisible to a person), and a `set`
+     * that repeats the same words dropped both the tag and the state — a finished item went back to
+     * todo and its reply could never find it again (api-test-report D7).
+     */
+    const plain = (t: string) => String(t ?? "").split("\u0000")[0].trim();
     const kept = items
-      .filter((x) => String(x.text ?? "").trim())
-      .map((x) => ({ text: x.text.trim(), state: x.state ?? before.find((b) => b.text === x.text.trim())?.state ?? "todo", ...(x.why ? { why: x.why } : {}) }));
+      .filter((x) => plain(x.text))
+      .map((x) => {
+        const was = before.find((b) => plain(b.text) === plain(x.text));
+        const text = plain(x.text) === plain(was?.text ?? "") && was ? was.text : x.text.trim();
+        return { text, state: x.state ?? was?.state ?? "todo", ...(x.why ? { why: x.why } : {}) };
+      });
     // A plan replaced with NOTHING is a plan discarded: the row goes rather than being kept empty,
     // so nothing downstream draws a count over a list with no items in it (owner, 2026-09-18:
     // "if the plan is discarded it should clear without leaving it there").
