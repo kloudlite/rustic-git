@@ -31,6 +31,7 @@ export const WORKSPACE_TOOLS = [
   "kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update",
   // and its space's environment: the person debugging here is the one who needs a service added
   // or its traffic pointed at this workspace (owner, 2026-09-17).
+  "kl_capabilities,kl_workspace_progress",
   "kl_env_current,kl_env_switch,kl_env_clear",
   "kl_environments,kl_environment,kl_environment_service_add,kl_environment_service_rm,kl_intercept",
 ].join(",");

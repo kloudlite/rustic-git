@@ -18,6 +18,8 @@ export const TOOLS: ToolSpec[] = [
 
   { name: "kl_workspace_ask", group: "workspace", summary: "Ask another workspace to do something: the request is queued into that workspace's own session, which does the work and answers back here.", effect: "write" },
 
+  { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
+
   { name: "kl_pkg_list", group: "workspace", summary: "The packages this machine has, and whether they are ready.", effect: "read" },
   { name: "kl_pkg_add", group: "workspace", summary: "Add packages to this machine (`attr` or `attr@version`).", effect: "write" },
   { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from this machine.", effect: "write" },
@@ -59,5 +61,6 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_volume_delete", group: "platform", summary: "Delete a detached volume with all its snapshots.", effect: "destroy" },
   { name: "kl_requests", group: "platform", summary: "Requests you have open (quota, access, region, other).", effect: "read" },
   { name: "kl_request_create", group: "platform", summary: "Open a request for something that has to be granted.", effect: "write" },
+  { name: "kl_capabilities", group: "platform", summary: "Everything you can do here, by name and effect. Read this instead of going looking.", effect: "read" },
   { name: "kl_whoami", group: "platform", summary: "Who the bench acts as on the platform, and until when.", effect: "read" },
 ];

@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -296,5 +296,55 @@ test("a background command reaches the tool server and is mirrored into the harn
   } finally {
     for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     srv.close();
+  }
+});
+
+test("the shell may not go behind the tools at the platform", () => {
+  // Ordinary work, CLI included: nothing here is about the platform's own back doors.
+  for (const ok of [
+    "kl pkg list",
+    "kl env switch devstack",
+    "kl container ls",
+    "mongosh mongodb://db:27017 --eval 'db.stats()'",
+    "npm install && npm run build",
+    "grep -rn 'v1' src/api.ts",
+    "curl http://api:8080/v1/orders",
+    "src/lib/kl.ts",
+  ]) assert.equal(forbidden(ok), undefined, ok);
+
+  // Each one of these was watched on the fleet.
+  for (const no of [
+    "cat $KL_TOOL_TOKEN_FILE",
+    "ls /etc/kloudlite",
+    "read /opt/harness/pi/catalog.ts",
+    "strings /usr/local/bin/kl | grep v1",
+    "grep -a '/v1/' /usr/local/bin/kl",
+    "xxd /usr/local/bin/kl | head",
+    "grep -r 'workspaces' .bench/workspaces/api/thread.jsonl",
+    "node -e 'fetch(process.env.KL_API_URL)'",
+    "curl https://api.kloudlite.io/v1/workspaces",
+  ]) assert.match(forbidden(no) ?? "", /^refused: the platform is reached only through kl_\* tools/, no);
+});
+
+test("a refused command never reaches the tool server", async () => {
+  const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
+  // An address nothing listens on: if the gate let it through, the call would fail differently.
+  process.env.KL_TOOLS_ADDRESS = "127.0.0.1:1";
+  process.env.KL_TOOLS_WORKSPACE = "api";
+  const tools: Record<string, { execute: (...a: any[]) => Promise<any> }> = {};
+  try {
+    workspaceTools({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
+    for (const [tool, args] of [
+      ["bash", { command: "cat $KL_TOOL_TOKEN_FILE" }],
+      ["read", { path: "/opt/harness/pi/kloudlite.ts" }],
+      ["grep", { pattern: "token", path: ".bench/sessions" }],
+      ["process", { action: "start", command: "strings /usr/local/bin/kl" }],
+    ] as const) {
+      const r = await tools[tool].execute("c1", args, undefined, undefined, undefined);
+      assert.equal(r.isError, true, tool);
+      assert.match(r.content[0].text, /^refused: the platform is reached only through kl_\* tools/, tool);
+    }
+  } finally {
+    for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });

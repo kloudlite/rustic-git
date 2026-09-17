@@ -36,6 +36,47 @@ export function traceHeaders(env: NodeJS.ProcessEnv = process.env, ageS = proces
   return { traceparent: env.KL_TRACEPARENT, ...(env.KL_PROBE === "1" ? { "x-kloudlite-probe": "1" } : {}) };
 }
 
+/**
+ * What a shell in the workspace may not go looking for. The fleet (2026-09-17) watched a model with
+ * no tool for a request go behind the tools instead: `read /opt/harness/pi/catalog.ts`, `grep -a`
+ * for strings in `/usr/local/bin/kl`, its own `.bench/` session logs grepped for API paths, and a
+ * node script reading `KL_TOOL_TOKEN_FILE` to call `/v1` by hand. Prose in a system prompt did not
+ * stop it. This does, and it is deliberately about the PLATFORM's own back doors only — ordinary
+ * work, `kl pkg list` and every other CLI included, is untouched.
+ */
+const REFUSAL = "refused: the platform is reached only through kl_* tools; if none fits, say so to the person";
+const BACK_DOORS: RegExp[] = [
+  /KL_TOOL_TOKEN_FILE|KL_API_URL/,
+  /\/etc\/kloudlite|\/opt\/harness/,
+  // The `kl` BINARY, not the command: `kl pkg list` is ordinary use, reading it as bytes is not.
+  /\/usr\/local\/bin\/kl\b/,
+  /\b(strings|xxd|od|hexdump)\b[^|;&]*\bkl\b/,
+  /\bgrep\b[^|;&]*\s-\w*a\w*\b[^|;&]*\bkl\b/,
+  // Its own session store: the transcripts hold every API path the harness ever used, and the token.
+  /(^|[\s"'`=:/])\.bench\//,
+  // A `/v1/` URL at a REAL hostname is the platform's api. A service inside an environment is a
+  // bare name (CoreDNS), so `curl http://api:8080/v1/orders` is a person's own backend, not this one.
+  /https?:\/\/[^\s"'`/]*\.[^\s"'`/]*\/v1\//,
+];
+
+/** The reason a command or path is refused, or undefined when there is none. */
+export function forbidden(s: unknown): string | undefined {
+  const t = Array.isArray(s) ? s.join(" ") : typeof s === "string" ? s : "";
+  if (!t) return undefined;
+  let host = "";
+  try {
+    host = new URL(process.env.KL_API_URL ?? "").host;
+  } catch {
+    /* no api url configured: nothing to name */
+  }
+  if (host && t.includes(host)) return REFUSAL;
+  return BACK_DOORS.some((re) => re.test(t)) ? REFUSAL : undefined;
+}
+
+/** Everything a call could reach with: what a shell would run, and what a path-taking tool would open. */
+const reaches = (name: string, p: Record<string, any>): unknown[] =>
+  name === "bash" || (name === "process" && p.action === "start") ? [p.command] : [p.path, p.pattern, p.glob];
+
 export type IdeCall = { tool: string; args: Record<string, any> };
 /** Tool-server calls whose effect the `/procs` table has to be re-read after. */
 const PROCESS_TOOLS = new Set(["process_kill", "process_write", "process_list"]);
@@ -223,6 +264,11 @@ Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be w
       parameters,
       async execute(_toolCallId, params, signal, _update, ctx) {
         const p = params as Record<string, any>;
+        // Before the call, not after: a refused read must never reach the tool server at all.
+        for (const r of reaches(name, p)) {
+          const no = forbidden(r);
+          if (no) return text(no, true);
+        }
         try {
           const c = toIde(name, p);
           const r = await server.call(c, signal);

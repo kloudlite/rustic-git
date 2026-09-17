@@ -81,9 +81,17 @@ test("the system prompt is the harness's own, not the agent CLI's", async () => 
     assert.match(prompt, /kl_pkg_add/);
     // The rule the fleet needed: a model asked what it could do ran a destroy to find out.
     assert.match(prompt, /Never call a tool whose effect is write or destroy unless the person asked/);
-    assert.match(prompt, /describe your tools by name; do not run them/);
+    assert.match(prompt, /answer from kl_capabilities and describe the tools by name; do not run them to find out/);
+    assert.match(prompt, /Never go behind the tools for it/);
+    // A new component gets its own workspace: one was installed into a running svelte frontend.
+    assert.match(prompt, /gets its OWN workspace \(kl_workspace_create, then kl_workspace_ask\)/);
+    assert.match(prompt, /use kl_workspace_progress/);
+    // Short answers, because the owner reads the id and the error, not the plan.
+    assert.match(prompt, /Answer short\. Lead with the result in one line\./);
+    assert.match(identity("its own hands here"), /Answer short/);
     // Every mode is told it: a workspace session's writes land on somebody's real machine too.
     assert.match(identity("its own hands here"), /Never call a tool whose effect is write or destroy/);
+    assert.match(identity("its own hands here"), /Never go behind the tools/);
   } finally {
     restore();
   }
@@ -284,5 +292,56 @@ test("/proc-stop kills on the session's own tool server and ends the row", async
     await bench.stop();
     srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("kl_capabilities answers this session's own catalogue, and says what is not there", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_capabilities") as any).execute("c1", {}, undefined, undefined, undefined)).content[0].text as string;
+    assert.match(out, /^this machine \(its own files and shell, nowhere else\):/);
+    for (const g of ["workspace:", "environment:", "platform:"]) assert.ok(out.includes(g), g);
+    assert.match(out, /kl_workspace_ask \[write\]/);
+    assert.match(out, /anything not listed is not something you can do — say so\.$/);
+  } finally {
+    restore();
+  }
+  // A workspace session lists its own, narrower set — answering with the bench's would be a lie.
+  const back = withEnv({ KL_TOOLS_WORKSPACE: "api", KL_TEAM: "acme", KL_WORKSPACE_ID: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_capabilities") as any).execute("c1", {}, undefined, undefined, undefined)).content[0].text as string;
+    assert.ok(!out.includes("kl_workspace_ask"), out);
+    assert.match(out, /kl_pkg_add \[write\]/);
+  } finally {
+    back();
+  }
+});
+
+test("kl_workspace_progress reads the bench's own routes and says what that workspace is up to", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(
+      req.url!.startsWith("/exchanges")
+        ? [{ dir: "out", state: "running", text: "[ask ask-1-x from session 1] add a health endpoint" }, { dir: "in", state: "done", text: "done" }]
+        : { total: 2, messages: [{ role: "user", content: "[ask ask-1-x from session 1] add a health endpoint" }, { role: "assistant", content: [{ type: "toolCall", name: "edit" }, { type: "text", text: "added /healthz" }] }] },
+    ));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const restore = withEnv({ KL_BENCH_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { workspace: "api" }, undefined, undefined, undefined)).content[0].text as string;
+    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/workspaces/api/messages?limit=10"]);
+    assert.equal(out, ["asked of api:", "  running: add a health endpoint", "its session, latest last:", "  asked: [ask ask-1-x from session 1] add a health endpoint", "  ran edit", "  said: added /healthz"].join("\n"));
+  } finally {
+    restore();
+    srv.close();
   }
 });

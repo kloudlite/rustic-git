@@ -91,8 +91,11 @@ export function identity(hands: string): string {
     // A bench model asked what tools it had ran kl_environment_service_rm to find out (2026-09-17,
     // harmless only because that service did not exist). Each tool's description ends with its
     // effect — [read], [write], [destroy] — so the rule can be stated in those terms.
-    "Never call a tool whose effect is write or destroy unless the person asked for that change in this conversation. When asked what you can do, describe your tools by name; do not run them.",
-    "Say what you did and what came back, briefly, in the person's own terms.",
+    "Never call a tool whose effect is write or destroy unless the person asked for that change in this conversation. When asked what you can do, answer from kl_capabilities and describe the tools by name; do not run them to find out.",
+    "When nothing you have does what was asked, say so and stop. Never go behind the tools for it — not the harness's own files, not the kl binary, not your session logs, not a token and a hand-made request. There is nothing there for you, and looking is refused.",
+    // The owner, 2026-09-17: "I should see things very clearly." A model that narrates its plan
+    // buries the one line that matters — the id, the port, the error.
+    "Answer short. Lead with the result in one line. Then only the facts the person needs, one line each — ids, paths, ports, errors verbatim. Never restate the request, the plan, or the text of an ask you sent. No headings, tables, emoji, or closing offers unless asked. When you queued an ask, say so in one line and stop.",
   ].join("\n\n");
 }
 
@@ -112,6 +115,8 @@ export function tellItWhereItStands(pi: ExtensionAPI, hands: string): void {
 export const BENCH_HANDS = [
   "You are yourself a workspace on the platform: a machine with its own files, its own shell, its own packages and its own environment. read, write, edit, bash, grep, find and ls all run THERE — in your own workspace, never on the machine this conversation runs on, and never in any other workspace. \"Install X\", \"add a package\", \"switch the environment\" with no workspace named mean YOURS — kl_pkg_list, kl_pkg_add, kl_pkg_rm, kl_pkg_update, kl_env_current, kl_env_switch, kl_env_clear.",
   "You never change another workspace yourself. To have work done in one, use kl_workspace_ask with the workspace id and the request in plain words: it is queued into that workspace's own session, which does the work there and answers back to you. Say that you asked, and go on; the answer arrives as a message.",
+  "A new component — a backend, a service, a separate project — gets its OWN workspace (kl_workspace_create, then kl_workspace_ask), unless the person names an existing workspace to put it in. Never add an unrelated component to a workspace because the code you touched last lives there.",
+  "To see how a workspace is getting on, use kl_workspace_progress.",
   "The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.",
 ].join("\n\n");
 
@@ -123,8 +128,10 @@ export const BENCH_HANDS = [
  */
 export function makeReg(pi: ExtensionAPI) {
   const spec = (name: string) => TOOLS.find((t) => t.name === name)!;
-  return <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
+  const names: string[] = [];
+  const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
     const s = spec(name);
+    names.push(name);
     pi.registerTool({
       name,
       label: name,
@@ -146,10 +153,64 @@ export function makeReg(pi: ExtensionAPI) {
       },
     });
   };
+  // What this session can do, for `kl_capabilities` to read back: a bench session and a workspace
+  // session register different sets, and answering with the other's would be a list of lies.
+  return Object.assign(reg, { names });
+}
+
+/**
+ * The answer to "what can you do here?" — which a model with no matching tool otherwise goes
+ * looking for, in the extension's own source or in the `kl` binary (the fleet, 2026-09-17).
+ * Registered last, so it names everything else this session holds.
+ */
+export function capabilities(reg: ReturnType<typeof makeReg>) {
+  reg("kl_capabilities", {}, async () => {
+    const mine = TOOLS.filter((t) => reg.names.includes(t.name));
+    const groups = ["workspace", "environment", "platform"] as const;
+    const lines = groups.flatMap((g) => {
+      const rows = mine.filter((t) => t.group === g);
+      return rows.length ? [`${g}:`, ...rows.map((t) => `  ${t.name} [${t.effect}] — ${t.summary}`)] : [];
+    });
+    return text(
+      [
+        "this machine (its own files and shell, nowhere else):",
+        "  read, write, edit, bash (background: true for a long-running one), process, grep, find, ls [write where they change a file]",
+        ...lines,
+        "anything not listed is not something you can do — say so.",
+      ].join("\n"),
+    );
+  });
 }
 
 /** Where harness-bench listens for its own extension; a test points this elsewhere. */
 const BENCH_URL = () => process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789";
+const benchCall = async (method: string, p: string, body?: unknown): Promise<{ ok: boolean; data: any }> => {
+  const r = await fetch(`${BENCH_URL()}${p}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  return { ok: r.ok, data: await r.json().catch(() => ({ error: `the bench answered ${r.status}` })) };
+};
+
+/**
+ * How a workspace is getting on, without going to look. A model with no tool for this grepped the
+ * bench's own `.bench/workspaces/*\/thread.jsonl` off disk (the fleet, 2026-09-17) — refused now,
+ * so here is the answer instead: what has been asked of it and what its session has been saying.
+ * Both modes have it: a workspace session may have asked something of another one too.
+ */
+export function progressTool(reg: ReturnType<typeof makeReg>) {
+  reg("kl_workspace_progress", { workspace: Type.String({ description: "workspace id" }) }, async (a) => {
+    const id = encodeURIComponent(a.workspace);
+    const [x, m] = await Promise.all([benchCall("GET", `/exchanges?workspace=${id}`), benchCall("GET", `/workspaces/${id}/messages?limit=10`)]);
+    if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
+    const asks = (x.data as { dir: string; state: string; text: string }[]).filter((e) => e.dir === "out").map((e) => `  ${e.state}: ${String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").slice(0, 160)}`);
+    const said = ((m.data as { messages?: Record<string, any>[] }).messages ?? []).slice(-10).flatMap((r) => {
+      const c = r.content;
+      if (r.role === "user") return [`  asked: ${(typeof c === "string" ? c : (c ?? []).map((b: any) => b.text ?? "").join("")).slice(0, 160)}`];
+      if (r.role !== "assistant") return [];
+      // A tool call is what it is DOING; the prose is what it thinks about it. Both, briefly.
+      return (c as any[] ?? []).map((b) => (b.type === "toolCall" ? `  ran ${b.name}` : b.text ? `  said: ${String(b.text).slice(0, 160)}` : "")).filter(Boolean);
+    });
+    return text([`asked of ${a.workspace}:`, ...(asks.length ? asks : ["  nothing outstanding"]), `its session, latest last:`, ...(said.length ? said : ["  nothing yet"])].join("\n"));
+  });
+}
 
 /**
  * The machine this session IS: the bench's own workspace, or, in a workspace
@@ -324,6 +385,8 @@ export function tools(pi: ExtensionAPI) {
     const claims = JSON.parse(Buffer.from(token().token.split(".")[1] ?? "", "base64url").toString() || "{}") as { sub?: string; team?: string; exp?: number };
     return text({ username: claims.sub, team: claims.team, expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : undefined });
   });
+  progressTool(reg);
+  capabilities(reg);
 }
 
 /**
@@ -342,7 +405,9 @@ export default function (pi: ExtensionAPI) {
   if (inWorkspace) {
     const reg = makeReg(pi);
     ownTools(pi, inWorkspace, process.env.KL_TEAM, reg);
-    return environmentTools(reg);
+    environmentTools(reg);
+    progressTool(reg);
+    return capabilities(reg);
   }
   tools(pi);
   const own = process.env.KL_WORKSPACE_ID;
