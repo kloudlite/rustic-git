@@ -123,3 +123,21 @@ const join = (doc: string, sections: string[]) => {
   const preamble = doc.split(/\n(?=## )/)[0];
   return [preamble.replace(/\s+$/, ""), "", ...sections].join("\n");
 };
+
+/**
+ * A work reply must end with a `contracts:` line (§24): `none`, or one item per line. This reads it
+ * back — the rows it names, and whether the line was there at all, because a reply without one is
+ * bounced once rather than quietly losing what changed.
+ */
+export function readContractsLine(reply: string): { said: boolean; rows: Contract[] } {
+  const lines = String(reply ?? "").split("\n");
+  // The LAST one wins: an agent that quotes the instruction earlier in its report has not answered.
+  const at = lines.map((l) => /^\s*contracts:\s*(.*)$/i.exec(l)).reduce((best, m, i) => (m ? i : best), -1);
+  if (at < 0) return { said: false, rows: [] };
+  const head = /^\s*contracts:\s*(.*)$/i.exec(lines[at])![1];
+  const rest = lines.slice(at + 1).filter((l) => /^\s*[-*]|^\s*[A-Z]+\s+\//.test(l));
+  return { said: true, rows: [head, ...rest].map(parseContract).filter((c): c is Contract => !!c) };
+}
+
+/** What the harness says back when a reply forgot the line. Said once, never twice. */
+export const CONTRACTS_BOUNCE = "[harness] add the contracts: line — `none`, or one item per line as `METHOD /path — request → response — owner`";

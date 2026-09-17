@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Architecture, parseContract } from "../src/architecture.ts";
+import { Architecture, CONTRACTS_BOUNCE, parseContract, readContractsLine } from "../src/architecture.ts";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
+import { until } from "./wait.ts";
 
 /**
  * The space's architecture, as one living document (§24): what runs where, what talks to what, and
@@ -107,6 +108,59 @@ test("the bench serves the document, and takes a section through PUT", async () 
     assert.equal(bad.status, 400);
   } finally {
     await srv.close();
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reply's contracts line is read, and 'none' says nothing changed", () => {
+  const { said, rows } = readContractsLine(
+    ["DONE — the orders endpoint is in.", "", "contracts:", "- POST /orders — {items} → {id, total} — api", "- GET /orders/{id} — {} → {order} — api"].join("\n"),
+  );
+  assert.equal(said, true);
+  assert.deepEqual(rows.map((c) => `${c.method} ${c.path}`), ["POST /orders", "GET /orders/{id}"]);
+  assert.equal(rows[0].owner, "api");
+
+  const none = readContractsLine("DONE — nothing to report.\n\ncontracts: none");
+  assert.deepEqual(none, { said: true, rows: [] }, "`none` is an answer, not a miss");
+
+  assert.deepEqual(readContractsLine("DONE — I forgot."), { said: false, rows: [] });
+  // The last line wins: an agent quoting the instruction has not answered it.
+  const quoted = readContractsLine("I will end with contracts: as asked.\n\ncontracts: none");
+  assert.equal(quoted.said, true);
+  assert.equal(quoted.rows.length, 0);
+  // One item on the same line as the keyword is an answer too.
+  assert.equal(readContractsLine("contracts: PUT /orders/{id} — {status} → {order} — api").rows.length, 1);
+});
+
+test("a work reply's contracts reach the document, and a reply without one is asked once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-contracts-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    // Two asks to the same workspace, answered one after the other.
+    const first = await bench.ask("api", "add the orders endpoint", asker);
+    await bench.deliverForTest(first.session, [`[reply ${first.exchange}] DONE — orders is in.`, "", "contracts:", "- POST /orders — {items} → {id} — api"].join("\n"));
+    assert.deepEqual(
+      bench.architecture.contracts().map((c) => `${c.method} ${c.path}`),
+      ["POST /orders"],
+      "what the reply said is in the table",
+    );
+
+    const second = await bench.ask("api", "rename it", asker);
+    await bench.deliverForTest(second.session, `[reply ${second.exchange}] DONE — renamed.`);
+    await until(
+      async () => ((await bench.messages(second.session)).messages as { content: string }[]).some((m) => String(m.content).includes("add the contracts: line")),
+      5_000,
+      "the one nudge",
+    );
+
+    // And once only: a third report without the line is not nagged again for the same ask.
+    await bench.deliverForTest(second.session, `[reply ${second.exchange}] DONE — still nothing.`);
+    const again = (await bench.messages(second.session)).messages as { role: string; content: string }[];
+    assert.equal(again.filter((m) => String(m.content).includes("add the contracts: line")).length, 1);
+  } finally {
     await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }

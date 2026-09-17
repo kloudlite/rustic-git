@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Architecture, parseContract, type Contract } from "./architecture.ts";
+import { Architecture, CONTRACTS_BOUNCE, readContractsLine } from "./architecture.ts";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
@@ -88,6 +88,8 @@ export class Bench {
   /** Sessions between agent_start and agent_end: a turn nobody watches still holds the bench up. */
   private turning = new Set<string>();
   private btwSeq = new Map<string, number>();
+  /** Exchanges already bounced for a missing `contracts:` line: asked once, never twice. */
+  private bounced = new Set<string>();
   /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
@@ -350,6 +352,11 @@ export class Bench {
    * which is the ordinary case of a queue of one. Anything the model invents that is not an
    * outstanding exchange of this workspace is ignored, not routed.
    */
+  /** A turn's own messages, as `agent_end` hands them over — the seam the contracts tests write to. */
+  deliverForTest(id: string, answer: string): Promise<void> {
+    return this.deliver(id, [{ role: "user", content: "[ask test] work" }, { role: "assistant", content: answer }]);
+  }
+
   private async deliver(id: string, ran?: { role?: string; content?: unknown }[]) {
     const queue = this.asked.get(id);
     if (!queue?.length) return;
@@ -391,6 +398,20 @@ export class Bench {
     const at = Math.max(0, queue.findIndex((x) => x.exchange === named));
     const [a] = queue.splice(at, 1);
     if (!queue.length) this.asked.delete(id);
+    // What this reply changed about the architecture (§24). A reply that forgot to say is asked
+    // ONCE — the work is done either way, and nagging twice would be its own conversation.
+    const contracts = readContractsLine(answer);
+    if (contracts.rows.length) this.write(() => this.architecture.mergeContracts(contracts.rows));
+    // Only a WORK REPLY is bounced — one that carries §18's own status word. A workspace answering
+    // a person's question in its own tab is a conversation, not a report, and must not be nagged.
+    // The status word leads, after whatever routing tag the reply carried.
+    const isReport = /^(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)\b/.test(answer.trim().replace(/^\[reply [^\]]+\]\s*/, ""));
+    if (isReport && !contracts.said && !this.bounced.has(a.exchange)) {
+      // Asked once, and the work still settles: holding the answer back would make a missing line
+      // into a stuck ask, which is worse than a line nobody wrote.
+      this.bounced.add(a.exchange);
+      void this.send(id, CONTRACTS_BOUNCE).catch(() => undefined);
+    }
     this.transitionAsk(a, answer ? "done" : "failed");
     // An agent that finished has nothing left to keep: its work is on a branch, and its copy of
     // the workspace goes (§22). One that is BLOCKED or NEEDS_CONTEXT keeps it — the caller may
