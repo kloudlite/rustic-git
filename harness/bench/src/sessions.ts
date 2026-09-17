@@ -1,9 +1,19 @@
 import path from "node:path";
 import { readJson, replaceJson } from "./log.ts";
+import type { Effort, Thinking, Triple } from "./defaults.ts";
+
+/** Only the fields that are set: a row carrying `model: undefined` would import as an unknown extra. */
+function triple(t?: Triple): Triple {
+  const o: Triple = {};
+  if (t?.model !== undefined) o.model = t.model;
+  if (t?.thinking !== undefined) o.thinking = t.thinking;
+  if (t?.effort !== undefined) o.effort = t.effort;
+  return o;
+}
 
 export type SessionKind = "bench" | "workspace" | "ephemeral";
 /** `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools. */
-export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; kind?: SessionKind; workspace?: string; target?: string };
+export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; thinking?: Thinking; effort?: Effort; kind?: SessionKind; workspace?: string; target?: string };
 
 type Stored = SessionRow[] | { nextSeq: number; rows: SessionRow[] };
 
@@ -37,11 +47,11 @@ export class SessionList {
   get(id: string): SessionRow | undefined {
     return this.rows.find((r) => r.id === id);
   }
-  create(model?: string): SessionRow {
+  create(t?: Triple): SessionRow {
     const seq = Math.max(this.nextSeq, Math.max(0, ...this.rows.map((r) => r.seq)) + 1);
     this.nextSeq = seq + 1;
     const now = Date.now();
-    const row: SessionRow = { id: `s-${seq}`, name: `session ${seq}`, seq, created: now, lastActive: now, archived: false, model };
+    const row: SessionRow = { id: `s-${seq}`, name: `session ${seq}`, seq, created: now, lastActive: now, archived: false, ...triple(t) };
     this.rows.push(row);
     this.save();
     return { ...row };
@@ -77,12 +87,12 @@ export class SessionList {
    * an ephemeral id is not scoped by its workspace, so a reuse under another would hand back the first one's file.
    * seq 0 keeps a thread out of create()'s numbering.
    */
-  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string }): SessionRow {
+  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string; thinking?: Thinking; effort?: Effort }): SessionRow {
     const id = this.threadId(t);
     const have = this.get(id);
     if (have) return { ...have };
     const now = Date.now();
-    const row: SessionRow = { id, name: t.kind === "workspace" ? t.workspace : `${t.workspace} · ${t.eph}`, seq: 0, file: t.file, created: now, lastActive: now, archived: false, model: t.model, kind: t.kind, workspace: t.workspace, target: t.target };
+    const row: SessionRow = { id, name: t.kind === "workspace" ? t.workspace : `${t.workspace} · ${t.eph}`, seq: 0, file: t.file, created: now, lastActive: now, archived: false, ...triple(t), kind: t.kind, workspace: t.workspace, target: t.target };
     this.rows.push(row);
     this.save();
     return { ...row };

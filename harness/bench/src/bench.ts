@@ -71,7 +71,7 @@ const isBench = (s: SessionRow) => (s.kind ?? "bench") === "bench";
 /** A session id the bench mints: never a path walk, never a btw fork. */
 const SESSION_ID = /^(bench|s-\d+|[we]-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$/;
 /** `file` is accepted and ignored: import always rewrites it to the copied file. */
-const IMPORT_FIELDS = new Set(["id", "name", "seq", "created", "lastActive", "archived", "model", "kind", "workspace", "target", "file"]);
+const IMPORT_FIELDS = new Set(["id", "name", "seq", "created", "lastActive", "archived", "model", "thinking", "effort", "kind", "workspace", "target", "file"]);
 
 /**
  * One person's bench in one team: the list, a pi per open session, and the
@@ -160,7 +160,7 @@ export class Bench {
     // about it (the owner watched a live dev server marked "lost 13m"). The poll re-syncs instead,
     // in both directions — a row this ledger calls lost is revived if its tool server still has it.
     if (this.procs.all().length) this.pollProcs();
-    if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
+    if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create({ model: this.opts.model }));
     // The architecture document starts with the machines in it (§24): an empty document is one
     // nobody writes, and one that already names the workspaces and services is one somebody
     // corrects. It is written once and never overwritten from here again.
@@ -888,7 +888,7 @@ export class Bench {
 
   async create(): Promise<SessionRow> {
     this.refuse(true);
-    const s = this.writable.run(() => this.sessions.create(this.opts.model));
+    const s = this.writable.run(() => this.sessions.create({ model: this.opts.model }));
     this.open(s);
     this.emit({ type: "sessions" });
     return s;
@@ -1082,7 +1082,7 @@ export class Bench {
         for (const d of [path.join(ws, "eph"), ws]) try { fs.rmdirSync(d); } catch { /* not empty or already gone */ }
       }
       // Never zero bench sessions: the replacement takes a fresh id (nextSeq), never the removed one.
-      if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.open(this.sessions.create(this.opts.model));
+      if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.open(this.sessions.create({ model: this.opts.model }));
       this.sessions.remove(id);
     });
     this.emit({ type: "sessions" });
