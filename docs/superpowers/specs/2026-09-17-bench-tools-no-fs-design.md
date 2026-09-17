@@ -218,3 +218,17 @@ things so simple … add skill/toolsearch")
   the verbs, one example. `skill` returns the text; the identity lists their names in one line.
 - Identity shrinks by the tool paragraphs: it names the skills and says "tool_search finds the
   tool for a platform verb".
+
+## 14. Memory (owner, 2026-09-17 15:50 IST: "just like claude code will update the knowledge
+this also should update the knowledge")
+
+Claude Code's auto-memory, on the bench: a per-person memory directory in the bench workspace,
+`{ws}/.bench/memory/` — `MEMORY.md` (one line per memory, the index) plus one file per memory
+with frontmatter `name`, `description`, `type: user | feedback | project | reference` and a body
+("**Why:** … **How to apply:** …" for feedback/project). Core tool `memory {save?: {name,
+description, type, body}, forget?: name}` (13th always-on tool); `MEMORY.md` is appended to the
+identity at every session start (bench and workspace sessions alike; it is the person's memory,
+not the session's). Identity rule: "When the person corrects you, states a preference, or tells
+you a fact about their setup you will need again, save a memory. Never save what a tool can
+answer." A `[from …]` reply or an ask is never saved. Snapshotted with the bench like everything
+under `.bench/`. Desktop: Settings › Memory lists the index with delete.
