@@ -313,7 +313,9 @@ workspace answers an open ask with **reports** (`report {ask, kind, text}`): the
 is its decision ("going ahead with …") — relayed to the bench and the person as a one-line update
 on the ask, never settling it; further `progress` lines as milestones land; the last, `done` or
 `blocked`, settles the ask with the shaped reply of §3.7. The bench waits between reports; it does
-not poll.
+not poll. Every message that crosses sessions — asks, reports, briefs — is caveman-terse: no
+preamble, no restating what the receiver already holds, the person's words plus at most one line
+the receiver cannot know (owner, 04:45 IST).
 
 ## 4. Subagents work in trees, not workspaces
 
