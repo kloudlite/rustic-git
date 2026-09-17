@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { benchSessions, inFlightItems, nestWorkspaces, procLabel, procState } from "../../src/renderer/rows.ts";
+import { benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -67,4 +67,22 @@ test("workspaces nest their clones, by the parent's id or its name", () => {
   // An orphan clone is still a machine, not a row that disappears.
   const orphan = nestWorkspaces([{ id: "ws-x-eph-1", name: "gone-eph-1" }]);
   assert.deepEqual(orphan.map((n) => n.row.id), ["ws-x-eph-1"]);
+});
+
+/**
+ * A clone row is called after the AGENT working in it, and nothing else: the owner saw
+ * `└ ⬡ probe-frontend-ws-nrt…  clone ●` — the agent's name with the clone's id trailing it
+ * (2026-09-17). No id fragment ever reaches the label.
+ */
+test("a clone is labelled by its agent, never by its id", () => {
+  assert.equal(cloneLabel("probe-frontend", "ws-nrt6k2", "ws-parent"), "probe-frontend");
+  assert.equal(cloneLabel("probe-frontend-ws-nrt6k2p9", "ws-nrt6k2p9", "ws-parent"), "probe-frontend", "the clone's own id comes off");
+  assert.equal(cloneLabel("audit-1-eph-5m3k1p", "ws-x", "ws-parent"), "audit-1", "and so does an -eph- suffix");
+  assert.equal(cloneLabel("svelte-ws-parent", "ws-x", "ws-parent"), "svelte", "and the parent's id");
+  // Nothing known: the row says what it is, with no tag to repeat it.
+  assert.equal(cloneLabel(undefined, "ws-x"), "clone");
+  assert.equal(cloneLabel("   ", "ws-x"), "clone");
+  // Whatever comes out, no hex fragment survives.
+  for (const label of [cloneLabel("probe-frontend-ws-nrt6k2p9", "ws-nrt6k2p9"), cloneLabel("x-eph-9q2z", "ws-y")])
+    assert.ok(!/ws-[a-z0-9]{6,}|-eph-/.test(label), label);
 });

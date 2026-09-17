@@ -4,7 +4,7 @@ import { Menu, MenuItem, MenuSep } from "../ui/Menu";
 import { Button } from "../ui/Button";
 import { Heading, Row, Gutter, Empty } from "../ui/parts";
 import { AGENT, ROLE_SHORT } from "./status";
-import { nestWorkspaces } from "../rows";
+import { cloneLabel, nestWorkspaces } from "../rows";
 import { EnvironmentDock } from "./EnvironmentDock";
 import type { AgentState, Environment, Machine, Thread } from "../model";
 
@@ -221,34 +221,43 @@ export function MachinePanel(props: {
                     {/* A clone of this machine, under it: the TUI's own connector, the agent's name
                         where there is one, and `clone` said once, muted (owner, 2026-09-17). */}
                     <For each={node.clones}>
-                      {(c, i) => (
-                        <Row
-                          class="pl-[26px]"
-                          selected={props.selected === c.row.id}
-                          state={c.row.state}
-                          onClick={() => props.onSelect(c.row.id)}
-                        >
-                          <span class="shrink-0 font-mono text-subtle select-none">
-                            {i() === node.clones.length - 1 && !ws.ephemerals.length ? "└" : "├"}
-                          </span>
-                          <Icon name="workspace" size={16} class={`mx-1 shrink-0 ${c.row.state === "stopped" ? "text-subtle" : "text-accent"}`} />
-                          <span class="min-w-0 flex-1 truncate pr-2 text-muted">{c.agent ?? "clone"}</span>
-                          <span class="shrink-0 text-subtle">clone</span>
-                          <StateDot state={c.row.state === "running" ? "running" : "idle"} label={c.row.state} />
-                        </Row>
-                      )}
+                      {(c, i) => {
+                        const label = () => cloneLabel(c.agent, c.row.id, ws.id);
+                        return (
+                          <Row
+                            selected={props.selected === c.row.id}
+                            state={c.row.state}
+                            onClick={() => props.onSelect(c.row.id)}
+                            title={label()}
+                          >
+                            {/* The connector sits in the PARENT's icon column and the child's own
+                                icon one cell right of it: a tree on the cell grid, not a glyph
+                                floating beside the name (owner, 2026-09-17). */}
+                            <span class="inline-flex h-4.5 w-4.5 shrink-0" />
+                            <span class="w-4 shrink-0 text-center font-mono text-subtle select-none">
+                              {i() === node.clones.length - 1 && !ws.ephemerals.length ? "└" : "├"}
+                            </span>
+                            <Icon name="workspace" size={16} class={`ml-1 shrink-0 ${c.row.state === "stopped" ? "text-subtle" : "text-accent"}`} />
+                            {/* The agent's name, and only that: it ellipsizes when it truly runs out
+                                of room, and the tag and the dot keep their places on the right. */}
+                            <span class="min-w-0 flex-1 truncate px-1 text-muted">{label()}</span>
+                            <Show when={c.agent}><span class="shrink-0 pr-1 text-subtle">clone</span></Show>
+                            <StateDot state={c.row.state === "running" ? "running" : "idle"} label={c.row.state} />
+                          </Row>
+                        );
+                      }}
                     </For>
                     <For each={ws.ephemerals}>
                       {(e) => (
                         <Row
-                          class="pl-[26px]"
                           selected={props.selected === e.id}
                           onClick={() => props.onSelect(e.id)}
                           title={`${e.agent} · ${AGENT[e.state].label} · ${e.task}`}
                         >
-                          <span class="shrink-0 font-mono text-subtle select-none">{e === ws.ephemerals[ws.ephemerals.length - 1] ? "└" : "├"}</span>
-                          <Icon name="ephemeral" size={16} class="mx-1 shrink-0 text-subtle" />
-                          <span class="min-w-0 flex-1 truncate pr-2 text-muted">{e.task}</span>
+                          <span class="inline-flex h-4.5 w-4.5 shrink-0" />
+                          <span class="w-4 shrink-0 text-center font-mono text-subtle select-none">{e === ws.ephemerals[ws.ephemerals.length - 1] ? "└" : "├"}</span>
+                          <Icon name="ephemeral" size={16} class="ml-1 shrink-0 text-subtle" />
+                          <span class="min-w-0 flex-1 truncate px-1 text-muted">{e.task}</span>
                           <span class="shrink-0 text-xs text-subtle">{ROLE_SHORT[e.agent] ?? e.agent}</span>
                           <StateDot state={e.state} label={AGENT[e.state].label} />
                         </Row>

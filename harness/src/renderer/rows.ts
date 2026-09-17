@@ -178,3 +178,21 @@ export function nestWorkspaces<T extends { id: string; name?: string }>(
   }
   return out;
 }
+
+/**
+ * What a clone's row is called: the AGENT working in it, and nothing else. The owner saw
+ * `probe-frontend-ws-nrt…` — the agent's name with the clone's own id trailing it — which is two
+ * names for one row and unreadable at any width (2026-09-17).
+ */
+export function cloneLabel(agent: string | undefined, id: string, parent?: string): string {
+  const raw = (agent ?? "").trim();
+  const bare = raw
+    // The clone's id, however it was appended: `-eph-<hex>`, the parent's id, or the clone's own.
+    .replace(/-eph-[a-z0-9]+$/i, "")
+    .replace(/-ws-[a-z0-9]{6,}$/i, "")
+    .replace(new RegExp(`-?${id.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}$`, "i"), "")
+    .replace(parent ? new RegExp(`-?${parent.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}$`, "i") : /$^/, "")
+    .replace(/[-_]+$/, "")
+    .trim();
+  return bare || "clone";
+}
