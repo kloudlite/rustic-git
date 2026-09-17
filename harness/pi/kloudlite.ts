@@ -962,7 +962,11 @@ export function tools(pi: ExtensionAPI) {
     if (started.status >= 400) return { ...text(`${started.status}: ${typeof started.data === "string" ? started.data : JSON.stringify(started.data)}`), isError: true };
     const r = await settle(() => call("GET", `/v1/${kind}/${encodeURIComponent(id)}`), (d) => RESTING.has(String(d?.state ?? "")), cap, signal);
     const state = String((r.data as any)?.state ?? "");
-    return text(r.settled ? r.data : `still ${state || "working"} after ${Math.round(r.waitedMs / 1000)}s\n${JSON.stringify(r.data, null, 2)}`);
+    // "still ready after 182s" is a contradiction, and it is what a wait that ran out printed when
+    // the state it was waiting for was one it did not know (transcripts, 2026-09-18). A wait that
+    // ends on a state we call settled IS settled; anything else says what it is still doing.
+    if (r.settled || RESTING.has(state)) return text(r.data);
+    return text(`still ${state || "working"} after ${Math.round(r.waitedMs / 1000)}s\n${JSON.stringify(r.data, null, 2)}`);
   };
   /**
    * The two things a person never types. Where their work runs is where THIS machine runs, and

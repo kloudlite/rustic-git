@@ -1315,3 +1315,33 @@ test("a machine that no longer exists says so rather than answering 404", async 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A wait that ran out printed `still ready after 182s` — a contradiction, and the state it named
+ * was one it should have settled on (transcripts, 2026-09-18). `ready` settles now (99ddf73d); a
+ * wait that ends on any state we call settled never says "still".
+ */
+test("a lifecycle verb never reports a settled state as still going", async () => {
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "r1" };
+    if (url === "/v1/workspaces" && m === "POST") return { id: "ws-slow", state: "creating" };
+    // Every read says a state the tool treats as settled: it must answer, not wait it out.
+    if (url === "/v1/workspaces/ws-slow") return { id: "ws-slow", state: "ready" };
+    return {};
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-still-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const r = await (tools.find((t) => t.name === "kl_workspace_create")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", { name: "slow" }, undefined, undefined, undefined);
+    assert.doesNotMatch(r.content[0].text, /still/);
+    assert.match(r.content[0].text, /ready/);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
