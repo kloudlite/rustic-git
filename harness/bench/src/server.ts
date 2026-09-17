@@ -145,7 +145,15 @@ export function serve(
           const b = await body(req);
           // yes / no for a proposal; a question's answer is the person's own words.
           if (typeof b.answer !== "string" || !b.answer.trim()) return send(res, 400, { error: "answer is yes, no, or what the person chose" });
-          return send(res, 200, bench.answerProposal(p[1], b.answer));
+          // A card answered after its tool stopped waiting: 409, and the desktop says so in the
+          // composer footer. Never a prompt — a late answer is not something to tell the model.
+          try {
+            return send(res, 200, bench.answerProposal(p[1], b.answer));
+          } catch (e) {
+            const msg = (e as Error).message;
+            if (msg.startsWith("no proposal ")) return send(res, 409, { error: "that question is no longer waiting for an answer" });
+            throw e;
+          }
         }
       }
       if (m === "GET" && u.pathname === "/proposals") return send(res, 200, bench.openProposals());

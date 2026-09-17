@@ -169,6 +169,11 @@ test("only the conversation reaches the transcript", () => {
   assert.match(live, /bench\("POST", `\/tasks\/\$\{t\.id\}\/cancel`/);
   // The plan panel is the surface for the plan; it is not repeated into the transcript.
   assert.ok(!/Todo: \$\{/.test(live), "the PLAN panel is the surface");
+  // A proposal's answer is the CARD: no user row, and nothing sent to pi — the bench wakes the
+  // waiting tool and the answer reaches the model as that tool's result.
+  const ans = live.slice(live.indexOf("export function answerProposal"), live.indexOf("export function answerProposal") + 400);
+  assert.ok(!/\.sent\(/.test(ans), "the card is the record; a `> yes` row said it twice");
+  assert.ok(!/harness\.pi\(/.test(ans), "an answer is a tool result, never a prompt");
   // A change worth reading back is a divider, derived from the bench's rows — never a message.
   assert.match(live, /divider\(`Model changed to \$\{name\}`\)/);
   assert.match(live, /divider\(`Thinking \$\{t\.thinking\}`\)/);

@@ -99,7 +99,7 @@ test("a waiting client that goes away stops waiting, and the question stays open
   }
 });
 
-test("a question to the person carries its own options, and the answer is their own row", async () => {
+test("a question to the person carries its own options, and the answer is the tool's result", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-question-"));
   const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
   const srv = await serve(bench, 0);
@@ -119,12 +119,17 @@ test("a question to the person carries its own options, and the answer is their 
     assert.equal(asked[0].tool, "question");
     assert.deepEqual((asked[0].question as { options: { label: string }[] }).options.map((o) => o.label), ["postgres", "mongodb"]);
 
-    // The person's answer is their own words, not a yes/no — and it is said in the transcript.
+    // The person's answer is their own words, not a yes/no, and it reaches the model as the
+    // question tool's RESULT — never also as a user message. It used to be sent as a prompt too, so
+    // pi wrote a `postgres` user row into the session file and every reopen replayed it beneath the
+    // card that already said it (owner, on the transcript).
     const waited = fetch(`${t.base}/proposals/q-1/wait`).then((r) => r.json() as Promise<{ answer: string }>);
     await new Promise((r) => setTimeout(r, 30));
     await fetch(`${t.base}/proposals/q-1`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "postgres" }) });
     assert.deepEqual(await waited, { answer: "postgres" });
-    await until(async () => ((await t.bench.messages(session)).messages as { content: string }[]).some((m) => String(m.content) === "postgres"), 5_000, "their row");
+    await new Promise((r) => setTimeout(r, 100));
+    const msgs = (await t.bench.messages(session)).messages as { role?: string; content?: unknown }[];
+    assert.ok(!msgs.some((m) => m.role === "user" && String(m.content) === "postgres"), "the card is the record; the answer is not a second user message");
   } finally {
     await t.down();
   }

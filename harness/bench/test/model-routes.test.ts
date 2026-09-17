@@ -105,3 +105,66 @@ test("stopping and cancelling never speak to the model", async () => {
     await b.down();
   }
 });
+
+/**
+ * The QUEUED panel showed the owner's own card answers ("We should create a new project",
+ * "TypeScript (Node)"): the answer was ALSO sent to pi, and mid-turn that is a `follow_up`, so it
+ * sat in pi's queue as if it were a new instruction. The wake is the whole delivery.
+ */
+test("a card answer wakes the tool and queues nothing", async () => {
+  const b = await startBench();
+  try {
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    const log = path.join(b.cmds, `commands-${session}.json`);
+    await until(() => fs.existsSync(log), 5_000, "the child to start");
+    (b.bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "q-9", tool: "question", args: {}, summary: "Which language?", question: { header: "Stack", options: [{ label: "TypeScript (Node)", description: "" }] } })],
+    });
+    // The tool call is awaiting this; the answer is what it returns.
+    const waiting = fetch(`${b.base}/proposals/q-9/wait`).then((r) => r.json() as Promise<{ answer: string }>);
+    await new Promise((r) => setTimeout(r, 30));
+    await post(b, "/proposals/q-9", { answer: "TypeScript (Node)" });
+    assert.deepEqual(await waiting, { answer: "TypeScript (Node)" }, "the wake carries the answer");
+    await new Promise((r) => setTimeout(r, 150));
+    const sent = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
+    assert.deepEqual(sent.filter((c) => ["prompt", "steer", "follow_up"].includes(c.type)), [], "nothing is queued for the model");
+  } finally {
+    await b.down();
+  }
+});
+
+/** A card answered after its tool stopped waiting is a 409, and still never a prompt. */
+test("a late card answer is refused, not spoken", async () => {
+  const b = await startBench();
+  try {
+    const r = await fetch(`${b.base}/proposals/gone`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "yes" }) });
+    assert.equal(r.status, 409);
+  } finally {
+    await b.down();
+  }
+});
+
+/** Answering a proposal wakes the waiting tool; the model is never sent a prompt for it. */
+test("answering a proposal speaks no prompt to the model", async () => {
+  const b = await startBench();
+  try {
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    const log = path.join(b.cmds, `commands-${session}.json`);
+    await until(() => fs.existsSync(log), 5_000, "the child to start");
+    (b.bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-1", tool: "question", args: {}, summary: "Which database?", question: { header: "Storage", options: [{ label: "postgres", description: "" }] } })],
+    });
+    await post(b, "/proposals/p-1", { answer: "postgres" });
+    await new Promise((r) => setTimeout(r, 150));
+    const sent = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
+    assert.deepEqual(sent.filter((c) => ["prompt", "steer", "follow_up"].includes(c.type)), [], "the answer is the tool's result, not a message");
+  } finally {
+    await b.down();
+  }
+});

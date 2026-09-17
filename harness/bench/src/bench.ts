@@ -811,8 +811,10 @@ export class Bench {
     p.answer ??= answer;
     // A no means the item the turn was on is not happening: the plan says so, with the reason.
     if (p.answer === "no") this.plan(p.session, { type: "declined" });
-    // A question's answer is the person SPEAKING: it belongs in the transcript as their own row.
-    if (p.tool === "question" && p.answer !== "no") void this.send(p.session, p.answer).catch(() => undefined);
+    // The answer reaches the model as the question tool's RESULT — `waitProposal` is what the tool
+    // call is awaiting, and it resolves with exactly this. It used to ALSO be sent as a prompt, so
+    // the model was told twice and pi wrote a `yes` user message into the session file, which every
+    // reopen then replayed under the card that already said it (owner, on the transcript).
     this.emit({ type: "proposal", row: { id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
     for (const w of p.wake.splice(0)) w();
     return { id, answer: p.answer };

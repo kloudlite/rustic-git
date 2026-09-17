@@ -216,12 +216,14 @@ const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({
 export { connected, setConnected, writable };
 
 /**
- * A person's answer to a proposal. The bench is holding the tool call until this lands; the answer
- * is also said out loud in the thread, so the transcript reads as the conversation it was.
+ * A person's answer to a proposal. The CARD is the record — it already reads "You answered: … →
+ * yes" — so nothing else is pushed: a `> yes` user row under it said the same thing twice (owner,
+ * on the transcript). Nothing goes to pi either: the bench is holding the tool call and wakes it
+ * with the answer, which reaches the model as that tool's RESULT, never as something the person
+ * typed.
  */
 export function answerProposal(session: string, id: string, answer: string) {
   thread(session).proposal({ id, tool: "", summary: "", answer });
-  thread(session).sent(answer);
   void window.harness.bench("POST", `/proposals/${id}`, { answer }).catch((e: Error) => setStatusNote(e.message));
 }
 
@@ -249,6 +251,16 @@ export function cancel(t: Task) {
  * Applied at every door a user row can come through: the local echo, pi's own report, and replay.
  */
 export const isCommandLine = (text: string): boolean => /^\s*\//.test(text);
+
+/**
+ * A bare answer that pi recorded right after a proposal or question tool call. The card IS the
+ * record — "You answered: … → yes" — and the `> yes` row under it said the same thing twice
+ * (owner, on the transcript). Live, nothing pushes it any more; an OLD session file still holds
+ * one, so replay drops it. Only a bare yes/no/approve-style word immediately after such a call:
+ * anything a person actually wrote is their message and stays.
+ */
+const ANSWER_WORDS = /^(y|n|yes|no|ok|okay|sure|approve|approved|allow|allowed|deny|denied|reject|rejected)[.!]?$/i;
+export const isCardAnswer = (text: string, afterCard: boolean): boolean => afterCard && ANSWER_WORDS.test(text.trim());
 
 const now = () => new Date().toTimeString().slice(0, 5);
 const argOf = (name: string, args: Record<string, unknown>) =>
@@ -311,13 +323,17 @@ function makeThread(id: string) {
   function replay(raw: unknown[]) {
     const out: Message[] = [];
     const calls = new Map<string, number>();
+    /** Whether the last thing pi recorded was a card the person answers — a question or a proposal. */
+    let afterCard = false;
     for (const m of raw as Record<string, unknown>[]) {
       const ts = typeof m.timestamp === "number" ? m.timestamp : undefined;
       const at = ts ? new Date(ts).toTimeString().slice(0, 5) : "";
       if (m.role === "user") {
         const c = m.content;
         const text = typeof c === "string" ? c : (c as { type: string; text?: string }[]).map((x) => x.text ?? "").join("");
-        if (text.trim() && !isCommandLine(text)) out.push({ role: "user", text, at, ts });
+        // A card's own answer is already drawn by the card; a command was never a message at all.
+        if (text.trim() && !isCommandLine(text) && !isCardAnswer(text, afterCard)) out.push({ role: "user", text, at, ts });
+        afterCard = false;
       } else if (m.role === "assistant") {
         for (const c of m.content as Record<string, unknown>[]) {
           if (c.type === "text" && (c.text as string).trim()) out.push({ role: "assistant", text: c.text as string, at, ts });
@@ -326,6 +342,7 @@ function makeThread(id: string) {
             const args = c.arguments as Record<string, unknown>;
             out.push({ role: "action", kind: name === "bash" ? "run" : "note", target: TOOL[name] ?? name, text: argOf(name, args), at, ts, output: "", tool: name, args });
             calls.set(c.id as string, out.length - 1);
+            if (name === "question" || name === "ask") afterCard = true;
           }
         }
       } else if (m.role === "toolResult") {

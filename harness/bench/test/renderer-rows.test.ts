@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isCommandLine } from "../../src/renderer/live.ts";
+import { isCardAnswer, isCommandLine } from "../../src/renderer/live.ts";
 import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, pickerRows, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
@@ -244,4 +244,17 @@ test("the cursor never lands on a header", () => {
 test("no slash line is ever a transcript row", () => {
   for (const t of ["/model", "/clear", "/compact", " /proc-stop p1", "/cancel #1", "/help"]) assert.equal(isCommandLine(t), true, t);
   for (const t of ["fix the router", "what does / mean", "a/b", ""]) assert.equal(isCommandLine(t), false, JSON.stringify(t));
+});
+
+/**
+ * The card already reads "You answered: … → yes"; a `> yes` row under it said the same thing twice
+ * (owner, on the transcript). Live, nothing pushes one; an OLD session file still holds one, so
+ * replay drops a bare answer that directly followed the card — and nothing else.
+ */
+test("a bare answer after a card is not a second row", () => {
+  for (const t of ["yes", "no", "Y", "approve", "denied", " ok "]) assert.equal(isCardAnswer(t, true), true, t);
+  // Only right after a card: the same word typed later is the person talking.
+  assert.equal(isCardAnswer("yes", false), false);
+  // Anything they actually wrote stays, wherever it sits.
+  for (const t of ["yes, and also add the index", "no idea", "postgres"]) assert.equal(isCardAnswer(t, true), false, t);
 });
