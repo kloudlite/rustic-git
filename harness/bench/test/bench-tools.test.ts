@@ -1685,3 +1685,77 @@ test("an ask crosses without the model's preamble", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * An exchange is one PERSISTED lifecycle (spec §3.9 rule 1): the log is the record and the queue a
+ * view of it. The queue lived only in memory, so a bench that restarted mid-ask left the row
+ * `running` with nobody able to settle it and the asking session waiting forever.
+ */
+test("an open ask survives a bench restart, and the plan still shows it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-resume-"));
+  const one = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  let exchange = "";
+  let asker = "";
+  try {
+    await one.start();
+    asker = one.sessions.all().find((s) => !s.archived)!.id;
+    ({ exchange } = await one.ask("api", "hang", asker));
+    await until(() => one.exchanges.bySession(asker).some((e) => e.id === exchange && e.state === "running"), 5_000, "the ask running");
+  } finally {
+    await one.stop();
+  }
+
+  const two = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await two.start();
+    // Still open, still owed, and still in the plan the person reads.
+    assert.equal(two.exchanges.bySession(asker).find((e) => e.id === exchange)!.state, "running");
+    assert.ok(two.plans.get(asker).some((i) => i.state !== "done"), JSON.stringify(two.plans.get(asker)));
+    // And it can be settled by the workspace that holds it, which is the whole point of resuming.
+    await two.report(two.sessions.all().find((s) => s.workspace === "api")!.id, exchange, "done", "it is live");
+    assert.equal(two.exchanges.bySession(asker).find((e) => e.id === exchange)!.state, "done");
+  } finally {
+    await two.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * "user should never be kept in dark" (owner, 2026-09-18): a session that ends takes its plan and
+ * its open handoffs with it, and the panels are told. A plan replaced with nothing is discarded,
+ * never kept as an empty list drawing "1/1 done" over no rows.
+ */
+test("archiving a session clears its plan and settles what it was waiting on", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-archive-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const seen: { type: string; session?: string; items?: unknown[] }[] = [];
+  bench.onEvent((ev) => seen.push(ev as never));
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    await bench.create();
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+    bench.plans.set(asker, [{ text: "ship it" }]);
+    assert.equal(bench.plans.get(asker).length, 1);
+
+    seen.length = 0;
+    await bench.archive(asker);
+    assert.deepEqual(bench.plans.get(asker), [], "the plan goes with the session");
+    assert.ok(seen.some((e) => e.type === "plan" && e.session === asker && (e.items ?? []).length === 0), "and the panel is told");
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "cancelled", "nothing is left waiting on a session that ended");
+
+    // A plan replaced with nothing is gone, not an empty list.
+    const other = bench.sessions.all().find((s) => !s.archived)!.id;
+    bench.plans.set(other, [{ text: "one" }, { text: "two" }]);
+    assert.deepEqual(bench.plans.set(other, []), []);
+    assert.deepEqual(bench.plans.get(other), []);
+    // Replacing a plan leaves only the new items.
+    bench.plans.set(other, [{ text: "a" }]);
+    bench.plans.set(other, [{ text: "b" }]);
+    assert.deepEqual(bench.plans.get(other).map((i) => i.text), ["b"]);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

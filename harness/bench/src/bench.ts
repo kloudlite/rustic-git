@@ -164,12 +164,43 @@ export class Bench {
     // about it (the owner watched a live dev server marked "lost 13m"). The poll re-syncs instead,
     // in both directions — a row this ledger calls lost is revived if its tool server still has it.
     if (this.procs.all().length) this.pollProcs();
+    // Open asks SURVIVE a restart. The queue lived only in memory, so a bench that restarted while
+    // a workspace was working left the ask `running` in the log with nobody waiting on it and
+    // nobody able to settle it — the asking session waited forever (spec §3.9 rule 1).
+    this.resumeAsks();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create({ model: this.opts.model }));
     // The architecture document starts with the machines in it (§24): an empty document is one
     // nobody writes, and one that already names the workspaces and services is one somebody
     // corrects. It is written once and never overwritten from here again.
     void this.seedArchitecture().catch(() => undefined);
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
+  }
+
+  /**
+   * The queue of open asks, folded from `exchanges.jsonl` rather than remembered: the log is the
+   * record and the map is a view of it (spec §3.9 rule 1). Every open exchange is re-checked on
+   * boot, never assumed — a workspace session that is gone leaves its asks `blocked` rather than
+   * waiting on a session that will never answer.
+   */
+  private resumeAsks(): void {
+    const open = this.exchanges.recent(500).filter((e) => e.dir === "out" && (e.state === "queued" || e.state === "running"));
+    for (const e of open) {
+      const asker = this.sessions.get(e.session);
+      const holder = this.sessions.all().find((s) => !s.archived && (s.workspace === e.workspace || s.target === e.workspace || s.id === `w-${e.workspace}`));
+      // Nobody left to answer it, or nobody left to answer TO: the wait ends here rather than
+      // outliving the thing it was for.
+      if (!asker || asker.archived || !holder) {
+        this.write(() => this.exchanges.transition(e.id, "blocked"));
+        this.plan(e.session, { type: "ask_failed", exchange: e.id, task: e.workspace });
+        this.emit({ type: "exchange", row: this.exchanges.bySession(e.session).find((x) => x.id === e.id) });
+        continue;
+      }
+      const queue = this.asked.get(holder.id) ?? [];
+      if (!queue.some((q) => q.exchange === e.id)) queue.push({ exchange: e.id, from: e.session, workspace: e.workspace, name: holder.name });
+      this.asked.set(holder.id, queue);
+      // The plan says what is outstanding, so a restart does not empty the panel a person reads.
+      this.plan(e.session, { type: "asked", exchange: e.id, to: e.workspace, task: e.text });
+    }
   }
 
   /**
@@ -1088,8 +1119,33 @@ export class Bench {
     this.children.get(id)?.stop();
     this.children.delete(id);
     const s = this.writable.run(() => this.sessions.update(id, { archived: true }));
+    // A session that is gone leaves nothing waiting on it and nothing drawn for it (spec §3.9):
+    // its plan clears, its open asks settle, and the panels are told — an archived session's items
+    // sitting in the plan panel is the person kept in the dark about work nobody is doing.
+    this.write(() => this.plans.discard(id));
+    this.emit({ type: "plan", session: id, items: [] });
+    this.settleOpen(id, "cancelled", "the session was archived");
     this.emit({ type: "sessions" });
     return s;
+  }
+
+  /**
+   * Every exchange this session is party to, ended: the ones it asked for, and the ones it was
+   * holding. Nothing is left `running` with no session to answer it or hear the answer.
+   */
+  private settleOpen(session: string, state: string, _why: string): void {
+    for (const e of this.exchanges.recent(500)) {
+      if (e.dir !== "out" || (e.state !== "queued" && e.state !== "running")) continue;
+      const holder = this.asked.get(session)?.some((q) => q.exchange === e.id);
+      if (e.session !== session && !holder) continue;
+      this.write(() => this.exchanges.transition(e.id, state));
+      this.plan(e.session, { type: "ask_failed", exchange: e.id, task: e.workspace });
+      this.emit({ type: "exchange", row: this.exchanges.bySession(e.session).find((x) => x.id === e.id) });
+    }
+    this.asked.delete(session);
+    // A proposal this session raised has nobody to answer it any more (rule 2: never expires on its
+    // own, cancelled when the session is archived).
+    for (const [id, p] of this.proposals) if (p.session === session && !p.answer) this.answerProposal(id, "no");
   }
 
   async restore(id: string): Promise<SessionRow> {
