@@ -328,6 +328,11 @@ pub fn shell_container(image: &str, ws_id: &str) -> Container {
             var("HISTFILE", format!("{HOME_STATE_DIR}/shell-history")),
             var("PATH", crate::packages::path_env(None)),
             var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
+            // `zsh -l` reads `$ZDOTDIR/.zshrc` and nothing else that this image can put bytes in:
+            // the home is the person's NFS mount (no platform rc on it, and a bench pod has no
+            // workspace container to seed one) and `/etc` is unwritable to uid 1000. Without this
+            // the shell came up as a bare `ws%` with no starship, aliases or history (2026-09-18).
+            var("ZDOTDIR", "/etc/kl".to_string()),
         ]),
         ports: Some(vec![ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() }]),
         volume_mounts: Some(vec![

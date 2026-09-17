@@ -26,6 +26,11 @@ RUN chmod 0755 /usr/local/bin/kl
 # same file the workspace image ships, so a repo cloned from either shell behaves identically.
 COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
 
+# The prompt. zsh -l reads $ZDOTDIR/.zshrc and nothing else here (the home is the person's NFS
+# mount, which carries no platform rc), so the pod spec sets ZDOTDIR=/etc/kl and this is the file.
+COPY deploy/shell-image/zshrc /etc/kl/.zshrc
+COPY deploy/shell-image/starship.toml /etc/starship.toml
+
 COPY deploy/shell-image/prelude.sh /usr/local/bin/prelude
 RUN chmod 0755 /usr/local/bin/prelude
 

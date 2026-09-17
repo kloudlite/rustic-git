@@ -1,0 +1,29 @@
+# /etc/kl/.zshrc — the shell sidecar's prompt, read because ZDOTDIR=/etc/kl in the pod spec.
+#
+# The workspace container writes /etc/zshrc from its prelude as root; this container is a separate
+# filesystem running as uid 1000, so it could write nothing under /etc and zsh found no rc at all —
+# the owner's shell was a bare `ws%` (2026-09-18). Everything between the MARKERS below is
+# `k8s::shell_rc::ZSHRC` verbatim, held equal by `the_shell_image_rc_carries_the_shared_zshrc`.
+#
+# --- shared with the workspace: begin ---
+[[ -o interactive ]] || return 0
+[ "$PWD" = "$HOME" ] && [ -d "$KL_WORKSPACE" ] && cd "$KL_WORKSPACE"
+[ -e "$HOME/.config/starship.toml" ] || export STARSHIP_CONFIG=/etc/starship.toml
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/zsh"
+autoload -Uz compinit && compinit -d "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump"
+zstyle ":completion:*" menu select
+HISTSIZE=50000
+SAVEHIST=50000
+setopt appendhistory incappendhistory sharehistory histignorealldups histignorespace
+_kl_profile=$(readlink /nix/profile/current 2>/dev/null)
+_kl_rehash() { local p=$(readlink /nix/profile/current 2>/dev/null); [[ $p != $_kl_profile ]] && { _kl_profile=$p; rehash; }; }
+precmd_functions+=(_kl_rehash)
+[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh
+# --- shared with the workspace: end ---
+# The workspace's own seed (`shell_rc::seed_zshrc`) is what these mirror; PATH is pod env here.
+eval "$(dircolors -b)" 2>/dev/null
+zstyle ":completion:*" list-colors "${(s.:.)LS_COLORS}"
+alias ls="ls --color=auto" grep="grep --color=auto"
+eval "$(starship init zsh)"
+# The person's own rc runs last and wins, exactly as in the workspace container.
+[ -r "$HOME/.config/zsh/.zshrc" ] && . "$HOME/.config/zsh/.zshrc"
