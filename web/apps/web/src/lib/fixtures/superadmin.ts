@@ -675,7 +675,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["snap.retain", "Workspace lifecycle", "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", "99.9 %", "weekly", "12 · Weekly"],
   ["agent.janitor", "Workspaces", "No snapshot record of this run outlives the volume it names", "99.9 %", "weekly", "12 · Weekly"],
   ["srv.lanes", "Control plane", "Pulls of an image reach its pull counter, which is the server lane beat writing it back", "99.9 %", "weekly", "12 · Weekly"],
-  ["ws.terminal.persists", "Workspaces", "A named terminal in a workspace survives a stop and a start: it is listed again and reattaching redraws what was in it", "99 %", "weekly", "12 · Weekly"],
+  ["ws.terminal.persists", "Workspaces", "A named terminal in a workspace survives a stop and a start: opening it again replays the text that was in it", "99 %", "weekly", "12 · Weekly"],
   ["bench.survives.reschedule", "Benches", "After the pod is deleted every session reopens and processes read `lost`", "99.9 % ≤ 180000 ms", "weekly", "12 · Weekly"],
   ["bak.tarball.age", "Backups", "The latest backup tarball is recent", "99.9 %", "monthly", "13 · Monthly"],
   ["bak.daily.slots", "Backups", "Every daily backup slot is present", "99.9 %", "monthly", "13 · Monthly"],
