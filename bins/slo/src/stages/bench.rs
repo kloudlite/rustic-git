@@ -480,7 +480,7 @@ async fn sessions(c: &mut Ctx) {
 /// Not "no hands at all" — that was one ruling earlier on 2026-09-17 and it was superseded: a bench
 /// session has read/write/edit/bash/grep/find/ls and `process`, all running on its own workspace
 /// container's tool server (`127.0.0.1:7788`), with pi's builtins off so nothing can run in the
-/// BENCH container. Another workspace is reached only by `kl_workspace_ask`, a queue.
+/// BENCH container. Another workspace is reached only by `ask`, a queue.
 ///
 /// Its own session rather than the round trip's, because this needs no model: the tenant holding no
 /// provider key skips every prompted id, and "the model ran with a shell in the wrong place" is
@@ -508,10 +508,16 @@ async fn own_hands(c: &mut Ctx) {
     .await;
 }
 
-/// The eight tools that act on the bench's own machine, the one that reaches another workspace, and
-/// the two facts that say WHERE the eight run — which the names alone cannot show.
-const OWN_HANDS: [&str; 9] =
-    ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "kl_workspace_ask"];
+/// The eight tools that act on the bench's own machine, and the two facts that say WHERE they run
+/// — which the names alone cannot show.
+const OWN_HANDS: [&str; 8] = ["read", "write", "edit", "bash", "grep", "find", "ls", "process"];
+
+/// The rest of the always-on set (spec §13/§14): one way to reach a workspace or an agent, and the
+/// four tools the session steers itself with. Deliberately NOT any `kl_*`: since 2026-09-17 every
+/// platform tool is registered but INACTIVE until `tool_search` turns it on, so demanding one here
+/// asserted the old catalogue and failed the id on a bench that was working exactly as designed.
+/// `tool_search` itself is what must be there — it is the door to all of them.
+const ALWAYS_ON: [&str; 5] = ["ask", "plan", "skill", "tool_search", "memory"];
 /// `k8s::BENCH_TOOLS` on the harness side: the workspace container's tool server, same pod.
 const OWN_TOOL_SERVER: &str = "127.0.0.1:7788";
 
@@ -523,7 +529,7 @@ fn judge_tools(body: &str) -> Result<()> {
         .iter()
         .map(|t| t.as_str().unwrap_or_default().to_string())
         .collect();
-    for want in OWN_HANDS {
+    for want in OWN_HANDS.iter().chain(ALWAYS_ON.iter()) {
         if !tools.iter().any(|t| t == want) {
             bail!("a bench session has no `{want}`: {}", tools.join(", "));
         }
@@ -569,8 +575,11 @@ async fn proposal_asked(c: &mut Ctx) {
                 bail!("POST /sessions answered {status}: {}", super::clip(&row));
             }
             let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            // Through `tool_search`, because every `kl_*` tool is DEFERRED now (spec §13): naming
+            // one directly asks for a tool the session has not turned on, and the turn would end
+            // with no proposal to answer.
             let prompt = format!(
-                "Call the tool kl_workspace_create exactly once with name \"{name}\" and region \"{region}\". Whatever it answers, then reply with exactly the word done."
+                "Call tool_search once with query \"create workspace\", then call the tool it names for creating a workspace exactly once with name \"{name}\" and region \"{region}\". Whatever it answers, then reply with exactly the word done."
             );
             // The turn does not end until the question is answered, so the answer is given from
             // here WHILE it runs — the same shape `answering` has, with the opposite answer and
@@ -862,11 +871,14 @@ const EXCHANGE_CEILING: Duration = Duration::from_secs(120);
 /// `bench.workspace.tool_roundtrip`: target 180 s.
 const TOOL_CEILING: Duration = Duration::from_secs(180);
 
-/// Only a `kl_workspace_*`/`kl_environment_*` call writes an exchange (harness/pi/kloudlite.ts), and
-/// all of them mutate — so the call names a workspace that does not exist: the 404 is recorded as a
-/// `failed` exchange with nothing created anywhere, and no teardown is owed for it.
+/// `ask` is what writes an exchange now (`Bench.ask` records one before it queues the task), so the
+/// prompt calls that — and the task is a greeting, which changes nothing wherever it lands and
+/// leaves no teardown owed.
 fn exchange_prompt(target: &str) -> String {
-    format!("Call the tool kl_workspace_start exactly once with id \"{target}\". Whatever it answers, then reply with exactly the word done.")
+    // `ask` (spec §13) replaced `kl_workspace_ask`/`kl_agent`, and it is what WRITES the exchange
+    // this id reads back. A prompt naming a `kl_*` tool would name a DEFERRED one now — inactive
+    // until `tool_search` turns it on — so the turn would end without the row.
+    format!("Call the tool ask exactly once with to \"{target}\" and task \"say hello\". Whatever it answers, then reply with exactly the word done.")
 }
 
 fn tool_prompt(marker: &str) -> String {
@@ -899,15 +911,18 @@ async fn exchanges(c: &mut Ctx, sid: Option<String>) {
     let Some(sid) = sid else {
         return c.skip("bench.exchange.both_views", "the round trip created no session");
     };
-    let target = format!("{}-exchange", c.prefix());
+    // The run's own workspace when there is one: `ask` OPENS the target's session before it
+    // records the exchange (`Bench.ask`), so a name nothing resolves to may throw before there is
+    // a row to read back. The synthetic name stays as the fallback — a stage that never made a
+    // workspace still files a sample rather than a skip.
+    let target = c.state.ux_workspace.clone().unwrap_or_else(|| format!("{}-exchange", c.prefix()));
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let nm = no_model.clone();
     c.step("bench.exchange.both_views", EXCHANGE_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
-            // `kl_workspace_start` is a gated write now, and its tool call does not return until
-            // somebody answers the question — so the answer has to come from here, while the turn
-            // is still running.
+            // `ask` is a gated write, and its tool call does not return until somebody answers
+            // the question — so the answer has to come from here, while the turn is still running.
             let _answering = answering(port);
             let mut rows: Vec<Value> = Vec::new();
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
@@ -1478,7 +1493,10 @@ mod tests {
         assert!(tool_workspace(None, true).is_err());
         assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
-        assert!(tool_prompt(m).contains(m) && exchange_prompt("run-abc-exchange").contains("kl_workspace_start"));
+        // `ask`, never a `kl_*` name: those are deferred until `tool_search` turns them on.
+        let ex = exchange_prompt("run-abc-exchange");
+        assert!(tool_prompt(m).contains(m) && ex.contains("tool ask") && ex.contains("run-abc-exchange"));
+        assert!(!ex.contains("kl_"), "{ex}");
 
         // The sign-in answer is an ordinary failed round trip now that the probe mints the token.
         let login = json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": "sign in on the Kloudlite desktop app"}]});
@@ -1525,14 +1543,15 @@ mod tests {
         assert!(proposal_ids(&json!({"error": "no"}).to_string()).is_empty());
     }
 
-    /// The ruling this id exists for, both halves: the eight own-machine tools and `kl_workspace_ask`
-    /// must be there, and they must run on the bench's OWN workspace tool server with pi's builtins
-    /// off. A list that satisfies the names while running in the bench container is the regression.
+    /// The ruling this id exists for, both halves: the eight own-machine tools and the always-on
+    /// five must be there, and they must run on the bench's OWN workspace tool server with pi's
+    /// builtins off. A list that satisfies the names while running in the bench container is the
+    /// regression. No `kl_*` is required: every one of them is deferred until `tool_search`.
     #[test]
     fn own_hands_wants_the_names_and_where_they_run() {
         let ok = json!({
             "tools": ["read", "write", "edit", "bash", "grep", "find", "ls", "process",
-                      "kl_workspace_ask", "kl_pkg_add"],
+                      "ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"],
             "toolsAddress": "127.0.0.1:7788",
             "builtinTools": false,
         });
@@ -1544,7 +1563,11 @@ mod tests {
         };
         assert!(without("bash").is_err(), "a bench session with no hands passed");
         assert!(without("process").is_err());
-        assert!(without("kl_workspace_ask").is_err());
+        assert!(without("ask").is_err());
+        assert!(without("tool_search").is_err(), "without it no platform tool can be reached at all");
+        assert!(without("memory").is_err());
+        // A catalogue with no `kl_*` in it at all is CORRECT now: they are registered inactive.
+        assert!(judge_tools(&ok.to_string()).is_ok());
         let mut elsewhere = ok.clone();
         elsewhere["toolsAddress"] = json!("10.0.0.7:7788");
         assert!(judge_tools(&elsewhere.to_string()).is_err(), "another workspace's tool server passed");
@@ -1553,7 +1576,7 @@ mod tests {
         assert!(judge_tools(&builtins.to_string()).is_err(), "hands in the bench container passed");
         let mut driving = ok.clone();
         driving["tools"] = json!(["read", "write", "edit", "bash", "grep", "find", "ls", "process",
-                                  "kl_workspace_ask", "kl_ws_exec"]);
+                                  "ask", "plan", "skill", "tool_search", "memory", "kl_ws_exec"]);
         assert!(judge_tools(&driving.to_string()).is_err(), "a direct tool onto another workspace passed");
     }
 
