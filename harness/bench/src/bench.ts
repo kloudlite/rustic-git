@@ -22,6 +22,16 @@ export type BenchEvent = { type: string; [k: string]: unknown };
  */
 const proposalKey = (session: string, id: string) => `${session}~${id}`;
 
+/** A card that already has an answer: the first stands, and the second is refused (D12). */
+export class AlreadyAnswered extends Error {
+  readonly answer: string;
+  constructor(id: string, answer: string) {
+    super(`proposal ${id} was already answered`);
+    this.name = "AlreadyAnswered";
+    this.answer = answer;
+  }
+}
+
 /** A model pick the provider has never heard of: refused with 409, naming what it does carry. */
 export class NoSuchModel extends Error {
   readonly known: string[];
@@ -1162,7 +1172,17 @@ export class Bench {
         this.proposals.get(key)?.wake.splice(0);
         resolve(a);
       };
-      const timer = setTimeout(() => (this.answerProposal(key, "no"), done("no")), capMs);
+      // The cap answers only a card nobody answered: a person who got there first has already
+      // settled it, and `answerProposal` now refuses a second answer — thrown from a timer, that
+      // would take the process down.
+      const timer = setTimeout(() => {
+        try {
+          if (!this.proposals.get(key)?.answer) this.answerProposal(key, "no");
+        } catch {
+          /* answered in the same tick: the first answer stands */
+        }
+        done("no");
+      }, capMs);
       timer.unref?.();
       p.wake.push(() => done(this.proposals.get(key)?.answer ?? "no"));
       // A client that went away takes its question with it; the tool call is over either way.
@@ -1170,14 +1190,18 @@ export class Bench {
     });
   }
 
-  /** A person's answer. Idempotent: the first answer stands, and a second changes nothing. */
+  /**
+   * A person's answer. The first stands; a SECOND is a conflict, not a second answer — answering
+   * twice returned 200 both times, which reads as though the later answer took (D12).
+   */
   answerProposal(id: string, answer: string): { id: string; answer: string } {
     // The desktop answers by the key it was given; a caller holding the child's own id (an older
     // window, a script) is resolved to the one unanswered card carrying it.
     const key = this.proposals.has(id) ? id : [...this.proposals.entries()].find(([, x]) => x.raw === id && !x.answer)?.[0];
     const p = key ? this.proposals.get(key) : undefined;
     if (!p || !key) throw new Error(`no proposal ${id}`);
-    p.answer ??= answer;
+    if (p.answer !== undefined) throw new AlreadyAnswered(id, p.answer);
+    p.answer = answer;
     // A no means the item the turn was on is not happening: the plan says so, with the reason.
     if (p.answer === "no") this.plan(p.session, { type: "declined" });
     // The answer reaches the model as the question tool's RESULT — `waitProposal` is what the tool

@@ -26,6 +26,14 @@ function segments(pathname: string): string[] {
   return p;
 }
 
+/** A body that is not a JSON object: refused, never read as an empty one (D10). */
+class BadBody extends Error {
+  constructor() {
+    super("the body is not JSON");
+    this.name = "BadBody";
+  }
+}
+
 const SCOPE_RE = /^ws-[0-9a-f]{16}$/;
 
 /** The tool server in this pod's workspace container; same pod, so no NetworkPolicy and no token. */
@@ -57,7 +65,15 @@ export function serve(
       if (size > maxBody) throw new Error(TOO_LARGE);
       s += c;
     }
-    return s ? (JSON.parse(s) as Record<string, unknown>) : {};
+    if (!s) return {};
+    try {
+      const v = JSON.parse(s) as unknown;
+      // A JSON scalar is not a body either: `"x"` would read as an object with no fields.
+      if (typeof v !== "object" || v === null || Array.isArray(v)) throw new Error("not an object");
+      return v as Record<string, unknown>;
+    } catch {
+      throw new BadBody();
+    }
   };
   const send = (res: http.ServerResponse, code: number, v?: unknown) => {
     res.writeHead(code, v === undefined ? {} : { "content-type": "application/json" });
@@ -75,7 +91,8 @@ export function serve(
       if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, model: bench.model, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
-        if (p.length === 1 && m === "POST") return send(res, 201, await bench.create(await body(req).catch(() => ({}))));
+        // A broken body was read as an EMPTY one, so `{not json` created a real session (D10).
+        if (p.length === 1 && m === "POST") return send(res, 201, await bench.create(await body(req)));
         if (p.length === 2 && m === "DELETE") {
           const b = await body(req);
           try {
@@ -124,6 +141,8 @@ export function serve(
       if (m === "GET" && u.pathname === "/exchanges") {
         const s = u.searchParams.get("session"), w = u.searchParams.get("workspace");
         if (!s === !w) return send(res, 400, { error: "exactly one of session= or workspace=" });
+        // `200 []` for a session that does not exist reads as "nothing asked yet" (D11).
+        if (s && !bench.sessions.get(s)) return send(res, 404, { error: `no session ${s}` });
         return send(res, 200, s ? bench.exchanges.bySession(s, n("after")) : bench.exchanges.byWorkspace(w!, n("after")));
       }
       if (p[0] === "workspaces") {
@@ -172,6 +191,7 @@ export function serve(
           try {
             return send(res, 200, bench.answerProposal(p[1], b.answer));
           } catch (e) {
+            if ((e as Error).name === "AlreadyAnswered") return send(res, 409, { error: (e as Error).message, answer: (e as { answer?: string }).answer });
             const msg = (e as Error).message;
             if (msg.startsWith("no proposal ")) return send(res, 409, { error: "that question is no longer waiting for an answer" });
             throw e;

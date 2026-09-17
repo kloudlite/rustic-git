@@ -260,3 +260,52 @@ test("a slash line over rpc never reaches the model", async () => {
     await b.down();
   }
 });
+
+/** D10. A broken body was read as an empty one, so `{not json` created a real session. */
+test("a malformed JSON body is refused, not read as empty", async () => {
+  const b = await startBench();
+  try {
+    const before = ((await get(b, "/sessions")) as unknown[]).length;
+    const r = await fetch(`${b.base}/sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" });
+    assert.equal(r.status, 400);
+    assert.match(String(((await r.json()) as { error?: string }).error), /json/i);
+    assert.equal(((await get(b, "/sessions")) as unknown[]).length, before, "and nothing was created");
+    // An EMPTY body is still a valid create: it means "no triple of my own".
+    assert.equal((await fetch(`${b.base}/sessions`, { method: "POST" })).status, 201);
+  } finally {
+    await b.down();
+  }
+});
+
+/** D11. `/exchanges?session=<unknown>` answered `200 []`, which reads as "nothing yet". */
+test("exchanges for a session that does not exist is a 404", async () => {
+  const b = await startBench();
+  try {
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    assert.equal((await fetch(`${b.base}/exchanges?session=${session}`)).status, 200, "a real session still answers");
+    const r = await fetch(`${b.base}/exchanges?session=s-nope`);
+    assert.equal(r.status, 404);
+  } finally {
+    await b.down();
+  }
+});
+
+/** D12. A card answered twice answered 200 twice; the second is a conflict, not a second answer. */
+test("answering a card twice is a conflict", async () => {
+  const b = await startBench();
+  try {
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    (b.bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-twice", tool: "question", args: {}, summary: "Which?", question: { header: "x", options: [{ label: "a", description: "" }] } })],
+    });
+    const once = await fetch(`${b.base}/proposals/p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "a" }) });
+    assert.equal(once.status, 200);
+    const twice = await fetch(`${b.base}/proposals/p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "b" }) });
+    assert.equal(twice.status, 409, "the first answer stands");
+  } finally {
+    await b.down();
+  }
+});
