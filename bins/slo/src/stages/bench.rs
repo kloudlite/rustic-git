@@ -1,7 +1,7 @@
 //! The owner's bench: create, start, the tunnel (fast, stage 5); sleep and wake plus the session
 //! journey (hourly, Experience); surviving a reschedule (weekly).
 //!
-//! The Bench's name is a hash of (owner, team), so the `run-{id}` teardown prefix never applies:
+//! The bench's name is a hash of (owner, team), so the `run-{id}` teardown prefix never applies:
 //! the probe owner's bench is long-lived and is left Running with no client, so it sleeps between
 //! runs and costs nothing. Its region is bound once by hand.
 //!

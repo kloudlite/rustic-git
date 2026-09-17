@@ -10,9 +10,9 @@
 //! sweep finds the team under its JWT.
 //!
 //! The gateway half cannot use a session token minted before the pause: those live 60 s
-//! (`SSH_SESSION_TTL_SECS`) and the Bench is marked paused only on the api's keys beat (300 s), so
+//! (`SSH_SESSION_TTL_SECS`) and the bench is marked paused only on the api's keys beat (300 s), so
 //! a pre-pause token reads as 401 there — expiry, not the pause. The probe mints the ticket itself
-//! from `kloudlite-jwt` once the Bench reads paused, which is a valid ticket the gateway can refuse
+//! from `kloudlite-jwt` once the bench reads paused, which is a valid ticket the gateway can refuse
 //! only for the reason being measured.
 //!
 //! The unpause runs under `drill::undoing`, so a failed or timed-out body never leaves the probe
@@ -28,8 +28,8 @@ pub(crate) const PAUSED_ID: &str = "team.member.paused";
 /// `bound(240_000)`: the 60 s refusal window, the unpause, a cold bench start and the canary read.
 const PAUSED_BODY: Duration = Duration::from_secs(240);
 pub(super) const PAUSED_CEILING: Duration = Duration::from_secs(PAUSED_BODY.as_secs() + UNDO_SLACK);
-/// Pause reconciles the member's Bench at once (`on_member_state`); the rest is the api's
-/// `membership.forget` and the gate's cache — seconds, with room for a slow Bench patch.
+/// Pause reconciles the member's bench at once (`on_member_state`); the rest is the api's
+/// `membership.forget` and the gate's cache — seconds, with room for a slow bench patch.
 const PAUSE_WINDOW: Duration = Duration::from_secs(60);
 const READY_WAIT: Duration = Duration::from_secs(120);
 const EXEC: Duration = Duration::from_secs(20);
@@ -73,18 +73,21 @@ async fn ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
 /// reached it yet — and the exec met a pod that no longer existed. Every clause is a fact the
 /// restart itself establishes: the spec carries the unpause and the start, and the status names a
 /// pod, which the stop cleared and only a new pod restores.
-fn back_up(b: Option<&crd::Bench>) -> bool {
+fn back_up(b: Option<&crd::Workspace>) -> bool {
     let Some(b) = b else { return false };
-    b.spec.access == crd::BenchAccess::Full
+    crd::is_bench(b)
+        && b.spec.access == crd::Access::Full
         && b.spec.desired_state == crd::DesiredState::Running
         && b.status.as_ref().is_some_and(|s| s.phase == crd::Phase::Ready && s.pod_ref.is_some())
 }
 
-/// The Bench itself, through the same client the exec uses, so the check and the exec cannot be
-/// looking at two different objects.
+/// The bench object itself, through the same client the exec uses, so the check and the exec cannot
+/// be looking at two different objects. A bench IS a Workspace (`crd::is_bench`) — the retired
+/// `Bench` kind is gone from the cluster, and reading it answered `benches.kloudlite.io
+/// "bench-…" not found` on every run (hourly, 2026-09-17).
 async fn back_up_within(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    crate::kube::wait_for::<crd::Bench>(k, &crd::bench_id(&c.probe_user, team), cap, back_up).await
+    crate::kube::wait_for::<crd::Workspace>(k, &crd::bench_id(&c.probe_user, team), cap, back_up).await
 }
 
 /// The paused member's bench, charged to the probe tenant — the one with a Quota.
@@ -158,16 +161,19 @@ async fn refused_everywhere(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     }
     let k = c.kube.clone().ok_or_else(|| anyhow!("no kubeconfig"))?;
     let id = crd::bench_id(&c.probe_user, team);
-    let b = kube::Api::<crd::Bench>::all(k).get(&id).await.context("could not read the member's Bench")?;
-    if b.spec.access != crd::BenchAccess::Paused || b.spec.desired_state != crd::DesiredState::Stopped {
-        return Err(anyhow!("the Bench is {:?}/{:?}, not paused and stopped", b.spec.access, b.spec.desired_state));
+    let b = kube::Api::<crd::Workspace>::all(k).get(&id).await.context("could not read the member's bench")?;
+    if !crd::is_bench(&b) {
+        return Err(anyhow!("{id} is not a bench workspace"));
+    }
+    if b.spec.access != crd::Access::Paused || b.spec.desired_state != crd::DesiredState::Stopped {
+        return Err(anyhow!("the bench is {:?}/{:?}, not paused and stopped", b.spec.access, b.spec.desired_state));
     }
     // And the STATUS has caught up with the pause: the agent has torn the pod down and cleared
     // `podRef`. Without this the pre-pause `ready` is still readable when the unpause runs, and
     // the readiness check below cannot tell it from the one the restart earns.
     let st = b.status.as_ref();
     if st.is_none_or(|s| s.phase == crd::Phase::Ready || s.pod_ref.is_some()) {
-        return Err(anyhow!("the Bench still reads {:?}, with a pod", st.map(|s| s.phase)));
+        return Err(anyhow!("the bench still reads {:?}, with a pod", st.map(|s| s.phase)));
     }
     let ticket = c.mint_bench_session(&c.probe_user, &id)?;
     // A real handshake, not reqwest with upgrade headers: the edge in front of the gateway
@@ -297,26 +303,35 @@ mod tests {
     #[test]
     fn a_stale_ready_is_not_back_up() {
         let bench = |access, desired, phase, pod: Option<&str>| {
-            let mut b = crd::Bench::new(
+            let mut b = crd::Workspace::new(
                 "b",
-                crd::BenchSpec {
+                crd::WorkspaceSpec {
                     owner: "p".into(),
                     team: "t".into(),
+                    name: "bench".into(),
+                    region: "r1".into(),
                     image: "i".into(),
-                    model: "m".into(),
+                    storage: None,
                     desired_state: desired,
-                    access,
-                    wake_at: None,
                     resources: Default::default(),
+                    packages: vec![],
+                    locks: vec![],
                     attached_environment: None,
+                    // What MAKES it a bench, and the first thing `back_up` checks.
+                    bench: Some(crd::BenchOptions { model: "m".into(), wake_at: None }),
+                    access,
                 },
             );
-            b.status = Some(crd::BenchStatus { phase, pod_ref: pod.map(Into::into), ..Default::default() });
+            b.status = Some(crd::WorkspaceStatus { phase, pod_ref: pod.map(Into::into), ..Default::default() });
             b
         };
         use crd::{Access::*, DesiredState::*, Phase};
         let up = bench(Full, Running, Phase::Ready, Some("ns/bench"));
         assert!(back_up(Some(&up)));
+        // An ordinary workspace of the same shape is not this team's bench.
+        let mut plain = up.clone();
+        plain.spec.bench = None;
+        assert!(!back_up(Some(&plain)));
         // Ready, but the stop cleared the pod: the very read that passed on 16 Sep.
         assert!(!back_up(Some(&bench(Full, Running, Phase::Ready, None))));
         assert!(!back_up(Some(&bench(Paused, Running, Phase::Ready, Some("ns/bench")))));

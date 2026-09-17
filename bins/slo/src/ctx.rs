@@ -292,7 +292,7 @@ impl Ctx {
 
     /// A gateway ticket for `bench` in this region, as `/v1/bench/session` would mint it. For
     /// `team.member.paused` alone: the api refuses a paused member one, and the one taken before
-    /// the pause is expired (60 s) by the time the beat marks the Bench.
+    /// the pause is expired (60 s) by the time the beat marks the bench.
     pub fn mint_bench_session(&self, owner: &str, bench: &str) -> anyhow::Result<String> {
         Ok(self.jwt.mint_bench_session(owner, bench, &self.cfg.region).map_err(|e| anyhow::anyhow!("mint bench session: {e}"))?.0)
     }

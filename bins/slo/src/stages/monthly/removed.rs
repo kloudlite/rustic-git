@@ -9,8 +9,8 @@
 //! every object still exists carrying a due, api-written `kloudlite.io/delete-after`.
 //!
 //! The bench folder `{pool}/homes/.benches/{team}/{owner}` is not visible from the probe: no pod
-//! the probe can exec into mounts the share's root. The Bench object is gone only once the agent
-//! has removed that folder and dropped `kloudlite.io/bench-folder`, so a vanished Bench is the
+//! the probe can exec into mounts the share's root. The bench object is gone only once the agent
+//! has removed that folder and dropped `kloudlite.io/bench-folder`, so a vanished bench is the
 //! finalizer cleared, and the folder's absence is inferred from it.
 
 use std::time::Instant;
@@ -94,21 +94,23 @@ async fn join(c: &Ctx, team: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove, wait for the stamp on the Bench, then ask for deletion now. `Ok(false)`: deletes are off.
+/// Remove, wait for the stamp on the member's bench, then ask for deletion now. `Ok(false)`:
+/// deletes are off. The bench is a Workspace (`crd::is_bench`); the retired `Bench` kind is gone
+/// from the cluster and reading it 404'd on every run (hourly, 2026-09-17).
 async fn remove(c: &Ctx, team: &str) -> Result<bool> {
     call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{team}/members/{}", c.other_email)), &c.probe_jwt, None)
         .await
         .context("could not remove the member")?;
-    let benches = kube::Api::<crd::Bench>::all(kube(c)?);
+    let benches = kube::Api::<crd::Workspace>::all(kube(c)?);
     let id = crd::bench_id(&c.other_user, team);
     let start = Instant::now();
     loop {
-        let b = benches.get(&id).await.context("could not read the member's Bench")?;
+        let b = benches.get(&id).await.context("could not read the member's bench")?;
         if b.metadata.annotations.as_ref().is_some_and(|a| a.contains_key(REMOVED_AT)) {
             break;
         }
         if start.elapsed() >= TWO_BEATS {
-            return Err(anyhow!("the Bench carried no {REMOVED_AT} within {} s", TWO_BEATS.as_secs()));
+            return Err(anyhow!("the bench carried no {REMOVED_AT} within {} s", TWO_BEATS.as_secs()));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -122,8 +124,8 @@ async fn remove(c: &Ctx, team: &str) -> Result<bool> {
 async fn cleaned(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
     let k = kube(c)?;
     let owner = &c.other_user;
-    if kube::Api::<crd::Bench>::all(k.clone()).get_opt(&crd::bench_id(owner, team)).await?.is_some() {
-        return Err(anyhow!("the Bench is still there (its bench-folder finalizer has not cleared)"));
+    if kube::Api::<crd::Workspace>::all(k.clone()).get_opt(&crd::bench_id(owner, team)).await?.is_some() {
+        return Err(anyhow!("the bench is still there (its bench-folder finalizer has not cleared)"));
     }
     if kube::Api::<crd::Workspace>::all(k.clone()).get_opt(&p.ws).await?.is_some() {
         return Err(anyhow!("the team Workspace {} is still there", p.ws));
@@ -168,8 +170,8 @@ async fn marked_due(c: &Ctx, team: &str, p: &Prep) -> Result<()> {
         }
         Ok(())
     };
-    let b = kube::Api::<crd::Bench>::all(k.clone()).get_opt(&crd::bench_id(&c.other_user, team)).await?.ok_or_else(|| anyhow!("the Bench was deleted with deletes off"))?;
-    due(&b.metadata, "the Bench")?;
+    let b = kube::Api::<crd::Workspace>::all(k.clone()).get_opt(&crd::bench_id(&c.other_user, team)).await?.ok_or_else(|| anyhow!("the bench was deleted with deletes off"))?;
+    due(&b.metadata, "the bench")?;
     let w = kube::Api::<crd::Workspace>::all(k).get_opt(&p.ws).await?.ok_or_else(|| anyhow!("the team Workspace was deleted with deletes off"))?;
     due(&w.metadata, "the team Workspace")
 }
