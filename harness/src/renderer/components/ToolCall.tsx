@@ -31,7 +31,13 @@ export function ToolCall(props: { a: Action }) {
   // see; a patch that only deletes is not (`part-default-open.ts:19`).
   createEffect(() => defaultOpen(props.a.tool, true, true, deletionOnly()) && setOpen(true));
   const html = () => /^\s*<!doctype html|^\s*<html/i.test(a().output ?? "");
-  const failed = () => a().ok === false || html();
+  /**
+   * A refusal is not a failure: the TUI strikes the line through and keeps the row quiet
+   * (`routes/session/index.tsx:1866` — `QuestionRejectedError`, "rejected permission",
+   * "specified a rule", "user dismissed").
+   */
+  const denied = () => /QuestionRejectedError|rejected permission|specified a rule|user dismissed|refused/i.test(a().output ?? "");
+  const failed = () => (a().ok === false || html()) && !denied();
   // While it runs: a spinner in the dot's place and a clock counting up, so
   // a slow command is visibly alive rather than merely unfinished.
   const [tick, setTick] = createSignal(Date.now());
@@ -49,17 +55,33 @@ export function ToolCall(props: { a: Action }) {
   // BLOCKS — their result is the thing you came to see, so it is not behind a click.
   const railed = () => a().tool === "edit" || a().tool === "bash" || a().tool === "write";
   return (
-    <div class="flex flex-col font-mono" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
-      {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
-      <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
-        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-success"}`}>
+    /* The TUI's own geometry: a row is indented three cells, a block row is a rail with one cell of
+       padding inside it, and a block is always separated from what came before
+       (`routes/session/index.tsx:1914` `InlineToolRow`, `:1994` `BlockTool`). */
+    <div class="flex flex-col font-mono" classList={{ "my-1 border-l border-line bg-raised py-1 pl-2": railed(), "pl-3": !railed() }}>
+      {/* One muted line: an icon two cells wide, then what ran. The card is what a click opens. */}
+      <button class="group flex w-full items-baseline text-left" onClick={() => setOpen((v) => !v)}>
+        <span
+          class="w-[2ch] shrink-0"
+          classList={{ "text-danger": failed(), "text-accent": a().pending, "text-muted": !failed() && !a().pending }}
+        >
+          {/* While it runs the TUI shows the braille spinner in the icon's place (`Spinner`, 80 ms);
+              a finished row is a dot, and a refused one keeps the dot and strikes the line. */}
           <Show when={a().pending} fallback="⏺"><Spinner /></Show>
         </span>
-        <span class="min-w-0 flex-1 truncate text-muted">
-          {/* A title that is still moving says "not finished" (`text-shimmer.css`, 1200 ms). */}
-          <Show when={line().verb}><span class="text-fg" classList={{ shimmer: a().pending }}>{line().verb} </span></Show>
-          {line().arg}
-          <Show when={line().count}>{(c) => <span class="text-subtle"> ({c()})</span>}</Show>
+        <span
+          class="min-w-0 flex-1 truncate"
+          /* Complete rows are muted, a live one is plain text, a failure is red: `fg()`, `:1875`. */
+          classList={{ "text-danger": failed(), "text-fg": a().pending, "text-muted": !failed() && !a().pending, "line-through": denied() }}
+        >
+          <Show when={a().pending} fallback={<>
+            <Show when={line().verb}><span classList={{ "text-fg": !failed() }}>{line().verb} </span></Show>
+            {line().arg}
+            <Show when={line().count}>{(c) => <span class="text-subtle"> ({c()})</span>}</Show>
+          </>}>
+            {/* `~ {pending}` is how the TUI says "not yet" (`:1955`). */}
+            ~ {[line().verb, line().arg].filter(Boolean).join(" ")}
+          </Show>
         </span>
         <span class="shrink-0 tabular-nums text-subtle">{took()}</span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />

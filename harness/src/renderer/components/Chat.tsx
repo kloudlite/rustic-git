@@ -18,7 +18,8 @@ import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
 import { modeLine, modeParts, modelOfThread } from "../rows";
 import { KEYS } from "../keys";
-import { Spinner, Ticker, WorkingDots } from "./Motion";
+import { Scanner, Ticker } from "./Motion";
+import { BoxCursor } from "./BoxCursor";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
 
@@ -124,6 +125,8 @@ export function Chat(props: {
   };
   const parts = () => modeParts(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
   const [pick, setPick] = createSignal(0);
+  /** The composer element itself, so the block cursor can follow its caret. */
+  const [composerEl, setComposerEl] = createSignal<HTMLTextAreaElement>();
   /** Whether escape has shut the command list; typing opens it again. */
   const [closed, setClosed] = createSignal(false);
   const matches = createMemo(() => {
@@ -462,7 +465,10 @@ export function Chat(props: {
                     }
                   >
                     <div class="flex flex-col font-mono">
-                      <div class="-mx-3 flex items-start border-l-2 border-request-line bg-request px-3 py-2">
+                      {/* The TUI's user block: a left rail in the agent's colour, one cell of
+                          padding top and bottom, two on the left, on the panel background
+                          (`routes/session/index.tsx:1397-1416`). */}
+                      <div class="-mx-3 flex items-start border-l border-request-line bg-raised px-2 py-1 transition-colors hover:bg-hover">
                         <span class="w-4 shrink-0 font-bold text-accent">&gt;</span>
                         <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
                           {/* An answer a workspace sent back arrives as a prompt; the workspace is a label, not the message. */}
@@ -592,11 +598,15 @@ export function Chat(props: {
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
+              {/* The caret is the TUI's block, drawn over the input (see BoxCursor.tsx). */}
+              <div class="relative min-w-0 flex-1">
+              <BoxCursor input={composerEl()} text={typed()} disabled={thread()?.kind === "machine" && !thread()?.pi} />
               <textarea
+                ref={setComposerEl}
                 data-composer
                 disabled={thread()?.kind === "machine" && !thread()?.pi}
                 rows="1"
-                class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 outline-none placeholder:text-subtle"
+                class="relative max-h-60 min-h-5 w-full resize-none border-0 bg-transparent p-0 caret-transparent outline-none placeholder:text-subtle"
                 placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
                 onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), setClosed(false), (hist = -1))}
                 onKeyDown={(e) => {
@@ -663,6 +673,7 @@ export function Chat(props: {
                   });
                 }}
               />
+              </div>
             </div>
             {/* What is attached, as thumbnails the way an editor shows a pasted
                 image: small, removable, sent with the next message. */}
@@ -720,8 +731,9 @@ export function Chat(props: {
                   </span>
                 )}
               </Show>
-              <Spinner class="text-accent" />
-              <WorkingDots class="shrink-0" />
+              {/* ONE indicator, the TUI's: a block scanner at 40 ms. A spinner AND a dot grid was
+                  two things saying "running" (owner, 2026-09-17). */}
+              <Scanner class="shrink-0 tracking-tight text-accent" />
               <span class="text-muted">{verbAt(elapsed())}…</span>
               <Ticker class="tabular-nums" value={`(${spinnerMeta(elapsed(), L().turn()?.tokens)})`} />
               {/* `esc interrupt`, then `esc again to interrupt` once it has been pressed once. */}

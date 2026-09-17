@@ -109,3 +109,32 @@ test("the command list is a full-width list above the composer, not a floating p
   // The selected row is a solid accent bar with dark text, spanning the full width.
   assert.match(src, /"bg-accent text-bg": i\(\) === pick\(\)/);
 });
+
+/**
+ * The pane is the TUI's, not their web app's: mono everywhere, one cell, and the rows drawn with
+ * the TUI's own geometry (`packages/tui/src/routes/session/index.tsx:1914`, `:1994`).
+ */
+test("tool rows use the TUI's geometry and colours", () => {
+  const src = fs.readFileSync(path.resolve("src/renderer/components/ToolCall.tsx"), "utf8");
+  assert.match(src, /w-\[2ch\]/, "the icon column is two cells (INLINE_TOOL_ICON_WIDTH)");
+  assert.match(src, /"pl-3": !railed\(\)/, "an inline row is indented three cells");
+  assert.match(src, /~ \{\[line\(\)\.verb/, "a pending row reads `~ …`");
+  assert.match(src, /"line-through": denied\(\)/, "a refusal is struck through, not reddened");
+});
+
+test("the composer's caret is the TUI's block, steady, in the text colour", () => {
+  const src = fs.readFileSync(path.resolve("src/renderer/components/BoxCursor.tsx"), "utf8");
+  const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
+  assert.match(src, /bg-fg text-bg/, "live: the text token in reverse video");
+  assert.match(src, /bg-line text-bg/, "disabled: the panel tone");
+  assert.ok(!/animate|blink|keyframes/i.test(code), "steady — nothing in the TUI blinks it");
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.match(chat, /caret-transparent/);
+});
+
+test("the status line shows exactly one working indicator", () => {
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.equal((chat.match(/<Scanner/g) ?? []).length, 1);
+  assert.equal((chat.match(/<WorkingDots/g) ?? []).length, 0, "the dot grid was the web app's; the TUI has one scanner");
+  assert.equal((chat.match(/<Spinner/g) ?? []).length, 0, "a spinner beside the scanner is the same fact twice");
+});

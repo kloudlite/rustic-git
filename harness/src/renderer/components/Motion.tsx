@@ -1,5 +1,5 @@
 import { For, createEffect, createSignal, on, onCleanup } from "solid-js";
-import { DOT_GAP, DOT_GRID, DOT_SIZE, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, TICK_MS } from "../motion";
+import { DOT_GAP, DOT_GRID, DOT_SIZE, SCAN_MS, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, TICK_MS, scanFrame } from "../motion";
 
 /**
  * The animations opencode runs, at opencode's own constants. They live together because they are
@@ -20,6 +20,25 @@ export function Spinner(props: { class?: string }) {
     onCleanup(() => clearInterval(t));
   }
   return <span class={props.class} aria-hidden="true">{still ? SPINNER_STILL : SPINNER_FRAMES[i()]}</span>;
+}
+
+/**
+ * The status line's own spinner: the TUI's block scanner, 40 ms a frame
+ * (`prompt/index.tsx:1525`). With animations off the TUI shows `[⋯]` (`:1524`), so that is the
+ * reduced-motion face here too.
+ */
+export function Scanner(props: { class?: string }) {
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const [frame, setFrame] = createSignal(0);
+  if (!still) {
+    const t = setInterval(() => setFrame((n) => n + 1), SCAN_MS);
+    onCleanup(() => clearInterval(t));
+  }
+  return (
+    <span class={props.class} aria-hidden="true">
+      {still ? "[⋯]" : <For each={scanFrame(frame())}>{(c) => <span style={{ opacity: String(c.alpha) }}>{c.glyph}</span>}</For>}
+    </span>
+  );
 }
 
 /**

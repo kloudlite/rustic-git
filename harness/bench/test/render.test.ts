@@ -6,7 +6,7 @@ import { diagnostics, toolError, toolLine } from "../../src/renderer/components/
 import { usage } from "../../src/renderer/live.ts";
 import { KEYS, LEADER, keyHint, leaderIndex, underLeader } from "../../src/renderer/keys.ts";
 import { playDemo, wantsDemo } from "../../src/renderer/demo.ts";
-import { SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL } from "../../src/renderer/motion.ts";
+import { SCAN_MS, SCAN_TRAIL, SCAN_WIDTH, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, scanFrame, scanHead } from "../../src/renderer/motion.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -179,4 +179,23 @@ test("the spinner is opencode's own braille, at its own tick", () => {
   assert.deepEqual(SPINNER_FRAMES, ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
   assert.equal(SPINNER_MS, 80);
   assert.equal(SPINNER_STILL, "⋯", "with animations off opencode shows a still mark, not a frozen frame");
+});
+
+test("the status spinner is the TUI's block scanner, at its own 40 ms", () => {
+  assert.equal(SCAN_MS, 40, "`interval={40}` (prompt/index.tsx:1525)");
+  assert.equal(SCAN_WIDTH, 8, "the scanner's own width");
+  // Blocks, not diamonds and not braille (`ui/spinner.ts:322-324`).
+  const first = scanFrame(0);
+  assert.equal(first.length, 8);
+  assert.equal(first[0].glyph, "■", "the head is a full block");
+  assert.ok(first.slice(SCAN_TRAIL).every((c) => c.glyph === "⬝"), "everything past the trail is the inactive dot");
+  // It runs out, holds, and comes back: the head is at the far end while it holds.
+  assert.equal(scanHead(0), 0);
+  assert.equal(scanHead(7), 7);
+  assert.equal(scanHead(8), 7, "holding at the end");
+  assert.equal(scanHead(8 + 9 + 6), 0, "and back at the start");
+  assert.equal(scanHead(8 + 9 + 7), undefined, "then it holds, dark, before going again");
+  // The trail fades rather than stopping dead.
+  const mid = scanFrame(4);
+  assert.ok(mid[4].alpha > mid[3].alpha && mid[3].alpha > mid[2].alpha);
 });

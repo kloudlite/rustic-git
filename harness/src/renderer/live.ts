@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createSignal, untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { Message } from "./model";
 
@@ -357,6 +357,21 @@ function makeThread(id: string) {
           return;
         }
         setRetry(undefined);
+        // How long the turn actually took, stamped on the answer it produced: the footer said
+        // "0s" because nothing ever wrote one (owner, 2026-09-17).
+        {
+          const since = untrack(turn)?.since;
+          if (since !== undefined) {
+            for (let k = messages.length - 1; k >= 0; k--) {
+              const m = messages[k];
+              if (m.role === "user") break;
+              if (m.role === "assistant" && (m as { kind?: string }).kind !== "reasoning" && (m as { ms?: number }).ms === undefined) {
+                setMessages(k, { ms: Date.now() - since } as never);
+                break;
+              }
+            }
+          }
+        }
         setBusy(false);
         setTurn(undefined);
         open = -1;
