@@ -72,6 +72,13 @@ A pick in an existing session writes both the session's fields **and** the gener
 dispatch that names a model writes only that session's fields. This is the whole rule for
 "general default unless asked for".
 
+### 1.2b Effort is stored, not yet applied (owner, 22:40 IST)
+
+pi 0.85.1 has no effort parameter: `set_model` takes provider and model id only, and effort is
+folded into its per-model thinking levels. The effort value is therefore **persisted** (session
+field, default triple, footer) and **not applied** to pi. How it takes effect is a later decision;
+nothing else changes here.
+
 ### 1.3 Surface
 
 - **Status line** (composer footer, opencode row grammar): `deepseek/deepseek-reasoner · thinking
