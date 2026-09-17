@@ -26,7 +26,6 @@
 !deploy/workspace-image/docker-credential-kl
 !deploy/workspace-image/kl-build.sh
 !deploy/workspace-image/gitignore-global
-!deploy/workspace-image/tmux.conf
 # Directory whitelists, not named files: a name whitelist here is what broke the workspace-caches
 # merge (a new file landed and nobody added its name). deploy/bench/ holds the bench Dockerfile; the
 # bench image installs the harness from its lockfile and runs bench/ and pi/ from source, so those
@@ -37,3 +36,4 @@
 !harness/bench/
 !harness/pi/
 harness/bench/test/
+!harness/pi/caveman.md
