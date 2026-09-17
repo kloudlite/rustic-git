@@ -44,6 +44,14 @@ export class Procs {
     this.rows = [...this.rows.filter((r) => r.session !== session), ...rows.map((r) => ({ ...r, session }))];
     replaceJson(this.file, this.rows);
   }
+  /** One row ended, because the harness itself stopped it; unknown ids are nothing to record. */
+  transitionEnded(session: string, id: string): ProcRow | undefined {
+    const r = this.rows.find((x) => x.session === session && x.id === id && x.ended === undefined);
+    if (!r) return undefined;
+    r.ended = Date.now();
+    replaceJson(this.file, this.rows);
+    return { ...r };
+  }
   all(): ProcRow[] {
     return this.rows.map((r) => ({ ...r }));
   }

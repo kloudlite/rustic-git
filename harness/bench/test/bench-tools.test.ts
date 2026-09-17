@@ -251,3 +251,33 @@ test("a person's own turn in the workspace tab answers nobody, and an ask is ans
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("/proc-stop kills on the session's own tool server and ends the row", async () => {
+  const killed: unknown[] = [];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      killed.push({ url: req.url, body: JSON.parse(b || "{}") });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ state: "exited" }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-proc-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, resolveTools: async () => at });
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    bench.procs.snapshot(ws.id, [{ id: "p1", name: "vite", command: "npm run dev", started: 1 }]);
+    // What the desktop sends: the harness answers it itself now, and no model ever sees it.
+    await bench.rpc(ws.id, { type: "prompt", message: "/proc-stop p1" });
+    assert.deepEqual(killed, [{ url: "/tools/process_kill", body: { id: "p1" } }]);
+    assert.notEqual(bench.procs.all().find((p) => p.id === "p1")!.ended, undefined);
+  } finally {
+    await bench.stop();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { call, tellItWhereItStands } from "./kloudlite.ts";
 
@@ -35,7 +36,35 @@ export function traceHeaders(env: NodeJS.ProcessEnv = process.env, ageS = proces
   return { traceparent: env.KL_TRACEPARENT, ...(env.KL_PROBE === "1" ? { "x-kloudlite-probe": "1" } : {}) };
 }
 
-export type IdeCall = { tool: string; args: Record<string, unknown> };
+export type IdeCall = { tool: string; args: Record<string, any> };
+/** Tool-server calls whose effect the `/procs` table has to be re-read after. */
+const PROCESS_TOOLS = new Set(["process_kill", "process_write", "process_list"]);
+
+/** A row of the bench's `/procs` table, as `harness:procs` carries it (ledger.ts's `ProcRow`). */
+type ProcLine = { id: string; name: string; command: string; started: number; ended?: number; code?: number | null };
+
+/**
+ * `harness:procs` is the one fire-and-forget channel an extension has to the harness, and the
+ * bench folds it straight into the table the desktop's Processes panel draws. The tool server is
+ * the truth: this publishes its whole list, so a process that exited between calls settles too.
+ */
+async function publishProcs(server: ToolServer, ctx: { ui?: { setWidget?: (k: string, lines: string[]) => void } } | undefined, signal?: AbortSignal) {
+  if (!ctx?.ui?.setWidget) return;
+  try {
+    const r = await server.call({ tool: "process_list", args: {} }, signal);
+    const rows: ProcLine[] = ((r.body?.processes ?? []) as { id: string; cmd: string; started_at?: string; state?: string; exit_code?: number | null }[]).map((x) => ({
+      id: x.id,
+      // The command IS the name here: the tool server names nothing, and a dev server is known by its argv.
+      name: String(x.cmd).slice(0, 40),
+      command: String(x.cmd),
+      started: Date.parse(x.started_at ?? "") || Date.now(),
+      ...(x.state === "exited" ? { ended: Date.now(), code: x.exit_code ?? null } : {}),
+    }));
+    ctx.ui.setWidget("harness:procs", [JSON.stringify(rows)]);
+  } catch {
+    /* the table is a view; a failed refresh is not a failed tool call */
+  }
+}
 type Result = { content: { type: "text"; text: string }[]; isError: boolean };
 const text = (t: string, isError = false): Result => ({ content: [{ type: "text", text: t || "(no output)" }], isError });
 
@@ -48,7 +77,26 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
     case "edit":
       return { tool: "edit", args: { path: p.path, edits: (p.edits ?? []).map((e: { oldText: string; newText: string }) => ({ old: e.oldText, new: e.newText })) } };
     case "bash":
-      return { tool: "exec", args: { cmd: p.command, timeout_ms: Math.min(MAX_EXEC_MS, (p.timeout ?? 120) * 1000) } };
+      // A background command is a PROCESS on the tool server: it outlives the turn and the answer
+      // is its id, not its output. Same tool, because "run this in the background" is the same wish.
+      return p.background
+        ? { tool: "exec", args: { cmd: p.command, detach: true } }
+        : { tool: "exec", args: { cmd: p.command, timeout_ms: Math.min(MAX_EXEC_MS, (p.timeout ?? 120) * 1000) } };
+    case "process":
+      switch (p.action) {
+        case "start":
+          return { tool: "exec", args: { cmd: p.command, detach: true } };
+        case "list":
+          return { tool: "process_list", args: {} };
+        case "logs":
+          return { tool: "process_output", args: { id: p.id, since: p.since ?? 0 } };
+        case "stop":
+          return { tool: "process_kill", args: { id: p.id, signal: p.signal } };
+        case "write":
+          return { tool: "process_write", args: { id: p.id, data: p.data } };
+        default:
+          throw new Error(`no process action ${p.action}`);
+      }
     case "grep":
       return { tool: "grep", args: { pattern: p.literal ? escapeRe(p.pattern) : p.pattern, cwd: p.path, glob: p.glob, ignore_case: p.ignoreCase, context: p.context, max: p.limit } };
     case "find":
@@ -70,8 +118,19 @@ export function fromIde(name: string, status: number, body: any, limit?: number)
       return text(`wrote ${body.bytes} bytes to ${body.path}`);
     case "edit":
       return text(`applied ${body.applied} edit(s) to ${body.path}`);
+    case "process":
     case "bash":
     case "ls": {
+      // Every detached shape answers by its own fields, so one branch reads them all.
+      if (body.id && body.exit_code === undefined) return text(`started in the background as process ${body.id}; read it with process logs`);
+      if (Array.isArray(body.processes))
+        return text(body.processes.map((x: { id: string; state: string; exit_code?: number | null; cmd: string }) => `${x.id} ${x.state}${x.exit_code === null || x.exit_code === undefined ? "" : ` (exit ${x.exit_code})`} ${x.cmd}`).join("\n") || "nothing running");
+      if (body.next !== undefined) {
+        const out = [body.stdout, body.stderr].filter(Boolean).join("\n").trim();
+        return text(`${out}\n[${body.state}${body.exit_code === null || body.exit_code === undefined ? "" : ` exit ${body.exit_code}`}; next ${body.next}${body.dropped ? `, ${body.dropped} bytes dropped` : ""}]`.trim());
+      }
+      if (body.bytes !== undefined && body.path === undefined) return text(`wrote ${body.bytes} bytes to its stdin`);
+      if (body.state !== undefined && body.exit_code === undefined && body.stdout === undefined) return text(`the process is ${body.state}`);
       const out = [body.stdout, body.stderr].filter(Boolean).join("\n").trim();
       if (body.timed_out) return text(`${out}\n[timed out]`.trim(), true);
       return body.exit_code === 0 ? text(out) : text(`${out}\n[exit ${body.exit_code}]`.trim(), true);
@@ -162,10 +221,14 @@ Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be w
       label,
       description: `${description} Runs in workspace ${ws}.`,
       parameters,
-      async execute(_toolCallId, params, signal) {
+      async execute(_toolCallId, params, signal, _update, ctx) {
         const p = params as Record<string, any>;
         try {
-          const r = await server.call(toIde(name, p), signal);
+          const c = toIde(name, p);
+          const r = await server.call(c, signal);
+          // The harness's own table of what is running: mirrored from the tool server after every
+          // call that could have changed it, because nothing else tells the bench a process exists.
+          if (PROCESS_TOOLS.has(c.tool) || c.args.detach) await publishProcs(server, ctx, signal);
           return fromIde(name, r.status, r.body, p.limit);
         } catch (e) {
           return text((e as Error).message, true);
@@ -175,7 +238,25 @@ Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be w
   reg("read", "Read", "Read a text file with line numbers. offset (1-based line) and limit page it.", Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }));
   reg("write", "Write", "Create or overwrite a file; parent directories are created.", Type.Object({ path: Type.String(), content: Type.String() }));
   reg("edit", "Edit", "Exact replacements in one file, all or nothing. Each oldText must occur exactly once.", Type.Object({ path: Type.String(), edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })) }));
-  reg("bash", "Bash", "Run a shell command in the workspace dir and return its output.", Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number({ description: "Seconds, at most 600" })) }));
+  reg(
+    "bash",
+    "Bash",
+    "Run a shell command in the workspace dir and return its output. background: true starts it and answers a process id instead, for a dev server or a watcher.",
+    Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number({ description: "Seconds, at most 600" })), background: Type.Optional(Type.Boolean()) }),
+  );
+  reg(
+    "process",
+    "Process",
+    "Long-running commands: start one (command), list them, read its logs since an offset, write to its stdin, or stop it. They outlive a turn and keep running in the workspace.",
+    Type.Object({
+      action: StringEnum(["start", "list", "logs", "stop", "write"]),
+      command: Type.Optional(Type.String({ description: "action=start" })),
+      id: Type.Optional(Type.String({ description: "the process, for logs/stop/write" })),
+      since: Type.Optional(Type.Number({ description: "action=logs: the byte offset to read from (0 = the start)" })),
+      data: Type.Optional(Type.String({ description: "action=write" })),
+      signal: Type.Optional(StringEnum(["TERM", "KILL"])),
+    }),
+  );
   reg("grep", "Grep", "Regex search, gitignore-aware. path is a directory.", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), glob: Type.Optional(Type.String()), ignoreCase: Type.Optional(Type.Boolean()), literal: Type.Optional(Type.Boolean()), context: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }));
   reg("find", "Find", "Files matching a glob, gitignore-aware, newest first.", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }));
   reg("ls", "List", "List a directory; directories end in /.", Type.Object({ path: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }));

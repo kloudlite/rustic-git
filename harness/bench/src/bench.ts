@@ -11,7 +11,15 @@ import { readJson, replaceJson } from "./log.ts";
 export type BenchEvent = { type: string; [k: string]: unknown };
 /** One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in. */
 type Ask = { exchange: string; from: string; workspace: string };
-export type BenchOpts = { dir: string; readOnly: boolean; model: string; bin?: string; extDir?: string };
+export type BenchOpts = {
+  dir: string;
+  readOnly: boolean;
+  model: string;
+  bin?: string;
+  extDir?: string;
+  /** A workspace's tool server address. Tests pass a fake; the real one asks /v1, loaded lazily so the bench's own routes never pull the extension in. */
+  resolveTools?: (ws: string) => Promise<string>;
+};
 
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
 const argOf = (name: string, args: Record<string, unknown>) =>
@@ -273,6 +281,22 @@ export class Bench {
     await this.send(a.from, `[from workspace ${a.workspace}] ${answer}`).catch(() => undefined);
   }
 
+  /**
+   * Stop a background process. It runs on a tool server — the session's own workspace, or, for a
+   * bench session, the bench pod's own workspace container over loopback — so this is the harness
+   * reaching the same place the tool did, never a command typed at the model.
+   */
+  async killProc(session: string, id: string): Promise<void> {
+    const s = this.sessions.get(session);
+    if (!s) throw new Error(`no session ${session}`);
+    const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
+    const at = s.target ? await resolve(s.target) : BENCH_TOOLS;
+    const r = await fetch(`http://${at}/tools/process_kill`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+    if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
+    const row = this.write(() => this.procs.transitionEnded(session, id));
+    if (row) this.emit({ type: "procs", rows: this.procs.all() });
+  }
+
   /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
   private send(id: string, message: string): Promise<PiEvent> {
     return this.rpc(id, { type: this.turning.has(id) ? "follow_up" : "prompt", message });
@@ -342,6 +366,13 @@ export class Bench {
     this.refuse(cmd.type === "prompt" || cmd.type === "steer" || cmd.type === "follow_up");
     if (s.archived) throw new Error(`session ${id} is archived; restore it to send`);
     const msg = typeof cmd.message === "string" ? cmd.message.trim() : "";
+    // `/proc-stop <id>` was an extension command when background commands ran in the bench pod;
+    // they run on a tool server now, so the harness answers it itself and no model sees it.
+    const stop = /^\/proc-stop (\S+)$/.exec(msg);
+    if (cmd.type === "prompt" && stop) {
+      await this.killProc(id, stop[1]);
+      return { type: "response", command: "prompt", success: true } as PiEvent;
+    }
     if (cmd.type === "prompt" && msg && !msg.startsWith("/") && s.name === `session ${s.seq}`) {
       this.write(() => this.sessions.update(id, { name: msg.replace(/\s+/g, " ").slice(0, 40), lastActive: Date.now() }));
       this.emit({ type: "sessions" });
@@ -430,7 +461,7 @@ export class Bench {
       // through pi before pi goes, or they outlive the session.
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background")))
         await c.send({ type: "prompt", message: t.state === "background" && t.n !== undefined ? `/cancel #${t.n}` : `/cancel ${t.id}` }).catch(() => undefined);
-      for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await c.send({ type: "prompt", message: `/proc-stop ${p.id}` }).catch(() => undefined);
+      for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await this.killProc(id, p.id).catch(() => undefined);
       await c.send({ type: "abort" }).catch(() => undefined);
       c.stop();
     }

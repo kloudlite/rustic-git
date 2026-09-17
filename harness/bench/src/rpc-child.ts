@@ -26,7 +26,7 @@ const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..",
  * it is registered into a session that cannot call it.
  */
 export const WORKSPACE_TOOLS = [
-  "read,write,edit,bash,grep,find,ls",
+  "read,write,edit,bash,grep,find,ls,process",
   // its own machine
   "kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update",
   // and its space's environment: the person debugging here is the one who needs a service added
@@ -38,7 +38,8 @@ export const WORKSPACE_TOOLS = [
 /** The built-in tools `--no-builtin-tools` takes away, and the same seven names `workspace-tools.ts`
  *  registers in their place — running on a tool server, not here. Only `tools()` reads these. */
 const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
-const IDE_TOOLS = PI_BUILTINS;
+/** `process` has no built-in counterpart: long-running commands exist only on a tool server. */
+const IDE_TOOLS = [...PI_BUILTINS, "process"];
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string };

@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { toIde, fromIde, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -229,5 +229,72 @@ test("whoami never returns the token", async () => {
   } finally {
     restore();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a background command and the process tool are the tool server's own process calls", () => {
+  assert.deepEqual(toIde("bash", { command: "npm run dev", background: true }), { tool: "exec", args: { cmd: "npm run dev", detach: true } });
+  assert.deepEqual(toIde("process", { action: "start", command: "vite" }), { tool: "exec", args: { cmd: "vite", detach: true } });
+  assert.deepEqual(toIde("process", { action: "list" }), { tool: "process_list", args: {} });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1", since: 40 }), { tool: "process_output", args: { id: "p1", since: 40 } });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1" }), { tool: "process_output", args: { id: "p1", since: 0 } });
+  assert.deepEqual(toIde("process", { action: "stop", id: "p1", signal: "KILL" }), { tool: "process_kill", args: { id: "p1", signal: "KILL" } });
+  assert.deepEqual(toIde("process", { action: "write", id: "p1", data: "y\n" }), { tool: "process_write", args: { id: "p1", data: "y\n" } });
+  assert.throws(() => toIde("process", { action: "restart" }), /no process action restart/);
+
+  // A detached answer is an id, never output; a page of logs says where to read from next.
+  assert.match(fromIde("bash", 200, { id: "p3" }).content[0].text, /^started in the background as process p3/);
+  assert.equal(fromIde("process", 200, { processes: [{ id: "p1", state: "running", cmd: "vite", exit_code: null }] }).content[0].text, "p1 running vite");
+  assert.equal(fromIde("process", 200, { processes: [] }).content[0].text, "nothing running");
+  assert.equal(fromIde("process", 200, { stdout: "ready", stderr: "", next: 120, state: "running" }).content[0].text, "ready\n[running; next 120]");
+  assert.equal(fromIde("process", 200, { state: "exited" }).content[0].text, "the process is exited");
+  assert.equal(fromIde("process", 200, { bytes: 2 }).content[0].text, "wrote 2 bytes to its stdin");
+});
+
+test("a background command reaches the tool server and is mirrored into the harness's process table", async () => {
+  const seen: { tool: string; body: any }[] = [];
+  const procs = [{ id: "p1", cmd: "npm run dev", started_at: "2026-09-17T06:00:00Z", state: "running", exit_code: null }];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      const tool = req.url!.split("/").pop()!;
+      seen.push({ tool, body: JSON.parse(b || "{}") });
+      const answer =
+        tool === "process_list" ? { processes: procs }
+        : tool === "exec" ? { id: "p1" }
+        : tool === "process_output" ? { stdout: "listening", stderr: "", next: 9, state: "running" }
+        : { state: "exited" };
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(answer));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
+  process.env.KL_TOOLS_ADDRESS = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  process.env.KL_TOOLS_WORKSPACE = "api";
+  const tools: Record<string, { execute: (...a: any[]) => Promise<any> }> = {};
+  const widgets: Record<string, string[]> = {};
+  const ctx = { ui: { setWidget: (k: string, lines: string[]) => (widgets[k] = lines) } };
+  try {
+    workspaceTools({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
+    const started = await tools.bash.execute("c1", { command: "npm run dev", background: true }, undefined, undefined, ctx);
+    assert.match(started.content[0].text, /process p1/);
+    assert.deepEqual(seen.map((x) => x.tool), ["exec", "process_list"], "the table is re-read after a detach");
+    assert.equal(seen[0].body.detach, true);
+    // The row the desktop's Processes panel draws, straight from the tool server's list.
+    assert.deepEqual(JSON.parse(widgets["harness:procs"][0]), [{ id: "p1", name: "npm run dev", command: "npm run dev", started: Date.parse("2026-09-17T06:00:00Z") }]);
+
+    // Logs page by `since`, and a stop both kills and re-reads the table.
+    const logs = await tools.process.execute("c2", { action: "logs", id: "p1", since: 9 }, undefined, undefined, ctx);
+    assert.equal(logs.content[0].text, "listening\n[running; next 9]");
+    assert.deepEqual(seen.at(-1), { tool: "process_output", body: { id: "p1", since: 9 } });
+    procs[0] = { ...procs[0], state: "exited", exit_code: 0 };
+    await tools.process.execute("c3", { action: "stop", id: "p1" }, undefined, undefined, ctx);
+    assert.deepEqual(seen.map((x) => x.tool).slice(-2), ["process_kill", "process_list"]);
+    assert.equal(JSON.parse(widgets["harness:procs"][0])[0].code, 0, "an exited process settles in the table");
+  } finally {
+    for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    srv.close();
   }
 });
