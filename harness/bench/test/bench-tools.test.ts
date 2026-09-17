@@ -217,3 +217,37 @@ test("a child that dies fails every ask it was still holding", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a person's own turn in the workspace tab answers nobody, and an ask is answered by id even when it is not the head", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-turn-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const one = bench.sessions.all().find((s) => !s.archived)!.id;
+    const two = (await bench.create()).id;
+    // Two asks left outstanding: "hang" ends no turn, so neither is answered by its own arrival.
+    const a1 = await bench.ask("api", "hang", one);
+    const a2 = await bench.ask("api", "hang", two);
+    // The head is `running` once its turn has actually begun; the second waits behind it.
+    await until(() => bench.exchanges.bySession(one)[0].state === "running", 5_000, "the head running");
+
+    // The person types in that workspace's own tab. It ends a turn like any other.
+    await bench.rpc("w-api", { type: "prompt", message: "what is in this repo" });
+    const answered = async (what: string) => {
+      const m = (await bench.messages("w-api")).messages as { role: string; content: unknown }[];
+      return m.some((x) => x.role === "assistant" && JSON.stringify(x.content).includes(`echo ${what}`));
+    };
+    await until(() => answered("what is in this repo"), 5_000, "the person's turn to end");
+    assert.deepEqual([...bench.exchanges.bySession(one), ...bench.exchanges.bySession(two)].map((e) => [e.dir, e.state]), [["out", "running"], ["out", "queued"]], "nobody's ask was touched");
+
+    // Now a turn that carries the SECOND ask's tag: it answers that one, not the head.
+    await bench.rpc("w-api", { type: "prompt", message: `[ask ${a2.exchange} from session 2] done now` });
+    await until(() => bench.exchanges.bySession(two).some((e) => e.dir === "in"), 5_000, "the second ask's answer");
+    assert.equal(bench.exchanges.bySession(two).find((e) => e.id === a2.exchange)!.state, "done");
+    assert.deepEqual(bench.exchanges.bySession(one).map((e) => [e.dir, e.state]), [["out", "running"]], "the head is still waiting");
+    assert.notEqual(a1.exchange, a2.exchange);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

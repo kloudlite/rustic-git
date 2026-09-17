@@ -40,7 +40,8 @@ process.stdin.on("data", (d) => {
       // endsWith, not equality: an ask arrives tagged, and a tagged "crash" is still a crash.
       if (String(cmd.message).endsWith("crash")) process.exit(3);
       ok();
-      messages.push({ role: "user", content: cmd.message, timestamp: Date.now() });
+      const asked = { role: "user", content: cmd.message, timestamp: Date.now() };
+      messages.push(asked);
       out({ type: "agent_start" });
       if (String(cmd.message).endsWith("hang")) return; // never answers: for a bounded-wait timeout test
       if (cmd.message === "task") { out({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 600" } }); return; } // a task left "running": no tool_execution_end
@@ -53,8 +54,9 @@ process.stdin.on("data", (d) => {
       out({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo ${cmd.message}` } });
       const answer = { role: "assistant", content: [{ type: "text", text: `echo ${cmd.message}` }], timestamp: Date.now() };
       messages.push(answer);
-      // Real pi hands the run's own messages to agent_end (rpc.md); the harness reads the answer there.
-      out({ type: "agent_end", messages: [answer] });
+      // Real pi hands the run's own messages to agent_end (rpc.md) — the prompt that started it
+      // among them, which is how the harness tells whose ask a turn answered.
+      out({ type: "agent_end", messages: [asked, answer] });
     } else out({ type: "response", id: cmd.id, command: cmd.type, success: false, error: `fake pi: ${cmd.type}` });
   }
 });

@@ -219,7 +219,9 @@ export class Bench {
    * A workspace session finished a turn: the answer goes back into the session that asked for it,
    * so the person sees one conversation rather than having to watch the other tab.
    *
-   * WHICH ask it answers is the workspace session's own to say. It holds a queue and works through
+   * WHICH ask it answers is read off the turn itself: the `[ask <id> …]` message that started it,
+   * or a `[reply <id>]` the answer opens with. A turn carrying neither answered nobody — the
+   * person typing in that workspace's own tab — and leaves the queue alone. It holds a queue and works through
    * it in whatever order makes sense, so a turn that answers a specific one starts with
    * `[reply <exchange>]`; without that tag the oldest outstanding ask is the one being answered,
    * which is the ordinary case of a queue of one. Anything the model invents that is not an
@@ -228,20 +230,40 @@ export class Bench {
   private async deliver(id: string, ran?: { role?: string; content?: unknown }[]) {
     const queue = this.asked.get(id);
     if (!queue?.length) return;
-    let answer = "";
-    try {
-      // THIS run's messages, which agent_end carries: the whole transcript would answer with
-      // whatever the session said last, and by now that may be a later turn's answer to somebody else.
-      const all = ran?.length ? ran : (((await this.children.get(id)?.send({ type: "get_messages" }))?.data as { messages?: unknown[] } | undefined)?.messages ?? []) as { role?: string; content?: unknown }[];
-      const last = [...all].reverse().find((m) => m.role === "assistant");
-      answer = typeof last?.content === "string" ? last.content : (Array.isArray(last?.content) ? last!.content : []).map((c: { text?: string }) => c.text ?? "").join("").trim();
-    } catch {
-      /* the child went; the head still has to settle */
+    const said = (m?: { content?: unknown }) => (typeof m?.content === "string" ? m.content : (Array.isArray(m?.content) ? m!.content : []).map((c: { text?: string }) => c.text ?? "").join("")).trim();
+    // `agent_end` carries the run's own messages, but not every build puts the prompt that started
+    // it among them; the transcript always has it, and reading the TAIL of either is the same walk.
+    let all = (ran ?? []) as { role?: string; content?: unknown }[];
+    // Only from the transcript: an unanswered turn leaves no assistant message to bound the walk,
+    // so an earlier ask still waiting would be read as part of this turn. The last prompt is the
+    // one this answer belongs to, and that is all a fallback may claim.
+    let lastPromptOnly = false;
+    if (!all.some((m) => m.role === "user")) {
+      lastPromptOnly = true;
+      try {
+        all = (((await this.children.get(id)?.send({ type: "get_messages" }))?.data as { messages?: unknown[] } | undefined)?.messages ?? []) as typeof all;
+      } catch {
+        /* the child went; the head still has to settle */
+      }
     }
-    const tagged = /\[reply ([^\]]+)\]/.exec(answer)?.[1];
-    const at = tagged ? queue.findIndex((x) => x.exchange === tagged) : 0;
-    const a = queue[at >= 0 ? at : 0];
-    queue.splice(at >= 0 ? at : 0, 1);
+    // This turn and no earlier one: the last answer, and the messages between it and the answer
+    // before it. Scanning the whole transcript would find every ask ever sent, and answer them all.
+    const end = all.map((m) => m.role).lastIndexOf("assistant");
+    const answer = said(all[end]);
+    const turn = all.slice(0, end < 0 ? all.length : end).reverse();
+    const stop = turn.findIndex((m) => m.role === "assistant");
+    const before = turn.slice(0, stop < 0 ? turn.length : stop).filter((m) => m.role === "user");
+    const asks = (lastPromptOnly ? before.slice(0, 1) : before).map((m) => /^\[ask (\S+)/.exec(said(m))?.[1]).filter((x): x is string => !!x);
+    // WHICH ask this turn answered, and whether it answered one at all. A person typing in the
+    // workspace's own tab ends a turn like any other, and popping the queue for it would mark
+    // somebody's ask done with an answer to a different question.
+    const replied = /\[reply ([^\]]+)\]/.exec(answer)?.[1];
+    const named = [replied, ...asks].find((x) => x && queue.some((q) => q.exchange === x));
+    if (!named && !asks.length) return;
+    // The tag is the truth; FIFO is the fallback when a turn took an ask whose id it dropped, or
+    // when several asks were merged into one run.
+    const at = Math.max(0, queue.findIndex((x) => x.exchange === named));
+    const [a] = queue.splice(at, 1);
     if (!queue.length) this.asked.delete(id);
     this.transitionAsk(a, answer ? "done" : "failed");
     const back = this.exchanges.record({ id: `${a.exchange}-in`, session: a.from, workspace: a.workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: a.exchange });
