@@ -240,6 +240,42 @@ pub async fn fast(c: &mut Ctx) {
         .boxed()
     })
     .await;
+    seed_model_key(c).await;
+}
+
+/// Put the probe tenant's model key where its bench reads provider keys from.
+///
+/// A bench keeps `auth.json` under `PI_CODING_AGENT_DIR` — `{workspace}/.bench/pi` since
+/// 2026-09-18 — inside its own volume, and NOTHING else writes that file: the desktop's Settings
+/// is the only other writer and no probe runs it. Before this, every bench probe that needed a
+/// model turn skipped on `NO_MODEL` forever, or passed on a key somebody had put there by hand
+/// and lost the moment the volume moved.
+///
+/// Idempotent, and untimed on purpose: seeding is a precondition of the bench probes, not one of
+/// the samples they report. A failure is logged and left to the probes that then skip, because a
+/// run that could not seed a key has nothing to say about the model path either way.
+///
+/// The key travels in the request BODY, never a path segment and never an error string — the same
+/// rule the route itself documents.
+pub(crate) async fn seed_model_key(c: &mut Ctx) {
+    let Some((provider, key)) = c.cfg.model_key.clone() else {
+        return tracing::info!("slo.bench.model_key.unset");
+    };
+    let out = async {
+        let (_child, port) = forward(c).await?;
+        let (status, _) = through_with(port, reqwest::Method::PUT, &format!("/providers/{provider}"), Some(json!({ "apiKey": key }))).await?;
+        // 204 is the route's answer; anything else is reported WITHOUT the body, which is the one
+        // place a mistyped key could otherwise be echoed back into a log.
+        if status != 204 {
+            bail!("the bench refused the model key for {provider}: {status}");
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    match out {
+        Ok(()) => tracing::info!(%provider, "slo.bench.model_key.seeded"),
+        Err(e) => tracing::warn!(%provider, error = %format!("{e:#}"), "slo.bench.model_key.failed"),
+    }
 }
 
 pub async fn hourly(c: &mut Ctx) {
@@ -342,6 +378,10 @@ pub async fn hourly(c: &mut Ctx) {
         None => return skip_sessions(c, "the bench could not be reached before the sleep"),
         Some(false) => {}
     }
+    // The pod was deleted and recreated by the idle/wake above, so the key is seeded HERE, after
+    // the wake and before any session: the bench's `.bench/pi` travels with the volume, but a run
+    // whose tenant never had a key would otherwise reach the model turns with none.
+    seed_model_key(c).await;
     sessions(c).await;
 }
 

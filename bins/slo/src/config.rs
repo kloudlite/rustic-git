@@ -29,6 +29,13 @@ pub struct Config {
     /// The `kloudlite-jwt` Secret. The probe mints its own tokens rather than holding a
     /// password, so this is the only credential in the pod.
     pub jwt_secret: String,
+    /// `(provider, api key)` for the model the bench probes prompt — the ONE key the probe seeds
+    /// into its own bench, because a bench reads provider keys from its own `.bench/pi` and
+    /// nothing else writes that file (2026-09-18). Unset means the bench probes skip on
+    /// `NO_MODEL`, exactly as they did before, rather than the run failing.
+    ///
+    /// A projected file first, like the signing key: it is a credential, not a setting.
+    pub model_key: Option<(String, String)>,
     /// The tenant pair THIS suite runs as, one pair per suite so a long suite never collides with
     /// the five-minute one — see `ctx::SUITE_TENANTS`. Not serialized into `state.json`: the parent
     /// reads the same env the child did.
@@ -106,6 +113,9 @@ impl Config {
             jwt_secret: kloudlite_core::secret::read("KLOUDLITE_JWT_SECRET")
                 .filter(|v| !v.is_empty())
                 .with_context(|| "KLOUDLITE_JWT_SECRET is not set".to_string())?,
+            model_key: kloudlite_core::secret::read("KLOUDLITE_SLO_MODEL_KEY")
+                .filter(|v| !v.trim().is_empty())
+                .map(|key| (opt("KLOUDLITE_SLO_MODEL_PROVIDER", "anthropic"), key.trim().to_string())),
             probe_user: opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER),
             other_user: opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER),
             ssh_key_path: opt("KLOUDLITE_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),

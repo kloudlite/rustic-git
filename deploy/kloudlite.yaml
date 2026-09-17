@@ -2047,6 +2047,15 @@ spec:
                       name: kloudlite-jwt
                       items:
                         - { key: secret, path: KLOUDLITE_JWT_SECRET }
+                  # The one model credential the probe seeds into its own bench: a bench reads
+                  # provider keys from its own volume and nothing else writes that file, so
+                  # without this every bench probe that needs a model turn skips forever.
+                  # `optional`, so a region that has not been given one runs exactly as before.
+                  - secret:
+                      name: kloudlite-slo-model
+                      optional: true
+                      items:
+                        - { key: key, path: KLOUDLITE_SLO_MODEL_KEY }
 ---
 # The hourly Experience suite: the fast journey plus stage 14, which walks every remaining verb a
 # person can perform (packages, teams, invitations, branch protection, a two-service environment,
@@ -2194,6 +2203,15 @@ spec:
                       name: kloudlite-jwt
                       items:
                         - { key: secret, path: KLOUDLITE_JWT_SECRET }
+                  # The one model credential the probe seeds into its own bench: a bench reads
+                  # provider keys from its own volume and nothing else writes that file, so
+                  # without this every bench probe that needs a model turn skips forever.
+                  # `optional`, so a region that has not been given one runs exactly as before.
+                  - secret:
+                      name: kloudlite-slo-model
+                      optional: true
+                      items:
+                        - { key: key, path: KLOUDLITE_SLO_MODEL_KEY }
 ---
 # The weekly suite: the fast journey plus the heavy checks (large push, cold nix profile,
 # cross-node start) and the control-plane failover drill. 02:12 Sunday UTC: after the 02:02 hourly
@@ -2306,6 +2324,15 @@ spec:
                       name: kloudlite-jwt
                       items:
                         - { key: secret, path: KLOUDLITE_JWT_SECRET }
+                  # The one model credential the probe seeds into its own bench: a bench reads
+                  # provider keys from its own volume and nothing else writes that file, so
+                  # without this every bench probe that needs a model turn skips forever.
+                  # `optional`, so a region that has not been given one runs exactly as before.
+                  - secret:
+                      name: kloudlite-slo-model
+                      optional: true
+                      items:
+                        - { key: key, path: KLOUDLITE_SLO_MODEL_KEY }
 ---
 # The monthly suite: the backup checks and the destructive drills (dead node, drain, Redis down).
 # Also a SUNDAY schedule, not a day-of-month one — cron cannot say "the first Sunday", so this
@@ -2446,6 +2473,15 @@ spec:
                       name: kloudlite-jwt
                       items:
                         - { key: secret, path: KLOUDLITE_JWT_SECRET }
+                  # The one model credential the probe seeds into its own bench: a bench reads
+                  # provider keys from its own volume and nothing else writes that file, so
+                  # without this every bench probe that needs a model turn skips forever.
+                  # `optional`, so a region that has not been given one runs exactly as before.
+                  - secret:
+                      name: kloudlite-slo-model
+                      optional: true
+                      items:
+                        - { key: key, path: KLOUDLITE_SLO_MODEL_KEY }
                   - secret:
                       name: kloudlite-storage
                       items:

@@ -12,6 +12,8 @@ pub async fn ctx() -> Ctx {
     // `Ctx::new` builds the rustls-backed client, and the binary installs the provider in main().
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cfg = Config {
+        // No key in a unit fixture: the seeding step logs that it is unset and does nothing.
+        model_key: None,
         admin_url: "http://127.0.0.1:1".into(),
         api_url: "http://127.0.0.1:1".into(),
         web_url: "http://127.0.0.1:1".into(),
