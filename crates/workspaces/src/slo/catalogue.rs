@@ -162,7 +162,7 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 20] = [
+const BENCH_IDS: [&str; 21] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -183,6 +183,7 @@ const BENCH_IDS: [&str; 20] = [
     "bench.shell.roundtrip",
     "bench.push.p95",
     "bench.pkg.add",
+    "agent.tree.run",
 ];
 
 /// Group 1: every id the intercept journey owns. It is also the skip list a probe run that cannot
@@ -538,6 +539,14 @@ pub const CATALOGUE: &[Slo] = &[
     // call every agent makes first. Read from INSIDE the pod, the way the ssh tunnel would.
     Slo { id: "ide.serve.up", feature: "Workspaces", sli: "`kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ide.exec", feature: "Workspaces", sli: "An exec through the workspace's own tool API runs as `kl` and answers exit code 0", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // Subagent trees (spec §4.8). All five read through the workspace's own tool server, because
+    // the tree only exists as something a session acts on: a subvolume nobody can address is not
+    // the thing being probed.
+    Slo { id: "ws.tree.cut", feature: "Workspaces", sli: "A tree asked for on a running workspace is ready within 10 s, lists the source's files, and `main` is refused a path under `.agents/`", target: p95(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.tree.isolated", feature: "Workspaces", sli: "A file written in a tree is not there in `main`, and neither is one written in `main` there in the tree", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.tree.no_travel", feature: "Workspaces", sli: "A workspace pushed with a tree restores elsewhere with `.agents/{name}` empty", target: p95(290_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.tree.ports", feature: "Workspaces", sli: "An exec in a tree prints a `$PORT` inside that tree's block, and a detached listener on a port `main` holds is marked failed naming it", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "ws.tree.closed", feature: "Workspaces", sli: "A deleted tree is gone from `status.trees` and from disk within one pass, and the workspace still deletes with a live tree on it", target: p95(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ws.seed.failed", feature: "Workspaces", sli: "A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating`", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "key.platform.regenerate", feature: "Identity", sli: "Regenerating the platform key keeps seeding working", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.create", feature: "Teams", sli: "A team can be created by a person", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -640,6 +649,9 @@ pub const CATALOGUE: &[Slo] = &[
     // the pod.
     Slo { id: "bench.push.p95", feature: "Benches", sli: "`POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready", target: p95(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.pkg.add", feature: "Benches", sli: "`kl pkg add` in the bench shell lands in the bench's `spec.packages`", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The whole subagent lifecycle as a person drives it, from the bench: the tree and the session
+    // STAY after the report — nothing is dropped on completion — and only a close takes them.
+    Slo { id: "agent.tree.run", feature: "Benches", sli: "A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session", target: p95(300_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -779,7 +791,7 @@ mod tests {
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
                    "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
                    "bench.shell.roundtrip", "bench.shell.workspace",
-                   "bench.push.p95", "bench.pkg.add"] {
+                   "bench.push.p95", "bench.pkg.add", "agent.tree.run"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }

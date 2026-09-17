@@ -449,6 +449,26 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.proposal.asked") {
         proposal_asked(c).await;
     }
+    if c.walks("agent.tree.run") {
+        agent_tree_run(c).await;
+    }
+/// `agent.tree.run`: the whole subagent lifecycle as a person drives it — dispatch, a tree, a
+/// report, and BOTH still standing afterwards, until a close takes them.
+///
+/// Filed as a skip, deliberately, until the harness's agent path runs on trees: today's
+/// `POST /agents` still clones a workspace per agent (`bench.cloneOf`, `forgetClone`), which is
+/// exactly what spec §4.3 removes. A probe written against that would go green on the behaviour
+/// this slice exists to delete, and then go red on the day it is fixed — worse than no probe,
+/// because it would be read as a regression. `Precondition`, so the run does not count it either
+/// way (a skip that read as a pass is the 2026-09-09 lesson).
+async fn agent_tree_run(c: &mut Ctx) {
+    c.skip_because(
+        "agent.tree.run",
+        "the bench still dispatches agents onto cloned workspaces; this id measures the tree path",
+        kloudlite_workspaces::history::slo::SkipReason::Precondition,
+    );
+}
+
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();

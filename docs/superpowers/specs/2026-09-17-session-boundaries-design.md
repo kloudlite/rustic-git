@@ -533,6 +533,21 @@ asserts under 50 ms).
 `bubblewrap` joins `WS_BASE_PACKAGES` so it comes from the pin like everything else. The shell
 sidecar (§2) does **not** use it: the shell is the person's, and its boundary is the container.
 
+**As built (2026-09-18): the wrapper is asserted, never executed, in CI.** `bwrap_argv` is held to
+the argv above element-by-element by
+`crates/ide/tests/trees.rs::the_sandbox_binds_the_tree_the_store_and_nothing_else`, but no test
+runs a wrapped command: `sandbox::available()` probes for the binary once per process and answers
+false on a developer machine and in CI, so every test exec runs UNWRAPPED. Nothing in the gate can
+therefore tell whether bwrap works — the two things to watch above are fleet questions in the
+strict sense, not merely fleet-first ones.
+
+The fleet signal is one log line: `ide.sandbox.unavailable` (reason `no-bwrap`), emitted once per
+tool-server process when the probe fails. **Its absence in a workspace pod's logs is the only
+positive evidence that execs are being wrapped**; its presence means every exec in that pod is
+running with `paths::confine` as its sole fence, which is the state §4.7 exists to improve on and
+is worth an alert if it outlives the rollout. Check it on the first pod after the roll, before
+reading anything else here as confirmed.
+
 ### 4.8 Probes
 
 - `ws.tree.cut`: POST a tree → ready within 10 s; `/fs/tree?tree=x` lists the source's files;

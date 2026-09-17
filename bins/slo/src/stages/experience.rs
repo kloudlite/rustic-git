@@ -37,6 +37,11 @@ pub const IDS: &[&str] = &[
     "ws.cache.travels",
     "ide.serve.up",
     "ide.exec",
+    "ws.tree.cut",
+    "ws.tree.isolated",
+    "ws.tree.no_travel",
+    "ws.tree.ports",
+    "ws.tree.closed",
     "ws.seed.failed",
     "key.platform.regenerate",
     "id.username",
@@ -110,6 +115,7 @@ pub const IDS: &[&str] = &[
     "bench.tool.revoked",
     "bench.push.p95",
     "bench.pkg.add",
+    "agent.tree.run",
     "bench.workspace.tool_roundtrip",
     "bench.shell.workspace",
     "feed.experience",
@@ -138,6 +144,9 @@ pub async fn run(c: &mut Ctx) {
             // One workspace, two assertions about its tool server.
             "ide.serve.up" => super::experience_ws::ide_server(c).await,
             "ide.exec" => {}
+            // One workspace, five assertions about the trees served from its tool server.
+            "ws.tree.cut" => super::experience_trees::trees(c).await,
+            "ws.tree.isolated" | "ws.tree.no_travel" | "ws.tree.ports" | "ws.tree.closed" => {}
             "ws.seed.failed" => super::experience_ws::seed_failed(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
             "home.persists" => super::experience_ws::home_persists(c).await,
@@ -211,6 +220,9 @@ pub async fn run(c: &mut Ctx) {
             // may run after it. One call reports both ids.
             "bench.push.p95" => super::bench_ws::run(c).await,
             "bench.pkg.add" => {}
+            // Dispatched from the bench's own stage (group 3), like every other `bench.*` id it
+            // walks; named here because this list is the whole stage, not one file's share.
+            "agent.tree.run" => {}
             // A grouped run walks the bench journey in group 3; this dial would reset its idle
             // wait, so it waits for that group to finish first.
             "bench.workspace.tool_roundtrip" if c.group.is_some() => {

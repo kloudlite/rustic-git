@@ -580,6 +580,11 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["ws.cache.travels", "Workspaces", "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", "95 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["ide.serve.up", "Workspaces", "`kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create", "95 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["ide.exec", "Workspaces", "An exec through the workspace's own tool API runs as `kl` and answers exit code 0", "99.9 %", "hourly", "14 · Experience"],
+  ["ws.tree.cut", "Workspaces", "A tree asked for on a running workspace is ready within 10 s, lists the source's files, and `main` is refused a path under `.agents/`", "95 % ≤ 60000 ms", "hourly", "14 · Experience"],
+  ["ws.tree.isolated", "Workspaces", "A file written in a tree is not there in `main`, and neither is one written in `main` there in the tree", "99.9 %", "hourly", "14 · Experience"],
+  ["ws.tree.no_travel", "Workspaces", "A workspace pushed with a tree restores elsewhere with `.agents/{name}` empty", "95 % ≤ 290000 ms", "hourly", "14 · Experience"],
+  ["ws.tree.ports", "Workspaces", "An exec in a tree prints a `$PORT` inside that tree's block, and a detached listener on a port `main` holds is marked failed naming it", "99.9 %", "hourly", "14 · Experience"],
+  ["ws.tree.closed", "Workspaces", "A deleted tree is gone from `status.trees` and from disk within one pass, and the workspace still deletes with a live tree on it", "95 % ≤ 120000 ms", "hourly", "14 · Experience"],
   ["ws.seed.failed", "Workspaces", "A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating`", "95 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["key.platform.regenerate", "Identity", "Regenerating the platform key keeps seeding working", "99.9 %", "hourly", "14 · Experience"],
   ["team.create", "Teams", "A team can be created by a person", "99.9 %", "hourly", "14 · Experience"],
@@ -656,6 +661,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["bench.workspace.tool_roundtrip", "Benches", "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", "99.9 % ≤ 180000 ms", "hourly", "14 · Experience"],
   ["bench.push.p95", "Benches", "`POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready", "95 % ≤ 60000 ms", "hourly", "14 · Experience"],
   ["bench.pkg.add", "Benches", "`kl pkg add` in the bench shell lands in the bench's `spec.packages`", "99.9 % ≤ 20000 ms", "hourly", "14 · Experience"],
+  ["agent.tree.run", "Benches", "A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session", "95 % ≤ 300000 ms", "hourly", "14 · Experience"],
   ["git.push.large", "Git hosting", "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", "99.9 %", "weekly", "12 · Weekly"],
   ["reg.push.large", "Container registry", "Pushing a large image layer succeeds", "99.9 %", "weekly", "12 · Weekly"],
   ["ws.cold.profile", "Workspaces", "A cold package profile builds successfully", "99.9 %", "weekly", "12 · Weekly"],
@@ -858,6 +864,7 @@ const BENCH_GROUP_IDS = [
   "bench.tool.revoked",
   "bench.push.p95",
   "bench.pkg.add",
+  "agent.tree.run",
 ];
 const INTERCEPT_GROUP_IDS = [
   "env.space.bench",

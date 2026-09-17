@@ -417,9 +417,33 @@ pub async fn ide_server(c: &mut Ctx) {
     .await;
 }
 
+/// One `POST /tools/{name}` against the workspace's own tool server, from INSIDE the pod over
+/// loopback. Answers the HTTP status and the body, both, because a tree probe cares which refusal
+/// it got (a 403 that should be a 400 is the whole point of §3.5) and not only that it failed.
+///
+/// `curl -s -o - -w` rather than `-f`: `-f` swallows the body on a 4xx, which is exactly the body
+/// these steps assert on.
+pub(crate) async fn ws_tool(c: &Ctx, id: &str, tool: &str, args: &Value) -> Result<(u16, String)> {
+    // Single-quoted into a shell, so a single quote inside the JSON would end the string early.
+    // None of ours carry one today; escaped anyway, because a probe that mangles its own request
+    // reports a fleet failure that is its own.
+    let body = serde_json::to_string(args)?.replace('\'', r"'\''");
+    let script = format!(
+        "curl -s -o /tmp/kl-tool.out -w '%{{http_code}}' -X POST http://127.0.0.1:7788/tools/{tool} \
+         -H 'content-type: application/json' -d '{body}'; echo; cat /tmp/kl-tool.out"
+    );
+    let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
+    if code != 0 {
+        return Err(anyhow!("the tool call could not be made: exit {code}: {}", err.trim()));
+    }
+    let (status, body) = out.split_once('\n').ok_or_else(|| anyhow!("no status line in {out:?}"))?;
+    let status: u16 = status.trim().parse().with_context(|| format!("status was {status:?}"))?;
+    Ok((status, body.to_string()))
+}
+
 /// Push `src`, wait for the snapshot to turn ready, restore it under `name`, wait for `ready`;
 /// answers the restored workspace's id. The volume is named after the workspace.
-async fn push_then_restore(c: &mut Ctx, src: &str, name: &str, message: &str) -> Result<String> {
+pub(crate) async fn push_then_restore(c: &mut Ctx, src: &str, name: &str, message: &str) -> Result<String> {
     let jwt = c.probe_jwt.clone();
     let doc = post(c, &api(c, &format!("/v1/workspaces/{src}/push")), &jwt, json!({ "message": message })).await.context("could not push")?;
     let snap = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("the push answered no snapshot id"))?.to_string();
