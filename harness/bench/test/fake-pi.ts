@@ -24,6 +24,7 @@ if (process.env.FAKE_PI_ARGV_FILE) fs.writeFileSync(process.env.FAKE_PI_ARGV_FIL
 const messages: unknown[] = [];
 const queued: string[] = [];
 const steering: string[] = [];
+const compacted: string[] = [];
 const out = (v: unknown) => process.stdout.write(JSON.stringify(v) + "\n");
 let buf = "";
 let turning = false;
@@ -34,9 +35,10 @@ process.stdin.on("data", (d) => {
     const cmd = JSON.parse(buf.slice(0, at));
     buf = buf.slice(at + 1);
     const ok = (data?: unknown) => out({ type: "response", id: cmd.id, command: cmd.type, success: true, data });
-    if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM });
+    if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM, compacted });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
+    else if (cmd.type === "compact") { compacted.push(String(cmd.customInstructions ?? "")); ok({ summary: "…", tokensBefore: 100, estimatedTokensAfter: 20 }); }
     // Enough of pi's queue for the harness's own triage: what is held, and putting it back.
     else if (cmd.type === "clear_queue") { const held = { steering: steering.splice(0), followUp: queued.splice(0) }; ok(held); }
     else if (cmd.type === "steer") { steering.push(String(cmd.message)); ok(); }

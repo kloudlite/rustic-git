@@ -31,6 +31,8 @@ const argOf = (name: string, args: Record<string, unknown>) =>
 /** A burst of arrivals is one ordering; a fork that thinks too long is not worth waiting for. */
 const TRIAGE_DEBOUNCE_MS = 3_000;
 const TRIAGE_TIMEOUT_MS = 60_000;
+/** How full the window may get before the conversation is summarised and carried on. */
+const COMPACT_AT = 0.8;
 const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
@@ -77,6 +79,8 @@ export class Bench {
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** Debounce per session: a burst of arrivals is one ordering, not one per message. */
   private triaging = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Sessions being summarised: one at a time, and never twice for the same growth. */
+  private compacting = new Set<string>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
   private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
 
@@ -201,6 +205,10 @@ export class Bench {
       // `willRetry` means this run is not the answer yet — pi keeps going on its own.
       if (ev.willRetry !== true) void this.deliver(id, ev.messages as { role?: string; content?: unknown }[] | undefined);
       if (ev.willRetry !== true) this.keepPlanCurrent(id);
+      // Between turns is the only safe moment to summarise: mid-turn would rewrite what the model
+      // is holding while it is using it.
+      const u = (ev.usage ?? (ev as { data?: { usage?: unknown } }).data?.usage) as { totalTokens?: number; contextWindow?: number } | undefined;
+      if (ev.willRetry !== true && u?.totalTokens && u.contextWindow) void this.compactIfFull(id, u.totalTokens, u.contextWindow);
     }
     if (ev.type === "exit") {
       this.turning.delete(id);
@@ -487,6 +495,33 @@ export class Bench {
    * at all. The harness says so ONCE, as a follow-up the model answers with a `plan` call: the
    * model forgetting is the common case, and a panel that lies is worse than a line of nagging.
    */
+  /**
+   * The conversation grew past what the model can hold. pi summarises and continues (`compact`),
+   * and the instruction says what must survive: the plan, what is still outstanding, and what the
+   * person has told us — everything else is recoverable, those three are not.
+   */
+  private async compactIfFull(id: string, used: number, window: number) {
+    if (!window || used / window < COMPACT_AT || this.compacting.has(id)) return;
+    this.compacting.add(id);
+    const plan = this.plans.get(id).filter((x) => x.state !== "done");
+    const open = (this.asked.get(id) ?? []).map((a) => a.workspace);
+    const keep = [
+      "Keep, verbatim where you can:",
+      plan.length ? `the plan, with state: ${plan.map((x) => `${x.text.split("\u0000")[0]} (${x.state})`).join("; ")}` : "there is no plan",
+      open.length ? `what is still outstanding: ${open.join(", ")}` : "nothing is outstanding",
+      "what the person has told you about themselves and their setup, and what they asked for that is not done yet.",
+      "Drop tool output, file contents and anything already reported.",
+    ].join("\n");
+    try {
+      await this.children.get(id)?.send({ type: "compact", customInstructions: keep });
+      this.emit({ type: "compacted", session: id, at: Date.now() });
+    } catch {
+      /* a compaction that failed is a turn that carries on: it is a tidy-up, not a gate */
+    } finally {
+      this.compacting.delete(id);
+    }
+  }
+
   private keepPlanCurrent(id: string) {
     const turn = this.turnCalls.get(id);
     if (!turn || turn.nudged) return;

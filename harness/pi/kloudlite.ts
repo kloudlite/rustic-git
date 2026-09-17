@@ -173,7 +173,7 @@ const PLATFORM = [
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
-  "Answer in one line, then only the facts needed.",
+  "Answer in one line, then only the facts needed. A thing you changed but could not verify is \"changed, unverified\" — never a claim that it works.",
 ].join("\n");
 
 /** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */

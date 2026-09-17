@@ -439,6 +439,11 @@ export function onEvent(ev: Ev & { pi?: string }) {
     case "queue_order":
       if (typeof ev.session === "string") thread(ev.session).reorder((ev.items as { text: string; reason?: string }[]) ?? []);
       return;
+    case "compacted":
+      // The conversation was summarised and carried on: one row, so a person is not left
+      // wondering where the middle of their transcript went.
+      if (typeof ev.session === "string") thread(ev.session).note("⟲ compacted — the conversation was summarised to keep going");
+      return;
     case "plan":
       if (typeof ev.session === "string") setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
       return;

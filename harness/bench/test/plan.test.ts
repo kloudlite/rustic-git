@@ -68,3 +68,37 @@ test("what crosses to the asking session is a standup answer, not a transcript",
   // 1,200 characters is the other bound.
   assert.ok(brief("x".repeat(3000), "api").length < 1260);
 });
+
+test("a conversation that fills its window is summarised, keeping the plan and what is outstanding", async () => {
+  const { Bench } = await import("../src/bench.ts");
+  const { FAKE } = await import("./fake-pi.ts");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-compact-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const id = bench.sessions.all().find((s) => !s.archived)!.id;
+    bench.plans.set(id, [{ text: "clone the repo", state: "done" }, { text: "add the endpoint", state: "doing" }]);
+    const rows: unknown[] = [];
+    bench.onEvent((ev) => ev.type === "compacted" && rows.push(ev));
+
+    // Under the mark: nothing happens, because compaction is a cost and a risk.
+    await (bench as any).compactIfFull(id, 100, 1000);
+    assert.deepEqual(rows, []);
+
+    // Past it: pi is asked to summarise, and TOLD what must survive.
+    await (bench as any).compactIfFull(id, 850, 1000);
+    const said = ((await bench.rpc(id, { type: "get_state" })).data as { compacted: string[] }).compacted;
+    assert.equal(said.length, 1, JSON.stringify(said));
+    assert.match(said[0], /the plan, with state: add the endpoint \(doing\)/);
+    assert.ok(!said[0].includes("clone the repo"), "what is done is not what must survive");
+    assert.match(said[0], /nothing is outstanding/);
+    assert.match(said[0], /Drop tool output, file contents/);
+    assert.equal(rows.length, 1, "and the transcript says it happened");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
