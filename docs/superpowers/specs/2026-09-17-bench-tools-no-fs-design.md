@@ -232,3 +232,20 @@ not the session's). Identity rule: "When the person corrects you, states a prefe
 you a fact about their setup you will need again, save a memory. Never save what a tool can
 answer." A `[from …]` reply or an ask is never saved. Snapshotted with the bench like everything
 under `.bench/`. Desktop: Settings › Memory lists the index with delete.
+
+## 15. Inbox triage and parallel work (owner, 2026-09-17 16:20 IST)
+
+- **A fork orders the inbox.** Whenever a session's queue changes while it is mid-turn (a person's
+  prompt, an ask, a reply), the bench spawns a FORK of that session (`--fork`, `--no-tools`,
+  inherits the context, one question): "here is the queue, answer the order as JSON, most urgent
+  first, with one reason each". The bench then re-queues pi's follow-ups in that order
+  (`clear_queue` returns the texts; re-`follow_up` them) and shows the order and reasons in the
+  queue panel. The main session is never interrupted; the fork's cost is one call per change,
+  debounced 3 s.
+- **A received message may be worked alone or in parallel.** `ask {to: "agent", isolated: true}`
+  gives the agent its OWN ephemeral workspace: a clone of the caller's workspace
+  (`kl_workspace_clone`, name `<ws>-eph-<hex>`, marked ephemeral) whose session is the agent's;
+  several agents run in parallel on their own clones; the agent's report says what changed and
+  where; the clone is deleted with `ask_close` (or when the caller's session ends) after the
+  person, or the caller, has taken what it wants (git push from the clone, or a `later` plan
+  item). Not isolated = the agent shares the caller's workspace, as today.
