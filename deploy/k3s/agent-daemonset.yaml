@@ -246,6 +246,11 @@ spec:
             # container (a bench IS a Workspace since 2026-09-16). Pinned by deploy/pin.sh.
             - name: KLOUDLITE_BENCH_IMAGE
               value: ghcr.io/kloudlite/kloudlite-bench:76e23739aea87764d30cdedc5d83e0fa287f2453@sha256:31a10db4b1e12e374ec27b777f692db2d493b93b51986b4ec0471d22d839f86d
+            # The shell sidecar every workspace and bench pod carries beside its main container
+            # (spec §2, 2026-09-17): ttyd on 7790, the home and the profile, nothing else.
+            # Pinned by deploy/pin.sh.
+            - name: KLOUDLITE_SHELL_IMAGE
+              value: ghcr.io/kloudlite/kloudlite-shell:latest
             # The forwarder that stands in for an intercepted service. Pinned by deploy/pin.sh.
             - name: WS_INTERCEPT_PROXY_IMAGE
               value: ghcr.io/kloudlite/kloudlite-intercept-proxy:76e23739aea87764d30cdedc5d83e0fa287f2453@sha256:76d59c9b8cacbe508d4fbcd19d7d49e08c266886daaead4ed026c508b7810a9d
@@ -253,7 +258,7 @@ spec:
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
             - name: WS_BASE_PACKAGES
-              value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils"
+              value: "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils ttyd bubblewrap"
             - name: WS_REPLICA_SECS
               value: "300"
             # How often the sync beat checks each running worktree's btrfs generation and cuts a
