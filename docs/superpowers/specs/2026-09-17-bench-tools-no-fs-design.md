@@ -429,3 +429,28 @@ differ in chrome; take Claude Code's row grammar and status behaviour.
 - **Direct line, no queue.** Caller ↔ agent messages are immediate (steer when mid-turn, prompt
   otherwise); no FIFO, no fork triage; exchanges are recorded only for the panel.
 - The caller's report row shows the branch/pull the agent left behind so the person can take it.
+
+## 23. Port opencode's session renderer, do not imitate it (owner, 2026-09-17 17:50 IST: "go
+through code of opencode and try to replicate it instead of just trying to replicate from ui
+screenshot")
+
+opencode is MIT (`/Volumes/kdisk/rustic-git-wt/opencode-ref/LICENSE`). `@opencode-ai/session-ui`
+is Solid, like the harness. The centre pane becomes a PORT of that package, not a re-drawing:
+- `harness/src/renderer/opencode/` holds the vendored components (message parts, `BasicTool`,
+  context group, text/reasoning/compaction, diff via `@pierre/diffs`, prompt/composer, footer,
+  progress indicator, shimmer, spinner, question, task), their CSS and the theme JSON loader, with
+  `LICENSE-opencode` beside them and a `VENDORED.md` naming the upstream commit (`5a83358`) and
+  every file taken; edits to vendored files are minimal and marked `// harness:`.
+- One adapter, `opencode/adapter.ts`: our live store (pi events, tool rows, exchanges, proposals,
+  plan, procs, usage) → opencode's `Message`/`Part` shapes from `@opencode-ai/sdk` types (vendor
+  the type definitions only). Our tools map to their tool kinds (the `opencode-map.ts` table).
+  Questions/proposals → their `question` part + permission dock; agents → `task`; plan →
+  `todowrite`; asks → `task` with `agent` = workspace name; harness notes → `text` with a system
+  flag as they render it.
+- Dependencies added as real dependencies where opencode has them: `@kobalte/core`, `motion`,
+  `@pierre/diffs`, `shiki`/`@shikijs/stream`, `dompurify`, `morphdom`, `remend`, `luxon`,
+  `fuzzysort`, `solid-list`, `strip-ansi`, the `@solid-primitives/*` used. `marked` we have.
+- Theme: their `one-dark.json` + `one-light.json` loaded by their theme code; IBM Plex Mono/Sans
+  set through their font variables. The terminal, sidebar and inspector keep our components.
+- Result: pixel-parity by construction. Our previous hand-drawn pane components are deleted once
+  the port renders every part; the render-contract document stays as the map.
