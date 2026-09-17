@@ -13,7 +13,17 @@ use super::*;
 pub const BUILDKIT_HOST: &str = "tcp://builder-gate.kloudlite-system.svc:1234";
 
 
-pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, registry_host: &str, api_url: &str) -> Vec<EnvVar> {
+#[allow(clippy::too_many_arguments)]
+pub(super) fn login_env(
+    ws_id: &str,
+    name: &str,
+    owner: &str,
+    team: &str,
+    registry_host: &str,
+    api_url: &str,
+    git_ssh_host: &str,
+    git_ssh_port: &str,
+) -> Vec<EnvVar> {
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     let mut env = vec![
         git_ssh_command(),
@@ -95,7 +105,37 @@ pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, regist
     if !api_url.is_empty() {
         env.push(var("KL_API_URL", api_url.to_string()));
     }
+    // Where this platform's git lives — the SAME host the seed init container clones from, so a
+    // `git clone` a person or a session runs inside the pod cannot disagree with the one the
+    // platform seeded from. Unset when the agent was told nothing, so a clone fails saying so
+    // rather than reaching a host nobody configured.
+    if !git_ssh_host.is_empty() {
+        env.push(var("KL_GIT_SSH_HOST", git_ssh_host.to_string()));
+        // Only when it is not the default: a variable that says 22 is one more thing to keep
+        // equal to the listener, and every reader already assumes ssh's own default.
+        if !git_ssh_port.is_empty() && git_ssh_port != "22" {
+            env.push(var("KL_GIT_SSH_PORT", git_ssh_port.to_string()));
+        }
+        // `git clone kl:owner/name`, for a person as much as for a tool. Carried in the
+        // ENVIRONMENT rather than in the `gitconfig` the `user-key` Secret holds, because that
+        // file is written by the API tier, which is not told the git host — the agent is (a
+        // second copy of one host is exactly the drift this codebase keeps out). git reads these
+        // three as configuration of its own, and they ride into an ssh login through `SetEnv`
+        // with the rest of this list.
+        env.push(var("GIT_CONFIG_COUNT", "1".into()));
+        env.push(var("GIT_CONFIG_KEY_0", format!("url.{}.insteadOf", git_ssh_url(git_ssh_host, git_ssh_port))));
+        env.push(var("GIT_CONFIG_VALUE_0", "kl:".into()));
+    }
     env
+}
+
+/// `ssh://git@host[:port]/` — the prefix `kl:` expands to. The port is spelled only when it is not
+/// ssh's own, for the same reason `KL_GIT_SSH_PORT` is.
+pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
+    match port {
+        "" | "22" => format!("ssh://git@{host}/"),
+        p => format!("ssh://git@{host}:{p}/"),
+    }
 }
 
 
@@ -624,7 +664,16 @@ pub fn workspace_pod(
             ].into_iter().chain(ssh_mounts).collect()),
             // So `git` in the workspace uses the platform key and commits as the owner without
             // anyone configuring it. The same list feeds sshd's `SetEnv`.
-            env: Some(login_env(ws_id, &spec.name, &spec.owner, &spec.team, ctx.registry_host, ctx.api_url)),
+            env: Some(login_env(
+                ws_id,
+                &spec.name,
+                &spec.owner,
+                &spec.team,
+                ctx.registry_host,
+                ctx.api_url,
+                ctx.git_ssh_host,
+                ctx.git_ssh_port,
+            )),
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()

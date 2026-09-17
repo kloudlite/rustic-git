@@ -362,6 +362,8 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         system: None,
         registry_host: &ctx.registry_host,
         api_url: &ctx.api_url,
+        git_ssh_host: &ctx.git_ssh_host,
+        git_ssh_port: &ctx.git_ssh_port,
     };
     // The space's environment, resolved and converged before the pod: resolv.conf in place, the
     // namespace-level grant, the legacy per-pod grant collected (`controller::space`).

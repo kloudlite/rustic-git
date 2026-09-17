@@ -137,6 +137,12 @@ pub struct PodContext<'a> {
     /// `WS_API_URL` — the api tier's external base, fed to `login_env` as `KL_API_URL` so `kl`
     /// can reach `/v1` from inside the pod. Empty leaves the variable unset and `kl` fails closed.
     pub api_url: &'a str,
+    /// `WS_GIT_SSH_HOST`/`WS_GIT_SSH_PORT` — where this platform's git lives, the SAME pair the
+    /// seed init container clones with (`git_init_container`). Fed to `login_env` so a person and
+    /// a session inside the pod clone from the one host the agent was told about, rather than
+    /// each being configured with a second copy of it.
+    pub git_ssh_host: &'a str,
+    pub git_ssh_port: &'a str,
 }
 
 

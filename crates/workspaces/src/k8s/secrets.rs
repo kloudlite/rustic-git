@@ -109,8 +109,18 @@ pub fn ws_ssh_secret_name(id: &str) -> String {
 /// where the file is written instead (`agent::controller::keys`: 0600, owned by `kl`).
 /// `ClientAliveInterval 30` is not a nicety — Cloudflare idles a
 /// WebSocket after 100s, and the tunnel is the whole data path.
-pub fn sshd_config(ws_id: &str, name: &str, owner: &str, team: &str, registry_host: &str, api_url: &str) -> String {
-    let set_env = format!("SetEnv {}", login_env(ws_id, name, owner, team, registry_host, api_url).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
+#[allow(clippy::too_many_arguments)]
+pub fn sshd_config(
+    ws_id: &str,
+    name: &str,
+    owner: &str,
+    team: &str,
+    registry_host: &str,
+    api_url: &str,
+    git_ssh_host: &str,
+    git_ssh_port: &str,
+) -> String {
+    let set_env = format!("SetEnv {}", login_env(ws_id, name, owner, team, registry_host, api_url, git_ssh_host, git_ssh_port).iter().map(|e| format!("\"{}={}\"", e.name, e.value.as_deref().unwrap_or_default())).collect::<Vec<_>>().join(" "));
     format!(
         "Port 22\n\
          HostKey {SSHD_DIR}/ssh_host_ed25519_key\n\
@@ -154,13 +164,15 @@ pub fn ws_ssh_secret(
     public_line: &str,
     registry_host: &str,
     api_url: &str,
+    git_ssh_host: &str,
+    git_ssh_port: &str,
 ) -> Secret {
     Secret {
         metadata: meta(&ws_ssh_secret_name(id), Some(namespace), owner, "workspace", owner_ref),
         string_data: Some(BTreeMap::from([
             ("ssh_host_ed25519_key".to_string(), private_openssh.to_string()),
             ("ssh_host_ed25519_key.pub".to_string(), public_line.to_string()),
-            ("sshd_config".to_string(), sshd_config(id, name, owner, team, registry_host, api_url)),
+            ("sshd_config".to_string(), sshd_config(id, name, owner, team, registry_host, api_url, git_ssh_host, git_ssh_port)),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()

@@ -309,6 +309,8 @@ pub(crate) fn test_pod_ctx() -> kloudlite_workspaces::k8s::PodContext<'static> {
     kloudlite_workspaces::k8s::PodContext {
         default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef",
         api_url: "https://api.kloudlite.io",
+        git_ssh_host: "git.khost.dev",
+        git_ssh_port: "22",
         pool: "/pool",
         node_name: "node-a",
         owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {

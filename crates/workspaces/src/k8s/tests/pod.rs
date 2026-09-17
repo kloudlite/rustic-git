@@ -168,7 +168,7 @@ pub(crate) fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
     );
 
     // Unset means the host kernel, not a broken pod.
-    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io" };
+    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io", git_ssh_host: "git.khost.dev", git_ssh_port: "22" };
     assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None, None).unwrap().spec.unwrap().runtime_class_name.is_none());
 }
 
@@ -410,9 +410,44 @@ pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
 }
 
 
+/// Where git lives, told to the pod once: the same host the seed init container clones from, and
+/// the `kl:` alias a person types. Carried as environment because the `gitconfig` in the `user-key`
+/// Secret is the API tier's, and that tier is not told the git host.
+#[test]
+fn the_login_env_names_the_git_host_and_the_kl_alias() {
+    let env = login_env("w-abc123", "ws-1", "acme", "", "r", "", "git.khost.dev", "22");
+    let get = |n: &str| env.iter().find(|e| e.name == n).and_then(|e| e.value.clone());
+    assert_eq!(get("KL_GIT_SSH_HOST").as_deref(), Some("git.khost.dev"));
+    // ssh's own default is not restated: one more variable to keep equal to the listener.
+    assert_eq!(get("KL_GIT_SSH_PORT"), None);
+    assert_eq!(get("GIT_CONFIG_COUNT").as_deref(), Some("1"));
+    assert_eq!(get("GIT_CONFIG_KEY_0").as_deref(), Some("url.ssh://git@git.khost.dev/.insteadOf"));
+    assert_eq!(get("GIT_CONFIG_VALUE_0").as_deref(), Some("kl:"));
+
+    let odd = login_env("w-abc123", "ws-1", "acme", "", "r", "", "git.khost.dev", "2222");
+    let get = |n: &str| odd.iter().find(|e| e.name == n).and_then(|e| e.value.clone());
+    assert_eq!(get("KL_GIT_SSH_PORT").as_deref(), Some("2222"));
+    assert_eq!(get("GIT_CONFIG_KEY_0").as_deref(), Some("url.ssh://git@git.khost.dev:2222/.insteadOf"));
+
+    // Nothing configured: unset, so a clone says so rather than reaching a host nobody named.
+    let none = login_env("w-abc123", "ws-1", "acme", "", "r", "", "", "");
+    for v in ["KL_GIT_SSH_HOST", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"] {
+        assert!(!none.iter().any(|e| e.name == v), "{v} is set with no git host");
+    }
+}
+
+/// And an ssh login sees them: sshd hands a login none of the container's environment, so the
+/// `SetEnv` line is the only way `git clone kl:…` works in a shell somebody ssh'd into.
+#[test]
+fn the_sshd_set_env_carries_the_git_host() {
+    let cfg = sshd_config("w-abc123", "dev", "acme", "", "r", "", "git.khost.dev", "22");
+    assert!(cfg.contains("\"KL_GIT_SSH_HOST=git.khost.dev\""), "{cfg}");
+    assert!(cfg.contains("\"GIT_CONFIG_VALUE_0=kl:\""), "{cfg}");
+}
+
 #[test]
 pub(crate) fn the_login_env_redirects_every_cache_and_keeps_histfile_with_the_tree() {
-    let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io");
+    let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22");
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
     // In the tree, not on the node: history travels with a clone, a restore and a move.
     assert_eq!(get("HISTFILE"), "/home/kl/workspaces/ws-1/.cache/zsh/history");
@@ -422,7 +457,7 @@ pub(crate) fn the_login_env_redirects_every_cache_and_keeps_histfile_with_the_tr
     assert_eq!(get("KL_WORKSPACE_NAME"), "ws-1");
     assert_eq!(get("KL_TEAM"), "acme");
     assert_eq!(get("KL_API_URL"), "https://api.kloudlite.io");
-    let team = login_env("w-abc123", "ws-1", "alice", "acme", "registry.kloudlite.io", "");
+    let team = login_env("w-abc123", "ws-1", "alice", "acme", "registry.kloudlite.io", "", "git.khost.dev", "22");
     assert_eq!(team.iter().find(|e| e.name == "KL_TEAM").unwrap().value.as_deref(), Some("acme"));
     // Unset, not empty, without `WS_API_URL`: `kl` fails closed rather than dialling an empty host.
     assert!(!team.iter().any(|e| e.name == "KL_API_URL"), "an empty api url must leave the var unset");
@@ -541,10 +576,10 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert_eq!(ak.sub_path, None);
     assert_eq!(ak.read_only, Some(true));
     // Where sshd is told to look has to be where the mount actually puts it.
-    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
+    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22").contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")));
     // The mount's parent directories are the node's, not `kl`'s; without this every key is
     // refused as "bad ownership or modes".
-    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io").contains("StrictModes no\n"));
+    assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22").contains("StrictModes no\n"));
     // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
     let prelude = &cmd[2];
     // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
@@ -609,7 +644,7 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert_eq!(ok.ok(), Some(true), "prelude does not parse:\n{prelude}");
     // Non-interactive logins (`ssh ws cmd`, sftp, editors' remote helpers) read no rc file,
     // so the profile's PATH has to come from sshd itself.
-    let cfg = sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io");
+    let cfg = sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22");
     // Exactly one SetEnv line, carrying every variable: sshd ignores a second one.
     assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
     let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
@@ -665,7 +700,7 @@ pub(crate) fn a_custom_image_keeps_its_entrypoint_and_gets_no_sshd() {
 /// The host key Secret is per workspace and dies with it — a clone gets its own.
 #[test]
 pub(crate) fn a_workspaces_host_key_lives_and_dies_with_it() {
-    let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", "", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws", "registry.kloudlite.io", "https://api.kloudlite.io");
+    let s = ws_ssh_secret("ws-1", "dev", "ws-alice", "alice", "", &owner_ref(), "PRIVATE", "ssh-ed25519 AAAA ws", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22");
     assert_eq!(s.metadata.name.as_deref(), Some("ws-ssh-ws-1"));
     assert_eq!(s.metadata.namespace.as_deref(), Some("ws-alice"));
     assert_eq!(s.metadata.owner_references.unwrap()[0].controller, Some(true));
@@ -719,6 +754,8 @@ pub(crate) fn workspace_pod_refuses_a_name_that_is_not_a_name() {
         system: None,
         registry_host: "registry.kloudlite.io",
         api_url: "https://api.kloudlite.io",
+        git_ssh_host: "git.khost.dev",
+        git_ssh_port: "22",
     };
     for hostile in ["../../etc", "a; touch /pwned", "", "..", "x'\nchown 0 /", &"n".repeat(64)] {
         let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
@@ -771,6 +808,8 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
         system: None,
         registry_host: "registry.kloudlite.io",
         api_url: "https://api.kloudlite.io",
+        git_ssh_host: "git.khost.dev",
+        git_ssh_port: "22",
     };
     let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
         "owner": "alice", "team": "", "name": "my-ws", "region": "r1",

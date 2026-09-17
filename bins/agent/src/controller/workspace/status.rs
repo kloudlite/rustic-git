@@ -67,7 +67,7 @@ pub(crate) async fn ensure_ssh(
             .unwrap_or_default(),
         None => {
             let (private, public) = crate::sshkeys::generate().map_err(ReconcileErr)?;
-            let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, &w.spec.team, owner_ref, &private, &public, &ctx.registry_host, &ctx.api_url);
+            let s = k8s::ws_ssh_secret(id, &w.spec.name, ns, &w.spec.owner, &w.spec.team, owner_ref, &private, &public, &ctx.registry_host, &ctx.api_url, &ctx.git_ssh_host, &ctx.git_ssh_port);
             match secrets.create(&PostParams::default(), &s).await {
                 Ok(_) => public,
                 // Lost the race with our own earlier pass: the winner's key is the identity, and
