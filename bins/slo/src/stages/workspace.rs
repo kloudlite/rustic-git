@@ -394,11 +394,18 @@ async fn home_round_trip(c: &mut Ctx, id: &str) {
 /// not guaranteed to be the one with GNU coreutils. Its second field is centiseconds, so the
 /// resolution is 10 ms against a 200 ms target — coarse, and the honest ceiling of what every
 /// image can measure.
+///
+/// POSIX, not bash: `/bin/sh` is dash on the debian workspace image, and `10#` — bash's base
+/// prefix, which this used to strip the centiseconds' leading zero — is a syntax error there
+/// (`arithmetic expression: expecting EOF: " 10#123 "`, hourly 2026-09-17, every glibc run). The
+/// seconds and the centiseconds are combined arithmetically instead, and the ONE leading zero a
+/// two-digit field can carry is stripped by parameter expansion — otherwise `$(( ))` reads `05`
+/// as octal.
 fn home_script(want: &str) -> String {
     format!(
         r#"set -e
 want={want}
-up() {{ read -r a _ < /proc/uptime; echo "$(( 10#${{a%.*}}${{a#*.}} ))"; }}
+up() {{ read -r a _ < /proc/uptime; s=${{a%.*}}; c=${{a#*.}}; c=${{c#0}}; [ -n "$c" ] || c=0; echo "$(( s * 100 + c ))"; }}
 s=$(up)
 echo "$want" > /home/kl/.slo
 sync /home/kl/.slo
@@ -1165,6 +1172,22 @@ mod tests {
         assert!(EXEC_SCRIPT.contains("/proc/mounts"), "{EXEC_SCRIPT}");
     }
 
+    /// Every script in this file is handed to `/bin/sh`, which is DASH on the debian workspace
+    /// image — so a bash-only construct is a step that fails on that image alone and passes on
+    /// alpine, which is the shape of the 2026-09-17 `homes.rw.p95` failure. The source is read
+    /// rather than the scripts enumerated, because a new script is exactly what this must catch;
+    /// each needle is split so this test is not its own counter-example.
+    #[test]
+    fn no_bashism_reaches_a_sh_minus_c() {
+        // Comments are skipped: they NAME the constructs (that is how the reason survives), and
+        // only what a shell is handed matters.
+        let src: String =
+            include_str!("workspace.rs").lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        for bad in [concat!("10", "#"), concat!("[", "[ "), concat!("<<", "<"), concat!("$", "{!"), concat!("pipe", "fail")] {
+            assert!(!src.contains(bad), "{bad:?} is bash-only and /bin/sh is dash on the debian image");
+        }
+    }
+
     /// The read-back comparison is the whole point: an export that took the write and handed back
     /// somebody else's bytes must fail the step, not report a fast round trip.
     #[test]
@@ -1175,6 +1198,8 @@ mod tests {
         assert!(script.contains("/proc/uptime"), "{script}");
         // BusyBox `date` has no `%N`, so a nanosecond clock would fail on some images.
         assert!(!script.contains("%N"), "{script}");
+        // Centiseconds, combined arithmetically: `10#` is bash's base prefix and dash refuses it.
+        assert!(script.contains("s * 100 + c"), "{script}");
     }
 
     /// No kubeconfig is a deployment gap, not an SLO breach: the two ids that need one skip with a
