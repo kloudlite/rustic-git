@@ -265,7 +265,7 @@ const PLATFORM = [
   "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a machine to move work along — it is already running.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
-  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
+  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each works in its own copy of the workspace's working directory and leaves a branch or a pull request behind; its copy and its transcript stay until you close it with `ask_close`.",
   "More than one step? The plan tool is the FIRST call, before any other. Mark each item doing then done as you go, and anything you push to later as later with the reason. The person reads the plan, not your text.",
   "",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
@@ -664,7 +664,6 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
       workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
-      shared: Type.Optional(Type.Boolean({ description: "work in the caller's own workspace instead of its own copy: for a read-only or tiny task" })),
       kind: Type.Optional(Type.String({ description: 'work (default: it does something) or info (a question about the workspace\'s code or state that changes nothing)' })),
     },
     async (a) => {

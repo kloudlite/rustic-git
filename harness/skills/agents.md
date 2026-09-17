@@ -1,6 +1,6 @@
 ---
 name: agents
-description: Use when work can run in parallel, does not need this conversation's context, or is risky enough to want its own clone
+description: Use when work can run in parallel, does not need this conversation's context, or is risky enough to want its own working directory
 ---
 
 # Agents
@@ -8,7 +8,7 @@ description: Use when work can run in parallel, does not need this conversation'
 An agent is a fresh session with one task, reporting back once. It has no history of this
 conversation — whatever it needs goes in the brief — and it cannot start agents of its own.
 
-Start one with `ask {to: "agent", task: "…", name: "…"}`; close it with `kl_agent_close {name}`.
+Start one with `ask {to: "agent", task: "…", name: "…"}`; close it with `ask_close {name}`.
 Several run at once, and you carry on meanwhile. Its answer arrives as a message:
 `[from agent <name>] …`.
 
@@ -20,16 +20,21 @@ everything it has done before. A teammate, not an agent.
 
 ## Where an agent works
 
-Every agent gets its OWN copy of the workspace (`<ws>-eph-<hex>`), with the same packages — that is
-the default, so two agents changing files at once cannot trip over each other and a refactor that
-goes wrong is thrown away with the copy. Pass `shared: true` only for a read-only or tiny task in
-your own workspace.
+Every agent gets its own **tree**: a writable copy of the workspace's working directory, inside the
+same machine, cut the moment it is dispatched. Two agents changing files at once cannot trip over
+each other, a refactor that goes wrong is thrown away with the tree, and the caches are already
+warm, so a build there is as fast as one in the workspace itself. There is no second machine and
+nothing to wait for beyond the cut.
+
+Its ports are a block of its own; a command it runs is given `PORT` and `KL_PORT_RANGE`, and the
+rest belong to the workspace's own working directory.
 
 It commits on a branch named after itself and pushes (or opens a pull request), then reports with
-the branch or the pull. Its copy is deleted once it reports DONE or DONE_WITH_CONCERNS; a BLOCKED
-or NEEDS_CONTEXT agent keeps it until you answer or `ask_close {name}`.
+the branch or the pull. Its tree and its transcript STAY whatever the outcome: you read the report,
+open the diff, and close it with `ask_close {name}` once the work is merged and clear — which is
+the one thing that deletes them.
 
     ask {to: "agent", name: "upgrade", task: "Upgrade to Svelte 5 and make the tests pass. Answer with what broke and the branch."}
-    ask {to: "agent", name: "audit", shared: true, task: "List every route with no auth check."}
+    ask {to: "agent", name: "audit", task: "List every route with no auth check."}
 
 - Reporting back: the outcome, what changed for the person in capability terms, the `contracts:` line, and what is needed next — never a file, a path, a command or a digest, which stay in the tree you worked in.

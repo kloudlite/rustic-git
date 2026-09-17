@@ -678,14 +678,15 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
     assert.equal(seen[1].body.kind, "info");
     assert.match(info.content[0].text, /answers from a read-only copy without stopping/);
 
-    // An agent starts clean, is named, and works on this machine unless told otherwise.
-    // `shared` keeps it in the caller's own workspace; the default (its own clone) needs /v1 and
-    // is covered where a fake api exists.
-    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit", shared: true }, undefined, undefined, undefined);
+    // An agent starts clean, is named, and works on this machine unless told otherwise. It works
+    // in a TREE of that machine, which the BENCH cuts — the extension asks for an agent and nothing
+    // else, so there is no /v1 call on this path at all (spec §4.3).
+    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
     assert.equal(seen[2].url, "/agents");
     assert.match(seen[2].body.name, /^audit-[a-z0-9]{6}$/);
     assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "bench-ada", "s-1"]);
     assert.match(agent.content[0].text, /^agent audit-[a-z0-9]{6} started$/);
+    assert.ok(!seen.some((x) => x.url.includes("/clone")), JSON.stringify(seen.map((x) => x.url)));
   } finally {
     restore();
     srv.close();
