@@ -11,9 +11,11 @@ bench pod. Three kinds of session, three tool sets. The rulings below are the ow
 
 ## The rules
 
-1. **A bench session has no hands in its own pod.** No filesystem, no shell, no process tool.
-   It is spawned with `--no-builtin-tools` and loads only `pi/kloudlite.ts`. Anything that would
-   run a command in the bench pod is a defect, not a feature request.
+1. **Every session's hands are its own workspace's, and only its own.** A workspace session's
+   read/write/edit/bash/grep/find/ls run on that workspace's tool server. The bench is a workspace
+   too: its session gets the same seven tools pointed at its OWN workspace container
+   (`KL_TOOLS_ADDRESS=127.0.0.1:7788`). Nothing runs in the bench container itself: pi's builtins
+   stay off (`--no-builtin-tools`), `background.ts`/`process.ts` are gone.
 2. **A bench session never touches a workspace's resources directly.** No workspace tool-server
    calls from the bench (no `kl_ws_*`, no read/write/exec by workspace id). Every mutation meant
    for a workspace — files, packages, commands, anything — is a MESSAGE queued into that
@@ -31,7 +33,7 @@ bench pod. Three kinds of session, three tool sets. The rulings below are the ow
 5. **The model does not know what it runs on.** `tellItWhereItStands` REPLACES the system prompt:
    it is "the Kloudlite harness"; no "pi", no `/opt/harness`, no coding-agent boilerplate. The
    btw fork gets the same identity with `--no-tools`.
-6. **A workspace session's hands are its own workspace only.** `workspace-tools.ts` maps
+6. **Every workspace session, the bench included, manages its space's environment** — `kl_env_*`, `kl_environment*`, service add/remove, `kl_intercept` (any service to any workspace of the space). `workspace-tools.ts` maps
    read/write/edit/bash/grep/find/ls to that workspace's tool server; `kloudlite.ts` in workspace
    mode adds only `kl_pkg_*` for that machine. `--tools` is a strict allow-list over extension
    tools too, so a new own-workspace tool must be added to `WORKSPACE_TOOLS` or it cannot be called.
