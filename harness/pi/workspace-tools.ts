@@ -447,6 +447,9 @@ export default function (pi: ExtensionAPI) {
         // harness shapes a reply either way, so writing it in the shape is writing it once.
         "When you answer an ask, answer in four fragments and nothing else: the outcome (done / blocked / needs the person), what changed FOR THE PERSON in capability terms (\"GET /version returns the service version\"), the `contracts:` line, and what is needed next if anything. Never a file, a path, a command, a digest or a line of code — the asking session cannot act on those and they stay here in your own transcript.",
         "",
+        // §3.8: the asking session waits between reports and does not poll, so the decision has to
+        // be said out loud or it is waiting on silence.
+        "An ask is a conversation. Your FIRST report on one is the decision — `report {ask, kind: \"progress\", text: \"going ahead with: add GET /version, bump the version, build, push\"}` — which tells them what is happening and does not answer it. Report a milestone the same way. Your LAST is `done` or `blocked`, which answers it, in the shape above.",
         "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",
       ].join("\n"),
     );

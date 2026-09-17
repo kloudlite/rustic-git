@@ -52,7 +52,9 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     // those are `workspace-tools.ts`'s, because they go to a tool server rather than to /v1.
     // `kl_pkg_*` and `kl_env_switch`/`_clear` are a WORKSPACE's own machine's; a bench session has
     // no machine, so it does not register them either (spec §3.1).
-    assert.deepEqual(registered, TOOLS.map((t) => t.name).filter((n) => !IDE_TOOLS.includes(n)).sort());
+    // `report` answers an ask this session is HOLDING; a bench session holds none — it is the one
+    // asking (spec §3.8).
+    assert.deepEqual(registered, TOOLS.map((t) => t.name).filter((n) => !IDE_TOOLS.includes(n) && n !== "report").sort());
     // Registered is not active: a session starts with what it needs and searches for the rest.
     assert.deepEqual(activeNow().slice().sort(), BENCH_ALWAYS_ON.slice().sort());
     assert.equal(new Set(registered).size, registered.length, "no tool is registered twice");
@@ -1603,4 +1605,58 @@ test("a list that answers nothing says there is nothing, not that it does not ex
   assert.match(sanitizeError("kl_workspace_start", 404, { error: "not found" }), /does not exist; check the name with the person/);
   // And nothing about the platform's shape crosses either way.
   for (const leak of ["404", "http", "/v1"]) assert.ok(!sanitizeError("kl_images", 404, { error: "GET /v1/images 404" }).includes(leak), leak);
+});
+
+/**
+ * An ask is a small conversation (spec §3.8, the owner's own words): the workspace decides, SAYS so,
+ * builds, and only then answers. A progress report leaves the ask open; done settles it once.
+ */
+test("a report says the decision without answering, and done answers once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-report-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    // The DECISION: relayed as one line, and the ask is still open.
+    const said = await bench.report(a.session, a.exchange, "progress", "going ahead with: add GET /version, bump the version, build, push");
+    assert.equal(said.settled, false);
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "running", "a decision is not an answer");
+    const heard = (await bench.messages(asker)).messages as { content: unknown }[];
+    const text = heard.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
+    assert.match(text, /going ahead with: add GET \/version/);
+    // It is a note on the ask, not a second ask.
+    assert.equal(bench.exchanges.bySession(asker).filter((e) => e.state === "note").length, 1);
+
+    // DONE settles it, once, with the shaped reply.
+    const end = await bench.report(a.session, a.exchange, "done", "the service reports its version\ncontracts: GET /version — none → {version} — api");
+    assert.equal(end.settled, true);
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "done");
+    // And a second `done` has nothing left to answer.
+    await assert.rejects(bench.report(a.session, a.exchange, "done", "again"), /no open ask/);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the ask a workspace receives is the person's words, not a tool name", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-intent-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const words = "add a version endpoint and push it";
+    const a = await bench.ask("api", words, asker);
+    const got = (await bench.messages(a.session)).messages as { role: string; content: unknown }[];
+    const first = String(got.find((m) => m.role === "user")!.content);
+    // The tag routes it; everything after the tag is what the person said, unrewritten.
+    assert.match(first, new RegExp(`^\\[ask ${a.exchange} from [^\\]]+\\] ${words}$`), first);
+    for (const invented of ["kl_container_build", "kl_workspace", "context:", "Please"]) assert.ok(!first.includes(invented), `${invented}: ${first}`);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

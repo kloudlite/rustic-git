@@ -733,6 +733,30 @@ export function imageTools(reg: ReturnType<typeof makeReg>) {
   );
 }
 
+/**
+ * Reporting on an ask this session is holding (spec §3.8). An ask is a small conversation: the
+ * first report is the DECISION — "going ahead with: add GET /version, bump to 0.1.0, build, push" —
+ * which reaches the asking session as one line and answers nothing; `done` or `blocked` answers it.
+ * The owner asked for exactly this shape so a bench is not left guessing between "queued" and a
+ * finished build (2026-09-18).
+ */
+export function reportTool(reg: ReturnType<typeof makeReg>) {
+  reg(
+    "report",
+    {
+      ask: Type.Optional(Type.String({ description: "the ask id from its `[ask <id> …]` tag; absent when only one is open" })),
+      kind: Type.String({ description: "progress (your decision, or a milestone — it does not answer the ask), done, or blocked" }),
+      text: Type.String({ description: "one fragment: what you are going ahead with, or the outcome. No files, paths, commands or digests." }),
+    },
+    async (a) => {
+      const kind = a.kind === "done" || a.kind === "blocked" ? a.kind : "progress";
+      const r = await benchCall("POST", "/reports", { from: process.env.KL_SESSION, ask: a.ask ?? "", kind, text: a.text });
+      if (!r.ok) return { ...text(String(r.data?.error ?? "the report did not reach the asking session")), isError: true };
+      return text(kind === "progress" ? `told them: ${a.text}` : `${kind}: the ask is answered`);
+    },
+  );
+}
+
 /** The plan this session is working to: written once, ticked as it lands. */
 export function planTools(reg: ReturnType<typeof makeReg>) {
   const publish = (ctx: any, v: unknown) => ctx?.ui?.setWidget?.("harness:plan", [JSON.stringify(v)]);
@@ -1301,6 +1325,8 @@ export default function (pi: ExtensionAPI) {
     // finds one (owner, 2026-09-17).
     lookAround(reg);
     architectureTools(reg);
+    // An ask is a conversation: its decision, then its result (§3.8).
+    reportTool(reg);
     // An agent is a session with one task: it reports to whoever started it and starts nobody.
     if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
     searchTools(reg, pi);

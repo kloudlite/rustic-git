@@ -393,6 +393,37 @@ export class Bench {
   }
 
   /**
+   * A workspace session reporting on an ask it holds (spec §3.8). An ask is a small conversation,
+   * not one reply: the first report is the DECISION ("going ahead with …"), relayed to the asking
+   * session as a one-line update and settling nothing; the last is `done` or `blocked`, which
+   * settles it with the shaped reply. The owner's own words: "it decides the change and tells the
+   * main session it is going ahead with a specific change; then it builds, and once built and
+   * pushed it informs the main agent that it is done."
+   */
+  async report(session: string, ask: string, kind: "progress" | "done" | "blocked", text: string): Promise<{ ask: string; kind: string; settled: boolean }> {
+    const queue = this.asked.get(session) ?? [];
+    const a = queue.find((x) => x.exchange === ask) ?? (queue.length === 1 ? queue[0] : undefined);
+    if (!a) throw new Error(`no open ask ${ask} here`);
+    const said = String(text ?? "").trim();
+    if (!said) throw new Error("a report needs something to say");
+    if (kind === "progress") {
+      // The ask stays running: a decision is not an answer, and the asking session waits for one.
+      const row = this.exchanges.record({ id: `${a.exchange}-note-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: said.slice(0, 2000), state: "note", ref: a.exchange });
+      this.write(() => row);
+      this.emit({ type: "exchange", row });
+      if (this.sessions.get(a.from)) await this.send(a.from, `[${a.workspace} ${a.exchange}] ${brief(said, a.name ?? a.workspace)}`).catch(() => undefined);
+      return { ask: a.exchange, kind, settled: false };
+    }
+    // `done` and `blocked` settle it exactly as a tagged reply does, through the one path that
+    // pops the queue, records the answer and wakes the asking session.
+    await this.deliver(session, [
+      { role: "user", content: `[ask ${a.exchange} from ${a.from}] ${a.workspace}` },
+      { role: "assistant", content: `[reply ${a.exchange}] ${kind === "blocked" ? `BLOCKED — ${said}` : said}` },
+    ]);
+    return { ask: a.exchange, kind, settled: true };
+  }
+
+  /**
    * A workspace session finished a turn: the answer goes back into the session that asked for it,
    * so the person sees one conversation rather than having to watch the other tab.
    *

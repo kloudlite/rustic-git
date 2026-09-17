@@ -21,7 +21,7 @@ export type ToolSpec = {
 };
 
 /** Which tools never ask: a message to another session, and this machine's own packages. */
-const UNGATED = new Set(["ask", "ask_close", "plan", "skill", "tool_search", "memory", "question", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
+const UNGATED = new Set(["ask", "ask_close", "plan", "skill", "tool_search", "memory", "question", "report", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
 
 /** Whether a call has to be asked about first: it changes somebody's platform state (spec §9). */
 export function gated(name: string): boolean {
@@ -43,6 +43,8 @@ const withList = (label: string, v: unknown) => (list(v) ? ` with ${label}${list
 export const TOOLS: ToolSpec[] = [
 
   { name: "ask", group: "workspace", summary: "Ask a workspace's own session to do something, or start a fresh agent with one task.", effect: "write" },
+
+  { name: "report", group: "workspace", summary: "Report on an ask you are holding: `progress` is your decision or a milestone and does not answer it, `done` or `blocked` answers it. The first report says what you are going ahead with.", effect: "read" },
 
   { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
 

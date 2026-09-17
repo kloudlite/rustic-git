@@ -37,7 +37,7 @@ const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
 // What only a session WITH a machine can run. `kl_images` is a registry read and `kl_container_*`
 // are an ask from the bench (`imageTools`), so those names exist in both modes and differ only in
 // where the work happens.
-export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone"];
+export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone", "report"];
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 /** `info`: a READ-ONLY fork that answers one question about a workspace, on that workspace's tool server. */

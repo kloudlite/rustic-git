@@ -262,6 +262,20 @@ export function serve(
         bench.watchProc(b.from, p[1], String(b.pattern ?? ""));
         return send(res, 202, { watching: p[1], pattern: b.pattern });
       }
+      /**
+       * A workspace session reporting on an ask it holds (spec §3.8): `progress` is its decision and
+       * settles nothing, `done`/`blocked` settle it. Loopback only, like every other extension route.
+       */
+      if (m === "POST" && u.pathname === "/reports") {
+        const b = await body(req);
+        if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
+        const kind = b.kind === "done" || b.kind === "blocked" ? b.kind : "progress";
+        try {
+          return send(res, 202, await bench.report(b.from, String(b.ask ?? ""), kind, String(b.text ?? "")));
+        } catch (e) {
+          return send(res, 400, { error: (e as Error).message });
+        }
+      }
       if (m === "POST" && u.pathname === "/import") {
         const b = await body(req);
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));
