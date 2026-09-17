@@ -134,3 +134,46 @@ test("a question to the person carries its own options, and the answer is the to
     await t.down();
   }
 });
+
+/**
+ * D3/D4 (api-test-report). Two children mint the same tool call id (`call_00_…`), the card was
+ * keyed by that id alone, and `if (!this.proposals.has(p.id))` DROPPED the second — so s-14's card
+ * carried s-13's session, the person's "yes" released the wrong tool call, and s-14's create was
+ * told "declined by the person" while the workspace had in fact been made. The person was told the
+ * opposite of the truth.
+ */
+test("two sessions raising the same tool call id get two cards", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-collide-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const a = bench.sessions.create({ model: "fake/m" }).id;
+    const b = bench.sessions.create({ model: "fake/m" }).id;
+    const card = (session: string) =>
+      (bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+        type: "extension_ui_request",
+        method: "setWidget",
+        widgetKey: "harness:proposal",
+        widgetLines: [JSON.stringify({ id: "call_00_same", tool: "kl_workspace_create", args: { name: "t-go" }, summary: "Create workspace t-go" })],
+      });
+    card(a);
+    card(b);
+    const open = bench.openProposals();
+    assert.equal(open.length, 2, "one card each: the second is not dropped into the first");
+    assert.deepEqual(open.map((p) => p.session).sort(), [a, b].sort(), "and each card names the session that raised it");
+
+    // D4: each answer releases its OWN session's tool call. The person answered yes, the workspace
+    // was created, and the bench said "Declined" — because one card had absorbed both waits.
+    const forA = open.find((p) => p.session === a)!;
+    const forB = open.find((p) => p.session === b)!;
+    assert.notEqual(forA.id, forB.id, "two cards, two ids");
+    const waitingB = bench.waitProposal(forB.id, 5_000);
+    bench.answerProposal(forA.id, "no");
+    assert.equal(bench.answerProposal(forB.id, "yes").answer, "yes", "B's answer is B's own");
+    assert.equal(await waitingB, "yes", "and B's tool call is released with it, not with A's");
+    assert.equal(bench.openProposals().length, 0, "both settled");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

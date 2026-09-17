@@ -16,6 +16,12 @@ import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 
+/**
+ * A card is identified by the session that raised it AND the id its child minted: two children mint
+ * the same tool call id, and one key for both collapsed two cards into one (D3).
+ */
+const proposalKey = (session: string, id: string) => `${session}~${id}`;
+
 /** A model pick the provider has never heard of: refused with 409, naming what it does carry. */
 export class NoSuchModel extends Error {
   readonly known: string[];
@@ -149,7 +155,7 @@ export class Bench {
   /** Sessions being summarised: one at a time, and never twice for the same growth. */
   private compacting = new Set<string>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
-  private proposals = new Map<string, { session: string; tool: string; summary: string; preview?: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
+  private proposals = new Map<string, { session: string; raw: string; tool: string; summary: string; preview?: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -444,8 +450,19 @@ export class Bench {
           // `preview` is what the card shows under its line — a diff, the file, the command — so a
           // person asked to agree to an edit can read the edit (owner, 2026-09-18).
           const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string; preview?: string; question?: unknown };
-          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
-          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary, preview: p.preview, question: p.question } });
+          // Two children mint the SAME tool call id (`call_00_…`). Keyed by that alone, the second
+          // session's card was dropped — `if (!has(p.id))` — and the surviving card carried the
+          // FIRST session's id: the person's "yes" released the wrong tool call, and the session
+          // that actually asked was told "declined by the person" while its workspace had been
+          // created (api-test-report D3/D4). The key is the session AND the id; `raw` is what the
+          // extension waits on, which is still its own id.
+          // The id the DESKTOP answers by stays the child's own while only one session holds it —
+          // the contract the routes and every window already use. A second session raising the same
+          // id gets the scoped key, so both cards exist and each answer finds its own tool call.
+          const taken = [...this.proposals.entries()].some(([k, x]) => x.raw === p.id && x.session !== id && !x.answer && k === p.id);
+          const key = taken ? proposalKey(id, p.id) : p.id;
+          if (!this.proposals.has(key)) this.proposals.set(key, { session: id, raw: p.id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
+          this.emit({ type: "proposal", row: { id: key, session: id, tool: p.tool, args: p.args, summary: p.summary, preview: p.preview, question: p.question } });
         }
         if (ev.widgetKey === "harness:procs") {
           const ws = this.workspaceOf(id);
@@ -1133,18 +1150,21 @@ export class Bench {
    * question is a NO — the whole point is that nothing changes without somebody saying yes.
    */
   waitProposal(id: string, capMs: number, signal?: AbortSignal): Promise<string> {
-    const p = this.proposals.get(id);
-    if (!p) return Promise.resolve("no");
+    // The extension waits on the id IT minted; the card is keyed by session + that id. An exact key
+    // wins (the desktop answers by key), else the one card holding this raw id.
+    const key = this.proposals.has(id) ? id : [...this.proposals.entries()].find(([, x]) => x.raw === id && !x.answer)?.[0];
+    const p = key ? this.proposals.get(key) : undefined;
+    if (!p || !key) return Promise.resolve("no");
     if (p.answer) return Promise.resolve(p.answer);
     return new Promise((resolve) => {
       const done = (a: string) => {
         clearTimeout(timer);
-        this.proposals.get(id)?.wake.splice(0);
+        this.proposals.get(key)?.wake.splice(0);
         resolve(a);
       };
-      const timer = setTimeout(() => (this.answerProposal(id, "no"), done("no")), capMs);
+      const timer = setTimeout(() => (this.answerProposal(key, "no"), done("no")), capMs);
       timer.unref?.();
-      p.wake.push(() => done(this.proposals.get(id)?.answer ?? "no"));
+      p.wake.push(() => done(this.proposals.get(key)?.answer ?? "no"));
       // A client that went away takes its question with it; the tool call is over either way.
       signal?.addEventListener("abort", () => done("no"), { once: true });
     });
@@ -1152,8 +1172,11 @@ export class Bench {
 
   /** A person's answer. Idempotent: the first answer stands, and a second changes nothing. */
   answerProposal(id: string, answer: string): { id: string; answer: string } {
-    const p = this.proposals.get(id);
-    if (!p) throw new Error(`no proposal ${id}`);
+    // The desktop answers by the key it was given; a caller holding the child's own id (an older
+    // window, a script) is resolved to the one unanswered card carrying it.
+    const key = this.proposals.has(id) ? id : [...this.proposals.entries()].find(([, x]) => x.raw === id && !x.answer)?.[0];
+    const p = key ? this.proposals.get(key) : undefined;
+    if (!p || !key) throw new Error(`no proposal ${id}`);
     p.answer ??= answer;
     // A no means the item the turn was on is not happening: the plan says so, with the reason.
     if (p.answer === "no") this.plan(p.session, { type: "declined" });
@@ -1161,9 +1184,9 @@ export class Bench {
     // call is awaiting, and it resolves with exactly this. It used to ALSO be sent as a prompt, so
     // the model was told twice and pi wrote a `yes` user message into the session file, which every
     // reopen then replayed under the card that already said it (owner, on the transcript).
-    this.emit({ type: "proposal", row: { id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
+    this.emit({ type: "proposal", row: { id: key, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
     for (const w of p.wake.splice(0)) w();
-    return { id, answer: p.answer };
+    return { id: key, answer: p.answer };
   }
 
   /** What is still being asked, for a window that opened after the question did. */
