@@ -2099,3 +2099,41 @@ test("the report's duplicate ask joins the open one instead of redoing its write
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * D9 (api-test-report): `/tasks` for s-14 carried `kl_workspace_progress` TWICE for one ask — the
+ * session polled because nothing told it the ask would wake it. Both halves of that answer are
+ * held here: what progress says while an ask is open, and that the reply arrives on its own.
+ */
+test("the report's stale case: one ask, no second progress poll", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url!.startsWith("/exchanges")) return void res.end(JSON.stringify([{ dir: "out", state: "running", text: "build and push backend:latest", ts: Date.now() - 58_000 }]));
+    if (req.url === "/procs") return void res.end(JSON.stringify([]));
+    res.end(JSON.stringify({ total: 0, messages: [] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-d9-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as never as { execute: (...a: unknown[]) => Promise<{ content: { text: string }[] }> }).execute("c1", { id: "ws-632cf9f23d9f2fbf" }, undefined, undefined, undefined)).content[0].text;
+
+    // One line for the ask: its state, its age, its first line — never the ask's body.
+    assert.match(out, /running for \d+s: build and push backend:latest/);
+    // And the reason there is no second call: it wakes the session itself.
+    assert.match(out, /you will be told when it answers — do not poll/);
+
+    // The identity says the same thing, so the model is not relying on one tool's wording.
+    assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it/);
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
