@@ -79,6 +79,11 @@ test("the system prompt is the harness's own, not the agent CLI's", async () => 
     assert.match(prompt, /Kloudlite harness/);
     assert.match(prompt, /kl_workspace_ask/);
     assert.match(prompt, /kl_pkg_add/);
+    // The rule the fleet needed: a model asked what it could do ran a destroy to find out.
+    assert.match(prompt, /Never call a tool whose effect is write or destroy unless the person asked/);
+    assert.match(prompt, /describe your tools by name; do not run them/);
+    // Every mode is told it: a workspace session's writes land on somebody's real machine too.
+    assert.match(identity("its own hands here"), /Never call a tool whose effect is write or destroy/);
   } finally {
     restore();
   }

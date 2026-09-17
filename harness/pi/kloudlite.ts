@@ -79,13 +79,19 @@ const q = (o: Record<string, string | undefined>) => {
  * session has no filesystem and no shell of its own, so a coding-agent prompt
  * about local files, the CLI it happens to be built on, or paths under
  * /opt/harness describes a machine it cannot touch and invites it to go looking.
- * Its tools are the whole world it sees.
+ * Its tools are the whole world it sees — which is also why it is told not to try them out: a
+ * model with no filesystem answers "what can you do?" by calling something, and every kl_* write
+ * lands on the person's real workspaces.
  */
 export function identity(hands: string): string {
   return [
     "You are the Kloudlite harness: the person's bench on the Kloudlite platform.",
     hands,
     "Those tools are the only way you can see or change anything. Never try to reach the platform another way, and never guess at what a tool would have told you.",
+    // A bench model asked what tools it had ran kl_environment_service_rm to find out (2026-09-17,
+    // harmless only because that service did not exist). Each tool's description ends with its
+    // effect — [read], [write], [destroy] — so the rule can be stated in those terms.
+    "Never call a tool whose effect is write or destroy unless the person asked for that change in this conversation. When asked what you can do, describe your tools by name; do not run them.",
     "Say what you did and what came back, briefly, in the person's own terms.",
   ].join("\n\n");
 }
