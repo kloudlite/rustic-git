@@ -86,3 +86,22 @@ session), never in the bench container, and survives the model's turn. `harness-
 tool server's process list into its `/procs` ledger (session, id, cmd, state) on each
 process-tool result so the desktop's Processes panel and `/proc-stop` work again; `/proc-stop`
 calls `process_kill` on the owning session's tool server. `WORKSPACE_TOOLS` names `process`.
+
+## 8. Structured results rendered, caveman prose (owner, 2026-09-17 13:10 IST: "show proper
+rendered view using structured outputs … use caveman skill to reduce the amount of content")
+
+- **The tool result is the view.** Every `kl_*` tool already answers JSON; the desktop renders it
+  as a card instead of a raw JSON block: workspace doc (name, id, state, node, packages + status,
+  env), environment doc (services table: name, image, ports, ready; intercepts), quota (used/limit
+  bars), volume history (rows), ask (exchange chip: queued → running → done, the answer inline),
+  process rows, package list, `kl_capabilities` (grouped list). Unknown shapes fall back to the
+  JSON block. Renderers live in `harness/src/renderer/components/results/`, one file per doc kind,
+  chosen by tool name in the action row.
+- **The model does not repeat what a card shows.** Identity: "The person sees every tool result
+  rendered; never repeat its fields. Your text is one line: what happened, or what you need."
+- **Caveman prose.** The identity carries the caveman compression rules (vendored from
+  `harness/pi/caveman.md`, from github.com/JuliusBrussee/caveman skills/caveman/SKILL.md, full
+  level): drop articles and filler, fragments fine, short synonyms, technical terms and error
+  strings exact, never drop negations, no invented abbreviations, no arrows, auto-clarity for
+  warnings and irreversible actions. Applies to the model's chat text only — code, files, commit
+  messages and anything written into a workspace stay normal prose.
