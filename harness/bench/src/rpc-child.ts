@@ -55,6 +55,9 @@ export class RpcChild {
   private buf = "";
   private seq = 0;
   private waiting = new Map<string, { resolve: (r: PiEvent) => void; reject: (e: Error) => void }>();
+  /** False until pi has answered once; commands sent before that are held rather than lost. */
+  private ready = false;
+  private pending: string[] = [];
 
   constructor(id: string, opts: ChildOpts, onEvent: (ev: PiEvent) => void) {
     this.id = id;
@@ -130,6 +133,8 @@ export class RpcChild {
 
   start(): void {
     if (this.child) return;
+    this.ready = false;
+    this.pending.length = 0;
     const o = this.opts;
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     // The image installs the whole harness tree at /opt/harness, so the relative defaults resolve there; the env names another layout.
@@ -148,7 +153,8 @@ export class RpcChild {
     // (owner, 2026-09-18).
     const env = { ...process.env, KL_SESSION: this.id, ...(o.effort ? { PI_EFFORT: o.effort } : {}), ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}),
       ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}), ...childTraceEnv() };
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
+    const c2 = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
+    const child = c2;
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));
     let errTail = "";
@@ -159,11 +165,17 @@ export class RpcChild {
     });
     child.on("exit", (code) => {
       this.child = undefined;
+      this.ready = false;
+      this.pending.length = 0;
       const err = new Error(`pi exited (${code})`);
       for (const w of this.waiting.values()) w.reject(err);
       this.waiting.clear();
       this.onEvent({ type: "exit", code, stderr: errTail.trim().split("\n").filter((l) => l.trim()).slice(-3).join(" · ") });
     });
+    // The child primes ITSELF: every kind of child gets one `get_state`, so the buffer above always
+    // has something that proves readiness. A fork is created directly rather than through `open()`,
+    // and waiting on a `get_state` nobody sent would hold its commands forever.
+    if (!this.ready) c2.stdin!.write(JSON.stringify({ type: "get_state", id: `c${++this.seq}` }) + "\n");
     this.onEvent({ type: "started", host: "bench", model: o.model, resumed: !!o.file, forked: !!o.fork });
   }
 
@@ -210,14 +222,33 @@ export class RpcChild {
     });
   }
 
+  /**
+   * A prompt sent while the child is still SPAWNING was dropped without a trace: written to stdin
+   * before pi had a session to answer with, it left no queue row and no error, and the caller's
+   * promise resolved empty (api-test-report D2). A warm child kept order correctly, which is what
+   * isolated the window to the cold start.
+   *
+   * Everything is queued until pi answers its first command — `open()` sends `get_state` at spawn,
+   * so the wait is one round trip — and then flushed in arrival order.
+   */
   send(cmd: Record<string, unknown>): Promise<PiEvent> {
     const c = this.child;
     if (!c) return Promise.reject(new Error("pi is not running"));
     const id = `c${++this.seq}`;
     return new Promise((resolve, reject) => {
       this.waiting.set(id, { resolve, reject });
-      c.stdin!.write(JSON.stringify({ ...cmd, id }) + "\n");
+      const line = JSON.stringify({ ...cmd, id }) + "\n";
+      // `get_state` is what proves the child is up, so it goes first and never waits on itself.
+      if (this.ready || cmd.type === "get_state") return void c.stdin!.write(line);
+      this.pending.push(line);
     });
+  }
+
+  /** Whatever arrived before pi could answer, in the order it was sent. */
+  private flush(): void {
+    const c = this.child;
+    if (!c) return;
+    for (const line of this.pending.splice(0)) c.stdin!.write(line);
   }
 
   private feed(chunk: string) {
@@ -233,6 +264,11 @@ export class RpcChild {
       } catch {
         this.onEvent({ type: "stderr", text: line });
         continue;
+      }
+      // pi has answered: it has a session and will read what follows. Anything held goes now.
+      if (ev.type === "response" && !this.ready) {
+        this.ready = true;
+        this.flush();
       }
       const w = ev.type === "response" && ev.id ? this.waiting.get(ev.id) : undefined;
       if (w) {

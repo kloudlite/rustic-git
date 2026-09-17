@@ -79,3 +79,44 @@ test("tools() reads the argv: every session its own machine's plus the platform,
   assert.ok(ws.includes("bash") && ws.includes("kl_pkg_add") && ws.includes("tool_search"), ws.join(","));
   assert.deepEqual(new RpcChild("b-1", { dir, model: "m", fork: "/tmp/x.jsonl" }, () => undefined).tools(), []);
 });
+
+/**
+ * D2 (api-test-report 1.6). A prompt sent while the child was still spawning was dropped without a
+ * trace: ALPHA landed, BETA one second later left no transcript row, no queue row and no error, and
+ * the caller's promise resolved empty. A warm child kept order correctly, which isolated the window
+ * to the cold start — commands were written to stdin before pi had a session to answer with.
+ */
+test("two prompts on a cold child both land, in order", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-cold-"));
+  const seen: PiEvent[] = [];
+  const c = new RpcChild("s-cold", { dir, model: "fake/m", bin: FAKE }, (ev) => seen.push(ev));
+  try {
+    c.start();
+    // Straight away, with no wait for readiness: this is the window BETA fell into.
+    const a = c.send({ type: "prompt", message: "say ALPHA" });
+    await new Promise((r) => setTimeout(r, 1000));
+    const b = c.send({ type: "prompt", message: "say BETA" });
+    await Promise.all([a, b]);
+    // The command is ACKED before its turn streams: wait for both turns to end, or the second
+    // message_update has simply not arrived yet and the assertion is about timing, not delivery.
+    await until(() => seen.filter((e) => e.type === "agent_end").length >= 2, 5_000, "both turns to end");
+    const said = seen.filter((e) => e.type === "message_update").map((e) => JSON.stringify(e));
+    assert.ok(said.some((t) => t.includes("ALPHA")), "ALPHA landed");
+    assert.ok(said.some((t) => t.includes("BETA")), "and so did BETA: neither is dropped");
+    const order = seen.filter((e) => e.type === "message_update").map((e) => (JSON.stringify(e).includes("ALPHA") ? "A" : "B"));
+    assert.deepEqual(order, ["A", "B"], "in the order they were sent");
+
+    // The stand-in pi attaches its stdin listener synchronously, so it cannot lose an early write
+    // the way the real one does — this half of the test would pass without the buffer. What the
+    // buffer guarantees is asserted directly: nothing is written before pi has answered once, and
+    // the child primes ITSELF so a fork (created outside `open()`) is never held forever.
+    const src = fs.readFileSync(new URL("../src/rpc-child.ts", import.meta.url), "utf8");
+    assert.match(src, /if \(this\.ready \|\| cmd\.type === "get_state"\) return void c\.stdin!\.write\(line\);/);
+    assert.match(src, /this\.pending\.push\(line\);/, "everything else is held");
+    assert.match(src, /if \(ev\.type === "response" && !this\.ready\)/, "and released when pi answers");
+    assert.match(src, /if \(!this\.ready\) c2\.stdin!\.write\(JSON\.stringify\(\{ type: "get_state"/, "every child primes itself");
+  } finally {
+    await c.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
