@@ -10,12 +10,17 @@
 //! `{"error":"…"}` and then close. No session id, no scrollback replay, no reconnect: a closed
 //! socket is a `SIGHUP` to the shell's process group. One socket, one shell, one life.
 //!
-//! A `?session=<name>` runs `tmux -L kl new-session -A -s <name>` under the terminal instead of a
-//! bare login shell, so a dropped socket detaches a client rather than hanging a shell up and a
-//! reconnect with the same name lands in the same session with tmux redrawing its scrollback.
+//! A `?session=<name>` is a PTY this process KEEPS after the socket drops (spec §7 of
+//! `2026-09-17-terminals-tmux-and-tabs-design.md`): output goes to a per-session ring
+//! (`PTY_RING_BYTES`), a reconnect with the same name replays the ring and then streams live, and a
+//! second attach detaches the first. tmux used to own this and is gone — it owned scrollback, the
+//! mouse and a prefix key, which is what made the terminal feel foreign; xterm.js owns them now.
 //! Without a name the route keeps the one-shot shell, which is what `exec`-style callers and the
-//! probe want. `/stream/pty/sessions` lists and `DELETE /stream/pty/sessions/{name}` kills; the
-//! server itself is the workspace container's, saved by tmux-resurrect into `{ws}/.cache/tmux`.
+//! probe want. `/stream/pty/sessions` lists and `DELETE /stream/pty/sessions/{name}` kills.
+//!
+//! Processes never survive the pod, but TEXT does: the ring is flushed to
+//! `{ws}/.cache/shell/<name>.log` on detach and every 30 s, and a session created under a name that
+//! has a log replays it once before the new shell's first prompt.
 //!
 //! `libc::openpty` + `fork`/`setsid`/`TIOCSCTTY`/`execvp` rather than `portable-pty`: `libc` is
 //! already here and `kl` is a musl binary with a size budget.
@@ -95,46 +100,23 @@ fn login_argv0(path: &CString) -> CString {
     CString::new(format!("-{base}")).unwrap_or_else(|_| CString::new("-sh").unwrap())
 }
 
-/// The tmux server every named terminal lives on. One per pod, named rather than the default so
-/// nothing a person starts by hand shares it.
-pub const SOCKET: &str = "kl";
-
-/// `[a-z0-9-]{1,48}`. The desktop names sessions (`kl-<tab>-<n>`); the server never invents one
-/// and never passes anything else to tmux, where a name is also a shell-free but `-t`-matched
-/// target.
+/// `[a-z0-9-]{1,48}`, no leading dash. The desktop names sessions (`kl-<tab>-<n>`); the server
+/// never invents one, and the name is also the `.log` file's, so nothing else may reach a path.
 pub fn valid_session(name: &str) -> bool {
     let body = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-';
-    // Not a leading dash: the name is an argument to `-s`/`-t`, and one that looks like a flag is
-    // a trap waiting for the next tmux version to parse it as one.
     name.len() <= 48 && name.bytes().next().is_some_and(|b| body(&b) && b != b'-') && name.bytes().all(|b| body(&b))
 }
 
-/// `tmux` as the profile puts it on PATH. Resolved in the parent: between fork and exec only
-/// async-signal-safe calls are sound, and `execvp` would search PATH inside the child.
-fn which(bin: &str) -> Option<CString> {
-    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
-        let c = CString::new(dir.join(bin).as_os_str().as_encoded_bytes()).ok()?;
-        if unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0 {
-            return Some(c);
-        }
-    }
-    None
-}
-
-/// What the terminal runs, in the order to try it: one tmux attach-or-create, or every candidate
-/// login shell. `-A` is what makes a reconnect an attach; `-x`/`-y` start the session at the
-/// client's size so nothing reflows from 80x24 on the first redraw.
-fn program(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Result<Vec<(CString, Vec<CString>)>> {
-    let Some(name) = session else {
-        return Ok(candidates().into_iter().map(|sh| { let a0 = login_argv0(&sh); (sh, vec![a0]) }).collect());
-    };
-    if !valid_session(name) {
-        return Err(io::Error::other("bad session name"));
-    }
-    let tmux = which("tmux").ok_or_else(|| io::Error::other("tmux is not on PATH"))?;
-    let args = ["tmux".to_string(), "-L".into(), SOCKET.into(), "new-session".into(), "-A".into(), "-s".into(), name.into(), "-x".into(), cols.to_string(), "-y".into(), rows.to_string(), "-c".into(), root.to_string_lossy().into_owned()];
-    let argv = args.into_iter().map(|a| CString::new(a).map_err(|_| io::Error::other("a NUL in the tmux argv"))).collect::<io::Result<Vec<_>>>()?;
-    Ok(vec![(tmux, argv)])
+/// Every candidate login shell, in the order to try it. Named or not, a terminal is a login shell:
+/// the persistence above it is this process's, not another program in the path.
+fn program() -> Vec<(CString, Vec<CString>)> {
+    candidates()
+        .into_iter()
+        .map(|sh| {
+            let a0 = login_argv0(&sh);
+            (sh, vec![a0])
+        })
+        .collect()
 }
 
 /// What `kl ide serve` was started with is NOT what an ssh login gets: the prelude starts it
@@ -145,12 +127,11 @@ fn program(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Resu
 /// it down; sshd instead sets it from the passwd entry. `spawn` already execs the passwd shell
 /// (that was the first half of this bug — every PTY landed in busybox ash while ssh got the Nix
 /// zsh, so the prompt was ash's `dir $` with no rc and no starship), but anything the person's
-/// shell RESPAWNS reads `$SHELL` — above all tmux, whose `default-shell` defaults to it, which
-/// would have put every named terminal straight back in ash one layer down.
+/// shell RESPAWNS reads `$SHELL`, and `/bin/sh` there is the same bug one layer down.
 ///
 /// `TERM`/`COLORTERM` are ours to state: this end is a real terminal whatever the server's env
 /// says. `TMUX` is only ever set when this process is itself inside a session (a dev machine,
-/// never a pod), where tmux refuses to nest without `-d`.
+/// never a pod), where it would make a person's own tmux refuse to nest.
 ///
 /// The rest are this process's own private state, which an ssh login never carries: the serve
 /// command's telemetry identity (anything the person then runs would report as `kl-ide`), and the
@@ -179,9 +160,8 @@ fn child_env(vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)
         .collect()
 }
 
-pub fn spawn(root: &Path, cols: u16, rows: u16, session: Option<&str>) -> io::Result<Pty> {
-    // Before the pty is opened, so a refusal leaks no descriptors.
-    let attempts = program(root, cols, rows, session)?;
+pub fn spawn(root: &Path, cols: u16, rows: u16) -> io::Result<Pty> {
+    let attempts = program();
     let (mut master, mut slave): (RawFd, RawFd) = (-1, -1);
     let mut ws = winsize(cols, rows);
     // The size is set at open, so the shell and everything it starts never see 80x24 first and
@@ -373,17 +353,176 @@ impl Drop for Slot {
     }
 }
 
+/// What a named session keeps of its own output. 4 MiB is xterm.js's 10 000 lines with room to
+/// spare, and it is the ceiling on the `.log` file too.
+pub const PTY_RING_BYTES: usize = 4 << 20;
+
+/// How often a live session's ring reaches the disk, so a pod that is killed rather than stopped
+/// still leaves the last half-minute behind.
+const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What an attached socket asks the session's own task to do; the task owns the `Pty`, so nothing
+/// else ever reads it, writes it or reaps it.
+enum Cmd {
+    In(Vec<u8>),
+    Resize(u16, u16),
+    /// `DELETE`: dropping the `Pty` is what hangs the process GROUP up.
+    Kill,
+}
+
+/// The ring and the live fan-out under ONE lock: an attach takes its snapshot and its subscription
+/// together, so no byte can land between the two and be lost or shown twice.
+struct Fan {
+    ring: std::collections::VecDeque<u8>,
+    tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+}
+
+/// One named terminal: a shell that outlives its socket.
+pub struct Session {
+    created: u64,
+    pid: libc::pid_t,
+    input: tokio::sync::mpsc::Sender<Cmd>,
+    out: std::sync::Mutex<Fan>,
+    /// Bumped by every attach; the previous attach watches it and lets go. One socket at a time is
+    /// the whole point — two would fight over the same screen.
+    attach: tokio::sync::watch::Sender<u64>,
+    exit: tokio::sync::watch::Sender<Option<i32>>,
+    log: std::path::PathBuf,
+    /// Held by the SESSION, not the socket: a named shell counts against `MAX_SHELLS` for as long
+    /// as it lives, which is now longer than any one client.
+    _slot: Slot,
+}
+
+impl Session {
+    fn snapshot(&self) -> (Vec<u8>, tokio::sync::broadcast::Receiver<Vec<u8>>) {
+        let f = self.out.lock().expect("pty ring");
+        (f.ring.iter().copied().collect(), f.tx.subscribe())
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut f = self.out.lock().expect("pty ring");
+        f.ring.extend(bytes);
+        let over = f.ring.len().saturating_sub(PTY_RING_BYTES);
+        f.ring.drain(..over);
+        // No receiver is the ordinary detached case, not an error.
+        let _ = f.tx.send(bytes.to_vec());
+    }
+
+    /// The ring as it stands, to the session's log. Blocking: at most `PTY_RING_BYTES` to a local
+    /// path, twice a minute per terminal.
+    fn flush(&self) {
+        let bytes: Vec<u8> = self.out.lock().expect("pty ring").ring.iter().copied().collect();
+        if let Some(dir) = self.log.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&self.log, &bytes) {
+            tracing::warn!(error = %e, path = %self.log.display(), "pty.log.write.failed");
+        }
+    }
+}
+
+/// Every live named terminal in this process. The table IS the state — there is no other server to
+/// ask, which is why a pod restart brings back text and never a process.
+#[derive(Default)]
+pub struct Sessions(std::sync::Mutex<std::collections::HashMap<String, Arc<Session>>>);
+
+impl Sessions {
+    fn get(&self, name: &str) -> Option<Arc<Session>> {
+        self.0.lock().expect("pty sessions").get(name).cloned()
+    }
+
+    fn list(&self) -> Vec<serde_json::Value> {
+        let map = self.0.lock().expect("pty sessions");
+        let mut rows: Vec<_> = map
+            .iter()
+            .map(|(name, s)| {
+                serde_json::json!({ "name": name, "windows": 1, "attached": s.attach.receiver_count() > 0, "created": s.created, "pid": s.pid })
+            })
+            .collect();
+        rows.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        rows
+    }
+}
+
+/// The path a session's text is kept at, confined under the workspace like every other path this
+/// server touches. The name is already `[a-z0-9-]`, so this can only refuse a root that is itself
+/// outside the home.
+fn log_path(app: &App, name: &str) -> io::Result<std::path::PathBuf> {
+    crate::paths::confine(&app.cfg.root, &app.cfg.home, &format!(".cache/shell/{name}.log")).map_err(|e| io::Error::other(format!("{e:?}")))
+}
+
+/// Open a named session, or attach to the one that is already there. A NEW one replays whatever a
+/// previous life of this pod left in its log, once, ahead of the shell's first prompt.
+fn open(app: &Arc<App>, name: &str, cols: u16, rows: u16) -> io::Result<Arc<Session>> {
+    if let Some(s) = app.ptys.get(name) {
+        return Ok(s);
+    }
+    let log = log_path(app, name)?;
+    let _slot = Slot::take(app).ok_or_else(|| io::Error::other("too many shells"))?;
+    let mut pty = spawn(&app.cfg.root, cols, rows)?;
+    let (input, mut rx) = tokio::sync::mpsc::channel(64);
+    let (tx, _) = tokio::sync::broadcast::channel(256);
+    let session = Arc::new(Session {
+        created: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        pid: pty.child,
+        input,
+        out: std::sync::Mutex::new(Fan { ring: std::collections::VecDeque::new(), tx }),
+        attach: tokio::sync::watch::Sender::new(0),
+        exit: tokio::sync::watch::Sender::new(None),
+        log,
+        _slot,
+    });
+    if let Ok(history) = std::fs::read(&session.log) {
+        session.push(&history);
+    }
+    app.ptys.0.lock().expect("pty sessions").insert(name.to_string(), session.clone());
+
+    let (app, sess, name) = (app.clone(), session.clone(), name.to_string());
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 << 10];
+        let mut tick = tokio::time::interval(FLUSH_EVERY);
+        tick.tick().await;
+        let mut killed = false;
+        loop {
+            tokio::select! {
+                read = pty.read(&mut buf) => match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sess.push(&buf[..n]),
+                },
+                cmd = rx.recv() => match cmd {
+                    Some(Cmd::In(b)) => if pty.write_all(&b).await.is_err() { break },
+                    Some(Cmd::Resize(c, r)) => pty.resize(c, r),
+                    // `None` is the table dropping the last sender, which only the kill does.
+                    Some(Cmd::Kill) | None => { killed = true; break }
+                },
+                _ = tick.tick() => sess.flush(),
+            }
+        }
+        app.ptys.0.lock().expect("pty sessions").remove(&name);
+        sess.flush();
+        // A killed shell is reaped by `Pty::drop`; only a shell that ended on its own has a code
+        // worth telling the client.
+        let code = if killed { -1 } else { pty.wait().unwrap_or(-1) };
+        drop(pty);
+        let _ = sess.exit.send(Some(code));
+    });
+    Ok(session)
+}
+
 #[derive(serde::Deserialize)]
 pub struct Query {
-    /// The tmux session to attach to or create. Absent = today's one-shot login shell.
+    /// The session to attach to or create. Absent = today's one-shot login shell.
     session: Option<String>,
 }
 
 pub async fn handler(State(app): State<Arc<App>>, axum::extract::Query(q): axum::extract::Query<Query>, ws: WebSocketUpgrade) -> Response {
-    // A bad name never reaches tmux, and it is a request error rather than something to print
-    // into a terminal: the desktop, not a person, chooses these.
+    // A bad name is a request error rather than something to print into a terminal: the desktop,
+    // not a person, chooses these.
     if q.session.as_deref().is_some_and(|n| !valid_session(n)) {
         return (axum::http::StatusCode::BAD_REQUEST, "session must match [a-z0-9-]{1,48}").into_response();
+    }
+    if let Some(name) = q.session {
+        return ws.on_upgrade(move |sock| attach(sock, app, name)).into_response();
     }
     let Some(slot) = Slot::take(&app) else {
         // Refused after the upgrade, not as an HTTP status: the tab is already a terminal and has
@@ -391,74 +530,34 @@ pub async fn handler(State(app): State<Arc<App>>, axum::extract::Query(q): axum:
         return ws.on_upgrade(|sock| fail(sock, "too many shells".into())).into_response();
     };
     let root = app.cfg.root.clone();
-    ws.on_upgrade(move |sock| pump(sock, root, q.session, slot)).into_response()
+    ws.on_upgrade(move |sock| pump(sock, root, slot)).into_response()
 }
 
-/// `tmux -L kl <args>`, with the workspace's own environment. Every session route is one of
-/// these: the tmux server is the state, so there is nothing to keep in this process.
-async fn tmux(args: &[&str]) -> std::io::Result<std::process::Output> {
-    tokio::process::Command::new("tmux").arg("-L").arg(SOCKET).args(args).output().await
-}
-
-/// `GET /stream/pty/sessions` → `[{name, windows, attached, created}]`, and an empty list when no
-/// server is running: another device shows the same terminals and reattaches them by name.
-pub async fn sessions() -> axum::Json<Vec<serde_json::Value>> {
-    const FORMAT: &str = "#{session_name} #{session_windows} #{session_attached} #{session_created}";
-    let out = match tmux(&["ls", "-F", FORMAT]).await {
-        // No server (nothing started yet, or the last session ended) is an empty list, not a fault.
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return axum::Json(Vec::new()),
-    };
-    let rows = String::from_utf8_lossy(&out)
-        .lines()
-        .filter_map(|l| {
-            let mut f = l.split(' ');
-            let name = f.next()?.to_string();
-            let n = |f: &mut std::str::Split<char>| f.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            Some(serde_json::json!({ "name": name, "windows": n(&mut f), "attached": n(&mut f) > 0, "created": n(&mut f) }))
-        })
-        .collect();
-    axum::Json(rows)
+/// `GET /stream/pty/sessions` → `[{name, windows, attached, created, pid}]`: another device shows
+/// the same terminals and reattaches them by name.
+pub async fn sessions(State(app): State<Arc<App>>) -> axum::Json<Vec<serde_json::Value>> {
+    axum::Json(app.ptys.list())
 }
 
 /// `DELETE /stream/pty/sessions/{name}`: killing a shell is the person's choice, which a dropped
 /// socket never is — so it is a route of its own and not something the detach does.
-pub async fn kill_session(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+pub async fn kill_session(State(app): State<Arc<App>>, axum::extract::Path(name): axum::extract::Path<String>) -> Response {
     if !valid_session(&name) {
         return (axum::http::StatusCode::BAD_REQUEST, "session must match [a-z0-9-]{1,48}").into_response();
     }
-    match tmux(&["kill-session", "-t", &name]).await {
-        Ok(o) if o.status.success() => axum::http::StatusCode::NO_CONTENT.into_response(),
-        // tmux says "can't find session" for an unknown name and the same nonzero exit for no
-        // server at all; both mean the terminal the caller named is gone.
-        Ok(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
-/// Restore what tmux-resurrect last saved into `{root}/.cache/tmux/resurrect`, once, before the
-/// first socket arrives — so after a pod stop, a move or a clone the same terminal names come
-/// back with their layout, cwd and pane text. The processes do not; no tool can bring those back.
-/// Never fatal: a workspace with no save, no tmux or a broken plugin still serves terminals.
-pub async fn restore(root: &Path) {
-    let dir = root.join(".cache/tmux/resurrect");
-    // tmux-resurrect writes `last` as a symlink to the newest save file; no save, nothing to do.
-    // `symlink_metadata`: a dangling link is still a save it should try, and `exists` follows.
-    if dir.join("last").symlink_metadata().is_err() {
-        return;
-    }
-    let profile = std::env::var("NIX_PROFILE").unwrap_or_else(|_| "/nix/profile/current".into());
-    let script = format!("{profile}/share/tmux-plugins/resurrect/scripts/restore.sh");
-    let set = format!("set -g @resurrect-dir {}", dir.display());
-    if let Err(e) = tmux(&["start-server", ";", &set, ";", "run-shell", &script]).await {
-        tracing::warn!(error = %e, "tmux.restore.failed");
-        return;
-    }
-    let n = match tmux(&["ls", "-F", "#{session_name}"]).await {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().count(),
-        _ => 0,
+    let Some(s) = app.ptys.get(&name) else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
     };
-    tracing::info!(sessions = n, "tmux.restored");
+    let _ = s.input.send(Cmd::Kill).await;
+    // Not "asked to die": the table is what the caller will look at next, so the delete waits for
+    // the name to leave it.
+    for _ in 0..200 {
+        if app.ptys.get(&name).is_none() {
+            return axum::http::StatusCode::NO_CONTENT.into_response();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "the shell did not die").into_response()
 }
 
 async fn fail(mut sock: WebSocket, why: String) {
@@ -475,21 +574,88 @@ fn resize_of(text: &str) -> Option<(u16, u16)> {
     (cols > 0 && rows > 0).then_some((cols, rows))
 }
 
-async fn pump(sock: WebSocket, root: std::path::PathBuf, session: Option<String>, _slot: Slot) {
-    let (mut tx, mut rx) = sock.split();
-    // The client's first frame is its size. Anything else it sent first is kept and delivered to
-    // the shell once there is one, so no keystroke is lost to the race.
-    let mut pending: Option<Vec<u8>> = None;
+/// The client's first frame is its size. Anything else it sent first is kept and delivered to the
+/// shell once there is one, so no keystroke is lost to the race. `None` = it went away first.
+async fn first_frame(rx: &mut futures::stream::SplitStream<WebSocket>) -> Option<((u16, u16), Option<Vec<u8>>)> {
     let mut size = (80u16, 24u16);
+    let mut pending = None;
     match tokio::time::timeout(FIRST_RESIZE, rx.next()).await {
         Ok(Some(Ok(Message::Text(t)))) => size = resize_of(&t).unwrap_or(size),
         Ok(Some(Ok(Message::Binary(b)))) => pending = Some(b.to_vec()),
         Ok(Some(Ok(_))) | Err(_) => {}
-        // Closed or broken before it asked for anything.
-        Ok(None) | Ok(Some(Err(_))) => return,
+        Ok(None) | Ok(Some(Err(_))) => return None,
+    }
+    Some((size, pending))
+}
+
+/// A named terminal: open or reattach, replay the ring, then stream live. The socket closing is a
+/// DETACH — the shell and its screen stay — and a second attach with the same name takes the
+/// session over, because two clients on one screen fight.
+async fn attach(sock: WebSocket, app: Arc<App>, name: String) {
+    let (mut tx, mut rx) = sock.split();
+    let Some((size, pending)) = first_frame(&mut rx).await else { return };
+    let session = match open(&app, &name, size.0, size.1) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(Message::Text(serde_json::json!({ "error": e.to_string() }).to_string().into())).await;
+            let _ = tx.close().await;
+            return;
+        }
+    };
+    // Both under the ring's lock, so nothing lands between the replay and the live stream.
+    let (replay, mut live) = session.snapshot();
+    let mut mine = 0;
+    session.attach.send_modify(|g| {
+        *g += 1;
+        mine = *g;
+    });
+    let mut detached = session.attach.subscribe();
+    let mut exited = session.exit.subscribe();
+    if !replay.is_empty() && tx.send(Message::Binary(replay.into())).await.is_err() {
+        return;
+    }
+    // The size is the NEW client's: a reattach from a different window resizes the shell rather
+    // than leaving it drawing for the one that left.
+    let _ = session.input.send(Cmd::Resize(size.0, size.1)).await;
+    if let Some(b) = pending {
+        let _ = session.input.send(Cmd::In(b)).await;
     }
 
-    let mut pty = match spawn(&root, size.0, size.1, session.as_deref()) {
+    loop {
+        tokio::select! {
+            out = live.recv() => match out {
+                Ok(b) => if tx.send(Message::Binary(b.into())).await.is_err() { break },
+                // A client too slow for 256 chunks loses bytes rather than the session: the ring
+                // still has them, and the next reattach replays it.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            msg = rx.next() => match msg {
+                Some(Ok(Message::Binary(b))) => if session.input.send(Cmd::In(b.to_vec())).await.is_err() { break },
+                Some(Ok(Message::Text(t))) => if let Some((c, r)) = resize_of(&t) {
+                    let _ = session.input.send(Cmd::Resize(c, r)).await;
+                },
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => break,
+            },
+            _ = detached.changed() => if *detached.borrow() != mine { break },
+            _ = exited.changed() => break,
+        }
+    }
+    // The text reaches the disk at the moment a person walks away, not only on the next tick.
+    session.flush();
+    let code = *session.exit.borrow();
+    if let Some(code) = code {
+        let _ = tx.send(Message::Text(serde_json::json!({ "exit": code }).to_string().into())).await;
+        let _ = tx.close().await;
+    }
+}
+
+async fn pump(sock: WebSocket, root: std::path::PathBuf, _slot: Slot) {
+    let (mut tx, mut rx) = sock.split();
+    let Some((size, pending)) = first_frame(&mut rx).await else { return };
+
+    let mut pty = match spawn(&root, size.0, size.1) {
         Ok(p) => p,
         Err(e) => {
             let _ = tx.send(Message::Text(serde_json::json!({ "error": e.to_string() }).to_string().into())).await;
@@ -612,7 +778,7 @@ mod tests {
     async fn a_shell_runs_under_the_terminal_and_reports_its_exit_code() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let mut pty = spawn(tmp.path(), 80, 24, None).unwrap();
+        let mut pty = spawn(tmp.path(), 80, 24).unwrap();
         pty.write_all(b"printf kl-%s ok\\n; exit 3\n").await.unwrap();
         let out = drain(&pty).await;
         assert!(out.contains("kl-ok"), "{out:?}");
@@ -623,7 +789,7 @@ mod tests {
     async fn a_resize_reaches_the_shell_as_a_window_size() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let mut pty = spawn(tmp.path(), 80, 24, None).unwrap();
+        let mut pty = spawn(tmp.path(), 80, 24).unwrap();
         pty.resize(120, 40);
         pty.write_all(b"stty size; exit 0\n").await.unwrap();
         let out = drain(&pty).await;
@@ -635,7 +801,7 @@ mod tests {
     async fn dropping_the_pty_hangs_up_the_process_group() {
         use_sh();
         let tmp = tempfile::tempdir().unwrap();
-        let pty = spawn(tmp.path(), 80, 24, None).unwrap();
+        let pty = spawn(tmp.path(), 80, 24).unwrap();
         pty.write_all(b"sleep 300\n").await.unwrap();
         let pid = pty.child;
         drop(pty);
@@ -662,13 +828,20 @@ mod tests {
     /// A server on a port, as a client sees it.
     async fn served() -> (tempfile::TempDir, Arc<App>, std::net::SocketAddr) {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().canonicalize().unwrap();
+        let (app, addr) = serve_at(tmp.path()).await;
+        (tmp, app, addr)
+    }
+
+    /// A server over a given workspace root — called twice over one root, it is what a restarted
+    /// pod looks like to a client.
+    async fn serve_at(root: &Path) -> (Arc<App>, std::net::SocketAddr) {
+        let home = root.canonicalize().unwrap();
         let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.clone(), home, graft_dir: None }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let served = crate::server::router(app.clone());
         tokio::spawn(async move { axum::serve(listener, served).await });
-        (tmp, app, addr)
+        (app, addr)
     }
 
     /// The 9th shell is refused on the socket, and a closed one frees its slot.
@@ -706,21 +879,6 @@ mod tests {
         assert_eq!(app.shells.load(Ordering::SeqCst), MAX_SHELLS - 1);
     }
 
-    /// tmux comes from the Nix profile in a workspace; this machine may not have one, and nothing
-    /// here may install it — so the tmux tests say so and pass rather than fail on a precondition
-    /// that has nothing to do with the code.
-    fn tmux_here() -> bool {
-        if which("tmux").is_some() {
-            // One private tmux server for the whole test binary, so a run never touches (or is
-            // confused by) whatever the person running it has open. Process-wide, like `SHELL`.
-            static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-            std::env::set_var("TMUX_TMPDIR", DIR.get_or_init(|| tempfile::tempdir().unwrap()).path());
-            return true;
-        }
-        eprintln!("skipping: tmux is not on PATH");
-        false
-    }
-
     #[test]
     fn a_session_name_is_lowercase_digits_and_dashes() {
         for ok in ["kl-bench-1", "a", "0", &"a".repeat(48)] {
@@ -750,6 +908,8 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_secs(5), sock.next()).await {
                 Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b)))) => seen.push_str(&String::from_utf8_lossy(&b)),
+                // Control frames too: an `{"exit":N}` is as much a thing to wait for as output is.
+                Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t)))) => seen.push_str(&t),
                 Ok(Some(Ok(_))) => {}
                 _ => break,
             }
@@ -778,16 +938,14 @@ mod tests {
         (status, body)
     }
 
-    /// The whole named-terminal contract against a live server: the session exists under
-    /// `tmux -L kl`, a second socket with the same name ATTACHES (tmux redraws what the first left
-    /// on screen instead of starting a new shell), the listing shows it, and only a kill removes it.
+    /// Everything a named terminal promises, against a live server: the shell outlives its socket,
+    /// a reattach replays the ring, a second attach takes the session over, the listing names it,
+    /// and only a kill removes it.
     #[tokio::test]
-    async fn a_named_terminal_is_a_tmux_session_a_second_socket_reattaches() {
+    async fn a_named_terminal_outlives_its_socket_and_replays_on_reattach() {
         use tokio_tungstenite::tungstenite::Message;
-        if !tmux_here() {
-            return;
-        }
-        let (_tmp, _app, addr) = served().await;
+        use_sh();
+        let (_tmp, app, addr) = served().await;
         let name = format!("kl-test-{}", std::process::id());
         let mark = format!("MARK-{name}");
         let mut first = dial(addr, &format!("?session={name}")).await.unwrap();
@@ -796,43 +954,95 @@ mod tests {
         let out = read_until(&mut first, &mark).await;
         assert!(out.contains(&mark), "{out:?}");
 
-        // Polled: tmux forks its server, so the socket exists a moment after the shell inside it
-        // has already answered.
-        let mut listed = String::new();
-        for _ in 0..100 {
-            listed = String::from_utf8_lossy(&tmux(&["ls", "-F", "#{session_name}"]).await.unwrap().stdout).into_owned();
-            if listed.lines().any(|l| l == name) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        assert!(listed.lines().any(|l| l == name), "{listed:?}");
-
-        // The socket closing is a DETACH: the session, and what is on its screen, outlive it.
+        // The socket closing is a DETACH: the shell, and everything it has printed, outlive it.
         drop(first);
         let mut again = dial(addr, &format!("?session={name}")).await.unwrap();
         say(&mut again, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
         let redraw = read_until(&mut again, &mark).await;
-        assert!(redraw.contains(&mark), "the reattach redrew nothing: {redraw:?}");
+        assert!(redraw.contains(&mark), "the reattach replayed nothing: {redraw:?}");
 
         let (status, body) = http(addr, "GET", "/stream/pty/sessions").await;
         assert_eq!(status, 200);
         let rows: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         let row = rows.iter().find(|r| r["name"] == name.as_str()).unwrap_or_else(|| panic!("{rows:?}"));
-        assert_eq!((row["windows"].as_u64(), row["attached"].as_bool()), (Some(1), Some(true)));
-        assert!(row["created"].as_u64().unwrap() > 0, "{row}");
-        drop(again);
+        assert_eq!(row["attached"].as_bool(), Some(true));
+        assert!(row["created"].as_u64().unwrap() > 0 && row["pid"].as_i64().unwrap() > 0, "{row}");
+
+        // A second attach takes the screen; the first is let go rather than left fighting for it.
+        let mut third = dial(addr, &format!("?session={name}")).await.unwrap();
+        say(&mut third, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        assert!(read_until(&mut third, &mark).await.contains(&mark));
+        let displaced = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(Ok(m)) = again.next().await {
+                // Only the detach ends this socket; an exit frame would mean the shell died.
+                assert!(m.into_text().map(|t| !t.contains("exit")).unwrap_or(true));
+            }
+        })
+        .await;
+        assert!(displaced.is_ok(), "the first socket was not detached by the second attach");
+        drop(third);
 
         // Killing a shell is the person's choice; a dropped socket never is.
         assert_eq!(http(addr, "DELETE", &format!("/stream/pty/sessions/{name}")).await.0, 204);
         assert_eq!(http(addr, "DELETE", &format!("/stream/pty/sessions/{name}")).await.0, 404);
         assert_eq!(http(addr, "DELETE", "/stream/pty/sessions/NOPE").await.0, 400);
-        // `exit-empty` takes the server with the last session, so this is also the no-server
-        // path: a failed `tmux ls` is an empty list with a 200, which is what the desktop asks
-        // for on every tab before anything has been opened.
         let (status, body) = http(addr, "GET", "/stream/pty/sessions").await;
         assert_eq!(status, 200);
         assert!(!String::from_utf8_lossy(&body).contains(&name), "{body:?}");
+        // The slot goes with the session, not with the last socket that held it.
+        assert_eq!(app.shells.load(Ordering::SeqCst), 0);
     }
 
+    /// A shell that ends is the one thing that closes a named terminal on its own: the client gets
+    /// its code and the table loses the name.
+    #[tokio::test]
+    async fn the_shells_exit_ends_the_session_and_reaches_the_client() {
+        use tokio_tungstenite::tungstenite::Message;
+        use_sh();
+        let (_tmp, _app, addr) = served().await;
+        let name = format!("kl-exit-{}", std::process::id());
+        let mut sock = dial(addr, &format!("?session={name}")).await.unwrap();
+        say(&mut sock, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        say(&mut sock, Message::Binary("exit 3\n".into())).await;
+        let frame = read_until(&mut sock, "\"exit\"").await;
+        assert!(frame.contains("\"exit\":3"), "{frame:?}");
+        let (_, body) = http(addr, "GET", "/stream/pty/sessions").await;
+        assert!(!String::from_utf8_lossy(&body).contains(&name), "{body:?}");
+    }
+
+    /// The pod restart path, with the restart standing in as a second server over the same
+    /// workspace: the log is what carries the text, and a NEW session under a name that has one
+    /// replays it before its own first prompt.
+    #[tokio::test]
+    async fn a_new_session_replays_the_log_a_previous_one_left() {
+        use tokio_tungstenite::tungstenite::Message;
+        use_sh();
+        let (tmp, _app, addr) = served().await;
+        let name = format!("kl-log-{}", std::process::id());
+        let mark = format!("MARK-{name}");
+        let mut first = dial(addr, &format!("?session={name}")).await.unwrap();
+        say(&mut first, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        say(&mut first, Message::Binary(format!("echo {mark}\n").into())).await;
+        assert!(read_until(&mut first, &mark).await.contains(&mark));
+        // The detach is what flushes; the kill after it is this test being a good citizen.
+        drop(first);
+        let log = tmp.path().join(format!(".cache/shell/{name}.log"));
+        let mut written = String::new();
+        for _ in 0..200 {
+            written = std::fs::read_to_string(&log).unwrap_or_default();
+            if written.contains(&mark) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(written.contains(&mark), "the detach flushed no log: {written:?}");
+        assert_eq!(http(addr, "DELETE", &format!("/stream/pty/sessions/{name}")).await.0, 204);
+
+        // A second server over the same workspace is what a restarted pod is.
+        let (_app2, addr2) = serve_at(tmp.path()).await;
+        let mut back = dial(addr2, &format!("?session={name}")).await.unwrap();
+        say(&mut back, Message::Text(r#"{"resize":{"cols":80,"rows":24}}"#.into())).await;
+        let replay = read_until(&mut back, &mark).await;
+        assert!(replay.contains(&mark), "a new session ignored the log it had: {replay:?}");
+    }
 }

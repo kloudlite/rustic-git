@@ -16,6 +16,8 @@ pub struct App {
     pub graft: Arc<Graft>,
     /// Live PTYs; the ceiling is `pty::MAX_SHELLS`.
     pub shells: AtomicUsize,
+    /// The named terminals, which outlive their sockets (`pty::Sessions`).
+    pub ptys: crate::pty::Sessions,
 }
 
 impl App {
@@ -34,7 +36,7 @@ impl App {
             Box::new(WatchTools { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), watches: watches.clone() }),
             Box::new(GraftTools { graft: graft.clone(), procs: procs.clone() }),
         ]);
-        App { cfg, registry, procs, watches, graft, shells: AtomicUsize::new(0) }
+        App { cfg, registry, procs, watches, graft, shells: AtomicUsize::new(0), ptys: crate::pty::Sessions::default() }
     }
 }
 

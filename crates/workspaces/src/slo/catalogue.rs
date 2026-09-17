@@ -664,7 +664,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "ws.terminal.persists", feature: "Workspaces", sli: "A named terminal in a workspace survives a stop and a start: it is listed again and reattaching redraws what was in it", target: avail(99.0), suite: Suite::Weekly, stage: "12 · Weekly" },
+    Slo { id: "ws.terminal.persists", feature: "Workspaces", sli: "A named terminal in a workspace survives a stop and a start: opening it again replays the text that was in it", target: avail(99.0), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly

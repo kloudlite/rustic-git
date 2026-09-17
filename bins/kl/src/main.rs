@@ -224,7 +224,7 @@ fn container(cmd: ContainerCmd) -> Result<(), String> {
 fn serve_ide(bind: std::net::SocketAddr, graft_dir: Option<std::path::PathBuf>) -> Result<(), String> {
     let root = std::path::PathBuf::from(env("KL_WORKSPACE")?);
     let home = std::path::PathBuf::from(env("HOME")?);
-    let cfg = kloudlite_ide::Config { bind, root: root.clone(), home, graft_dir };
+    let cfg = kloudlite_ide::Config { bind, root, home, graft_dir };
     kloudlite_ide::guard::preflight(&cfg)?;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -236,13 +236,7 @@ fn serve_ide(bind: std::net::SocketAddr, graft_dir: Option<std::path::PathBuf>) 
         .with(tracing_subscriber::fmt::layer().json().with_writer(std::io::stderr))
         .init();
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    // Before the first socket: tmux-resurrect brings back the terminal names, layout and pane
-    // text a stop, a move or a clone left in `{ws}/.cache/tmux`, so a reconnect finds them.
-    rt.block_on(async {
-        kloudlite_ide::pty::restore(&root).await;
-        kloudlite_ide::serve(cfg).await
-    })
-    .map_err(|e| e.to_string())
+    rt.block_on(kloudlite_ide::serve(cfg)).map_err(|e| e.to_string())
 }
 
 

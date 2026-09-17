@@ -54,17 +54,17 @@ const SHELL_CEILING: Duration = Duration::from_secs(20);
 /// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first,
 /// and the id now walks a named session twice plus its listing and its kill.
 const SHELL_WS_CEILING: Duration = Duration::from_secs(45);
-/// `ws.terminal.persists`: dominated by the one continuum save it has to wait out plus a stop and
-/// a start of the bench workspace.
+/// `ws.terminal.persists`: a stop and a start of the bench workspace, and the flush before them.
 const TERMINAL_CEILING: Duration = Duration::from_secs(600);
-/// tmux-continuum saves on its own interval (`@continuum-save-interval 1`) and nothing outside the
-/// session can ask for a save, so one interval is the shortest wait that makes a restore provable.
-const CONTINUUM_SAVE: Duration = Duration::from_secs(75);
-/// A detached PTY is quiet once the attach redraw and the typed line have landed; there is no exit
-/// frame on this path, because exiting the shell would kill the session the probe is measuring.
+/// The tool server flushes a session's ring to `{ws}/.cache/shell/<name>.log` ON DETACH, so the
+/// probe only has to let that write land before it stops the pod — no save interval to wait out
+/// any more (it was 75 s of continuum before tmux left).
+const FLUSH_SETTLE: Duration = Duration::from_secs(5);
+/// A detached PTY is quiet once the replay and the typed line have landed; there is no exit frame
+/// on this path, because exiting the shell would kill the session the probe is measuring.
 const PTY_SETTLE: Duration = Duration::from_secs(2);
 /// Half the stop and half the start of `ws.terminal.persists`, and then the wait for the tool
-/// server to have restored its sessions.
+/// server inside the new pod to be listening.
 const TERMINAL_POLL: Duration = Duration::from_secs(150);
 
 pub const STUB: &str = "bench image is the stub";
@@ -586,9 +586,9 @@ pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(St
 }
 
 /// One NAMED terminal, attached and then DETACHED: the socket is closed after `PTY_SETTLE` of
-/// quiet instead of waiting for an exit frame, because typing `exit` would kill the tmux session
-/// this whole path exists to keep. Returns everything the socket saw — on a reattach that is
-/// tmux's own redraw of the pane, which is what carries the earlier marker.
+/// quiet instead of waiting for an exit frame, because typing `exit` would kill the session this
+/// whole path exists to keep. Returns everything the socket saw — on a reattach that is the tool
+/// server's replay of the session ring, which is what carries the earlier marker.
 pub(crate) async fn pty_attach(port: u16, scope: &str, session: &str, input: &str) -> Result<String> {
     let url = format!("ws://127.0.0.1:{port}/pty?scope={scope}&session={session}");
     let (mut ws, _) = tokio_tungstenite::connect_async(url).await.context("pty socket")?;
@@ -619,16 +619,15 @@ pub(crate) async fn pty_attach(port: u16, scope: &str, session: &str, input: &st
     Ok(out)
 }
 
-/// A tmux session name the tool server will accept (`[a-z0-9][a-z0-9-]{0,47}`) built from the run
+/// A session name the tool server will accept (`[a-z0-9][a-z0-9-]{0,47}`) built from the run
 /// id, so two runs never share a session and teardown can name it.
 fn session_name(prefix: &str, run_id: &str) -> String {
     let tail: String = run_id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' }).collect();
     format!("{prefix}{tail}").chars().take(48).collect()
 }
 
-/// Whether the bench's `GET /pty/sessions` listing names `session`. A body that is not the
-/// listing is "not listed" for the delete's sake and a failure for the restore's, which is why
-/// both callers say which they mean rather than this deciding for them.
+/// Whether the bench's `GET /pty/sessions` listing names `session`. A body that is not the listing
+/// counts as "not listed": the one caller is the kill's check that the name is gone.
 fn lists_session(body: &str, session: &str) -> bool {
     serde_json::from_str::<Vec<Value>>(body).is_ok_and(|rows| rows.iter().any(|r| r["name"] == session))
 }
@@ -708,15 +707,15 @@ async fn shell_workspace(c: &mut Ctx) {
                 // The PROMPT is the product here: starship's character is what says the splice landed
                 // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
                 judge_shell(&out, "❯", code)?;
-                // A NAMED session is a tmux session, and the whole point of one is that closing the
-                // socket detaches instead of ending it. `printf` builds the marker so the echoed
+                // A NAMED session outlives its socket, and the whole point of one is that closing
+                // the socket detaches instead of ending it. `printf` builds the marker so the echoed
                 // command line cannot pass the reattach assertion on its own.
                 let first = pty_attach(port, &ws, &sess, &format!("printf 'MARK-%s\\n' {}\n", c.run_id)).await?;
                 if !first.contains(&mark) {
                     bail!("the named session never printed {mark}: {}", super::clip(&first));
                 }
-                // Same name, second socket: what comes back is tmux's redraw of the pane the first
-                // one left behind, so the marker being there IS the reattach.
+                // Same name, second socket: what comes back is the replay of the ring the first one
+                // left behind, so the marker being there IS the reattach.
                 let again = pty_attach(port, &ws, &sess, "").await?;
                 if !again.contains(&mark) {
                     bail!("reattaching to {sess} redrew nothing carrying {mark}: {}", super::clip(&again));
@@ -1090,9 +1089,10 @@ const TERMINAL: &str = "ws.terminal.persists";
 /// create the weekly suite already measures elsewhere. Stop and start are `/v1/workspaces/{id}`'s,
 /// so no pod-delete grant is needed — `bench.survives.reschedule` is skipped for want of one.
 ///
-/// The wait is the one unavoidable cost: tmux-continuum saves on its own minute interval and
-/// nothing outside the session can ask it to save, so a restart inside that window would prove
-/// nothing about a restore. Weekly is where a wait like that belongs.
+/// What survives is TEXT, not a process (spec §7): the tool server flushes the session's ring to
+/// `{ws}/.cache/shell/<name>.log` on detach, and after the restart a session opened under the same
+/// name replays that log before its own first prompt. So the assertion is the marker coming back
+/// out of a fresh attach — NOT the listing, which is an in-process table a restart starts empty.
 async fn terminal_persists(c: &mut Ctx) {
     let id = match get(c, &bench_url(c, ""), &c.probe_jwt).await.ok().and_then(|d| d.get("id").and_then(Value::as_str).map(str::to_string)) {
         Some(id) => id,
@@ -1124,7 +1124,8 @@ async fn terminal_persists(c: &mut Ctx) {
             if !first.contains(&mark) {
                 bail!("the named session never printed {mark}: {}", super::clip(&first));
             }
-            tokio::time::sleep(CONTINUUM_SAVE).await;
+            // The detach above is what wrote the log; this only lets the write land.
+            tokio::time::sleep(FLUSH_SETTLE).await;
             // The tunnel is the bench pod's; it goes with the stop, and the reads afterwards open
             // their own.
             drop(child);
@@ -1132,24 +1133,19 @@ async fn terminal_persists(c: &mut Ctx) {
             poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("stopped")).await.context("the bench never stopped")?;
             post(c, &start, &jwt, Value::Null).await.context("could not start the bench")?;
             poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("ready")).await.context("the bench never came back ready")?;
-            // Polled, not read once: `kl ide serve` restores the saved sessions at its own start,
-            // which is after the workspace reports ready.
+            // Polled, not attached once: the tool server comes up a little after the workspace
+            // reports ready, and an attach before it is listening is a socket error, not a verdict.
             let (_child, port) = forward(c).await?;
-            let listed = Instant::now();
+            let opened = Instant::now();
             loop {
-                let (status, body) = through(port, "/pty/sessions?scope=bench").await?;
-                if status == 200 && lists_session(&body, &sess) {
-                    break;
+                match pty_attach(port, "bench", &sess, "").await {
+                    Ok(again) if again.contains(&mark) => break,
+                    Ok(again) if opened.elapsed() >= TERMINAL_POLL => {
+                        bail!("{sess} came back without {mark} in it: {}", super::clip(&again))
+                    }
+                    Err(e) if opened.elapsed() >= TERMINAL_POLL => return Err(e).context("the tool server never took a terminal again"),
+                    _ => tokio::time::sleep(Duration::from_secs(5)).await,
                 }
-                if listed.elapsed() >= TERMINAL_POLL {
-                    bail!("{sess} was never listed again after the restart ({status}): {}", super::clip(&body));
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-            // Listed is not restored: the pane contents are what the person left behind.
-            let again = pty_attach(port, "bench", &sess, "").await?;
-            if !again.contains(&mark) {
-                bail!("{sess} came back without {mark} in it: {}", super::clip(&again));
             }
             kill_session(port, "bench", &sess).await
         }

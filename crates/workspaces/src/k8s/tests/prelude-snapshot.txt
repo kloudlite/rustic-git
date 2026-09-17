@@ -19,7 +19,7 @@ grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /
 SEED
 chown -Rh 1000:1000 /home/kl/workspaces/api
 echo prelude.chown.done
-su kl -s /bin/sh -c 'mkdir -p /home/kl/workspaces/api/.cache/zsh /home/kl/workspaces/api/.cache/tmux'
+su kl -s /bin/sh -c 'mkdir -p /home/kl/workspaces/api/.cache/zsh /home/kl/workspaces/api/.cache/shell'
 su kl -s /bin/sh -c 'cd /home/kl/workspaces/api && KL_WORKSPACE=/home/kl/workspaces/api KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:7788 >> /home/kl/.local/state/kl-ide.log 2>&1' &
 echo prelude.sshd.start
 exec /nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config

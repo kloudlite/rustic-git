@@ -796,9 +796,10 @@ pub(crate) fn a_non_bench_pod_never_mounts_the_bench_tool_secret() {
 /// The rc text moved into `k8s::shell_rc` so the bench image could bake the same bytes. The
 /// snapshot is the prelude as it read before that move (HEAD c271c73e), captured verbatim: the
 /// files a pod ends up with are only as good as this shell string, and nothing else here would
-/// catch a printf quoting change. Updated deliberately since, once: the `HISTFILE` and tmux
+/// catch a printf quoting change. Updated deliberately since, twice: the `HISTFILE` and terminal
 /// directories under `{ws}/.cache`, made as `kl` AFTER the chown so a restored tree's root-owned
-/// files cannot fail the seed.
+/// files cannot fail the seed, and `.cache/tmux` becoming `.cache/shell` when the tool server took
+/// terminal persistence over from tmux.
 #[test]
 pub(crate) fn the_prelude_is_byte_identical_to_the_snapshot_before_shell_rc() {
     // `PRELUDE_SNAPSHOT_REGEN=1 cargo test …` rewrites the snapshot: a deliberate act, reviewed
