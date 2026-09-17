@@ -4,7 +4,7 @@ import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
 import { Memories, type Memory } from "./memory.ts";
-import { nudge, reduce, type PlanEvent } from "./plan.ts";
+import { brief, nudge, reduce, type PlanEvent } from "./plan.ts";
 import { order, question as triageQuestion } from "./triage.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
@@ -345,7 +345,9 @@ export class Bench {
     this.emit({ type: "exchange", row: back });
     // The asking session may be gone by now (removed, archived): an answer nobody is waiting for is dropped, not thrown.
     if (!answer || !this.sessions.get(a.from)) return;
-    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${answer}`).catch(() => undefined);
+    // The exchange row above keeps the whole reply; what crosses to the asking session is the
+    // standup version of it, because that session is a planner and not a reader of diffs.
+    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${brief(answer, a.workspace)}`).catch(() => undefined);
   }
 
   /**

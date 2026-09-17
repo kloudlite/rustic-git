@@ -28,7 +28,9 @@ function fakePi() {
     setActiveTools: (names: string[]) => void (active = names),
     registerCommand: (name: string, def: { handler: (a: string, ctx: any) => Promise<void> }) => void (commands[name] = def),
   } as any;
-  return { pi, tools, hooks, commands, active: () => active };
+  // The extension applies its active set on session_start, never at load: `start()` is that event.
+  const start = async () => { for (const fn of hooks["session_start"] ?? []) await fn({}); };
+  return { pi, tools, hooks, commands, start, active: () => active };
 }
 const withEnv = (vars: Record<string, string | undefined>) => {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
@@ -39,11 +41,12 @@ const withEnv = (vars: Record<string, string | undefined>) => {
   };
 };
 
-test("a bench session registers exactly the catalogue; a workspace session only its own packages", () => {
+test("a bench session registers exactly the catalogue; a workspace session only its own packages", async () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
   try {
-    const { pi, tools, active: activeNow } = fakePi();
+    const { pi, tools, active: activeNow, start } = fakePi();
     kloudlite(pi);
+    await start();
     const registered = tools.map((t) => t.name).sort();
     // `kloudlite.ts` registers the catalogue except the entries that run ON this machine —
     // those are `workspace-tools.ts`'s, because they go to a tool server rather than to /v1.
@@ -574,8 +577,9 @@ test("a snapshot is a snapshot: create from one, list them, and never the word v
 test("twelve tools on, the rest one search away, and the six skills read", async () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
   try {
-    const { pi, tools, active } = fakePi();
+    const { pi, tools, active, start } = fakePi();
     kloudlite(pi);
+    await start();
     const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
     const run = (n: string, a: any) => tool(n).execute("c1", a, undefined, undefined, undefined);
 
@@ -647,11 +651,12 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
   }
 });
 
-test("an agent cannot start agents", () => {
+test("an agent cannot start agents", async () => {
   const restore = withEnv({ KL_EPHEMERAL: "1", KL_TOOLS_WORKSPACE: "api", KL_TEAM: "acme", KL_WORKSPACE_ID: undefined, KL_FORK: undefined });
   try {
-    const { pi, tools, active } = fakePi();
+    const { pi, tools, active, start } = fakePi();
     kloudlite(pi);
+    await start();
     // Its child would have nobody to report to and no tab to be seen in.
     assert.ok(!tools.some((t) => t.name === "ask"), tools.map((t) => t.name).join(","));
     assert.ok(!active().includes("ask"), active().join(","));
@@ -682,6 +687,44 @@ test("plan mode turns the writes off in pi itself, and build turns them back on"
 
     await commands.mode.handler("build", ctx);
     assert.ok(active().includes("bash") && active().includes("ask"), active().join(","));
+  } finally {
+    restore();
+  }
+});
+
+test("loading the extension calls no action method; the active set is applied on session_start", async () => {
+  // The fleet's own failure (2026-09-17): `setActiveTools` at load threw "Extension runtime not
+  // initialized" and every bench session exited 1. Registering is describing; activating is doing.
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    let started = false;
+    let active: string[] = [];
+    const hooks: Record<string, ((ev: any) => Promise<any>)[]> = {};
+    const tools: { name: string }[] = [];
+    const boom = (what: string) => {
+      if (!started) throw new Error(`Extension runtime not initialized. Action methods cannot be called during extension loading (${what})`);
+    };
+    const pi = {
+      registerTool: (t: { name: string }) => tools.push(t),
+      registerCommand: () => undefined,
+      on: (name: string, fn: (ev: any) => Promise<any>) => ((hooks[name] ??= []).push(fn), undefined),
+      getAllTools: () => tools,
+      getActiveTools: () => (boom("getActiveTools"), active),
+      setActiveTools: (names: string[]) => (boom("setActiveTools"), void (active = names)),
+      sendMessage: () => boom("sendMessage"),
+      ui: { notify: () => boom("ui.notify"), setWidget: () => boom("ui.setWidget") },
+    } as any;
+
+    // Loading must not throw, and must not have decided anything yet.
+    kloudlite(pi);
+    workspaceTools(pi);
+    assert.ok(tools.length > 10, "tools are registered at load, which is allowed");
+    assert.deepEqual(active, [], "nothing activated during load");
+    assert.ok(hooks["session_start"]?.length, "it waits for the session");
+
+    started = true;
+    for (const fn of hooks["session_start"]) await fn({});
+    assert.deepEqual(active.slice().sort(), ALWAYS_ON.slice().sort());
   } finally {
     restore();
   }

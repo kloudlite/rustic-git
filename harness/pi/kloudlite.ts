@@ -164,6 +164,7 @@ const PLATFORM = [
   "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
   "You start with your own machine's tools — read, write, edit, bash, grep, find, ls, process — plus ask, plan, skill and tool_search. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
   "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
+  "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent; parallel or risky changes → isolated agents.",
@@ -779,8 +780,18 @@ export function tools(pi: ExtensionAPI) {
   memoryTools(reg);
   capabilities(reg);
   modeCommand(pi, PLAN_TOOLS);
-  // Thirteen to start with; the rest are one `tool_search` away.
-  pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
+  startWith(pi);
+}
+
+/**
+ * The active set is applied on SESSION START, never at load. `registerTool` works while an
+ * extension loads; an action method does not — `setActiveTools` at load threw "Extension runtime
+ * not initialized" and every bench session on the fleet exited (2026-09-17). Registering is
+ * describing; activating is doing, and doing waits for a session.
+ */
+function startWith(pi: ExtensionAPI) {
+  const set = () => pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
+  pi.on("session_start", async () => void set());
 }
 
 /**
@@ -810,7 +821,7 @@ export default function (pi: ExtensionAPI) {
     memoryTools(reg);
     capabilities(reg);
     modeCommand(pi, PLAN_TOOLS);
-    return pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
+    return startWith(pi);
   }
   tools(pi);
   const own = process.env.KL_WORKSPACE_ID;
