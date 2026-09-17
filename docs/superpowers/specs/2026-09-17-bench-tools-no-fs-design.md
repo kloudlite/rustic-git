@@ -75,3 +75,14 @@ deprived of exec tool too. it should use workspace ide tools directly".
 ## Out of scope
 Renaming a service in place (remove + add). Per-tool approval in the desktop. Bench `bash` for
 power users (owner ruled against).
+
+## 7. Background processes are tools again (owner, 06:45 IST: "if not we should include")
+
+Every session's `bash` takes `background: true` and there is a `process` tool (`start | list |
+logs | stop | write`), both mapped in `workspace-tools.ts` onto the session's OWN workspace tool
+server: `exec {detach:true}`, `process_list`, `process_output`, `process_kill`, `process_write`.
+A background command therefore runs inside the workspace (the bench's own container for a bench
+session), never in the bench container, and survives the model's turn. `harness-bench` mirrors the
+tool server's process list into its `/procs` ledger (session, id, cmd, state) on each
+process-tool result so the desktop's Processes panel and `/proc-stop` work again; `/proc-stop`
+calls `process_kill` on the owning session's tool server. `WORKSPACE_TOOLS` names `process`.
