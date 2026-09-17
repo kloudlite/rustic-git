@@ -863,7 +863,8 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             let mut last = Ok(());
             for _ in 0..2 {
                 one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
-                // Read by the workspace route, which is the thread file under /bench/workspaces/{ws}/.
+                // Read by the workspace route, which is the thread file under the bench folder's
+                // own `workspaces/{ws}/` — `{KL_WORKSPACE}/.bench`, never a `/bench` mount.
                 let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
                 if status != 200 {
                     bail!("GET /workspaces/{ws}/messages answered {status}");

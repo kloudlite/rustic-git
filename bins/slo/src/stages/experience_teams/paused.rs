@@ -33,7 +33,22 @@ pub(super) const PAUSED_CEILING: Duration = Duration::from_secs(PAUSED_BODY.as_s
 const PAUSE_WINDOW: Duration = Duration::from_secs(60);
 const READY_WAIT: Duration = Duration::from_secs(120);
 const EXEC: Duration = Duration::from_secs(20);
-const CANARY: &str = "/bench/.slo-canary";
+/// What the canary file holds — and what the read must give back. The PATH is derived in the pod
+/// (`canary_js`), so the marker is the only constant either side shares.
+const CANARY: &str = "kloudlite-slo-pause-canary";
+
+/// The canary's path, computed INSIDE the bench container from the same two facts the container
+/// itself is built from: `KL_WORKSPACE` (the live worktree, mounted at the same path the workspace
+/// container sees) and `k8s::BENCH_SUBDIR`, which is what `harness-bench --dir` is given. It used
+/// to be the literal `/bench`, the retired Bench pod's own mount — nothing mounts that now, and
+/// the write failed `ENOENT` on every run (hourly, 2026-09-17). One expression for the write and
+/// the read, so the two can never drift apart.
+fn canary_js(body: &str) -> String {
+    format!(
+        r#"const w=process.env.KL_WORKSPACE;if(!w){{console.error("no KL_WORKSPACE in the bench container");process.exit(2)}}const p=require("path").join(w,{subdir:?},".slo-canary");{body}"#,
+        subdir = k8s::BENCH_SUBDIR,
+    )
+}
 const TOKEN_JS: &str = r#"let d="";try{d=require("fs").readFileSync(process.env.KL_TOOL_TOKEN_FILE,"utf8").trim()}catch{}process.stdout.write(d)"#;
 
 pub(super) fn pause_team(c: &Ctx) -> String {
@@ -108,7 +123,9 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
     post(c, &api(c, &format!("/v1/invites/{token}/accept")), &c.probe_jwt, Value::Null).await.context("the member could not join")?;
     make_bench(c, team).await?;
     ready(c, team, READY_WAIT).await.context("the member's bench never became ready")?;
-    in_bench(c, team, r#"require("fs").writeFileSync(process.argv[1],process.argv[1])"#, CANARY).await.context("could not write the canary")?;
+    in_bench(c, team, &canary_js(r#"require("fs").writeFileSync(p,process.argv[1])"#), CANARY)
+        .await
+        .context("could not write the canary")?;
     let (cli, cli_id) = super::super::experience_gaps::cli_login(c, &c.probe_jwt, &format!("{team}-tool")).await?;
     let prep = async {
         let (status, text) = raw(c, reqwest::Method::POST, &bench_url(c, "/tool-token", team), &cli, None, &[]).await?;
@@ -231,7 +248,7 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
                 // reconcile writes `access: full`, which it has by the time the unpause answers.
                 call(c, reqwest::Method::POST, &bench_url(c, "/start", &t), &c.probe_jwt, None).await.context("could not start the bench")?;
                 back_up_within(c, &t, PAUSED_BODY.saturating_sub(start.elapsed())).await.context("the bench never came back")?;
-                let got = in_bench(c, &t, r#"process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))"#, CANARY).await?;
+                let got = in_bench(c, &t, &canary_js(r#"process.stdout.write(require("fs").readFileSync(p,"utf8"))"#), "").await?;
                 if got != CANARY {
                     return Err(anyhow!("the canary reads back as {:?}", clip(&got)));
                 }
@@ -257,6 +274,22 @@ async fn teardown(c: &Ctx, team: &str) {
         return;
     }
     super::super::env_intercept::delete_members_now(c, team).await;
+}
+
+#[cfg(test)]
+mod canary_tests {
+    use super::*;
+
+    /// The path is the pod's to compute, from the two facts the bench container is built from.
+    /// A literal `/bench` here is the 2026-09-17 failure: nothing mounts it any more.
+    #[test]
+    fn the_canary_path_comes_from_the_containers_own_env() {
+        let js = canary_js("read(p)");
+        assert!(js.contains("process.env.KL_WORKSPACE"), "{js}");
+        assert!(js.contains(&format!("{:?}", k8s::BENCH_SUBDIR)), "{js}");
+        assert!(js.ends_with("read(p)"), "{js}");
+        assert!(!js.contains("\"/bench\""), "the retired Bench mount is back: {js}");
+    }
 }
 
 #[cfg(test)]
