@@ -30,7 +30,11 @@ deprived of exec tool too. it should use workspace ide tools directly".
    `kl_pkg_list | kl_pkg_add | kl_pkg_rm | kl_pkg_update` (PATCH / POST on
    `/v1/workspaces/{own id}`) and `kl_env_current | kl_env_switch | kl_env_clear`
    (`/v1/me/environments/{KL_TEAM}`). A workspace session gets the same `kl_pkg_*` tools acting
-   on its own workspace (`KL_TOOLS_WORKSPACE`). `kl_workspace_packages` (by arbitrary id) is
+   on its own workspace (`KL_TOOLS_WORKSPACE`). **Every workspace session, the bench included,
+   manages its space's environment** (owner, 06:05 IST): `kl_env_current | kl_env_switch |
+   kl_env_clear`, `kl_environments | kl_environment`, `kl_environment_service_add | _rm`, and
+   `kl_intercept` (any service of the environment to any workspace of the space) are registered
+   in workspace mode too, and named in `WORKSPACE_TOOLS`. `kl_workspace_packages` (by arbitrary id) is
    removed from the bench: another workspace is only ever asked. The system prompt says so.
 3. **The catalogue covers `/v1`.** New tools (all through `kloudlite.ts`'s `reg`, named in
    `catalog.ts` with effect): `kl_environment_services` (PATCH `/v1/environments/{id}` `{services}`,
