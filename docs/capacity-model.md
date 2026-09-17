@@ -9,7 +9,7 @@ from the code on 2026-09-09.
 
 | Slot | Guaranteed (request) | Limit | Where the numbers live |
 | --- | --- | --- | --- |
-| Workspace ("M session") | 4 GB memory, 2 vCPU | 8 GB, 4 vCPU | `crd::PodResources::default` |
+| Workspace ("M session") | 1 GB memory, 500m vCPU | 8 GB, 4 vCPU | `crd::PodResources::default` |
 | Environment service ("env unit") | 2730Mi memory, 250m cpu | 4 GB, 2 vCPU | `k8s::env_unit_resources` |
 
 Packing rules, and what reads them:
@@ -23,8 +23,16 @@ Packing rules, and what reads them:
 | Workspace-node average utilisation | 45% | **pricing only** — never a scheduling allowance |
 | Env pool on preemptible | 0 | decided, nothing to read |
 
-The 45% figure is an assumption about how bursty a workspace is over a day. It prices the fleet; it
-must never admit a pod beyond the guarantees, because the guarantee is what the person was sold.
+The 45% figure is an assumption about how bursty a workspace is over a day. It prices the fleet.
+
+**The workspace request was cut to 1 GB / 500m on 2026-09-17** — the sheet's "M session" row is the
+LIMIT now, not the request. Requesting the peak while a workspace sat idle declined ten hourly
+starts for minutes across three 8-core nodes that were themselves nearly idle
+(`claim.declined.capacity gate=start`). What a person was sold is the burst, and the burst is the
+limit; the request is what an idle workspace occupies, so a node holds the workspaces people really
+keep open. The consequence is deliberate and stated here rather than discovered: CPU is now
+oversubscribed at peak (128 workspaces × 4 vCPU of limit on 64), which is exactly the 45%
+utilisation assumption above being spent. Memory is still the binding dimension.
 
 1 OCPU = 2 vCPU. Node allocatable already excludes the kubelet's reserved capacity and eviction
 threshold, so nothing here adds a second system margin on top of it.

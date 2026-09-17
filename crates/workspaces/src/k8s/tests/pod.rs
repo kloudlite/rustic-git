@@ -240,14 +240,17 @@ pub(crate) fn a_user_pod_cannot_reach_the_api_server_or_escalate() {
 /// fits is decided by the REQUEST, not the limit. These numbers are therefore a pricing input,
 /// not a tuning knob — drifting them silently changes what a workspace costs.
 ///
-/// "M session" in the model is a workspace. On a 32-OCPU / 128 GB session node at 94% usable
-/// memory: 120 GB ÷ 4 GB = 30 workspaces, needing 30 × 2 = 60 vCPU of the 64 available.
+/// Since 2026-09-17 the request is what an IDLE workspace occupies and the sheet's "M session"
+/// row is the LIMIT: requesting the peak declined ten hourly starts for minutes on nodes that
+/// were themselves idle. On a 32-OCPU / 128 GB node at 94% usable memory: 120 GB ÷ 1 GB = 120
+/// workspaces by memory, 64 vCPU ÷ 500m = 128 by CPU — memory-bound, burst oversubscribed on
+/// purpose.
 #[test]
 pub(crate) fn pod_requests_match_the_capacity_model() {
     let r = PodResources::default();
-    assert_eq!(r.memory_request, "4Gi", "M workspace guarantee is 4 GB");
-    assert_eq!(r.memory_limit, "8Gi", "M workspace limit is 8 GB");
-    assert_eq!(r.cpu_request, "2", "2 vCPU guaranteed, and deliberately not oversubscribed");
+    assert_eq!(r.memory_request, "1Gi", "what an idle workspace occupies");
+    assert_eq!(r.memory_limit, "8Gi", "M workspace limit is 8 GB — the burst the person was sold");
+    assert_eq!(r.cpu_request, "500m", "idle, not peak: the peak is the limit below");
     assert_eq!(r.cpu_limit, "4");
 
     // An environment service: 4 GB limit packed at 1.5x oversubscription.

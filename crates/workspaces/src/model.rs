@@ -517,7 +517,7 @@ mod bench_capacity_tests {
         assert_eq!(crate::quota::millicores(&bench.cpu_request), 250);
         assert_eq!(crate::quota::mebibytes(&bench.memory_request), 512);
         assert!(
-            crate::quota::millicores(&bench.cpu_request) * 4 < crate::quota::millicores(&ws.cpu_request),
+            crate::quota::millicores(&bench.cpu_request) < crate::quota::millicores(&ws.cpu_request),
             "a bench container that packs like a workspace is the defect this test exists for"
         );
         // The LIMIT still allows a real burst mid-turn — a request is not a ceiling.

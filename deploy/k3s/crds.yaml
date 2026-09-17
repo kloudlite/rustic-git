@@ -470,9 +470,9 @@
                       },
                       "resources": {
                         "default": {
-                          "cpuRequest": "2",
+                          "cpuRequest": "500m",
                           "cpuLimit": "4",
-                          "memoryRequest": "4Gi",
+                          "memoryRequest": "1Gi",
                           "memoryLimit": "8Gi"
                         },
                         "description": "Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.",
@@ -2655,9 +2655,9 @@
                       },
                       "resources": {
                         "default": {
-                          "cpuRequest": "2",
+                          "cpuRequest": "500m",
                           "cpuLimit": "4",
-                          "memoryRequest": "4Gi",
+                          "memoryRequest": "1Gi",
                           "memoryLimit": "8Gi"
                         },
                         "description": "Requests and limits for a workspace pod, as plain strings in Kubernetes quantity form.",

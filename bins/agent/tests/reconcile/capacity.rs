@@ -18,8 +18,11 @@ pub(crate) fn crowded(created_ago: Option<i64>) -> Vec<Route> {
         kloudlite_workspaces::kube_test::get(
             "/api/v1/pods",
             serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [
+                // 7800m of 8: less than one workspace's REQUEST is left, whatever that request is
+                // — it was cut to 500m on 2026-09-17, and a fixture that left a whole vCPU free
+                // stopped crowding the node at all.
                 {"metadata": {"name": "busy", "namespace": "ws-bob"},
-                 "spec": {"containers": [{"name": "c", "resources": {"requests": {"cpu": "7", "memory": "8Gi"}}}]},
+                 "spec": {"containers": [{"name": "c", "resources": {"requests": {"cpu": "7800m", "memory": "8Gi"}}}]},
                  "status": {"phase": "Running"}},
                 // Terminated: its capacity is back, and counting it would refuse claims on a node
                 // full of yesterday's finished pods.
@@ -35,8 +38,8 @@ pub(crate) fn crowded(created_ago: Option<i64>) -> Vec<Route> {
     v
 }
 
-/// A default workspace requests 2 vCPU; only 1 is left. The node must decline so a peer with room
-/// takes it — and it must not write the "nobody has room" condition yet, because a peer claiming
+/// A default workspace's request does not fit in what is left. The node must decline so a peer with
+/// room takes it — and it must not write the "nobody has room" condition yet, because a peer claiming
 /// this a second later is the normal case.
 #[tokio::test]
 async fn a_node_without_room_declines_a_fresh_claim() {
@@ -44,7 +47,7 @@ async fn a_node_without_room_declines_a_fresh_claim() {
     let (ctx, rec) = ctx(tmp.path(), crowded(None));
 
     kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
-    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a node with 1 vCPU free must not take a 2 vCPU workspace: {:?}", rec.calls());
+    assert!(rec.sent("PUT", WS_STATUS).is_empty(), "a node with 200m free must not take a whole workspace: {:?}", rec.calls());
     assert!(
         rec.requests().iter().any(|c| c.contains("/api/v1/pods?") && c.contains("spec.nodeName%3Dnode-a")),
         "the pod list must be scoped to this node: {:?}", rec.requests()
@@ -69,8 +72,13 @@ async fn a_workspace_nothing_can_fit_gets_the_no_capacity_condition() {
     let c = sent[0]["status"]["conditions"].as_array().unwrap().iter().find(|c| c["type"] == "Placed").expect("Placed");
     assert_eq!(c["status"], "False");
     assert_eq!(c["reason"], "NoCapacity");
-    assert!(c["message"].as_str().unwrap().contains("2000m cpu"), "the message names what it needs: {c}");
-    assert!(c["message"].as_str().unwrap().contains("4096 MiB"), "{c}");
+    // What it needs is the workspace REQUEST, read from the definition so the message and the
+    // gate cannot drift apart when it is resized.
+    let want = kloudlite_workspaces::crd::PodResources::default();
+    let cpu = kloudlite_workspaces::quota::millicores(&want.cpu_request);
+    let mib = kloudlite_workspaces::quota::mebibytes(&want.memory_request);
+    assert!(c["message"].as_str().unwrap().contains(&format!("{cpu}m cpu")), "the message names what it needs: {c}");
+    assert!(c["message"].as_str().unwrap().contains(&format!("{mib} MiB")), "{c}");
 }
 
 /// The hand-off, which is the whole point of declining: the crowded node writes nothing, and the
@@ -125,9 +133,10 @@ async fn a_claim_clears_a_no_capacity_condition() {
     assert!(!conds.iter().any(|c| c["reason"] == "NoCapacity"), "the reason must not survive the claim: {conds:?}");
 }
 
-/// A burst: four workspaces created at once all read a pod list with none of the others in it,
-/// because the claim writes `status.nodeName` a whole reconcile before the pod exists. Counting
-/// what is CLAIMED here — three 2-vCPU workspaces on an 8-vCPU node — is what stops the fourth.
+/// A burst: workspaces created at once all read a pod list with none of the others in it, because
+/// the claim writes `status.nodeName` a whole reconcile before the pod exists. Counting what is
+/// CLAIMED here is what stops the one that does not fit: sixteen claimed workspaces at 500m each
+/// are the whole of an 8-vCPU node, and not one of them has a pod yet.
 #[tokio::test]
 async fn workspaces_claimed_here_but_not_yet_running_are_counted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -141,14 +150,14 @@ async fn workspaces_claimed_here_but_not_yet_running_are_counted() {
         vec![kloudlite_workspaces::kube_test::get(
             WORKSPACES_LIST,
             serde_json::json!({"apiVersion": "v1", "kind": "WorkspaceList", "metadata": {},
-                               "items": [claimed("ws-a"), claimed("ws-b"), claimed("ws-c"), claimed("ws-d")]}),
+                               "items": (0..16).map(|i| claimed(&format!("ws-{i}"))).collect::<Vec<_>>()}),
         )],
     );
 
     kloudlite_agent::claim::claim_workspace(&workspace(serde_json::json!({})), &ctx).await.unwrap();
     assert!(
         rec.sent("PUT", WS_STATUS).is_empty(),
-        "4 claimed x 2 vCPU fills an 8 vCPU node, and not one of them has a pod yet: {:?}", rec.calls()
+        "16 claimed x 500m fills an 8 vCPU node, and not one of them has a pod yet: {:?}", rec.calls()
     );
 }
 

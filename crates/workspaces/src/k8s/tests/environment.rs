@@ -156,10 +156,14 @@ pub(crate) fn the_namespace_refuses_anything_larger_than_its_slot() {
     assert_eq!(max.get("memory").unwrap().0, "8Gi");
     assert_eq!(max.get("cpu").unwrap().0, "4");
 
-    // defaultRequest is what capacity is priced on, for anything that names no request.
+    // defaultRequest is what the scheduler packs anything that names no request at — the idle
+    // figure, the same one `PodResources::default` requests since 2026-09-17.
     let dr = item.default_request.as_ref().unwrap();
-    assert_eq!(dr.get("memory").unwrap().0, "4Gi");
-    assert_eq!(dr.get("cpu").unwrap().0, "2");
+    assert_eq!(dr.get("memory").unwrap().0, "1Gi");
+    assert_eq!(dr.get("cpu").unwrap().0, "500m");
+    // And no `min`: a container asking for less than the slot — the bench one asks 250m — must
+    // still be admitted.
+    assert!(item.min.is_none(), "a min would refuse the bench container's own request");
 
     // Shared user namespace: no ownerReference, or deleting one workspace drops the ceiling
     // for every sibling.

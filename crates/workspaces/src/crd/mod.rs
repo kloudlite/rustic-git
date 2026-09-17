@@ -128,25 +128,37 @@ pub struct PodResources {
 
 
 impl Default for PodResources {
-    /// The workspace slot from the capacity model — the sheet's "M session" row, and `session` is
-    /// its word for a workspace: guarantee 4 GB / 2 vCPU, limit 8 GB / 4 vCPU. The model and its
+    /// The workspace slot: **request 1 GB / 500m, limit 8 GB / 4 vCPU**. The model and its
     /// provenance are tabulated in `docs/capacity-model.md`; change a number there and here
     /// together, never one alone.
     ///
-    /// The REQUEST is the load-bearing half. It is what the scheduler packs against, so it — not
-    /// the limit — decides how many sessions a node holds and therefore what a session costs. The
-    /// previous 512Mi/250m request was a small floor "with room to burst", which let a 128 GB node
-    /// accept roughly 235 sessions against the model's ~30, and made the model's "guaranteed CPU is
-    /// NOT oversubscribed on session nodes" false: 235 × 2 vCPU of promised capacity on 64 vCPU.
+    /// The REQUEST is the load-bearing half. It is what the scheduler packs against and what
+    /// `claim::room_to_start` gates a start on, so it — not the limit — decides how many
+    /// workspaces a node holds.
     ///
-    /// The arithmetic these numbers have to satisfy, on a 32-OCPU / 128 GB session node at the
-    /// model's 94% usable-memory headroom: 120 GB ÷ 4 GB = 30 sessions, needing 30 × 2 = 60 vCPU of
-    /// 64. Memory-bound, CPU fits, guarantee honoured.
+    /// It has been wrong in BOTH directions, and the two incidents are why these numbers read the
+    /// way they do:
+    ///   * 512Mi/250m as a bare floor "with room to burst" let a 128 GB node accept ~235
+    ///     workspaces against the model's ~30, so the guarantee the person was sold was fiction.
+    ///   * The capacity sheet's own 4 GB / 2 vCPU guarantee, used as the REQUEST, priced every
+    ///     workspace at its peak while it sat idle: on 2026-09-17 ten hourly starts across three
+    ///     8-core nodes — which also carry two probe benches and the owner's own workspaces —
+    ///     were declined for minutes (`claim.declined.capacity gate=start`) with the nodes almost
+    ///     entirely idle.
+    ///
+    /// So the request is what an IDLE workspace actually occupies and the LIMIT is the burst the
+    /// person was sold, which is what a limit is for. A node holds the workspaces people really
+    /// keep open; one that wakes up gets its 4 vCPU because nothing else is asking.
+    ///
+    /// The arithmetic on a 32-OCPU / 128 GB node at the model's 94% usable-memory headroom:
+    /// 120 GB ÷ 1 GB = 120 workspaces by memory, 64 vCPU ÷ 500m = 128 by CPU — memory-bound, and
+    /// the burst is oversubscribed DELIBERATELY (the model's 45% utilisation assumption, which
+    /// `docs/capacity-model.md` says prices the fleet).
     fn default() -> Self {
         Self {
-            cpu_request: "2".into(),
+            cpu_request: "500m".into(),
             cpu_limit: "4".into(),
-            memory_request: "4Gi".into(),
+            memory_request: "1Gi".into(),
             memory_limit: "8Gi".into(),
         }
     }
