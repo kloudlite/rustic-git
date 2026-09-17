@@ -1913,3 +1913,78 @@ test("a turn that ends in an error blocks the ask with the plain sentence", asyn
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A duplicate ask is one exchange (spec §3.9 rule 6). The bench that polled and re-asked had the
+ * workspace build the same image twice; asking again while the first is open joins it instead.
+ */
+test("the same ask twice is the same exchange", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-dup-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const one = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === one.exchange && e.state === "running"), 5_000, "the ask running");
+
+    const two = await bench.ask("api", "hang", asker);
+    assert.equal(two.exchange, one.exchange, "it joins the open one");
+    assert.equal(bench.exchanges.bySession(asker).filter((e) => e.dir === "out").length, 1, "and no second row is written");
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes(`already asked: ${one.exchange}`)),
+      "the asking session is told which one it is waiting on",
+    );
+
+    // Different words are a different ask, even to the same workspace.
+    const three = await bench.ask("api", "hang again", asker);
+    assert.notEqual(three.exchange, one.exchange);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A watch is bounded (spec §3.9 rule 5): twenty batches is a standing subscription, not a
+ * notification, and it says so rather than going quiet.
+ */
+test("a watch stops after twenty fires, and says why", async () => {
+  let n = 0;
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      // Every poll has a NEW matching line, so the dedupe never hides the bound being tested.
+      const out = req.url === "/tools/process_output" ? { stdout: `error ${++n}`, stderr: "", next: n, next_err: 0 } : { processes: [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "running", exit_code: null }] };
+      res.end(JSON.stringify(out));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-watchmax-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, resolveTools: async () => at });
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    (bench as never as { foldRow: (id: string, ev: unknown) => void }).foldRow(ws.id, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:procs",
+      widgetLines: [JSON.stringify([{ id: "p1", name: "dev", command: "npm run dev", started: Date.now() }])],
+    });
+    bench.watchProc(ws.id, "p1", "error");
+    for (let i = 0; i < 25; i++) await (bench as never as { sweepWatches: () => Promise<void> }).sweepWatches();
+
+    const said = ((await bench.messages(ws.id)).messages as { content: unknown }[])
+      .map((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+      .filter((t) => t.startsWith("[watch"));
+    assert.equal(said.length, 20, `fired ${said.length} times`);
+    assert.match(said[19], /\[watch ended: it has fired 20 times; watch it again if you still need it\]/);
+  } finally {
+    await bench.stop();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

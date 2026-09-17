@@ -62,6 +62,8 @@ const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
 const WATCH_MAX_LINES = 20;
+/** How many times one watch may fire before it says so and stops (spec §3.9 rule 5). */
+const WATCH_MAX_FIRES = 20;
 /**
  * Deadlines, per state (spec §3.9 rule 2). Nothing waits forever, and nothing waits SILENTLY: the
  * person sees the age on the card and the session is told what happened to its ask.
@@ -121,7 +123,7 @@ export class Bench {
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
   /** Patterns a session asked to be told about, by process id. */
-  private watching = new Map<string, { session: string; re: RegExp; since: number; sinceErr: number; pattern: string; said: Set<string> }>();
+  private watching = new Map<string, { session: string; re: RegExp; since: number; sinceErr: number; pattern: string; said: Set<string>; fires: number }>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** The last thing a session SAID, so a turn that ended in a question is read as waiting. */
@@ -768,7 +770,7 @@ export class Bench {
    */
   watchProc(session: string, id: string, pattern: string): void {
     const re = new RegExp(pattern);
-    this.watching.set(id, { session, re, since: 0, sinceErr: 0, pattern, said: new Set() });
+    this.watching.set(id, { session, re, since: 0, sinceErr: 0, pattern, said: new Set(), fires: 0 });
     this.pollProcs();
   }
 
@@ -796,7 +798,13 @@ export class Bench {
       for (const l of hit) w.said.add(l);
       // A build prints thousands of lines; only what matched is remembered, and never unboundedly.
       if (w.said.size > 2_000) w.said = new Set([...w.said].slice(-1_000));
-      if (hit.length) await this.send(w.session, `[watch ${row.name} /${w.pattern}/]\n${hit.join("\n")}`).catch(() => undefined);
+      if (!hit.length) continue;
+      // A watch is BOUNDED (spec §3.9 rule 5): twenty batches is a standing subscription, not a
+      // notification, and the last one says so rather than going quiet on its own.
+      w.fires += 1;
+      const last = w.fires >= WATCH_MAX_FIRES;
+      if (last) this.watching.delete(id);
+      await this.send(w.session, `[watch ${row.name} /${w.pattern}/]\n${hit.join("\n")}${last ? "\n[watch ended: it has fired 20 times; watch it again if you still need it]" : ""}`).catch(() => undefined);
     }
   }
 
@@ -1000,6 +1008,15 @@ export class Bench {
     const { id: workspace, name } = agent && !agent.archived ? { id: to, name: agent.name || to } : await this.resolveWorkspace(to);
     const s = agent && !agent.archived ? agent : await this.openWorkspace(workspace);
     const direct = !!agent && !agent.archived;
+    // The SAME ask, again, while the first is still open: one exchange, not two (spec §3.9 rule 6).
+    // A bench that re-asks after a poll would otherwise have the workspace do the work twice.
+    const open = this.exchanges.recent(500).find(
+      (e) => e.dir === "out" && e.session === from && e.workspace === workspace && e.text.trim() === text.trim() && (e.state === "queued" || e.state === "running"),
+    );
+    if (open) {
+      void this.send(from, `[harness] already asked: ${open.id}, still ${open.state}`).catch(() => undefined);
+      return { session: s.id, exchange: open.id, workspace, queued: (this.asked.get(s.id) ?? []).length };
+    }
     const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
     this.emit({ type: "exchange", row });
