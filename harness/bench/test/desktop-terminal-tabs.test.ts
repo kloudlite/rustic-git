@@ -8,7 +8,7 @@ import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
-import { checkPty, checkWatch, readTtydFrame } from "../../src/pty-ipc.ts";
+import { checkPty, checkWatch, closeSocket, readTtydFrame } from "../../src/pty-ipc.ts";
 import { makeTab, nextIndex, scopeOfTab, sessionIndex, sessionName, sessionsOfTab, slug, type TermTab } from "../../src/renderer/components/terminal/tabs.ts";
 import { WebSocketServer } from "ws";
 import type { Machine, Workspace } from "../../src/renderer/model.ts";
@@ -174,4 +174,32 @@ test("ttyd frames: the opcode is the first byte, text or binary, and an unknown 
   // person's scrollback.
   for (const odd of ["9whatever", "", "not json at all"]) assert.deepEqual(text(odd), { kind: "ignore" }, odd);
   assert.deepEqual(binary(JSON.stringify({ exit: 0 })), { kind: "ignore" }, "a binary frame is never control JSON");
+});
+
+/**
+ * `ws` THROWS from `close()` while a socket is still CONNECTING, and an uncaught throw in the main
+ * process is Electron's crash dialog — which is what a Files tab left before its watch opened did
+ * to the owner's desktop (2026-09-18).
+ */
+test("closing a socket that never connected does not throw", () => {
+  const calls: string[] = [];
+  const connecting = {
+    readyState: 0,
+    close() {
+      calls.push("close");
+      throw new Error("WebSocket was closed before the connection was established");
+    },
+    terminate() {
+      calls.push("terminate");
+    },
+  };
+  closeSocket(connecting);
+  assert.deepEqual(calls, ["terminate"], "a connecting socket is terminated, never closed");
+
+  // An open one is closed the ordinary way, and a close that throws anyway is swallowed.
+  const open = { readyState: 1, close: () => calls.push("close-open"), terminate: () => calls.push("nope") };
+  closeSocket(open);
+  assert.deepEqual(calls, ["terminate", "close-open"]);
+  assert.doesNotThrow(() => closeSocket({ readyState: 1, close: () => { throw new Error("already gone"); } }));
+  assert.doesNotThrow(() => closeSocket(undefined));
 });

@@ -23,6 +23,25 @@ export function checkWatch(scope: unknown): string {
   return checkScope(scope);
 }
 
+
+/**
+ * Closing a socket that has not finished connecting. `ws` THROWS synchronously from `close()` while
+ * a socket is CONNECTING ("WebSocket was closed before the connection was established"), and an
+ * uncaught throw in the main process is Electron's own crash dialog — which is what the owner saw
+ * when a Files tab was left before its watch had opened (2026-09-18). A connecting socket is
+ * terminated, an open one is closed, and neither ever throws out of here.
+ */
+export function closeSocket(w: { readyState: number; close(): void; terminate?: () => void } | undefined): void {
+  if (!w) return;
+  try {
+    // 0 is CONNECTING in every ws implementation and in the browser.
+    if (w.readyState === 0 && w.terminate) w.terminate();
+    else w.close();
+  } catch {
+    /* a socket that could not be closed is already going away */
+  }
+}
+
 /** Throws with the reason; returns the pair when both are a shell's. */
 export function checkPty(id: unknown, scope: unknown): { id: string; scope: string } {
   if (typeof id !== "string" || !ID.test(id)) throw new Error("not a terminal id");

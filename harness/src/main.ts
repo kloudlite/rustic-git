@@ -11,12 +11,21 @@ import { createAuth, type AuthState, type Deps } from "./auth/controller";
 import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listRepos, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
-import { checkPty, checkWatch, readTtydFrame } from "./pty-ipc";
+import { checkPty, checkWatch, closeSocket, readTtydFrame } from "./pty-ipc";
 import type WebSocket from "ws";
 
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
 // `quit`: quit is asynchronous and whenReady below would still open a window first.
 if (!app.requestSingleInstanceLock()) app.exit(0);
+
+/**
+ * A throw nothing caught is Electron's own "A JavaScript error occurred in the main process"
+ * dialog, and the person loses the window to a socket that closed a moment early (owner,
+ * 2026-09-18). The app keeps running and the stack goes to stderr, where the log already is: a
+ * background socket failing is not a reason to take the desktop down with it.
+ */
+process.on("uncaughtException", (e: Error) => console.error("uncaught in main:", e?.stack ?? e));
+process.on("unhandledRejection", (e: unknown) => console.error("unhandled rejection in main:", (e as Error)?.stack ?? e));
 
 let mainWin: BrowserWindow | undefined;
 // Login is always required. HARNESS_BENCH is a developer override for WHERE the bench is
@@ -360,7 +369,7 @@ function openPty(id: string): WebSocket | undefined {
 }
 
 function closePtys() {
-  for (const w of ptys.values()) w.close();
+  for (const w of ptys.values()) closeSocket(w);
   ptys.clear();
 }
 
@@ -453,7 +462,7 @@ function stopWatch(scope: string) {
   held.closed = true;
   clearTimeout(held.timer);
   held.w?.removeAllListeners();
-  held.w?.close();
+  closeSocket(held.w);
   watches.delete(scope);
 }
 
