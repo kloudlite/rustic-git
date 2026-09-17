@@ -571,8 +571,12 @@ async fn teardown(c: &mut Ctx, j: &Journey, peer_ws: Option<String>) {
     };
     match drained {
         Ok(()) => {
-            warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{}", j.team)), &jwt).await;
+            // BEFORE the team goes: `delete-now` only marks objects a REMOVAL has stamped, and a
+            // team that is already deleted has no membership left to remove — which is why every
+            // failed run left its bench behind with `409 not pending removal` (four on
+            // 2026-09-17, one per red run).
             delete_members_now(c, &j.team).await;
+            warn_on_err(c, reqwest::Method::DELETE, &api(c, &format!("/v1/teams/{}", j.team)), &jwt).await;
         }
         Err(e) => tracing::warn!(kind = "team", op = "drain", name = %j.team, error = %format!("{e:#}"), "slo.teardown.failed"),
     }
@@ -584,11 +588,33 @@ async fn teardown(c: &mut Ctx, j: &Journey, peer_ws: Option<String>) {
 /// and team. Deletion still needs the region's `memberRemovalDeletes`; without it this only marks.
 pub(crate) async fn delete_members_now(c: &Ctx, team: &str) {
     let admin = c.admin_jwt();
-    for who in [c.probe_user.clone(), c.other_user.clone()] {
+    for (who, email, jwt) in [
+        (c.probe_user.clone(), c.probe_email.clone(), c.probe_jwt.clone()),
+        (c.other_user.clone(), c.other_email.clone(), c.other_jwt.clone()),
+    ] {
+        // TWO steps, and the first is what was missing: `delete-now` marks the objects a REMOVAL
+        // stamped, so a member who was never removed is `409 not pending removal` and their bench
+        // stands forever (a bench has no delete route of its own — `delete_as` refuses one by
+        // hand, deliberately: it goes with the membership). A member who is already gone answers
+        // 404, which is this step's desired state, not a failure.
+        let remove = api(c, &format!("/v1/teams/{team}/members/{email}"));
+        // As the team's owner, not as the admin: this is the ordinary remove-a-member route.
+        if let Err(e) = call(c, reqwest::Method::DELETE, &remove, &jwt, None).await {
+            let why = format!("{e:#}");
+            if why.contains("404") || why.contains("no such") {
+                tracing::info!(kind = "team", name = %team, %who, "slo.teardown.already_gone");
+                continue;
+            }
+            tracing::warn!(kind = "team", op = "remove_member", name = %team, %who, error = %why, "slo.teardown.failed");
+        }
         let url = api(c, &format!("/v1/teams/{team}/members/{who}/delete-now"));
         match post(c, &url, &admin, serde_json::json!({ "person": who, "team": team })).await {
             Ok(v) if v["deletes_enabled"] == false => tracing::info!(kind = "team", name = %team, "slo.teardown.marked_only"),
             Ok(_) => {}
+            // Nothing left to mark is the outcome this asked for; only anything else is a leak.
+            Err(e) if format!("{e:#}").contains("404") => {
+                tracing::info!(kind = "team", name = %team, %who, "slo.teardown.already_gone")
+            }
             Err(e) => tracing::warn!(kind = "team", op = "delete_now", name = %team, error = %format!("{e:#}"), "slo.teardown.failed"),
         }
     }
@@ -652,6 +678,70 @@ mod tests {
     use super::*;
     use crate::testkit;
     use std::sync::{Arc, Mutex};
+
+    /// The 2026-09-17 leak, as a fake fleet: every failed `g1-icept` run left its team bench
+    /// standing because teardown asked for `delete-now` on a membership NOBODY HAD REMOVED, and
+    /// the api answered `409 not pending removal`. The removal has to come first — and a member
+    /// already gone (404) is the state this asked for, not a failure.
+    #[tokio::test]
+    async fn teardown_removes_the_member_before_it_asks_for_the_delete() {
+        use axum::routing::{delete as route_delete, post as route_post};
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let (rm, dn, gone) = (seen.clone(), seen.clone(), seen.clone());
+        let app = axum::Router::new()
+            .route(
+                "/v1/teams/{slug}/members/{email}",
+                route_delete(move |axum::extract::Path((_, email)): axum::extract::Path<(String, String)>| {
+                    let rm = rm.clone();
+                    async move {
+                        rm.lock().unwrap().push(format!("remove {email}"));
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .route(
+                "/v1/teams/{slug}/members/{who}/delete-now",
+                route_post(move |axum::extract::Path((_, who)): axum::extract::Path<(String, String)>| {
+                    let dn = dn.clone();
+                    async move {
+                        dn.lock().unwrap().push(format!("delete-now {who}"));
+                        axum::Json(serde_json::json!({"deletes_enabled": true}))
+                    }
+                }),
+            );
+        let c = testkit::ctx_against(app).await;
+        delete_members_now(&c, "run-x-icept").await;
+        let calls = gone.lock().unwrap().clone();
+        assert_eq!(calls.len(), 4, "both owners, both steps: {calls:?}");
+        for (i, w) in [(0, &c.probe_email), (2, &c.other_email)] {
+            assert_eq!(calls[i], format!("remove {w}"), "{calls:?}");
+            assert!(calls[i + 1].starts_with("delete-now "), "the removal comes first: {calls:?}");
+        }
+    }
+
+    /// A team that is already gone answers 404 on the removal, and teardown stops there rather
+    /// than filing a failure for the state it wanted.
+    #[tokio::test]
+    async fn a_member_already_gone_is_not_a_teardown_failure() {
+        use axum::routing::{delete as route_delete, post as route_post};
+        let asked: Arc<Mutex<Vec<String>>> = Default::default();
+        let a = asked.clone();
+        let app = axum::Router::new()
+            .route("/v1/teams/{slug}/members/{email}", route_delete(|| async { axum::http::StatusCode::NOT_FOUND }))
+            .route(
+                "/v1/teams/{slug}/members/{who}/delete-now",
+                route_post(move || {
+                    let a = a.clone();
+                    async move {
+                        a.lock().unwrap().push("delete-now".into());
+                        axum::Json(serde_json::json!({"deletes_enabled": true}))
+                    }
+                }),
+            );
+        let c = testkit::ctx_against(app).await;
+        delete_members_now(&c, "run-x-icept").await;
+        assert!(asked.lock().unwrap().is_empty(), "nothing left to remove means nothing left to mark");
+    }
 
     /// The restart wait answers only for a replacement: the old uid, or a new pod not yet Running
     /// and Ready, keeps it waiting.
