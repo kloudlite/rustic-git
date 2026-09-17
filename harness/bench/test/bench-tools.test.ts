@@ -2138,3 +2138,21 @@ test("the report's stale case: one ask, no second progress poll", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D14 (api-test-report round 2): "attach t-go to t-env" sent the model hunting for a
+ * per-workspace attach verb and burned three asks; `spec.attachedEnvironment` was never set. There
+ * is no such verb — `/v1/workspaces/{id}/attach` answers 410 and an environment belongs to the
+ * SPACE — so both the tool and the identity say which verb that sentence means.
+ */
+test("attaching a workspace to an environment is the space's verb, and says so", () => {
+  const env = TOOLS.find((t) => t.name === "kl_env_switch")!;
+  assert.match(env.summary, /THIS is how a workspace is attached to one/);
+  assert.match(env.summary, /no per-workspace attach any more/);
+  // Nothing offers a verb the platform refuses.
+  for (const invented of ["kl_workspace_attach", "kl_workspace_detach"]) assert.ok(!TOOLS.some((t) => t.name === invented), invented);
+
+  const id = identity(BENCH_HANDS);
+  assert.match(id, /"Attach this workspace to that environment" is kl_env_switch/);
+  assert.match(id, /never spend an ask looking for it/);
+});

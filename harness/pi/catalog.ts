@@ -77,7 +77,7 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_workspace_delete", group: "workspace", summary: "Delete a workspace; its snapshots survive on the volume.", effect: "destroy", ask: (a) => `Delete workspace ${a.id}; its snapshots stay on the volume` },
 
   { name: "kl_env_current", group: "environment", summary: "Which environment this machine's space uses (and every other space of yours).", effect: "read" },
-  { name: "kl_env_switch", group: "environment", summary: "Use an environment for this space — this machine and every workspace in it.", effect: "write", ask: (a) => `Use environment ${a.environment} for this space` },
+  { name: "kl_env_switch", group: "environment", summary: "Point a space at an environment: THIS is how a workspace is attached to one — every workspace in the space resolves its services by bare name. There is no per-workspace attach any more; asking for one gets nothing done.", effect: "write", ask: (a) => `Use environment ${a.environment} for this space` },
   { name: "kl_env_clear", group: "environment", summary: "Stop using an environment in this space.", effect: "write", ask: () => `Stop using an environment in this space` },
   { name: "kl_environments", group: "environment", summary: "List environments you can see.", effect: "read" },
   { name: "kl_environment", group: "environment", summary: "One environment in full: services, ports, intercepts.", effect: "read" },
