@@ -176,6 +176,7 @@ const PLATFORM = [
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
+  "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
   "Independent commands go in one turn, together; they run at the same time.",
@@ -617,7 +618,7 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
   // A pin is `attr@version`: matching on the attr alone is what lets "remove nodejs" take `nodejs@20`.
   const attr = (e: string) => e.split("@")[0];
   const setPackages = async (next: string[]) => answer("PATCH", `/v1/workspaces/${encodeURIComponent(own)}`, { packages: next });
-  const P = Type.Array(Type.String(), { description: "packages: attr or attr@version" });
+  const P = Type.Array(Type.String(), { description: "nixpkgs ATTRIBUTE names, not language names: rustc cargo (Rust), nodejs_22, go, python3, bun, pnpm, jdk21, gcc, gnumake; `attr@version` pins one" });
   reg("kl_pkg_list", {}, async () => text(await packages()));
   reg("kl_pkg_add", { packages: P }, async (a) => {
     const have = await packages();
@@ -831,7 +832,7 @@ export function tools(pi: ExtensionAPI) {
       name: S("workspace name"),
       repo: O(S("repository to start from, e.g. kloudlite/rustic-git")),
       branch: O(S("branch to check out")),
-      packages: O(Type.Array(Type.String(), { description: "packages: attr or attr@version" })),
+      packages: O(Type.Array(Type.String(), { description: "nixpkgs ATTRIBUTE names, not language names: rustc cargo (Rust), nodejs_22, go, python3, bun, pnpm, jdk21, gcc, gnumake; `attr@version` pins one" })),
       from_snapshot: O(S("a snapshot id to start from instead of an empty workspace")),
     },
     async (a, signal) => {

@@ -877,3 +877,23 @@ test("a platform call publishes no exchange; an ask does", async () => {
     restore();
   }
 });
+
+test("packages are named as nixpkgs attributes wherever they are asked for", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const param = (tool: string) =>
+      String((tools.find((t) => t.name === tool) as unknown as { parameters?: { properties?: Record<string, { description?: string }> } })?.parameters?.properties?.packages?.description ?? "");
+    for (const tool of ["kl_pkg_add", "kl_pkg_rm", "kl_workspace_create"]) {
+      assert.match(param(tool), /nixpkgs ATTRIBUTE names/, tool);
+      assert.match(param(tool), /rustc cargo \(Rust\)/, tool);
+      assert.match(param(tool), /attr@version/, tool);
+    }
+    // And the identity says it once, so a model that never opens the skill still knows.
+    assert.match(identity(BENCH_HANDS), /Packages are nixpkgs attributes, not language names/);
+  } finally {
+    restore();
+  }
+});

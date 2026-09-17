@@ -47,7 +47,7 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
 
   { name: "kl_pkg_list", group: "workspace", summary: "The packages this machine has, and whether they are ready.", effect: "read" },
-  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to this machine (`attr` or `attr@version`).", effect: "write" },
+  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to this machine — nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), not language names; `attr@version` pins.", effect: "write" },
   { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from this machine.", effect: "write" },
 
   { name: "kl_repos", group: "code", summary: "Repositories you can see — yours, or an owner's with `owner`.", effect: "read" },
