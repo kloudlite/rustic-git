@@ -59,7 +59,7 @@ export function Chat(props: {
   onDropTab: (id: string, index: number) => void;     // a tab dragged onto this pane's tab row
   onSplit?: () => void;                               // move the current tab to a new pane on the right
   onCloseThread: (id: string) => void;
-  file?: { path: string; status?: string };
+  file?: { path: string; status?: string; scope?: string };
   onCloseFile: () => void;
   task?: live.Task;          // a task's log, open in place like a file
   onCloseTask: () => void;
@@ -356,7 +356,7 @@ export function Chat(props: {
             stays put, because reading a file is part of following the work
             rather than a separate place to be. */}
         <Show when={props.file} keyed>
-          {(f) => <FileView path={f.path} status={f.status} onClose={props.onCloseFile} />}
+          {(f) => <FileView path={f.path} status={f.status} scope={f.scope} onClose={props.onCloseFile} />}
         </Show>
         <Show when={!props.file && props.task}>
           {(t) => <TaskView task={t()} onClose={props.onCloseTask} />}

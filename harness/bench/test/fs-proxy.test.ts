@@ -1,0 +1,112 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { Bench } from "../src/bench.ts";
+import { serve } from "../src/server.ts";
+import { FAKE } from "./fake-pi.ts";
+
+/**
+ * The desktop renders a workspace from its tool server's `/fs/*` (spec §2): the bench proxies those
+ * reads, and `/fs/file` answers BYTES with a content type and an ETag rather than JSON — so one
+ * envelope carries either over the tunnel, and a file already held costs a 304 and no bytes.
+ */
+async function toolServer(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void) {
+  const srv = http.createServer(handler);
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  return { srv, address: `127.0.0.1:${(srv.address() as { port: number }).port}`, close: () => new Promise((r) => srv.close(r)) };
+}
+
+async function up(address: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-fs-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  await bench.start();
+  const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools: async () => address });
+  return {
+    base: `http://127.0.0.1:${srv.port}`,
+    down: async () => (await srv.close(), await bench.stop(), fs.rmSync(dir, { recursive: true, force: true })),
+  };
+}
+
+const WS = "ws-0123456789abcdef";
+
+test("a text file comes back as text, with the tag to ask again with", async () => {
+  const asked: { url: string; etag?: string }[] = [];
+  const tools = await toolServer((req, res) => {
+    asked.push({ url: req.url ?? "", etag: req.headers["if-none-match"] as string | undefined });
+    if (req.headers["if-none-match"] === '"7-1"') return void res.writeHead(304, { etag: '"7-1"' }).end();
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8", etag: '"7-1"' }).end("hello\n");
+  });
+  const t = await up(tools.address);
+  try {
+    const first = await (await fetch(`${t.base}/fs/file?scope=${WS}&path=src/index.ts`)).json();
+    assert.equal(first.text, "hello\n");
+    assert.equal(first.etag, '"7-1"');
+    assert.equal(first.bytes, 6);
+    assert.ok(!first.binary);
+    // The path reaches the tool server; the scope does not — it is how the bench found it.
+    assert.match(asked[0].url, /^\/fs\/file\?path=src%2Findex\.ts$/);
+    assert.equal(asked[0].etag, undefined);
+
+    // Asking again with the tag is a 304, and the envelope says so rather than carrying bytes.
+    const again = await (await fetch(`${t.base}/fs/file?scope=${WS}&path=src/index.ts&etag=${encodeURIComponent('"7-1"')}`)).json();
+    assert.deepEqual(again, { notModified: true, etag: '"7-1"' });
+    assert.equal(asked[1].etag, '"7-1"');
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});
+
+test("a binary file is named and measured, never sent as text", async () => {
+  const tools = await toolServer((_req, res) => {
+    res.writeHead(200, { "content-type": "image/png", etag: '"9-2"' }).end(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2]));
+  });
+  const t = await up(tools.address);
+  try {
+    const got = await (await fetch(`${t.base}/fs/file?scope=${WS}&path=logo.png`)).json();
+    assert.equal(got.binary, true);
+    assert.equal(got.text, undefined);
+    assert.equal(got.bytes, 7);
+    assert.equal(got.mime, "image/png");
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});
+
+test("a file that cannot be read answers its own sentence, not an envelope", async () => {
+  const tools = await toolServer((_req, res) => {
+    res.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "src/gone.ts: not found" }));
+  });
+  const t = await up(tools.address);
+  try {
+    const r = await fetch(`${t.base}/fs/file?scope=${WS}&path=src/gone.ts`);
+    assert.equal(r.status, 404);
+    assert.deepEqual(await r.json(), { error: "src/gone.ts: not found" });
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});
+
+test("the other fs routes are passed through as the JSON they are", async () => {
+  const tools = await toolServer((req, res) => {
+    if ((req.url ?? "").startsWith("/fs/changes")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ repo: true, head: "9a9034f", branch: "main", changes: [{ path: "src/a.ts", index: ".", worktree: "M" }] }));
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ entries: [{ name: "src", kind: "dir", ignored: false, git: "" }] }));
+  });
+  const t = await up(tools.address);
+  try {
+    const tree = await (await fetch(`${t.base}/fs/tree?scope=${WS}`)).json();
+    assert.deepEqual(tree.entries[0], { name: "src", kind: "dir", ignored: false, git: "" });
+    const changes = await (await fetch(`${t.base}/fs/changes?scope=${WS}`)).json();
+    assert.equal(changes.repo, true);
+    assert.equal(changes.head, "9a9034f");
+    assert.deepEqual(changes.changes[0], { path: "src/a.ts", index: ".", worktree: "M" });
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});

@@ -1,7 +1,8 @@
-import { For, Match, Show, Switch, createMemo, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createMemo, createResource, createSignal } from "solid-js";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { DIFFS, FILES } from "../model";
+import * as live from "../live";
 import { highlight, languageOf } from "../syntax";
 
 type Row = { kind: "add" | "del" | "ctx" | "hunk"; old?: number; neu?: number; text: string };
@@ -16,10 +17,28 @@ type Row = { kind: "add" | "del" | "ctx" | "hunk"; old?: number; neu?: number; t
  * wash plus a rule on the edge rather than a full-strength highlight, so a long
  * run of changes stays readable.
  */
-export function FileView(props: { path: string; status?: string; onClose: () => void }) {
+export function FileView(props: { path: string; status?: string; scope?: string; onClose: () => void }) {
   const lang = createMemo(() => languageOf(props.path));
-  const rows = createMemo<Row[] | undefined>(() => (DIFFS[props.path] ? parse(DIFFS[props.path]) : undefined));
-  const body = () => FILES[props.path];
+  /**
+   * The workspace's own file and its diff, read from its tool server (spec §2: the desktop renders
+   * a workspace from `/fs/*`). The fixtures are the fallback for a view with no scope — a tab that
+   * is not a workspace, or the preview window.
+   */
+  const [fetched] = createResource(
+    () => (props.scope ? { scope: props.scope, path: props.path } : undefined),
+    (k) => live.fsFile(k.scope, k.path),
+  );
+  const [fetchedDiff] = createResource(
+    () => (props.scope && props.status && props.status !== "?" ? { scope: props.scope, path: props.path } : undefined),
+    (k) => live.fsDiff(k.scope, k.path),
+  );
+  const rows = createMemo<Row[] | undefined>(() => {
+    const raw = fetchedDiff()?.diff ?? DIFFS[props.path];
+    return raw ? parse(raw) : undefined;
+  });
+  const body = () => fetched()?.text ?? FILES[props.path];
+  /** A file that is not text is named and measured, never rendered: "binary file, N bytes". */
+  const binary = () => (fetched()?.binary ? `binary file, ${fetched()!.bytes ?? 0} bytes` : undefined);
   const parts = () => props.path.split("/");
   const name = () => parts()[parts().length - 1];
   const dir = () => parts().slice(0, -1).join("/");
@@ -53,7 +72,7 @@ export function FileView(props: { path: string; status?: string; onClose: () => 
           when={rows() ?? body()}
           fallback={
             <p class="px-4 py-4 font-ui text-sm text-subtle">
-              Nothing to show yet. Contents come from the workspace's own tool server, which this build does not reach.
+              {binary() ?? (fetched.loading ? "reading…" : "This file could not be read.")}
             </p>
           }
         >

@@ -64,3 +64,18 @@ test("the fs reads are admitted, and only reads", () => {
   assert.ok(!admits("POST /fs/tree?scope=ws-1"), "the console reads a workspace; it never writes one");
   assert.ok(!admits("GET /fs/../etc/passwd"));
 });
+
+/**
+ * The file view reads the workspace's own files the way the tree does: read-only `GET` on the
+ * `/fs/*` routes, nothing else. Clicking a file said "this build does not reach" the tool server
+ * because nothing ever asked it (owner, 2026-09-18).
+ */
+test("the file, diff and stat reads are admitted, and only as reads", () => {
+  const admits = (route: string) => ROUTES.test(route);
+  assert.ok(admits("GET /fs/file?scope=ws-30b60ec83f5ff77f&path=src/index.ts"));
+  assert.ok(admits("GET /fs/file?scope=ws-1&path=src/a.ts&etag=W/%22123%22"));
+  assert.ok(admits("GET /fs/diff?scope=ws-1&path=src/a.ts"));
+  assert.ok(admits("GET /fs/stat?scope=ws-1&path=src/a.ts"));
+  for (const no of ["POST /fs/file?scope=ws-1&path=a", "DELETE /fs/file?scope=ws-1&path=a", "PUT /fs/diff?scope=ws-1"])
+    assert.ok(!admits(no), no);
+});

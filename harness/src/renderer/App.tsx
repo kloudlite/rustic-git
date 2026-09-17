@@ -295,7 +295,8 @@ export function App() {
 
   // A file opens as a tab too: reading one is a subject of its own, not a
   // property of the workspace it came from.
-  const [file, setFile] = createSignal<{ path: string; status?: string } | undefined>(
+  // A file is opened FROM somewhere: the scope says which workspace's tool server holds it.
+  const [file, setFile] = createSignal<{ path: string; status?: string; scope?: string } | undefined>(
     hashView.endsWith("/diff") ? { path: "bins/agent/src/controller/run.rs", status: "M" } : undefined,
   );
   // A task's log opens in place like a file does; a process is shown through
@@ -988,7 +989,10 @@ export function App() {
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
             onOpenFile={(path, status) => {
               setEnvTab(false);
-              setFile({ path, status });
+              // Which workspace's tool server holds it: the selected tab's own, as the terminal
+              // and the inspector resolve it. "bench" has no files to read.
+              const scope = scopeOfTab(machine(), selected());
+              setFile({ path, status, scope: scope === "bench" ? undefined : scope });
             }}
           />
         </Show>
