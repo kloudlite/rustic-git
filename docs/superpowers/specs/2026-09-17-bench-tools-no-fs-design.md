@@ -301,3 +301,47 @@ supersedes §9's UI-face prose for the transcript; cards keep their structure bu
   interrupts.
 Map: mode ↔ our bench/plan-only toggle (plan mode = read-only tools + plan tool); variants ↔ model
 thinking level; MCP list ↔ our tool servers / connected workspaces; `ctrl+x down` ↔ agent tabs.
+
+## 17. Claude Code's behaviour, adopted (owner, 2026-09-17 17:55 IST; read off this very
+session's transcript: 486 agent dispatches, 217 background commands, 188 follow-up messages to
+running agents, 8 monitors, questions to the person, skills and tool_search)
+
+What Claude Code does, and what the harness does for it:
+1. **Dispatch with a brief, receive a report.** An agent is started with a one-line description,
+   a model tier, and a brief; it answers with a status (`DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT
+   | BLOCKED`), commits/changes, a one-line test summary and concerns, and writes the long report
+   to a FILE the parent reads only if needed. Harness: `ask {to:"agent"}` takes `brief` (text) and
+   optional `model`; the agent's identity tells it the four statuses and that its final message
+   is the report; the reply row shows status + one line, the full text folded.
+2. **Agents are resumable.** A parent sends follow-ups to a named agent with its context intact
+   ("fix round", "one more thing"). Harness: `ask {to: "<agent name>", task}` on a live agent
+   resumes it; `[from agent]` replies route as before. An agent stays until `ask_close`.
+3. **Background work notifies; the parent does not poll.** Long commands run detached; a
+   completion notification arrives as a message (`[task <title> finished: exit N]`) with the
+   output file path; monitors stream matching lines as messages. Harness: `bash {background:
+   true}` and `process start` deliver a follow-up message on exit with the last 20 lines; a
+   `watch {process, pattern}` action on `process` emits a message per matching line; all sent
+   through the same follow-up path so the model handles them in turn order.
+4. **A person's message mid-turn is surfaced as such.** The model sees "the person sent a new
+   message while you were working" and addresses it in the same turn. Harness: a queued prompt
+   is delivered as a steer with that prefix line (the fork-ordered queue still applies to
+   follow-ups; a person's own message is a steer, first).
+5. **Only the model sees tool output.** A reminder after long output: "only you see this; relay
+   what the person needs". Harness: tool results over 40 lines carry that trailer line.
+6. **Questions to the person are a tool** (`AskUserQuestion`: header, question, 2–4 options with
+   descriptions, multi-select, free text). Harness: core tool `question {header, question,
+   options[{label, description}], multi?}` rendered as the §16b card; the answer returns as the
+   tool result and as the person's row.
+7. **Plan mode / read-only exploration** before changing things; **skills invoked before work**;
+   **tool_search** for deferred tools; **memory** saved when corrected — all already in §12–§14
+   and §16b (`/mode plan`).
+8. **Context management.** When the conversation grows long it is summarised and continues.
+   Harness: at 80 % of the model's window the bench sends `/compact`-equivalent (pi `compact`)
+   with a summary prompt that keeps the plan, open asks and memory index; the transcript shows a
+   `⟲ compacted` row.
+9. **Stop and cancel.** A running background task can be stopped (`TaskStop`); esc interrupts the
+   turn; a stopped turn's tools are cancelled. Harness: `process stop`, `esc` → pi `abort`, and
+   `ask_close` on a running agent aborts it first.
+10. **Reporting to the person**: lead with the result; failures with cause and fix; never claim a
+    fleet fact unverified. Already in the identity (caveman + brevity); add: "A thing you changed
+    but could not verify is 'changed, unverified'".
