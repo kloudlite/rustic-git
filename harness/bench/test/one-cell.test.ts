@@ -148,6 +148,27 @@ test("the status line shows exactly one working indicator", () => {
  * The per-turn footer shows on hover (opencode's message meta) with its height reserved, so the
  * transcript never jumps; and it is built from the MESSAGE, never from the live `line()`.
  */
+/**
+ * The picker is ONE grouped list at one cell size: the owner was "confused with the way highlights
+ * are happening" when a highlight could be in either of two columns. Every row shares one gutter
+ * and one name column, so nothing shifts between a header and a model.
+ */
+test("the model dialog is one grouped list on a shared gutter", () => {
+  const dlg = fs.readFileSync(path.resolve("src/renderer/components/ModelDialog.tsx"), "utf8");
+  // The cursor row is a full-width bar at NORMAL weight — never a bar AND bold.
+  assert.match(dlg, /classList=\{\{ "bg-hover": cursor\(\) === i\(\) \}\}/);
+  assert.ok(!/font-bold/.test(dlg), "the bar is the highlight; bold as well is two highlights");
+  // One gutter constant, shared by every row, and models indented 2ch beneath their header.
+  assert.match(dlg, /const GUTTER = "w-\[2ch\] shrink-0 select-none"/);
+  assert.match(dlg, /class="pl-\[2ch\] text-fg"/);
+  // Dropped on the owner's word: no thinking tag, and no wall of unconfigured providers.
+  assert.ok(!/thinking</.test(dlg), "every model has thinking; the tag said nothing");
+  assert.ok(!/not configured/.test(dlg), "only configured providers are listed");
+  assert.match(dlg, /no provider configured — add a key in Settings/);
+  // ↑↓ and Enter only: there are no columns left to move between.
+  assert.ok(!/ArrowLeft|ArrowRight/.test(dlg));
+});
+
 test("a turn's footer is its own and shows on hover", () => {
   const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
   assert.match(chat, /opacity-0 transition-opacity[^"]*group-hover\/text:opacity-100/, "hover, by opacity — the row keeps its height");

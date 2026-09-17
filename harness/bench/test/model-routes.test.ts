@@ -50,7 +50,13 @@ test("the triple is re-sent on session_start", async () => {
   }
 });
 
-test("every provider pi lists is offered, and only DeepSeek is wired", async () => {
+/**
+ * `GET /models` carries EVERY provider pi supports, wired or not — that is Settings' surface, where
+ * a key is added. The `/model` DIALOG is a different question: it lists only the configured ones
+ * (`pickerRows`, renderer-rows.test.ts), because the owner does not want a wall of providers he
+ * cannot pick.
+ */
+test("the route offers every provider pi lists, and only DeepSeek is wired", async () => {
   const b = await startBench();
   try {
     const m = (await get(b, "/models")) as { providers: { id: string; wired: boolean }[] };

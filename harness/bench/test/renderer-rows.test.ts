@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, pickerRows, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -204,4 +204,33 @@ test("a turn's footer is stamped, not live", () => {
 test("the model name is not doubled by its provider", () => {
   assert.ok(!turnMeta({ model: "deepseek/deepseek-v4-flash" }).includes("Flash DeepSeek"));
   assert.ok(!modeLine("build", "deepseek/deepseek-v4-flash").includes("Flash DeepSeek"));
+});
+
+const PROVIDERS = [
+  { id: "deepseek", label: "DeepSeek", wired: true, models: [{ id: "deepseek-chat", name: "DeepSeek Chat" }, { id: "deepseek-reasoner", name: "DeepSeek Reasoner" }] },
+  { id: "anthropic", label: "Anthropic", wired: false, models: [{ id: "claude-opus-5", name: "Claude Opus 5" }] },
+  { id: "groq", label: "Groq", wired: true, models: [] },
+];
+
+/** Owner: "why are you showing so many non configured. show only configured." */
+test("only a configured provider with models is offered", () => {
+  const rows = pickerRows(PROVIDERS);
+  assert.deepEqual(rows.filter((r) => r.kind === "header").map((r) => (r as { label: string }).label), ["DeepSeek"]);
+  assert.ok(!rows.some((r) => r.kind === "model" && r.id.startsWith("anthropic/")), "an unwired provider is not offered");
+  assert.equal(pickerRows([]).length, 0, "nothing configured is an empty list, and the dialog says so");
+});
+
+/** The filter narrows models across providers, and a header left with none disappears. */
+test("filter drops empty headers", () => {
+  assert.deepEqual(pickerRows(PROVIDERS, "reasoner").map((r) => (r.kind === "header" ? `#${r.label}` : r.id)), ["#DeepSeek", "deepseek/deepseek-reasoner"]);
+  assert.deepEqual(pickerRows(PROVIDERS, "opus"), [], "every model gone takes its header with it");
+});
+
+/** A header is a label, not a choice: the cursor can only ever rest on a model. */
+test("the cursor never lands on a header", () => {
+  const rows = pickerRows(PROVIDERS);
+  const selectable = rows.flatMap((r, i) => (r.kind === "model" ? [i] : []));
+  assert.ok(selectable.length > 0);
+  for (const i of selectable) assert.equal(rows[i].kind, "model");
+  assert.ok(!selectable.includes(0), "row 0 is the DeepSeek header");
 });

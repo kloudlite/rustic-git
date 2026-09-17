@@ -124,6 +124,30 @@ export function modelOfThread(row: string | undefined, benchDefault: string | un
 }
 
 /**
+ * The `/model` dialog's one grouped list (opencode's `/models` shape): a provider is a header, its
+ * models are the rows beneath it. Pure, so the rules that confused the owner are testable:
+ *  - only providers that are WIRED and have models are offered — Settings is where a key is added;
+ *  - the filter narrows MODELS across every provider, and a header left with none disappears;
+ *  - a header is never selectable, so the cursor can only ever rest on a model.
+ */
+export type PickerRow = { kind: "header"; label: string } | { kind: "model"; id: string; name: string };
+export function pickerRows(
+  providers: readonly { id: string; label: string; wired: boolean; models: readonly { id: string; name: string }[] }[],
+  filter = "",
+): PickerRow[] {
+  const has = (s: string) => s.toLowerCase().includes(filter.toLowerCase());
+  const out: PickerRow[] = [];
+  for (const p of providers) {
+    if (!p.wired || !p.models.length) continue;
+    const models = p.models.filter((m) => !filter || has(m.name) || has(m.id));
+    if (!models.length) continue;
+    out.push({ kind: "header", label: p.label });
+    for (const m of models) out.push({ kind: "model", id: `${p.id}/${m.id}`, name: m.name });
+  }
+  return out;
+}
+
+/**
  * One finished turn's own footer. Everything here is a fact ABOUT THAT TURN, stamped when it
  * ended — never the live line, which made every old message change as soon as the model changed
  * (owner, on the fleet). A turn with no stamp (an older message, a transcript replayed from disk)
