@@ -62,6 +62,14 @@ const text = (v: unknown) => ({ content: [{ type: "text" as const, text: typeof 
  * The detail is not lost: it goes to the bench's log on stderr, named by the tool, where a person
  * debugging the platform can read it.
  */
+/**
+ * Tools that answer a LIST. A 404 from one of these is not "it does not exist" — there is no name
+ * in the request to be wrong about: it is an empty collection, or a route this token cannot reach.
+ * `kl_images` answered "that images does not exist; check the name with the person", which is a
+ * sentence about nothing (owner, 2026-09-18).
+ */
+const LISTS = new Set(["kl_images", "kl_workspaces", "kl_environments", "kl_repos", "kl_pkg_list", "kl_workspace_snapshots", "kl_environment_snapshots", "kl_env_current"]);
+
 export function sanitizeError(tool: string, status: number, data: unknown): string {
   const raw = typeof data === "string" ? data : JSON.stringify(data);
   // The one message that IS the person's to act on, and says nothing about the platform's shape.
@@ -74,7 +82,10 @@ export function sanitizeError(tool: string, status: number, data: unknown): stri
   }
   const thing = subject(tool);
   if (status === 403) return `you are not allowed to do that with ${thing}; the person may have to grant it`;
-  if (status === 404) return `that ${thing.replace(/^the /, "")} does not exist; check the name with the person`;
+  if (status === 404)
+    return LISTS.has(tool)
+      ? `no ${thing.replace(/^the /, "")} to list here yet`
+      : `that ${thing.replace(/^the /, "")} does not exist; check the name with the person`;
   if (status === 409) return `that cannot be done while ${thing} is in its current state; say what you tried`;
   if (status === 422) return `${thing} refused those details: ${short(raw)}`;
   if (status >= 500) return `${thing} could not be reached just now; try again, or tell the person it is unavailable`;

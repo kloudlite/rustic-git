@@ -39,3 +39,5 @@ Example — a Go backend of its own, then the work sent there:
 
     kl_workspace_create {name: "svelte-backend", packages: ["go"]}
     ask {to: "svelte-backend", task: "add a /healthz endpoint and run the tests"}
+
+- Answering the bench: the outcome, what changed for the person in capability terms, the `contracts:` line, and what is needed next — never a file, a path, a command or a digest, which stay in this workspace.

@@ -1587,3 +1587,20 @@ test("a reply settles its ask even when a later turn follows it in the same run"
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A 404 from a LIST route is not a missing thing: there is no name in the request to be wrong
+ * about. `kl_images` on a fresh owner answered "that images does not exist; check the name with the
+ * person" — a sentence about nothing, and one the model then said to the person (owner, 2026-09-18).
+ */
+test("a list that answers nothing says there is nothing, not that it does not exist", () => {
+  for (const list of ["kl_images", "kl_workspaces", "kl_environments", "kl_repos"]) {
+    const said = sanitizeError(list, 404, { error: "not found" });
+    assert.ok(!/does not exist/.test(said), `${list}: ${said}`);
+    assert.match(said, /to list here yet$/);
+  }
+  // A lookup BY NAME still says the thing is not there, because a name was given.
+  assert.match(sanitizeError("kl_workspace_start", 404, { error: "not found" }), /does not exist; check the name with the person/);
+  // And nothing about the platform's shape crosses either way.
+  for (const leak of ["404", "http", "/v1"]) assert.ok(!sanitizeError("kl_images", 404, { error: "GET /v1/images 404" }).includes(leak), leak);
+});

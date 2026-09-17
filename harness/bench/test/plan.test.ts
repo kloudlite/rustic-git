@@ -53,24 +53,42 @@ test("what the harness says when a turn ends with the plan out of date", () => {
   assert.equal(nudge(plan(["a", "done"], ["b", "later"]), 5), undefined);
 });
 
-test("what crosses to the asking session is a standup answer, not a transcript", () => {
-  // A bench handed 300 lines of diff is a bench whose context is gone by the third ask (§18).
-  const withCode = ["done: added /healthz", "```ts", "export function healthz() {", "  return 200;", "}", "```", "tests pass"].join("\n");
-  assert.equal(brief(withCode, "api"), "done: added /healthz\n\ntests pass");
+test("what crosses to the asking session is the SHAPE of an answer, not a shortened copy", () => {
+  // The bench holds what things ARE; the workspace holds how they are done (spec §3.7). A bench
+  // handed 300 lines of diff is a bench whose context is gone by the third ask.
+  const withCode = ["done: added /healthz", "```ts", "export function healthz() {", "  return 200;", "}", "```", "GET /healthz answers 200 for the person"].join("\n");
+  assert.equal(brief(withCode, "api"), "done: added /healthz\nGET /healthz answers 200 for the person\n… (full reply in the api tab)");
 
-  // Long answers are cut, and say where the rest is.
-  const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
-  const cut = brief(long, "svelte-frontend");
-  assert.equal(cut.split("\n").length, 13, cut);
-  assert.match(cut, /… \(full reply in the svelte-frontend tab\)$/);
-  assert.match(cut, /^line 0\nline 1/);
+  // A 40-line reply with a fence reaches the bench as eight lines at most, with no fence in it.
+  const big = ["DONE — the version endpoint is live", "```go", "func version() {}", "```", ...Array.from({ length: 36 }, (_, i) => `the service now answers question ${i} for anyone who asks it`)].join("\n");
+  const small = brief(big, "backend");
+  assert.ok(small.split("\n").length <= 9, small);
+  assert.ok(!small.includes("```") && !small.includes("func version"), small);
+  assert.match(small, /^DONE — the version endpoint is live/);
 
-  // A short answer is left exactly as it was.
+  // What is IMPLEMENTATION never crosses: a file, a path, a command, a digest, a line of code.
+  const impl = [
+    "DONE — the service reports its version",
+    "edited src/main.go and go.mod",
+    "ran `go build ./...`",
+    "pushed backend:latest, digest sha256:1296abcd9f21",
+    "GET /version returns the service version",
+    "contracts: GET /version — none → {version} — backend",
+  ].join("\n");
+  const shaped = brief(impl, "backend");
+  for (const gone of ["src/main.go", "go build", "sha256:", "go.mod"]) assert.ok(!shaped.includes(gone), `${gone} crossed: ${shaped}`);
+  assert.match(shaped, /GET \/version returns the service version/);
+  assert.match(shaped, /contracts: GET \/version/, "the contracts line is the bench's own business and stays");
+
+  // `next` is kept where the workspace named one.
+  assert.match(brief("BLOCKED — no credential for the registry\nnext: the person has to add a token", "api"), /next: the person has to add a token/);
+
+  // A short answer in the shape already is left as it is.
   assert.equal(brief("done: nothing to change", "api"), "done: nothing to change");
   // An unterminated fence still goes: it is the thing this exists to stop.
   assert.equal(brief("partial\n```\nhalf a file", "api"), "partial");
-  // 1,200 characters is the other bound.
-  assert.ok(brief("x".repeat(3000), "api").length < 1260);
+  // The reply tag is routing, not content.
+  assert.match(brief("[reply ask-1-x] DONE — it is live", "api"), /^DONE — it is live/);
 });
 
 test("a conversation that fills its window is summarised, keeping the plan and what is outstanding", async () => {

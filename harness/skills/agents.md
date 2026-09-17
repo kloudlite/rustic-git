@@ -31,3 +31,5 @@ or NEEDS_CONTEXT agent keeps it until you answer or `ask_close {name}`.
 
     ask {to: "agent", name: "upgrade", task: "Upgrade to Svelte 5 and make the tests pass. Answer with what broke and the branch."}
     ask {to: "agent", name: "audit", shared: true, task: "List every route with no auth check."}
+
+- Reporting back: the outcome, what changed for the person in capability terms, the `contracts:` line, and what is needed next — never a file, a path, a command or a digest, which stay in the tree you worked in.
