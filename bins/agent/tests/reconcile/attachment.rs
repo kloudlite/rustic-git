@@ -362,7 +362,8 @@ async fn a_workspace_whose_inputs_are_already_built_does_not_invoke_nix() {
     let (ctx, rec, fake) = ws_ctx_with_nix(tmp.path());
     // Seed the index as a previous build would have.
     let store = ctx.profiles_dir.join("seeded-store-path");
-    std::fs::create_dir_all(&store).unwrap();
+    // With `bin/`: an index entry whose target has none is a miss that rebuilds.
+    std::fs::create_dir_all(store.join("bin")).unwrap();
     let pin = kloudlite_agent::nix::nixpkgs_pin(&test_settings());
     let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[]);
     kloudlite_agent::nix::record_index(&ctx.profiles_dir, &hash, &store).unwrap();
@@ -521,7 +522,7 @@ async fn an_index_entry_pointing_at_nothing_still_builds() {
 #[tokio::test]
 async fn a_finished_build_is_recorded_under_its_inputs() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ctx, _rec, _fake) = ws_ctx_with_nix(tmp.path());
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
     let ws = ready_workspace("ws-1", vec!["hello".into()]);
     apply_until_settled(&ws, &ctx).await;
 
@@ -529,7 +530,7 @@ async fn a_finished_build_is_recorded_under_its_inputs() {
     let hash = kloudlite_workspaces::packages::hash(&pin, &with_base(&["hello".into()]), &[]);
     assert_eq!(
         kloudlite_agent::nix::indexed(&ctx.profiles_dir, &hash),
-        Some(std::path::PathBuf::from("/tmp")),
+        Some(fake.store_path()),
         "the store path the build produced"
     );
 }

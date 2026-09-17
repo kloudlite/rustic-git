@@ -736,7 +736,7 @@ mod janitor_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let store = root.join("store-x");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         nix::record_index(root, "orphan", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 1);
         assert!(nix::indexed(root, "orphan").is_none());
@@ -748,7 +748,7 @@ mod janitor_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let store = root.join("store-y");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         nix::record_index(root, "used", &store).unwrap();
         nix::link_profile(root, "ws-1", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, std::time::Duration::ZERO), 0);
@@ -769,7 +769,7 @@ mod janitor_tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let store = root.join("store-z");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         nix::record_index(root, "fresh-orphan", &store).unwrap();
         assert_eq!(janitor_sweep_profiles(root, SWEEP_MIN_AGE), 0, "a young orphan is presumed live");
         assert!(nix::indexed(root, "fresh-orphan").is_some());

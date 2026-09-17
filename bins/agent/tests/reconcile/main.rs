@@ -92,6 +92,11 @@ struct FakeNix {
     ping: std::sync::Mutex<Result<(), String>>,
     /// Run while a build is "in flight", so a test can change the spec mid-build.
     on_build: std::sync::Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// The links registered as GC roots.
+    roots: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    /// The store path every build answers with. It holds a `bin/`, because a profile whose target
+    /// has none reads as a miss since 2026-09-18 — exactly as the pod would find it.
+    store: tempfile::TempDir,
 }
 impl Default for FakeNix {
     fn default() -> Self {
@@ -104,9 +109,20 @@ impl Default for FakeNix {
             answer: std::sync::Mutex::new(Ok(())),
             ping: std::sync::Mutex::new(Ok(())),
             on_build: std::sync::Mutex::new(None),
+            roots: std::sync::Mutex::new(Vec::new()),
+            store: {
+                let d = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(d.path().join("bin")).unwrap();
+                d
+            },
         }
     }
 }
+impl FakeNix {
+    /// What every build of this fake answers with.
+    fn store_path(&self) -> std::path::PathBuf { self.store.path().to_path_buf() }
+}
+
 #[async_trait::async_trait]
 impl kloudlite_agent::nix::Nix for FakeNix {
     async fn build(&self, expr: &str, _: std::time::Duration) -> Result<std::path::PathBuf, String> {
@@ -115,7 +131,7 @@ impl kloudlite_agent::nix::Nix for FakeNix {
             f();
         }
         let r = self.answer.lock().unwrap().clone();
-        r.map(|()| std::path::PathBuf::from("/tmp"))
+        r.map(|()| self.store.path().to_path_buf())
     }
     async fn eval_out_path(&self, rev: &str, attr: &str, _: std::time::Duration) -> Result<String, String> {
         self.evals.lock().unwrap().push((rev.to_string(), attr.to_string()));
@@ -127,6 +143,12 @@ impl kloudlite_agent::nix::Nix for FakeNix {
     }
     async fn ping(&self) -> Result<(), String> { self.ping.lock().unwrap().clone() }
     async fn collect_garbage(&self) -> Result<u64, String> { Ok(0) }
+    /// Every link the reconciler asked to root, so a test can assert that a published profile is
+    /// GC-rooted and not merely linked (env-0 held nine profiles and one store path, 2026-09-18).
+    async fn add_root(&self, link: &std::path::Path) -> Result<(), String> {
+        self.roots.lock().unwrap().push(link.to_path_buf());
+        Ok(())
+    }
 }
 
 /// A profile as a finished build leaves it: the directory the pod mounts, with `current` inside.
@@ -140,7 +162,11 @@ fn with_base(own: &[String]) -> Vec<String> {
 
 fn plant_profile(ctx: &Arc<Ctx>, id: &str) {
     std::fs::create_dir_all(kloudlite_agent::nix::profile_dir(&ctx.profiles_dir, id)).unwrap();
-    std::os::unix::fs::symlink("/tmp", kloudlite_agent::nix::profile_path(&ctx.profiles_dir, id)).unwrap();
+    // A target with `bin/`: an existing profile is one a pod could actually put on its `PATH`,
+    // and since 2026-09-18 anything else reads as a miss that rebuilds.
+    let target = ctx.profiles_dir.join(format!("planted-{id}"));
+    std::fs::create_dir_all(target.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&target, kloudlite_agent::nix::profile_path(&ctx.profiles_dir, id)).unwrap();
 }
 
 fn patch_ok(path: &str) -> Route {

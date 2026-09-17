@@ -182,6 +182,26 @@ pub(crate) async fn ensure_profile(
     Ok(Some(Action::requeue(TICK)))
 }
 
+/// Register this workspace's `current` and its index entry as INDIRECT GC roots.
+///
+/// Without this nothing on the node is rooted at all: `gcroots/kloudlite-profiles` points at a
+/// directory of our symlinks, not at a store path, and a collection took every profile but one —
+/// leaving nine dangling `current` links, shells dying with `execvp failed`, `curl: not found` in
+/// a workspace exec, and status reading `PackagesReady=True/Built` the whole time (env-0,
+/// 2026-09-18). An indirect root follows the link, so a swap moves the root with it and the
+/// janitor's unlink is what drops it — there is nothing extra to clean up.
+///
+/// Best effort, and said out loud when it fails: the profile is on disk and correct either way,
+/// and refusing to publish a working profile because a root could not be registered would turn a
+/// future garbage collection into an immediate outage.
+async fn root_profile(id: &str, hash: &str, ctx: &Arc<Ctx>) {
+    for link in [crate::nix::profile_path(&ctx.profiles_dir, id), crate::nix::index_path(&ctx.profiles_dir, hash)] {
+        if let Err(e) = ctx.nix.add_root(&link).await {
+            tracing::warn!(workspace = %id, link = %link.display(), error = %e, "profile.gcroot.failed");
+        }
+    }
+}
+
 /// How long `Building` may stand before it is a stall rather than a build: twice the node's own
 /// nix timeout, so a build that is legitimately slow (a cold substituter, a big closure) always
 /// wins, and one whose child is wedged or whose expression can never evaluate is bounded.
@@ -338,6 +358,7 @@ async fn settle_finished(
                 .await
                 .map_err(|e| ReconcileErr(format!("publish panicked: {e}")))?
                 .map_err(|e| ReconcileErr(format!("publish profile: {e}")))?;
+                root_profile(id, hash, ctx).await;
                 had_finished = true;
             }
             Ok(_) => {
@@ -410,6 +431,10 @@ async fn reuse_or_record(
             .await
             .map_err(|e| ReconcileErr(format!("link panicked: {e}")))?
             .map_err(|e| ReconcileErr(format!("link profile: {e}")))?;
+        // The index entry is already rooted (whoever built it rooted it), but THIS workspace's
+        // `current` is a new link and must be a root of its own: the index entry can be swept
+        // while the workspace still runs on the path it named.
+        root_profile(id, &inputs.hash, ctx).await;
         let st = packages_status(prev, Some(inputs.observed.clone()), "Built", "reused a profile already on this node", true, gen);
         write_ws_status_tracking(w, st, prev, ctx).await?;
         return Ok(true);

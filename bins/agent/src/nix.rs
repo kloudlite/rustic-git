@@ -34,9 +34,17 @@ pub fn profile_dir(root: &Path, id: &str) -> PathBuf { root.join(id) }
 pub fn profile_path(root: &Path, id: &str) -> PathBuf { profile_dir(root, id).join("current") }
 pub fn building_path(root: &Path, id: &str) -> PathBuf { profile_dir(root, id).join("current.building") }
 
-/// The one GC root for every profile on this node: an indirect root under `gcroots`, pointing at
-/// the profiles dir. `nix build --no-link` registers nothing, and the auto-root a `-o` out-link
-/// gets is orphaned the moment we rename over it — without this the live profile is collectable.
+/// A marker link at `gcroots/kloudlite-profiles`, kept for one reason: a person on the node can
+/// see that this agent owns profiles here.
+///
+/// It is NOT what keeps a profile alive, and believing it was cost the fleet every profile but one
+/// (env-0, 2026-09-18: nine index entries and nine `current` links, ONE surviving
+/// `*-kloudlite-workspace-env` in the store, and a bench shell dying with `execvp failed` on a
+/// dangling link while status read `PackagesReady=True/Built`). A `gcroots` entry roots a STORE
+/// PATH; this one points at a directory of our own symlinks, and what nix makes of that is nix's
+/// business, not something to bet nine workspaces on. Every published profile and every index
+/// entry is now its own INDIRECT root (`add_root`), which is what `nix-env` itself does and what
+/// `nix-store --gc --print-roots` actually lists.
 pub fn ensure_gcroot() {
     let gcroots = Path::new("/nix/var/nix/gcroots");
     if !gcroots.is_dir() {
@@ -108,6 +116,13 @@ pub trait Nix: Send + Sync {
     async fn eval_out_path(&self, rev: &str, attr_path: &str, timeout: Duration) -> Result<String, String>;
     /// `nix store ping`.
     async fn ping(&self) -> Result<(), String>;
+    /// `nix-store --add-root <link> --indirect`: register OUR symlink as a root, so the store path
+    /// it points at survives a collection and the root follows the link when we swap it.
+    ///
+    /// Indirect on purpose: nix keeps `gcroots/auto/<hash>` pointing back at our link, so a root
+    /// disappears by itself when the janitor unlinks the profile or the index entry — there is no
+    /// second thing to clean up, and no way for a removed profile to keep pinning its closure.
+    async fn add_root(&self, link: &Path) -> Result<(), String>;
     /// `nix-collect-garbage`; returns bytes freed as nix reports them (0 if unparseable).
     async fn collect_garbage(&self) -> Result<u64, String>;
 }
@@ -203,6 +218,18 @@ impl Nix for RealNix {
     async fn ping(&self) -> Result<(), String> {
         self.run(self.cmd(&["store", "ping"]), Duration::from_secs(10)).await.map(|_| ())
     }
+    async fn add_root(&self, link: &Path) -> Result<(), String> {
+        // `nix-store`, not `nix`: the new CLI has no equivalent that registers an indirect root.
+        let mut c = Command::new(self.bin.join("nix-store"));
+        c.args(["--add-root".as_ref(), link.as_os_str(), "--indirect".as_ref(), "--realise".as_ref(), link.as_os_str()])
+            .env("NIX_REMOTE", "daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+        self.run(c, Duration::from_secs(60)).await.map(|_| ())
+    }
     async fn collect_garbage(&self) -> Result<u64, String> {
         let mut c = Command::new(self.bin.join("nix-collect-garbage"));
         c.env("NIX_REMOTE", "daemon")
@@ -276,10 +303,20 @@ pub fn remove_profile(root: &Path, id: &str) -> std::io::Result<()> {
     }
 }
 
-/// A link whose target is gone (a GC that ran with the root missing, a wiped store) is a missing
-/// profile: mounting it would give the pod an empty `bin`.
+/// A link whose target is gone — or is there but holds no `bin/` — is a missing profile: mounting
+/// it gives the pod a `PATH` entry that does not exist, and every shell in it dies with
+/// `execvp failed` while status happily says `Built` (env-0, 2026-09-18).
+///
+/// `metadata()` alone was not enough: it follows the link, so a target that survived as a DIRECTORY
+/// without its contents still read as present. What the pod actually needs is `bin/`, so that is
+/// what is asked for.
 pub fn profile_exists(root: &Path, id: &str) -> bool {
-    std::fs::metadata(profile_path(root, id)).is_ok()
+    usable_profile(&profile_path(root, id))
+}
+
+/// Whether `link` resolves to something a pod can put on its `PATH`.
+pub(crate) fn usable_profile(link: &Path) -> bool {
+    std::fs::metadata(link.join("bin")).is_ok()
 }
 
 /// The node's index of built profiles, keyed by `packages::hash` — the same hash the workspace
@@ -297,7 +334,9 @@ pub fn index_path(root: &Path, hash: &str) -> PathBuf {
 pub fn indexed(root: &Path, hash: &str) -> Option<PathBuf> {
     let link = index_path(root, hash);
     let target = std::fs::read_link(&link).ok()?;
-    std::fs::metadata(&target).ok()?;
+    // `bin/`, not merely "the path is there": a collected profile can leave a directory behind, and
+    // publishing one from the index is how a workspace gets a profile with nothing in it.
+    usable_profile(&target).then_some(())?;
     Some(target)
 }
 
@@ -335,8 +374,8 @@ mod tests {
     #[test]
     fn publish_renames_the_building_link_inside_the_mounted_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let target_a = dir.path().join("a"); std::fs::create_dir(&target_a).unwrap();
-        let target_b = dir.path().join("b"); std::fs::create_dir(&target_b).unwrap();
+        let target_a = dir.path().join("a"); std::fs::create_dir_all(target_a.join("bin")).unwrap();
+        let target_b = dir.path().join("b"); std::fs::create_dir_all(target_b.join("bin")).unwrap();
         std::fs::create_dir(profile_dir(dir.path(), "ws-1")).unwrap();
         std::os::unix::fs::symlink(&target_a, profile_path(dir.path(), "ws-1")).unwrap();
         std::os::unix::fs::symlink(&target_b, building_path(dir.path(), "ws-1")).unwrap();
@@ -370,7 +409,11 @@ mod tests {
         std::fs::create_dir(profile_dir(dir.path(), "ws-1")).unwrap();
         std::os::unix::fs::symlink(dir.path().join("gone"), profile_path(dir.path(), "ws-1")).unwrap();
         assert!(!profile_exists(dir.path(), "ws-1"));
+        // A target that came back as a bare directory is still a miss: what the pod puts on its
+        // `PATH` is `bin/`, and a profile without one is the `execvp failed` shell of env-0.
         std::fs::create_dir(dir.path().join("gone")).unwrap();
+        assert!(!profile_exists(dir.path(), "ws-1"), "no bin/ is not a profile");
+        std::fs::create_dir(dir.path().join("gone").join("bin")).unwrap();
         assert!(profile_exists(dir.path(), "ws-1"));
         remove_profile(dir.path(), "ws-1").unwrap();
         assert!(!profile_dir(dir.path(), "ws-1").exists(), "the whole directory goes");
@@ -384,10 +427,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let store = root.join("fake-store-path");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         record_index(root, "abc123", &store).unwrap();
         assert_eq!(indexed(root, "abc123").as_deref(), Some(store.as_path()));
 
+        std::fs::remove_dir_all(store.join("bin")).unwrap();
+        assert!(indexed(root, "abc123").is_none(), "an entry with no bin/ must not be reused");
         std::fs::remove_dir_all(&store).unwrap();
         assert!(indexed(root, "abc123").is_none(), "a dangling entry must not be reused");
     }
@@ -397,7 +442,7 @@ mod tests {
     fn recording_an_index_entry_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store-a");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         record_index(tmp.path(), "k", &store).unwrap();
         record_index(tmp.path(), "k", &store).unwrap();
         assert_eq!(indexed(tmp.path(), "k").as_deref(), Some(store.as_path()));
@@ -409,7 +454,7 @@ mod tests {
     fn linking_a_profile_points_current_at_the_store_path() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store-b");
-        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(store.join("bin")).unwrap();
         link_profile(tmp.path(), "ws-1", &store).unwrap();
         assert!(profile_exists(tmp.path(), "ws-1"));
         assert_eq!(std::fs::read_link(profile_path(tmp.path(), "ws-1")).unwrap(), store);

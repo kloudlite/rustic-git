@@ -28,6 +28,9 @@ impl crate::nix::Nix for NoopNix {
     async fn collect_garbage(&self) -> Result<u64, String> {
         Ok(0)
     }
+    async fn add_root(&self, _link: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {

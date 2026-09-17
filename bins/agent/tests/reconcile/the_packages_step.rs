@@ -216,6 +216,26 @@ async fn a_workspace_builds_its_profile_from_its_spec_before_its_pod() {
     assert_eq!(packages_condition(&st)["reason"], "Built");
 }
 
+/// A published profile must be a GC ROOT of its own. The single marker link under
+/// `gcroots/` is a symlink to a DIRECTORY, which `nix-store --gc` does not follow, so on env-0
+/// nine live profiles shared one surviving store path and every shell died with `execvp failed`
+/// (2026-09-18). Both links are rooted: `{id}/current` keeps the workspace's profile, and the
+/// `by-inputs` entry keeps the shared one alive for the next workspace with the same packages.
+#[tokio::test]
+async fn a_published_profile_and_its_index_entry_are_both_gc_rooted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, _rec, fake) = ws_ctx_with_nix(tmp.path());
+    let ws = ready_workspace("ws-1", vec!["hello".into()]);
+    apply_until_settled(&ws, &ctx).await;
+
+    let roots = fake.roots.lock().unwrap().clone();
+    assert!(roots.contains(&kloudlite_agent::nix::profile_path(&ctx.profiles_dir, "ws-1")), "{roots:?}");
+    assert!(
+        roots.iter().any(|r| r.starts_with(ctx.profiles_dir.join("by-inputs"))),
+        "the index entry is rooted too: {roots:?}"
+    );
+}
+
 /// An empty list is still a profile: the pod mounts it as a subPath of the read-only `nix`
 /// hostPath, so a missing link is a pod that cannot mount at all.
 #[tokio::test]
