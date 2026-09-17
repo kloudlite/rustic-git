@@ -192,8 +192,16 @@ export function noteTriple(id: string, t: { model?: string; thinking?: string; e
 }
 
 /** Which dialog takes the composer's place, if any. One at a time, like the permission prompt. */
-const [dialog, setDialog] = createSignal<"model" | undefined>();
-export { dialog, setDialog };
+/**
+ * TAB level: which dialog takes the composer's place, per tab. A window-wide signal opened the
+ * picker in every tab at once and closing one closed them all — a dialog is a view's state, not
+ * the window's. Keyed by tab id; `closeTab` drops it with the tab.
+ */
+const [dialogs, setDialogs] = createStore<Record<string, "model" | undefined>>({});
+export const dialog = (tab: string) => dialogs[tab];
+export const setDialog = (tab: string, d: "model" | undefined) => setDialogs(tab, d);
+/** Everything TAB level holds for one tab, dropped together when it closes. */
+export const closeTab = (tab: string) => setDialogs(tab, undefined);
 
 /**
  * A person's pick, for one session. The bench writes the session's fields AND the general default

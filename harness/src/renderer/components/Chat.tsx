@@ -124,7 +124,7 @@ export function Chat(props: {
   /** One string for the mode, the model and the level, used in all three places. */
   /** The SESSION's own thinking and effort, from its bench row; nothing invented when unset. */
   /** Whether the picker holds the composer slot: it REPLACES the input row, never stacks over it. */
-  const dialogOpen = () => live.dialog() === "model" && !!L().id && !waiting();
+  const dialogOpen = () => !!thread()?.id && live.dialog(thread()!.id) === "model" && !!L().id && !waiting();
   const thinkingOf = () => thread()?.thinking;
   const effortOf = () => thread()?.effort;
   const line = () => modeLine(live.mode(), modelName(), thinkingOf(), effortOf());
@@ -644,7 +644,7 @@ export function Chat(props: {
                 composer slot, never a floating modal (spec §1.3). */}
             <Show when={dialogOpen()}>
               <div class="px-4 py-2">
-                <ModelDialog session={L().id} model={modelName()} effort={effortOf()} onClose={() => (live.setDialog(undefined), composerEl()?.focus())} />
+                <ModelDialog session={L().id} model={modelName()} effort={effortOf()} onClose={() => (live.setDialog(thread()!.id, undefined), composerEl()?.focus())} />
               </div>
             </Show>
             <Show when={waiting()}>

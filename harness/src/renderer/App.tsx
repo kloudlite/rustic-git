@@ -240,8 +240,10 @@ export function App() {
   const closeThread = (id: string) => {
     const pi = paneOf(id);
     if (pi < 0) return;
-    // The tab goes and so does what it had open: the file was drawing over the next tab.
+    // The tab goes and so does everything TAB level held for it: the open file was drawing over
+    // the next tab, and a dialog left open belonged to a view that no longer exists.
     setFiles(id, undefined);
+    live.closeTab(id);
     const list = panes[pi].open;
     const i = list.indexOf(id);
     const rest = list.filter((x) => x !== id);
@@ -485,7 +487,7 @@ export function App() {
       live.setMode(next);
       void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
     } },
-    { id: "model", group: "Suggested", label: "Model…", keys: "/model", run: () => live.setDialog("model") },
+    { id: "model", group: "Suggested", label: "Model…", keys: "/model", run: () => live.setDialog(selected(), "model") },
     { id: "thinking", group: "Suggested", label: "Thinking level (cycle)", keys: keyHint(KEYS.thinking), run: () => cycleThinking() },
     { id: "effort", group: "Suggested", label: "Effort (cycle)", keys: keyHint(KEYS.effort), run: () => cycleEffort() },
     { id: "composer", group: "Suggested", label: "Focus the prompt", keys: keyHint(KEYS.composer), run: () => composer()?.focus() },
@@ -597,7 +599,7 @@ export function App() {
     if (palette()) return;
     // The dialog owns escape while it is open: without this, a focus that had drifted off the card
     // would abort the turn instead of closing the picker.
-    if (hit(KEYS.back) && live.dialog()) return (stop(), void live.setDialog(undefined));
+    if (hit(KEYS.back) && live.dialog(selected())) return (stop(), void live.setDialog(selected(), undefined));
     if (hit(KEYS.back) && find() !== undefined) return closeFind();
 
     if (hit(KEYS.shell)) return (stop(), toggleShell());
@@ -714,7 +716,7 @@ export function App() {
     // takes a direct pick for somebody who knows what they want.
     "/model": { help: "pick the model, thinking level and effort", local: true, run: (arg) => {
       const id = curThread()?.pi;
-      if (!arg.trim()) return void live.setDialog("model");
+      if (!arg.trim()) return void live.setDialog(selected(), "model");
       if (!id) return void live.setStatusNote("open a session first");
       if (!/^[^/]+\/.+$/.test(arg.trim())) return void live.setStatusNote("usage: /model, or /model provider/id");
       void live.setModel(id, { model: arg.trim() });

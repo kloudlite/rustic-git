@@ -30,6 +30,15 @@ test("TAB: an open file belongs to its tab, and goes when the tab does", () => {
   assert.match(close, /setFiles\(id, undefined\)/, "a closed tab takes its open file with it");
 });
 
+test("TAB: a dialog is a view's state, not the window's", () => {
+  const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
+  // A window-wide signal opened the `/model` picker in every tab at once.
+  assert.ok(!/const \[dialog, setDialog\] = createSignal/.test(live), "the dialog is not a window-wide signal");
+  assert.match(live, /const \[dialogs, setDialogs\] = createStore<Record<string, "model" \| undefined>>/, "it is keyed by tab");
+  assert.match(live, /export const closeTab = \(tab: string\) =>/, "and TAB state is dropped as one thing");
+  assert.match(app(), /live\.closeTab\(id\)/, "which closing a tab calls");
+});
+
 test("TAB state is dropped by closing a tab, and only that", () => {
   const s = app();
   const close = s.slice(s.indexOf("const closeThread = (id: string) => {"), s.indexOf("/** A btw is removed"));
