@@ -799,6 +799,9 @@ export function packageTools(reg: ReturnType<typeof makeReg>) {
 export function ownTools(pi: ExtensionAPI, own: string, space: string | undefined, reg = makeReg(pi)) {
   const packages = async (): Promise<string[]> => {
     const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(own)}`);
+    // This machine is GONE — deleted under a session that stayed open. `404: not found` read as a
+    // blip and was retried four times in one session (transcripts, 2026-09-18); it never changes.
+    if (status === 404) throw new Error("this machine no longer exists; nothing here can be read or changed, and asking again will not change that");
     if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
     return ((data as { packages?: string[] } | null)?.packages ?? []).slice();
   };

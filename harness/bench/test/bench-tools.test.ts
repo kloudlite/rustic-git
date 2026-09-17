@@ -480,7 +480,7 @@ test("settle waits for the platform instead of the model sleeping", async () => 
 });
 
 /** A fake /v1 that records every call, for the tools that now fill in what a person would not type. */
-function fakeApi(routes: (m: string, url: string, body: any) => unknown) {
+function fakeApi(routes: (m: string, url: string, body: any) => unknown, missing = 200) {
   const seen: { m: string; url: string; body: any }[] = [];
   const srv = http.createServer((req, res) => {
     let b = "";
@@ -492,8 +492,11 @@ function fakeApi(routes: (m: string, url: string, body: any) => unknown) {
         res.writeHead(200, { "content-type": "application/json" });
         return void res.end(JSON.stringify({ answer: "yes" }));
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(routes(req.method!, req.url!, body) ?? {}));
+      // A route that answers nothing is whatever `missing` says it is: 200 {} by default, or the
+      // status a test wants for a thing that is not there.
+      const answered = routes(req.method!, req.url!, body);
+      res.writeHead(answered === undefined ? missing : 200, { "content-type": "application/json" });
+      res.end(JSON.stringify(answered ?? (missing === 200 ? {} : { error: "not found" })));
     });
   });
   return { srv, seen, listen: async () => (await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r)), `http://127.0.0.1:${(srv.address() as { port: number }).port}`) };
@@ -1284,5 +1287,31 @@ test("a skill is found however it is named, and an unreadable one says so as its
     assert.ok(!listed.split(", ").includes("kubernetes"), listed);
   } finally {
     restore();
+  }
+});
+
+/**
+ * A workspace deleted under a session that stayed open answered `404: not found` to `kl_pkg_list`,
+ * four times in one session (transcripts, 2026-09-18). A machine that is gone says so, once.
+ */
+test("a machine that no longer exists says so rather than answering 404", async () => {
+  const api = fakeApi((_m, url) => (url.startsWith("/v1/workspaces/") ? undefined : { ok: true }), 404);
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-gone-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_TOOLS_ADDRESS: "127.0.0.1:7788", KL_TOOLS_WORKSPACE: "api", KL_WORKSPACE_ID: "api", KL_TEAM: "acme", KL_OWNER: "ada", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    workspaceTools(pi);
+    kloudlite(pi);
+    const r = await (tools.find((t) => t.name === "kl_pkg_list")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", {}, undefined, undefined, undefined);
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /this machine no longer exists/);
+    assert.match(r.content[0].text, /asking again will not change that/);
+    assert.ok(!/404/.test(r.content[0].text), r.content[0].text);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
