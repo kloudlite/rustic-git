@@ -385,16 +385,10 @@ not other trees, not the home, not the token, not `kl`. `--die-with-parent` ties
 process to the server's lifetime the way the ring already does. The server itself stays outside
 the wrapper: it must see every tree to serve them.
 
-Two conditions to verify before this is written down as fact, as a **spike in slice 3**:
-
-1. **User namespaces under the workspace runtime.** bwrap unprivileged needs `CLONE_NEWUSER` and
-   bind mounts inside the new namespace. The workspace pods run under the region's runtime class;
-   gVisor supports user and mount namespaces in current releases but has refused `bwrap` in the
-   past on the `--dev`/`--proc` setup. If it fails, the fallback is `unshare -Urm` with a plain
-   `chroot`-less bind (same guarantees, weaker `/dev`), and if that fails, the server-side
-   `confine` plus `cwd` is what we have and §3.5's instruction carries more weight.
-2. **Cost per exec.** bwrap adds a few milliseconds; the probes `ide.exec` and `ws.tree.ports`
-   assert it stays under 50 ms overhead.
+Owner (21:50 IST): no spike up front — build it, test it on the fleet, improve later. Two things
+to watch when it lands: whether bwrap's user-namespace and `/dev` setup runs under the workspace
+pods' runtime class (fallback `unshare -Urm` with bind mounts), and per-exec overhead (`ide.exec`
+asserts under 50 ms).
 
 `bubblewrap` joins `WS_BASE_PACKAGES` so it comes from the pin like everything else. The shell
 sidecar (§2) does **not** use it: the shell is the person's, and its boundary is the container.
