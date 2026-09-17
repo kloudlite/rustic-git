@@ -281,6 +281,13 @@ export const isCommandLine = (text: string): boolean => /^\s*\//.test(text);
 const ANSWER_WORDS = /^(y|n|yes|no|ok|okay|sure|approve|approved|allow|allowed|deny|denied|reject|rejected)[.!]?$/i;
 export const isCardAnswer = (text: string, afterCard: boolean): boolean => afterCard && ANSWER_WORDS.test(text.trim());
 
+/**
+ * Tool calls that waited on a PERSON. Their row is the card, never a `Called …` line: the live path
+ * has skipped them since b1119b9a, and replay does the same, so an old session file reads as it was
+ * lived rather than as a tool that took five minutes.
+ */
+const WAITS_ON_PERSON = new Set(["question", "ask_close"]);
+
 const now = () => new Date().toTimeString().slice(0, 5);
 const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
@@ -344,6 +351,8 @@ function makeThread(id: string) {
     const calls = new Map<string, number>();
     /** Whether the last thing pi recorded was a card the person answers — a question or a proposal. */
     let afterCard = false;
+    /** Calls that waited on a person, by id: they become their card when the answer arrives. */
+    const waited = new Map<string, { id: string; args: Record<string, unknown>; at: string; ts?: number }>();
     for (const m of raw as Record<string, unknown>[]) {
       const ts = typeof m.timestamp === "number" ? m.timestamp : undefined;
       const at = ts ? new Date(ts).toTimeString().slice(0, 5) : "";
@@ -359,12 +368,41 @@ function makeThread(id: string) {
           if (c.type === "toolCall") {
             const name = c.name as string;
             const args = c.arguments as Record<string, unknown>;
+            // A call that waited on a PERSON is its card, never a tool row — the same rule the live
+            // path follows. Replayed, it drew as ``● Called `question` … 305.4s``, which is the
+            // question said a second time and a clock nobody was waiting on (owner, 2026-09-18).
+            if (WAITS_ON_PERSON.has(name)) {
+              waited.set(c.id as string, { id: c.id as string, args, at, ts });
+              afterCard = true;
+              continue;
+            }
             out.push({ role: "action", kind: name === "bash" ? "run" : "note", target: TOOL[name] ?? name, text: argOf(name, args), at, ts, output: "", tool: name, args });
             calls.set(c.id as string, out.length - 1);
-            if (name === "question" || name === "ask") afterCard = true;
+            if (name === "ask") afterCard = true;
           }
         }
       } else if (m.role === "toolResult") {
+        const asked = waited.get(m.toolCallId as string);
+        if (asked) {
+          // What the person answered IS the record: the card, already settled.
+          const content = (m.content as { type?: string; text?: string }[]) ?? [];
+          const said = content.map((x) => x.text ?? "").join("").trim();
+          const q = asked.args as { header?: string; question?: string; options?: unknown };
+          waited.delete(m.toolCallId as string);
+          if (!(m.isError as boolean) && said)
+            out.push({
+              role: "question",
+              id: asked.id,
+              tool: "question",
+              summary: String(q.question ?? q.header ?? ""),
+              args: asked.args,
+              ask: { header: String(q.header ?? "Question"), options: (q.options as { label: string; description: string }[] | undefined) ?? [] },
+              answer: said,
+              at: asked.at,
+              ts: asked.ts,
+            });
+          continue;
+        }
         const i = calls.get(m.toolCallId as string);
         if (i === undefined) continue;
         const content = (m.content as { type?: string; text?: string }[]) ?? [];

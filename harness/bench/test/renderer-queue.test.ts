@@ -181,7 +181,30 @@ test("a replayed session keeps its first prompt", () => {
   assert.equal(t.messages[0].role, "user", "the first row is the prompt that started it");
   assert.equal((t.messages[0] as { text: string }).text, "create a TS Node project");
   assert.equal(t.messages.filter((m) => m.role === "user").length, 1, "the card's own `yes` is not a second row");
-  assert.equal(t.messages.filter((m) => m.role === "action").length, 4);
+  assert.equal(t.messages.filter((m) => m.role === "action").length, 3, "the question is a card, not a fourth tool row");
+});
+
+/**
+ * Replayed, a `question` drew as ``● Called `question` … 305.4s`` — the question said a second time
+ * under a clock nobody was waiting on (owner, 2026-09-18). The live path has suppressed it since
+ * b1119b9a; the fold does the same, and the recorded answer becomes the settled card.
+ */
+test("a replayed question is the answered card, never a tool row", () => {
+  const t = thread("w-replay-q");
+  t.replay([
+    { role: "user", content: "start", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "q1", name: "question", arguments: { header: "Which one?", question: "Which one?", options: [{ label: "a", description: "" }] } }],
+      timestamp: 2,
+    },
+    { role: "toolResult", toolCallId: "q1", content: [{ type: "text", text: "a" }], timestamp: 3 },
+  ]);
+  assert.ok(!t.messages.some((m) => m.role === "action" && (m as { tool?: string }).tool === "question"), "no `Called question` row");
+  const card = t.messages.find((m) => m.role === "question") as { answer?: string; ask?: { header: string } } | undefined;
+  assert.ok(card, "the card is there");
+  assert.equal(card?.answer, "a", "settled with what the person answered");
+  assert.equal(card?.ask?.header, "Which one?");
 });
 
 /**

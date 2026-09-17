@@ -89,7 +89,10 @@ export function TerminalPanel(props: {
               visible={t.id === props.active}
               onExited={markExited}
               onEnded={() => props.onEnded(t.id)}
-              onTitle={(id, title) => setTitles((m) => ({ ...m, [id]: title }))}
+              /* ttyd's title is the COMMAND, which reads as `/nix/profile/cur…` — not a name for a
+                 tab (owner, 2026-09-18). The tab is named after its scope; a title only replaces
+                 that when it is something a person would have written. */
+              onTitle={(id, title) => setTitles((m) => (title.startsWith("/") ? m : { ...m, [id]: title }))}
             />
           )}
         </For>
