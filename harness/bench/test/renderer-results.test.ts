@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
 import { procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { onEvent, planOf } from "../../src/renderer/live.ts";
+import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -68,4 +69,36 @@ test("a plan event fills the panel, with the doing item and the reason for a lat
     ["write the tests", "pending", undefined],
   ]);
   assert.deepEqual(planOf("nobody"), [], "a session with no plan has no plan, not a stale one");
+});
+
+test("a read result is parsed into rows: one gutter, the real numbers, the trailer as a footer", () => {
+  // What the tool server prints: its OWN line numbers. The viewer used to add a second gutter, so
+  // the person saw "1 1 import fs" with the first line out of step (owner's screenshot).
+  const out = ['   1\timport fs from "node:fs";', "   2\t", "   3\texport function main() {", "[50 lines in all; page with offset]"].join("\n");
+  const b = readBlock(out);
+  assert.deepEqual(b.lines, [
+    { n: 1, text: 'import fs from "node:fs";' },
+    { n: 2, text: "" },
+    { n: 3, text: "export function main() {" },
+  ]);
+  assert.equal(b.footer, "50 lines in all \u00b7 showing 1\u20133");
+
+  // An offset page starts where it actually starts, not at 1.
+  const page = readBlock(["  40\tconst x = 1;", "  41\tconst y = 2;", "[50 lines in all; page with offset]"].join("\n"));
+  assert.deepEqual(page.lines.map((l) => l.n), [40, 41]);
+  assert.equal(page.footer, "50 lines in all \u00b7 showing 40\u201341");
+
+  // A whole file has no trailer and no footer; an unnumbered answer keeps its text.
+  assert.deepEqual(readBlock("hello\nthere"), { lines: [{ text: "hello" }, { text: "there" }], footer: undefined });
+  assert.equal(readBlock("x\n[truncated]").footer, "truncated");
+});
+
+test("grep rows split into path, line and match; terminal output loses its escape codes", () => {
+  assert.deepEqual(grepBlock("src/a.ts:12:  const x = 1\nnot a match\nsrc/b.ts:3:fn main()"), [
+    { path: "src/a.ts", n: 12, text: "  const x = 1" },
+    { path: "src/b.ts", n: 3, text: "fn main()" },
+  ]);
+  // A dev server writes colour; a <pre> renders the escapes as mojibake.
+  const coloured = `${String.fromCharCode(27)}[32mready${String.fromCharCode(27)}[0m in 300ms\n[exit 0]`;
+  assert.deepEqual(plainBlock(coloured), { lines: [{ text: "ready in 300ms" }], footer: "exit 0" });
 });

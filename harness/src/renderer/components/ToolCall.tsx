@@ -3,6 +3,7 @@ import { Icon } from "../ui/Icon";
 import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
 import { ResultCard, pickRenderer } from "./results";
+import { grepBlock, plainBlock, readBlock, type CodeBlock } from "./results/code";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -113,8 +114,8 @@ function Body(props: { a: Action }) {
     <Show when={!a().pending} fallback={<Show when={a().output}><Out text={a().output!} /></Show>}>
       <Switch tool={a().tool}>
         {{
-          bash: () => <Out text={a().output ?? ""} empty="(no output)" />,
-          read: () => <Code path={String(g().path ?? "")} text={a().output ?? ""} from={Number(g().offset ?? 1)} />,
+          bash: () => <Out text={plainBlock(a().output ?? "").lines.map((l) => l.text).join("\n")} empty="(no output)" />,
+          read: () => <Code path={String(g().path ?? "")} text={a().output ?? ""} from={Number(g().offset ?? 1)} block={readBlock(a().output ?? "")} />,
           write: () => <Code path={String(g().path ?? "")} text={String(g().content ?? "")} from={1} />,
           edit: () => <Edits path={String(g().path ?? "")} edits={(g().edits as { oldText: string; newText: string }[]) ?? []} result={a().output} />,
           grep: () => <Hits text={a().output ?? ""} />,
@@ -152,7 +153,7 @@ function Out(props: { text: string; empty?: string; head?: number }) {
   const more = () => Math.max(0, ls().length - HEAD) || (ls().slice(0, HEAD).join("\n").length > CHARS ? 1 : 0);
   return (
     <Show when={props.text.trim()} fallback={<div class="py-1 text-subtle">{props.empty ?? ""}</div>}>
-      <pre class="m-0 py-1 whitespace-pre-wrap wrap-words font-[inherit] text-muted">{all() ? ls().join("\n") : folded()}</pre>
+      <pre class="m-0 py-1 whitespace-pre-wrap wrap-words font-[inherit] text-muted [tab-size:4]">{all() ? ls().join("\n") : folded()}</pre>
       <Show when={more()}>
         <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : ls().length > HEAD ? `… ${ls().length - HEAD} more lines` : "… show all"}</button>
       </Show>
@@ -160,28 +161,41 @@ function Out(props: { text: string; empty?: string; head?: number }) {
   );
 }
 
-/** A file, or the part of it read: numbered, highlighted by its extension. */
-function Code(props: { path: string; text: string; from: number }) {
+/**
+ * A file, or the part of it read. The tool server's own line numbers are the gutter — ONE gutter,
+ * with the real numbers, so an offset page starts where it actually starts. The trailer it prints
+ * is the block's footer, not a line of code, and the header names the file.
+ */
+function Code(props: { path: string; text: string; from: number; block?: CodeBlock }) {
   const HEAD = 12;
   const [all, setAll] = createSignal(false);
   const lang = () => languageOf(props.path);
-  const ls = () => props.text.replace(/\s+$/, "").split("\n");
-  const shown = () => (all() ? ls() : ls().slice(0, HEAD));
+  const block = () => props.block ?? { lines: props.text.replace(/\s+$/, "").split("\n").map((text, i) => ({ n: props.from + i, text })) };
+  const shown = () => (all() ? block().lines : block().lines.slice(0, HEAD));
+  const gutter = () => Math.max(2, String(block().lines[block().lines.length - 1]?.n ?? "").length);
   return (
     <Show when={props.text.trim()} fallback={<div class="py-1 text-subtle">(empty)</div>}>
-      <div class="my-1 overflow-x-auto rounded-[2px] bg-codeblock py-1">
+      <div class="my-1 flex items-baseline gap-2 text-xs text-subtle">
+        <span class="min-w-0 truncate text-muted">{props.path}</span>
+        <span class="flex-1" />
+        <span class="tabular-nums">{block().lines.length} lines</span>
+      </div>
+      <div class="overflow-x-auto rounded-[2px] bg-codeblock py-1 [tab-size:4]">
         <For each={shown()}>
-          {(l, i) => (
+          {(l) => (
             <div class="flex">
-              <span class="w-10 shrink-0 pr-3 text-right text-line-number select-none">{props.from + i()}</span>
-              <span class="whitespace-pre" innerHTML={highlight(l, lang())} />
+              <span class="shrink-0 pr-3 text-right text-line-number select-none" style={{ width: `${gutter() + 1}ch`, "padding-left": "8px" }}>{l.n ?? ""}</span>
+              <span class="whitespace-pre" innerHTML={highlight(l.text, lang())} />
             </div>
           )}
         </For>
       </div>
-      <Show when={ls().length > HEAD}>
-        <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${ls().length - HEAD} more lines`}</button>
-      </Show>
+      <div class="flex items-baseline gap-3 pb-1 text-xs">
+        <Show when={block().lines.length > HEAD}>
+          <button class="text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${block().lines.length - HEAD} more lines`}</button>
+        </Show>
+        <Show when={block().footer}>{(f) => <span class="text-subtle">{f()}</span>}</Show>
+      </div>
     </Show>
   );
 }
@@ -208,27 +222,32 @@ function Edits(props: { path: string; edits: { oldText: string; newText: string 
   );
 }
 
-/** Search or listing results: one per line, the path part quiet. */
+/** Search results: the path and the line in a gutter, the match as code beside it. */
 function Hits(props: { text: string }) {
   const HEAD = 12;
   const [all, setAll] = createSignal(false);
-  const ls = () => props.text.replace(/\s+$/, "").split("\n").filter(Boolean);
+  const rows = () => grepBlock(props.text);
+  const plain = () => props.text.replace(/\s+$/, "").split("\n").filter(Boolean);
   return (
-    <Show when={ls().length} fallback={<div class="py-1 text-subtle">nothing</div>}>
-      <div class="py-1">
-        <For each={all() ? ls() : ls().slice(0, HEAD)}>
-          {(l) => {
-            const m = /^([^:\s]+):(\d+):(.*)$/.exec(l);
-            return m ? (
-              <div class="truncate"><span class="text-muted">{m[1]}</span><span class="text-subtle">:{m[2]}:</span><span class="text-fg">{m[3]}</span></div>
-            ) : (
-              <div class="truncate text-muted">{l}</div>
-            );
-          }}
-        </For>
+    <Show when={plain().length} fallback={<div class="py-1 text-subtle">nothing</div>}>
+      <div class="py-1 [tab-size:4]">
+        <Show
+          when={rows().length}
+          fallback={<For each={all() ? plain() : plain().slice(0, HEAD)}>{(l) => <div class="truncate text-muted">{l}</div>}</For>}
+        >
+          <For each={all() ? rows() : rows().slice(0, HEAD)}>
+            {(r) => (
+              <div class="flex gap-2">
+                <span class="shrink-0 truncate text-subtle" style={{ "max-width": "28ch" }} title={r.path}>{r.path}</span>
+                <span class="shrink-0 text-right text-line-number tabular-nums select-none" style={{ width: "5ch" }}>{r.n}</span>
+                <span class="min-w-0 flex-1 truncate whitespace-pre text-fg">{r.text}</span>
+              </div>
+            )}
+          </For>
+        </Show>
       </div>
-      <Show when={ls().length > HEAD}>
-        <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${ls().length - HEAD} more`}</button>
+      <Show when={(rows().length || plain().length) > HEAD}>
+        <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${(rows().length || plain().length) - HEAD} more`}</button>
       </Show>
     </Show>
   );

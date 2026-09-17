@@ -2,6 +2,7 @@ import { Show, createEffect, createSignal, onCleanup } from "solid-js";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import * as live from "../live";
+import { plainBlock } from "./results/code";
 
 const TONE: Record<live.Task["state"], "success" | "accent" | "neutral" | "danger" | "warning"> = { running: "success", background: "accent", done: "neutral", failed: "danger", cancelled: "warning", lost: "warning" };
 
@@ -50,8 +51,9 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
           <Button variant="ghost" size="sm" icon="x" onClick={() => (props.task.tool === "Process" ? live.stopProc({ id: props.task.id } as live.Proc) : live.cancel(props.task))}>{props.task.tool === "Process" ? "Stop" : "Cancel"}</Button>
         </Show>
       </header>
-      <pre class="m-0 min-h-0 flex-1 overflow-auto px-6 py-4 font-mono text-sm leading-6 whitespace-pre-wrap text-muted select-text">
-        {(props.task.tool === "Process" ? log() : props.task.output) || (active() ? "waiting for output…" : "(no output)")}
+      {/* A process writes colour; the escapes render as mojibake in a <pre>, so they are stripped. */}
+      <pre class="m-0 min-h-0 flex-1 overflow-auto px-6 py-4 font-mono text-sm leading-6 whitespace-pre-wrap text-muted select-text [tab-size:4]">
+        {plainBlock(props.task.tool === "Process" ? log() : props.task.output).lines.map((l) => l.text).join("\n") || (active() ? "waiting for output…" : "(no output)")}
       </pre>
     </div>
   );
