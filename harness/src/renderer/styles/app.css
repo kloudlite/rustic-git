@@ -403,32 +403,37 @@
 
 }
 
-/* Prose in an answer: the editor's mono at 12/20 — the terminal's own face,
-   which is what a person watching an agent expects — with real air between
-   blocks, real cells in tables, and a real step for headings. */
-.prose { font-family: var(--font-mono); font-size: 12px; line-height: 20px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
-.prose > * + * { margin-top: 10px; }
-.prose p, .prose li { line-height: 20px; }
-.prose ul, .prose ol { padding-left: 22px; }
-.prose li + li { margin-top: 3px; }
+/* Prose in an answer reads as PROSE: the UI face, at the size everything else in
+   the product is set in (owner, 2026-09-17 — a screenshot of monospace paragraphs
+   with raw-looking chips). What is code stays mono, in a chip or a block, so the
+   two are told apart by their face rather than by both being the same one. The
+   rest keeps its air: real space between blocks, real cells, a real heading step. */
+.prose { font-family: var(--font-ui); font-size: var(--text-base); line-height: 21px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
+.prose > * + * { margin-top: 8px; }
+.prose p, .prose li { line-height: 21px; }
+.prose ul, .prose ol { padding-left: 20px; }
+.prose li + li { margin-top: 2px; }
 .prose li::marker { color: var(--subtle); }
 .prose ul { list-style: disc; }
 .prose ol { list-style: decimal; }
-.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 700; line-height: 22px; color: var(--fg-strong); }
-.prose h1 { font-size: 14px; margin-top: 18px; }
-.prose h2 { font-size: 13px; margin-top: 16px; }
-.prose h3, .prose h4 { font-size: 12px; margin-top: 14px; }
+/* A heading in an answer is a label, not a title page: one step up at most. */
+.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; line-height: 20px; color: var(--fg-strong); }
+.prose h1 { font-size: 14px; margin-top: 14px; }
+.prose h2 { font-size: 13px; margin-top: 12px; }
+.prose h3, .prose h4 { font-size: var(--text-base); margin-top: 12px; letter-spacing: 0.02em; color: var(--muted); text-transform: uppercase; }
 .prose > h1:first-child, .prose > h2:first-child, .prose > h3:first-child { margin-top: 0; }
 .prose hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
 .prose strong { font-weight: 700; color: var(--fg-strong); }
 .prose em { font-style: italic; color: var(--muted); }
-.prose code { font-family: var(--font-mono); font-size: 12px; padding: 1px 4px; border-radius: 2px; background: var(--preformat); color: var(--preformat-fg); }
+/* Inline code is a chip: mono, a shade behind it, and never wrapped in backticks
+   a person can see. It sits ON the text line, so it must not grow the line box. */
+.prose code { font-family: var(--font-mono); font-size: 11px; line-height: 1; padding: 1px 4px; border-radius: 2px; background: var(--preformat); color: var(--preformat-fg); white-space: nowrap; }
 .prose pre { max-width: 100%; margin: 10px 0; padding: 10px 12px; border-radius: 2px; background: var(--codeblock); overflow-x: auto; }
 .prose pre code { padding: 0; background: none; color: inherit; font-size: 12px; line-height: 18px; white-space: pre; }
 .prose a { color: var(--accent); text-decoration: none; }
 .prose a:hover { text-decoration: underline; }
-.prose blockquote { margin: 10px 0; padding: 6px 12px; border-left: 3px solid var(--quote-line); background: var(--codeblock); color: var(--muted); }
-.prose table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 18px; margin: 10px 0; }
+.prose blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--quote-line); background: var(--codeblock); color: var(--muted); }
+.prose table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 18px; margin: 8px 0; font-family: var(--font-mono); }
 .prose thead th { background: var(--codeblock); font-weight: 700; color: var(--fg-strong); text-align: left; }
 .prose th, .prose td { padding: 6px 10px; border: 1px solid var(--line); vertical-align: top; }
 .prose td code, .prose th code { font-size: 11px; }

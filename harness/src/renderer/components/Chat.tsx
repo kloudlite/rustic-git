@@ -353,7 +353,8 @@ export function Chat(props: {
                     when={b.role === "user"}
                     fallback={
                       <div class="flex items-start">
-                        <span class="w-5 shrink-0 leading-[20px] text-fg-strong">⏺</span>
+                        {/* The dot keeps the mono rail every other row hangs off; the answer beside it is prose. */}
+                        <span class="w-5 shrink-0 font-mono leading-[21px] text-fg-strong">⏺</span>
                         <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
                       </div>
                     }
