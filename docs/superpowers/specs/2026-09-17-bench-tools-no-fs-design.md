@@ -125,3 +125,25 @@ state of the system … properly prompt the user about what's happening as quest
 - Motion: every transition is transform/opacity only, 120–160 ms, `prefers-reduced-motion`
   honoured; streaming text must not reflow earlier rows (fixed row heights for action rows,
   `content-visibility` where cheap); drawer and tab switches never drop frames from layout thrash.
+
+## 10. Code and containers are tools (owner, 2026-09-17 14:20 IST: "give access of code repos to
+our sessions … also containers, building images and push images etc as tools")
+
+Repos, through `/v1` (every session): `kl_repos {owner?}`, `kl_repo_create {owner?, name,
+visibility?, description?}`, `kl_repo_branches {repo}` (new `GET /v1/repos/{o}/{n}/branches`),
+`kl_pulls {repo, state?}` (new `GET /v1/repos/{o}/{n}/pulls`), `kl_pull {repo, number}`,
+`kl_pull_create {repo, title, head, base, body?}` (new `POST /v1/repos/{o}/{n}/pulls`),
+`kl_pull_merge {repo, number, method?}`, `kl_pull_close`, `kl_compare {repo, base, head}`,
+`kl_commit {repo, branch, message, patch}` (existing `POST …/commits`). Code itself is worked on
+in the session's OWN workspace with git over ssh: `kl_repo_clone {repo, dir?}` runs
+`git clone ssh://git@{host}/{owner}/{name}.git` there (host from the workspace's own git config
+the prelude wrote; the owner's key is already in the pod). Push/branch/commit locally = plain
+`bash git …` in the own workspace.
+
+Containers, in the session's OWN workspace through the `kl` CLI (builder + registry credential
+already there): `kl_container_build {context, tag, dockerfile?}` → `kl container build -t <tag>
+[-f <dockerfile>] <context>` as a background process (a build is long; answers the process id,
+progress via `process logs`), `kl_container_push {from, to}` → `kl container push`, `kl_images
+{owner?}` → new `kl container images` (registry `/v2/_catalog` + tags with the registry token)
+wrapped as a tool. Every write here is a proposal per §9 except the local git operations and the
+build itself (it writes only to the registry under the person's own name).
