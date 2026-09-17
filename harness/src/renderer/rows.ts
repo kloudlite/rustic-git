@@ -65,3 +65,24 @@ export function refusal(cmd: { type: string }, st: { session?: string; connected
   if (WRITES.has(cmd.type) && !st.writable.ok) return `the bench cannot save right now (${st.writable.reason}); nothing was sent`;
   return undefined;
 }
+
+
+/**
+ * A model id as a person says it: `deepseek/deepseek-v4-flash` is not what anybody calls it. The
+ * map is short on purpose — anything not in it reads better as its own id than as a guess.
+ */
+const MODEL_NAMES: Record<string, string> = {
+  "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "deepseek/deepseek-v4": "DeepSeek V4",
+  "anthropic/claude-opus-5": "Claude Opus 5",
+  "anthropic/claude-sonnet-5": "Claude Sonnet 5",
+  "anthropic/claude-haiku-5": "Claude Haiku 5",
+  "openai/gpt-5": "GPT-5",
+};
+export function displayModel(id: string | undefined): string {
+  const t = (id ?? "").trim();
+  // "not started" is pi's own status before a child is up: it is not a model, and saying it where
+  // the model goes told the owner his session had none (2026-09-17).
+  if (!t || /^not started$/i.test(t)) return "no model";
+  return MODEL_NAMES[t] ?? t.split("/").pop() ?? t;
+}

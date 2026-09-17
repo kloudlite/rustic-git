@@ -86,6 +86,10 @@ export { mode, setMode };
 export const LEVELS = ["low", "medium", "high"] as const;
 const [level, setLevel] = createSignal<(typeof LEVELS)[number]>("low");
 export { level, setLevel };
+// Only shown once somebody has set it: a default we invented is not a fact about the model.
+const [levelKnown, setLevelKnown] = createSignal(false);
+export { levelKnown };
+export const noteLevel = (l: (typeof LEVELS)[number]) => (setLevel(l), setLevelKnown(true));
 
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };

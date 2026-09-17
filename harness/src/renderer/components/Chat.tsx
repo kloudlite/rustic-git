@@ -11,6 +11,7 @@ import { FileView } from "./FileView";
 import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
+import { displayModel } from "../rows";
 import { HINTS } from "../keys";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
@@ -109,14 +110,24 @@ export function Chat(props: {
   // `/` completion: the commands whose name starts with what is typed, shown
   // above the composer while the caret is still in the first word.
   const [typed, setTyped] = createSignal("");
+  // The composer floats over the reversed scroller, so the last row — the turn footer — was under
+  // it. Measured rather than guessed: it grows with what is typed and with the queued rows.
+  let composerBox: HTMLDivElement | undefined;
+  onMount(() => {
+    if (!composerBox) return;
+    const ro = new ResizeObserver(([e]) => scroller?.style.setProperty("--composer-h", `${Math.round(e.contentRect.height)}px`));
+    ro.observe(composerBox);
+    onCleanup(() => ro.disconnect());
+  });
   // One clock for the footer bar, ticking only while something runs.
   const [now, setNow] = createSignal(Date.now());
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
   const elapsed = () => Math.max(0, Math.round((now() - (L().turn()?.since ?? now())) / 1000));
   const mode = () => (live.mode() === "plan" ? "Plan" : "Build");
-  // The model's own name, as pi reported it at startup ("<model> · <host>").
-  const modelName = () => (L().status() || props.machine.model).split(" · ")[0] || props.machine.model;
+  // The model's name: pi's status line while it is up, otherwise the session's own row — a window
+  // opened after the child started saw no `started` event and read "not started" as the model.
+  const modelName = () => displayModel(L().status().split(" · ")[0] || thread()?.model || props.machine.model);
   const [pick, setPick] = createSignal(0);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
@@ -337,7 +348,8 @@ export function Chat(props: {
             once a person scrolls up — the terminal's behaviour, no script. */}
         <div
           ref={scroller}
-          class="pane relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 pb-4 select-text"
+          class="pane relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 select-text"
+          style={{ "padding-bottom": `calc(var(--composer-h, 0px) + 16px)` }}
           classList={{ hidden: onFile() }}
           onScroll={() => { if (atBottom()) setBehind(false); }}
         >
@@ -491,7 +503,7 @@ export function Chat(props: {
 
           {/* The composer is a block with the same accent rail a person's message has: what you
               type and what you typed read as the same thing. */}
-          <div class="pane flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
+          <div ref={composerBox} class="pane flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
             <div class="flex items-start px-3 pt-2 pb-1.5 font-mono">
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
@@ -577,7 +589,7 @@ export function Chat(props: {
             {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
             <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono">
               <span class="text-accent">{mode()}</span>
-              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()} · {live.level()}</span>
+              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()}<Show when={live.levelKnown()}> · {live.level()}</Show></span>
             </div>
           </div>
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}

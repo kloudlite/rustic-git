@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
-import { procsOf, sessionOf } from "../../src/renderer/rows.ts";
+import { displayModel, procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
@@ -134,4 +134,16 @@ test("an agent's reply reads as status + one line, with the rest folded", () => 
   assert.equal(report("NEEDS_CONTEXT which repo?").status, "NEEDS_CONTEXT");
   // An agent that ignored the contract still reads: no status, all body.
   assert.deepEqual(report("[from agent x] i had a look around\nand found nothing"), { status: undefined, head: "i had a look around", body: "and found nothing" });
+});
+
+test("a model reads as its name, and pi's status is never mistaken for one", () => {
+  assert.equal(displayModel("deepseek/deepseek-v4-flash"), "DeepSeek V4 Flash");
+  assert.equal(displayModel("anthropic/claude-opus-5"), "Claude Opus 5");
+  // Unknown ids read better as themselves than as a guess, minus the vendor.
+  assert.equal(displayModel("someone/new-model-9"), "new-model-9");
+  assert.equal(displayModel("bare-model"), "bare-model");
+  // pi's own status before a child is up is NOT a model (the owner read "not started" as one).
+  assert.equal(displayModel("not started"), "no model");
+  assert.equal(displayModel(""), "no model");
+  assert.equal(displayModel(undefined), "no model");
 });

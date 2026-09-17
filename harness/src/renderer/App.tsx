@@ -128,7 +128,9 @@ export function App() {
   createEffect(() => live.setWorkspaceNames(workspaces()));
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
-    return x && { id, name: x.name, kind: "session", readonly: !live.connected(), messages: [], pi: id };
+    // The model is the SESSION's, from sessions.json: a window that opened after the child started
+    // never saw pi's `started` event, and read its status ("not started") as the model's name.
+    return x && { id, name: x.name, kind: "session", readonly: !live.connected(), messages: [], pi: id, model: (x as { model?: string }).model };
   };
   const fail = (e: Error) => live.thread(cur()).note(e.message);
   const loadThread = async (id: string) => live.thread(id).replay(await window.harness.benchMessages(id));
@@ -499,7 +501,7 @@ export function App() {
     } },
     { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: KEYS.level.keys, run: () => {
       const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
-      live.setLevel(next);
+      live.noteLevel(next);
       void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
     } },
     { id: "composer", group: "Suggested", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
@@ -568,7 +570,7 @@ export function App() {
     if (hit(KEYS.level)) {
       stop();
       const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
-      live.setLevel(next);
+      live.noteLevel(next);
       void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
       return;
     }
