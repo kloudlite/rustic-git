@@ -61,3 +61,13 @@ test("every provider pi lists is offered, and only DeepSeek is wired", async () 
     await b.down();
   }
 });
+
+test("an effort-only pick keeps the session's model", async () => {
+  const b = await startBench();
+  const a = await post(b, "/sessions", {});
+  await post(b, `/sessions/${a.id}/model`, { model: "deepseek/deepseek-chat" });
+  const row = await post(b, `/sessions/${a.id}/model`, { effort: "low" });
+  assert.equal(row.model, "deepseek/deepseek-chat");
+  assert.equal(row.effort, "low");
+  await b.down();
+});

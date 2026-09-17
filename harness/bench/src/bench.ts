@@ -910,7 +910,9 @@ export class Bench {
    */
   async create(body: Partial<Triple> & { default?: boolean } = {}): Promise<SessionRow> {
     this.refuse(true);
-    const pick: Triple = { model: body.model, thinking: body.thinking, effort: body.effort };
+    // Only what the body names moves: an effort-only pick wiped the model once (Object.assign
+    // copies an explicit undefined), and the footer read "no model" after the person chose one.
+    const pick = Object.fromEntries(Object.entries({ model: body.model, thinking: body.thinking, effort: body.effort }).filter(([, v]) => v !== undefined)) as Triple;
     const named = pick.model !== undefined || pick.thinking !== undefined || pick.effort !== undefined;
     if (named && body.default !== false) this.write(() => this.defaults.set(pick));
     const t: Triple = { ...this.defaults.get(), ...Object.fromEntries(Object.entries(pick).filter(([, v]) => v !== undefined)) };
@@ -928,7 +930,9 @@ export class Bench {
   async setModel(id: string, body: Partial<Triple> & { default?: boolean }): Promise<SessionRow> {
     this.refuse(true);
     if (!this.sessions.get(id)) throw new Error(`no session ${id}`);
-    const pick: Triple = { model: body.model, thinking: body.thinking, effort: body.effort };
+    // Only what the body names moves: an effort-only pick wiped the model once (Object.assign
+    // copies an explicit undefined), and the footer read "no model" after the person chose one.
+    const pick = Object.fromEntries(Object.entries({ model: body.model, thinking: body.thinking, effort: body.effort }).filter(([, v]) => v !== undefined)) as Triple;
     if (body.default !== false) this.write(() => this.defaults.set(pick));
     const row = this.writable.run(() => this.sessions.update(id, pick));
     await this.children.get(id)?.applyTriple(this.rowTriple(row));
