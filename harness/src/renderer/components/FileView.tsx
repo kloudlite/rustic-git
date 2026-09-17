@@ -25,11 +25,12 @@ export function FileView(props: { path: string; status?: string; scope?: string;
    * is not a workspace, or the preview window.
    */
   const [fetched] = createResource(
-    () => (props.scope ? { scope: props.scope, path: props.path } : undefined),
+    // The watch drops a changed file's text, so re-keying on it re-reads exactly that one file.
+    () => (props.scope ? { scope: props.scope, path: props.path, v: live.fsChanged() } : undefined),
     (k) => live.fsFile(k.scope, k.path),
   );
   const [fetchedDiff] = createResource(
-    () => (props.scope && props.status && props.status !== "?" ? { scope: props.scope, path: props.path } : undefined),
+    () => (props.scope && props.status && props.status !== "?" ? { scope: props.scope, path: props.path, v: live.fsChanged() } : undefined),
     (k) => live.fsDiff(k.scope, k.path),
   );
   const rows = createMemo<Row[] | undefined>(() => {

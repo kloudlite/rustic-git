@@ -34,7 +34,9 @@ export function FsTree(props: {
   const depth = () => props.depth ?? 0;
   const at = (name: string) => (props.path ? `${props.path}/${name}` : name);
   const [rows] = createResource(
-    () => ({ scope: props.scope, path: props.path }),
+    // `fsChanged` is in the key so a directory the watch patched is redrawn from the cache; the
+    // fetch itself is a cache hit, not a second read.
+    () => ({ scope: props.scope, path: props.path, v: live.fsChanged() }),
     async (k) => (await live.fsTree(k.scope, k.path))?.entries ?? [],
   );
   /** Directories first, then files, each alphabetical — the order an editor's explorer uses. */

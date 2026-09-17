@@ -1,4 +1,4 @@
-import { Show, createResource, createSignal, type JSX } from "solid-js";
+import { Show, createEffect, createResource, createSignal, onCleanup, type JSX } from "solid-js";
 import { Segmented } from "../../ui/Segmented";
 import * as live from "../../live";
 import { Icon } from "../../ui/Icon";
@@ -38,7 +38,21 @@ export function WorkView(props: {
    * fallback for a view with no tool server (an ephemeral's source, the fixtures); the TREE is
    * `FsTree`'s own business, one directory at a time.
    */
-  const [diff] = createResource(() => (tab() === "files" && props.scope ? props.scope : undefined), (scope) => live.fsChanges(scope));
+  const [diff] = createResource(
+    () => (tab() === "files" && props.scope ? { scope: props.scope, v: live.fsChanged() } : undefined),
+    (k) => live.fsChanges(k.scope),
+  );
+  /**
+   * The workspace's files follow its own watch while it is on show: the tree, the changes and the
+   * file texts are patched as they change instead of being read again on every visit
+   * (owner: "can't we use what VSCode is using to sync fs?").
+   */
+  createEffect(() => {
+    const scope = props.scope;
+    if (!scope) return;
+    live.watchFs(scope);
+    onCleanup(() => live.unwatchFs(scope));
+  });
   /**
    * Which folders are open, by PATH, held here rather than in the rows: the tree refetches — on the
    * live poll, on a tab switch — and a fold whose state lived in the fetched data snapped shut

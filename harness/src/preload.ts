@@ -95,6 +95,20 @@ const harness = {
       return () => void ipcRenderer.removeListener("pty:title", fn);
     },
   },
+  /**
+   * A workspace's files, as they change. One stream per workspace, owned by main; the renderer says
+   * which workspace it is showing and hears `{path, kind}` (or `{resync:true}` when the far end
+   * lost events and everything must be read again).
+   */
+  watch: {
+    open: (scope: string): Promise<void> => ipcRenderer.invoke("watch:open", scope),
+    close: (scope: string): void => ipcRenderer.send("watch:close", scope),
+    onEvent: (cb: (scope: string, ev: { path?: string; kind?: string; resync?: true }) => void): (() => void) => {
+      const fn = (_e: unknown, scope: string, ev: { path?: string; kind?: string; resync?: true }) => cb(scope, ev);
+      ipcRenderer.on("watch:event", fn);
+      return () => void ipcRenderer.removeListener("watch:event", fn);
+    },
+  },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
   /** Whether the SYSTEM asks for less motion — Chromium's own media query lies about this here. */
   reducedMotion: (): Promise<boolean> => ipcRenderer.invoke("app:reduced-motion"),

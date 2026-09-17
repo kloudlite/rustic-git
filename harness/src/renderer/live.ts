@@ -809,7 +809,106 @@ export type FsChanges = {
   changes: { path: string; index?: string; worktree?: string; renamed_from?: string }[];
 };
 
+/**
+ * What has been read, per workspace, and a counter each view reads so a patched cache redraws.
+ *
+ * The cache SURVIVES tab and session switches: opening the Files tab draws what was read before and
+ * asks for nothing (owner: "it's taking time to load everything every time"). What keeps it honest
+ * is the watch stream below, not a refetch.
+ */
 const fsCache = new Map<string, unknown>();
+const [fsVersion, setFsVersion] = createSignal(0);
+/** Read this in a view that draws files: it changes when the watch patched what is cached. */
+export const fsChanged = fsVersion;
+const bump = () => setFsVersion((n) => n + 1);
+
+/** The key a directory listing is cached under; `""` is the workspace root. */
+const treeKey = (scope: string, path?: string) => `tree?${new URLSearchParams({ scope, ...(path ? { path } : {}) }).toString()}`;
+const parentOf = (path: string) => (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+
+/**
+ * One watch event, applied to what is already held. A created or deleted path is a row inserted or
+ * removed under ITS parent — never a reason to re-read the tree, which is what made every visit
+ * cost a full walk. A modified file only loses its text, so the next open re-reads that one file.
+ *
+ * `kind` is notify's own word, lowercased by the tool server: `create`, `modify`, `remove`, `any`.
+ */
+export function applyWatch(scope: string, ev: { path?: string; kind?: string; resync?: true }): "patched" | "resync" | "ignored" {
+  if (ev.resync || !ev.path) return "resync";
+  const path = ev.path;
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  tags.delete(`${scope}:${path}`);
+  fsCache.delete(`diff?${new URLSearchParams({ scope, path }).toString()}`);
+  const key = treeKey(scope, parentOf(path) || undefined);
+  const held = fsCache.get(key) as { entries?: FsEntry[] } | undefined;
+  if (held) {
+    const entries = held.entries ?? [];
+    const at = entries.findIndex((e) => e.name === name);
+    if (ev.kind === "remove") {
+      if (at >= 0) fsCache.set(key, { ...held, entries: entries.filter((_, i) => i !== at) });
+    } else if (at < 0) {
+      // A path we have never seen: the kind alone cannot say whether it is a directory, so ask the
+      // one thing that knows. Until it answers it is a file, which is what it usually is.
+      fsCache.set(key, { ...held, entries: [...entries, { name, kind: "file" }] });
+      void fsStat(scope, path).then((st) => {
+        if (st?.kind !== "dir") return;
+        const now = fsCache.get(key) as { entries?: FsEntry[] } | undefined;
+        if (!now) return;
+        fsCache.set(key, { ...now, entries: (now.entries ?? []).map((e) => (e.name === name ? { ...e, kind: "dir" as const } : e)) });
+        bump();
+      });
+    }
+    // A directory that is gone takes what was read under it; folds are the panel's, so they stay.
+    if (ev.kind === "remove") for (const k of [...fsCache.keys()]) if (k.startsWith(treeKey(scope, path))) fsCache.delete(k);
+  }
+  // Git's own view of the workspace changed too, but only once per burst: a save writes many
+  // events and `/fs/changes` walks the whole status.
+  dirtyChanges(scope);
+  bump();
+  return "patched";
+}
+
+/** `/fs/changes` re-read once a burst has settled, never per event. */
+const CHANGES_SETTLE_MS = 500;
+const settling = new Map<string, ReturnType<typeof setTimeout>>();
+function dirtyChanges(scope: string) {
+  clearTimeout(settling.get(scope));
+  settling.set(
+    scope,
+    setTimeout(() => {
+      settling.delete(scope);
+      fsCache.delete(`changes?${new URLSearchParams({ scope }).toString()}`);
+      void fsChanges(scope).then(bump);
+    }, CHANGES_SETTLE_MS),
+  );
+}
+
+/** Everything this workspace held, dropped: what the stream missed cannot be patched in. */
+export function refetchFs(scope: string): void {
+  for (const k of [...fsCache.keys()]) if (k.includes(`scope=${encodeURIComponent(scope)}`)) fsCache.delete(k);
+  for (const k of [...tags.keys()]) if (k.startsWith(`${scope}:`)) tags.delete(k);
+  bump();
+}
+
+/**
+ * One watch per workspace on show. The stream itself — dialling, the backoff, the redial — is
+ * main's; here it is only what an event means to what is cached.
+ */
+const watching = new Set<string>();
+export function watchFs(scope: string): void {
+  if (watching.has(scope)) return;
+  watching.add(scope);
+  void window.harness.watch.open(scope).catch(() => watching.delete(scope));
+}
+export function unwatchFs(scope: string): void {
+  if (!watching.delete(scope)) return;
+  window.harness.watch.close(scope);
+}
+if (typeof window !== "undefined" && window.harness?.watch)
+  window.harness.watch.onEvent((scope, ev) => {
+    if (applyWatch(scope, ev) === "resync") refetchFs(scope);
+  });
+
 async function fsGet<T>(scope: string, what: string, params: Record<string, string> = {}): Promise<T | undefined> {
   const q = new URLSearchParams({ scope, ...params }).toString();
   const key = `${what}?${q}`;

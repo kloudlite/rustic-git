@@ -148,6 +148,15 @@ export class BenchClient {
   }
 
 
+  /**
+   * A workspace's file-system watch, owned by the caller exactly as `pty` is: the bench starts the
+   * watch in the pod when this opens and stops it when it closes.
+   */
+  watch(scope: string): WebSocket {
+    if (!this.up) throw new Error(OFFLINE);
+    return this.ws(`/watch?scope=${encodeURIComponent(scope)}`);
+  }
+
   start(): void {
     if (this.closed) return;
     const w = this.ws("/events");

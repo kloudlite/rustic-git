@@ -4,6 +4,7 @@ import type { Bench } from "./bench.ts";
 import { Idle } from "./idle.ts";
 import { listProviders, removeProvider, setProvider } from "./providers.ts";
 import { holdFrames, spliceShell } from "./pty.ts";
+import { spliceWatch } from "./watch.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -365,6 +366,12 @@ export function serve(
     }
     const rpc = p.length === 3 && p[0] === "sessions" && p[2] === "rpc" ? p[1] : undefined;
     let scope: string | undefined;
+    // The workspace's file-system watch, scope-resolved exactly like a shell.
+    let watch: string | undefined;
+    if (p.length === 1 && p[0] === "watch") {
+      watch = u.searchParams.get("scope") ?? "";
+      if (watch !== "bench" && !SCOPE_RE.test(watch)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+    }
     if (p.length === 1 && p[0] === "pty") {
       scope = u.searchParams.get("scope") ?? "";
       // A scope that is neither the bench nor a workspace id is refused before anything is opened or dialled.
@@ -372,13 +379,24 @@ export function serve(
       // No session name: a terminal is a live socket to the pod's shell and nothing more. tmux
       // sessions and their reattach went with the tool server's PTY (spec §2.3).
     }
-    if (!rpc && scope === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
+    if (!rpc && scope === undefined && watch === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
       // A connected device holds the bench up whichever socket it holds.
       idle.opened();
       w.on("close", () => idle.closed());
       // An oversized frame (maxPayload) or a torn socket errors before it closes; unheard, it would crash the bench.
       w.on("error", () => undefined);
+      if (watch !== undefined) {
+        const where = watch === "bench" ? Promise.resolve(LOCAL_TOOLS) : resolveTools(watch);
+        void where.then(
+          (a) => spliceWatch(w, a),
+          (e: Error) => {
+            w.send(JSON.stringify({ error: e.message }));
+            w.close();
+          },
+        );
+        return;
+      }
       if (scope !== undefined) {
         // 80x24 is the fallback, never the shell a client that spoke gets.
         const held = holdFrames(w, 2_000);

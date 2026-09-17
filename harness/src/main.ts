@@ -432,6 +432,76 @@ ipcMain.on("pty:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
   // `1` then the size, as ttyd names it: columns and rows, not cols and rows.
   if (w) w.send(`1${JSON.stringify({ columns: cols, rows })}`);
 });
+/**
+ * One file-system watch per workspace on show, owned here the way a shell's socket is. The renderer
+ * hears events and patches what it already holds, so opening the Files tab never re-reads a tree it
+ * read a minute ago (owner, 2026-09-18).
+ *
+ * A dropped stream is not a lost workspace: it is redialled on the same backoff the bench client
+ * uses, and the renderer is told to read everything once when it comes back, since events during
+ * the gap are simply gone.
+ */
+const watches = new Map<string, { w?: WebSocket; timer?: NodeJS.Timeout; backoff: number; closed?: boolean }>();
+
+function closeWatches() {
+  for (const [scope] of watches) stopWatch(scope);
+}
+
+function stopWatch(scope: string) {
+  const held = watches.get(scope);
+  if (!held) return;
+  held.closed = true;
+  clearTimeout(held.timer);
+  held.w?.removeAllListeners();
+  held.w?.close();
+  watches.delete(scope);
+}
+
+ipcMain.handle("watch:open", (e, rawScope: unknown) => {
+  const { scope } = checkPty("w", rawScope);
+  if (watches.has(scope)) return;
+  const held: { w?: WebSocket; timer?: NodeJS.Timeout; backoff: number; closed?: boolean } = { backoff: 1_000 };
+  watches.set(scope, held);
+  const send = (ev: Record<string, unknown>) => {
+    if (!e.sender.isDestroyed()) e.sender.send("watch:event", scope, ev);
+  };
+  const dial = (resync: boolean) => {
+    if (held.closed) return;
+    let w: WebSocket;
+    try {
+      w = needBench().watch(scope);
+    } catch {
+      held.timer = setTimeout(() => dial(true), held.backoff);
+      held.backoff = Math.min(held.backoff * 2, 15_000);
+      return;
+    }
+    held.w = w;
+    w.on("open", () => {
+      held.backoff = 1_000;
+      // Whatever happened while there was no stream was never delivered: one full read covers it.
+      if (resync) send({ resync: true });
+    });
+    w.on("message", (d: Buffer) => {
+      try {
+        send(JSON.parse(d.toString()) as Record<string, unknown>);
+      } catch {
+        /* a frame this app cannot read is not a reason to drop the watch */
+      }
+    });
+    w.on("error", () => undefined);
+    w.on("close", () => {
+      if (held.closed) return;
+      held.timer = setTimeout(() => dial(true), held.backoff);
+      held.backoff = Math.min(held.backoff * 2, 15_000);
+    });
+  };
+  dial(false);
+});
+
+ipcMain.on("watch:close", (_e, scope: unknown) => {
+  if (typeof scope === "string") stopWatch(scope);
+});
+
 ipcMain.on("pty:close", (_e, id: unknown) => {
   if (typeof id !== "string") return;
   ptys.get(id)?.close();
@@ -463,6 +533,7 @@ let closeTunnel: (() => void) | undefined;
 let stopToolToken: (() => void) | undefined;
 function disconnect() {
   closePtys();
+  closeWatches();
   stopToolToken?.();
   stopToolToken = undefined;
   bench?.close();
