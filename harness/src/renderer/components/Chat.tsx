@@ -88,6 +88,11 @@ export function Chat(props: {
   // `/` completion: the commands whose name starts with what is typed, shown
   // above the composer while the caret is still in the first word.
   const [typed, setTyped] = createSignal("");
+  // One clock for the footer bar, ticking only while something runs.
+  const [now, setNow] = createSignal(Date.now());
+  const clock = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(clock));
+  const elapsed = () => Math.max(0, Math.round((now() - (L().turn()?.since ?? now())) / 1000));
   const [pick, setPick] = createSignal(0);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
@@ -330,13 +335,22 @@ export function Chat(props: {
             </Show>
             {/* Where the thread begins, so the space above the first message reads
                 as the top of something rather than as nothing. */}
-            <div class="flex items-center gap-3 pb-1 font-ui text-xs text-subtle" classList={{ hidden: blocks().length === 0 }}>
-              <span class="h-px flex-1 bg-line-subtle" />
-              <span>
-                {thread()?.kind === "machine" ? "Bench Thread" : thread()?.kind === "ephemeral" ? "watching" : thread()?.kind === "btw" ? "forked from the bench · read-only" : thread()?.name}
-                <Show when={thread()?.messages[0]}>{(m) => <> · started {m().at}</>}</Show>
+            {/* `# session` left, what it has spent right: the session view's own header. */}
+            <div class="flex items-baseline gap-3 pb-2 font-mono text-[13px] text-subtle" classList={{ hidden: blocks().length === 0 }}>
+              <span class="min-w-0 truncate text-fg-strong">
+                <span class="text-subtle"># </span>
+                {thread()?.kind === "machine" ? "bench" : thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "btw" ? "fork · read-only" : thread()?.name}
               </span>
-              <span class="h-px flex-1 bg-line-subtle" />
+              <span class="flex-1" />
+              <Show when={L().spend().tokens}>
+                {(n) => (
+                  <span class="shrink-0 tabular-nums">
+                    {n() > 1000 ? `${Math.round(n() / 100) / 10}k` : n()} tokens
+                    <Show when={L().spend().context}>{(w) => <> · {Math.min(100, Math.round((n() / w()) * 100))}%</>}</Show>
+                    <Show when={L().spend().cost}>{(c) => <> · ${c().toFixed(2)}</>}</Show>
+                  </span>
+                )}
+              </Show>
             </div>
             <For each={sittings()}>
               {(sit, si) => (
@@ -346,22 +360,20 @@ export function Chat(props: {
               {(b) => (
                 <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} />}>
                 <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
-                  {/* A prompt is a command and reads like one; an answer is prose
-                      and reads in the UI face, so the two turns are told apart by
-                      their type rather than by a glyph alone. */}
+                  {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
+                      answer is plain text beside it; the two turns are told apart by shape. */}
                   <Show
                     when={b.role === "user"}
+                    /* No rail and no card: an answer is text, and the pane is monospace. */
                     fallback={
                       <div class="flex items-start">
-                        {/* The dot keeps the mono rail every other row hangs off; the answer beside it is prose. */}
-                        <span class="w-5 shrink-0 font-mono leading-[21px] text-fg-strong">⏺</span>
                         <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
                       </div>
                     }
                   >
                     <div class="flex flex-col leading-[18px]">
-                      <div class="-mx-3 flex items-start rounded-[2px] border border-request-line bg-request px-3 py-2">
-                        <span class="w-5 shrink-0 font-bold text-accent">&gt;</span>
+                      <div class="-mx-3 flex items-start border-l-2 border-request-line bg-request px-3 py-2">
+                        <span class="w-4 shrink-0 font-bold text-accent">&gt;</span>
                         <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
                           {/* An answer a workspace sent back arrives as a prompt; the workspace is a label, not the message. */}
                           <Show when={fromWorkspace((b as { text: string }).text)}>
@@ -451,14 +463,13 @@ export function Chat(props: {
               </For>
             </div>
           </Show>
-          {/* One status line while a turn runs: what it is doing, for how long, what it has spent.
-              A question card blocks it — nothing is happening until the person answers. */}
-          <Show when={L().busy() && thread()?.pi && !L().messages.some((m) => m.role === "question" && !(m as { answer?: string }).answer)}>
-            <StatusLine turn={L().turn()} />
-          </Show>
-          <div class="flex flex-col rounded-[2px] border border-input-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
-            <div class="flex items-start px-3 pt-2 pb-1.5">
-              <span class="w-5 shrink-0 leading-5 text-accent">❯</span>
+
+
+          {/* The composer is a block with the same accent rail a person's message has: what you
+              type and what you typed read as the same thing. */}
+          <div class="flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
+            <div class="flex items-start px-3 pt-2 pb-1.5 font-mono text-[13px]">
+              <span class="w-4 shrink-0 leading-5 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
               <textarea
@@ -539,15 +550,22 @@ export function Chat(props: {
                 </For>
               </div>
             </Show>
-            <div class="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-line-subtle px-3 py-1.5 font-ui text-xs text-subtle">
-              <Show when={L().busy()} fallback={<For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>}>
-                <Hint keys="↩">queue after this</Hint>
-                <Hint keys="⌘↩">steer now</Hint>
-                <Hint keys="⇧↩">newline</Hint>
-              </Show>
-              <span class="flex-1" />
-              <span class="min-w-0 truncate" title={L().status()}>{L().busy() ? "working…" : L().status()}</span>
+            {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
+            <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono text-xs">
+              <span class="text-accent">{thread()?.kind === "btw" ? "fork" : thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "workspace" ? "workspace" : "bench"}</span>
+              <span class="min-w-0 truncate text-subtle" title={L().status()}>{L().status()}</span>
             </div>
+          </div>
+          {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}
+          <div class="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-xs text-subtle">
+            <Show when={L().busy()} fallback={<span class="text-subtle">ready</span>}>
+              <span class="animate-pulse text-accent">⣾</span>
+              <span class="text-muted">{L().turn()?.verb ?? "Thinking"}…</span>
+              <span class="tabular-nums">{elapsed()}s</span>
+              <span>esc interrupt</span>
+            </Show>
+            <span class="flex-1" />
+            <For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>
           </div>
         </div>
         {props.shell}
@@ -757,23 +775,6 @@ function Question(props: { q: QuestionRow; session: string }) {
           <span class="text-xs text-subtle">nothing changes until you answer</span>
         </div>
       </Show>
-    </div>
-  );
-}
-
-/** The verb, the clock and the tokens: a person watching an agent wants to know it is alive and on what. */
-function StatusLine(props: { turn?: { verb: string; since: number; tokens: number } }) {
-  const [now, setNow] = createSignal(Date.now());
-  const t = setInterval(() => setNow(Date.now()), 1000);
-  onCleanup(() => clearInterval(t));
-  const secs = () => Math.max(0, Math.round((now() - (props.turn?.since ?? now())) / 1000));
-  return (
-    <div class="flex items-center gap-2 px-3 pb-2 font-mono text-sm text-muted">
-      <span class="animate-pulse text-accent">✻</span>
-      <span>{props.turn?.verb ?? "Thinking"}…</span>
-      <span class="text-subtle tabular-nums">{secs()}s</span>
-      <Show when={props.turn?.tokens}>{(n) => <span class="text-subtle tabular-nums">· {n() > 1000 ? `${Math.round(n() / 100) / 10}k` : n()} tokens</span>}</Show>
-      <span class="text-subtle">(esc to interrupt · ^B to background a command)</span>
     </div>
   );
 }

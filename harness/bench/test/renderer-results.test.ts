@@ -4,6 +4,7 @@ import { pickRenderer, processes, capabilities } from "../../src/renderer/compon
 import { procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
+import { render as renderLine, toolLine } from "../../src/renderer/components/results/toolline.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -101,4 +102,22 @@ test("grep rows split into path, line and match; terminal output loses its escap
   // A dev server writes colour; a <pre> renders the escapes as mojibake.
   const coloured = `${String.fromCharCode(27)}[32mready${String.fromCharCode(27)}[0m in 300ms\n[exit 0]`;
   assert.deepEqual(plainBlock(coloured), { lines: [{ text: "ready in 300ms" }], footer: "exit 0" });
+});
+
+test("a tool call is one muted line: glyph, verb, argument, what came back", () => {
+  const line = (tool: string, args: Record<string, unknown>, out?: string, state?: { pending?: boolean; secs?: number }) => renderLine(toolLine(tool, args, out, state));
+  // The spec's own examples.
+  assert.equal(line("grep", { pattern: "homepage|home.*button" }, Array(18).fill("a.ts:1: x").join("\n")), '∗ Grep "homepage|home.*button" (18 matches)');
+  assert.equal(line("read", { path: "/home/kl/workspaces/api/path/to/file.tsx" }, "   1\tx"), "→ Read path/to/file.tsx (1 line)");
+  assert.equal(line("bash", { command: "npm test" }, "ok\n[exit 0]"), "$ npm test (exit 0)");
+  assert.equal(line("ask", { to: "svelte-frontend", task: "run the tests" }), "⇢ ask svelte-frontend: run the tests (queued)");
+  assert.equal(line("ask", { to: "agent", name: "audit" }, undefined, { pending: true, secs: 12 }), "◐ agent audit (running 12s)");
+  // A failure keeps its exit code, and a running command says so rather than lying about one.
+  assert.equal(line("bash", { command: "npm test" }, "boom\n[exit 1]"), "$ npm test (exit 1)");
+  assert.equal(line("bash", { command: "npm run dev" }, undefined, { pending: true }), "$ npm run dev (running)");
+  // The always-on tools read as themselves; a platform tool falls back to its own name and subject.
+  assert.equal(line("plan", { set: [1, 2, 3] }), "▤ Plan 3 steps");
+  assert.equal(line("plan", { done: "clone the repo" }), "▤ Plan done: clone the repo");
+  assert.equal(line("kl_workspace_create", { name: "svelte-backend" }), "~ workspace create svelte-backend");
+  assert.equal(line("edit", { path: "src/a.ts", edits: [1, 2] }), "✎ Edit src/a.ts (2 edits)");
 });

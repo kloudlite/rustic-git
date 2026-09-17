@@ -4,6 +4,7 @@ import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
 import { ResultCard, pickRenderer } from "./results";
 import { grepBlock, plainBlock, readBlock, type CodeBlock } from "./results/code";
+import { toolLine } from "./results/toolline";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -31,24 +32,23 @@ export function ToolCall(props: { a: Action }) {
   onCleanup(() => clearInterval(timer));
   const fmt = (ms: number) => (ms < 1000 ? `${Math.max(0, Math.round(ms))}ms` : `${(ms / 1000).toFixed(1)}s`);
   const took = () => (a().pending ? fmt(tick() - (a().ts ?? tick())) : a().ms !== undefined ? fmt(a().ms!) : "");
-  const head = createMemo(() => describe(a()));
+  const line = createMemo(() => toolLine(a().tool, a().args ?? {}, a().output, { pending: a().pending, ok: a().ok !== false, secs: a().pending ? Math.round((tick() - (a().ts ?? tick())) / 1000) : undefined }));
 
   return (
-    <div class="flex flex-col font-mono text-sm leading-[18px]">
-      <button class="group flex h-6 w-full items-center gap-2 text-left" onClick={() => setOpen((v) => !v)}>
-        <span class="flex w-5 shrink-0 items-center justify-center">
-          <Show when={!a().pending} fallback={<Icon name="spinner" size={14} class="animate-spin text-accent" />}>
-            <span class={`size-1.5 rounded-full ${failed() ? "bg-danger" : "bg-success"}`} />
-          </Show>
+    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]">
+      {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
+      <button class="group flex w-full items-baseline gap-2 py-px text-left leading-[19.5px]" onClick={() => setOpen((v) => !v)}>
+        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-subtle"}`} classList={{ "animate-pulse": a().pending }}>{line().glyph}</span>
+        <span class="min-w-0 flex-1 truncate text-muted">
+          <Show when={line().verb}><span class="text-fg">{line().verb} </span></Show>
+          {line().arg}
+          <Show when={line().count}>{(c) => <span class="text-subtle"> ({c()})</span>}</Show>
         </span>
-        <span class="shrink-0 font-bold text-fg-strong">{head().verb}</span>
-        <span class="min-w-0 flex-1 truncate text-fg">{head().subject}</span>
-        <Show when={head().meta}><span class="shrink-0 text-xs text-subtle">{head().meta}</span></Show>
-        <span class="shrink-0 text-xs tabular-nums" classList={{ "text-accent": a().pending, "text-subtle": !a().pending }}>{took()}</span>
-        <Icon name={open() ? "chevronDown" : "chevronRight"} size={16} class="shrink-0 text-subtle opacity-60 group-hover:opacity-100" />
+        <span class="shrink-0 text-xs tabular-nums text-subtle">{took()}</span>
+        <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
       <Show when={open()}>
-        <div class="ml-5 border-l border-line pl-3">
+        <div class="ml-4 border-l border-line pl-3">
           <Show when={failed()} fallback={<Body a={a()} />}>
             <Fail text={a().output ?? ""} />
           </Show>
@@ -58,24 +58,6 @@ export function ToolCall(props: { a: Action }) {
   );
 }
 
-/** The head line: verb, subject and a fact, per tool. */
-function describe(a: Action): { verb: string; subject: string; meta?: string } {
-  const g = a.args ?? {};
-  const s = (k: string) => (typeof g[k] === "string" ? (g[k] as string) : "");
-  switch (a.tool) {
-    case "bash": return { verb: "$", subject: s("command") };
-    case "read": return { verb: "read", subject: s("path"), meta: g.offset ? `from line ${g.offset}` : lines(a.output) };
-    case "write": return { verb: "write", subject: s("path"), meta: lines(s("content")) };
-    case "edit": return { verb: "edit", subject: s("path"), meta: `${(g.edits as unknown[] | undefined)?.length ?? 1} ${(g.edits as unknown[] | undefined)?.length === 1 ? "change" : "changes"}` };
-    case "grep": return { verb: "grep", subject: `${s("pattern")}${s("path") ? ` in ${s("path")}` : ""}`, meta: count(a.output, "match") };
-    case "find": return { verb: "find", subject: `${s("pattern")}${s("path") ? ` in ${s("path")}` : ""}`, meta: count(a.output, "file") };
-    case "ls": return { verb: "ls", subject: s("path") || ".", meta: count(a.output, "entry") };
-    case "process": return { verb: "process", subject: `${s("action")} ${s("name") || s("command") || s("id")}`.trim() };
-    default:
-      if (a.tool?.startsWith("kl_")) return { verb: "kloudlite", subject: `${a.tool.slice(3).replace(/_/g, " ")}${short(g)}` };
-      return { verb: a.target ?? a.tool ?? "", subject: a.text };
-  }
-}
 const lines = (t?: string) => (t ? `${t.split("\n").length} lines` : "");
 const count = (t: string | undefined, noun: string) => {
   if (!t || t.startsWith("No ")) return "no " + noun + "s";

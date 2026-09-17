@@ -20,42 +20,43 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  /* VS Code Dark Modern: near-neutral greys, one blue, semantic colours only
-     where they mean something. Every name is a role; the hues are theirs. */
-  --bg: #1f1f1f;          /* editor */
-  --raised: #181818;      /* side bar, panels */
-  --input: #313131;       /* input, dropdown, checkbox */
-  --input-line: #3c3c3c;
-  --tab-inactive: #2b2b2b;
-  --activity-fg: #d7d7d7;
-  --activity-inactive: #868686;
-  --badge: #616161;
-  --badge-fg: #f8f8f8;
-  --overlay: #222222;     /* quick input, menus (#1f1f1f), editor widgets (#202020) */
-  --chrome: #181818;      /* title bar, activity bar, status bar */
+  /* Zed's default One Dark (owner, 2026-09-17): the editor's own palette, so a bench beside
+     an editor does not read as a different product. Every name here is a role; the hues are
+     One Dark's, and the semantic four (green, red, yellow, purple) are its syntax colours. */
+  --bg: #282c33;          /* editor */
+  --raised: #2f343e;      /* side bar, panels */
+  --input: #2f343e;       /* input, dropdown, checkbox */
+  --input-line: #464b57;
+  --tab-inactive: #2f343e;
+  --activity-fg: #dce0e5;
+  --activity-inactive: #838994;
+  --badge: #464b57;
+  --badge-fg: #dce0e5;
+  --overlay: #2f343e;     /* quick input, menus (#1f1f1f), editor widgets (#202020) */
+  --chrome: #2f343e;      /* title bar, activity bar, status bar */
 
-  --line: #2b2b2b;
-  --line-subtle: #2b2b2b;
-  --widget-line: #3c3c3c;     /* pickerGroup.border / dropdown.border: the line an overlay is cut by */
-  --focus: #0078d4;
+  --line: #464b57;
+  --line-subtle: #353b45;
+  --widget-line: #464b57;     /* pickerGroup.border / dropdown.border: the line an overlay is cut by */
+  --focus: #74ade8;
 
-  --hover: #2a2d2e;
-  --active: #37373d;
-  --selected: #04395e;
-  --selected-fg: #ffffff;
-  --focus-outline: #0078d4;
+  --hover: #2f343e;
+  --active: #353b45;
+  --selected: #3b4252;
+  --selected-fg: #dce0e5;
+  --focus-outline: #74ade8;
 
-  --fg: #cccccc;
+  --fg: #dce0e5;
   --fg-strong: #ffffff;   /* settings.headerForeground: what is emphasised */
-  --muted: #9d9d9d;
-  --subtle: #8c8c8c;
-  --disabled: #6f6f6f;
+  --muted: #a9b1bc;
+  --subtle: #838994;
+  --disabled: #6b7280;
   --request: rgb(255 255 255 / 4%);        /* chat.requestBackground */
-  --request-line: rgb(255 255 255 / 10%);  /* chat.requestBorder */
-  --preformat: #3c3c3c;   /* textPreformat.background */
-  --preformat-fg: #d0d0d0;
-  --codeblock: #2b2b2b;   /* textCodeBlock.background */
-  --quote-line: #616161;  /* textBlockQuote.border */
+  --request-line: #74ade8;  /* chat.requestBorder */
+  --preformat: #353b45;   /* textPreformat.background */
+  --preformat-fg: #dce0e5;
+  --codeblock: #2f343e;   /* textCodeBlock.background */
+  --quote-line: #464b57;  /* textBlockQuote.border */
   --btn2: transparent;    /* button.secondaryBackground (Dark Modern) */
   --btn2-line: rgb(255 255 255 / 10%);
   --btn2-hover: #2b2b2b;
@@ -66,33 +67,33 @@
   --kbd-bottom: rgb(68 68 68 / 60%);
   --line-number: #6e7681;
   --line-number-active: #cccccc;
-  --guide: #585858;       /* tree.indentGuidesStroke */
-  --tile: #2b2b2b;        /* welcomePage.tileBackground */
+  --guide: #464b57;       /* tree.indentGuidesStroke */
+  --tile: #2f343e;        /* welcomePage.tileBackground */
 
-  --accent: #4daafc;
+  --accent: #74ade8;
   --on-accent: #ffffff;
-  --success: #89d185;
-  --warning: #cca700;
-  --danger: #f14c4c;
+  --success: #a1c181;
+  --warning: #dec184;
+  --danger: #d07277;
 
-  --accent-wash: rgb(0 120 212 / 18%);
-  --success-wash: rgb(155 185 85 / 20%);   /* diffEditor.insertedLineBackground */
-  --warning-wash: rgb(204 167 0 / 14%);
-  --danger-wash: rgb(255 0 0 / 20%);       /* diffEditor.removedLineBackground */
+  --accent-wash: rgb(116 173 232 / 18%);
+  --success-wash: rgb(161 193 129 / 20%);   /* diffEditor.insertedLineBackground */
+  --warning-wash: rgb(222 193 132 / 14%);
+  --danger-wash: rgb(208 114 119 / 20%);       /* diffEditor.removedLineBackground */
 
-  --modified: #e2c08d;
-  --created: #73c991;
-  --deleted: #f14c4c;
+  --modified: #dec184;
+  --created: #a1c181;
+  --deleted: #d07277;
 
-  --syn-keyword: #569cd6;
-  --syn-string: #ce9178;
-  --syn-function: #dcdcaa;
-  --syn-number: #b5cea8;
-  --syn-comment: #6a9955;
-  --syn-type: #4ec9b0;
-  --syn-constant: #4fc1ff;
-  --syn-property: #9cdcfe;
-  --syn-punctuation: #d4d4d4;
+  --syn-keyword: #b477cf;
+  --syn-string: #a1c181;
+  --syn-function: #73ade9;
+  --syn-number: #bf956a;
+  --syn-comment: #5d636f;
+  --syn-type: #6eb4bf;
+  --syn-constant: #dec184;
+  --syn-property: #dce0e5;
+  --syn-punctuation: #dce0e5;
 
   --thumb: rgb(121 121 121 / 40%);
   --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 36%);   /* widget.shadow */
@@ -101,41 +102,41 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  /* VS Code Light Modern. */
-  --bg: #ffffff;
-  --raised: #f8f8f8;
+  /* One Light, the same roles. */
+  --bg: #fafafa;
+  --raised: #f0f0f0;
   --input: #ffffff;
-  --input-line: #cecece;
-  --tab-inactive: #e5e5e5;
-  --activity-fg: #1f1f1f;
-  --activity-inactive: #616161;
-  --badge: #cccccc;
-  --badge-fg: #3b3b3b;
-  --overlay: #f8f8f8;
-  --chrome: #f8f8f8;
+  --input-line: #d3d3d3;
+  --tab-inactive: #ebebec;
+  --activity-fg: #383a41;
+  --activity-inactive: #7f8188;
+  --badge: #d3d3d3;
+  --badge-fg: #383a41;
+  --overlay: #ffffff;
+  --chrome: #f0f0f0;
 
-  --line: #e5e5e5;
-  --line-subtle: #e5e5e5;
-  --widget-line: #cecece;
-  --focus: #005fb8;
+  --line: #d3d3d3;
+  --line-subtle: #e5e5e6;
+  --widget-line: #d3d3d3;
+  --focus: #5c79e2;
 
-  --hover: #f2f2f2;
-  --active: #e8e8e8;
-  --selected: #e8e8e8;
-  --selected-fg: #000000;
-  --focus-outline: #005fb8;
+  --hover: #ebebec;
+  --active: #e2e2e3;
+  --selected: #dbe3f8;
+  --selected-fg: #383a41;
+  --focus-outline: #5c79e2;
 
-  --fg: #3b3b3b;
-  --fg-strong: #1f1f1f;
-  --muted: #616161;
-  --subtle: #767676;
-  --disabled: #a0a0a0;
+  --fg: #383a41;
+  --fg-strong: #1c1e22;
+  --muted: #5c5f6a;
+  --subtle: #7f8188;
+  --disabled: #a1a1a6;
   --request: rgb(0 0 0 / 3%);
-  --request-line: rgb(0 0 0 / 10%);
-  --preformat: rgb(0 0 0 / 12%);
-  --preformat-fg: #3b3b3b;
-  --codeblock: #f8f8f8;
-  --quote-line: #e5e5e5;
+  --request-line: #5c79e2;
+  --preformat: #e5e5e6;
+  --preformat-fg: #383a41;
+  --codeblock: #f0f0f0;
+  --quote-line: #d3d3d3;
   --btn2: #e5e5e5;
   --btn2-line: rgb(0 0 0 / 10%);
   --btn2-hover: #cccccc;
@@ -146,33 +147,33 @@
   --kbd-bottom: rgb(187 187 187 / 40%);
   --line-number: #6e7681;
   --line-number-active: #171184;
-  --guide: #a9a9a9;
-  --tile: #f3f3f3;
+  --guide: #d3d3d3;
+  --tile: #f0f0f0;
 
-  --accent: #005fb8;
+  --accent: #5c79e2;
   --on-accent: #ffffff;
-  --success: #388a34;
-  --warning: #bf8803;
-  --danger: #cd3131;
+  --success: #669f59;
+  --warning: #dec184;
+  --danger: #d36151;
 
-  --accent-wash: rgb(0 95 184 / 10%);
-  --success-wash: rgb(156 204 44 / 25%);
-  --warning-wash: rgb(191 136 3 / 12%);
-  --danger-wash: rgb(255 0 0 / 12%);
+  --accent-wash: rgb(92 121 226 / 16%);
+  --success-wash: rgb(102 159 89 / 18%);
+  --warning-wash: rgb(222 193 132 / 18%);
+  --danger-wash: rgb(211 97 81 / 18%);
 
-  --modified: #895503;
-  --created: #587c0c;
-  --deleted: #ad0707;
+  --modified: #dec184;
+  --created: #669f59;
+  --deleted: #d36151;
 
-  --syn-keyword: #0000ff;
-  --syn-string: #a31515;
-  --syn-function: #795e26;
-  --syn-number: #098658;
-  --syn-comment: #008000;
-  --syn-type: #267f99;
-  --syn-constant: #0070c1;
-  --syn-property: #001080;
-  --syn-punctuation: #3b3b3b;
+  --syn-keyword: #a449ab;
+  --syn-string: #669f59;
+  --syn-function: #5c79e2;
+  --syn-number: #ad6e25;
+  --syn-comment: #a1a1a6;
+  --syn-type: #3a82b7;
+  --syn-constant: #ad6e25;
+  --syn-property: #383a41;
+  --syn-punctuation: #383a41;
 
   --thumb: rgb(100 100 100 / 40%);
   --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 16%);
@@ -324,8 +325,8 @@
      short enough never to be waited on. Transform and opacity only — anything
      that animates a size or a position property lays the page out per frame. */
   --motion: 140ms;
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
-  --font-mono: Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", "Courier New", "Lilex", monospace;
+  --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
+  --font-mono: "Lilex", Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", monospace;
   /* No 10px anywhere: VS Code's smallest UI text is 11px (badges, status bar). */
   --text-2xs: 11px;
   --text-2xs--line-height: 16px;
@@ -415,14 +416,12 @@
 
 }
 
-/* Prose in an answer reads as PROSE: the UI face, at the size everything else in
-   the product is set in (owner, 2026-09-17 — a screenshot of monospace paragraphs
-   with raw-looking chips). What is code stays mono, in a chip or a block, so the
-   two are told apart by their face rather than by both being the same one. The
-   rest keeps its air: real space between blocks, real cells, a real heading step. */
-.prose { font-family: var(--font-ui); font-size: var(--text-base); line-height: 21px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
+/* Everything in the centre pane is monospace (owner, 2026-09-17 17:10, superseding the UI-face
+   prose above it): the pane is a session view in the shape of opencode's, and prose set in the UI
+   face beside mono tool lines reads as two products. 13px/1.5 is Zed's own. */
+.prose { font-family: var(--font-mono); font-size: 13px; line-height: 19.5px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
 .prose > * + * { margin-top: 8px; }
-.prose p, .prose li { line-height: 21px; }
+.prose p, .prose li { line-height: 19.5px; }
 .prose ul, .prose ol { padding-left: 20px; }
 .prose li + li { margin-top: 2px; }
 .prose li::marker { color: var(--subtle); }
@@ -432,7 +431,7 @@
 .prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; line-height: 20px; color: var(--fg-strong); }
 .prose h1 { font-size: 14px; margin-top: 14px; }
 .prose h2 { font-size: 13px; margin-top: 12px; }
-.prose h3, .prose h4 { font-size: var(--text-base); margin-top: 12px; letter-spacing: 0.02em; color: var(--muted); text-transform: uppercase; }
+.prose h3, .prose h4 { font-size: 13px; margin-top: 12px; letter-spacing: 0.02em; color: var(--muted); text-transform: uppercase; }
 .prose > h1:first-child, .prose > h2:first-child, .prose > h3:first-child { margin-top: 0; }
 .prose hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
 .prose strong { font-weight: 700; color: var(--fg-strong); }

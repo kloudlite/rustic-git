@@ -271,6 +271,8 @@ function makeThread(id: string) {
    * alive and on what — "Working…" for four minutes says neither.
    */
   const [turn, setTurn] = createSignal<{ verb: string; since: number; tokens: number } | undefined>();
+  /** What this session has spent so far: pi reports it cumulatively, and the header shows it. */
+  const [spend, setSpend] = createSignal<{ tokens: number; cost: number; context?: number }>({ tokens: 0, cost: 0 });
   const doing = (verb: string) => setTurn((t) => ({ verb, since: t?.since ?? Date.now(), tokens: t?.tokens ?? 0 }));
 
   /** The assistant message being streamed, by index into `messages`. */
@@ -322,8 +324,11 @@ function makeThread(id: string) {
       }
       case "message_update": {
         // pi reports cumulative usage as it streams; a provider that reports none leaves it at 0.
-        const used = (ev.usage as { totalTokens?: number } | undefined)?.totalTokens;
-        if (typeof used === "number" && used) setTurn((t) => (t ? { ...t, tokens: used } : t));
+        const u = ev.usage as { totalTokens?: number; cost?: { total?: number }; contextWindow?: number } | undefined;
+        if (typeof u?.totalTokens === "number" && u.totalTokens) {
+          setTurn((t) => (t ? { ...t, tokens: u.totalTokens! } : t));
+          setSpend((p) => ({ tokens: u.totalTokens!, cost: u.cost?.total ?? p.cost, context: u.contextWindow ?? p.context }));
+        }
         const d = ev.assistantMessageEvent as { type: string; delta?: string } | undefined;
         if (d?.type === "text_delta" && d.delta) doing("Writing");
         if (d?.type !== "text_delta" || !d.delta) return;
@@ -387,7 +392,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, turn, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
+  return { id, messages, busy, turn, spend, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
