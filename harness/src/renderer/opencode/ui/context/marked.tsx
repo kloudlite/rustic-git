@@ -1,5 +1,7 @@
 import { getSharedHighlighter } from "@pierre/diffs"
-import { bundledLanguages, type BundledLanguage } from "shiki"
+// harness: our own short grammar list in place of every grammar shiki ships (see languages.ts).
+import { LANGUAGES as bundledLanguages } from "../../languages"
+import { type BundledLanguage } from "shiki"
 import { createSimpleContext } from "./helper"
 import { createMarkdownParser } from "./marked-parser"
 import { registerOpenCodeTheme } from "./marked-theme-register"

@@ -158,6 +158,33 @@ We already have `solid-js` (1.9, theirs is 1.9.10 **patched** — see risks) and
 5. `@pierre/diffs` and `shiki` pull a WASM highlighter into an Electron renderer that currently
    ships `highlight.js`; bundle size and cold start both change.
 
+## `// harness:` edits, in full
+
+| file | edit | why |
+|---|---|---|
+| `shims/client-promise.ts` | new file | `@opencode-ai/client` is a tarball in their repo; one type is used |
+| `session-ui/components/markdown.worker.ts` | `bundledLanguages` → our `LANGUAGES` | shiki's full map code-split ~600 grammars (22 MB) into the build |
+| `ui/context/marked.tsx` | same swap | same reason |
+| `session-ui/components/message-file.ts` | `bundledLanguagesInfo` → our `LANGUAGE_NAMES` | the metadata table pulled the whole bundle in for a chip label |
+| `ui/v2/components/toast-v2.tsx` | deleted | needs `solid-sonner`, imported by nothing in the closure |
+| `../../tsconfig.renderer.json` | `lib: ES2023, DOM.Iterable` | they use `findLast`, `toReversed`, NodeList iteration |
+| `../../vite.config.ts` | `worker: { format: "es" }` | rollup will not code-split an IIFE worker |
+
+The language list lives in `languages.ts`: ts/tsx/js/jsx/json/yaml/toml/rust/go/python/bash/sh/
+dockerfile/sql/html/css/md/diff and their aliases. Anything else highlights as plain text, which is
+what an unknown language already did. Build after the restriction: **13 MB** (was 22 MB); what is
+left comes from `@pierre/diffs`' own worker bundle, inside the dependency, not from our imports.
+
+## TODO — behaviour the port has no home for yet
+
+| ours | where it goes now | still to do |
+|---|---|---|
+| proposals (`role: "question"`) | their `question` tool part for the ANSWERED record; a live one is a permission dock beside the composer | wire the dock's allow/deny to `POST /proposals/:id` |
+| asks and agents (`ask`) | a `task` part, `metadata.agent` = the agent's name or the workspace it was sent to | their task card links to a child session; ours has no child session id |
+| `kl_*` platform answers | a synthetic `text` part with the answer as a fenced `json` block | our `WorkspaceCard`/`QuotaCard`/`EnvironmentCard` have no part type; either register a harness part or keep the block |
+| process rows, memory, plan panel | the inspector, which stays ours | nothing — deliberate |
+| exchanges (asks in flight) | the queue dock above the composer, ours | fold into their followup dock when the composer lands |
+
 ## Order of work (one commit each)
 
 1. **This file.** — "Plan the opencode session-ui port"

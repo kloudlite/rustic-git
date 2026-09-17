@@ -1,4 +1,6 @@
-import { bundledLanguagesInfo } from "shiki"
+// harness: our own name table, so this file does not pull shiki's full grammar bundle in for a
+// label (see ../../languages.ts).
+import { LANGUAGE_NAMES } from "../../languages"
 import { getFilename } from "@opencode-ai/core/util/path"
 import type { FilePart } from "@opencode-ai/sdk/v2"
 
@@ -13,13 +15,6 @@ export function inline(part: FilePart) {
 export function kind(part: FilePart) {
   return part.mime.startsWith("image/") ? "image" : "file"
 }
-
-// language metadata only; grammars stay behind shiki's lazy imports
-const LANGUAGE_NAMES = new Map<string, string>(
-  bundledLanguagesInfo.flatMap((info) =>
-    [info.id, ...(info.aliases ?? [])].map((alias) => [alias, info.name] as [string, string]),
-  ),
-)
 
 // attachments carry text/plain for all text files, so the label comes from the extension;
 // filename may be an absolute path, so extract the basename before looking for one

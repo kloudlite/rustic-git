@@ -3,8 +3,11 @@
 import { ShikiStreamTokenizer } from "@shikijs/stream"
 import { createMarkdownParser } from "@opencode-ai/ui/context/marked-parser"
 import { OpenCodeTheme } from "@opencode-ai/ui/context/marked-theme"
+// harness: shiki's `bundledLanguages` lazily code-splits ~600 grammars into the build (22 MB).
+// `LANGUAGES` is the short list a workspace actually shows; anything else is plain text, which is
+// what an unknown language already did here.
+import { LANGUAGES as bundledLanguages } from "../../languages"
 import {
-  bundledLanguages,
   createHighlighter,
   getTokenStyleObject,
   stringifyTokenStyle,
