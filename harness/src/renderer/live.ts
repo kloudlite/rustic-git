@@ -28,6 +28,29 @@ const taskIndex = (id: string) => tasks.findIndex((t) => t.id === id);
 export type Proc = { id: string; session?: string; name: string; command: string; started: number; ended?: number; code?: number | null; tail: string; pid?: number; lost?: true };
 const [procs, setProcs] = createStore<Proc[]>([]);
 export { procs };
+/**
+ * Every message between a session and a workspace, as the bench publishes it. The bench is the
+ * record (`/exchanges`); this is the live view of the same rows, and it is what shows a person
+ * what became of an ask — it was reaching the renderer and being dropped on the floor.
+ */
+export type Exchange = { ts: number; id: string; session: string; workspace: string; dir: "in" | "out"; text: string; state: string; ref?: string };
+const [exchanges, setExchanges] = createStore<Exchange[]>([]);
+export { exchanges };
+function foldExchange(row: Exchange) {
+  const i = exchanges.findIndex((e) => e.id === row.id);
+  // A transition carries only id and state; the row it updates keeps everything else.
+  if (i >= 0) setExchanges(i, (e) => ({ ...e, ...row }));
+  else setExchanges(produce((es) => void es.push(row)));
+}
+/** The bench's cached rows at connect, so a fresh window is not blank until the next change. */
+export function seedExchanges(rows: unknown[]) {
+  for (const r of rows as Exchange[]) if (r?.id) foldExchange(r);
+}
+/** Everything said to and from one workspace. */
+export const exchangesOf = (workspace: string) => exchanges.filter((e) => e.workspace === workspace);
+/** What a session has asked of a workspace and has not had back yet: its own queue. */
+export const asksOf = (session: string) => exchanges.filter((e) => e.session === session && e.dir === "out" && e.state !== "done" && e.state !== "failed");
+
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
 /** Sessions whose workspace messages were discarded with them; queues hide these. */
@@ -317,6 +340,10 @@ export function onEvent(ev: Ev & { pi?: string }) {
       return void setConnected(ev.connected === true);
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
+    case "exchange":
+      // One row per publish: a record, or a transition of one already held.
+      if (ev.row) foldExchange(ev.row as Exchange);
+      return;
     case "procs":
       // The bench folds every session's widget into one table; it is the whole list.
       return void setProcs(produce((ps) => void ps.splice(0, ps.length, ...((ev.rows as Proc[]) ?? []))));

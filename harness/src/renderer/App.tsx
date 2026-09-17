@@ -587,6 +587,8 @@ export function App() {
     if (!st.configured) return void live.thread("bench").note("not connected to your bench yet");
     // Cold and offline: the cached list and messages, read-only until connected.
     setSessions(reconcile(st.sessions as Session[]));
+    // The asks already in flight: a window opened mid-conversation shows the queue, not a blank.
+    live.seedExchanges(st.exchanges ?? []);
     for (const x of live_()) void loadThread(x.id);
     if (!st.connected) return;
     await refreshSessions().catch(fail);

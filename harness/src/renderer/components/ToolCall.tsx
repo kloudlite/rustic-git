@@ -2,6 +2,7 @@ import { For, Show, createMemo, createSignal, onCleanup, type JSX } from "solid-
 import { Icon } from "../ui/Icon";
 import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
+import { ResultCard, pickRenderer } from "./results";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -107,6 +108,7 @@ function Fail(props: { text: string }) {
 function Body(props: { a: Action }) {
   const a = () => props.a;
   const g = () => a().args ?? {};
+  const card = createMemo(() => !!pickRenderer(a().tool, a().output, a().args));
   return (
     <Show when={!a().pending} fallback={<Show when={a().output}><Out text={a().output!} /></Show>}>
       <Switch tool={a().tool}>
@@ -118,8 +120,14 @@ function Body(props: { a: Action }) {
           grep: () => <Hits text={a().output ?? ""} />,
           find: () => <Hits text={a().output ?? ""} />,
           ls: () => <Hits text={a().output ?? ""} />,
-          process: () => <Out text={a().output ?? ""} />,
-          other: () => (a().tool?.startsWith("kl_") ? <Answer text={a().output ?? ""} /> : <Out text={a().output ?? ""} empty="(no output)" />),
+          // A card when one fits, the block it always had when none does: an api route this build
+          // does not know about must still be readable (spec §8).
+          process: () => <Show when={card()} fallback={<Out text={a().output ?? ""} />}><ResultCard tool={a().tool} output={a().output} args={a().args} /></Show>,
+          other: () => (
+            <Show when={card()} fallback={a().tool?.startsWith("kl_") ? <Answer text={a().output ?? ""} /> : <Out text={a().output ?? ""} empty="(no output)" />}>
+              <ResultCard tool={a().tool} output={a().output} args={a().args} />
+            </Show>
+          ),
         }}
       </Switch>
     </Show>
