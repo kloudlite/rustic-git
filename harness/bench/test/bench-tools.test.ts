@@ -100,7 +100,8 @@ test("the system prompt is the harness's own, and says only what the model must 
       /Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell\./,
       /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
-      /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\. Never save what a tool can answer\./,
+      /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\./,
+      /never save a conclusion about the harness's own behaviour — report that instead\./,
       /Do what is asked, directly\. No checks first\./,
       /Only the tools reach the platform\. Never change anything the person did not ask for\./,
       /Answer in one line, then only the facts needed\./,
@@ -645,7 +646,9 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
     assert.match(info.content[0].text, /answers from a read-only copy without stopping/);
 
     // An agent starts clean, is named, and works on this machine unless told otherwise.
-    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
+    // `shared` keeps it in the caller's own workspace; the default (its own clone) needs /v1 and
+    // is covered where a fake api exists.
+    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit", shared: true }, undefined, undefined, undefined);
     assert.equal(seen[2].url, "/agents");
     assert.match(seen[2].body.name, /^audit-[a-z0-9]{6}$/);
     assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "bench-ada", "s-1"]);

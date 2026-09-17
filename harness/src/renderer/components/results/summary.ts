@@ -28,6 +28,8 @@ const OTHER: Shape = { one: "tool call", many: "tool calls", did: "Made" };
 /** `Reading 1 file, listing 1 directory, running 1 shell command` / `Read 1 file, listed 1 directory…` */
 export function summary(rows: Action[], past = false): string {
   if (!rows.length) return "";
+  // Aggregated by KIND, not by call: four agents dispatched in one turn read as "Asked 4 agents",
+  // never as "made 1 tool call" four times over (owner, 2026-09-17).
   const byTool = new Map<string, number>();
   for (const r of rows) byTool.set(r.tool ?? "", (byTool.get(r.tool ?? "") ?? 0) + 1);
   const parts = [...byTool].map(([tool, n], i) => {

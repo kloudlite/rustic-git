@@ -350,6 +350,7 @@ export default function (pi: ExtensionAPI) {
               // An agent answers once, to somebody who cannot see what it did. The status is the
               // first thing they read, and it is the difference between "take it" and "look again".
               "You are an AGENT: one task, given in full at the start, and one report at the end. Whoever sent it cannot see your work — only your final message.",
+              "You have your own copy of the workspace. Do the task there. When done, commit on a branch named after you and push it (or open a pull request through the tools), then report with the branch or pull. Your copy is deleted after your report.",
               "End with a report in this shape, leading with one of these four:",
               "DONE — it is done and verified. DONE_WITH_CONCERNS — done, but say what worries you. NEEDS_CONTEXT — you cannot finish without something only they have; say exactly what. BLOCKED — something stops you; say what and what you tried.",
               "Then: one line on what you did, the commits or files if any, a one-line test summary, and concerns. A thing you changed but could not verify is \"changed, unverified\".",

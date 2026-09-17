@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import WebSocket from "ws";
 
 /**
@@ -20,12 +22,24 @@ const KEEP_EXCHANGES = 500;
 export type PtySession = { name: string; windows: number; attached: number; created: number };
 const OFFLINE = "not connected to the bench; nothing was sent";
 
+/**
+ * One connection, many requests. Each accepted TCP connection to the tunnel opens its OWN gateway
+ * WebSocket — a TLS handshake to the edge, 120–190 ms of round trip from here — so a `fetch` per
+ * request paid that every time while the bench itself answered in 1–50 ms (measured, 2026-09-17).
+ * A keep-alive agent turns hundreds of requests into one handshake.
+ *
+ * `http.request` rather than `fetch`: Node's fetch takes a `dispatcher`, but that needs undici as a
+ * real dependency, and the agent below is four lines and no dependency at all.
+ */
+const KEEP_ALIVE = { keepAlive: true, keepAliveMsecs: 15_000, maxSockets: 4, maxFreeSockets: 4, timeout: 0 };
+
 export class BenchClient {
   private base: string;
   private emit: Emit;
   private cacheFile: string;
   private cache: Cache;
   private events?: WebSocket;
+  private agents: Record<string, http.Agent> = {};
   private up = false;
   private closed = false;
   private backoff = 1000;
@@ -74,6 +88,38 @@ export class BenchClient {
     this.up = v;
     this.emit({ type: "bench", connected: v });
   }
+  /** One request over a pooled connection; the agent is per-scheme and made once. */
+  private send(method: string, p: string, body?: unknown): Promise<{ status: number; body: string }> {
+    const url = new URL(this.base + p);
+    const mod = url.protocol === "https:" ? https : http;
+    this.agents[url.protocol] ??= url.protocol === "https:" ? new https.Agent(KEEP_ALIVE) : new http.Agent(KEEP_ALIVE);
+    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    return new Promise((resolve, reject) => {
+      const req = mod.request(
+        url,
+        {
+          method,
+          agent: this.agents[url.protocol],
+          headers: { ...this.tunnel(), ...(payload ? { "content-type": "application/json", "content-length": String(payload.length) } : {}) },
+        },
+        (res) => {
+          let text = "";
+          res.setEncoding("utf8");
+          res.on("data", (c: string) => (text += c));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text }));
+        },
+      );
+      req.on("error", reject);
+      if (payload) req.write(payload);
+      req.end();
+    });
+  }
+
+  /** Open the pool before anything needs it: the first request otherwise pays the handshake. */
+  private warm(): void {
+    for (let i = 0; i < 2; i++) void this.send("GET", "/healthz").catch(() => undefined);
+  }
+
   private tunnel(): Record<string, string> {
     return this.nonce ? { "x-kl-tunnel": this.nonce } : {};
   }
@@ -109,6 +155,8 @@ export class BenchClient {
     w.on("open", async () => {
       this.backoff = 1000;
       this.setUp(true);
+      // A reconnect means new sockets: warm them before the resync asks for everything at once.
+      this.warm();
       try {
         await this.rest("GET", "/sessions");
       } catch {
@@ -165,19 +213,14 @@ export class BenchClient {
   }
 
   async rest<T = unknown>(method: string, p: string, body?: unknown): Promise<T> {
-    const r = await fetch(this.base + p, {
-      method,
-      headers: { ...this.tunnel(), ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await r.text();
+    const text = await this.send(method, p, body);
     let data: unknown = null;
     try {
-      data = text ? JSON.parse(text) : null;
+      data = text.body ? JSON.parse(text.body) : null;
     } catch {
       data = null;
     }
-    if (r.status >= 400) throw new Error((data as { error?: string } | null)?.error ?? `bench answered ${r.status}`);
+    if (text.status >= 400) throw new Error((data as { error?: string } | null)?.error ?? `bench answered ${text.status}`);
     if (method === "GET" && p === "/sessions") {
       this.cache.sessions = data as unknown[];
       this.save();

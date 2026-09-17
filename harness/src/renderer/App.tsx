@@ -126,6 +126,8 @@ export function App() {
   createEffect(() => live.setSessionCount(live_().length));
   // Ids are what every event names a workspace by; the name is what a person reads.
   createEffect(() => live.setWorkspaceNames(workspaces()));
+  /** A thread's own model, from the bench's session row — a workspace tab is not the bench. */
+  const modelOf = (id: string) => (sessions.find((y) => y.id === id) as { model?: string } | undefined)?.model;
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
     // The model is the SESSION's, from sessions.json: a window that opened after the child started
@@ -198,7 +200,9 @@ export function App() {
       .map((id) => threadOf(machine(), id) ?? sessionThread(id) ?? sides.find((t) => t.id === id))
       .filter((t) => t !== undefined)
       .map((t) => (t.kind === "machine" ? { ...t, pi: live_()[0]?.id ?? "", readonly: !live.connected() } : t))
-      .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages } : t));
+      // Every thread carries its own session's model: a workspace tab is not the bench, and
+      // reading only the bench's row showed "no model" in one (owner, 2026-09-17).
+      .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages, model: t.model ?? modelOf(t.pi) } : t));
   const threads = createMemo(() => threadsOf(pane()));
   const setSelectedRaw = (id: string) => setPanes(activePane(), "sel", id);
   const setSelected = (id: string) => {
@@ -632,6 +636,19 @@ export function App() {
     live.seedExchanges(st.exchanges ?? []);
     for (const x of live_()) void loadThread(x.id);
     if (!st.connected) return;
+    // ONE request for everything a window needs to open: six separate ones each paid a TLS
+    // handshake at the edge (measured 2026-09-17), and the bench's own answers were never the
+    // slow part. Live updates still arrive over the events socket.
+    const boot = (await window.harness.benchBootstrap(cur()).catch(() => undefined)) as
+      | { sessions?: Session[]; plans?: { session: string; items: unknown[] }[]; procs?: unknown[]; tasks?: { row?: unknown }[]; exchanges?: unknown[]; messages?: { messages: unknown[] } }
+      | undefined;
+    if (boot?.sessions) setSessions(reconcile(boot.sessions));
+    for (const r of boot?.plans ?? []) live.onEvent({ type: "plan", ...r });
+    if (boot?.procs) live.onEvent({ type: "procs", rows: boot.procs });
+    for (const row of boot?.tasks ?? []) live.onEvent({ type: "task", row });
+    if (boot?.exchanges) live.seedExchanges(boot.exchanges);
+    if (boot?.messages) live.thread(cur()).replay(boot.messages.messages);
+    if (boot) return;
     await refreshSessions().catch(fail);
     // These three are VIEWS the bench also pushes as events: a first read that fails (an older
     // main with a narrower allow-list, a bench mid-restart) must not put an error in somebody's

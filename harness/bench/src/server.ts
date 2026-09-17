@@ -165,6 +165,25 @@ export function serve(
         if (p.length === 2 && m === "GET") return send(res, 200, { name: p[1], text: bench.memories.read(p[1]) });
         if (p.length === 2 && m === "DELETE") return send(res, 200, bench.memories.forget(p[1]));
       }
+      /**
+       * Everything a window needs to open, in ONE request. Each request over the tunnel opens its
+       * own gateway WebSocket — a TLS handshake at the edge — so six calls to paint a thread cost
+       * six handshakes and the bench's own answers were never the slow part (measured).
+       */
+      if (m === "GET" && u.pathname === "/bootstrap") {
+        const session = u.searchParams.get("session") ?? undefined;
+        return send(res, 200, {
+          sessions: bench.sessions.all(),
+          plans: bench.plans.all(),
+          procs: bench.procs.all(),
+          tasks: bench.tasks.all(),
+          exchanges: bench.exchanges.recent(200),
+          proposals: bench.openProposals(),
+          memory: bench.memories.all(),
+          messages: session ? await bench.messages(session, undefined, undefined, n("tail") ?? 60) : undefined,
+          session,
+        });
+      }
       if (m === "GET" && u.pathname === "/plans") return send(res, 200, bench.plans.all());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());

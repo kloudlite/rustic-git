@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
-import { displayModel, procsOf, sessionOf } from "../../src/renderer/rows.ts";
+import { displayModel, modeLine, procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { AUTO_YES, MODES, onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
@@ -135,7 +135,11 @@ test("an agent's reply reads as status + one line, with the rest folded", () => 
   assert.equal(report("BLOCKED no ssh host").status, "BLOCKED");
   assert.equal(report("NEEDS_CONTEXT which repo?").status, "NEEDS_CONTEXT");
   // An agent that ignored the contract still reads: no status, all body.
-  assert.deepEqual(report("[from agent x] i had a look around\nand found nothing"), { status: undefined, head: "i had a look around", body: "and found nothing" });
+  assert.deepEqual(report("[from agent x] i had a look around\nand found nothing"), { status: undefined, head: "i had a look around", body: "and found nothing", left: undefined });
+  // What it left behind is what the person will go and take.
+  assert.equal(report("DONE — pushed branch fix-login").left, "fix-login");
+  assert.equal(report("DONE_WITH_CONCERNS — opened pull ada/api#12").left, "ada/api#12");
+  assert.equal(report("BLOCKED no ssh host").left, undefined);
 });
 
 test("a model reads as its name, and pi's status is never mistaken for one", () => {
@@ -224,4 +228,14 @@ test("shift+tab cycles the three modes, and only own-file edits are answered for
   for (const never of ["kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "bash", "ask"]) {
     assert.ok(!AUTO_YES.includes(never), `${never} must still ask`);
   }
+});
+
+test("the mode, the model and the level read the same everywhere", () => {
+  // Two formats for one fact is what the owner saw: "✻ Accept edits · no model" in the footer and
+  // "⏵⏵ accept edits on (⇧tab to cycle) · no model" in the composer.
+  assert.equal(modeLine("build", "deepseek/deepseek-v4-flash", "low"), "Build · DeepSeek V4 Flash · low");
+  assert.equal(modeLine("accept-edits", "deepseek/deepseek-v4-flash", "low"), "Accept edits · DeepSeek V4 Flash · low");
+  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan · Claude Opus 5", "the level shows only once it is known");
+  // A session whose row has a model shows it; only a session with none at all says so.
+  assert.equal(modeLine("build", undefined), "Build · no model");
 });

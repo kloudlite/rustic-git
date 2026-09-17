@@ -371,13 +371,17 @@ export class Bench {
     const [a] = queue.splice(at, 1);
     if (!queue.length) this.asked.delete(id);
     this.transitionAsk(a, answer ? "done" : "failed");
+    // An agent that finished has nothing left to keep: its work is on a branch, and its copy of
+    // the workspace goes (§22). One that is BLOCKED or NEEDS_CONTEXT keeps it — the caller may
+    // answer and send it back in.
+    if (a.agent && /^(DONE|DONE_WITH_CONCERNS)\b/.test(answer.trim())) void this.dropClone(a.workspace).catch(() => undefined);
     const back = this.exchanges.record({ id: `${a.exchange}-in`, session: a.from, workspace: a.workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: a.exchange });
     this.emit({ type: "exchange", row: back });
     // The asking session may be gone by now (removed, archived): an answer nobody is waiting for is dropped, not thrown.
     if (!answer || !this.sessions.get(a.from)) return;
     // The exchange row above keeps the whole reply; what crosses to the asking session is the
     // standup version of it, because that session is a planner and not a reader of diffs.
-    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${brief(answer, a.workspace)}`).catch(() => undefined);
+    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${brief(answer, a.workspace)}`, a.agent).catch(() => undefined);
   }
 
   /**
@@ -559,10 +563,14 @@ export class Bench {
   }
 
   /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
-  private send(id: string, message: string): Promise<PiEvent> {
+  private send(id: string, message: string, direct = false): Promise<PiEvent> {
     const mid = this.turning.has(id);
+    // A session and its OWN agents talk directly (owner, 2026-09-17): a dispatch goes at once, and
+    // a report comes back at once — as a steer when the caller is mid-turn, so it is read in this
+    // turn rather than behind whatever else is queued. The fork-ordered inbox is for prompts from
+    // OTHER sessions and from people, which is where ordering is a judgement at all.
+    if (direct) return this.rpc(id, { type: mid ? "steer" : "prompt", message });
     const r = this.rpc(id, { type: mid ? "follow_up" : "prompt", message });
-    // Something joined a queue somebody is already working through: ask what to take first.
     if (mid) this.triageSoon(id);
     return r;
   }
@@ -634,6 +642,7 @@ export class Bench {
     // A LIVE AGENT by name is resumed, not replaced: its context is the whole reason to send it more.
     const agent = this.sessions.get(`e-${workspace}`);
     const s = agent && !agent.archived ? agent : await this.openWorkspace(workspace);
+    const direct = !!agent && !agent.archived;
     const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
     this.emit({ type: "exchange", row });
@@ -642,7 +651,8 @@ export class Bench {
     this.asked.set(s.id, queue);
     this.plan(from, { type: "asked", exchange, to: workspace, task: text });
     try {
-      await this.send(s.id, `[ask ${exchange} from ${asker.name}] ${text}`);
+      // A live agent of this session is talked to directly; a workspace is a teammate with a queue.
+      await this.send(s.id, direct ? text : `[ask ${exchange} from ${asker.name}] ${text}`, direct);
     } catch (e) {
       this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
       this.transitionAsk({ exchange, from, workspace }, "failed");
@@ -718,8 +728,9 @@ export class Bench {
     this.plan(from, { type: "asked", exchange, to: name, task });
     try {
       // No tag and no history: an agent is given the task and nothing else, so its answer is the
-      // answer to that task rather than to a conversation it was not part of.
-      await this.send(s.id, task);
+      // answer to that task rather than to a conversation it was not part of. Direct: an agent is
+      // this session's own, not a queue it has to wait in.
+      await this.send(s.id, task, true);
     } catch (e) {
       this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
       this.transitionAsk({ exchange, from, workspace: name }, "failed");
@@ -761,6 +772,14 @@ export class Bench {
   }
   forgetClone(name: string): void {
     this.clones.delete(name);
+  }
+
+  /** The clone an agent worked in, deleted through /v1 — its work is on a branch by now. */
+  private async dropClone(name: string): Promise<void> {
+    const clone = this.clones.get(name)?.clone;
+    if (!clone) return;
+    this.clones.delete(name);
+    this.emit({ type: "clone-dropped", agent: name, clone });
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */
@@ -858,8 +877,10 @@ export class Bench {
     const file = eph === undefined ? path.join(base, "thread.jsonl") : path.join(base, "eph", `${eph}.jsonl`);
     const s = this.writable.run(() => {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      // An ephemeral is a workspace cut for one agent: its tools run on its own tool server.
-      return this.sessions.thread({ kind, workspace: ws, eph, target: eph ?? ws, file, model: this.opts.model });
+      // An agent's hands are the WORKSPACE's, never its own name: `eph` is the session key and
+      // nothing else. Binding tools to it made every agent's first command answer "workspace
+      // <agent-name>: not found" and every kl_pkg_* 404 (owner, four agents, 2026-09-17).
+      return this.sessions.thread({ kind, workspace: ws, eph, target: ws, file, model: this.opts.model });
     });
     if (s.archived) throw new Error(`session ${s.id} is archived; restore it to send`);
     this.open(s);

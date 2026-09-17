@@ -115,7 +115,8 @@ test("an isolated agent works in a clone, and closing it says which clone to del
     assert.equal(r.status, 202);
     const started = (await r.json()) as { session: string; name: string; clone?: string };
     assert.deepEqual([started.session, started.name, started.clone], ["e-upgrade-1", "upgrade-1", "svelte-app-eph-9f2a"]);
-    assert.equal(t.bench.sessions.get("e-upgrade-1")!.target, "upgrade-1");
+    // Its hands are the CLONE's, not its own name: the name is only the session key.
+    assert.equal(t.bench.sessions.get("e-upgrade-1")!.target, "svelte-app-eph-9f2a");
     assert.equal(t.bench.sessions.get("e-upgrade-1")!.workspace, "svelte-app-eph-9f2a", "its session lives under the clone");
     assert.equal(t.bench.cloneOf("upgrade-1"), "svelte-app-eph-9f2a");
 
@@ -243,6 +244,52 @@ test("a workspace with no session still answers a question, from the tools witho
     await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "the answer");
     // Answering a question never opened a session for it.
     assert.equal(t.bench.sessions.get("w-cold"), undefined, "no session was created to answer a question");
+  } finally {
+    await t.down();
+  }
+});
+
+test("an agent that finishes loses its copy; one that is blocked keeps it", async () => {
+  const t = await up("bench-clone-life-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    const dropped: unknown[] = [];
+    t.bench.onEvent((ev) => ev.type === "clone-dropped" && dropped.push(ev));
+
+    // The fake echoes its prompt, so the report's first word is the prompt's.
+    await post(t.base, "/agents", { task: "DONE — pushed branch fix-login", workspace: "api", clone: "api-eph-1111", name: "done-1", from: caller });
+    await until(() => dropped.length > 0, 5_000, "the finished agent's copy going");
+    assert.deepEqual(dropped, [{ type: "clone-dropped", agent: "done-1", clone: "api-eph-1111" }]);
+    assert.equal(t.bench.cloneOf("done-1"), undefined);
+
+    // BLOCKED keeps it: the caller may answer and send it back in.
+    dropped.length = 0;
+    await post(t.base, "/agents", { task: "BLOCKED no ssh host", workspace: "api", clone: "api-eph-2222", name: "stuck-1", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).filter((e) => e.dir === "in").length === 2, 5_000, "its report");
+    assert.deepEqual(dropped, [], "a blocked agent's copy stays");
+    assert.equal(t.bench.cloneOf("stuck-1"), "api-eph-2222");
+  } finally {
+    await t.down();
+  }
+});
+
+test("a caller and its agents talk directly: no queue, no triage", async () => {
+  const t = await up("bench-direct-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    // The caller is mid-turn; two agents report while it works.
+    await t.bench.rpc(caller, { type: "prompt", message: "hang" });
+    await until(() => t.bench.busy(), 2_000, "mid-turn");
+    await post(t.base, "/agents", { task: "first", workspace: "api", name: "a-1", from: caller });
+    await post(t.base, "/agents", { task: "second", workspace: "api", name: "a-2", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).filter((e) => e.dir === "in").length === 2, 5_000, "both reports");
+
+    // Delivered at once, in arrival order — as steers, not held behind an ordering fork.
+    const said = ((await t.bench.rpc(caller, { type: "clear_queue" })).data as { steering: string[]; followUp: string[] });
+    assert.equal(said.followUp.length, 0, "nothing was queued");
+    assert.equal(said.steering.filter((m) => m.startsWith("[from agent")).length, 2, JSON.stringify(said));
+    assert.match(said.steering[0], /first/);
+    assert.match(said.steering[1], /second/);
   } finally {
     await t.down();
   }

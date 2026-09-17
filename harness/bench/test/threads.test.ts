@@ -37,8 +37,9 @@ test("a workspace thread runs its own pi on the workspace's tools, with its file
     const e = await b.openEphemeral("api", "api-eph-1");
     assert.equal(e.id, "e-api-eph-1");
     assert.equal(e.file, path.join(dir, "workspaces", "api", "eph", "api-eph-1.jsonl"));
-    assert.equal(e.target, "api-eph-1");
-    assert.equal(((await b.rpc("e-api-eph-1", { type: "get_state" })).data as State).tools, "api-eph-1");
+    assert.equal(e.target, "api", "its hands are the workspace's; the eph id is only the session key");
+    // An ephemeral session's tools run in the WORKSPACE it was opened on, never on its own id.
+    assert.equal(((await b.rpc("e-api-eph-1", { type: "get_state" })).data as State).tools, "api");
     for (const bad of ["../x", "A_B", "a/b", "", "-a"]) await assert.rejects(b.openWorkspace(bad), /not a workspace id/);
     await assert.rejects(b.openEphemeral("api", "a/b"), /not a workspace id/);
     await assert.rejects(b.openEphemeral("api", "A_B"), /not a workspace id/);

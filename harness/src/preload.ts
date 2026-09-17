@@ -25,6 +25,8 @@ const harness = {
   bench: <T = unknown>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> => ipcRenderer.invoke("bench", method, path, body),
   /** A session's history: the cache first, then whatever the bench has beyond it. */
   benchMessages: (id: string): Promise<unknown[]> => ipcRenderer.invoke("bench:messages", id),
+  /** Everything a window needs to open, in one request over the tunnel. */
+  benchBootstrap: (session?: string): Promise<Record<string, unknown>> => ipcRenderer.invoke("bench:bootstrap", session),
   /** Configured, connected, and the last list and exchanges seen, for a cold offline start. */
   benchState: (): Promise<{ configured: boolean; connected: boolean; sessions: unknown[]; exchanges: unknown[] }> => ipcRenderer.invoke("bench:state"),
   /** Copies this laptop's sessions onto the bench; safe to run again. */

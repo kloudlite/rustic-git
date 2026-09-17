@@ -64,12 +64,15 @@ export const STATUSES = ["DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED", "DONE
  * An agent's reply, split into what a person reads at a glance and what they open. The status is
  * the first word by contract (the agent's own identity says so); anything else is all body.
  */
-export function report(text: string): { status?: string; head: string; body: string } {
+/** `branch fix-login` / `pull ada/api#12` — what an agent left behind for the person to take. */
+const LEFT = /\b(?:branch|pushed(?: to)?|pull request|pull|PR)\s+(?:branch\s+)?([\w./#-]{2,60})/i;
+
+export function report(text: string): { status?: string; head: string; body: string; left?: string } {
   const t = String(text).replace(/^\[from agent [^\]]*\]\s*/, "").trim();
   const status = STATUSES.find((s) => t.startsWith(s));
   const rest = (status ? t.slice(status.length).replace(/^[\s—:-]+/, "") : t).trim();
   const [head, ...body] = rest.split("\n");
-  return { status, head: head ?? "", body: body.join("\n").trim() };
+  return { status, head: head ?? "", body: body.join("\n").trim(), left: LEFT.exec(rest)?.[1] };
 }
 
 /** The one line, assembled: `∗ Grep "homepage" (18 matches)`. */

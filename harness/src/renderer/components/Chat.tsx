@@ -13,7 +13,7 @@ import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
 import { elapsed, segments, timing, verb } from "./results/group";
 import { notification, spinnerMeta, subjects, summary, turnFooter, verbAt } from "./results/summary";
-import { displayModel } from "../rows";
+import { modeLine } from "../rows";
 import { HINTS } from "../keys";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
@@ -29,7 +29,7 @@ const FROM_AGENT = /^\[from agent ([^\]]+)\] /;
 const fromAgent = (t: string) => (FROM_AGENT.test(t) ? report(t) : undefined);
 
 /** Status and one line; the rest is a click away — a report is read, not scrolled past. */
-function AgentReport(props: { report: { status?: string; head: string; body: string } }) {
+function AgentReport(props: { report: { status?: string; head: string; body: string; left?: string } }) {
   const [open, setOpen] = createSignal(false);
   const tone = () => (props.report.status === "DONE" ? "text-success" : props.report.status === "BLOCKED" ? "text-danger" : "text-warning");
   return (
@@ -37,6 +37,8 @@ function AgentReport(props: { report: { status?: string; head: string; body: str
       <span class="flex min-w-0 items-baseline gap-2">
         <Show when={props.report.status}>{(s) => <span class={`shrink-0 font-bold ${tone()}`}>{s()}</span>}</Show>
         <span class="min-w-0 flex-1">{props.report.head}</span>
+        {/* What it left behind, where a person will look for it. */}
+        <Show when={props.report.left}>{(l) => <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-muted">{l()}</span>}</Show>
         <Show when={props.report.body}>
           <button class="shrink-0 text-subtle hover:text-fg" onClick={() => setOpen((v) => !v)}>{open() ? "less" : "more"}</button>
         </Show>
@@ -119,10 +121,17 @@ export function Chat(props: {
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
   const elapsed = () => Math.max(0, Math.round((now() - (L().turn()?.since ?? now())) / 1000));
-  const mode = () => (live.mode() === "plan" ? "Plan" : live.mode() === "accept-edits" ? "Accept edits" : "Build");
-  // The model's name: pi's status line while it is up, otherwise the session's own row — a window
-  // opened after the child started saw no `started` event and read "not started" as the model.
-  const modelName = () => displayModel(L().status().split(" · ")[0] || thread()?.model || props.machine.model);
+  /**
+   * The model of THIS thread — a workspace session has its own row and its own model, and reading
+   * only the bench's showed "no model" in a workspace tab (owner, 2026-09-17). pi's status line
+   * first while it is up, then the row, then the bench's default.
+   */
+  const modelName = () => {
+    const said = L().status().split(" · ")[0];
+    return /^not started$/i.test(said) ? undefined : said || thread()?.model || props.machine.model;
+  };
+  /** One string for the mode, the model and the level, used in all three places. */
+  const line = () => modeLine(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
   const [pick, setPick] = createSignal(0);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
@@ -409,7 +418,7 @@ export function Chat(props: {
                         </div>
                         {/* After every assistant turn: what answered, on what, in how long. */}
                         <div class="pt-1 font-mono text-subtle">
-                          ✻&nbsp; {(b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : `${mode()} · ${modelName()}`}
+                          ✻&nbsp; {(b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : line()}
                         </div>
                       </div>
                       }>
@@ -618,10 +627,10 @@ export function Chat(props: {
             </Show>
             {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
             <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono">
-              {/* Claude Code puts the mode where the eye already is, with the way to change it. */}
-              <span class="text-accent">{live.mode() === "accept-edits" ? "⏵⏵ accept edits on" : mode()}</span>
-              <span class="shrink-0 text-subtle">(⇧tab to cycle)</span>
-              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()}<Show when={live.levelKnown()}> · {live.level()}</Show></span>
+              {/* The same string the turn footer and the footer bar show; the key hint lives with
+                  the other key hints, not here. */}
+              <span class="text-accent">{line().split(" · ")[0]}</span>
+              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {line().split(" · ").slice(1).join(" · ")}</span>
             </div>
           </div>
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}
@@ -630,7 +639,7 @@ export function Chat(props: {
           <div class="pane flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-subtle">
             <Show
               when={L().busy()}
-              fallback={<span class="min-w-0 truncate">{props.machine.id}{thread()?.kind === "workspace" ? ` · ${thread()?.name}` : ""}</span>}
+              fallback={<span class="min-w-0 truncate">{line()}</span>}
             >
               <span class="animate-pulse text-accent">✳</span>
               <span class="text-muted">{verbAt(elapsed())}…</span>

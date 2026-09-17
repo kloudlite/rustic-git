@@ -86,3 +86,15 @@ export function displayModel(id: string | undefined): string {
   if (!t || /^not started$/i.test(t)) return "no model";
   return MODEL_NAMES[t] ?? t.split("/").pop() ?? t;
 }
+
+
+/**
+ * `Build · DeepSeek V4 Flash · low` — ONE string, wherever the mode and the model are shown. The
+ * turn footer said "✻ Accept edits · no model" while the composer said "⏵⏵ accept edits on
+ * (⇧tab to cycle) · no model" (owner, 2026-09-17): two formats for one fact, and a model that was
+ * there all along in the session's own row.
+ */
+export function modeLine(mode: string, model: string | undefined, level?: string): string {
+  const name = mode === "accept-edits" ? "Accept edits" : mode[0].toUpperCase() + mode.slice(1);
+  return [name, displayModel(model), level].filter(Boolean).join(" · ");
+}

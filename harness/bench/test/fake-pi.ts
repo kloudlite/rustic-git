@@ -64,7 +64,10 @@ process.stdin.on("data", (d) => {
         out({ type: "extension_ui_request", id: "w2", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "sleeper", command: "sleep 600", pid: child.pid, started: Date.now() }])] });
       }
       out({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo ${cmd.message}` } });
-      const answer = { role: "assistant", content: [{ type: "text", text: `echo ${cmd.message}` }], timestamp: Date.now() };
+      // A message that already reads as an agent's report is echoed as-is: the harness acts on the
+      // status word, and "echo DONE …" is not a status word.
+      const isReport = /^(DONE_WITH_CONCERNS|NEEDS_CONTEXT|BLOCKED|DONE)\b/.test(String(cmd.message));
+      const answer = { role: "assistant", content: [{ type: "text", text: isReport ? String(cmd.message) : `echo ${cmd.message}` }], timestamp: Date.now() };
       messages.push(answer);
       // Real pi hands the run's own messages to agent_end (rpc.md) — the prompt that started it
       // among them, which is how the harness tells whose ask a turn answered.

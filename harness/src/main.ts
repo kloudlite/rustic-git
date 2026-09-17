@@ -289,7 +289,7 @@ ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
 // reaches anything else through this.
 const SID = "(bench|btw-\\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)";
 export const BENCH_ROUTES = new RegExp(
-  `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/(btw|tools)$|^GET /(tasks|procs|proposals|plans|healthz)$|^GET /procs/[\\w.-]+/output(\\?since=\\d+)?$|^POST /proposals/[\\w.-]+$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^GET /memory$|^DELETE /memory/[\\w.-]+$|^GET /memory/[\\w.-]+$|^POST /import$|^POST /workspaces/[a-z0-9-]+(/eph/[a-z0-9-]+)?/session$`,
+  `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/(btw|tools)$|^GET /(tasks|procs|proposals|plans|healthz)$|^GET /bootstrap(\\?session=${SID}(&tail=\\d+)?)?$|^GET /procs/[\\w.-]+/output(\\?since=\\d+)?$|^POST /proposals/[\\w.-]+$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^GET /memory$|^DELETE /memory/[\\w.-]+$|^GET /memory/[\\w.-]+$|^POST /import$|^POST /workspaces/[a-z0-9-]+(/eph/[a-z0-9-]+)?/session$`,
 );
 ipcMain.handle("bench", async (_e, method: unknown, p: unknown, body: unknown) => {
   if (typeof method !== "string" || typeof p !== "string" || !BENCH_ROUTES.test(`${method} ${p}`)) throw new Error(`not a bench route: ${String(method)} ${String(p)}`);
@@ -298,6 +298,10 @@ ipcMain.handle("bench", async (_e, method: unknown, p: unknown, body: unknown) =
 ipcMain.handle("bench:messages", (_e, id: unknown) => {
   if (typeof id !== "string" || !SESSION.test(id)) throw new Error("not a session id");
   return needBench().messages(id);
+});
+ipcMain.handle("bench:bootstrap", (_e, session: unknown) => {
+  const q = typeof session === "string" && SESSION.test(session) ? `?session=${encodeURIComponent(session)}` : "";
+  return needBench().rest("GET", `/bootstrap${q}`);
 });
 ipcMain.handle("bench:state", () => ({ configured: !!bench, connected: bench?.connected() ?? false, ...(bench?.cached() ?? { sessions: [], exchanges: [] }) }));
 // `bench import`: the laptop's sessions onto the bench, once. The list is the

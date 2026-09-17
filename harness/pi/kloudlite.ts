@@ -168,10 +168,10 @@ const PLATFORM = [
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
-  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent; parallel or risky changes → isolated agents.",
+  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
-  "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer.",
+  "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
   "Independent commands go in one turn, together; they run at the same time.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
@@ -438,7 +438,7 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
       workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
-      isolated: Type.Optional(Type.Boolean({ description: "give the agent its own clone of that workspace: for parallel or risky changes" })),
+      shared: Type.Optional(Type.Boolean({ description: "work in the caller's own workspace instead of its own copy: for a read-only or tiny task" })),
       kind: Type.Optional(Type.String({ description: 'work (default: it does something) or info (a question about the workspace\'s code or state that changes nothing)' })),
     },
     async (a) => {
@@ -449,8 +449,10 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
         const where = a.workspace ?? own;
         // ISOLATED: its own copy of the machine, so two agents changing files at once cannot
         // trip over each other and a refactor that goes wrong is thrown away with the clone.
+        // Its OWN copy by default (§22): two agents changing files at once cannot trip over each
+        // other, and a refactor that goes wrong is thrown away with the clone.
         let clone: string | undefined;
-        if (a.isolated && where) {
+        if (!a.shared && where) {
           const made = await call("POST", `/v1/workspaces/${encodeURIComponent(where)}/clone`, { name: `${where}-eph-${Math.random().toString(36).slice(2, 8)}` });
           if (made.status >= 400) return { ...text(`${made.status}: ${typeof made.data === "string" ? made.data : JSON.stringify(made.data)}`), isError: true };
           clone = String((made.data as { id?: string } | null)?.id ?? "");
