@@ -232,14 +232,16 @@ export class Bench {
     // Open asks SURVIVE a restart. The queue lived only in memory, so a bench that restarted while
     // a workspace was working left the ask `running` in the log with nobody waiting on it and
     // nobody able to settle it — the asking session waited forever (spec §3.9 rule 1).
-    this.resumeAsks();
-    // PROBE: this.sweepOn();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create({ model: this.opts.model }));
     // The architecture document starts with the machines in it (§24): an empty document is one
     // nobody writes, and one that already names the workspaces and services is one somebody
     // corrects. It is written once and never overwritten from here again.
     void this.seedArchitecture().catch(() => undefined);
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
+    // AFTER the sessions are open, so a queued ask has somebody to be re-delivered to: this reads
+    // the log and puts every open exchange back where it was, or ends it (spec §3.9 rule 1).
+    this.resumeAsks();
+    this.sweepOn();
   }
 
   /**
@@ -266,6 +268,16 @@ export class Bench {
       this.asked.set(holder.id, queue);
       // The plan says what is outstanding, so a restart does not empty the panel a person reads.
       this.plan(e.session, { type: "asked", exchange: e.id, to: e.workspace, task: e.text });
+      /**
+       * A QUEUED ask was never taken by the workspace session, and the child that would have taken
+       * it is gone with the restart: nothing is going to pick it up on its own. It sat queued
+       * forever (api-test-report R-D19), so it is re-delivered here — once, and the deadline takes
+       * it from there if that lands nowhere either.
+       */
+      if (e.state === "queued") {
+        this.clocks.set(e.id, { at: Date.now() });
+        this.tell(holder.id, `[ask ${e.id} from ${e.session}] ${e.text}`);
+      }
     }
   }
 

@@ -2231,3 +2231,42 @@ test("answering the card puts the ask back on its ordinary clock", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D19 (api-test-report round 2): an ask that was `queued` when the bench restarted stayed queued
+ * forever. The child that would have taken it went with the restart, so nothing was ever going to
+ * pick it up — rule 1 says every open exchange is RE-CHECKED on boot, not assumed.
+ */
+test("a queued ask does not survive a restart as queued", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-rd19-"));
+  const one = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  let asker = "";
+  try {
+    await one.start();
+    asker = one.sessions.all().find((s) => !s.archived)!.id;
+    await one.openWorkspace("api");
+    // The row as the log holds it when the bench goes down mid-queue.
+    one.exchanges.record({ id: "ask-q1", session: asker, workspace: "api", dir: "out", text: "add a version endpoint", state: "queued" });
+  } finally {
+    await one.stop();
+  }
+
+  const two = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await two.start();
+    // Re-delivered: it is owed by the session that holds it, and its clock starts now rather than
+    // at whenever it was first queued.
+    const held = (two as never as { asked: Map<string, { exchange: string }[]> }).asked;
+    assert.ok([...held.values()].some((q) => q.some((x) => x.exchange === "ask-q1")), "somebody owes it again");
+
+    // And if that lands nowhere, the deadline takes it — it never sits queued forever.
+    const t0 = Date.now();
+    await two.sweepExchanges(t0 + 61_000);
+    await two.sweepExchanges(t0 + 122_000);
+    const row = two.exchanges.bySession(asker).find((e) => e.id === "ask-q1")!;
+    assert.ok(row.state !== "queued", `still queued: ${row.state}`);
+  } finally {
+    await two.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
