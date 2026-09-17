@@ -33,6 +33,8 @@ const TRIAGE_DEBOUNCE_MS = 3_000;
 const TRIAGE_TIMEOUT_MS = 60_000;
 const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
+/** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
+const WATCH_MAX_LINES = 20;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 // A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
@@ -69,6 +71,8 @@ export class Bench {
   private procPoll?: ReturnType<typeof setInterval>;
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
+  /** Patterns a session asked to be told about, by process id. */
+  private watching = new Map<string, { session: string; re: RegExp; since: number; pattern: string }>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** Debounce per session: a burst of arrivals is one ordering, not one per message. */
@@ -358,13 +362,16 @@ export class Bench {
    */
   private pollProcs(): void {
     if (this.procPoll) return;
-    this.procPoll = setInterval(() => void this.sweepProcs().catch(() => undefined), PROC_POLL_MS);
+    this.procPoll = setInterval(() => {
+      void this.sweepProcs().catch(() => undefined);
+      void this.sweepWatches().catch(() => undefined);
+    }, PROC_POLL_MS);
     this.procPoll.unref?.();
   }
 
   private async sweepProcs(): Promise<void> {
     const sessions = [...new Set(this.procs.all().filter((p) => p.ended === undefined).map((p) => p.session))];
-    if (!sessions.length) {
+    if (!sessions.length && !this.watching.size) {
       clearInterval(this.procPoll);
       this.procPoll = undefined;
       return;
@@ -391,7 +398,10 @@ export class Bench {
         // Gone from the tool server's list, or exited in it: either way it is over.
         if (now && now.state !== "exited") continue;
         // Gone from the tool server's own list without ever reporting an exit: THAT is lost.
-        moved = !!this.write(() => this.procs.transitionEnded(session, p.id, now?.exit_code ?? null, !now)) || moved;
+        const row = this.write(() => this.procs.transitionEnded(session, p.id, now?.exit_code ?? null, !now));
+        moved = !!row || moved;
+        // Nobody polls: the session is TOLD, with enough of the output to know what happened.
+        if (row && now) void this.notifyEnded(session, row.id, row.name, now.exit_code ?? null).catch(() => undefined);
       }
       if (moved) this.emit({ type: "procs", rows: this.procs.all() });
     }
@@ -402,6 +412,43 @@ export class Bench {
     const r = await fetch(`http://${at}/tools/process_list`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     if (!r.ok) throw new Error(`process_list: ${r.status}`);
     return ((await r.json()) as { processes?: { id: string; state?: string; exit_code?: number | null }[] }).processes ?? [];
+  }
+
+  /**
+   * A background command finished. The model does not watch it — it is told, in its own turn order,
+   * with the tail of what it printed, because "it failed" without the last twenty lines is a
+   * message that only makes somebody go and look.
+   */
+  private async notifyEnded(session: string, id: string, title: string, code: number | null) {
+    const out = await this.procOutput(id, 0).catch(() => undefined);
+    const tail = [out?.stdout, out?.stderr].filter(Boolean).join("\n").replace(/\s+$/, "").split("\n").slice(-20).join("\n");
+    await this.send(session, `[task ${title} finished: exit ${code ?? "?"}]${tail ? `\n${tail}` : ""}`).catch(() => undefined);
+  }
+
+  /**
+   * A watch: lines of a running process that match a pattern, delivered as they appear. One message
+   * per batch (debounced), never one per line — a `watch` on a noisy log would otherwise be a way
+   * to fill a context window from a dev server.
+   */
+  watchProc(session: string, id: string, pattern: string): void {
+    const re = new RegExp(pattern);
+    this.watching.set(id, { session, re, since: 0, pattern });
+    this.pollProcs();
+  }
+
+  private async sweepWatches(): Promise<void> {
+    for (const [id, w] of [...this.watching]) {
+      const row = this.procs.all().find((p) => p.id === id);
+      if (!row || row.ended !== undefined) {
+        this.watching.delete(id);
+        continue;
+      }
+      const out = await this.procOutput(id, w.since).catch(() => undefined);
+      if (!out) continue;
+      w.since = out.next ?? w.since;
+      const hit = [out.stdout, out.stderr].filter(Boolean).join("\n").split("\n").filter((l) => l.trim() && w.re.test(l)).slice(0, WATCH_MAX_LINES);
+      if (hit.length) await this.send(w.session, `[watch ${row.name} /${w.pattern}/]\n${hit.join("\n")}`).catch(() => undefined);
+    }
   }
 
   /** A process's output, from the tool server that is running it: the desktop's log view reads this. */

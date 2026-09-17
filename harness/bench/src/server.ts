@@ -165,6 +165,13 @@ export function serve(
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       // A process's log, followed from a byte offset: the desktop's detail view reads this while it runs.
       if (p[0] === "procs" && p.length === 3 && p[2] === "output" && m === "GET") return send(res, 200, await bench.procOutput(p[1], Number(u.searchParams.get("since")) || 0));
+      // Tell this session about lines of a running process that match a pattern.
+      if (p[0] === "procs" && p.length === 3 && p[2] === "watch" && m === "POST") {
+        const b = await body(req);
+        if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
+        bench.watchProc(b.from, p[1], String(b.pattern ?? ""));
+        return send(res, 202, { watching: p[1], pattern: b.pattern });
+      }
       if (m === "POST" && u.pathname === "/import") {
         const b = await body(req);
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));

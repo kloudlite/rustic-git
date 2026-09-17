@@ -192,6 +192,9 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
           return { tool: "process_kill", args: { id: p.id, signal: p.signal } };
         case "write":
           return { tool: "process_write", args: { id: p.id, data: p.data } };
+        case "watch":
+          // Handled by the harness, not the tool server: the bench polls and tells this session.
+          return { tool: "process_list", args: {} };
         default:
           throw new Error(`no process action ${p.action}`);
       }
@@ -357,6 +360,15 @@ export default function (pi: ExtensionAPI) {
           if (no) return text(no, true);
         }
         try {
+          // A watch is the harness's own: nothing to run in the workspace, only a standing request.
+          if (name === "process" && p.action === "watch") {
+            const w = await fetch(`${process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789"}/procs/${encodeURIComponent(String(p.id))}/watch`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ pattern: p.pattern ?? ".", from: process.env.KL_SESSION }),
+            });
+            return w.ok ? text(`watching ${p.id} for /${p.pattern ?? "."}/; matching lines arrive as messages`) : text(`the bench would not watch ${p.id}`, true);
+          }
           const c = toIde(name, p);
           const r = await server.call(c, signal);
           // The title belongs to the id the tool server just minted.
@@ -385,15 +397,16 @@ export default function (pi: ExtensionAPI) {
   reg(
     "process",
     "Process",
-    "Long-running commands: start one (command), list them, read its logs since an offset, write to its stdin, or stop it. They outlive a turn and keep running in the workspace.",
+    "Long-running commands: start one (command), list them, read its logs since an offset, write to its stdin, stop it, or WATCH it for a pattern. They outlive a turn; you are told when one ends and when a watched line appears, so never poll.",
     Type.Object({
-      action: StringEnum(["start", "list", "logs", "stop", "write"]),
+      action: StringEnum(["start", "list", "logs", "stop", "write", "watch"]),
       command: Type.Optional(Type.String({ description: "action=start" })),
       id: Type.Optional(Type.String({ description: "the process, for logs/stop/write" })),
       title: Type.Optional(Type.String({ description: "short name people will see, e.g. \"svelte dev server\"" })),
       since: Type.Optional(Type.Number({ description: "action=logs: the byte offset to read from (0 = the start)" })),
       data: Type.Optional(Type.String({ description: "action=write" })),
       signal: Type.Optional(StringEnum(["TERM", "KILL"])),
+      pattern: Type.Optional(Type.String({ description: "action=watch: a regular expression; matching lines are sent to you as they appear" })),
     }),
   );
   reg("grep", "Grep", "Regex search, gitignore-aware. path is a directory.", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), glob: Type.Optional(Type.String()), ignoreCase: Type.Optional(Type.Boolean()), literal: Type.Optional(Type.Boolean()), context: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }));

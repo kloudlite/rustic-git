@@ -729,3 +729,49 @@ test("loading the extension calls no action method; the active set is applied on
     restore();
   }
 });
+
+test("a background command that ends tells its session, and a watch sends the lines that match", async () => {
+  let live: any[] = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "running", exit_code: null }];
+  let out = { stdout: "", stderr: "", next: 0 };
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.url === "/tools/process_list" ? { processes: live } : req.url === "/tools/process_output" ? out : { state: "exited" }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-notify-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, resolveTools: async () => at });
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    (bench as any).foldRow(ws.id, { type: "extension_ui_request", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "svelte dev server", command: "npm run dev", started: Date.now() }])] });
+
+    // A WATCH: only the matching lines, and only once each.
+    bench.watchProc(ws.id, "p1", "error");
+    out = { stdout: "listening on 3000\nerror: cannot find module\nready", stderr: "", next: 64 };
+    await (bench as any).sweepWatches();
+    let said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
+    const watched = said.filter((m) => String(m.content).startsWith("[watch"));
+    assert.equal(watched.length, 1, JSON.stringify(said));
+    assert.match(watched[0].content, /\[watch svelte dev server \/error\/\]\nerror: cannot find module/);
+    assert.ok(!watched[0].content.includes("listening on 3000"), "only what matched");
+
+    // It ends: the session is TOLD, with the tail of what it printed.
+    out = { stdout: "error: cannot find module\nexiting", stderr: "", next: 99 };
+    live = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "exited", exit_code: 1 }];
+    await (bench as any).sweepProcs();
+    await until(async () => ((await bench.messages(ws.id)).messages as { content: string }[]).some((m) => String(m.content).startsWith("[task ")), 5_000, "the finish notice");
+    said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
+    const done = said.find((m) => String(m.content).startsWith("[task "))!;
+    assert.match(done.content, /^\[task svelte dev server finished: exit 1\]/);
+    assert.match(done.content, /exiting/);
+  } finally {
+    await bench.stop();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
