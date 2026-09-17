@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, WebContentsView, clipboard, ipcMain, nativeTheme, safeStorage, shell, type WebContents } from "electron";
+import { BrowserWindow, Menu, WebContentsView, app, clipboard, ipcMain, nativeTheme, safeStorage, shell, systemPreferences, type WebContents } from "electron";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -450,6 +450,20 @@ ipcMain.handle("pty:kill", async (_e, id: unknown) => {
   ptys.get(id)?.close();
   ptys.delete(id);
   sizes.delete(id);
+});
+
+/**
+ * Whether the SYSTEM asks for less motion. A Chromium renderer inside Electron answers
+ * `prefers-reduced-motion: reduce` even with the OS setting off (measured over CDP on the owner's
+ * build, 2026-09-17: `{"reduce":true,"noPref":false}`), which froze every spinner to its
+ * animations-off face. The OS's own answer is the one that counts.
+ */
+ipcMain.handle("app:reduced-motion", () => {
+  try {
+    return systemPreferences.getAnimationSettings().prefersReducedMotion === true;
+  } catch {
+    return false;
+  }
 });
 
 ipcMain.handle("set-theme", (_e, mode: unknown) => {

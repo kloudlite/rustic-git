@@ -12,6 +12,7 @@ import { makeTab, nextIndex, reconcile as reconcileTabs, scopeOfTab, sessionInde
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
+import { cycleMotion, motionChoice } from "./components/Motion";
 import { playDemo, wantsDemo } from "./demo";
 import { KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
@@ -541,6 +542,7 @@ export function App() {
     { id: "nth", label: "Thread by position", keys: "⌘1…9", run: () => setPalette("go") },
     { id: "close", label: "Close what is open", keys: keyHint(KEYS.close), run: closeCurrent },
     { id: "theme", label: "Cycle theme", run: cycleTheme },
+    { id: "motion", label: `Animations: ${motionChoice()} (cycle)`, run: cycleMotion },
     ...machine().plugins.filter((p) => p.kind === "skill" && p.enabled).map((p) => ({
       id: `skill:${p.name}`, label: `/${p.name}`, detail: (p as { summary: string }).summary, kind: "skill",
       run: () => {

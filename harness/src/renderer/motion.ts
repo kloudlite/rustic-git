@@ -8,6 +8,18 @@ export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 export const SPINNER_MS = 80;
 /** `⋯` is what opencode shows with animations off (`spinner.tsx:17`). */
 export const SPINNER_STILL = "⋯";
+
+/**
+ * Whether to stand still. The media query is NOT the answer here: a Chromium renderer inside
+ * Electron reports `prefers-reduced-motion: reduce` with the OS setting off (measured over CDP,
+ * 2026-09-17), which is why the footer showed the animations-off face while a turn ran. The OS's
+ * own setting decides; the query is only the fallback for a plain browser, where it is truthful.
+ */
+export function stillness(os: boolean | undefined, query: boolean, asked?: "on" | "off"): boolean {
+  if (asked) return asked === "off";
+  if (os !== undefined) return os;
+  return query;
+}
 /** The working indicator's grid (`session-progress-indicator-v2.tsx:4-12`). */
 export const DOT_GRID = 5;
 export const DOT_SIZE = 2;

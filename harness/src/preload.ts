@@ -90,6 +90,8 @@ const harness = {
     },
   },
   setTheme: (mode: "system" | "light" | "dark"): Promise<void> => ipcRenderer.invoke("set-theme", mode),
+  /** Whether the SYSTEM asks for less motion — Chromium's own media query lies about this here. */
+  reducedMotion: (): Promise<boolean> => ipcRenderer.invoke("app:reduced-motion"),
 };
 
 export type Harness = typeof harness;

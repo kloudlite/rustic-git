@@ -6,7 +6,7 @@ import { diagnostics, toolError, toolLine } from "../../src/renderer/components/
 import { usage } from "../../src/renderer/live.ts";
 import { KEYS, LEADER, keyHint, leaderIndex, underLeader } from "../../src/renderer/keys.ts";
 import { playDemo, wantsDemo } from "../../src/renderer/demo.ts";
-import { SCAN_MS, SCAN_TRAIL, SCAN_WIDTH, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, scanFrame, scanHead } from "../../src/renderer/motion.ts";
+import { SCAN_MS, SCAN_TRAIL, SCAN_WIDTH, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, scanFrame, scanHead, stillness } from "../../src/renderer/motion.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -198,4 +198,16 @@ test("the status spinner is the TUI's block scanner, at its own 40 ms", () => {
   // The trail fades rather than stopping dead.
   const mid = scanFrame(4);
   assert.ok(mid[4].alpha > mid[3].alpha && mid[3].alpha > mid[2].alpha);
+});
+
+test("what stands still is the OS's decision, not Chromium's media query", () => {
+  // Electron's renderer answers the query wrongly: it said `reduce` with the setting off, and the
+  // footer showed `[⋯]` all through a turn (owner, 2026-09-17, verified over CDP).
+  assert.equal(stillness(false, true), false, "the OS says no: it moves, whatever the query claims");
+  assert.equal(stillness(true, false), true, "the OS says yes: it stands still");
+  assert.equal(stillness(undefined, true), true, "no OS answer yet: the query is the fallback");
+  assert.equal(stillness(undefined, false), false);
+  // A person's own choice wins over both.
+  assert.equal(stillness(true, true, "on"), false);
+  assert.equal(stillness(false, false, "off"), true);
 });

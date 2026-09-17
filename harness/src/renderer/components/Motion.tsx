@@ -1,5 +1,45 @@
-import { For, createEffect, createSignal, on, onCleanup } from "solid-js";
-import { DOT_GAP, DOT_GRID, DOT_SIZE, SCAN_MS, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, TICK_MS, scanFrame } from "../motion";
+import { For, Show, createEffect, createSignal, on, onCleanup } from "solid-js";
+import { DOT_GAP, DOT_GRID, DOT_SIZE, SCAN_MS, SPINNER_FRAMES, SPINNER_MS, SPINNER_STILL, TICK_MS, scanFrame, stillness } from "../motion";
+
+/**
+ * Does this machine want less motion? Asked of the OS through the bridge, once, because Chromium
+ * inside Electron answers the media query wrongly (see `stillness`). Until it answers, we move —
+ * a spinner that never starts is worse than one that stops a moment later.
+ */
+const [osReduced, setOsReduced] = createSignal<boolean | undefined>();
+void (typeof window !== "undefined" && window.harness?.reducedMotion?.().then(setOsReduced).catch(() => setOsReduced(false)));
+const query = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/**
+ * A person's own answer, which beats both: `system` follows the machine, `on` always moves, `off`
+ * never does. It exists because "the system asked for less motion" is a guess about what somebody
+ * wants, and on this machine it was wrong in the direction that froze the status line.
+ */
+const MOTION_KEY = "harness.motion";
+const saved = (): "system" | "on" | "off" => {
+  try {
+    const v = localStorage.getItem(MOTION_KEY);
+    return v === "on" || v === "off" ? v : "system";
+  } catch {
+    return "system";
+  }
+};
+const [choice, setChoice] = createSignal<"system" | "on" | "off">(saved());
+export { choice as motionChoice };
+export function cycleMotion() {
+  const next = choice() === "system" ? "on" : choice() === "on" ? "off" : "system";
+  setChoice(next);
+  try {
+    localStorage.setItem(MOTION_KEY, next);
+  } catch {
+    /* not being able to remember the choice is not a reason to refuse it */
+  }
+}
+
+export const still = () => {
+  const c = choice();
+  return stillness(osReduced(), query(), c === "system" ? undefined : c);
+};
 
 /**
  * The animations opencode runs, at opencode's own constants. They live together because they are
@@ -13,13 +53,10 @@ import { DOT_GAP, DOT_GRID, DOT_SIZE, SCAN_MS, SPINNER_FRAMES, SPINNER_MS, SPINN
  * (`spinner.tsx:17`) — a still mark that still says "running", rather than a frozen frame.
  */
 export function Spinner(props: { class?: string }) {
-  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const [i, setI] = createSignal(0);
-  if (!still) {
-    const t = setInterval(() => setI((n) => (n + 1) % SPINNER_FRAMES.length), SPINNER_MS);
-    onCleanup(() => clearInterval(t));
-  }
-  return <span class={props.class} aria-hidden="true">{still ? SPINNER_STILL : SPINNER_FRAMES[i()]}</span>;
+  const t = setInterval(() => setI((n) => (n + 1) % SPINNER_FRAMES.length), SPINNER_MS);
+  onCleanup(() => clearInterval(t));
+  return <span class={props.class} aria-hidden="true">{still() ? SPINNER_STILL : SPINNER_FRAMES[i()]}</span>;
 }
 
 /**
@@ -28,15 +65,14 @@ export function Spinner(props: { class?: string }) {
  * reduced-motion face here too.
  */
 export function Scanner(props: { class?: string }) {
-  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const [frame, setFrame] = createSignal(0);
-  if (!still) {
-    const t = setInterval(() => setFrame((n) => n + 1), SCAN_MS);
-    onCleanup(() => clearInterval(t));
-  }
+  const t = setInterval(() => setFrame((n) => n + 1), SCAN_MS);
+  onCleanup(() => clearInterval(t));
   return (
     <span class={props.class} aria-hidden="true">
-      {still ? "[⋯]" : <For each={scanFrame(frame())}>{(c) => <span style={{ opacity: String(c.alpha) }}>{c.glyph}</span>}</For>}
+      <Show when={!still()} fallback="[⋯]">
+        <For each={scanFrame(frame())}>{(c) => <span style={{ opacity: String(c.alpha) }}>{c.glyph}</span>}</For>
+      </Show>
     </span>
   );
 }
