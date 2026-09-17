@@ -51,10 +51,81 @@ export async function call(method: string, p: string, body?: unknown): Promise<{
 }
 
 const text = (v: unknown) => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
-const answer = async (method: string, p: string, body?: unknown) => {
+
+/**
+ * What a failed platform call SAYS to the model: one sentence about the person's intent, and
+ * nothing about where anything runs. A model told "502: not an api answer for /v1/repos — the
+ * route is not published on https://dev.kloudlite.io" repeated all of it to the person
+ * (owner, 2026-09-18), which is a host, a route and a status code they can do nothing with — and
+ * which the identity (§3.5) says the session does not know in the first place.
+ *
+ * The detail is not lost: it goes to the bench's log on stderr, named by the tool, where a person
+ * debugging the platform can read it.
+ */
+export function sanitizeError(tool: string, status: number, data: unknown): string {
+  const raw = typeof data === "string" ? data : JSON.stringify(data);
+  // The one message that IS the person's to act on, and says nothing about the platform's shape.
+  if (status === 401 || String(raw).includes(SIGN_IN)) return SIGN_IN;
+  // stderr, never the tool result: the bench captures this, the model never sees it.
+  try {
+    process.stderr.write(`kl-tool ${tool} ${status} ${String(raw).slice(0, 500)}\n`);
+  } catch {
+    /* a closed stderr is not worth failing a tool call over */
+  }
+  const thing = subject(tool);
+  if (status === 403) return `you are not allowed to do that with ${thing}; the person may have to grant it`;
+  if (status === 404) return `that ${thing.replace(/^the /, "")} does not exist; check the name with the person`;
+  if (status === 409) return `that cannot be done while ${thing} is in its current state; say what you tried`;
+  if (status === 422) return `${thing} refused those details: ${short(raw)}`;
+  if (status >= 500) return `${thing} could not be reached just now; try again, or tell the person it is unavailable`;
+  return `${thing} refused that: ${short(raw)}`;
+}
+
+/** A thrown error, said the same way a refused call is: never a host, a route or a status. */
+export function thrown(tool: string, e: Error): string {
+  const said = String(e?.message ?? "");
+  if (said.includes(SIGN_IN)) return SIGN_IN;
+  const clean = short(said);
+  try {
+    process.stderr.write(`kl-tool ${tool} threw ${said.slice(0, 500)}\n`);
+  } catch {
+    /* a closed stderr is not worth failing a tool call over */
+  }
+  return clean === "it did not say why" ? `${subject(tool)} could not be reached just now; try again, or tell the person it is unavailable` : clean;
+}
+
+/** What a tool is ABOUT, in a person's words: `kl_workspace_create` → "workspaces". */
+function subject(tool: string): string {
+  const name = tool.replace(/^kl_/, "");
+  if (name.startsWith("repo") || name.startsWith("pull")) return "repositories";
+  if (name.startsWith("workspace") || name.startsWith("pkg")) return "workspaces";
+  if (name.startsWith("env")) return "environments";
+  if (name.startsWith("container") || name.startsWith("image")) return "images";
+  if (name.startsWith("volume") || name.startsWith("snapshot")) return "snapshots";
+  return "the platform";
+}
+
+/**
+ * The sentence a 4xx body carries, with anything that names the platform's shape taken out: a URL,
+ * a route, a host, a port or a bare status code is never the person's business.
+ */
+function short(raw: unknown): string {
+  const said = String(raw ?? "")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\/v\d+\/\S*/g, "")
+    .replace(/\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b/g, "")
+    .replace(/\b[a-z0-9-]+\.[a-z0-9.-]+\.[a-z]{2,}\b/gi, "")
+    .replace(/\b[45]\d\d\b/g, "")
+    .replace(/[{}"\[\]]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return said.slice(0, 160) || "it did not say why";
+}
+
+const answer = async (method: string, p: string, body?: unknown, tool = "") => {
   const { status, data } = await call(method, p, body);
-  if (status >= 400) return { ...text(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`), isError: true };
-  return text(data ?? `${status} ok`);
+  if (status >= 400) return { ...text(sanitizeError(tool || p.split("/")[2] || "the platform", status, data)), isError: true };
+  return text(data ?? "done");
 };
 /**
  * A service as `/v1` takes it. `command`, `env` and `mounts` have no serde default on the api
@@ -178,6 +249,7 @@ const PLATFORM = [
   "",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
   "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
+  "Never mention hosts, URLs, routes, ports, status codes or where you run; say what you could not do for the person and what you need from them.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
   "Independent commands go in one turn, together; they run at the same time.",
@@ -232,8 +304,9 @@ export function makeReg(pi: ExtensionAPI) {
         // `kl_workspace_create {"name":"backend-rust","packages":["rust"]}` in the queue as though
         // somebody were waiting on it (owner, 2026-09-17). The call renders as its own tool row.
         // A tool that throws — a name two things answer to, a repo that is not owner/name — answers
-        // with the sentence, not with a stack: the model can read a sentence and act on it.
-        return await run(args, signal, ctx).catch((e: Error) => ({ ...text(e.message), isError: true }));
+        // with the sentence, not with a stack. The sentence is cleaned the same way a failed call's
+        // is: a thrown error can carry a URL too (owner, 2026-09-18).
+        return await run(args, signal, ctx).catch((e: Error) => ({ ...text(thrown(name, e)), isError: true }));
       },
     });
   };

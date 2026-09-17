@@ -360,6 +360,7 @@ export default function (pi: ExtensionAPI) {
         // Spec §3.5, verbatim: a session knows its tree, not the container it is served from.
         "You work in one working directory. Every path you give or receive is relative to it. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out; none of that is yours, and tools refuse it. If a task seems to need a path outside your directory, say so in your reply instead.",
         "",
+        "Never mention hosts, URLs, routes, ports, status codes or where you run; say what you could not do for the person and what you need from them.",
         "Never ask a question to confirm an action. Call the tool; the harness asks the person for you. Use question only when the person must choose between real alternatives you cannot decide.",
         "Packages are nixpkgs attributes, not language names: rustc and cargo for Rust, nodejs_22 for Node, go, python3, bun, pnpm, jdk21, gcc. `attr@version` pins one.",
         "",

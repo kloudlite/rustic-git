@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
-import kloudlite, { ALWAYS_ON, BENCH_ALWAYS_ON, identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import kloudlite, { ALWAYS_ON, BENCH_ALWAYS_ON, identity, sanitizeError, settle, thrown, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import workspaceTools from "../../pi/workspace-tools.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
@@ -990,5 +990,51 @@ test("packages from the bench name a workspace, or are refused", async () => {
     }
   } finally {
     restore();
+  }
+});
+
+/**
+ * A tool error says what could not be done, never where anything runs. The model was handed
+ * "502: not an api answer for /v1/repos — the route is not published on https://dev.kloudlite.io"
+ * and repeated all of it to the person (owner, 2026-09-18): a host, a route and a status code they
+ * can do nothing with, about a machine the session is not supposed to know exists (spec §3.5).
+ */
+test("a failed platform call says what failed, not where", () => {
+  const leaky = "not an api answer for /v1/repos — the route is not published on https://dev.kloudlite.io (got a web page)";
+  const said = sanitizeError("kl_repos", 502, leaky);
+  for (const leak of ["http", "https", "/v1", "dev.kloudlite.io", "502"]) assert.ok(!said.includes(leak), `${leak} leaked: ${said}`);
+  assert.match(said, /repositories could not be reached just now/);
+
+  // Each class of refusal reads as the person's own business.
+  assert.match(sanitizeError("kl_workspace_start", 404, "no workspace api"), /does not exist/);
+  assert.match(sanitizeError("kl_workspace_create", 403, "forbidden"), /not allowed/);
+  assert.match(sanitizeError("kl_environment_stop", 409, "still running"), /current state/);
+  // A 422's own sentence survives, minus anything naming the platform's shape.
+  const refused = sanitizeError("kl_workspace_create", 422, '{"error":"rust: unknown attribute at https://search.devbox.sh/v1/x"}');
+  assert.match(refused, /unknown attribute/);
+  for (const leak of ["http", "/v1", "search.devbox.sh"]) assert.ok(!refused.includes(leak), `${leak} leaked: ${refused}`);
+
+  // Signing in IS the person's business, and says nothing about a machine.
+  assert.equal(sanitizeError("kl_repos", 401, "anything"), "sign in on the Kloudlite desktop app");
+
+  // A thrown error is cleaned the same way.
+  const threw = thrown("kl_repo_create", new Error("connect ECONNREFUSED 10.42.3.190:7788"));
+  for (const leak of ["10.42.3.190", "7788"]) assert.ok(!threw.includes(leak), `${leak} leaked: ${threw}`);
+});
+
+test("no identity tells a model to talk about where it runs", () => {
+  const rule = "Never mention hosts, URLs, routes, ports, status codes or where you run; say what you could not do for the person and what you need from them.";
+  assert.ok(identity(BENCH_HANDS).includes(rule), "the bench identity");
+  const restore = withEnv({ KL_TOOLS_WORKSPACE: "ws-1", KL_WORKSPACE_ID: "ws-1", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, hooks } = fakePi();
+    workspaceTools(pi);
+    return hooks["before_agent_start"][0]({ prompt: "", systemPrompt: "" }).then((out: { systemPrompt: string }) => {
+      assert.ok(out.systemPrompt.includes(rule), "the workspace identity");
+      restore();
+    });
+  } catch (e) {
+    restore();
+    throw e;
   }
 });
