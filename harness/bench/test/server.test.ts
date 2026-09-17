@@ -200,7 +200,7 @@ test("GET /sessions/{id}/tools answers what that session can call, and 404s an i
     // The seven are there, but they are the tool server's, run in the bench's OWN workspace — the
     // built-ins, which would have run in the bench container, are what `--no-builtin-tools` removed.
     for (const own of ["bash", "read", "write"]) assert.ok(tools.includes(own), `${own}: ${tools.join(",")}`);
-    assert.ok(tools.includes("kl_workspace_ask"), tools.join(","));
+    assert.ok(tools.includes("ask"), tools.join(","));
     assert.equal((await fetch(t.base + "/sessions/nope/tools")).status, 404);
   } finally {
     await t.down();

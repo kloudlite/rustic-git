@@ -20,7 +20,7 @@ const MAX_BODY = 64 * 1024 * 1024;
 /** Split and decode a path; a bad escape or an id that could walk out of a folder (`..%2F`) is a 400, never a crash or a read elsewhere. */
 function segments(pathname: string): string[] {
   const p = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if ((p[0] === "sessions" || p[0] === "workspaces" || p[0] === "proposals") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
+  if ((p[0] === "sessions" || p[0] === "workspaces" || p[0] === "proposals" || p[0] === "agents") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
     throw new Error(`bad id ${JSON.stringify(p[1])}`);
   return p;
 }
@@ -133,6 +133,20 @@ export function serve(
         }
       }
       if (m === "GET" && u.pathname === "/proposals") return send(res, 200, bench.openProposals());
+      // An agent: a fresh ephemeral session in a workspace, given one task.
+      if (p[0] === "agents") {
+        if (p.length === 1 && m === "POST") {
+          const b = await body(req);
+          if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
+          return send(res, 202, await bench.agent(String(b.workspace ?? ""), String(b.task ?? ""), String(b.name ?? ""), b.from));
+        }
+        // Closing one is removing its session: an agent's transcript is its own and goes with it.
+        if (p.length === 2 && m === "DELETE") {
+          await bench.remove(`e-${p[1]}`, true);
+          return send(res, 204);
+        }
+      }
+      if (m === "GET" && u.pathname === "/plans") return send(res, 200, bench.plans.all());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       if (m === "POST" && u.pathname === "/import") {

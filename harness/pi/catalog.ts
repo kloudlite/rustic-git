@@ -21,7 +21,7 @@ export type ToolSpec = {
 };
 
 /** Which tools never ask: a message to another session, and this machine's own packages. */
-const UNGATED = new Set(["kl_workspace_ask", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
+const UNGATED = new Set(["ask", "plan", "skill", "tool_search", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
 
 /** Whether a call has to be asked about first: it changes somebody's platform state (spec §9). */
 export function gated(name: string): boolean {
@@ -42,7 +42,7 @@ const withList = (label: string, v: unknown) => (list(v) ? ` with ${label}${list
 
 export const TOOLS: ToolSpec[] = [
 
-  { name: "kl_workspace_ask", group: "workspace", summary: "Ask another workspace to do something: the request is queued into that workspace's own session, which does the work and answers back here.", effect: "write" },
+  { name: "ask", group: "workspace", summary: "Ask a workspace's own session to do something, or start a fresh agent with one task.", effect: "write" },
 
   { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
 
@@ -90,6 +90,11 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_environment_service_rm", group: "environment", summary: "Remove a service from an environment; its workload goes, its files stay on the volume.", effect: "destroy", ask: (a) => `Remove service ${a.name} from environment ${a.id}; its files stay on the volume` },
   { name: "kl_environment_restore", group: "environment", summary: "Restore a snapshot into a new environment.", effect: "write", ask: (a) => `Restore snapshot ${a.snapshot_id} into a new environment ${a.name}` },
   { name: "kl_environment_delete", group: "environment", summary: "Delete an environment.", effect: "destroy", ask: (a) => `Delete environment ${a.id}` },
+
+  { name: "kl_agent_close", group: "workspace", summary: "Close an agent and its transcript.", effect: "write", ask: (a) => `Close agent ${a.name}` },
+  { name: "plan", group: "workspace", summary: "Write the plan for this work, and tick steps as they land.", effect: "read" },
+  { name: "skill", group: "workspace", summary: "What a part of the platform is and the verbs it has: workspaces, environments, snapshots, repos, images, agents.", effect: "read" },
+  { name: "tool_search", group: "workspace", summary: "Find the tool for a platform verb, by what you want to do. It answers the names and parameters, and turns them on.", effect: "read" },
 
   { name: "kl_capabilities", group: "platform", summary: "Everything you can do here, by name and effect. Read this instead of going looking.", effect: "read" },
 ];

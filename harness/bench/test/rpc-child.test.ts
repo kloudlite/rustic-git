@@ -61,15 +61,16 @@ test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions
   }
 });
 
-test("tools() reads the argv: a bench session its own machine's plus the platform, a workspace session its allow-list, a fork none", () => {
+test("tools() reads the argv: every session its own machine's plus the platform, a fork none", () => {
   const dir = "/tmp/bench-tools";
   const bench = new RpcChild("s-1", { dir, model: "m" }, () => undefined).tools();
   // The seven are the tool server's, in the bench's own workspace; the built-ins that would have
   // run in the bench container are gone with `--no-builtin-tools`.
   for (const own of ["bash", "read", "write"]) assert.ok(bench.includes(own), `${own}: ${bench.join(",")}`);
-  assert.ok(bench.includes("kl_workspace_ask"), bench.join(","));
+  assert.ok(bench.includes("ask") && bench.includes("tool_search"), bench.join(","));
   const ws = new RpcChild("w-1", { dir, model: "m", file: "/tmp/x.jsonl", tools: "ws-1" }, () => undefined).tools();
-  assert.ok(ws.includes("bash") && ws.includes("kl_pkg_add"), ws.join(","));
-  assert.ok(!ws.includes("kl_workspace_ask"), "a workspace session drives nothing: " + ws.join(","));
+  // No `--tools` allow-list any more: `tool_search` turns a deferred tool on at runtime, and an
+  // allow-list would have to be kept equal to the whole catalogue by hand to admit it.
+  assert.ok(ws.includes("bash") && ws.includes("kl_pkg_add") && ws.includes("tool_search"), ws.join(","));
   assert.deepEqual(new RpcChild("b-1", { dir, model: "m", fork: "/tmp/x.jsonl" }, () => undefined).tools(), []);
 });

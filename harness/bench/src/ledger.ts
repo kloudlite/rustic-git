@@ -68,3 +68,46 @@ export class Procs {
     return lost.map((r) => ({ ...r }));
   }
 }
+
+
+export type PlanItem = { text: string; done?: true };
+
+/**
+ * `/bench/plans.json`: what each session said it was going to do. The model writes it with
+ * `kl_plan` and ticks items with `kl_plan_done`; the inspector's PLAN panel draws it. Kept on
+ * disk so a reconnect or a restart shows the plan rather than an empty panel.
+ */
+export class Plans {
+  private file: string;
+  private rows: Record<string, PlanItem[]>;
+  constructor(dir: string) {
+    this.file = path.join(dir, "plans.json");
+    this.rows = readJson<Record<string, PlanItem[]>>(this.file, {});
+  }
+  set(session: string, items: string[]): PlanItem[] {
+    this.rows[session] = items.map((text) => ({ text }));
+    replaceJson(this.file, this.rows);
+    return this.get(session);
+  }
+  /** Tick by exact text, else by the first item that contains it — a model rarely quotes itself exactly. */
+  done(session: string, item: string): PlanItem[] {
+    const list = this.rows[session] ?? [];
+    const i = list.findIndex((x) => x.text === item);
+    const j = i >= 0 ? i : list.findIndex((x) => !x.done && x.text.toLowerCase().includes(item.toLowerCase()));
+    if (j < 0) throw new Error(`no plan item ${JSON.stringify(item)}`);
+    list[j].done = true;
+    replaceJson(this.file, this.rows);
+    return this.get(session);
+  }
+  get(session: string): PlanItem[] {
+    return (this.rows[session] ?? []).map((x) => ({ ...x }));
+  }
+  all(): { session: string; items: PlanItem[] }[] {
+    return Object.entries(this.rows).map(([session, items]) => ({ session, items: items.map((x) => ({ ...x })) }));
+  }
+  discard(session: string): void {
+    if (!(session in this.rows)) return;
+    delete this.rows[session];
+    replaceJson(this.file, this.rows);
+  }
+}

@@ -4,10 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
-import kloudlite, { identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import kloudlite, { ALWAYS_ON, identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
-import { IDE_TOOLS, WORKSPACE_TOOLS } from "../src/rpc-child.ts";
+import { IDE_TOOLS } from "../src/rpc-child.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
@@ -17,11 +17,15 @@ type Registered = { name: string; description: string; parameters: any };
 function fakePi() {
   const tools: Registered[] = [];
   const hooks: Record<string, ((ev: any) => Promise<any>)[]> = {};
+  let active: string[] = [];
   const pi = {
     registerTool: (t: Registered) => tools.push(t),
     on: (name: string, fn: (ev: any) => Promise<any>) => ((hooks[name] ??= []).push(fn), undefined),
+    getAllTools: () => tools,
+    getActiveTools: () => active,
+    setActiveTools: (names: string[]) => void (active = names),
   } as any;
-  return { pi, tools, hooks };
+  return { pi, tools, hooks, active: () => active };
 }
 const withEnv = (vars: Record<string, string | undefined>) => {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
@@ -35,17 +39,19 @@ const withEnv = (vars: Record<string, string | undefined>) => {
 test("a bench session registers exactly the catalogue; a workspace session only its own packages", () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
   try {
-    const { pi, tools } = fakePi();
+    const { pi, tools, active: activeNow } = fakePi();
     kloudlite(pi);
     const registered = tools.map((t) => t.name).sort();
     // `kloudlite.ts` registers the catalogue except the entries that run ON this machine —
     // those are `workspace-tools.ts`'s, because they go to a tool server rather than to /v1.
     assert.deepEqual(registered, TOOLS.map((t) => t.name).filter((n) => !IDE_TOOLS.includes(n)).sort());
+    // Registered is not active: a session starts with twelve and searches for the rest.
+    assert.deepEqual(activeNow().slice().sort(), ALWAYS_ON.slice().sort());
     assert.equal(new Set(registered).size, registered.length, "no tool is registered twice");
     // The shell is gone: nothing a bench session can call runs in the bench pod.
     for (const gone of ["bash", "read", "write", "edit", "grep", "find", "ls", "process"]) assert.ok(!registered.includes(gone), gone);
     // Another workspace is asked, never driven — and never re-packaged by id.
-    assert.ok(registered.includes("kl_workspace_ask"));
+    assert.ok(registered.includes("ask"));
     assert.ok(!registered.includes("kl_workspace_packages"));
   } finally {
     restore();
@@ -58,8 +64,9 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const registered = tools.map((t) => t.name).sort();
-    assert.deepEqual(registered, WORKSPACE_TOOLS.split(",").filter((t) => t.startsWith("kl_") && !IDE_TOOLS.includes(t)).sort());
-    for (const no of ["kl_workspace_ask", "kl_environment_delete", "kl_workspace_delete", "kl_quota"]) assert.ok(!registered.includes(no), no);
+    // A workspace session registers the same catalogue minus what only the bench does with it.
+    for (const yes of ["kl_pkg_add", "kl_env_switch", "kl_intercept", "kl_environment_service_add", "ask", "plan", "tool_search"]) assert.ok(registered.includes(yes), yes);
+    for (const no of ["kl_workspace_delete", "kl_environment_delete", "kl_workspace_create"]) assert.ok(!registered.includes(no), no);
   } finally {
     back();
   }
@@ -82,8 +89,10 @@ test("the system prompt is the harness's own, and says only what the model must 
 
     // What it must know: the five things, in the person's words.
     for (const rule of [
-      /A workspace is a machine with packages and a shell/,
-      /Another workspace is asked, not touched: kl_workspace_ask/,
+      /`skill \{name\}` says what each one is and the verbs it has: workspaces, environments, snapshots, repos, images, agents\./,
+      /Every platform tool is one `tool_search` away/,
+      /Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell\./,
+      /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
       /Do what is asked, directly\. No checks first\./,
       /Only the tools reach the platform\. Never change anything the person did not ask for\./,
@@ -319,7 +328,7 @@ test("kl_capabilities answers this session's own catalogue, and says what is not
     const out = (await (tools.find((t) => t.name === "kl_capabilities") as any).execute("c1", {}, undefined, undefined, undefined)).content[0].text as string;
     assert.match(out, /^this machine \(its own files and shell, nowhere else\):/);
     for (const g of ["workspace:", "environment:", "platform:"]) assert.ok(out.includes(g), g);
-    assert.match(out, /kl_workspace_ask \[write\]/);
+    assert.match(out, /ask \[write\]/);
     assert.match(out, /anything not listed is not something you can do — say so\.$/);
   } finally {
     restore();
@@ -540,5 +549,87 @@ test("a snapshot is a snapshot: create from one, list them, and never the word v
     restore();
     api.srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("twelve tools on, the rest one search away, and the six skills read", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, active } = fakePi();
+    kloudlite(pi);
+    const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
+    const run = (n: string, a: any) => tool(n).execute("c1", a, undefined, undefined, undefined);
+
+    // 43 tools in front of a model is a menu it reads instead of working.
+    assert.deepEqual(active().slice().sort(), ALWAYS_ON.slice().sort());
+    assert.ok(tools.some((t) => t.name === "kl_intercept"), "still registered, just not active");
+
+    // A search finds it, says what it takes, and turns it on for the rest of the session.
+    const found = await run("tool_search", { query: "intercept" });
+    // Every match, best-named first is not promised — what matters is that the tool is in there
+    // with what it takes, and that it is on afterwards.
+    assert.match(found.content[0].text, /kl_intercept — .*\[write\]; params: id, service, workspace, ports/);
+    assert.ok(active().includes("kl_intercept"), active().join(","));
+    // What the model should say when there is no tool, in the words it should use.
+    assert.equal((await run("tool_search", { query: "reboot the datacentre" })).content[0].text, "no tool for that; say so to the person");
+
+    // The skills are product words, not tool lists, and each one loads from beside the extension.
+    for (const name of ["workspaces", "environments", "snapshots", "repos", "images", "agents"]) {
+      const r = await run("skill", { name });
+      assert.match(r.content[0].text, new RegExp(`^# ${name[0].toUpperCase()}`, "i"));
+    }
+    assert.equal((await run("skill", { name: "nope" })).isError, true);
+  } finally {
+    restore();
+  }
+});
+
+test("ask routes to a workspace's own session or to a fresh agent", async () => {
+  const seen: { url: string; body: any }[] = [];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      seen.push({ url: req.url!, body: b ? JSON.parse(b) : undefined });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const restore = withEnv({ KL_BENCH_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_SESSION: "s-1", KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const ask = tools.find((t) => t.name === "ask")! as unknown as { execute: (...a: any[]) => Promise<any> };
+
+    // A workspace REMEMBERS: its own session, which has done everything it has done before.
+    const teammate = await ask.execute("c1", { to: "svelte-frontend", task: "run the tests" }, undefined, undefined, undefined);
+    assert.equal(seen[0].url, "/workspaces/svelte-frontend/ask");
+    assert.deepEqual(seen[0].body, { text: "run the tests", from: "s-1" });
+    assert.match(teammate.content[0].text, /queued in svelte-frontend's session/);
+
+    // An agent starts clean, is named, and works on this machine unless told otherwise.
+    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
+    assert.equal(seen[1].url, "/agents");
+    assert.match(seen[1].body.name, /^audit-[a-z0-9]{6}$/);
+    assert.deepEqual([seen[1].body.task, seen[1].body.workspace, seen[1].body.from], ["audit the routes", "bench-ada", "s-1"]);
+    assert.match(agent.content[0].text, /^agent audit-[a-z0-9]{6} started$/);
+  } finally {
+    restore();
+    srv.close();
+  }
+});
+
+test("an agent cannot start agents", () => {
+  const restore = withEnv({ KL_EPHEMERAL: "1", KL_TOOLS_WORKSPACE: "api", KL_TEAM: "acme", KL_WORKSPACE_ID: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools, active } = fakePi();
+    kloudlite(pi);
+    // Its child would have nobody to report to and no tab to be seen in.
+    assert.ok(!tools.some((t) => t.name === "ask"), tools.map((t) => t.name).join(","));
+    assert.ok(!active().includes("ask"), active().join(","));
+    assert.ok(active().includes("tool_search"), "it can still find a tool it needs");
+  } finally {
+    restore();
   }
 });

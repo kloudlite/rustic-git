@@ -139,13 +139,12 @@ export function identity(hands: string, platform = true): string {
  * (owner, 2026-09-17: "keep the skills simple").
  */
 const PLATFORM = [
-  "You have workspaces, environments, snapshots, repos and images, and tools for each.",
-  "- A workspace is a machine with packages and a shell. This one is yours: \"install X\" or \"switch environment\" means here.",
-  "- Another workspace is asked, not touched: kl_workspace_ask. Something new (a backend, a service, a project) gets a new workspace.",
-  "- An environment runs services (databases, queues, web). Add or remove a service, snapshot it, restore a snapshot, intercept a service to a workspace.",
-  "- Snapshots: take one, list them, restore or clone from one.",
-  "- Repos: clone into your workspace and work there; open pull requests with the tools.",
-  "- Images: build and push from your workspace.",
+  "You have workspaces, environments, snapshots, repos and images. `skill {name}` says what each one is and the verbs it has: workspaces, environments, snapshots, repos, images, agents.",
+  "You start with your own machine's tools — read, write, edit, bash, grep, find, ls, process — plus ask, plan, skill and tool_search. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
+  "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
+  "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
+  "",
+  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Write the plan first when the work has more than two steps, and tick items as they land.",
   "",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
@@ -171,7 +170,7 @@ export const BENCH_HANDS = "You are the Kloudlite harness, the person's bench.";
 export function makeReg(pi: ExtensionAPI) {
   const spec = (name: string) => TOOLS.find((t) => t.name === name)!;
   const names: string[] = [];
-  const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
+  const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal, ctx?: any) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
     const s = spec(name);
     names.push(name);
     pi.registerTool({
@@ -197,7 +196,7 @@ export function makeReg(pi: ExtensionAPI) {
         publish({ id, workspace: target, dir: "out", text: `${name} ${JSON.stringify(args)}`, state: "sent" });
         // A tool that throws — a name two things answer to, a repo that is not owner/name — answers
         // with the sentence, not with a stack: the model can read a sentence and act on it.
-        const r = await run(args, signal).catch((e: Error) => ({ ...text(e.message), isError: true }));
+        const r = await run(args, signal, ctx).catch((e: Error) => ({ ...text(e.message), isError: true }));
         publish({ id: `${id}-in`, workspace: target, dir: "in", text: r.content.map((c) => c.text).join("").slice(0, 2000), state: r.isError ? "failed" : "done", ref: id });
         publish({ id, state: r.isError ? "failed" : "done" });
         return r;
@@ -258,6 +257,109 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
   const r = await fetch(`${BENCH_URL()}${p}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { ok: r.ok, data: await r.json().catch(() => ({ error: `the bench answered ${r.status}` })) };
 };
+
+/**
+ * The twelve tools a session starts with, and the rest one search away. 43 tools in front of a
+ * model is a menu it reads instead of working (owner, 2026-09-17: "43 tools is huge"); every
+ * platform tool stays REGISTERED — the proposals, the cards and the waits are unchanged — but
+ * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
+ */
+export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "plan", "skill", "tool_search"];
+
+/** The six skills, read from beside the extension: product words, not tool lists. */
+const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
+function skillText(name: string): string | undefined {
+  if (!SKILLS.includes(name)) return undefined;
+  try {
+    return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", `${name}.md`), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** One line per match, as the catalogue describes it: what it is called, what it does, what it takes. */
+function describeTool(pi: ExtensionAPI, name: string): string {
+  const t = TOOLS.find((x) => x.name === name);
+  const params = Object.keys((pi.getAllTools?.() ?? []).find((x: { name: string }) => x.name === name)?.parameters?.properties ?? {});
+  return `${name} — ${t?.summary ?? ""} [${t?.effect ?? "read"}]${params.length ? `; params: ${params.join(", ")}` : ""}`;
+}
+
+/**
+ * `skill` and `tool_search`: the two ways out of the twelve. A search that finds nothing says so
+ * in the words the model should then use with the person, rather than leaving it to invent a tool.
+ */
+export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
+  reg("skill", { name: Type.String({ description: SKILLS.join(", ") }) }, async (a) => {
+    const body = skillText(String(a.name));
+    return body ? text(body) : { ...text(`no skill ${a.name}; there are ${SKILLS.join(", ")}`), isError: true };
+  });
+  reg("tool_search", { query: Type.String({ description: "what you want to do, in a word or two" }) }, async (a) => {
+    const words = String(a.query).toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
+    const hit = TOOLS.filter((t) => {
+      const hay = `${t.name} ${t.summary} ${t.group}`.toLowerCase();
+      return words.length ? words.every((w) => hay.includes(w)) || words.some((w) => t.name.includes(w)) : false;
+    });
+    if (!hit.length) return text("no tool for that; say so to the person");
+    // Activated for the rest of the session: pi applies an additive change before the next request.
+    const active = pi.getActiveTools?.() ?? ALWAYS_ON;
+    pi.setActiveTools?.([...new Set([...active, ...hit.map((t) => t.name)])]);
+    return text(hit.map((t) => describeTool(pi, t.name)).join("\n"));
+  });
+}
+
+/**
+ * Agents and the plan — Claude Code's own two shapes (owner, 2026-09-17). An AGENT is a fresh
+ * session in a workspace with one task and no history, running in the background and reporting
+ * once; it is the ask machinery pointed at a session that did not exist a moment ago. The PLAN is
+ * what this session says it will do, drawn in the inspector.
+ *
+ * An agent cannot start agents: its own child would have nobody to report to and no way to be
+ * seen. `KL_EPHEMERAL` is how a session knows it is one.
+ */
+export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefined) {
+  const slug = (s: string) => (s || "agent").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || "agent";
+  reg(
+    "ask",
+    {
+      to: Type.String({ description: 'a workspace (by name or id), or "agent" for a fresh one with no history' }),
+      task: Type.String({ description: "the whole brief, in one message: what to do and what to answer with" }),
+      name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
+      workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
+    },
+    async (a) => {
+      // One verb, two shapes: a workspace REMEMBERS (its own session, a teammate), an agent starts
+      // clean and is thrown away. A person says "ask X to…" for both, so the tool is one.
+      if (a.to === "agent") {
+        const name = `${slug(a.name ?? a.task.split(/\s+/).slice(0, 3).join("-"))}-${Math.random().toString(36).slice(2, 8)}`;
+        const r = await benchCall("POST", "/agents", { task: a.task, workspace: a.workspace ?? own, name, from: process.env.KL_SESSION });
+        if (!r.ok) return { ...text(String(r.data?.error ?? "the bench could not start it")), isError: true };
+        return text(`agent ${name} started`);
+      }
+      const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: a.task, from: process.env.KL_SESSION });
+      if (!r.ok) return { ...text(String(r.data?.error ?? `the bench answered about ${a.to}`)), isError: true };
+      return text(`queued in ${a.to}'s session; its reply arrives here`);
+    },
+  );
+  reg("kl_agent_close", { name: Type.String({ description: "the agent's name" }) }, async (a) => {
+    const r = await benchCall("DELETE", `/agents/${encodeURIComponent(a.name)}`);
+    return r.ok ? text(`agent ${a.name} closed`) : { ...text(String(r.data?.error ?? "no such agent")), isError: true };
+  });
+}
+
+/** The plan this session is working to: written once, ticked as it lands. */
+export function planTools(reg: ReturnType<typeof makeReg>) {
+  const publish = (ctx: any, v: unknown) => ctx?.ui?.setWidget?.("harness:plan", [JSON.stringify(v)]);
+  reg(
+    "plan",
+    { items: Type.Optional(Type.Array(Type.String(), { description: "the steps, in order — writes the plan" })), done: Type.Optional(Type.String({ description: "a step that is finished — ticks it" })) },
+    async (a, _signal, ctx) => {
+      if (a.done !== undefined) return publish(ctx, { done: a.done }), text(`done: ${a.done}`);
+      if (!a.items?.length) return { ...text("plan takes items (the steps) or done (a step that landed)"), isError: true };
+      publish(ctx, { items: a.items });
+      return text(`plan: ${a.items.length} steps`);
+    },
+  );
+}
 
 /**
  * How a workspace is getting on, without going to look. A model with no tool for this grepped the
@@ -501,18 +603,7 @@ export function tools(pi: ExtensionAPI) {
   };
   const O = <T>(t: T) => Type.Optional(t as any);
 
-  // workspaces. Another workspace is ASKED, never driven: the request goes to the bench's own
-  // server, which queues it into that workspace's session — the one place with hands there.
-  reg("kl_workspace_ask", { workspace: S("workspace id"), request: S("what to do there, in plain words") }, async (a) => {
-    const r = await fetch(`${BENCH_URL()}/workspaces/${encodeURIComponent(a.workspace)}/ask`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: a.request, from: process.env.KL_SESSION }),
-    });
-    const d = (await r.json().catch(() => ({}))) as { error?: string };
-    if (!r.ok) return { ...text(d.error ?? `the bench answered ${r.status}`), isError: true };
-    return text(`queued in ${a.workspace}'s session; its reply arrives here`);
-  });
+  // workspaces
   reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
   reg("kl_workspace", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}`));
   reg(
@@ -571,7 +662,12 @@ export function tools(pi: ExtensionAPI) {
 
   repoTools(reg);
   progressTool(reg);
+  planTools(reg);
+  if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, process.env.KL_WORKSPACE_ID);
+  searchTools(reg, pi);
   capabilities(reg);
+  // Twelve to start with; the rest are one `tool_search` away.
+  pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
 }
 
 /**
@@ -594,7 +690,12 @@ export default function (pi: ExtensionAPI) {
     environmentTools(reg);
     repoTools(reg);
     progressTool(reg);
-    return capabilities(reg);
+    planTools(reg);
+    // An agent is a session with one task: it reports to whoever started it and starts nobody.
+    if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
+    searchTools(reg, pi);
+    capabilities(reg);
+    return pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
   }
   tools(pi);
   const own = process.env.KL_WORKSPACE_ID;

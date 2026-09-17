@@ -458,6 +458,9 @@ export function App() {
   // The selected session's pi and live state: what every command acts on.
   const cur = () => threads().find((t) => t.id === selected())?.pi ?? live_()[0]?.id ?? "";
   const L = () => live.thread(cur());
+  // The plan is the session's own: the panel follows whichever thread is being read. It sits here
+  // rather than on `machine` above because the active thread is only known this far down.
+  const planned = createMemo(() => ({ ...machine(), todos: live.planOf(cur()) }));
   /** Every pi call the harness makes goes through here: a refusal or a failure is a note, never silence. */
   const pi = (cmd: Record<string, unknown> & { type: string }, id = cur()) => {
     const why = refusal(cmd, { session: id, connected: live.connected(), writable: live.writable() });
@@ -595,6 +598,7 @@ export function App() {
     if (!st.connected) return;
     await refreshSessions().catch(fail);
     void bench<Record<string, unknown>[]>("GET", "/procs").then((rows) => live.onEvent({ type: "procs", rows }), fail);
+    void bench<{ session: string; items: unknown[] }[]>("GET", "/plans").then((rows) => rows.forEach((r) => live.onEvent({ type: "plan", ...r })), fail);
     void bench<Record<string, unknown>[]>("GET", "/tasks").then((rows) => rows.forEach((row) => live.onEvent({ type: "task", row })), fail);
   });
   // Slash commands the harness answers itself, before anything reaches pi;

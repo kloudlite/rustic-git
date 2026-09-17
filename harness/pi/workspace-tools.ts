@@ -72,6 +72,18 @@ export function onlyWaits(cmd: string): boolean {
   return steps.every((x) => /^(sleep|timeout)\b/.test(x) || /^echo\b/.test(x) || /^(true|:)$/.test(x) || /^date\b/.test(x));
 }
 
+/**
+ * `kl env switch`, `kl pkg add`, `kl container build` — the CLI a person uses in their own shell,
+ * which a model reaches for because it is the verb it knows. It stays ALLOWED (it is their machine
+ * and their CLI), but the answer carries one line pointing at the tool that does the same thing
+ * with a card, a proposal and a wait attached.
+ */
+const KL_VERB = /(^|[\s;&|])kl\s+(env|pkg|container|workspace|snapshot|repo)\b\s*(\w+)?/;
+export function shellNote(cmd: string): string | undefined {
+  const m = KL_VERB.exec(cmd);
+  return m ? `note: tool_search '${[m[2], m[3]].filter(Boolean).join(" ")}' has a tool for this` : undefined;
+}
+
 /** The reason a command or path is refused, or undefined when there is none. */
 export function forbidden(s: unknown): string | undefined {
   const t = Array.isArray(s) ? s.join(" ") : typeof s === "string" ? s : "";
@@ -318,10 +330,13 @@ export default function (pi: ExtensionAPI) {
         try {
           const c = toIde(name, p);
           const r = await server.call(c, signal);
+          // A CLI verb that a tool covers: the work is done, and the model is told where the tool is.
+          const note = name === "bash" || (name === "process" && p.action === "start") ? shellNote(String(p.command ?? "")) : undefined;
           // The harness's own table of what is running: mirrored from the tool server after every
           // call that could have changed it, because nothing else tells the bench a process exists.
           if (PROCESS_TOOLS.has(c.tool) || c.args.detach) await publishProcs(server, ctx, signal);
-          return fromIde(name, r.status, r.body, p.limit);
+          const out = fromIde(name, r.status, r.body, p.limit);
+          return note ? { ...out, content: [...out.content, { type: "text" as const, text: note }] } : out;
         } catch (e) {
           return text((e as Error).message, true);
         }

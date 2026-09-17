@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, shellNote, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -366,4 +366,16 @@ test("code and containers run in this machine, as argv the shell cannot splice",
   } finally {
     if (saved === undefined) delete process.env.KL_GIT_SSH_HOST; else process.env.KL_GIT_SSH_HOST = saved;
   }
+});
+
+test("a kl CLI verb in the shell is allowed, and points at the tool that does it properly", () => {
+  // It is their machine and their CLI: the work happens. The note is where the tool is.
+  assert.equal(shellNote("kl env switch devstack"), "note: tool_search 'env switch' has a tool for this");
+  assert.equal(shellNote("cd app && kl container build -t api:1 ."), "note: tool_search 'container build' has a tool for this");
+  assert.equal(shellNote("kl pkg add ripgrep"), "note: tool_search 'pkg add' has a tool for this");
+  // Not a platform verb, and not the word kl inside something else.
+  assert.equal(shellNote("npm run dev"), undefined);
+  assert.equal(shellNote("./scripts/klingon.sh"), undefined);
+  assert.equal(shellNote("kl ide serve"), undefined);
+  assert.equal(forbidden("kl env switch devstack"), undefined, "allowed, not refused");
 });

@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
-import { WORKSPACE_TOOLS } from "../src/rpc-child.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 
@@ -26,13 +25,12 @@ test("a workspace thread runs its own pi on the workspace's tools, with its file
     assert.equal(st.tools, "api");
     assert.equal(st.team, "acme");
     assert.equal(st.sessionFile, s.file);
-    assert.equal(st.argv[st.argv.indexOf("--tools") + 1], WORKSPACE_TOOLS);
-    // Its own machine, its own packages, and its space's environment — and nothing that names another workspace.
-    for (const t of ["bash", "kl_pkg_add", "kl_env_switch", "kl_intercept", "kl_environment_service_add"]) assert.ok(WORKSPACE_TOOLS.split(",").includes(t), t);
-    for (const t of ["kl_workspace_ask", "kl_workspace_delete", "kl_environment_delete"]) assert.ok(!WORKSPACE_TOOLS.split(",").includes(t), t);
+    // `--no-builtin-tools` and no allow-list, the same as a bench session: what a session may call
+    // is what its extensions registered, and `tool_search` turns the deferred ones on at runtime.
+    assert.equal(st.argv.indexOf("--tools"), -1, st.argv.join(" "));
+    assert.ok(st.argv.includes("--no-builtin-tools"), st.argv.join(" "));
     const exts = st.argv.filter((_, i) => st.argv[i - 1] === "-e");
     assert.deepEqual(exts.map((x) => path.basename(x)), ["workspace-tools.ts", "kloudlite.ts"], "the workspace's own tools, and its own packages");
-    assert.equal(st.argv.includes("--no-builtin-tools"), false, "a workspace session keeps its allow-listed tools");
     assert.ok(fs.existsSync(s.file!));
     assert.equal((await b.openWorkspace("api")).id, "w-api", "opening twice is one thread");
 

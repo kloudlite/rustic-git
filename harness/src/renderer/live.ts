@@ -62,6 +62,15 @@ export function setWorkspaceNames(rows: { id: string; name?: string }[]) {
 }
 export const wsName = (id: string) => wsNames()[id] ?? id;
 
+/**
+ * What each session said it would do. The PLAN panel used to draw a hardcoded empty list — pi has
+ * no todo events of its own, so the plan comes from the model's own `kl_plan` through the bench.
+ */
+const [plans, setPlans] = createStore<Record<string, { text: string; done?: true }[]>>({});
+export { plans };
+export const planOf = (session: string) =>
+  (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text, state: (x.done ? "done" : "pending") as "done" | "pending" }));
+
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
 /** Sessions whose workspace messages were discarded with them; queues hide these. */
@@ -376,6 +385,9 @@ export function onEvent(ev: Ev & { pi?: string }) {
       if (row?.session) thread(row.session).proposal(row);
       return;
     }
+    case "plan":
+      if (typeof ev.session === "string") setPlans(ev.session, (ev.items as { text: string; done?: true }[]) ?? []);
+      return;
     case "exchange":
       // One row per publish: a record, or a transition of one already held.
       if (ev.row) foldExchange(ev.row as Exchange);

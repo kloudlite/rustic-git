@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
-import { Procs, Tasks, type ProcRow } from "./ledger.ts";
+import { Plans, Procs, Tasks, type PlanItem, type ProcRow } from "./ledger.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
@@ -10,7 +10,7 @@ import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 /** One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in. */
-type Ask = { exchange: string; from: string; workspace: string };
+type Ask = { exchange: string; from: string; workspace: string; agent?: true };
 export type BenchOpts = {
   dir: string;
   readOnly: boolean;
@@ -47,6 +47,7 @@ export class Bench {
   readonly exchanges: ExchangeLog;
   readonly tasks: Tasks;
   readonly procs: Procs;
+  readonly plans: Plans;
   readonly writable: Writable;
   private opts: BenchOpts;
   private children = new Map<string, RpcChild>();
@@ -68,6 +69,7 @@ export class Bench {
     this.exchanges = new ExchangeLog(opts.dir);
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
+    this.plans = new Plans(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
   }
 
@@ -207,6 +209,13 @@ export class Bench {
     if (ev.type === "extension_ui_request" && ev.method === "setWidget") {
       const line = (ev.widgetLines as string[] | undefined)?.[0];
       try {
+        if (ev.widgetKey === "harness:plan" && line) {
+          // What this session says it is going to do. The panel draws it; nothing else reads it.
+          const p = JSON.parse(line) as { items?: string[]; done?: string };
+          const items = p.done !== undefined ? this.plans.done(id, p.done) : this.plans.set(id, p.items ?? []);
+          this.write(() => items);
+          this.emit({ type: "plan", session: id, items });
+        }
         if (ev.widgetKey === "harness:proposal" && line) {
           // A tool asking to run: recorded here, drawn by the desktop, answered by a person.
           const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string };
@@ -294,7 +303,7 @@ export class Bench {
     this.emit({ type: "exchange", row: back });
     // The asking session may be gone by now (removed, archived): an answer nobody is waiting for is dropped, not thrown.
     if (!answer || !this.sessions.get(a.from)) return;
-    await this.send(a.from, `[from workspace ${a.workspace}] ${answer}`).catch(() => undefined);
+    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${answer}`).catch(() => undefined);
   }
 
   /**
@@ -436,6 +445,37 @@ export class Bench {
     return [...this.proposals.entries()].filter(([, p]) => !p.answer).map(([id, p]) => ({ id, session: p.session, tool: p.tool, args: p.args, summary: p.summary }));
   }
 
+  /**
+   * An AGENT: a fresh session in a workspace, given one task and no history, whose answer comes
+   * back to whoever started it. It is an ask (§2's machinery, unchanged) to a session that did not
+   * exist a moment ago — which is the whole difference between an agent and a teammate: the
+   * teammate remembers, the agent starts clean and is thrown away.
+   *
+   * Several run at once because each has its own session; the caller carries on meanwhile.
+   */
+  async agent(workspace: string, task: string, name: string, from: string): Promise<{ session: string; exchange: string; name: string }> {
+    this.refuse(true);
+    if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
+    if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    const s = await this.openEphemeral(workspace, name);
+    const exchange = `agent-${++this.askSeq}-${Date.now().toString(36)}`;
+    const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: task, state: "queued" }));
+    this.emit({ type: "exchange", row });
+    const queue = this.asked.get(s.id) ?? [];
+    queue.push({ exchange, from, workspace: name, agent: true });
+    this.asked.set(s.id, queue);
+    try {
+      // No tag and no history: an agent is given the task and nothing else, so its answer is the
+      // answer to that task rather than to a conversation it was not part of.
+      await this.send(s.id, task);
+    } catch (e) {
+      this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
+      this.transitionAsk({ exchange, from, workspace: name }, "failed");
+      throw e;
+    }
+    return { session: s.id, exchange, name };
+  }
+
   /** What the idle clock asks: is anything running that a client leaving must not stop? */
   busy(): boolean {
     return (
@@ -569,6 +609,7 @@ export class Bench {
     this.writable.run(() => {
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background"))) this.tasks.transition({ id: t.id, state: "cancelled", ended: Date.now() });
       this.exchanges.discard(id);
+      this.plans.discard(id);
       fs.rmSync(path.join(this.opts.dir, "btw", id), { recursive: true, force: true });
       if (s.file && fs.existsSync(s.file)) {
         const trash = path.join(this.opts.dir, "sessions", ".trash");
