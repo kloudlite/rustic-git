@@ -174,18 +174,32 @@ pub(crate) async fn pod_carries_the_attach_mount(pods: &Api<Pod>, name: &str) ->
 }
 
 
+/// Whether two workspace statuses say the SAME thing, i.e. whether a write can be skipped.
+///
+/// Named and public because it is the one place a reconcile's work can be silently thrown away:
+/// a field missing from here is a field that never reaches the API server when it is the only
+/// thing that changed. That has now cost two incidents — `head` (a snapshot's advance) and
+/// `trees` (R-D16, where a subagent tree was cut, served and deleted correctly on disk while
+/// `status.trees` stayed empty for its whole life).
+pub fn ws_status_eq(a: &crd::WorkspaceStatus, b: &crd::WorkspaceStatus) -> bool {
+    a.phase == b.phase
+        && a.observed_generation == b.observed_generation
+        && a.pod_ref == b.pod_ref
+        && a.node_name == b.node_name
+        && a.volume_ref == b.volume_ref
+        // `head` in the comparison: without it, a snapshot's advance of `head` with every other
+        // field unchanged reads as a no-op and the write silently never happens — exactly the
+        // bug `snapshot::advance_head`'s own test caught.
+        && a.head == b.head
+        // `trees` for the same reason, and it cost the same bug twice: a pass that only cut or
+        // dropped a subagent tree changes nothing else, so the write was skipped and
+        // `status.trees` stayed empty for the whole life of a tree that was cut, served and
+        // deleted correctly on disk (R-D16, live run 8dca6d54, 2026-09-18). Any field a
+        // reconcile can change ALONE has to be here.
+        && a.trees == b.trees
+        && conditions_eq(&a.conditions, &b.conditions)
+}
+
 pub(crate) async fn write_ws_status(w: &crd::Workspace, st: crd::WorkspaceStatus, ctx: &Arc<Ctx>) -> Result<(), ReconcileErr> {
-    write_status(w, "Workspace", w.status.as_ref(), &st, ctx, |a, b| {
-        a.phase == b.phase
-            && a.observed_generation == b.observed_generation
-            && a.pod_ref == b.pod_ref
-            && a.node_name == b.node_name
-            && a.volume_ref == b.volume_ref
-            // `head` in the comparison: without it, a snapshot's advance of `head` with every other
-            // field unchanged reads as a no-op and the write silently never happens — exactly the
-            // bug `snapshot::advance_head`'s own test caught.
-            && a.head == b.head
-            && conditions_eq(&a.conditions, &b.conditions)
-    })
-    .await
+    write_status(w, "Workspace", w.status.as_ref(), &st, ctx, ws_status_eq).await
 }
