@@ -8,7 +8,7 @@
 //! silently re-acquiring two writers.
 //!
 //! Runs right after stage 6, whose workspace and environment it grants between; stage 6 ends with
-//! the space cleared, so every choice here starts from nothing. Dials are busybox `nc` speaking
+//! the space cleared, so every choice here starts from nothing. Dials are bash's `/dev/tcp` speaking
 //! redis's inline `PING`, from the WORKSPACE pod: `redis-cli` is in the environment's image, not
 //! the workspace's, and the workspace is the side a grant is for. Every refusal is judged beside a
 //! positive control from the target environment's own service pod, so a redis that is down never
@@ -360,9 +360,20 @@ fn resolve() -> String {
     format!("getent hosts {SERVICE} || nslookup {SERVICE}")
 }
 
-/// redis's inline `PING` over busybox `nc`, the one client every image here carries.
+/// redis's inline `PING` over bash's `/dev/tcp`, under `timeout`.
+///
+/// NOT `nc`: busybox's was the alpine workspace image's, and the debian one has no netcat at all —
+/// `ctl.grant.set` failed "`redis` never resolved and answered PONG" on every glibc run while
+/// `getent` resolved the name perfectly well (hourly, 2026-09-17). `bash` and `timeout` come from
+/// the workspace's NIX PROFILE (`bashInteractive`, `coreutils` in the base set), so they are the
+/// same on every image, present or future, where a package from the base image is not.
+///
+/// `timeout` is what makes a DENIED dial finish: a policy that drops the packet leaves the connect
+/// hanging, and the refusal cases poll for an empty answer.
 fn ping(host: &str) -> String {
-    format!(r"printf 'PING\r\n' | nc -w 2 {host} {PORT}")
+    format!(
+        r#"timeout 3 bash -c 'exec 3<>/dev/tcp/{host}/{PORT} && printf "PING\r\n" >&3 && head -c 7 <&3'"#
+    )
 }
 
 fn pong(out: &str) -> bool {

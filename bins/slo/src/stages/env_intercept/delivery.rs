@@ -79,7 +79,7 @@ pub(super) async fn remap(c: &mut Ctx, j: &Journey, held: bool) {
     c.step("env.intercept.remap", REMAP_CEILING, move |c| {
         async move {
             // The listener is where the mapping says it is, judged from inside the workspace.
-            let (_, out, err) = ws_exec(c, &ns, &w, &http_get("127.0.0.1", WS_PORT), EXEC_CEILING).await?;
+            let (_, out, err) = ws_exec(c, &ns, &w, &http_get_ws("127.0.0.1", WS_PORT), EXEC_CEILING).await?;
             if !out.contains(MARKER) {
                 return Err(anyhow!("the workspace does not answer on {WS_PORT}: {:?} {}", super::super::clip(out.trim()), err.trim()));
             }
@@ -127,7 +127,7 @@ pub(super) async fn peer(c: &mut Ctx, j: &Journey, held: bool) -> Option<String>
         async move {
             // Fully qualified: the follower is being asked about REACHABILITY, not about whose
             // resolv.conf carries which search domain.
-            let script = http_get(&format!("{TARGET}.{env_ns}.svc.cluster.local"), TARGET_PORT);
+            let script = http_get_ws(&format!("{TARGET}.{env_ns}.svc.cluster.local"), TARGET_PORT);
             let start = std::time::Instant::now();
             loop {
                 let out = ws_exec(c, &ns, &id, &script, EXEC_CEILING).await.map(|(_, o, _)| o).unwrap_or_default();

@@ -60,30 +60,30 @@ const MARKER: &str = "slo-intercept";
 /// pod until it answers: intercepting a port nothing listens on would measure the intercept as
 /// broken when the listener is what never came up.
 ///
-/// busybox `nc`, which is in the workspace IMAGE, never a package: the workspace is created with
+/// `node`, which is in the workspace IMAGE, never a package: the workspace is created with
 /// `"packages": []`, so its nix profile holds the base set and nothing else. An earlier version
 /// used `bun` and skipped every intercept id on the fleet with "failed to run command 'bun'" —
-/// bun was only ever present in a workspace whose owner had installed it.
+/// bun was only ever present in a workspace whose owner had installed it. Before that it was
+/// busybox `nc`, which the ALPINE image had and the debian one does not.
 ///
-/// One connection per `nc -l`, so the loop restarts it; the dial side polls, which covers the gap.
-/// No Content-Length: the answer ends when the connection closes, which is what `nc -w 3` reads.
+/// One http server rather than a `nc -l` loop, so there is no window between connections; the
+/// readiness dial below is bash's `/dev/tcp`, for the same reason the listener is not netcat.
 ///
 /// Idempotent by design: `env.intercept.proxy.restart` kills the pod and runs it again, and a
 /// second copy of the loop would fight the first for the port rather than fail visibly.
 ///
-/// The previous loop is stopped by its saved pid and `pkill -x nc` (process NAME), never `pkill -f`:
+/// The previous listener is stopped by its saved pid and `pkill -x node` (process NAME), never
+/// `pkill -f`:
 /// this whole script is the `sh -c` argument, so ANY command-line pattern for the listener matches
-/// the shell running it — `[n]c` included, because the nohup line below spells `nc -l -p` out
-/// literally — and the exec killed itself (exit 143) before the listener started. Every intercept
-/// id skipped on 2026-09-15, twice.
-const LISTENER: &str = r#"body='HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nslo-intercept\n'
-[ -f /tmp/slo-intercept.pid ] && kill "$(cat /tmp/slo-intercept.pid)" 2>/dev/null
-pkill -x nc 2>/dev/null
-nohup sh -c "while true; do printf '$body' | nc -l -p 3000; done" > /tmp/slo-intercept.log 2>&1 &
+/// the shell running it — and the exec killed itself (exit 143) before the listener started. Every
+/// intercept id skipped on 2026-09-15, twice.
+const LISTENER: &str = r#"[ -f /tmp/slo-intercept.pid ] && kill "$(cat /tmp/slo-intercept.pid)" 2>/dev/null
+pkill -x node 2>/dev/null
+nohup node -e "require('http').createServer((q,r)=>r.end('slo-intercept\n')).listen(3000,'0.0.0.0')" > /tmp/slo-intercept.log 2>&1 &
 echo $! > /tmp/slo-intercept.pid
 i=0
 while [ $i -lt 20 ]; do
-  if printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 127.0.0.1 3000 2>/dev/null | grep -q slo-intercept; then
+  if timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000 && printf "GET / HTTP/1.0\r\n\r\n" >&3 && cat <&3' 2>/dev/null | grep -q slo-intercept; then
     echo listening
     exit 0
   fi
@@ -340,10 +340,17 @@ async fn dial(c: &Ctx, env: &str, script: &str) -> Result<String> {
     Ok(out)
 }
 
-/// A bare HTTP GET, written for busybox `nc`: the one client present in every image this journey
-/// dials from.
+/// A bare HTTP GET for the ENVIRONMENT's own pods, written for busybox `nc`: the service image is
+/// alpine's and carries it.
 fn http_get(host: &str, port: u16) -> String {
     format!(r"printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 {host} {port}")
+}
+
+/// The same GET from a WORKSPACE, over bash's `/dev/tcp` under `timeout`. The workspace image is
+/// debian-slim now and has no netcat at all; `bash` and `timeout` come from the nix profile's base
+/// set, so they are there whatever the base image is (the same reason `controller::ping` moved).
+pub(super) fn http_get_ws(host: &str, port: u16) -> String {
+    format!(r#"timeout 5 bash -c 'exec 3<>/dev/tcp/{host}/{port} && printf "GET / HTTP/1.0\r\n\r\n" >&3 && cat <&3'"#)
 }
 
 /// A GET the BENCH can run: its image ships `node` and no curl, wget or nc (fleet, 2026-09-15).
@@ -682,19 +689,21 @@ mod tests {
 
     #[test]
     fn the_listener_listens_on_the_port_the_intercept_maps_to() {
-        assert!(LISTENER.contains(&format!("nc -l -p {WS_PORT}")), "{LISTENER}");
-        assert!(LISTENER.contains(&format!("127.0.0.1 {WS_PORT}")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!(".listen({WS_PORT},")), "{LISTENER}");
+        assert!(LISTENER.contains(&format!("127.0.0.1/{WS_PORT}")), "{LISTENER}");
         // Served and asserted on, both by name: the log file happens to carry the marker too.
         assert!(LISTENER.contains(&format!("{MARKER}\\n'")), "{LISTENER}");
         assert!(LISTENER.contains(&format!("grep -q {MARKER}")), "{LISTENER}");
         // The runtime this leans on is the image's, not a package: the workspace is created with
         // an empty package list, and an earlier `bun` here skipped every id on the fleet.
         assert!(!LISTENER.contains("bun"), "{LISTENER}");
+        // And not netcat: the alpine workspace image had busybox's, debian-slim has none at all.
+        assert!(!LISTENER.contains("nc -"), "{LISTENER}");
         // Run again after the pod is killed, so it must not stack a second copy on the port.
         assert!(LISTENER.contains("pkill"), "{LISTENER}");
         // A pattern that matches its own `sh -c` argv kills the exec running it.
         assert!(!LISTENER.contains("pkill -f"), "{LISTENER}");
-        assert!(LISTENER.contains("pkill -x nc"), "{LISTENER}");
+        assert!(LISTENER.contains("pkill -x node"), "{LISTENER}");
         assert!(LISTENER.contains("echo $! > /tmp/slo-intercept.pid"), "{LISTENER}");
         // The whole point of the id: the environment dials the service's port, never the
         // workspace's.
