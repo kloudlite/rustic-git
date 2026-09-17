@@ -1,4 +1,8 @@
 import { test } from "node:test";
+import { Plans } from "../src/ledger.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 import { brief, itemText, nudge, reduce } from "../src/plan.ts";
 import type { PlanItem } from "../src/ledger.ts";
@@ -129,4 +133,24 @@ test("no nudge for a turn that is asking, or an item that is waiting on a person
     nudge(plan(["migrate the schema", "doing"]), 5, "I have started the migration."),
     "[harness] the plan still shows 1 item(s) doing — mark each done or later (with why) before you stop",
   );
+});
+
+/**
+ * A plan item with no text is not an item. The owner's `plans.json` held
+ * `s-3: [{"text":"","state":"done"}]` after a `/clear`, and the panel drew "1/1 done" over an
+ * empty row (2026-09-17).
+ */
+test("a plan keeps no empty items, and no empty name can tick one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plans-"));
+  const plans = new Plans(dir);
+  plans.set("s-1", [{ text: "migrate the schema" }, { text: "   " }, { text: "" }]);
+  assert.deepEqual(plans.get("s-1").map((i) => i.text), ["migrate the schema"]);
+  // `includes("")` would match the first unfinished item and tick somebody else's work.
+  assert.throws(() => plans.mark("s-1", "", "done"), /no plan item ""/);
+  assert.throws(() => plans.mark("s-1", "   ", "done"), /no plan item/);
+  // A real name still works, exactly or by containing.
+  assert.equal(plans.mark("s-1", "migrate", "done")[0].state, "done");
+  // And a cleared session keeps nothing.
+  plans.discard("s-1");
+  assert.deepEqual(plans.get("s-1"), []);
 });

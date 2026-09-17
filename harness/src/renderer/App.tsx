@@ -102,7 +102,8 @@ export function App() {
   // workspace or an ephemeral opens its thread as a tab. There is nothing to
   // create — a thread exists because its node does.
   const hashView = location.hash.slice(1).replace(/^team:[^/]+\/?/, "");
-  const first = (!hashView.startsWith("settings") && hashView.split("/")[0]) || machine().id;
+  // Opening the bench opens the session you were last in — there is no thread above the sessions.
+  const first = (!hashView.startsWith("settings") && hashView.split("/")[0]) || "";
   // Panes: the centre is one pane, or two side by side. Each pane has its own
   // tabs and its own selected tab; the ACTIVE pane is the one the keys, the
   // sidebar and the inspector speak to. A tab is dragged to reorder within a
@@ -201,7 +202,7 @@ export function App() {
     p.open
       .map((id) => threadOf(machine(), id) ?? sessionThread(id) ?? sides.find((t) => t.id === id))
       .filter((t) => t !== undefined)
-      .map((t) => (t.kind === "machine" ? { ...t, pi: live_()[0]?.id ?? "", readonly: !live.connected() } : t))
+      .map((t) => (t.kind === "session" ? { ...t, readonly: !live.connected() } : t))
       // Every thread carries its own session's model: a workspace tab is not the bench, and
       // reading only the bench's row showed "no model" in one (owner, 2026-09-17).
       .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages, model: t.model ?? modelOf(t.pi) } : t));
@@ -480,7 +481,8 @@ export function App() {
   };
   const placeItems = createMemo<PaletteItem[]>(() => {
     const m = machine();
-    const out: PaletteItem[] = [{ id: m.id, label: "Bench Thread", detail: m.goal, kind: "machine", icon: "machine", run: () => goTo(m.id) }];
+    // Every session is its own place to go; there is no thread above them.
+    const out: PaletteItem[] = live_().map((x) => ({ id: x.id, label: x.name, detail: "session", kind: "session" as const, icon: "thread", run: () => goTo(x.id) }));
     for (const x of live_().slice(1)) out.push({ id: x.id, label: x.name, detail: x.id, kind: "session", icon: "thread", run: () => goTo(x.id) });
     for (const w of m.workspaces) {
       out.push({ id: w.id, label: w.name, detail: `${w.repo} · ${w.branch}`, kind: "workspace", icon: "workspace", run: () => goTo(w.id) });

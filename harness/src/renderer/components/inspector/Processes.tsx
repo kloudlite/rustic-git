@@ -10,7 +10,7 @@ import { Heading } from "../../ui/parts";
  * one that exited shows its code for a minute and then goes. Hover shows the
  * stop; click opens the live log.
  */
-export function Processes(props: { onOpen: (id: string) => void; session: string }) {
+export function Processes(props: { onOpen: (id: string) => void; session: string; workspace?: string }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
@@ -21,7 +21,7 @@ export function Processes(props: { onOpen: (id: string) => void; session: string
   // This session's, and what is RUNNING: an ended process has its row in the transcript, and a
   // panel that keeps yesterday's exits is a panel nobody reads (owner, 2026-09-17).
   const KEEP_ENDED_MS = 10_000;
-  const mine = () => procsOf(live.procs, props.session).filter((p) => !p.ended || tick() - p.ended < KEEP_ENDED_MS);
+  const mine = () => procsOf(live.procs, props.session, props.workspace).filter((p) => !p.ended || tick() - p.ended < KEEP_ENDED_MS);
   const running = () => mine().filter((p) => !p.ended).length;
   return (
     <Show when={mine().length}>

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -99,4 +99,23 @@ test("a proposal says what it would act on, values only", () => {
   assert.equal(argLine({ name: "new-workspace", region: "nrt", packages: ["node", "bun"] }), "new-workspace · nrt · node, bun");
   assert.equal(argLine({ name: "test", team: "kloudlite", session: "s-1" }), "test", "routing fields are not the subject");
   assert.equal(argLine({}, "Create workspace test"), "test", "nothing to show: the summary minus the verb the header already says");
+});
+
+/**
+ * Processes and background tasks belong to a WORKSPACE, not to a session: every bench session
+ * shares the bench's own machine, and a workspace's sessions — its thread and the agents working in
+ * it — share that workspace's (owner, 2026-09-17).
+ */
+test("two sessions of one workspace see the same processes; another workspace sees its own", () => {
+  const rows = [
+    { id: "p1", session: "s-1", workspace: "bench", cmd: "npm run dev" },
+    { id: "p2", session: "s-2", workspace: "bench", cmd: "tail -f log" },
+    { id: "p3", session: "w-ws-api", workspace: "ws-api", cmd: "cargo watch" },
+  ];
+  assert.deepEqual(procsOf(rows, "s-1", "bench").map((p) => p.id), ["p1", "p2"], "a sibling session's process is this session's too");
+  assert.deepEqual(procsOf(rows, "s-2", "bench").map((p) => p.id), ["p1", "p2"]);
+  assert.deepEqual(procsOf(rows, "w-ws-api", "ws-api").map((p) => p.id), ["p3"], "a workspace tab sees only its own");
+  // A row written before the ledger carried a workspace still belongs to the session that made it.
+  assert.deepEqual(procsOf([{ id: "old", session: "s-1", cmd: "x" }], "s-1", "bench").map((p) => p.id), ["old"]);
+  assert.deepEqual(procsOf([{ id: "old", session: "s-1", cmd: "x" }], "w-ws-api", "ws-api"), []);
 });

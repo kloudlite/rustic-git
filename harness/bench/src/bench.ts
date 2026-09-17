@@ -243,6 +243,10 @@ export class Bench {
       // The row is corrected below when get_state answers; the event is what makes every window
       // drop what it cached.
       void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
+      // A fresh session has no plan either: the old one's items belonged to work that is no longer
+      // in front of anybody (owner, 2026-09-17 — `/clear` left `[{"text":"","state":"done"}]`).
+      this.write(() => this.plans.discard(id));
+      this.emit({ type: "plan", session: id, items: [] });
       this.emit({ type: "cleared", session: id });
     }
     if (ev.type === "agent_start") {
@@ -286,7 +290,7 @@ export class Bench {
       // composer, and the ledger showed it as "Lost · 1m 11s" because nothing but an answer would
       // ever end it (owner, 2026-09-17). Tasks are work that runs on its own.
       if (!WAITS.has(name)) {
-        const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
+        const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, workspace: this.workspaceOf(id), tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
         if (row) this.emit({ type: "task", row });
       }
     }
@@ -331,7 +335,8 @@ export class Bench {
           this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary, question: p.question } });
         }
         if (ev.widgetKey === "harness:procs") {
-          const rows = (line ? JSON.parse(line) : []) as Omit<ProcRow, "session">[];
+          const ws = this.workspaceOf(id);
+          const rows = (line ? JSON.parse(line) : []).map((r: Omit<ProcRow, "session">) => ({ ...r, workspace: ws })) as Omit<ProcRow, "session">[];
           this.write(() => this.procs.snapshot(id, rows));
           this.emit({ type: "procs", rows: this.procs.all() });
           // Something is running: from here the bench watches it, rather than waiting for the model
@@ -562,6 +567,17 @@ export class Bench {
     const r = await fetch(`http://${at}/tools/process_output`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since }) });
     if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
     return (await r.json()) as { stdout: string; stderr: string; next: number };
+  }
+
+  /**
+   * Which WORKSPACE a session's processes and tasks belong to (owner, 2026-09-17). Every bench
+   * session shares the bench's own machine; a workspace session — and the agents working in it —
+   * share that workspace; a clone is its own. It is never the session id: two bench sessions must
+   * see the same dev server.
+   */
+  workspaceOf(id: string): string {
+    const s = this.sessions.get(id);
+    return s?.target || s?.workspace || process.env.KL_WORKSPACE_ID || "bench";
   }
 
   /** Where a session's tools run: its workspace, or for a bench session its own container. */

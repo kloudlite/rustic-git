@@ -366,7 +366,7 @@ export function Chat(props: {
             {/* A thread with nothing in it yet is a first run: say what the bench
                 is for and offer a few first asks, which fill the prompt rather
                 than send — the person's words go first. */}
-            <Show when={(thread()?.kind === "machine" || thread()?.kind === "session") && L().ready() && blocks().length === 0}>
+            <Show when={thread()?.kind === "session" && L().ready() && blocks().length === 0}>
               <FirstRun team={props.team} onPick={(t) => {
                 const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
                 if (c) (c.value = t, fit(c), c.focus());
@@ -378,7 +378,9 @@ export function Chat(props: {
             <div class="flex items-baseline gap-3 pb-2 font-mono text-subtle" classList={{ hidden: blocks().length === 0 }}>
               <span class="min-w-0 truncate text-fg-strong">
                 <span class="text-subtle"># </span>
-                {thread()?.kind === "machine" ? "bench" : thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "btw" ? "fork · read-only" : thread()?.name}
+                {/* A session's own title — auto-named from its first message, renameable. There is
+                    no thread above the sessions to call "bench" (owner, 2026-09-17). */}
+                {thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "btw" ? "fork · read-only" : thread()?.name}
               </span>
               <span class="flex-1" />
               <Show when={L().spend().tokens}>
@@ -629,14 +631,14 @@ export function Chat(props: {
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
               {/* The caret is the TUI's block, drawn over the input (see BoxCursor.tsx). */}
               <div class="relative min-w-0 flex-1">
-              <BoxCursor input={composerEl()} text={typed()} disabled={thread()?.kind === "machine" && !thread()?.pi} />
+              <BoxCursor input={composerEl()} text={typed()} disabled={!thread()?.pi} />
               <textarea
                 ref={setComposerEl}
                 data-composer
-                disabled={thread()?.kind === "machine" && !thread()?.pi}
+                disabled={!thread()?.pi}
                 rows="1"
                 class="relative max-h-60 min-h-5 w-full resize-none border-0 bg-transparent p-0 caret-transparent outline-none placeholder:text-subtle"
-                placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
+                placeholder={!thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
                 onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), setClosed(false), (hist = -1))}
                 onKeyDown={(e) => {
                   // Completion first: while suggestions show, ↑/↓ move, ⇥ and ↩

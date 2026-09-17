@@ -2,6 +2,7 @@ import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as live from "../../live";
 import { Icon } from "../../ui/Icon";
 import { Heading } from "../../ui/parts";
+import { procsOf } from "../../rows";
 
 /**
  * Only what was sent to the background (^B): a command still running in the
@@ -11,7 +12,7 @@ import { Heading } from "../../ui/parts";
  * then leaves; its log stays in the thread. A row is the tool and its
  * argument, the state and the clock; hover shows the cancel; click opens the log.
  */
-export function Tasks(props: { onOpen: (id: string) => void; session: string }) {
+export function Tasks(props: { onOpen: (id: string) => void; session: string; workspace?: string }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
@@ -20,7 +21,8 @@ export function Tasks(props: { onOpen: (id: string) => void; session: string }) 
     const s = Math.max(0, Math.round(((t.ended ?? tick()) - t.started) / 1000));
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   };
-  const mine = () => live.tasks.filter((t) => t.session === props.session);
+  // A task belongs to the WORKSPACE its work runs in: two bench sessions see the same ones.
+  const mine = () => procsOf(live.tasks, props.session, props.workspace);
   const background = () => mine().filter((t) => t.state === "background");
   // Just ended after being backgrounded: shown dim for a few seconds, then gone.
   const settling = () => mine().filter((t) => t.n && t.ended && tick() - t.ended < 4000 && t.state !== "background" && t.state !== "lost");

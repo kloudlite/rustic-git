@@ -33,7 +33,11 @@ export function procLabel(p: { ended?: number; code?: number | null; lost?: true
  * the panel drew all of them, so a workspace's dev server appeared under the bench tab. A row with
  * no session at all belongs to nothing and is shown nowhere.
  */
-export function procsOf<T extends { session?: string }>(rows: readonly T[], session: string): T[] {
+export function procsOf<T extends { session?: string; workspace?: string }>(rows: readonly T[], session: string, workspace?: string): T[] {
+  // Processes and background tasks belong to a WORKSPACE, not to a session: every bench session
+  // shares the bench's machine, and a workspace's sessions share its own (owner, 2026-09-17). The
+  // session is the fallback for a row written before the ledger carried a workspace.
+  if (workspace) return rows.filter((p) => (p.workspace ? p.workspace === workspace : p.session === session));
   return rows.filter((p) => p.session === session);
 }
 

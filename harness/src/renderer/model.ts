@@ -519,8 +519,10 @@ const THREADS: Record<string, Message[]> = {
 
 /** The thread for a node of the machine, or nothing if the id names none. */
 export function threadOf(m: Machine, id: string): Thread | undefined {
+  // There is no "the bench session" (owner, 2026-09-17): every session in SESSIONS is a peer with
+  // its own thread, tab, composer, plan and queue. What they share is the person's memory and the
+  // space's architecture — not a thread.
   const messages = THREADS[id] ?? [];
-  if (id === m.id) return { id, name: "Bench Thread", kind: "machine", readonly: false, messages, pi: "bench" };
   for (const w of m.workspaces) {
     // A workspace's thread and an ephemeral's log are sessions on the bench; their messages are live, not fixtures.
     if (w.id === id) return { id, name: w.name, kind: "workspace", readonly: false, messages: [], pi: `w-${w.id}` };

@@ -36,12 +36,17 @@ export function Inspector(props: {
   const procSession = () =>
     found().eph ? sessionOf({ kind: "ephemeral", id: found().eph!.id }) : found().ws ? sessionOf({ kind: "workspace", id: found().ws!.id }) : sessionOf({ kind: /^s-\d+$/.test(props.selected) ? "session" : "bench", id: props.selected });
 
+  /** The workspace whose processes and tasks these are: a clone is its own, the bench is one. */
+  const procWorkspace = () => found().eph?.id ?? found().ws?.id ?? "bench";
+
   return (
     <aside class="min-h-0 overflow-x-hidden overflow-y-auto border-l border-line bg-panel pb-4">
       {/* The tasks of THIS thread, as the processes below are: the bench session's rows appeared
           under a workspace tab (owner, 2026-09-17). Same session, same rule. */}
-      <Tasks onOpen={props.onOpenTask} session={procSession()} />
-      <Processes onOpen={props.onOpenTask} session={procSession()} />
+      {/* Both belong to the WORKSPACE this thread's work runs in: every bench session shares the
+          bench's machine, a workspace's sessions share its own (owner, 2026-09-17). */}
+      <Tasks onOpen={props.onOpenTask} session={procSession()} workspace={procWorkspace()} />
+      <Processes onOpen={props.onOpenTask} session={procSession()} workspace={procWorkspace()} />
       <Show when={!found().ws}>
         <MachineView machine={props.machine} session={session()} onOpenShell={props.onOpenShell} />
       </Show>

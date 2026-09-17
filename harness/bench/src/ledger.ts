@@ -1,7 +1,7 @@
 import path from "node:path";
 import { appendLine, readJson, readLines, replaceJson } from "./log.ts";
 
-export type TaskRow = { id: string; session: string; n?: number; tool: string; arg: string; state: "running" | "background" | "done" | "failed" | "cancelled" | "lost"; started: number; ended?: number };
+export type TaskRow = { id: string; session: string; workspace?: string; n?: number; tool: string; arg: string; state: "running" | "background" | "done" | "failed" | "cancelled" | "lost"; started: number; ended?: number };
 
 /** `/bench/tasks.jsonl`: one line per transition; the current table is the fold. */
 export class Tasks {
@@ -30,7 +30,7 @@ export class Tasks {
   }
 }
 
-export type ProcRow = { id: string; session: string; name: string; command: string; pid?: number; started: number; ended?: number; code?: number | null; lost?: true };
+export type ProcRow = { id: string; session: string; workspace?: string; name: string; command: string; pid?: number; started: number; ended?: number; code?: number | null; lost?: true };
 
 /** `/bench/procs.json`: the live table, replaced whole; each session publishes only its own rows. */
 export class Procs {
@@ -105,7 +105,11 @@ export class Plans {
   /** The whole plan, replaced. What was already done keeps its state when the text is unchanged. */
   set(session: string, items: { text: string; state?: PlanState; why?: string }[]): PlanItem[] {
     const before = this.rows[session] ?? [];
-    this.rows[session] = items.map((x) => ({ text: x.text, state: x.state ?? before.find((b) => b.text === x.text)?.state ?? "todo", ...(x.why ? { why: x.why } : {}) }));
+    // An item with no text is not an item: the owner's plans.json held `{"text":"","state":"done"}`
+    // and the panel drew "1/1 done" over an empty row (2026-09-17).
+    this.rows[session] = items
+      .filter((x) => String(x.text ?? "").trim())
+      .map((x) => ({ text: x.text.trim(), state: x.state ?? before.find((b) => b.text === x.text.trim())?.state ?? "todo", ...(x.why ? { why: x.why } : {}) }));
     replaceJson(this.file, this.rows);
     return this.get(session);
   }
@@ -115,6 +119,9 @@ export class Plans {
    * annoys rather than one that works.
    */
   mark(session: string, item: string, state: PlanState, why?: string): PlanItem[] {
+    // `includes("")` matches the first unfinished item, so an empty name would silently tick
+    // somebody else's work.
+    if (!String(item ?? "").trim()) throw new Error(`no plan item ${JSON.stringify(item ?? "")}`);
     const list = this.rows[session] ?? [];
     const i = list.findIndex((x) => x.text === item);
     const j = i >= 0 ? i : list.findIndex((x) => x.state !== "done" && x.text.toLowerCase().includes(item.toLowerCase()));
