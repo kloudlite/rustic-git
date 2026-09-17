@@ -299,7 +299,7 @@ export function Chat(props: {
       </Show>
 
       <Show when={props.env} keyed>
-        {(env) => <EnvironmentPage env={env} snapshots={props.snapshots} />}
+        {(env) => <EnvironmentPage env={env} snapshots={props.snapshots} followed={env.id === props.machine.environmentId} />}
       </Show>
       <Show when={props.settings && !props.env}>
         <SettingsPage machine={props.machine} open={props.settingsPage} />
