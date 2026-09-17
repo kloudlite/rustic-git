@@ -4,7 +4,7 @@ import { pickRenderer, processes, capabilities } from "../../src/renderer/compon
 import { procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
-import { render as renderLine, toolLine } from "../../src/renderer/components/results/toolline.ts";
+import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -121,4 +121,17 @@ test("a tool call is one muted line: glyph, verb, argument, what came back", () 
   assert.equal(line("plan", { done: "clone the repo" }), "▤ Plan done: clone the repo");
   assert.equal(line("kl_workspace_create", { name: "svelte-backend" }), "~ workspace create svelte-backend");
   assert.equal(line("edit", { path: "src/a.ts", edits: [1, 2] }), "✎ Edit src/a.ts (2 edits)");
+});
+
+test("an agent's reply reads as status + one line, with the rest folded", () => {
+  const r = report("[from agent audit-1] DONE_WITH_CONCERNS — 3 routes have no auth check\nsrc/a.ts:12\nsrc/b.ts:40");
+  assert.deepEqual([r.status, r.head], ["DONE_WITH_CONCERNS", "3 routes have no auth check"]);
+  assert.equal(r.body, "src/a.ts:12\nsrc/b.ts:40");
+  // Every status is recognised, and the longest wins over its own prefix.
+  assert.equal(report("DONE: it is done").status, "DONE");
+  assert.equal(report("DONE_WITH_CONCERNS: hmm").status, "DONE_WITH_CONCERNS");
+  assert.equal(report("BLOCKED no ssh host").status, "BLOCKED");
+  assert.equal(report("NEEDS_CONTEXT which repo?").status, "NEEDS_CONTEXT");
+  // An agent that ignored the contract still reads: no status, all body.
+  assert.deepEqual(report("[from agent x] i had a look around\nand found nothing"), { status: undefined, head: "i had a look around", body: "and found nothing" });
 });

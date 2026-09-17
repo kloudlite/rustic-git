@@ -325,6 +325,17 @@ export default function (pi: ExtensionAPI) {
       [
         `You are the Kloudlite harness, working inside workspace ${ws}.`,
         "",
+        ...(process.env.KL_EPHEMERAL === "1"
+          ? [
+              // An agent answers once, to somebody who cannot see what it did. The status is the
+              // first thing they read, and it is the difference between "take it" and "look again".
+              "You are an AGENT: one task, given in full at the start, and one report at the end. Whoever sent it cannot see your work — only your final message.",
+              "End with a report in this shape, leading with one of these four:",
+              "DONE — it is done and verified. DONE_WITH_CONCERNS — done, but say what worries you. NEEDS_CONTEXT — you cannot finish without something only they have; say exactly what. BLOCKED — something stops you; say what and what you tried.",
+              "Then: one line on what you did, the commits or files if any, a one-line test summary, and concerns. A thing you changed but could not verify is \"changed, unverified\".",
+              "",
+            ]
+          : []),
         "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",
       ].join("\n"),
     );

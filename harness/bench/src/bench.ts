@@ -522,7 +522,9 @@ export class Bench {
     if (typeof text !== "string" || !text.trim()) throw new Error("an ask needs something to do");
     const asker = this.sessions.get(from);
     if (!asker) throw new Error(`no session ${from}`);
-    const s = await this.openWorkspace(workspace);
+    // A LIVE AGENT by name is resumed, not replaced: its context is the whole reason to send it more.
+    const agent = this.sessions.get(`e-${workspace}`);
+    const s = agent && !agent.archived ? agent : await this.openWorkspace(workspace);
     const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
     this.emit({ type: "exchange", row });
@@ -587,13 +589,14 @@ export class Bench {
    *
    * Several run at once because each has its own session; the caller carries on meanwhile.
    */
-  async agent(workspace: string, task: string, name: string, from: string, clone?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
+  async agent(workspace: string, task: string, name: string, from: string, clone?: string, model?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
     this.refuse(true);
     if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
     if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
     // An ISOLATED agent works in a clone of the caller's machine: `openEphemeral` targets whatever
     // workspace it is given, so the session's tools run on the CLONE's tool server, not the caller's.
     const s = await this.openEphemeral(clone ?? workspace, name);
+    if (model && this.sessions.get(s.id)?.model !== model) this.write(() => this.sessions.update(s.id, { model }));
     if (clone) this.clones.set(name, { clone, from });
     const exchange = `agent-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: task, state: "queued" }));

@@ -403,9 +403,11 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
   reg(
     "ask",
     {
-      to: Type.String({ description: 'a workspace (by name or id), or "agent" for a fresh one with no history' }),
-      task: Type.String({ description: "the whole brief, in one message: what to do and what to answer with" }),
+      to: Type.String({ description: 'a workspace, a LIVE agent\'s name (which resumes it, with everything it has done), or "agent" for a fresh one' }),
+      task: Type.String({ description: "one line: what this is" }),
+      brief: Type.Optional(Type.String({ description: "everything it needs and nothing it does not: the files, the constraints, what to answer with. It cannot see this conversation." })),
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
+      model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
       workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
       isolated: Type.Optional(Type.Boolean({ description: "give the agent its own clone of that workspace: for parallel or risky changes" })),
     },
@@ -423,11 +425,16 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
           if (made.status >= 400) return { ...text(`${made.status}: ${typeof made.data === "string" ? made.data : JSON.stringify(made.data)}`), isError: true };
           clone = String((made.data as { id?: string } | null)?.id ?? "");
         }
-        const r = await benchCall("POST", "/agents", { task: a.task, workspace: where, clone, name, from: process.env.KL_SESSION });
+        // The brief IS the agent's world: it has no history of this conversation, so what is not
+        // written here it cannot know (the fleet's own lesson, 486 dispatches deep).
+        const task = [a.task, a.brief].filter(Boolean).join("\n\n");
+        const r = await benchCall("POST", "/agents", { task, workspace: where, clone, name, model: a.model, from: process.env.KL_SESSION });
         if (!r.ok) return { ...text(String(r.data?.error ?? "the bench could not start it")), isError: true };
         return text(`agent ${name} started${clone ? ` in clone ${clone}` : ""}`);
       }
-      const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: a.task, from: process.env.KL_SESSION });
+      // A live agent by name RESUMES it — "one more thing", "fix round" — with everything it has
+      // done still in front of it; the bench routes on the name, so one verb covers both.
+      const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: [a.task, a.brief].filter(Boolean).join("\n\n"), from: process.env.KL_SESSION });
       if (!r.ok) return { ...text(String(r.data?.error ?? `the bench answered about ${a.to}`)), isError: true };
       return text(`queued in ${a.to}'s session; its reply arrives here`);
     },

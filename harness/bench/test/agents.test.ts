@@ -128,3 +128,35 @@ test("an isolated agent works in a clone, and closing it says which clone to del
     await t.down();
   }
 });
+
+test("a live agent is resumed by name, with everything it has done", async () => {
+  const t = await up("bench-resume-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    await post(t.base, "/agents", { task: "first pass", workspace: "api", name: "impl-1", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "its first report");
+
+    // "one more thing" — the same session, not a second agent with no memory of the first pass.
+    const again = await post(t.base, "/workspaces/impl-1/ask", { text: "fix round: the tests fail", from: caller });
+    assert.equal(again.status, 202);
+    assert.equal((await again.json() as { session: string }).session, "e-impl-1");
+    assert.equal(t.bench.sessions.all().filter((s) => s.kind === "ephemeral").length, 1, "resumed, not replaced");
+
+    const said = (await t.bench.messages("e-impl-1")).messages as { role: string; content: unknown }[];
+    assert.equal(said[0].content, "first pass", "its first brief is still there");
+    assert.ok(said.some((m) => String(m.content).includes("fix round: the tests fail")));
+  } finally {
+    await t.down();
+  }
+});
+
+test("an agent can be given its own model", async () => {
+  const t = await up("bench-model-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    await post(t.base, "/agents", { task: "a big refactor", workspace: "api", name: "big-1", model: "anthropic/opus", from: caller });
+    assert.equal(t.bench.sessions.get("e-big-1")!.model, "anthropic/opus");
+  } finally {
+    await t.down();
+  }
+});

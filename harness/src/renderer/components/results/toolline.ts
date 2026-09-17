@@ -57,5 +57,20 @@ export function toolLine(tool: string | undefined, args: Record<string, unknown>
   }
 }
 
+/** The four an agent may lead its report with; the first word of a reply is the thing to read. */
+export const STATUSES = ["DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED", "DONE"] as const;
+
+/**
+ * An agent's reply, split into what a person reads at a glance and what they open. The status is
+ * the first word by contract (the agent's own identity says so); anything else is all body.
+ */
+export function report(text: string): { status?: string; head: string; body: string } {
+  const t = String(text).replace(/^\[from agent [^\]]*\]\s*/, "").trim();
+  const status = STATUSES.find((s) => t.startsWith(s));
+  const rest = (status ? t.slice(status.length).replace(/^[\s—:-]+/, "") : t).trim();
+  const [head, ...body] = rest.split("\n");
+  return { status, head: head ?? "", body: body.join("\n").trim() };
+}
+
 /** The one line, assembled: `∗ Grep "homepage" (18 matches)`. */
 export const render = (l: ToolLine) => `${l.glyph} ${[l.verb, l.arg].filter(Boolean).join(" ")}${l.count ? ` (${l.count})` : ""}`.replace(/\s+/g, " ").trim();

@@ -10,6 +10,7 @@ import { SettingsPage } from "./SettingsPage";
 import { FileView } from "./FileView";
 import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
+import { report } from "./results/toolline";
 import { HINTS } from "../keys";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
@@ -21,6 +22,26 @@ const KIND_GLYPH = { spawn: "+", run: "$", fold: "⇡", note: "…" } as const;
 /** A workspace's answer to an ask comes back as a prompt tagged with its name; the tag is a label. */
 const FROM_WS = /^\[from workspace ([^\]]+)\] /;
 const fromWorkspace = (t: string) => FROM_WS.exec(t)?.[1];
+const FROM_AGENT = /^\[from agent ([^\]]+)\] /;
+const fromAgent = (t: string) => (FROM_AGENT.test(t) ? report(t) : undefined);
+
+/** Status and one line; the rest is a click away — a report is read, not scrolled past. */
+function AgentReport(props: { report: { status?: string; head: string; body: string } }) {
+  const [open, setOpen] = createSignal(false);
+  const tone = () => (props.report.status === "DONE" ? "text-success" : props.report.status === "BLOCKED" ? "text-danger" : "text-warning");
+  return (
+    <span class="flex min-w-0 flex-col">
+      <span class="flex min-w-0 items-baseline gap-2">
+        <Show when={props.report.status}>{(s) => <span class={`shrink-0 font-bold ${tone()}`}>{s()}</span>}</Show>
+        <span class="min-w-0 flex-1">{props.report.head}</span>
+        <Show when={props.report.body}>
+          <button class="shrink-0 text-xs text-subtle hover:text-fg" onClick={() => setOpen((v) => !v)}>{open() ? "less" : "more"}</button>
+        </Show>
+      </span>
+      <Show when={open() && props.report.body}>{(t) => <span class="pt-1 whitespace-pre-wrap text-muted">{t()}</span>}</Show>
+    </span>
+  );
+}
 const said = (t: string) => t.replace(FROM_WS, "");
 
 /**
@@ -386,7 +407,9 @@ export function Chat(props: {
                           <Show when={fromWorkspace((b as { text: string }).text)}>
                             {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-2xs text-subtle">{w()}</span>}
                           </Show>
-                          {said((b as { text: string }).text)}
+                          <Show when={fromAgent((b as { text: string }).text)} fallback={said((b as { text: string }).text)}>
+                            {(r) => <AgentReport report={r()} />}
+                          </Show>
                         </span>
                         <Time at={(b as { at: string }).at} />
                       </div>
