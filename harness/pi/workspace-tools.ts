@@ -309,7 +309,12 @@ export class ToolServer {
       } catch (e) {
         if (signal?.aborted) throw e;
         this.address = undefined;
-        if (attempt > 0) throw new Error(`workspace ${this.workspace} did not answer at ${at}: ${(e as Error).message}`);
+        // Never the address and never fetch's own words: the model repeated "did not answer at
+        // 127.0.0.1:7788: fetch failed" to the person (owner, 2026-09-18). The detail is stderr's.
+        if (attempt > 0) {
+          console.error(`workspace ${this.workspace} did not answer at ${at}: ${(e as Error).message}`);
+          throw new Error(`the workspace's tools did not answer; is it running?`);
+        }
       }
     }
   }
@@ -361,6 +366,7 @@ export default function (pi: ExtensionAPI) {
         "You work in one working directory. Every path you give or receive is relative to it. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out; none of that is yours, and tools refuse it. If a task seems to need a path outside your directory, say so in your reply instead. Never repeat a path a tool printed that starts with a slash.",
         "",
         "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
+        "A watch wake-up is a notification about a process you already started; read it, do not start the process again.",
         "Never ask a question to confirm an action. Call the tool; the harness asks the person for you. Use question only when the person must choose between real alternatives you cannot decide.",
         "Packages are nixpkgs attributes, not language names: rustc and cargo for Rust, nodejs_22 for Node, go, python3, bun, pnpm, jdk21, gcc. `attr@version` pins one.",
         "",

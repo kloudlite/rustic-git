@@ -380,8 +380,22 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "api" }, undefined, undefined, undefined)).content[0].text as string;
-    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/workspaces/api/messages?limit=10"]);
-    assert.equal(out, ["asked of api:", "  running: add a health endpoint", "its session, latest last:", "  asked: [ask ask-1-x from session 1] add a health endpoint", "  ran edit", "  said: added /healthz"].join("\n"));
+    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/workspaces/api/messages?limit=10"]);
+    assert.equal(
+      out,
+      [
+        "asked of api:",
+        "  running: add a health endpoint",
+        // What is RUNNING there is part of the answer: the bench could not see a build it had asked
+        // for and started building again (owner, 2026-09-18).
+        "running there:",
+        "  nothing running",
+        "its session, latest last:",
+        "  asked: [ask ask-1-x from session 1] add a health endpoint",
+        "  ran edit",
+        "  said: added /healthz",
+      ].join("\n"),
+    );
   } finally {
     restore();
     srv.close();
@@ -781,6 +795,24 @@ test("a background command that ends tells its session, and a watch sends the li
     assert.equal(watched.length, 1, JSON.stringify(said));
     assert.match(watched[0].content, /\[watch svelte dev server \/error\/\]\nerror: cannot find module/);
     assert.ok(!watched[0].content.includes("listening on 3000"), "only what matched");
+
+    // The tool server answers STDERR from byte 0 every time (`crates/ide/src/tools/exec.rs:192`), so
+    // a build's progress came back on every fire and the same `#N DONE` lines were sent again and
+    // again (owner, 2026-09-18). A line already said is not news.
+    out = { stdout: "", stderr: "error: cannot find module\n#5 DONE", next: 64 };
+    await (bench as any).sweepWatches();
+    await (bench as any).sweepWatches();
+    said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
+    assert.equal(said.filter((m) => String(m.content).startsWith("[watch")).length, 1, "still one, however many times the same line comes back");
+
+    // A line that IS new still gets through.
+    out = { stdout: "", stderr: "error: cannot find module\nerror: and another", next: 64 };
+    await (bench as any).sweepWatches();
+    said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
+    const all = said.filter((m) => String(m.content).startsWith("[watch"));
+    assert.equal(all.length, 2, JSON.stringify(all));
+    assert.match(all[1].content, /error: and another/);
+    assert.ok(!all[1].content.includes("cannot find module"), "and only the new one");
 
     // It ends: the session is TOLD, with the tail of what it printed.
     out = { stdout: "error: cannot find module\nexiting", stderr: "", next: 99 };
@@ -1358,6 +1390,11 @@ test("progress asked by name reads the workspace's own thread", async () => {
     res.writeHead(200, { "content-type": "application/json" });
     if (req.url!.startsWith("/v1/workspaces")) return void res.end(JSON.stringify([{ id: "ws-632cf9f23d9f", name: "backend" }]));
     if (req.url!.startsWith("/exchanges")) return void res.end(JSON.stringify([{ dir: "out", state: "running", text: "write the service" }]));
+    if (req.url === "/procs")
+      return void res.end(JSON.stringify([
+        { id: "p1", session: "w-1", workspace: "ws-632cf9f23d9f", name: "build", command: "kl container build -t backend:0.1 .", started: 1789600000000 },
+        { id: "p2", session: "w-2", workspace: "ws-other", name: "dev", command: "npm run dev", started: 1789600000000 },
+      ]));
     res.end(JSON.stringify({ total: 1, messages: [{ role: "assistant", content: [{ type: "toolCall", name: "write" }] }] }));
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
@@ -1373,6 +1410,7 @@ test("progress asked by name reads the workspace's own thread", async () => {
     assert.ok(seen.includes("/workspaces/ws-632cf9f23d9f/messages?limit=10"), seen.join(" "));
     assert.match(out, /running: write the service/);
     assert.doesNotMatch(out, /nothing yet/);
+    assert.match(out, /kl container build -t backend:0\.1 \./, "what is running there, so it is not started twice");
   } finally {
     restore();
     srv.close();
@@ -1407,5 +1445,100 @@ test("an intercept's port remap is named the way /v1 names it", async () => {
     restore();
     api.srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The bench proposed `Start workspace bench-505f6b8c9d7b` — ITSELF — while its ask to a real
+ * workspace was still running (owner, 2026-09-18). A bench is not a workspace: it is never a
+ * target, it is never listed, and no tool defaults to the session's own machine any more.
+ */
+test("the bench is never a workspace target, and never in a listing", async () => {
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/workspaces" && m === "GET")
+      return [
+        { id: "ws-632cf9f23d9f2fbf", name: "backend", state: "running" },
+        // A row that leaked from anywhere — an older api, a cached answer — must not be nameable.
+        { id: "bench-505f6b8c9d7b", name: "bench", state: "running", bench: {} },
+      ];
+    return { ok: true };
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-self-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-505f6b8c9d7b", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+
+    // Its own id, by either name it goes by.
+    for (const self of ["bench-505f6b8c9d7b", "bench-0123456789ab"]) {
+      for (const verb of ["kl_workspace_start", "kl_workspace_stop", "kl_workspace_delete", "kl_workspace"]) {
+        const r = await run(verb, { id: self });
+        assert.equal(r.isError, true, `${verb} ${self}`);
+        assert.match(r.content[0].text, /that is you, not a workspace; name a workspace/, `${verb} ${self}`);
+      }
+      assert.match((await run("kl_pkg_list", { workspace: self })).content[0].text, /that is you, not a workspace/);
+      assert.match((await run("kl_workspace_progress", { id: self })).content[0].text, /that is you, not a workspace/);
+    }
+    // A real workspace still works.
+    api.seen.length = 0;
+    const ok = await run("kl_workspace", { id: "ws-632cf9f23d9f2fbf" });
+    assert.ok(!ok.isError, JSON.stringify(ok));
+
+    // And no listing ever offers a bench to name in the first place.
+    const listed = (await run("kl_workspaces", {})).content[0].text;
+    const rows = typeof listed === "string" ? listed : JSON.stringify(listed);
+    assert.match(rows, /ws-632cf9f23d9f2fbf/);
+    assert.ok(!rows.includes("bench-505f6b8c9d7b"), rows);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("waiting on an ask is waiting, not restarting a machine", () => {
+  // The model reached for `start` with an ask in flight; the identity now says what to do instead.
+  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on is waited on: read it with kl_workspace_progress, or ask again\. Never start, stop or restart a machine to move work along/);
+});
+
+/**
+ * The bench was handed its own pod's loopback tool server as "its machine" — the rule that died
+ * with spec §3.1 — so a build was attempted against a container that has no tool server, and the
+ * model told the person to start `bench-…` to fix it, quoting the address (owner, 2026-09-18).
+ */
+test("a bench session is handed no machine, and a workspace that will not answer says so plainly", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-hands-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const id = bench.sessions.all().find((s) => !s.archived)!.id;
+    const hands = bench.tools(id) as { toolsAddress?: string; builtinTools: boolean; tools: string[] };
+    assert.equal(hands.toolsAddress, undefined, "no tool server anywhere near the bench pod");
+    assert.equal(hands.builtinTools, false);
+    for (const gone of ["read", "write", "edit", "bash", "process", "kl_repo_clone"]) assert.ok(!hands.tools.includes(gone), gone);
+    // `kl_container_build` is still THERE for a bench session — as an ask to the workspace holding
+    // the context, not an exec anywhere near the bench (owner, 2026-09-18).
+    assert.ok(hands.tools.includes("kl_container_build"), hands.tools.join(","));
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a workspace whose tools are unreachable never says where it tried", async () => {
+  const restore = withEnv({ KL_TOOLS_ADDRESS: "127.0.0.1:1", KL_TOOLS_WORKSPACE: "api", KL_WORKSPACE_ID: "api", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    workspaceTools(pi);
+    const read = tools.find((t) => t.name === "read")! as unknown as { execute: (...x: any[]) => Promise<any> };
+    const r = await read.execute("c1", { paths: ["go.mod"] }, undefined, undefined, undefined);
+    const said = r.content[0].text as string;
+    assert.match(said, /the workspace's tools did not answer; is it running\?/);
+    for (const leak of ["127.0.0.1", ":1", "fetch failed", "ECONNREFUSED"]) assert.ok(!said.includes(leak), `${leak} leaked: ${said}`);
+  } finally {
+    restore();
   }
 });

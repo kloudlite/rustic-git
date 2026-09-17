@@ -60,9 +60,9 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_pull_merge", group: "code", summary: "Merge a pull request (fast-forward, squash, merge or rebase).", effect: "write", ask: (a) => `Merge ${a.repo}#${a.number} (${a.method ?? "fast-forward"})` },
   { name: "kl_pull_close", group: "code", summary: "Close a pull request without merging it.", effect: "write", ask: (a) => `Close ${a.repo}#${a.number} without merging` },
 
-  { name: "kl_container_build", group: "code", summary: "Build an image from a context in this machine and push it, as a background process.", effect: "write" },
-  { name: "kl_container_push", group: "code", summary: "Copy an image the registry already holds to another tag.", effect: "write", ask: (a) => `Copy image ${a.from} to ${a.to}` },
-  { name: "kl_images", group: "code", summary: "Images in the registry, by owner.", effect: "read" },
+  { name: "kl_container_build", group: "code", summary: "Build an image from a context in a workspace and push it. In that workspace it runs there; from the bench it asks the workspace to do it, since the bench has no tree of its own.", effect: "write" },
+  { name: "kl_container_push", group: "code", summary: "Copy an image the registry already holds to another tag. From the bench it asks a workspace to run it.", effect: "write", ask: (a) => `Copy image ${a.from} to ${a.to}` },
+  { name: "kl_images", group: "code", summary: "Images in the registry, by owner. A registry read: no machine is involved.", effect: "read" },
 
   { name: "kl_workspaces", group: "workspace", summary: "List workspaces — yours, or a team's with `team`.", effect: "read" },
   { name: "kl_workspace", group: "workspace", summary: "One workspace in full: state, node, packages, its space's environment.", effect: "read" },

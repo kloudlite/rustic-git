@@ -50,7 +50,9 @@ test("a call goes to the looked-up address, a dead address is looked up once mor
   const stopped = new ToolServer("api", async () => { throw new Error("workspace api is stopped; start it to run tools"); });
   await assert.rejects(stopped.call(toIde("ls", {})), /is stopped; start it to run tools/);
   const gone = new ToolServer("api", async () => "127.0.0.1:1");
-  await assert.rejects(gone.call(toIde("ls", {})), /workspace api did not answer at 127\.0\.0\.1:1/);
+  // Never the address: the model repeated "did not answer at 127.0.0.1:7788: fetch failed" to the
+  // person (owner, 2026-09-18). What it tried is stderr's business.
+  await assert.rejects(gone.call(toIde("ls", {})), /the workspace's tools did not answer; is it running\?/);
   srv.close();
 });
 

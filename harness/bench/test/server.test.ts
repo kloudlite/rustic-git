@@ -193,13 +193,12 @@ test("GET /sessions/{id}/tools answers what that session can call, and 404s an i
     const r = await fetch(`${t.base}/sessions/${created.id}/tools`);
     assert.equal(r.status, 200);
     const { tools, toolsAddress, builtinTools } = await r.json() as { tools: string[]; toolsAddress?: string; builtinTools: boolean };
-    // Where they RUN is the half the names cannot show: its own workspace container's tool server,
-    // on loopback, with pi's own builtins off.
-    assert.equal(toolsAddress, "127.0.0.1:7788");
+    // Where they RUN is the half the names cannot show, and for a bench session the answer is
+    // NOWHERE: no tool server and no builtins (spec §3.1). It used to be handed its own pod's
+    // loopback, which is what had the model asking for the bench itself to be started.
+    assert.equal(toolsAddress, undefined);
     assert.equal(builtinTools, false);
-    // The seven are there, but they are the tool server's, run in the bench's OWN workspace — the
-    // built-ins, which would have run in the bench container, are what `--no-builtin-tools` removed.
-    for (const own of ["bash", "read", "write"]) assert.ok(tools.includes(own), `${own}: ${tools.join(",")}`);
+    for (const none of ["bash", "read", "write", "process", "kl_repo_clone"]) assert.ok(!tools.includes(none), `${none}: ${tools.join(",")}`);
     assert.ok(tools.includes("ask"), tools.join(","));
     assert.equal((await fetch(t.base + "/sessions/nope/tools")).status, 404);
   } finally {

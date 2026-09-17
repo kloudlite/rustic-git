@@ -242,6 +242,7 @@ const PLATFORM = [
   "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
+  "An ask you are already waiting on is waited on: read it with kl_workspace_progress, or ask again. Never start, stop or restart a machine to move work along — it is already running.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
@@ -309,7 +310,13 @@ export function makeReg(pi: ExtensionAPI) {
         // A tool that throws — a name two things answer to, a repo that is not owner/name — answers
         // with the sentence, not with a stack. The sentence is cleaned the same way a failed call's
         // is: a thrown error can carry a URL too (owner, 2026-09-18).
-        return await run(args, signal, ctx).catch((e: Error) => ({ ...text(thrown(name, e)), isError: true }));
+        // A SYNCHRONOUS throw — an argument refused while the call is still being built — escaped
+        // this catch and surfaced as a stack (owner, 2026-09-18); both kinds answer the sentence.
+        try {
+          return await run(args, signal, ctx);
+        } catch (e) {
+          return { ...text(thrown(name, e as Error)), isError: true };
+        }
       },
     });
   };
@@ -452,8 +459,12 @@ export function lookAround(reg: ReturnType<typeof makeReg>) {
     const p = Object.entries(o).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v!)}`);
     return p.length ? `?${p.join("&")}` : "";
   };
-  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
-  reg("kl_workspace", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}`));
+  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, async (a) => {
+    const r = await call("GET", `/v1/workspaces${q({ team: a.team })}`);
+    if (r.status >= 400) return { ...text(sanitizeError("kl_workspaces", r.status, r.data)), isError: true };
+    return text(withoutBenches(r.data));
+  });
+  reg("kl_workspace", { id: S("workspace id or name") }, (a) => answer("GET", `/v1/workspaces/${encodeURIComponent(refuseOwnBench(String(a.id)))}`));
   reg("kl_workspace_snapshots", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}/snapshots`));
   reg("kl_environments", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/environments${q({ team: a.team })}`));
   reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
@@ -667,6 +678,40 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
   });
 }
 
+/**
+ * Images, from a session with no machine. Listing the registry is a READ of the platform and needs
+ * nobody's tree; building one needs a tree, so the bench asks the workspace that has it — the
+ * workspace session runs `kl container build` where the context actually is. The bench proposed
+ * starting ITSELF to get a builder, because its image tools defaulted to "this machine" and the
+ * bench has none (owner, 2026-09-18).
+ */
+export function imageTools(reg: ReturnType<typeof makeReg>) {
+  const S = (d: string) => Type.String({ description: d });
+  reg("kl_images", { owner: Type.Optional(S("owner slug; absent = your own")) }, async (a) =>
+    answer("GET", `/api/${encodeURIComponent(String(a.owner ?? process.env.KL_OWNER ?? process.env.KL_TEAM ?? "me"))}/images`, undefined, "kl_images"));
+  const build = async (workspace: string, what: string) => {
+    refuseOwnBench(workspace);
+    const r = await benchCall("POST", `/workspaces/${encodeURIComponent(workspace)}/ask`, { text: what, kind: "work", from: process.env.KL_SESSION });
+    if (!r.ok) return { ...text(String(r.data?.error ?? "the workspace could not be asked")), isError: true };
+    return text(`${workspace} was asked to do it; read kl_workspace_progress for how it is going`);
+  };
+  reg(
+    "kl_container_build",
+    {
+      workspace: S("the workspace holding the build context — required: this session has no machine of its own"),
+      context: S("the build context directory, relative to that workspace"),
+      tag: S("name:tag; it is pushed under your own owner"),
+      dockerfile: Type.Optional(S("a Dockerfile other than the context's own")),
+    },
+    (a) => build(String(a.workspace), `build and push ${a.tag} from ${a.context}${a.dockerfile ? ` with ${a.dockerfile}` : ""}, with kl_container_build, and tell me the tag when it is pushed`),
+  );
+  reg(
+    "kl_container_push",
+    { workspace: S("a workspace to run it in — required: this session has no machine of its own"), from: S("the tag the registry already holds"), to: S("the new tag") },
+    (a) => build(String(a.workspace), `copy image ${a.from} to ${a.to} with kl_container_push, and tell me when it is done`),
+  );
+}
+
 /** The plan this session is working to: written once, ticked as it lands. */
 export function planTools(reg: ReturnType<typeof makeReg>) {
   const publish = (ctx: any, v: unknown) => ctx?.ui?.setWidget?.("harness:plan", [JSON.stringify(v)]);
@@ -708,8 +753,15 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
     // The bench keys a workspace's thread and its exchanges by the workspace ID. Asked by NAME —
     // which is what a person says and what this tool now takes — both reads answered nothing, so a
     // workspace mid-task reported "nothing outstanding / nothing yet" (transcripts, 2026-09-18).
+    refuseOwnBench(String(a.id));
     const id = encodeURIComponent(await resolveNamed("workspaces", String(a.id)).catch(() => String(a.id)));
-    const [x, m] = await Promise.all([benchCall("GET", `/exchanges?workspace=${id}`), benchCall("GET", `/workspaces/${id}/messages?limit=10`)]);
+    const [x, m, procs] = await Promise.all([
+      benchCall("GET", `/exchanges?workspace=${id}`),
+      benchCall("GET", `/workspaces/${id}/messages?limit=10`),
+      // What is RUNNING there. Without this the bench asked "is the build done?", could not see the
+      // workspace's own `kl container build`, and set about building it again (owner, 2026-09-18).
+      benchCall("GET", "/procs").catch(() => ({ ok: false, data: [] })),
+    ]);
     if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
     const asks = (x.data as { dir: string; state: string; text: string }[]).filter((e) => e.dir === "out").map((e) => `  ${e.state}: ${String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").slice(0, 160)}`);
     const said = ((m.data as { messages?: Record<string, any>[] }).messages ?? []).slice(-10).flatMap((r) => {
@@ -719,7 +771,20 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
       // A tool call is what it is DOING; the prose is what it thinks about it. Both, briefly.
       return (c as any[] ?? []).map((b) => (b.type === "toolCall" ? `  ran ${b.name}` : b.text ? `  said: ${String(b.text).slice(0, 160)}` : "")).filter(Boolean);
     });
-    return text([`asked of ${a.id}:`, ...(asks.length ? asks : ["  nothing outstanding"]), `its session, latest last:`, ...(said.length ? said : ["  nothing yet"])].join("\n"));
+    const ws = decodeURIComponent(id);
+    const running = (procs.ok && Array.isArray(procs.data) ? (procs.data as { workspace?: string; name: string; command: string; started: number; ended?: number }[]) : [])
+      .filter((r) => r.workspace === ws && r.ended === undefined)
+      .map((r) => `  ${r.name}: ${String(r.command).slice(0, 120)} (since ${new Date(r.started).toISOString().slice(11, 16)})`);
+    return text(
+      [
+        `asked of ${a.id}:`,
+        ...(asks.length ? asks : ["  nothing outstanding"]),
+        `running there:`,
+        ...(running.length ? running : ["  nothing running"]),
+        `its session, latest last:`,
+        ...(said.length ? said : ["  nothing yet"]),
+      ].join("\n"),
+    );
   });
 }
 
@@ -765,7 +830,7 @@ export function packageTools(reg: ReturnType<typeof makeReg>) {
   const WS = Type.Optional(Type.String({ description: "the workspace to act on, by name or id — required: this session has no machine of its own" }));
   const attr = (e: string) => e.split("@")[0];
   const NAME_IT = { ...text("name the workspace: packages are installed in a workspace, and this session has no machine of its own"), isError: true };
-  const named = (workspace: unknown) => (typeof workspace === "string" && workspace.trim() ? workspace.trim() : undefined);
+  const named = (workspace: unknown) => (typeof workspace === "string" && workspace.trim() ? refuseOwnBench(workspace.trim()) : undefined);
   const have = async (id: string): Promise<string[]> => {
     const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(id)}`);
     if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
@@ -928,6 +993,41 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
   });
 }
 
+/**
+ * The bench is not a workspace, and a bench session must never name itself as one. It proposed
+ * `Start workspace bench-505f6b8c9d7b` — itself — while an ask to a real workspace was still
+ * running (owner, 2026-09-18). `/v1` hides benches from every listing but still answers a bench id
+ * by name, so the refusal belongs here, where the id is read.
+ *
+ * A bench session no longer defaults ANY tool to its own machine (spec §3.1: it has none). A
+ * workspace session still defaults to its own workspace, which is what `ownTools` is.
+ */
+export const NOT_A_WORKSPACE = "that is you, not a workspace; name a workspace";
+export const isOwnBench = (id: string): boolean => {
+  const own = process.env.KL_WORKSPACE_ID;
+  // The bench's own workspace id, and the `bench-` objects the platform names a bench with
+  // (`crd::bench_id`) — a listing never offers one, so anything shaped like one is a mistake.
+  return !!id && (id === own || /^bench-[0-9a-f]{8,}$/.test(id));
+};
+/** Throws the person's own sentence when a bench session names itself. */
+export function refuseOwnBench(id: string): string {
+  if (isOwnBench(id)) throw new Error(NOT_A_WORKSPACE);
+  return id;
+}
+
+/**
+ * A listing the model reads never contains a bench. `/v1` already drops them
+ * (`api::workspaces::visible`), and this is the second fence: a row that leaked from anywhere —
+ * an older api, a cached answer — must not become something the model can name.
+ */
+export function withoutBenches(data: unknown): unknown {
+  if (!Array.isArray(data)) return data;
+  return data.filter((r) => {
+    const row = r as { id?: string; bench?: unknown; kind?: string };
+    return !(row?.bench || row?.kind === "bench" || isOwnBench(String(row?.id ?? "")));
+  });
+}
+
 /** Per-verb ceilings: long enough for a real create on a cold node, short enough to answer. */
 const CAP = { create: 180_000, start: 180_000, restore: 180_000, push: 120_000 };
 /**
@@ -1007,7 +1107,7 @@ export function tools(pi: ExtensionAPI) {
     // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours.
     return idOrName;
   };
-  const ws = (a: Record<string, any>) => resolve("workspaces", String(a.id));
+  const ws = async (a: Record<string, any>) => refuseOwnBench(await resolve("workspaces", refuseOwnBench(String(a.id))));
   const env = (a: Record<string, any>) => resolve("environments", String(a.id));
 
   /** The id a create answered with, or the one it was given. */
@@ -1031,8 +1131,12 @@ export function tools(pi: ExtensionAPI) {
   const O = <T>(t: T) => Type.Optional(t as any);
 
   // workspaces
-  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
-  reg("kl_workspace", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}`));
+  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, async (a) => {
+    const r = await call("GET", `/v1/workspaces${q({ team: a.team })}`);
+    if (r.status >= 400) return { ...text(sanitizeError("kl_workspaces", r.status, r.data)), isError: true };
+    return text(withoutBenches(r.data));
+  });
+  reg("kl_workspace", { id: S("workspace id or name") }, (a) => answer("GET", `/v1/workspaces/${encodeURIComponent(refuseOwnBench(String(a.id)))}`));
   reg(
     "kl_workspace_create",
     {
@@ -1088,6 +1192,7 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_environment_delete", { id: ENV }, async (a) => answer("DELETE", `/v1/environments/${await env(a)}`));
 
   repoTools(reg);
+  imageTools(reg);
   progressTool(reg);
   planTools(reg);
   if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, process.env.KL_WORKSPACE_ID);

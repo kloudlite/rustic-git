@@ -64,10 +64,15 @@ test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions
 test("tools() reads the argv: every session its own machine's plus the platform, a fork none", () => {
   const dir = "/tmp/bench-tools";
   const bench = new RpcChild("s-1", { dir, model: "m" }, () => undefined).tools();
-  // The seven are the tool server's, in the bench's own workspace; the built-ins that would have
-  // run in the bench container are gone with `--no-builtin-tools`.
-  for (const own of ["bash", "read", "write"]) assert.ok(bench.includes(own), `${own}: ${bench.join(",")}`);
+  // A bench session has NO machine (spec §3.1): not the built-ins, which would run in the bench
+  // container, and not the tool server's seven either — it was handed its own pod's loopback as
+  // "its machine", and the model then asked the person to start the bench so a build could run
+  // (owner, 2026-09-18).
+  for (const none of ["bash", "read", "write", "process", "kl_repo_clone"]) assert.ok(!bench.includes(none), `${none}: ${bench.join(",")}`);
+  // `kl_container_build` stays, as an ASK to the workspace holding the context — never an exec.
+  assert.ok(bench.includes("kl_container_build") && bench.includes("kl_images"), bench.join(","));
   assert.ok(bench.includes("ask") && bench.includes("tool_search"), bench.join(","));
+  assert.equal(new RpcChild("s-1", { dir, model: "m" }, () => undefined).hands().toolsAddress, undefined, "and no address to reach one at");
   const ws = new RpcChild("w-1", { dir, model: "m", file: "/tmp/x.jsonl", tools: "ws-1" }, () => undefined).tools();
   // No `--tools` allow-list any more: `tool_search` turns a deferred tool on at runtime, and an
   // allow-list would have to be kept equal to the whole catalogue by hand to admit it.

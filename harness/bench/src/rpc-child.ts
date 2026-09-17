@@ -12,11 +12,6 @@ import type { Triple } from "./defaults.ts";
  * here remembers anything — reopening a session is `--session <file>`.
  */
 export type PiEvent = Record<string, unknown> & { type: string; id?: string };
-/**
- * The bench's own workspace container's tool server. The two containers of a bench pod share a
- * network namespace, so this is the same loopback address `pty.ts` splices a bench-scope shell to.
- */
-export const BENCH_TOOLS = "127.0.0.1:7788";
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
@@ -39,7 +34,10 @@ export const WORKSPACE_TOOLS = "";
 const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
 /** `process` has no built-in counterpart: long-running commands exist only on a tool server. */
 /** What `workspace-tools.ts` registers — the machine's own hands, catalogue entries included. */
-export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone", "kl_container_build", "kl_container_push", "kl_images"];
+// What only a session WITH a machine can run. `kl_images` is a registry read and `kl_container_*`
+// are an ask from the bench (`imageTools`), so those names exist in both modes and differ only in
+// where the work happens.
+export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone"];
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 /** `info`: a READ-ONLY fork that answers one question about a workspace, on that workspace's tool server. */
@@ -47,7 +45,7 @@ export const INFO_TOOLS = "read,grep,find,ls";
 /** One row of `get_available_models`, reduced to what the picker draws. */
 export type ModelInfo = { id: string; name: string; provider: string; thinking: boolean; effort: boolean };
 
-export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean; ownWorkspace?: boolean; thinking?: string; effort?: string };
+export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean; thinking?: string; effort?: string };
 
 export class RpcChild {
   readonly id: string;
@@ -76,10 +74,9 @@ export class RpcChild {
   private args(extDir: string): string[] {
     const o = this.opts;
     // Every kind but the fork loads `workspace-tools.ts`; what differs is whose machine it points
-    // at. A workspace session names its workspace (`KL_TOOLS_WORKSPACE`, address from /v1); a bench
-    // session is handed `BENCH_TOOLS`, its OWN workspace container's tool server on loopback, so
-    // its hands are its own machine's and no other's — reaching a different workspace is
-    // `kl_workspace_ask`, a queue, never a tool call (owner, 2026-09-17).
+    // at. A workspace session names its workspace (`KL_TOOLS_WORKSPACE`, address from /v1); a BENCH
+    // session names none and registers no hands at all (spec §3.1) — reaching a workspace is `ask`,
+    // a queue, never a tool call.
     //
     // `--no-builtin-tools` stays either way: a built-in read or bash would run in the BENCH
     // container, which is nobody's machine. It leaves exactly the extensions' tools, which for a
@@ -104,25 +101,29 @@ export class RpcChild {
     if (a.includes("--no-tools")) return [];
     // Not the builtins: the same seven NAMES, registered by `workspace-tools.ts` and run on a tool
     // server. `--no-builtin-tools` removes pi's own; these stay.
-    const ide = a.some((x) => x.endsWith("workspace-tools.ts")) ? IDE_TOOLS : [];
-    const ext = a.some((x) => x.endsWith("kloudlite.ts")) ? TOOLS.map((t) => t.name) : [];
+    // `workspace-tools.ts` registers nothing without a workspace to point at, which is a bench
+    // session exactly (spec §3.1): the extension is loaded so it is told what it is, not for hands.
+    const ide = a.some((x) => x.endsWith("workspace-tools.ts")) && (this.opts.tools || process.env.KL_TOOLS_ADDRESS) ? IDE_TOOLS : [];
+    // `kloudlite.ts` never registers the entries that RUN on a machine — those are
+    // `workspace-tools.ts`'s — so a session with no machine has neither half of them.
+    const ext = a.some((x) => x.endsWith("kloudlite.ts")) ? TOOLS.map((t) => t.name).filter((n) => ide.length || !IDE_TOOLS.includes(n)) : [];
     return [...(a.includes("--no-builtin-tools") ? [] : PI_BUILTINS), ...ide, ...ext];
   }
 
   /**
    * `tools()` plus the two facts that say WHERE they run: the tool-server address this session's
-   * child is handed, and whether pi's own builtins are on. A bench session's hands are its own
-   * workspace container's (`BENCH_TOOLS`) with the builtins off — the tool NAMES alone cannot tell
-   * that from a session running them in the bench container, which is what the fleet probe checks.
+   * child is handed, and whether pi's own builtins are on. A bench session has NO address and no
+   * builtins: nothing it can call runs anywhere near the bench pod, which is what the fleet probe
+   * checks.
    */
   hands(): { tools: string[]; toolsAddress?: string; builtinTools: boolean } {
     const o = this.opts;
     const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
     return {
       tools: this.tools(extDir),
-      // The same condition the spawn env below is built from: a workspace session resolves its
-      // address from /v1 instead, and a fork has no tools at all.
-      toolsAddress: o.fork || o.tools ? undefined : BENCH_TOOLS,
+      // A bench session has no tool server of its own (spec §3.1); a workspace session resolves
+      // its address from /v1 when its child starts.
+      toolsAddress: undefined,
       builtinTools: !this.args(extDir).includes("--no-builtin-tools"),
     };
   }
@@ -140,9 +141,13 @@ export class RpcChild {
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
     // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
-    const env = { ...process.env, KL_SESSION: this.id, ...(o.effort ? { PI_EFFORT: o.effort } : {}), ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), // Which machine this session's hands are on, and whose packages `kl_pkg_*` act on.
-      ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}),
-      ...(o.ownWorkspace ? { KL_TOOLS_ADDRESS: BENCH_TOOLS } : {}), ...childTraceEnv() };
+    // Which machine this session's hands are on: a WORKSPACE session's own workspace, and nothing
+    // at all for a bench session. It was handed its own pod's loopback tool server, which is the
+    // "own machine is the default target" rule that died with spec §3.1 — the sessions container
+    // has no tool server, so the model was told to start `bench-…` to make a build work
+    // (owner, 2026-09-18).
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.effort ? { PI_EFFORT: o.effort } : {}), ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}),
+      ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

@@ -617,6 +617,7 @@ export class Bench {
   private async toolsAddress(session: string): Promise<string> {
     const s = this.sessions.get(session);
     if (!s) throw new Error(`no session ${session}`);
+    if (!s.target) throw new Error("this session has no machine; a process runs in a workspace");
     const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
     return await resolve(s.target);
   }
