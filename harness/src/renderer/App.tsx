@@ -12,7 +12,7 @@ import { makeTab, nextIndex, reconcile as reconcileTabs, scopeOfTab, sessionInde
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
-import { KEYS, inTerminal, mayAct, threadIndex } from "./keys";
+import { KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
@@ -498,25 +498,25 @@ export function App() {
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
     // Suggested: what a person does next. Session: what they do to this conversation.
-    { id: "mode", group: "Suggested", label: `Mode: ${live.mode()} (cycle)`, keys: KEYS.mode.keys, run: () => {
+    { id: "mode", group: "Suggested", label: `Mode: ${live.mode()} (cycle)`, keys: keyHint(KEYS.mode), run: () => {
       const next = live.MODES[(live.MODES.indexOf(live.mode()) + 1) % live.MODES.length];
       live.setMode(next);
       void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
     } },
-    { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: KEYS.level.keys, run: () => {
+    { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: keyHint(KEYS.level), run: () => {
       const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
       live.noteLevel(next);
       void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
     } },
-    { id: "composer", group: "Suggested", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
-    { id: "shell", group: "Suggested", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell() },
-    { id: "env", group: "Suggested", label: envTab() ? "Close the environment" : "Open the environment", keys: KEYS.environment.keys, run: () => (setFile(undefined), setEnvTab((v) => !v)) },
-    { id: "panel", group: "Suggested", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: KEYS.panel.keys, run: () => setLeftOpen((v) => !v) },
-    { id: "inspector", group: "Suggested", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
-    { id: "workspaces", group: "Suggested", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
-    { id: "go", group: "Suggested", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
-    { id: "settings", group: "Suggested", label: "Settings", keys: KEYS.settings.keys, run: () => openSettings() },
-    { id: "bg", group: "Session", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
+    { id: "composer", group: "Suggested", label: "Focus the prompt", keys: keyHint(KEYS.composer), run: () => composer()?.focus() },
+    { id: "shell", group: "Suggested", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: keyHint(KEYS.shell), run: () => toggleShell() },
+    { id: "env", group: "Suggested", label: envTab() ? "Close the environment" : "Open the environment", keys: keyHint(KEYS.environment), run: () => (setFile(undefined), setEnvTab((v) => !v)) },
+    { id: "panel", group: "Suggested", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: keyHint(KEYS.panel), run: () => setLeftOpen((v) => !v) },
+    { id: "inspector", group: "Suggested", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: keyHint(KEYS.inspector), run: () => setRightOpen((v) => !v) },
+    { id: "workspaces", group: "Suggested", label: "Switch workspace…", keys: keyHint(KEYS.workspaces), run: () => setPalette("workspaces") },
+    { id: "go", group: "Suggested", label: "Go to…", keys: keyHint(KEYS.quickOpen), run: () => setPalette("go") },
+    { id: "settings", group: "Suggested", label: "Settings", keys: keyHint(KEYS.settings), run: () => openSettings() },
+    { id: "bg", group: "Session", label: "Send the running command to the background", keys: keyHint(KEYS.background), run: () => void pi({ type: "prompt", message: "/bg" }) },
     { id: "abort", group: "Session", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", group: "Session", label: "New session", run: newSession },
     { id: "benchImport", group: "Session", label: "Import this laptop's sessions into the bench", run: () => {
@@ -532,12 +532,12 @@ export function App() {
     { id: "deleteSession", label: "Delete this session", run: () => deleteSession(cur()) },
     { id: "archiveSession", label: "Archive this session", run: () => archiveSession(cur()) },
     { id: "archiveIdle", label: "Archive idle sessions (untouched for a day)", run: () => idleSessions().forEach((x) => archiveSession(x.id)) },
-    { id: "split", label: "Split the tab to the right", keys: KEYS.split.keys, run: splitRight },
-    { id: "find", label: "Find in page", keys: KEYS.find.keys, run: openFind },
-    { id: "prev", label: "Previous thread", keys: KEYS.prevThread.keys, run: () => cycleThread(-1) },
-    { id: "next", label: "Next thread", keys: KEYS.nextThread.keys, run: () => cycleThread(1) },
+    { id: "split", label: "Split the tab to the right", keys: keyHint(KEYS.split), run: splitRight },
+    { id: "find", label: "Find in page", keys: keyHint(KEYS.find), run: openFind },
+    { id: "prev", label: "Previous thread", keys: keyHint(KEYS.prevThread), run: () => cycleThread(-1) },
+    { id: "next", label: "Next thread", keys: keyHint(KEYS.nextThread), run: () => cycleThread(1) },
     { id: "nth", label: "Thread by position", keys: "⌘1…9", run: () => setPalette("go") },
-    { id: "close", label: "Close what is open", keys: KEYS.close.keys, run: closeCurrent },
+    { id: "close", label: "Close what is open", keys: keyHint(KEYS.close), run: closeCurrent },
     { id: "theme", label: "Cycle theme", run: cycleTheme },
     ...machine().plugins.filter((p) => p.kind === "skill" && p.enabled).map((p) => ({
       id: `skill:${p.name}`, label: `/${p.name}`, detail: (p as { summary: string }).summary, kind: "skill",
@@ -550,6 +550,16 @@ export function App() {
     ...environments().filter((e) => e.id !== environment()?.id).map((e) => ({ id: `env:${e.id}`, label: `Connect to ${e.name}`, run: () => connectTo(e.id) })),
   ]);
 
+  /** Whether opencode's leader (`ctrl+x`) is armed, and the timer that forgets it. */
+  const [armed, setArmed] = createSignal(false);
+  let leaderTimer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    setArmed(true);
+    clearTimeout(leaderTimer);
+    leaderTimer = setTimeout(() => setArmed(false), LEADER_FORGET_MS);
+  };
+  onCleanup(() => clearTimeout(leaderTimer));
+
   const onKey = (e: KeyboardEvent) => {
     // A terminal owns the keyboard while it has focus: nothing here may take a key from it except
     // a chord it cannot mean. Everything else reaches the PTY, once, through xterm alone.
@@ -557,6 +567,24 @@ export function App() {
     const hit = (b: { match: (e: KeyboardEvent) => boolean }) => b.match(e);
     const stop = () => e.preventDefault();
 
+    // The leader layer, first: while it is armed the next key is opencode's, not ours.
+    if (armed()) {
+      setArmed(false);
+      clearTimeout(leaderTimer);
+      const b = underLeader(e);
+      if (b) {
+        stop();
+        if (b === KEYS.panel) return void setLeftOpen((v) => !v);
+        if (b === KEYS.inspector) return void setRightOpen((v) => !v);
+        if (b === KEYS.quickOpen) return void setPalette("go");
+        if (b === KEYS.palette) return void setPalette("commands");
+        if (b === KEYS.close) return closeCurrent();
+      }
+      const slot = leaderIndex(e);
+      if (slot !== undefined && open()[slot]) return (stop(), showThread(open()[slot]));
+      return;
+    }
+    if (hit(LEADER)) return (stop(), arm());
     if (hit(KEYS.steer)) return (stop(), send("steer"));
     if (hit(KEYS.send)) return (stop(), send());
     if (hit(KEYS.background)) return (stop(), void pi({ type: "prompt", message: "/bg" }));

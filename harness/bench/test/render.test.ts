@@ -4,6 +4,7 @@ import { TEXT_RENDER_IMMEDIATE, next, paced, step } from "../../src/renderer/com
 import { badge, editFile, patchFiles, split } from "../../src/renderer/components/results/diff.ts";
 import { diagnostics, toolError, toolLine } from "../../src/renderer/components/results/toolline.ts";
 import { usage } from "../../src/renderer/live.ts";
+import { KEYS, LEADER, keyHint, leaderIndex, underLeader } from "../../src/renderer/keys.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -140,4 +141,20 @@ test("the footer says tokens, how full the window is, and what it cost", () => {
   assert.equal(usage(12400, 1.2, 32000), "12.4K (39%) · $1.20");
   assert.equal(usage(900, 0, undefined), "900");
   assert.equal(usage(64000, undefined, 32000), "64K (100%)", "a window over its limit stops at 100");
+});
+
+test("opencode's leader is an alias layer over our own keys", () => {
+  const ev = (key: string, mods: Partial<KeyboardEvent> = {}) => ({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...mods }) as KeyboardEvent;
+  assert.ok(LEADER.match(ev("x", { ctrlKey: true })), "ctrl+x arms the leader");
+  assert.ok(!LEADER.match(ev("x", { metaKey: true })), "⌘X is not the leader");
+  assert.equal(underLeader(ev("b")), KEYS.panel);
+  assert.equal(underLeader(ev("l")), KEYS.quickOpen);
+  assert.equal(underLeader(ev("s")), KEYS.inspector);
+  assert.equal(underLeader(ev("z")), undefined);
+  assert.equal(leaderIndex(ev("3")), 2);
+  assert.equal(leaderIndex(ev("0")), undefined);
+  // Our own key still works, and the palette shows both.
+  assert.ok(KEYS.panel.match(ev("b", { metaKey: true })));
+  assert.equal(keyHint(KEYS.panel), "⌘B  ^X B");
+  assert.equal(keyHint(KEYS.shell), "⌘J", "a binding with no alias reads as itself");
 });

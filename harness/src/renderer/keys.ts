@@ -9,6 +9,12 @@ export type Binding = {
   keys: string;      // as a person reads it
   label: string;     // what it does
   hint?: boolean;    // shown under the composer
+  /**
+   * The same command under opencode's leader (`ctrl+x`, `keybind.ts:39`). It is an ALIAS, not a
+   * replacement: a person who came from opencode presses `ctrl+x b` and a person who came from an
+   * editor presses ⌘B, and both open the same thing.
+   */
+  leader?: string;
   match: (e: KeyboardEvent) => boolean;
 };
 
@@ -22,13 +28,13 @@ export const KEYS = {
   composer: { keys: "⌘L", label: "prompt", hint: true, match: (e) => meta(e) && key(e, "l") },
   shell: { keys: "⌘J", label: "shell", hint: true, match: (e) => meta(e) && key(e, "j") },
   environment: { keys: "⌘E", label: "environment", match: (e) => meta(e) && key(e, "e") },
-  panel: { keys: "⌘B", label: "workspaces", match: (e) => meta(e) && !e.altKey && key(e, "b") },
-  inspector: { keys: "⌘⌥B", label: "inspector", match: (e) => meta(e) && e.altKey && key(e, "b") },
+  panel: { keys: "⌘B", label: "workspaces", leader: "b", match: (e) => meta(e) && !e.altKey && key(e, "b") },
+  inspector: { keys: "⌘⌥B", label: "inspector", leader: "s", match: (e) => meta(e) && e.altKey && key(e, "b") },
   prevThread: { keys: "⌘[", label: "previous thread", match: (e) => meta(e) && e.key === "[" },
   nextThread: { keys: "⌘]", label: "next thread", match: (e) => meta(e) && e.key === "]" },
-  close: { keys: "⌘W", label: "close the tab", match: (e) => meta(e) && key(e, "w") },
+  close: { keys: "⌘W", label: "close the tab", leader: "q", match: (e) => meta(e) && key(e, "w") },
   back: { keys: "esc", label: "back", match: (e) => e.key === "Escape" },
-  quickOpen: { keys: "⌘P", label: "go to…", match: (e) => meta(e) && !e.shiftKey && key(e, "p") },
+  quickOpen: { keys: "⌘P", label: "go to…", leader: "l", match: (e) => meta(e) && !e.shiftKey && key(e, "p") },
   commands: { keys: "⌘⇧P", label: "commands", match: (e) => meta(e) && e.shiftKey && key(e, "p") },
   settings: { keys: "⌘,", label: "settings", match: (e) => meta(e) && e.key === "," },
   background: { keys: "^B", label: "background", match: (e) => e.ctrlKey && !e.metaKey && key(e, "b") },
@@ -39,8 +45,30 @@ export const KEYS = {
   // opencode's own three, on our shapes: Build/Plan, how hard the model thinks, and the palette.
   mode: { keys: "⇧tab", label: "cycle mode", hint: true, match: (e) => e.key === "Tab" && e.shiftKey && !meta(e) && !e.altKey },
   level: { keys: "^T", label: "thinking level", match: (e) => e.ctrlKey && !e.metaKey && key(e, "t") },
-  palette: { keys: "^P", label: "commands", hint: true, match: (e) => e.ctrlKey && !e.metaKey && key(e, "p") },
+  palette: { keys: "^P", label: "commands", leader: "p", hint: true, match: (e) => e.ctrlKey && !e.metaKey && key(e, "p") },
 } as const satisfies Record<string, Binding>;
+
+/**
+ * opencode's leader key. Pressing it arms the next keystroke: `ctrl+x b` is the sidebar, `ctrl+x l`
+ * is the session list, `ctrl+x 1…9` a session by slot. It forgets after three seconds, because a
+ * leader that stays armed eats the next thing a person types.
+ */
+export const LEADER: Binding = { keys: "^X", label: "leader", match: (e) => e.ctrlKey && !e.metaKey && !e.altKey && key(e, "x") };
+export const LEADER_FORGET_MS = 3000;
+
+/** Which binding a key means while the leader is armed, if any. */
+export function underLeader(e: KeyboardEvent): Binding | undefined {
+  return Object.values(KEYS).find((b) => "leader" in b && b.leader && key(e, b.leader));
+}
+
+/** `ctrl+x 1…9` picks a session by slot, the way ⌘1…9 picks a tab. */
+export function leaderIndex(e: KeyboardEvent): number | undefined {
+  const n = Number(e.key);
+  return n >= 1 && n <= 9 ? n - 1 : undefined;
+}
+
+/** Both ways of saying it, for the palette: `⌘B  ^X B`. A hidden alias is not an alias. */
+export const keyHint = (b: Binding): string => (b.leader ? `${b.keys}  ${LEADER.keys} ${b.leader.toUpperCase()}` : b.keys);
 
 /** ⌘1…⌘9 select a thread tab by position; listed in the command palette as one row. */
 export function threadIndex(e: KeyboardEvent): number | undefined {
