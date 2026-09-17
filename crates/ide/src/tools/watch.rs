@@ -2,16 +2,15 @@
 use super::{argv, opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
 use crate::paths::confine;
 use crate::procs::Procs;
+use crate::trees::Trees;
 use crate::watches::Watches;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct WatchTools {
-    pub root: PathBuf,
-    pub home: PathBuf,
+    pub trees: Arc<Trees>,
     pub procs: Arc<Procs>,
     pub watches: Arc<Watches>,
 }
@@ -23,7 +22,7 @@ fn obj(props: Value, required: &[&str]) -> Value {
 impl ToolSet for WatchTools {
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool { name: "watch", description: "Start a watch and answer {id}. Either paths[] (file-system changes under them, recursive) or cmd (a command whose output lines are events, filtered by the regex pattern when given). once:true ends the watch at the first event. Read with watch_poll or GET /stream/watch/{id}.", schema: obj(json!({ "paths": {"type":"array","items":{"type":"string"}}, "cmd": {}, "pattern": {"type":"string"}, "once": {"type":"boolean"} }), &[]) },
+            Tool { name: "watch", description: "Start a watch and answer {id}. Either paths[] (file-system changes under them, recursive) or cmd (a command whose output lines are events, filtered by the regex pattern when given). once:true ends the watch at the first event. Read with watch_poll or GET /stream/watch/{id}.", schema: obj(json!({ "paths": {"type":"array","items":{"type":"string"}}, "cmd": {}, "pattern": {"type":"string"}, "once": {"type":"boolean"}, "tree": {"type":"string"} }), &[]) },
             Tool { name: "watch_poll", description: "Events since an index (0 = from the start; the ring keeps the last 1000). Answers events, next, dropped, state.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
             Tool { name: "watch_stop", description: "Stop a watch (and its command, if any).", schema: obj(json!({ "id": {"type":"string"} }), &["id"]) },
         ]
@@ -31,6 +30,7 @@ impl ToolSet for WatchTools {
 
     fn call<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, ToolError>> {
         async move {
+            let t = self.trees.resolve(opt_str(&args, "tree"))?;
             match name {
                 "watch" => {
                     let once = opt_bool(&args, "once");
@@ -38,7 +38,7 @@ impl ToolSet for WatchTools {
                         let mut confined = Vec::new();
                         for p in paths {
                             let p = p.as_str().ok_or_else(|| ToolError::Invalid("paths[] must be strings".into()))?;
-                            confined.push(confine(&self.root, &self.home, p)?);
+                            confined.push(confine(&t, p)?);
                         }
                         if confined.is_empty() {
                             return Err(ToolError::Invalid("paths[] is empty".into()));
@@ -62,10 +62,10 @@ impl ToolSet for WatchTools {
                         }
                         _ => return Err(ToolError::Invalid("cmd must be a string or an argv array".into())),
                     };
-                    command.current_dir(&self.root);
+                    command.current_dir(&t.root);
                     command.process_group(0);
                     command.kill_on_drop(true);
-                    let id = self.watches.watch_cmd(self.procs.clone(), command, line, pattern, once).map_err(ToolError::Failed)?;
+                    let id = self.watches.watch_cmd(&t.name, self.procs.clone(), command, line, pattern, once).map_err(ToolError::Failed)?;
                     Ok(json!({ "id": id }))
                 }
                 "watch_poll" => {
@@ -102,7 +102,7 @@ mod tests {
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("ws");
         std::fs::create_dir_all(&root).unwrap();
-        let w = WatchTools { root, home, procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
+        let w = WatchTools { trees: Arc::new(Trees::new(root, None)), procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
         let v = w.call("watch", json!({ "cmd": "echo one; echo two; sleep 30" })).await.unwrap();
         let id = v["id"].as_str().unwrap().to_string();
 
@@ -132,7 +132,7 @@ mod tests {
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("ws");
         std::fs::create_dir_all(&root).unwrap();
-        let w = WatchTools { root, home, procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
+        let w = WatchTools { trees: Arc::new(Trees::new(root, None)), procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
         let e = w.call("watch", json!({ "cmd": ["echo", 7] })).await.unwrap_err();
         assert!(matches!(e, ToolError::Invalid(_)), "{e:?}");
         let e = w.call("watch", json!({ "paths": [7] })).await.unwrap_err();

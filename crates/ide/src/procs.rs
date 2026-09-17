@@ -65,6 +65,13 @@ pub enum State {
 
 pub struct Proc {
     pub id: String,
+    /// Set when the process died on a bind failure: the sentence `port_conflict` composed, which
+    /// a model reads instead of the stack trace it would otherwise have to parse.
+    pub failed: Option<String>,
+    /// The tree this process was started in. A process id NAMES its tree: listing from one tree
+    /// never shows another's, and reaching one by id from the wrong tree is a miss — a subagent
+    /// must not be able to kill the main session's dev server, or even see that it is there.
+    pub tree: String,
     pub cmd: String,
     pub started_at: String,
     pub state: State,
@@ -93,7 +100,7 @@ fn now_rfc3339() -> String {
 impl Procs {
     /// Spawn `command` detached: pipes wired, readers pumping into the rings and the broadcast,
     /// the exit recorded when it comes. `command` must already carry argv, cwd and env.
-    pub fn spawn(&self, mut command: Command, cmdline: String) -> Result<String, String> {
+    pub fn spawn(&self, tree: &str, mut command: Command, cmdline: String) -> Result<String, String> {
         {
             let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             self.reap_locked(&mut map);
@@ -108,7 +115,7 @@ impl Procs {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let stdin = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
-        let proc_ = Arc::new(Mutex::new(Proc { id: id.clone(), cmd: cmdline, started_at: now_rfc3339(), state: State::Running, exit_code: None, exited_at: None, out: Ring::new(RING_BYTES), err: Ring::new(RING_BYTES), stdin, tx: tx.clone(), child: None }));
+        let proc_ = Arc::new(Mutex::new(Proc { id: id.clone(), failed: None, tree: tree.to_string(), cmd: cmdline, started_at: now_rfc3339(), state: State::Running, exit_code: None, exited_at: None, out: Ring::new(RING_BYTES), err: Ring::new(RING_BYTES), stdin, tx: tx.clone(), child: None }));
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).insert(id.clone(), proc_.clone());
         let pump = |reader: Option<tokio::process::ChildStdout>, err_reader: Option<tokio::process::ChildStderr>, p: Arc<Mutex<Proc>>| {
             if let Some(r) = reader {
@@ -169,6 +176,15 @@ impl Procs {
                         g.exit_code = Some(code);
                         g.exited_at = Some(std::time::Instant::now());
                         g.child = None;
+                        // A server that could not take its port: the answer is a sentence naming
+                        // the port and who holds it, composed once here rather than left for the
+                        // model to read out of a stack trace (spec §4.6).
+                        if code != 0 {
+                            let (err, _, _) = g.err.read_since(0);
+                            if let Some(port) = port_conflict(&err, &g.cmd) {
+                                g.failed = Some(format!("port {port} in use"));
+                            }
+                        }
                         // Not waited on: a write in flight owns the lock and its own error says
                         // the pipe is gone; the handle drops with the Proc either way.
                         if let Ok(mut s) = g.stdin.try_lock() {
@@ -187,8 +203,17 @@ impl Procs {
         Ok(id)
     }
 
+    /// A process by id, WITHOUT the tree check — the stream routes and the reaper, which address
+    /// a process they were already handed. Every tool path goes through `get_in` instead.
     pub fn get(&self, id: &str) -> Option<Arc<Mutex<Proc>>> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).get(id).cloned()
+    }
+
+    /// A process by id, as seen FROM `tree`. A process of another tree answers `None`, the same as
+    /// one that never existed: which trees hold which processes is not something to leak through
+    /// the difference between "not yours" and "no such id".
+    pub fn get_in(&self, tree: &str, id: &str) -> Option<Arc<Mutex<Proc>>> {
+        self.get(id).filter(|p| p.lock().unwrap_or_else(|q| q.into_inner()).tree == tree)
     }
 
     pub fn list(&self) -> Vec<Arc<Mutex<Proc>>> {
@@ -197,9 +222,14 @@ impl Procs {
         map.values().cloned().collect()
     }
 
+    /// One tree's processes, which is all any caller of `process_list` ever sees.
+    pub fn list_in(&self, tree: &str) -> Vec<Arc<Mutex<Proc>>> {
+        self.list().into_iter().filter(|p| p.lock().unwrap_or_else(|q| q.into_inner()).tree == tree).collect()
+    }
+
     /// TERM now; KILL if it is still there five seconds later.
-    pub async fn kill(&self, id: &str, signal: &str) -> Result<State, String> {
-        let p = self.get(id).ok_or_else(|| format!("no process {id}"))?;
+    pub async fn kill(&self, tree: &str, id: &str, signal: &str) -> Result<State, String> {
+        let p = self.get_in(tree, id).ok_or_else(|| format!("no process {id}"))?;
         let pid = {
             let g = p.lock().unwrap_or_else(|q| q.into_inner());
             if g.state == State::Exited {
@@ -232,8 +262,8 @@ impl Procs {
         Ok(state)
     }
 
-    pub async fn write_stdin(&self, id: &str, data: &[u8]) -> Result<usize, String> {
-        let p = self.get(id).ok_or_else(|| format!("no process {id}"))?;
+    pub async fn write_stdin(&self, tree: &str, id: &str, data: &[u8]) -> Result<usize, String> {
+        let p = self.get_in(tree, id).ok_or_else(|| format!("no process {id}"))?;
         let slot = p.lock().unwrap_or_else(|q| q.into_inner()).stdin.clone();
         let mut g = slot.lock().await;
         let Some(s) = g.as_mut() else { return Err(format!("process {id} takes no more input")) };
@@ -256,6 +286,37 @@ pub(crate) fn rand_u64() -> u64 {
     t ^ ((std::process::id() as u64) << 32) ^ (t >> 17)
 }
 
+/// The port a detached process failed to bind, when its output says it failed to bind one.
+///
+/// The net under §4.6's convention: `PORT` and `KL_PORT_RANGE` move most dev servers into their
+/// tree's block, and the ones that ignore both collide with the main tree. A model reading a raw
+/// `EADDRINUSE` stack trace guesses; a sentence naming the port and the holder does not.
+///
+/// Best effort by design, and in the one safe direction: the bind failure must be IN THE OUTPUT
+/// before any number is claimed, and the number comes from the command line's own
+/// `--port`/`-p`/`PORT=` hint. A failure with no readable hint answers `None` — the process is
+/// still reported failed, with no port invented for it.
+pub fn port_conflict(ring: &[u8], cmdline: &str) -> Option<u16> {
+    // The first 4 KiB: a bind failure is the first thing a server prints, and scanning a full
+    // 4 MiB ring for a string on every exit is work nothing asked for.
+    let head = String::from_utf8_lossy(&ring[..ring.len().min(4096)]).to_lowercase();
+    if !head.contains("eaddrinuse") && !head.contains("address already in use") {
+        return None;
+    }
+    let words: Vec<&str> = cmdline.split_whitespace().collect();
+    words
+        .iter()
+        .enumerate()
+        .find_map(|(i, w)| match *w {
+            "--port" | "-p" => words.get(i + 1).and_then(|n| n.parse().ok()),
+            _ => w
+                .strip_prefix("--port=")
+                .or_else(|| w.strip_prefix("PORT="))
+                .and_then(|n| n.parse().ok()),
+        })
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,7 +338,7 @@ mod tests {
         let procs = Procs::default();
         let mut c = Command::new("sh");
         c.arg("-c").arg("echo one; echo two >&2; echo three");
-        let id = procs.spawn(c, "sh -c …".into()).unwrap();
+        let id = procs.spawn("main", c, "sh -c …".into()).unwrap();
         let p = procs.get(&id).unwrap();
         for _ in 0..100 {
             if p.lock().unwrap().state == State::Exited {
@@ -296,8 +357,8 @@ mod tests {
         let procs = Procs::default();
         let mut c = Command::new("sh");
         c.arg("-c").arg("cat");
-        let id = procs.spawn(c, "cat".into()).unwrap();
-        let (a, b) = tokio::join!(procs.write_stdin(&id, b"one\n"), procs.write_stdin(&id, b"two\n"));
+        let id = procs.spawn("main", c, "cat".into()).unwrap();
+        let (a, b) = tokio::join!(procs.write_stdin("main", &id, b"one\n"), procs.write_stdin("main", &id, b"two\n"));
         assert_eq!((a.unwrap(), b.unwrap()), (4, 4));
         let p = procs.get(&id).unwrap();
         for _ in 0..100 {
@@ -307,7 +368,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(p.lock().unwrap().out.end(), 8);
-        procs.kill(&id, "KILL").await.unwrap();
+        procs.kill("main", &id, "KILL").await.unwrap();
     }
 
     #[tokio::test]
@@ -316,8 +377,8 @@ mod tests {
         let mut c = Command::new("sh");
         c.arg("-c").arg("sleep 30");
         c.process_group(0);
-        let id = procs.spawn(c, "sh -c sleep".into()).unwrap();
-        let st = procs.kill(&id, "TERM").await.unwrap();
+        let id = procs.spawn("main", c, "sh -c sleep".into()).unwrap();
+        let st = procs.kill("main", &id, "TERM").await.unwrap();
         assert_eq!(st, State::Exited);
     }
 }

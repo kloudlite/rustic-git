@@ -2,15 +2,16 @@
 //! as a job. Schemas are a fixed table (graft 0.18's own, copied) so `GET /tools` answers while
 //! the child is still starting.
 use super::{opt_bool, opt_str, Tool, ToolError, ToolSet};
-use crate::graft::{Graft, GraphState};
+use crate::graft::GraphState;
 use crate::procs::Procs;
+use crate::trees::Trees;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 pub struct GraftTools {
-    pub graft: Arc<Graft>,
+    pub trees: Arc<Trees>,
     pub procs: Arc<Procs>,
 }
 
@@ -24,13 +25,13 @@ fn obj(props: Value, required: &[&str]) -> Value {
 
 pub fn table() -> Vec<Tool> {
     vec![
-        Tool { name: "graft_find_code", description: "Query the repo context graph in plain words: ranked nodes with exact file:line spans and the relevant source inlined. Usually the whole answer, no file read needed.", schema: obj(json!({ "query": {"type":"string"}, "limit": {"type":"integer"}, "full": {"type":"boolean"}, "in": {"type":"string"} }), &["query"]) },
-        Tool { name: "graft_find_all", description: "Regex search over the graph's indexed files, hits grouped by innermost enclosing symbol and ranked by coupling — every occurrence, not top-N.", schema: obj(json!({ "pattern": {"type":"string"}, "in": {"type":"string"}, "ignore_case": {"type":"boolean"}, "fixed": {"type":"boolean"} }), &["pattern"]) },
-        Tool { name: "graft_trace_calls", description: "Structural edges for a symbol: direct callers by default; direction \"out\" for callees; depth N or \"all\" for the transitive closure (blast radius before a change).", schema: obj(json!({ "symbol": {"type":"string"}, "direction": {"type":"string","enum":["in","out"]}, "depth": {}, "in": {"type":"string"} }), &["symbol"]) },
-        Tool { name: "graft_file_api", description: "Signatures-only view of one file: every definition's signature and line span, about a tenth of the tokens of reading it.", schema: obj(json!({ "file": {"type":"string"} }), &["file"]) },
-        Tool { name: "graft_repo_map", description: "Token-budgeted repo orientation: directory clusters, per-directory hubs, global hotspots.", schema: obj(json!({ "max_dirs": {"type":"integer"} }), &[]) },
-        Tool { name: "graft_build", description: "Rebuild the graph as a detached process (answers {id}; read it with process_output). deep:true adds the LLM concept map and per-symbol summaries and needs GRAFT_PROVIDER/GRAFT_API_KEY in the workspace; no_reuse re-parses every file.", schema: obj(json!({ "deep": {"type":"boolean"}, "no_reuse": {"type":"boolean"} }), &[]) },
-        Tool { name: "graft_blast", description: "Blast radius of a diff: what depends on the lines the change touched. base is a git ref (default HEAD); depth N or \"all\".", schema: obj(json!({ "base": {"type":"string"}, "depth": {} }), &[]) },
+        Tool { name: "graft_find_code", description: "Query the repo context graph in plain words: ranked nodes with exact file:line spans and the relevant source inlined. Usually the whole answer, no file read needed.", schema: obj(json!({ "tree": {"type":"string"}, "query": {"type":"string"}, "limit": {"type":"integer"}, "full": {"type":"boolean"}, "in": {"type":"string"} }), &["query"]) },
+        Tool { name: "graft_find_all", description: "Regex search over the graph's indexed files, hits grouped by innermost enclosing symbol and ranked by coupling — every occurrence, not top-N.", schema: obj(json!({ "tree": {"type":"string"}, "pattern": {"type":"string"}, "in": {"type":"string"}, "ignore_case": {"type":"boolean"}, "fixed": {"type":"boolean"} }), &["pattern"]) },
+        Tool { name: "graft_trace_calls", description: "Structural edges for a symbol: direct callers by default; direction \"out\" for callees; depth N or \"all\" for the transitive closure (blast radius before a change).", schema: obj(json!({ "tree": {"type":"string"}, "symbol": {"type":"string"}, "direction": {"type":"string","enum":["in","out"]}, "depth": {}, "in": {"type":"string"} }), &["symbol"]) },
+        Tool { name: "graft_file_api", description: "Signatures-only view of one file: every definition's signature and line span, about a tenth of the tokens of reading it.", schema: obj(json!({ "tree": {"type":"string"}, "file": {"type":"string"} }), &["file"]) },
+        Tool { name: "graft_repo_map", description: "Token-budgeted repo orientation: directory clusters, per-directory hubs, global hotspots.", schema: obj(json!({ "tree": {"type":"string"}, "max_dirs": {"type":"integer"} }), &[]) },
+        Tool { name: "graft_build", description: "Rebuild the graph as a detached process (answers {id}; read it with process_output). deep:true adds the LLM concept map and per-symbol summaries and needs GRAFT_PROVIDER/GRAFT_API_KEY in the workspace; no_reuse re-parses every file.", schema: obj(json!({ "tree": {"type":"string"}, "deep": {"type":"boolean"}, "no_reuse": {"type":"boolean"} }), &[]) },
+        Tool { name: "graft_blast", description: "Blast radius of a diff: what depends on the lines the change touched. base is a git ref (default HEAD); depth N or \"all\".", schema: obj(json!({ "tree": {"type":"string"}, "base": {"type":"string"}, "depth": {} }), &[]) },
     ]
 }
 
@@ -41,24 +42,29 @@ impl ToolSet for GraftTools {
 
     fn call<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, ToolError>> {
         async move {
-            if self.graft.state() == GraphState::Unavailable {
+            // One graph per tree: a subagent asks about ITS files, and the main session about the
+            // workspace's. Resolved first, so an unknown tree is a 400 rather than a query
+            // answered from the wrong graph.
+            let t = self.trees.resolve(opt_str(&args, "tree"))?;
+            let graft = &t.graft;
+            if graft.state() == GraphState::Unavailable {
                 return Err(ToolError::Failed("graft is not installed in this workspace image".into()));
             }
             match name {
                 n if PROXIED.contains(&n) => {
-                    if self.graft.state() == GraphState::Building && self.graft.root.join("graft").exists() {
+                    if graft.state() == GraphState::Building && graft.root.join("graft").exists() {
                         // A refresh in flight answers from the graph on disk; a first build has nothing yet.
-                    } else if self.graft.state() == GraphState::Building {
+                    } else if graft.state() == GraphState::Building {
                         return Err(ToolError::Failed("the graph is being built for the first time; retry in a moment".into()));
                     }
-                    self.graft.call(n, args).await.map_err(ToolError::Failed)
+                    graft.call(n, args).await.map_err(ToolError::Failed)
                 }
                 "graft_build" => {
                     if opt_bool(&args, "deep") && (std::env::var_os("GRAFT_PROVIDER").is_none() || std::env::var_os("GRAFT_API_KEY").is_none()) {
                         return Err(ToolError::Failed("no_provider: a deep build needs GRAFT_PROVIDER and GRAFT_API_KEY in the workspace".into()));
                     }
                     let mut c = tokio::process::Command::new("graft");
-                    if let Some(d) = &self.graft.graft_dir {
+                    if let Some(d) = &graft.graft_dir {
                         c.arg("--dir").arg(d);
                     }
                     c.arg("build");
@@ -68,13 +74,13 @@ impl ToolSet for GraftTools {
                     if opt_bool(&args, "no_reuse") {
                         c.arg("--no-reuse");
                     }
-                    c.arg(&self.graft.root).current_dir(&self.graft.root).env("DO_NOT_TRACK", "1").process_group(0);
-                    let id = self.procs.spawn(c, "graft build".into()).map_err(ToolError::Failed)?;
+                    c.arg(&graft.root).current_dir(&graft.root).env("DO_NOT_TRACK", "1").process_group(0);
+                    let id = self.procs.spawn(&t.name, c, "graft build".into()).map_err(ToolError::Failed)?;
                     Ok(json!({ "id": id }))
                 }
                 "graft_blast" => {
                     let depth = args.get("depth").map(|d| match d { Value::Number(n) => n.to_string(), Value::String(s) => s.clone(), _ => "1".into() });
-                    self.graft.blast(opt_str(&args, "base"), depth.as_deref()).await.map_err(ToolError::Failed)
+                    graft.blast(opt_str(&args, "base"), depth.as_deref()).await.map_err(ToolError::Failed)
                 }
                 other => Err(ToolError::Unknown(other.to_string())),
             }

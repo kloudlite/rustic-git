@@ -3,6 +3,8 @@
 use super::{argv, opt_bool, opt_str, opt_u64, str_arg, Tool, ToolError, ToolSet};
 use crate::paths::confine;
 use crate::procs::{Procs, Ring, State};
+use crate::sandbox;
+use crate::trees::{TreeCtx, Trees};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
@@ -16,35 +18,68 @@ pub const MAX_TIMEOUT_MS: u64 = 600_000;
 pub const JOB_CAP: usize = 4 << 20;
 
 pub struct Exec {
-    pub root: PathBuf,
-    pub home: PathBuf,
+    pub trees: Arc<Trees>,
     pub procs: Arc<Procs>,
-    /// Called after every finished job: a command may have moved the tree.
-    pub after_change: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Where the nix profile is, for the sandbox's read-only bind. The one thing the home is
+    /// still read for here; it is no longer a confinement boundary.
+    pub profile: PathBuf,
 }
 
-/// Build the command: argv or a shell string, cwd confined, env merged, its own process group so
-/// a kill reaches the children, inheriting the pod's login environment.
-fn command(root: &std::path::Path, home: &std::path::Path, args: &Value) -> Result<(Command, String), ToolError> {
-    let (mut cmd, line) = match args.get("cmd") {
+/// The words the command actually is, before any wrapper: a shell string becomes `sh -c ...`,
+/// an argv array is itself.
+fn words_of(args: &Value) -> Result<(Vec<String>, String), ToolError> {
+    match args.get("cmd") {
         Some(Value::String(s)) => {
             // Not a login shell: the server was started from the pod's prelude and already carries the
             // login environment (`login_env`, the nix profile on PATH). `/etc/profile` would reset PATH
             // to the system directories — `git: command not found` on build fb3673f1.
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(s);
-            (c, s.clone())
+            Ok((vec!["sh".into(), "-c".into(), s.clone()], s.clone()))
         }
         Some(Value::Array(a)) if !a.is_empty() => {
-            let words = argv(a)?;
-            let mut c = Command::new(words[0]);
-            c.args(&words[1..]);
-            (c, words.join(" "))
+            let w = argv(a)?;
+            Ok((w.iter().map(|s| (*s).to_string()).collect(), w.join(" ")))
         }
-        _ => return Err(ToolError::Invalid("`cmd` (string, or argv array) is required".into())),
+        _ => Err(ToolError::Invalid("`cmd` (string, or argv array) is required".into())),
+    }
+}
+
+/// Build the command: wrapped in bubblewrap, cwd confined to the tree, env merged, its own process
+/// group so a kill reaches the children.
+///
+/// The environment a model can print is the profile's own plus exactly three of ours —
+/// `KL_TREE`, `PORT`, `KL_PORT_RANGE`. `HOME` is the sandbox's (`{tree}/.home`) and `KL_WORKSPACE`
+/// is REMOVED: it names the layout §3.5 says a model is never taught, and it was in the pod
+/// environment this process inherited.
+fn command(t: &TreeCtx, profile: &std::path::Path, args: &Value) -> Result<(Command, String), ToolError> {
+    let (words, line) = words_of(args)?;
+    let cwd = confine(t, opt_str(args, "cwd").unwrap_or("."))?;
+    // Wrapping each exec, never the server: the server must see every tree to serve them, and an
+    // exec is a shell that can `cd ..` past everything `confine` guards (spec §4.7). A missing
+    // `bwrap` runs the command unwrapped rather than refusing to run anything — the fleet reports
+    // whether it works under the runtime class, by the owner's ruling.
+    let mut cmd = if sandbox::available() {
+        // The sandbox's HOME must exist before bwrap sets it, or every tool that writes a dotfile
+        // fails inside an empty namespace.
+        let _ = std::fs::create_dir_all(t.sandbox_home());
+        let mut c = Command::new("bwrap");
+        c.args(sandbox::bwrap_argv(t, profile, &words));
+        // bwrap's own --chdir is the tree; a `cwd` deeper in it is set here, where the path is
+        // the same string on both sides of the bind.
+        c.current_dir(&cwd);
+        c
+    } else {
+        let mut c = Command::new(&words[0]);
+        c.args(&words[1..]);
+        c.current_dir(&cwd);
+        c
     };
-    let cwd = confine(root, home, opt_str(args, "cwd").unwrap_or("."))?;
-    cmd.current_dir(&cwd);
+    cmd.env_remove("KL_WORKSPACE");
+    cmd.env("KL_TREE", &t.name);
+    if let Some((lo, hi)) = t.port_block {
+        cmd.env("PORT", lo.to_string());
+        cmd.env("KL_PORT_RANGE", format!("{lo}-{hi}"));
+    }
+    // The caller's own env last, so a command that means to set PORT itself still can.
     if let Some(env) = args.get("env").and_then(Value::as_object) {
         for (k, v) in env {
             if let Some(v) = v.as_str() {
@@ -152,40 +187,40 @@ fn obj(props: Value, required: &[&str]) -> Value {
 impl ToolSet for Exec {
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. head or tail keep only N lines of each stream; quiet answers the exit code alone (stderr's last 20 lines on failure). With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "head": {"type":"integer"}, "tail": {"type":"integer"}, "quiet": {"type":"boolean"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
-            Tool { name: "process_list", description: "Every detached process: id, cmd, started_at, state (running|exited), exit_code.", schema: obj(json!({}), &[]) },
-            Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). since addresses stdout and since_err addresses stderr; pass back the next and next_err from the previous answer to page. Answers stdout, stderr, next, next_err, dropped, dropped_err, state, exit_code.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"}, "since_err": {"type":"integer"} }), &["id"]) },
-            Tool { name: "process_write", description: "Write to a process's stdin.", schema: obj(json!({ "id": {"type":"string"}, "data": {"type":"string"} }), &["id","data"]) },
-            Tool { name: "process_kill", description: "Stop a process: TERM (default), then KILL after 5 s; or KILL.", schema: obj(json!({ "id": {"type":"string"}, "signal": {"type":"string","enum":["TERM","KILL"]} }), &["id"]) },
+            Tool { name: "exec", description: "Run a command in your working directory. Every path is relative to it. cmd is a shell string or an argv array; cwd defaults to your working directory. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. head or tail keep only N lines of each stream; quiet answers the exit code alone (stderr's last 20 lines on failure). With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "tree": {"type":"string"}, "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "head": {"type":"integer"}, "tail": {"type":"integer"}, "quiet": {"type":"boolean"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
+            Tool { name: "process_list", description: "Every detached process: id, cmd, started_at, state (running|exited), exit_code.", schema: obj(json!({ "tree": {"type":"string"} }), &[]) },
+            Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). since addresses stdout and since_err addresses stderr; pass back the next and next_err from the previous answer to page. Answers stdout, stderr, next, next_err, dropped, dropped_err, state, exit_code.", schema: obj(json!({ "tree": {"type":"string"}, "id": {"type":"string"}, "since": {"type":"integer"}, "since_err": {"type":"integer"} }), &["id"]) },
+            Tool { name: "process_write", description: "Write to a process's stdin.", schema: obj(json!({ "tree": {"type":"string"}, "id": {"type":"string"}, "data": {"type":"string"} }), &["id","data"]) },
+            Tool { name: "process_kill", description: "Stop a process: TERM (default), then KILL after 5 s; or KILL.", schema: obj(json!({ "tree": {"type":"string"}, "id": {"type":"string"}, "signal": {"type":"string","enum":["TERM","KILL"]} }), &["id"]) },
         ]
     }
 
     fn call<'a>(&'a self, name: &'a str, args: Value) -> BoxFuture<'a, Result<Value, ToolError>> {
         async move {
+            let t = self.trees.resolve(opt_str(&args, "tree"))?;
             match name {
                 "exec" => {
                     if opt_bool(&args, "pty") {
                         return Err(ToolError::Invalid("pty: unsupported in this version".into()));
                     }
-                    let (cmd, line) = command(&self.root, &self.home, &args)?;
+                    let (cmd, line) = command(&t, &self.profile, &args)?;
                     if opt_bool(&args, "detach") {
-                        let id = self.procs.spawn(cmd, line).map_err(ToolError::Failed)?;
+                        let id = self.procs.spawn(&t.name, cmd, line).map_err(ToolError::Failed)?;
                         return Ok(json!({ "id": id }));
                     }
                     let timeout = opt_u64(&args, "timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
                     let r = job(cmd, timeout).await.map(|v| trim_output(v, &args));
-                    if let Some(f) = &self.after_change {
-                        f();
-                    }
+                    // The TREE's graph: a command that moved a subagent's files refreshes its own.
+                    t.graft.refresh_soon();
                     r
                 }
-                "process_list" => Ok(json!({ "processes": self.procs.list().iter().map(|p| {
+                "process_list" => Ok(json!({ "processes": self.procs.list_in(&t.name).iter().map(|p| {
                     let g = p.lock().unwrap_or_else(|q| q.into_inner());
-                    json!({ "id": g.id, "cmd": g.cmd, "started_at": g.started_at, "state": g.state, "exit_code": g.exit_code })
+                    json!({ "id": g.id, "cmd": g.cmd, "started_at": g.started_at, "state": g.state, "exit_code": g.exit_code, "failed": g.failed })
                 }).collect::<Vec<_>>() })),
                 "process_output" => {
                     let id = str_arg(&args, "id")?;
-                    let p = self.procs.get(id).ok_or_else(|| ToolError::Failed(format!("no process {id}")))?;
+                    let p = self.procs.get_in(&t.name, id).ok_or_else(|| ToolError::Failed(format!("no process {id}")))?;
                     let since = opt_u64(&args, "since").unwrap_or(0);
                     // stderr has its own offset, answered as `next_err`: reading it from 0 on
                     // every poll re-sent every warning a build had already printed, which is half
@@ -195,17 +230,17 @@ impl ToolSet for Exec {
                     let g = p.lock().unwrap_or_else(|q| q.into_inner());
                     let (o, next, dropped) = g.out.read_since(since);
                     let (e, next_err, dropped_err) = g.err.read_since(since_err);
-                    Ok(json!({ "stdout": String::from_utf8_lossy(&o), "stderr": String::from_utf8_lossy(&e), "next": next, "next_err": next_err, "dropped": dropped, "dropped_err": dropped_err, "state": g.state, "exit_code": g.exit_code }))
+                    Ok(json!({ "stdout": String::from_utf8_lossy(&o), "stderr": String::from_utf8_lossy(&e), "next": next, "next_err": next_err, "dropped": dropped, "dropped_err": dropped_err, "state": g.state, "exit_code": g.exit_code, "failed": g.failed }))
                 }
                 "process_write" => {
                     let id = str_arg(&args, "id")?;
                     let data = str_arg(&args, "data")?;
-                    let n = self.procs.write_stdin(id, data.as_bytes()).await.map_err(ToolError::Failed)?;
+                    let n = self.procs.write_stdin(&t.name, id, data.as_bytes()).await.map_err(ToolError::Failed)?;
                     Ok(json!({ "bytes": n }))
                 }
                 "process_kill" => {
                     let id = str_arg(&args, "id")?;
-                    let st: State = self.procs.kill(id, opt_str(&args, "signal").unwrap_or("TERM")).await.map_err(ToolError::Failed)?;
+                    let st: State = self.procs.kill(&t.name, id, opt_str(&args, "signal").unwrap_or("TERM")).await.map_err(ToolError::Failed)?;
                     Ok(json!({ "state": st }))
                 }
                 other => Err(ToolError::Unknown(other.to_string())),
@@ -234,20 +269,22 @@ mod tests {
         assert_eq!((v["stdout"].as_str().unwrap(), v["stderr"].as_str().unwrap()), ("", "e1\ne2"));
     }
 
-    fn exec_set() -> (tempfile::TempDir, Exec) {
+    /// A workspace with one tree, `x`, so a test can ask for either.
+    fn exec_set() -> (tempfile::TempDir, Exec, Arc<Trees>) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("ws");
-        std::fs::create_dir_all(&root).unwrap();
-        (tmp, Exec { root, home, procs: Arc::new(Procs::default()), after_change: None })
+        std::fs::create_dir_all(root.join(".agents/x")).unwrap();
+        let trees = Arc::new(Trees::new(root, None));
+        (tmp, Exec { trees: trees.clone(), procs: Arc::new(Procs::default()), profile: home.join(".nix-profile") }, trees)
     }
 
     #[tokio::test]
     async fn a_job_answers_its_exit_code_and_output_in_the_workspace_dir() {
-        let (_t, x) = exec_set();
+        let (_t, x, trees) = exec_set();
         let v = x.call("exec", json!({ "cmd": "pwd; echo err >&2; exit 3" })).await.unwrap();
         assert_eq!(v["exit_code"], 3);
-        assert_eq!(v["stdout"].as_str().unwrap().trim(), x.root.to_string_lossy());
+        assert_eq!(v["stdout"].as_str().unwrap().trim(), trees.resolve(None).unwrap().root.to_string_lossy());
         assert_eq!(v["stderr"].as_str().unwrap().trim(), "err");
         let v = x.call("exec", json!({ "cmd": ["sh", "-c", "echo $FOO"], "env": { "FOO": "bar" } })).await.unwrap();
         assert_eq!(v["stdout"].as_str().unwrap().trim(), "bar");
@@ -255,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_job_that_prints_more_than_the_ring_holds_keeps_the_tail_and_says_truncated() {
-        let (_t, x) = exec_set();
+        let (_t, x, _trees) = exec_set();
         let v = x.call("exec", json!({ "cmd": "yes 0123456789abcdef | head -c 5000000; echo END" })).await.unwrap();
         assert_eq!(v["truncated"], true);
         let out = v["stdout"].as_str().unwrap();
@@ -265,14 +302,14 @@ mod tests {
 
     #[tokio::test]
     async fn an_argv_entry_that_is_not_a_string_is_refused_rather_than_dropped() {
-        let (_t, x) = exec_set();
+        let (_t, x, _trees) = exec_set();
         let e = x.call("exec", json!({ "cmd": ["echo", 1, "b"] })).await.unwrap_err();
         assert!(matches!(e, ToolError::Invalid(_)), "{e:?}");
     }
 
     #[tokio::test]
     async fn a_job_that_outlives_its_timeout_is_killed_and_says_so() {
-        let (_t, x) = exec_set();
+        let (_t, x, _trees) = exec_set();
         let v = x.call("exec", json!({ "cmd": "sleep 5", "timeout_ms": 200 })).await.unwrap();
         assert_eq!(v["timed_out"], true);
     }
@@ -283,7 +320,7 @@ mod tests {
     /// workspace model looped rebuilding the image (2026-09-18).
     #[tokio::test]
     async fn paging_a_process_with_the_returned_cursors_repeats_neither_stream() {
-        let (_t, x) = exec_set();
+        let (_t, x, _trees) = exec_set();
         let v = x
             .call("exec", json!({ "cmd": "echo out1; echo err1 >&2; sleep 30", "detach": true }))
             .await
@@ -318,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_detached_process_is_listed_polled_and_killed() {
-        let (_t, x) = exec_set();
+        let (_t, x, _trees) = exec_set();
         let v = x.call("exec", json!({ "cmd": "for i in 1 2 3; do echo $i; sleep 0.05; done; sleep 30", "detach": true })).await.unwrap();
         let id = v["id"].as_str().unwrap().to_string();
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;

@@ -4,8 +4,9 @@
 //! entry — a workspace directory has thousands.
 use super::git::{self, Status};
 use crate::paths::confine;
+use crate::trees::TreeCtx;
 use crate::tools::ToolError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const MAX_DEPTH: u8 = 3;
 pub const MAX_ENTRIES: usize = 5_000;
@@ -112,32 +113,33 @@ fn read_level(dir: &Path, root: &Path, st: &Status, depth: u8, budget: &mut usiz
 
 /// The entries under `path`, `depth` levels deep (1..=MAX_DEPTH). Answers the resolved directory,
 /// the rows and whether the entry cap cut the answer short.
-pub async fn tree(root: &Path, home: &Path, path: &str, depth: u8) -> Result<(PathBuf, Vec<Entry>, bool), ToolError> {
+pub async fn tree(t: &TreeCtx, path: &str, depth: u8) -> Result<(String, Vec<Entry>, bool), ToolError> {
     if !(1..=MAX_DEPTH).contains(&depth) {
         return Err(ToolError::Invalid(format!("depth: 1..={MAX_DEPTH}")));
     }
-    let dir = confine(root, home, path)?;
+    let dir = confine(t, path)?;
     if !dir.is_dir() {
-        return Err(ToolError::Failed(format!("{}: not a directory", dir.display())));
+        return Err(ToolError::Failed(format!("{}: not a directory", crate::paths::relative(t, &dir))));
     }
-    let st = git::status(root, true).await.map_err(ToolError::Failed)?;
-    let (root, dir2) = (root.to_path_buf(), dir.clone());
+    let st = git::status(&t.root, true).await.map_err(ToolError::Failed)?;
+    let (root, dir2) = (t.root.clone(), dir.clone());
     let (entries, truncated) = tokio::task::spawn_blocking(move || {
         let mut budget = MAX_ENTRIES;
         read_level(&dir2, &root, &st, depth, &mut budget)
     })
     .await
     .map_err(|e| ToolError::Failed(e.to_string()))?
-    .map_err(|e| ToolError::Failed(format!("{}: {e}", dir.display())))?;
-    Ok((dir, entries, truncated))
+    .map_err(|e| ToolError::Failed(format!("{}: {e}", crate::paths::relative(t, &dir))))?;
+    // The DIRECTORY the caller asked about, as its own tree spells it.
+    Ok((crate::paths::relative(t, &dir), entries, truncated))
 }
 
 /// One row for one path, or `None` when nothing is there.
-pub async fn stat(root: &Path, home: &Path, path: &str) -> Result<Option<Entry>, ToolError> {
-    let p = confine(root, home, path)?;
+pub async fn stat(t: &TreeCtx, path: &str) -> Result<Option<Entry>, ToolError> {
+    let p = confine(t, path)?;
     let Ok(m) = std::fs::symlink_metadata(&p) else { return Ok(None) };
-    let st = git::status(root, true).await.map_err(ToolError::Failed)?;
-    let rel = p.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned());
+    let st = git::status(&t.root, true).await.map_err(ToolError::Failed)?;
+    let rel = p.strip_prefix(&t.root).ok().map(|r| r.to_string_lossy().into_owned());
     let kind = if m.is_symlink() { "symlink" } else if m.is_dir() { "dir" } else { "file" };
     let is_dir = kind == "dir";
     let (git, ign) = match &rel {
@@ -160,6 +162,15 @@ pub async fn stat(root: &Path, home: &Path, path: &str) -> Result<Option<Entry>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trees::Trees;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// A `TreeCtx` for a bare root — these tests are about the listing, not about which tree it
+    /// came from, so each one makes the main tree of whatever root it built.
+    fn ctx_for(root: &std::path::Path) -> Arc<TreeCtx> {
+        Trees::new(root.to_path_buf(), None).resolve(None).unwrap()
+    }
 
     fn repo() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -187,9 +198,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_level_is_dirs_first_with_ignored_flags_and_rolled_up_letters() {
-        let (tmp, root) = repo();
-        let home = tmp.path().canonicalize().unwrap();
-        let (_, rows, truncated) = tree(&root, &home, ".", 1).await.unwrap();
+        let (_tmp, root) = repo();
+        let t = ctx_for(&root);
+        let (dir, rows, truncated) = tree(&t, ".", 1).await.unwrap();
+        assert_eq!(dir, ".", "the directory is answered as the tree spells it, never absolutely");
         assert!(!truncated);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec![".cache", ".git", "src", ".gitignore", "README.md", "link"]);
@@ -204,29 +216,32 @@ mod tests {
 
     #[tokio::test]
     async fn depth_two_nests_children_skips_ignored_dirs_and_the_bound_holds() {
-        let (tmp, root) = repo();
-        let home = tmp.path().canonicalize().unwrap();
-        let (_, rows, _) = tree(&root, &home, ".", 2).await.unwrap();
+        let (_tmp, root) = repo();
+        let t = ctx_for(&root);
+        let (_, rows, _) = tree(&t, ".", 2).await.unwrap();
         let src = rows.iter().find(|r| r.name == "src").unwrap();
         let kids = src.entries.as_ref().unwrap();
         assert_eq!(kids.iter().map(|k| (k.name.as_str(), k.git.as_str())).collect::<Vec<_>>(), vec![("lib.rs", "M"), ("new.rs", "?")]);
         assert!(rows.iter().find(|r| r.name == ".cache").unwrap().entries.is_none(), "ignored dirs are not descended");
-        assert!(matches!(tree(&root, &home, ".", 0).await, Err(ToolError::Invalid(_))));
-        assert!(matches!(tree(&root, &home, ".", 4).await, Err(ToolError::Invalid(_))));
-        assert!(matches!(tree(&root, &home, "/etc", 1).await, Err(ToolError::Denied(_))));
+        assert!(matches!(tree(&t, ".", 0).await, Err(ToolError::Invalid(_))));
+        assert!(matches!(tree(&t, ".", 4).await, Err(ToolError::Invalid(_))));
+        // Absolute is a SHAPE error now, not a denial: there is nothing to refuse, only a
+        // spelling to correct (spec §3.5).
+        assert!(matches!(tree(&t, "/etc", 1).await, Err(ToolError::Invalid(_))));
+        assert!(matches!(tree(&t, "../../etc", 1).await, Err(ToolError::Denied(_))));
     }
 
     #[tokio::test]
     async fn stat_answers_one_row_or_none_and_outside_a_repo_nothing_is_ignored() {
         let (tmp, root) = repo();
-        let home = tmp.path().canonicalize().unwrap();
-        let e = stat(&root, &home, "src/lib.rs").await.unwrap().unwrap();
+        let t = ctx_for(&root);
+        let e = stat(&t, "src/lib.rs").await.unwrap().unwrap();
         assert_eq!((e.kind, e.git.as_str(), e.size), ("file", "M", 20));
-        assert!(stat(&root, &home, "nope").await.unwrap().is_none());
-        let plain = home.join("plain");
+        assert!(stat(&t, "nope").await.unwrap().is_none());
+        let plain = tmp.path().canonicalize().unwrap().join("plain");
         std::fs::create_dir_all(plain.join("d")).unwrap();
         std::fs::write(plain.join("f"), "1").unwrap();
-        let (_, rows, _) = tree(&plain, &home, ".", 1).await.unwrap();
+        let (_, rows, _) = tree(&ctx_for(&plain), ".", 1).await.unwrap();
         assert!(rows.iter().all(|r| !r.ignored && r.git.is_empty()));
     }
 }

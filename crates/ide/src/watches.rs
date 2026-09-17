@@ -34,7 +34,9 @@ pub struct Watch {
 enum Stop {
     /// Held only so the watcher lives as long as the watch: dropping it is what stops notify.
     Fs(#[allow(dead_code)] Option<notify::RecommendedWatcher>),
-    Cmd(String, Arc<Procs>),
+    /// The tree the process lives in, its id, and the table it is in: a kill goes through the
+    /// tree-scoped accessor like every other, so a watch can only stop its own command.
+    Cmd(String, String, Arc<Procs>),
 }
 
 impl Watch {
@@ -105,9 +107,9 @@ impl Watches {
     }
 
     /// A command's output lines, filtered by `pattern` (every line when absent), as events.
-    pub fn watch_cmd(&self, procs: Arc<Procs>, cmd: tokio::process::Command, line: String, pattern: Option<regex::Regex>, once: bool) -> Result<String, String> {
-        let pid = procs.spawn(cmd, line.clone())?;
-        let (id, w) = self.insert(line, once, Stop::Cmd(pid.clone(), procs.clone()))?;
+    pub fn watch_cmd(&self, tree: &str, procs: Arc<Procs>, cmd: tokio::process::Command, line: String, pattern: Option<regex::Regex>, once: bool) -> Result<String, String> {
+        let pid = procs.spawn(tree, cmd, line.clone())?;
+        let (id, w) = self.insert(line, once, Stop::Cmd(tree.to_string(), pid.clone(), procs.clone()))?;
         let p = procs.get(&pid).ok_or("the process vanished")?;
         let mut rx = p.lock().unwrap_or_else(|q| q.into_inner()).tx.subscribe();
         let sink = w.clone();
@@ -121,7 +123,7 @@ impl Watches {
                                 continue;
                             }
                             // The guard ends before any await: what to kill is copied out first.
-                            let kill: Option<Option<(String, Arc<Procs>)>> = {
+                            let kill: Option<Option<(String, String, Arc<Procs>)>> = {
                                 let mut g = sink.lock().unwrap_or_else(|q| q.into_inner());
                                 if g.state == State::Stopped {
                                     Some(None)
@@ -129,7 +131,7 @@ impl Watches {
                                     g.push(json!({ "line": l }));
                                     if g.state == State::Stopped {
                                         Some(match &g.stop {
-                                            Stop::Cmd(pid, procs) => Some((pid.clone(), procs.clone())),
+                                            Stop::Cmd(tree, pid, procs) => Some((tree.clone(), pid.clone(), procs.clone())),
                                             Stop::Fs(_) => None,
                                         })
                                     } else {
@@ -140,8 +142,8 @@ impl Watches {
                             match kill {
                                 None => {}
                                 Some(None) => return,
-                                Some(Some((pid, procs))) => {
-                                    let _ = procs.kill(&pid, "TERM").await;
+                                Some(Some((tree, pid, procs))) => {
+                                    let _ = procs.kill(&tree, &pid, "TERM").await;
                                     return;
                                 }
                             }
@@ -172,8 +174,8 @@ impl Watches {
             g.state = State::Stopped;
             std::mem::replace(&mut g.stop, Stop::Fs(None))
         };
-        if let Stop::Cmd(pid, procs) = stop {
-            let _ = procs.kill(&pid, "TERM").await;
+        if let Stop::Cmd(tree, pid, procs) = stop {
+            let _ = procs.kill(&tree, &pid, "TERM").await;
         }
         Ok(State::Stopped)
     }
@@ -210,7 +212,7 @@ mod tests {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg("echo a; echo ready; sleep 30");
         c.process_group(0);
-        let id = ws.watch_cmd(procs.clone(), c, "sh".into(), Some(regex::Regex::new("ready").unwrap()), true).unwrap();
+        let id = ws.watch_cmd("main", procs.clone(), c, "sh".into(), Some(regex::Regex::new("ready").unwrap()), true).unwrap();
         let w = ws.get(&id).unwrap();
         for _ in 0..100 {
             if w.lock().unwrap().state == State::Stopped {

@@ -7,8 +7,9 @@
 use super::files::atomic_write;
 use super::ToolError;
 use crate::paths::confine;
+use crate::trees::TreeCtx;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// How far from its stated line a hunk may land; a diff made against a slightly older copy still
 /// applies, a diff made against another file does not.
@@ -152,12 +153,12 @@ fn apply_file(mut doc: Vec<String>, mut trailing_nl: bool, fp: &FilePatch, name:
     Ok((doc, trailing_nl))
 }
 
-pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError> {
+pub fn patch(t: &TreeCtx, args: &Value) -> Result<Value, ToolError> {
     let diff = super::str_arg(args, "diff")?;
     if diff.len() as u64 > super::files::MAX_BYTES {
         return Err(ToolError::Failed(format!("{} bytes, over the {} byte limit", diff.len(), super::files::MAX_BYTES)));
     }
-    let cwd = confine(root, home, super::opt_str(args, "cwd").unwrap_or("."))?;
+    let cwd = confine(t, super::opt_str(args, "cwd").unwrap_or("."))?;
     let files = parse(diff)?;
     // Everything in memory first; a hunk that misses anywhere means nothing is written.
     // `before` per file, as `edit` keeps: a delete or a write that fails halfway puts back what
@@ -166,12 +167,16 @@ pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
     let mut touched: Vec<String> = Vec::new();
     for fp in &files {
         let target = fp.new.clone().or_else(|| fp.old.clone()).ok_or_else(|| ToolError::Invalid("patch: a file header with /dev/null on both sides".into()))?;
-        let path = confine(&cwd, home, &target)?;
+        // The diff's own paths are relative to `cwd`, and `cwd` is already inside the tree — so
+        // the join is what gets confined, and one confinement covers both hops.
+        let rel = crate::paths::relative(t, &cwd);
+        let joined = if rel == "." { target.clone() } else { format!("{rel}/{target}") };
+        let path = confine(t, &joined)?;
         let name = target.clone();
         let (doc, nl) = match &fp.old {
             None => (Vec::new(), true),
             Some(_) => {
-                let text = std::fs::read_to_string(&path).map_err(|e| ToolError::Failed(format!("{}: {e}", path.display())))?;
+                let text = std::fs::read_to_string(&path).map_err(|e| ToolError::Failed(format!("{}: {e}", crate::paths::relative(t, &path))))?;
                 split(&text)
             }
         };
@@ -195,10 +200,10 @@ pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
         let one = match content {
             Some(c) => path
                 .parent()
-                .map(|parent| std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(format!("{}: {e}", parent.display()))))
+                .map(|parent| std::fs::create_dir_all(parent).map_err(|e| ToolError::Failed(format!("{}: {e}", crate::paths::relative(t, parent)))))
                 .unwrap_or(Ok(()))
                 .and_then(|_| atomic_write(path, c.as_bytes())),
-            None => std::fs::remove_file(path).map_err(|e| ToolError::Failed(format!("{}: {e}", path.display()))),
+            None => std::fs::remove_file(path).map_err(|e| ToolError::Failed(format!("{}: {e}", crate::paths::relative(t, path)))),
         };
         if let Err(e) = one {
             restore(&written);
@@ -206,7 +211,7 @@ pub fn patch(root: &Path, home: &Path, args: &Value) -> Result<Value, ToolError>
         }
         written.push((path, before));
     }
-    Ok(json!({ "cwd": cwd, "files": touched }))
+    Ok(json!({ "cwd": crate::paths::relative(t, &cwd), "files": touched }))
 }
 
 /// Put back what the earlier entries wrote: the recorded text, or no file at all when the entry
@@ -228,38 +233,39 @@ fn restore(written: &[(&PathBuf, &Option<String>)]) {
 mod tests {
     use super::*;
 
-    fn ws() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    fn ws() -> (tempfile::TempDir, std::sync::Arc<TreeCtx>, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().canonicalize().unwrap();
         let root = home.join("ws");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-        (tmp, root, home)
+        let t = crate::trees::Trees::new(root.clone(), None).resolve(None).unwrap();
+        (tmp, t, root)
     }
 
     #[test]
     fn a_hunk_applies_at_its_line_and_a_missing_one_writes_nothing() {
-        let (_t, root, home) = ws();
+        let (_t, t, root) = ws();
         let d = "--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n one\n-two\n+TWO\n three\n four\n";
-        let v = patch(&root, &home, &json!({ "diff": d })).unwrap();
+        let v = patch(&t, &json!({ "diff": d })).unwrap();
         assert_eq!(v["files"], json!(["a.txt"]));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one\nTWO\nthree\nfour\n");
-        let e = patch(&root, &home, &json!({ "diff": d })).unwrap_err();
+        let e = patch(&t, &json!({ "diff": d })).unwrap_err();
         assert!(e.to_string().contains("hunk 1 of a.txt does not apply"), "{e}");
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one\nTWO\nthree\nfour\n");
     }
 
     #[test]
     fn a_shifted_hunk_is_found_by_its_context_and_two_files_are_all_or_nothing() {
-        let (_t, root, home) = ws();
+        let (_t, t, root) = ws();
         std::fs::write(root.join("a.txt"), "zero\none\ntwo\nthree\nfour\n").unwrap();
         std::fs::write(root.join("b.txt"), "x\n").unwrap();
         let d = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-nope\n+y\n";
-        let e = patch(&root, &home, &json!({ "diff": d })).unwrap_err();
+        let e = patch(&t, &json!({ "diff": d })).unwrap_err();
         assert!(e.to_string().contains("b.txt"), "{e}");
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "zero\none\ntwo\nthree\nfour\n", "the first file must not have landed");
         let d = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y\n";
-        let v = patch(&root, &home, &json!({ "diff": d })).unwrap();
+        let v = patch(&t, &json!({ "diff": d })).unwrap();
         assert_eq!(v["files"], json!(["a.txt", "b.txt"]));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "zero\none\nTWO\nthree\nfour\n");
         assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "y\n");
@@ -267,7 +273,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_puts_back_what_the_earlier_entries_of_the_diff_wrote() {
-        let (_t, root, _home) = ws();
+        let (_tmp, _t, root) = ws();
         std::fs::write(root.join("a.txt"), "changed\n").unwrap();
         let made = root.join("made.txt");
         std::fs::write(&made, "x\n").unwrap();
@@ -279,17 +285,17 @@ mod tests {
 
     #[test]
     fn new_deleted_and_no_trailing_newline_files_round_trip_and_a_climb_is_refused() {
-        let (_t, root, home) = ws();
+        let (_t, t, root) = ws();
         let d = "diff --git a/new/n.txt b/new/n.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new/n.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n\\ No newline at end of file\n";
-        patch(&root, &home, &json!({ "diff": d })).unwrap();
+        patch(&t, &json!({ "diff": d })).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("new/n.txt")).unwrap(), "hello\nworld");
         let d = "--- a/new/n.txt\n+++ b/new/n.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n\\ No newline at end of file\n+world\n";
-        patch(&root, &home, &json!({ "diff": d })).unwrap();
+        patch(&t, &json!({ "diff": d })).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("new/n.txt")).unwrap(), "hello\nworld\n");
         let d = "--- a/new/n.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-hello\n-world\n";
-        patch(&root, &home, &json!({ "diff": d })).unwrap();
+        patch(&t, &json!({ "diff": d })).unwrap();
         assert!(!root.join("new/n.txt").exists());
-        let e = patch(&root, &home, &json!({ "diff": "--- a/../../x\n+++ b/../../x\n@@ -0,0 +1 @@\n+y\n" })).unwrap_err();
+        let e = patch(&t, &json!({ "diff": "--- a/../../x\n+++ b/../../x\n@@ -0,0 +1 @@\n+y\n" })).unwrap_err();
         assert!(matches!(e, ToolError::Denied(_)), "{e}");
         assert!(matches!(parse("garbage"), Err(ToolError::Invalid(_))));
     }

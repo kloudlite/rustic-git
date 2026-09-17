@@ -93,6 +93,9 @@ pub struct TreeQuery {
     path: String,
     #[serde(default = "one")]
     depth: u8,
+    /// Which tree to read, absent or `main` being the workspace itself. Every `/fs/*` route takes
+    /// it, because a console renders a subagent's tree from exactly these routes.
+    tree: Option<String>,
 }
 fn dot() -> String {
     ".".into()
@@ -102,7 +105,11 @@ fn one() -> u8 {
 }
 
 pub async fn tree(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<TreeQuery>) -> Response {
-    match tree::tree(&app.cfg.root, &app.cfg.home, &q.path, q.depth).await {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    match tree::tree(&t, &q.path, q.depth).await {
         Ok((dir, entries, truncated)) => conditional_json(&headers, &json!({ "path": dir, "truncated": truncated, "entries": entries })),
         Err(e) => err(e),
     }
@@ -112,14 +119,19 @@ pub async fn tree(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
 pub struct PathQuery {
     path: String,
     at: Option<String>,
+    tree: Option<String>,
 }
 
 pub async fn stat(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<PathQuery>) -> Response {
-    match tree::stat(&app.cfg.root, &app.cfg.home, &q.path).await {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    match tree::stat(&t, &q.path).await {
         Ok(Some(e)) => {
             let mut v = serde_json::to_value(&e).unwrap_or_default();
             if e.kind == "file" {
-                let p = confine(&app.cfg.root, &app.cfg.home, &q.path).unwrap_or_default();
+                let p = confine(&t, &q.path).unwrap_or_default();
                 // 8 KiB, never the whole file: a stat of a 2 GiB artefact read all of it to
                 // decide one mime string (2026-09-12).
                 let mut head = vec![0u8; 8192];
@@ -140,14 +152,18 @@ pub async fn stat(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
 /// The bytes of a file: the worktree copy, or `at=` a ref (`index` for the staged copy). The
 /// worktree ETag is `"{len}-{mtime_ns}"`, decided from metadata alone, so a 304 never reads the file.
 pub async fn file(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<PathQuery>) -> Response {
-    let p = match confine(&app.cfg.root, &app.cfg.home, &q.path) {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let p = match confine(&t, &q.path) {
         Ok(p) => p,
         Err(e) => return err(e),
     };
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if let Some(at) = q.at.as_deref() {
-        let Ok(rel) = p.strip_prefix(&app.cfg.root) else { return err(ToolError::Invalid("at: only paths inside the workspace directory have a history".into())) };
-        return match git::show(&app.cfg.root, at, &rel.to_string_lossy()).await {
+        let Ok(rel) = p.strip_prefix(&t.root) else { return err(ToolError::Invalid("at: only paths inside your working directory have a history".into())) };
+        return match git::show(&t.root, at, &rel.to_string_lossy()).await {
             Ok(Some(bytes)) => {
                 if bytes.len() as u64 > MAX_FILE {
                     return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({ "error": format!("{}: over {} bytes", q.path, MAX_FILE) }))).into_response();
@@ -188,15 +204,19 @@ pub async fn file(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
     }
 }
 
-pub async fn git_state(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    let st = match git::status(&app.cfg.root, false).await {
+pub async fn git_state(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<TreeQuery>) -> Response {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let st = match git::status(&t.root, false).await {
         Ok(s) => s,
         Err(e) => return failed(e),
     };
     if !st.repo {
         return conditional_json(&headers, &json!({ "repo": false }));
     }
-    let stashes = git::stash_count(&app.cfg.root).await;
+    let stashes = git::stash_count(&t.root).await;
     conditional_json(&headers, &json!({
         "repo": true, "branch": st.branch, "head": st.head, "upstream": st.upstream,
         "ahead": st.ahead, "behind": st.behind, "dirty": !st.changes.is_empty(), "stashes": stashes,
@@ -240,15 +260,19 @@ pub async fn log(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Quer
 }
 
 /// Status and line counts in one answer — the changes panel needs both and asks once.
-pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    let st = match git::status(&app.cfg.root, false).await {
+pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<TreeQuery>) -> Response {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let st = match git::status(&t.root, false).await {
         Ok(s) => s,
         Err(e) => return failed(e),
     };
     if !st.repo {
         return conditional_json(&headers, &json!({ "repo": false, "changes": [] }));
     }
-    let counts = match git::numstat(&app.cfg.root, &st.changes).await {
+    let counts = match git::numstat(&t.root, &st.changes).await {
         Ok(c) => c,
         Err(e) => return failed(e),
     };
@@ -271,13 +295,18 @@ pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap) -> Respons
 pub struct DiffQuery {
     path: Option<String>,
     against: Option<String>,
+    tree: Option<String>,
 }
 
 pub async fn diff(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<DiffQuery>) -> Response {
+    let t = match app.tree(q.tree.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
     let Some(against) = git::Against::parse(q.against.as_deref()) else { return err(ToolError::Invalid("against: HEAD, index or staged".into())) };
     let rel = match &q.path {
-        Some(p) => match confine(&app.cfg.root, &app.cfg.home, p) {
-            Ok(full) => match full.strip_prefix(&app.cfg.root) {
+        Some(p) => match confine(&t, p) {
+            Ok(full) => match full.strip_prefix(&t.root) {
                 Ok(r) => Some(r.to_string_lossy().into_owned()),
                 Err(_) => return err(ToolError::Invalid("path: only the workspace directory has a diff".into())),
             },
@@ -287,13 +316,13 @@ pub async fn diff(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
     };
     // Untracked is decided from status so a brand-new file diffs against /dev/null.
     let untracked = match &rel {
-        Some(r) => match git::status(&app.cfg.root, false).await {
+        Some(r) => match git::status(&t.root, false).await {
             Ok(st) => st.changes.iter().any(|c| c.path == *r && c.worktree == '?'),
             Err(e) => return failed(e),
         },
         None => false,
     };
-    match git::diff(&app.cfg.root, rel.as_deref(), against, untracked).await {
+    match git::diff(&t.root, rel.as_deref(), against, untracked).await {
         Ok((mut patch, binary)) => {
             let truncated = patch.len() > MAX_DIFF;
             if truncated {

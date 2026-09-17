@@ -12,7 +12,8 @@
 //!
 //! Design: `docs/superpowers/specs/2026-09-11-kl-ide-serve-design.md`. Module map: `guard`
 //! (the preconditions the server refuses to start without), `server` (axum routes), `api`
-//! (the tool routes), `fs/` (the workspace-state routes a UI renders from: tree, stat,
+//! (the tool routes), `trees` (the tree a call acts on and the map of them), `sandbox` (the
+//! bubblewrap argv every exec runs under), `fs/` (the workspace-state routes a UI renders from: tree, stat,
 //! file, git, changes, diff — read-only, conditional, not tools), `paths` (confinement to the home), `tools/` (one file per tool
 //! family), `procs` (detached processes and their ring buffers), `stream` (the two WebSocket
 //! streams), `graft` (the child and the freshness triggers).
@@ -21,6 +22,8 @@ pub mod fs;
 pub mod graft;
 pub mod guard;
 pub mod paths;
+pub mod sandbox;
+pub mod trees;
 pub mod procs;
 pub mod server;
 pub mod stream;
@@ -34,12 +37,17 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind: SocketAddr,
-    /// The workspace directory (`$KL_WORKSPACE`), the tree every relative path resolves against.
+    /// The workspace directory (`$KL_WORKSPACE`), which is the MAIN tree's root. Every other
+    /// tree is `{root}/.agents/{name}`; a call names one with `tree` and every path in and out of
+    /// it is relative to that tree (spec §3.5).
     pub root: PathBuf,
-    /// `$HOME`; every path a tool touches must stay under it.
+    /// `$HOME`. NOT a confinement boundary any more — it was, so a model could edit dotfiles, and
+    /// that is the person's shell's job now. Kept because the server still resolves the nix
+    /// profile under it for the sandbox.
     pub home: PathBuf,
     /// A graft context directory other than `{root}/graft`.
     pub graft_dir: Option<PathBuf>,
 }
 
 pub use server::serve;
+pub use trees::{TreeCtx, Trees};

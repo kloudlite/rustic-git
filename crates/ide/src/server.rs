@@ -1,6 +1,6 @@
 //! The HTTP surface: `/healthz`, `/tools`, `/fs`, and the two streams. Loopback only — see the crate doc.
-use crate::graft::Graft;
 use crate::procs::Procs;
+use crate::trees::{TreeCtx, Trees};
 use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
 use crate::watches::Watches;
 use crate::Config;
@@ -12,7 +12,9 @@ pub struct App {
     pub registry: Registry,
     pub procs: Arc<Procs>,
     pub watches: Arc<Watches>,
-    pub graft: Arc<Graft>,
+    /// Every tree this workspace serves, built lazily. There is no separate `graft` handle on the
+    /// App any more: a graph belongs to a tree, and `main`'s is the one on `main`'s ctx.
+    pub trees: Arc<Trees>,
 }
 
 impl App {
@@ -20,18 +22,29 @@ impl App {
     pub fn new(cfg: Config) -> Self {
         let procs = Arc::new(Procs::default());
         let watches = Arc::new(Watches::default());
-        let graft = Graft::new(cfg.root.clone(), cfg.graft_dir.clone());
-        let after: Arc<dyn Fn() + Send + Sync> = {
-            let g = graft.clone();
-            Arc::new(move || g.refresh_soon())
-        };
+        let trees = Arc::new(Trees::new(cfg.root.clone(), cfg.graft_dir.clone()));
+        // The nix profile, for the sandbox's read-only bind. The home is read for this and for
+        // nothing else now — it stopped being a confinement boundary with §4.4.
+        let profile = cfg.home.join(".nix-profile");
         let registry = Registry::new(vec![
-            Box::new(Files { root: cfg.root.clone(), home: cfg.home.clone(), after_change: Some(after.clone()) }),
-            Box::new(Exec { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), after_change: Some(after) }),
-            Box::new(WatchTools { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), watches: watches.clone() }),
-            Box::new(GraftTools { graft: graft.clone(), procs: procs.clone() }),
+            Box::new(Files { trees: trees.clone() }),
+            Box::new(Exec { trees: trees.clone(), procs: procs.clone(), profile }),
+            Box::new(WatchTools { trees: trees.clone(), procs: procs.clone(), watches: watches.clone() }),
+            Box::new(GraftTools { trees: trees.clone(), procs: procs.clone() }),
         ]);
-        App { cfg, registry, procs, watches, graft }
+        App { cfg, registry, procs, watches, trees }
+    }
+
+    /// The tree a request names, or the main one. The accessor every route goes through, so a
+    /// route added later cannot quietly read the workspace when it was asked for a tree.
+    pub fn tree(&self, name: Option<&str>) -> Result<Arc<TreeCtx>, crate::tools::ToolError> {
+        self.trees.resolve(name)
+    }
+
+    /// `main`'s graph. Named because the server's own beat and `/healthz` are about the
+    /// workspace, not about whichever tree happened to be asked for last.
+    pub fn graft(&self) -> Arc<crate::graft::Graft> {
+        self.trees.resolve(None).map(|t| t.graft.clone()).expect("the main tree always resolves")
     }
 }
 
@@ -65,13 +78,22 @@ pub fn router(app: Arc<App>) -> Router {
 }
 
 async fn healthz(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "ok": true, "root": app.cfg.root, "graph": app.graft.state() }))
+    // One `graph` per tree, keyed by name: `main`'s is what the workspace's own session reads,
+    // and a subagent's is its own (spec §4.4).
+    let graphs: serde_json::Map<String, serde_json::Value> = app
+        .trees
+        .served()
+        .into_iter()
+        .map(|t| (t.name.clone(), serde_json::json!(t.graft.state())))
+        .collect();
+    let main = app.graft().state();
+    Json(serde_json::json!({ "ok": true, "root": app.cfg.root, "graph": main, "graphs": graphs }))
 }
 
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let bind = cfg.bind;
     let app = Arc::new(App::new(cfg));
-    app.graft.start();
+    app.graft().start();
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "ide.listening");
     axum::serve(listener, router(app)).await?;
@@ -191,9 +213,18 @@ mod tests {
         let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt"})).await;
         assert_eq!(s, 200);
         assert!(v["content"].as_str().unwrap().contains("two"));
+        // An absolute path is a 400 and a SHAPE to correct, not a 403: there is nothing to deny,
+        // and the sentence never names the layout (spec §3.5).
         let (s, v) = post(&app, "read", serde_json::json!({"path": "/etc/passwd"})).await;
+        assert_eq!(s, 400, "{v}");
+        assert_eq!(v["error"], crate::paths::RELATIVE_ONLY, "{v}");
+        // Climbing OUT is the 403, and it names the path the caller can act on.
+        let (s, v) = post(&app, "read", serde_json::json!({"path": "../../etc/passwd"})).await;
         assert_eq!(s, 403, "{v}");
-        assert!(v["error"].as_str().unwrap().contains("outside"), "{v}");
+        assert!(v["error"].as_str().unwrap().contains("etc/passwd"), "{v}");
+        // A tree nobody cut is a 400 naming it, never a read of the workspace instead.
+        let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt", "tree": "nope"})).await;
+        assert_eq!(s, 400, "{v}");
         let (s, _) = post(&app, "read", serde_json::json!({})).await;
         assert_eq!(s, 400);
         let (s, _) = post(&app, "nope", serde_json::json!({})).await;
@@ -244,7 +275,9 @@ mod tests {
         let (s, _, b) = get(&app, "/fs/tree?depth=2", etag.as_deref()).await;
         assert_eq!((s, b.len()), (304, 0));
         assert_eq!(get(&app, "/fs/tree?depth=9", None).await.0, 400);
-        assert_eq!(get(&app, "/fs/tree?path=/etc", None).await.0, 403);
+        assert_eq!(get(&app, "/fs/tree?path=/etc", None).await.0, 400, "absolute is a shape error");
+        assert_eq!(get(&app, "/fs/tree?path=../../etc", None).await.0, 403);
+        assert_eq!(get(&app, "/fs/tree?tree=nope", None).await.0, 400, "an unknown tree is named, never silently main");
 
         let (s, _, b) = get(&app, "/fs/stat?path=README.md", None).await;
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
