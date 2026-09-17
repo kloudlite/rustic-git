@@ -294,3 +294,62 @@ test("a caller and its agents talk directly: no queue, no triage", async () => {
     await t.down();
   }
 });
+
+/**
+ * An ask addressed by NAME must reach the workspace by ID. The owner's bench sent
+ * `ask {to:"svelte-frontend", kind:"info"}` and the fork came up with `KL_TOOLS_WORKSPACE` set to
+ * the name: every tool answered `workspace svelte-frontend: not found`, and because the session
+ * file is keyed by id the fork had no transcript to read either (2026-09-17).
+ */
+test("an ask by name resolves to the workspace's id before anything is spawned", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-wsname-"));
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    listWorkspaces: async () => [{ id: "ws-30b60ec83f5ff77f", name: "svelte-frontend" }, { id: "ws-other", name: "api" }],
+  });
+  const srv = await serve(bench, 0);
+  await bench.start();
+  const base = `http://127.0.0.1:${srv.port}`;
+  try {
+    const caller = bench.sessions.all().find((s) => !s.archived)!.id;
+    assert.deepEqual(await bench.resolveWorkspace("svelte-frontend"), { id: "ws-30b60ec83f5ff77f", name: "svelte-frontend" });
+    assert.deepEqual(await bench.resolveWorkspace("ws-30b60ec83f5ff77f"), { id: "ws-30b60ec83f5ff77f", name: "svelte-frontend" });
+    await assert.rejects(() => bench.resolveWorkspace("nope"), /no workspace nope/);
+
+    // A work ask: the session it opens is keyed by the ID, and so is the exchange that routes it.
+    const work = await post(base, "/workspaces/svelte-frontend/ask", { text: "run the tests", from: caller });
+    assert.equal(work.status, 202);
+    assert.equal(((await work.json()) as { session: string }).session, "w-ws-30b60ec83f5ff77f");
+    assert.equal(bench.exchanges.bySession(caller)[0].workspace, "ws-30b60ec83f5ff77f");
+    // And the hands that session runs with are that workspace's, by id — this is the env the child
+    // gets as `KL_TOOLS_WORKSPACE`, and the name is what used to land here.
+    assert.equal(bench.sessions.get("w-ws-30b60ec83f5ff77f")?.target, "ws-30b60ec83f5ff77f");
+
+    // An info ask: the fork's tools are bound to the ID, and it forks that thread's own file.
+    const argvFile = path.join(dir, "argv.json");
+    process.env.FAKE_PI_ARGV_FILE = argvFile;
+    try {
+      const info = await post(base, "/workspaces/svelte-frontend/ask", { text: "which routes have no auth?", kind: "info", from: caller });
+      assert.equal(info.status, 202);
+    } finally {
+      delete process.env.FAKE_PI_ARGV_FILE;
+    }
+    await until(() => fs.existsSync(argvFile), 5_000, "the fork started");
+    const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
+    const forked = argv[argv.indexOf("--fork") + 1];
+    assert.equal(forked, path.join(dir, "workspaces", "ws-30b60ec83f5ff77f", "thread.jsonl"), "the id's own thread, which is where the history is");
+    assert.ok(fs.existsSync(forked), "and it exists, so the fork actually has a transcript");
+
+    // What a person reads is still the NAME.
+    await until(() => bench.exchanges.bySession(caller).some((e) => e.id.startsWith("info-") && e.dir === "in"), 5_000, "the answer");
+    const back = (await bench.messages(caller)).messages as { content: string }[];
+    assert.ok(back.some((m) => String(m.content).startsWith("[info from svelte-frontend] ")), JSON.stringify(back));
+  } finally {
+    await srv.close();
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

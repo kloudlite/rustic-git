@@ -12,8 +12,12 @@ import { SessionList, type SessionRow } from "./sessions.ts";
 import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
-/** One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in. */
-type Ask = { exchange: string; from: string; workspace: string; agent?: true };
+/**
+ * One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in.
+ * `workspace` is always the ID — it is a path segment, a session key and an env var — and `name`
+ * is only what a person reads.
+ */
+type Ask = { exchange: string; from: string; workspace: string; name?: string; agent?: true };
 export type BenchOpts = {
   dir: string;
   readOnly: boolean;
@@ -22,6 +26,8 @@ export type BenchOpts = {
   extDir?: string;
   /** A workspace's tool server address. Tests pass a fake; the real one asks /v1, loaded lazily so the bench's own routes never pull the extension in. */
   resolveTools?: (ws: string) => Promise<string>;
+  /** The team's workspaces, for turning a NAME into an id. Tests pass a fake; the real one asks /v1. */
+  listWorkspaces?: () => Promise<{ id: string; name?: string }[]>;
 };
 
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
@@ -386,7 +392,9 @@ export class Bench {
     if (!answer || !this.sessions.get(a.from)) return;
     // The exchange row above keeps the whole reply; what crosses to the asking session is the
     // standup version of it, because that session is a planner and not a reader of diffs.
-    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${a.workspace}] ${brief(answer, a.workspace)}`, a.agent).catch(() => undefined);
+    // The tag a person reads carries the NAME; everything that routes carries the id.
+    const who = a.name ?? a.workspace;
+    await this.send(a.from, `[from ${a.agent ? "agent" : "workspace"} ${who}] ${brief(answer, who)}`, a.agent).catch(() => undefined);
   }
 
   /**
@@ -639,20 +647,23 @@ export class Bench {
    * ponytail: no deadline — a turn that never ends leaves its exchange `running` until the child
    * exits. The upgrade is a timer per ask that fails the exchange and tells the asker so.
    */
-  async ask(workspace: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string; queued: number }> {
+  async ask(to: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string; queued: number }> {
     this.refuse(true);
     if (typeof text !== "string" || !text.trim()) throw new Error("an ask needs something to do");
     const asker = this.sessions.get(from);
     if (!asker) throw new Error(`no session ${from}`);
     // A LIVE AGENT by name is resumed, not replaced: its context is the whole reason to send it more.
-    const agent = this.sessions.get(`e-${workspace}`);
+    const agent = this.sessions.get(`e-${to}`);
+    // Everything downstream — the session key, the fork's file, `KL_TOOLS_WORKSPACE` — is the ID.
+    // The name survives only in what a person reads.
+    const { id: workspace, name } = agent && !agent.archived ? { id: to, name: agent.name || to } : await this.resolveWorkspace(to);
     const s = agent && !agent.archived ? agent : await this.openWorkspace(workspace);
     const direct = !!agent && !agent.archived;
     const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
     this.emit({ type: "exchange", row });
     const queue = this.asked.get(s.id) ?? [];
-    queue.push({ exchange, from, workspace });
+    queue.push({ exchange, from, workspace, name });
     this.asked.set(s.id, queue);
     this.plan(from, { type: "asked", exchange, to: workspace, task: text });
     try {
@@ -715,15 +726,19 @@ export class Bench {
    *
    * Several run at once because each has its own session; the caller carries on meanwhile.
    */
-  async agent(workspace: string, task: string, name: string, from: string, clone?: string, model?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
+  async agent(to: string, task: string, name: string, from: string, clone?: string, model?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
     this.refuse(true);
     if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
     if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    // The workspace it works in, and the clone it may work in instead, are IDs before any child
+    // exists — an agent bound to a name has no hands (owner, 2026-09-17).
+    const { id: workspace } = await this.resolveWorkspace(to);
+    const parent = clone ? (await this.resolveWorkspace(clone)).id : undefined;
     // An ISOLATED agent works in a clone of the caller's machine: `openEphemeral` targets whatever
     // workspace it is given, so the session's tools run on the CLONE's tool server, not the caller's.
-    const s = await this.openEphemeral(clone ?? workspace, name);
+    const s = await this.openEphemeral(parent ?? workspace, name);
     if (model && this.sessions.get(s.id)?.model !== model) this.write(() => this.sessions.update(s.id, { model }));
-    if (clone) this.clones.set(name, { clone, from });
+    if (parent) this.clones.set(name, { clone: parent, from });
     const exchange = `agent-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: task, state: "queued" }));
     this.emit({ type: "exchange", row });
@@ -741,7 +756,7 @@ export class Bench {
       this.transitionAsk({ exchange, from, workspace: name }, "failed");
       throw e;
     }
-    return { session: s.id, exchange, name, clone };
+    return { session: s.id, exchange, name, clone: parent };
   }
 
   /**
@@ -862,6 +877,52 @@ export class Bench {
     this.open(s);
     this.emit({ type: "sessions" });
     return s;
+  }
+
+  /** What a name lookup found, and how long ago: a list call per ask is a round trip nobody needs. */
+  private workspaces?: { at: number; rows: { id: string; name?: string }[] };
+
+  /**
+   * A workspace NAME becomes its ID, once, before anything is spawned (owner, 2026-09-17: an
+   * info-ask on "svelte-frontend" ran a fork whose `KL_TOOLS_WORKSPACE` was the name, so every tool
+   * answered `workspace svelte-frontend: not found` and the fork had no transcript to read — the
+   * session file is keyed by id too).
+   *
+   * A session this bench already holds settles it without asking anybody; otherwise the team's list
+   * does, by exact id first and then by unique name. Ambiguous or unknown is ONE error, before a
+   * child exists.
+   */
+  async resolveWorkspace(to: string): Promise<{ id: string; name: string }> {
+    if (typeof to !== "string" || !to.trim()) throw new Error("which workspace?");
+    const want = to.trim();
+    // A thread we already hold names its own workspace, whichever way it was addressed.
+    for (const key of [`w-${want}`, `e-${want}`]) {
+      const s = this.sessions.get(key);
+      if (s?.workspace) return { id: s.workspace, name: s.name || want };
+    }
+    const byWorkspace = this.sessions.all().find((s) => s.workspace === want);
+    if (byWorkspace) return { id: want, name: byWorkspace.name || want };
+
+    const fresh = this.workspaces && Date.now() - this.workspaces.at < 30_000;
+    if (!fresh) {
+      const list = this.opts.listWorkspaces ?? (() => import("../../pi/kloudlite.ts").then(async (m) => {
+        const team = process.env.KL_TEAM;
+        const r = await m.call("GET", `/v1/workspaces${team ? `?team=${encodeURIComponent(team)}` : ""}`);
+        return Array.isArray(r.data) ? (r.data as { id: string; name?: string }[]) : [];
+      }));
+      this.workspaces = { at: Date.now(), rows: await list().catch(() => []) };
+    }
+    const rows = this.workspaces?.rows ?? [];
+    // No list at all — offline, no team, a bench under test — is not evidence that the workspace is
+    // wrong: take what was said as the id, which is what happened before any of this existed.
+    if (!rows.length) return { id: want, name: want };
+    const exact = rows.find((w) => w.id === want);
+    if (exact) return { id: exact.id, name: exact.name || exact.id };
+    const named = rows.filter((w) => w.name === want);
+    if (named.length === 1) return { id: named[0].id, name: named[0].name || named[0].id };
+    if (named.length > 1) throw new Error(`${want} is the name of ${named.length} workspaces (${named.map((w) => w.id).join(", ")}); say which id`);
+    // Known list, and it is not in it: say what there is, once, before anything is spawned.
+    throw new Error(`no workspace ${want} — this team has ${rows.map((w) => w.name ?? w.id).join(", ")}`);
   }
 
   async openWorkspace(ws: string): Promise<SessionRow> {
@@ -994,18 +1055,21 @@ export class Bench {
    *
    * It is not work, so it is not a plan item: nobody is waiting on it to finish anything.
    */
-  async infoAsk(workspace: string, question: string, from: string, timeoutMs = INFO_TIMEOUT_MS): Promise<{ exchange: string; workspace: string }> {
+  async infoAsk(to: string, question: string, from: string, timeoutMs = INFO_TIMEOUT_MS): Promise<{ exchange: string; workspace: string }> {
     this.refuse(true);
     if (typeof question !== "string" || !question.trim()) throw new Error("an info ask needs a question");
     if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    // The id first, before a row is written or a fork exists: a fork bound to a NAME has no tools
+    // and no transcript, and it fails one tool call at a time instead of once, here.
+    const { id: workspace, name } = await this.resolveWorkspace(to);
     const exchange = `info-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: question, state: "running" }));
     this.emit({ type: "exchange", row });
-    void this.answerInfo(workspace, question, from, exchange, timeoutMs).catch(() => this.transitionAsk({ exchange, from, workspace }, "failed"));
+    void this.answerInfo(workspace, question, from, exchange, timeoutMs, name).catch(() => this.transitionAsk({ exchange, from, workspace }, "failed"));
     return { exchange, workspace };
   }
 
-  private async answerInfo(workspace: string, question: string, from: string, exchange: string, timeoutMs: number) {
+  private async answerInfo(workspace: string, question: string, from: string, exchange: string, timeoutMs: number, name = workspace) {
     // Its own session's transcript is the context worth having; with none, the fork is a fresh
     // read-only session on that workspace — the tools, without the history.
     const target = this.sessions.get(`e-${workspace}`) ?? this.sessions.get(`w-${workspace}`);
@@ -1032,7 +1096,7 @@ export class Bench {
       this.transitionAsk({ exchange, from, workspace }, answer ? "done" : "failed");
       const back = this.write(() => this.exchanges.record({ id: `${exchange}-in`, session: from, workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: exchange }));
       this.emit({ type: "exchange", row: back });
-      if (answer && this.sessions.get(from)) await this.send(from, `[info from ${workspace}] ${brief(answer, workspace)}`).catch(() => undefined);
+      if (answer && this.sessions.get(from)) await this.send(from, `[info from ${name}] ${brief(answer, name)}`).catch(() => undefined);
     } finally {
       clearTimeout(timer);
       await child.stop();
