@@ -199,9 +199,11 @@ bound to their workspace. This section makes it total and removes the exceptions
 2. **No shell on the model's path.** The bench image keeps `/bin/sh` for the entrypoint only; pi's
    `bash` tool is not registered in any mode, and the `harness:shell-gate` allow-list from the
    tools design is deleted with it (nothing left to gate).
-3. **The token is not the model's.** `BENCH_TOOL_PATH` is read by `harness-bench` at start into
-   memory; the file is `0400` root-owned via the init container so that even a tool that leaked a
-   path could not read it. Every outbound call the harness makes carries it; no tool exposes it.
+3. **The token is not the model's.** `BENCH_TOOL_PATH` stays a read-only secret mount that
+   `harness-bench` (uid 1000) reads; no init container and no `0400` root copy (decided at
+   implementation, 18 Sep 00:40 IST): with no filesystem tool registered in the sessions container
+   the boundary is the tool set, and a root-owned copy would need new machinery for no extra
+   boundary. Every outbound call the harness makes carries the token; no tool exposes it.
 4. **Identity says so.** One line in both identities: "You have no filesystem or shell where you
    run. Every read, edit and command is a tool call that names a workspace and a tree." The
    `skills/workspaces.md` "Packages" section drops the bench as a target.
