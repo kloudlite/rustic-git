@@ -449,8 +449,9 @@ export function App() {
   const placeItems = createMemo<PaletteItem[]>(() => {
     const m = machine();
     // Every session is its own place to go; there is no thread above them.
+    // One row per session, by its own title. The second loop listed every session after the first
+    // a SECOND time — a leftover from when row 0 was "the bench thread" and the rest were extra.
     const out: PaletteItem[] = live_().map((x) => ({ id: x.id, label: x.name, detail: "session", kind: "session" as const, icon: "thread", run: () => goTo(x.id) }));
-    for (const x of live_().slice(1)) out.push({ id: x.id, label: x.name, detail: x.id, kind: "session", icon: "thread", run: () => goTo(x.id) });
     for (const w of m.workspaces) {
       out.push({ id: w.id, label: w.name, detail: `${w.repo} · ${w.branch}`, kind: "workspace", icon: "workspace", run: () => goTo(w.id) });
       for (const e of w.ephemerals) out.push({ id: e.id, label: e.task, detail: `${w.name} · ${e.agent}`, kind: "ephemeral", icon: "ephemeral", run: () => goTo(e.id) });
@@ -956,6 +957,7 @@ export function App() {
             <Chat
               machine={machine()}
               team={teamName()}
+              sessions={live_()}
               env={isActive() && envTab() ? environment() : undefined}
               file={isActive() ? file() : undefined}
               onCloseFile={() => setFile(undefined)}

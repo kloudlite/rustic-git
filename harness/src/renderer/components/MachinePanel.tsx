@@ -89,8 +89,11 @@ export function MachinePanel(props: {
           what they are). A row's dot says its pi is busy; the cross on hover
           ends one — never the last. */}
       <For each={props.sessions}>
-        {(x, i) => {
-          const sid = () => (i() === 0 ? props.machine.id : x.id);
+        {(x) => {
+          // Every session is a PEER with its own thread (055f07c6): the first row is not "the
+          // machine's own" any more. It used to be clicked as the machine's id, which matches no
+          // thread — so the row highlighted and nothing opened (owner, on the fleet).
+          const sid = () => x.id;
           return (
             <>
               <Row

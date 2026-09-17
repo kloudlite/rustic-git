@@ -163,6 +163,31 @@ test("the status line shows exactly one working indicator", () => {
  * The panel lists what the platform answers. It said "No repositories in this team yet" for a team
  * that had them, because `App.tsx` rendered the `REPOS` fixture and nothing fetched.
  */
+/**
+ * Clicking `session 7` highlighted the row and opened nothing. The panel clicked the FIRST row as
+ * `props.machine.id` — a leftover from when row 0 was "the machine's own" — and no thread has that
+ * id, so `showThread` found nothing to open. Every session is a peer now (055f07c6), so every row
+ * is simply its own id.
+ */
+test("clicking a session opens it", () => {
+  const panel = fs.readFileSync(path.resolve("src/renderer/components/MachinePanel.tsx"), "utf8");
+  assert.ok(!/i\(\) === 0 \? props\.machine\.id/.test(panel), "the first row is not the machine's id");
+  assert.match(panel, /const sid = \(\) => x\.id;/, "a session row is its own id");
+  // A workspace row was always its own id; it stays that way.
+  assert.match(panel, /onClick=\{\(\) => props\.onSelect\(ws\.id\)\}/);
+
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  // The empty state's "Open" list: real sessions, not a synthesised row opening the machine's id.
+  assert.ok(!/Bench Thread|the thread that changes things/.test(chat), "no synthesised bench row");
+  assert.ok(!/onGo\(props\.machine\.id\)/.test(chat), "and nothing opens the machine's id");
+  assert.match(chat, /props\.onGo\(x\.id\)/, "each listed session opens itself");
+
+  const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
+  // The palette listed every session after the first a second time.
+  assert.ok(!/for \(const x of live_\(\)\.slice\(1\)\)/.test(app), "one row per session");
+  assert.match(app, /sessions=\{live_\(\)\}/, "the empty state is given the real sessions");
+});
+
 test("repositories come from the platform, never the fixture", () => {
   const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
   assert.ok(!/\bREPOS\b/.test(app), "the demo fixture is not what the panel lists");

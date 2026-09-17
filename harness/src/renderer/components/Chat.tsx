@@ -42,6 +42,8 @@ const said = (t: string) => t.replace(FROM_WS, "");
 export function Chat(props: {
   machine: Machine;
   team: string;
+  /** The live sessions, for the empty state's "Open" list: each is a peer with its own thread. */
+  sessions?: { id: string; name: string }[];
   env?: Environment;        // open as a tab of its own, when the dock asks for it
   snapshots: Snapshot[];
   onCloseEnv: () => void;
@@ -339,7 +341,7 @@ export function Chat(props: {
           centred container together, rather than the transcript floating in the
           middle of the pane with the inspector pinned to the window's edge. */}
       <Show when={!away() && !thread()}>
-        <Home machine={props.machine} team={props.team} onGo={props.onThread} onSwitch={props.onSwitch} />
+        <Home machine={props.machine} team={props.team} sessions={props.sessions ?? []} onGo={props.onThread} onSwitch={props.onSwitch} />
       </Show>
 
       <div class="min-h-0 min-w-0 overflow-clip" classList={{ hidden: away() || !thread() }}>
@@ -860,7 +862,7 @@ const TAB_TITLE = {
  * then the places a person can go on the left and the keys that take them
  * there on the right — one screen, no scrolling, nothing to learn twice.
  */
-function Home(props: { machine: Machine; team: string; onGo: (id: string) => void; onSwitch: () => void }) {
+function Home(props: { machine: Machine; team: string; sessions: { id: string; name: string }[]; onGo: (id: string) => void; onSwitch: () => void }) {
   const running = (w: Workspace) => w.ephemerals.filter((e) => e.state === "running").length;
   const KEYS_SHOWN: [string, string][] = [
     ["⌘T", "switch workspace"],
@@ -886,11 +888,17 @@ function Home(props: { machine: Machine; team: string; onGo: (id: string) => voi
           <section>
             <div class="mb-1.5 font-semibold uppercase text-subtle">Open</div>
             <div class="flex flex-col">
-              <button class={HOME_ROW} onClick={() => props.onGo(props.machine.id)}>
-                <Icon name="machine" size={14} class="shrink-0 text-accent" />
-                <span class="text-fg">Bench Thread</span>
-                <span class="min-w-0 flex-1 truncate text-subtle">the thread that changes things</span>
-              </button>
+              {/* Every session is a peer with its own thread (055f07c6): there is no "Bench
+                  Thread" above them. The synthesised row opened the MACHINE's id, which matches no
+                  thread, so clicking it did nothing (owner, on the fleet). */}
+              <For each={props.sessions}>
+                {(x) => (
+                  <button class={HOME_ROW} onClick={() => props.onGo(x.id)}>
+                    <Icon name="thread" size={14} class="shrink-0 text-accent" />
+                    <span class="min-w-0 flex-1 truncate text-fg">{x.name}</span>
+                  </button>
+                )}
+              </For>
               <For each={props.machine.workspaces}>
                 {(w) => (
                   <button class={HOME_ROW} onClick={() => props.onGo(w.id)}>
