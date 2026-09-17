@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 import { Icon } from "../ui/Icon";
 import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
@@ -17,7 +17,11 @@ type Action = Extract<Message, { role: "action" }>;
  */
 export function ToolCall(props: { a: Action }) {
   const a = () => props.a;
-  const [open, setOpen] = createSignal(true);
+  // Folded to its one line, opened on click. A transcript of open blocks is a wall; what a person
+  // wants at a glance is WHAT ran and whether it worked — a failure opens itself, because that is
+  // the one they were about to click anyway.
+  const [open, setOpen] = createSignal(false);
+  createEffect(() => props.a.ok === false && setOpen(true));
   const html = () => /^\s*<!doctype html|^\s*<html/i.test(a().output ?? "");
   const failed = () => a().ok === false || html();
   // While it runs: a spinner in the dot's place and a clock counting up, so
@@ -41,7 +45,7 @@ export function ToolCall(props: { a: Action }) {
         <span class="min-w-0 flex-1 truncate text-fg">{head().subject}</span>
         <Show when={head().meta}><span class="shrink-0 text-xs text-subtle">{head().meta}</span></Show>
         <span class="shrink-0 text-xs tabular-nums" classList={{ "text-accent": a().pending, "text-subtle": !a().pending }}>{took()}</span>
-        <Icon name={open() ? "chevronDown" : "chevronRight"} size={16} class="shrink-0 text-subtle opacity-0 group-hover:opacity-100" />
+        <Icon name={open() ? "chevronDown" : "chevronRight"} size={16} class="shrink-0 text-subtle opacity-60 group-hover:opacity-100" />
       </button>
       <Show when={open()}>
         <div class="ml-5 border-l border-line pl-3">

@@ -71,3 +71,26 @@ test("the bench's exchange events are the session's queue, and settle when the a
   seedExchanges([{ ts: 2, id: "ask-2", session: "s-9", workspace: "web", dir: "out", text: "build it", state: "running" }]);
   assert.deepEqual(asksOf("s-9").map((e) => e.workspace), ["web"]);
 });
+
+test("the status line says what the turn is doing, for how long, and what it has spent", () => {
+  const t = thread("s-status");
+  assert.equal(t.turn(), undefined, "nothing running, nothing to say");
+
+  t.onEvent({ type: "agent_start" });
+  assert.equal(t.turn()!.verb, "Thinking");
+  const since = t.turn()!.since;
+
+  // The verb follows the work, and the clock does not restart with it.
+  t.onEvent({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "npm test" } });
+  assert.equal(t.turn()!.verb, "Running Bash");
+  t.onEvent({ type: "tool_execution_start", toolCallId: "t2", toolName: "ask", args: { to: "agent", name: "svelte" } });
+  assert.equal(t.turn()!.verb, "Waiting on agent svelte");
+  t.onEvent({ type: "tool_execution_start", toolCallId: "t3", toolName: "ask", args: { to: "api" } });
+  assert.equal(t.turn()!.verb, "Waiting on api");
+
+  t.onEvent({ type: "message_update", usage: { totalTokens: 1234 }, assistantMessageEvent: { type: "text_delta", delta: "ok" } });
+  assert.deepEqual([t.turn()!.verb, t.turn()!.tokens, t.turn()!.since], ["Writing", 1234, since]);
+
+  t.onEvent({ type: "agent_end" });
+  assert.equal(t.turn(), undefined, "the turn ended; the line goes with it");
+});

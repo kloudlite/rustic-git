@@ -429,15 +429,17 @@ export function Chat(props: {
               <For each={L().queue}>
                 {(q) => (
                   <div class="flex items-start gap-2 text-muted">
-                    <span class="w-12 shrink-0 text-xs text-subtle">{q.how === "steer" ? "steer" : "queued"}</span>
+                    <span class="w-5 shrink-0 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>›</span>
                     <span class="min-w-0 flex-1 truncate">{q.text}</span>
+                    <Show when={q.how === "steer"}><span class="shrink-0 text-xs text-subtle">steer</span></Show>
                   </div>
                 )}
               </For>
               <For each={live.asksOf(L().id)}>
                 {(a) => (
                   <div class="flex items-start gap-2 text-muted">
-                    <span class="w-12 shrink-0 text-xs text-subtle">{a.state}</span>
+                    <span class="w-5 shrink-0 text-subtle">›</span>
+                    <span class="shrink-0 text-xs text-subtle">{a.state}</span>
                     <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-2xs text-muted">{a.workspace}</span>
                     <span class="min-w-0 flex-1 truncate">{a.text.replace(/^\[ask \S+ from [^\]]*\] /, "")}</span>
                   </div>
@@ -445,12 +447,10 @@ export function Chat(props: {
               </For>
             </div>
           </Show>
-          <Show when={L().busy() && thread()?.pi}>
-            <div class="flex items-center gap-2 px-3 pb-2 font-mono text-sm text-muted">
-              <span class="animate-pulse text-accent">✻</span>
-              <span>Working…</span>
-              <span class="text-subtle">(esc to interrupt · ^B to background a command)</span>
-            </div>
+          {/* One status line while a turn runs: what it is doing, for how long, what it has spent.
+              A question card blocks it — nothing is happening until the person answers. */}
+          <Show when={L().busy() && thread()?.pi && !L().messages.some((m) => m.role === "question" && !(m as { answer?: string }).answer)}>
+            <StatusLine turn={L().turn()} />
           </Show>
           <div class="flex flex-col rounded-[2px] border border-input-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
             <div class="flex items-start px-3 pt-2 pb-1.5">
@@ -753,6 +753,23 @@ function Question(props: { q: QuestionRow; session: string }) {
           <span class="text-xs text-subtle">nothing changes until you answer</span>
         </div>
       </Show>
+    </div>
+  );
+}
+
+/** The verb, the clock and the tokens: a person watching an agent wants to know it is alive and on what. */
+function StatusLine(props: { turn?: { verb: string; since: number; tokens: number } }) {
+  const [now, setNow] = createSignal(Date.now());
+  const t = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(t));
+  const secs = () => Math.max(0, Math.round((now() - (props.turn?.since ?? now())) / 1000));
+  return (
+    <div class="flex items-center gap-2 px-3 pb-2 font-mono text-sm text-muted">
+      <span class="animate-pulse text-accent">✻</span>
+      <span>{props.turn?.verb ?? "Thinking"}…</span>
+      <span class="text-subtle tabular-nums">{secs()}s</span>
+      <Show when={props.turn?.tokens}>{(n) => <span class="text-subtle tabular-nums">· {n() > 1000 ? `${Math.round(n() / 100) / 10}k` : n()} tokens</span>}</Show>
+      <span class="text-subtle">(esc to interrupt · ^B to background a command)</span>
     </div>
   );
 }

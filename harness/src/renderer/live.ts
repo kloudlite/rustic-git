@@ -258,6 +258,14 @@ function makeThread(id: string) {
     open = -1;
   }
 
+  /**
+   * What this turn is doing, for the one status line under the transcript: a verb that changes as
+   * it goes, when it started, and what it has spent. A person watching an agent wants to know it is
+   * alive and on what — "Working…" for four minutes says neither.
+   */
+  const [turn, setTurn] = createSignal<{ verb: string; since: number; tokens: number } | undefined>();
+  const doing = (verb: string) => setTurn((t) => ({ verb, since: t?.since ?? Date.now(), tokens: t?.tokens ?? 0 }));
+
   /** The assistant message being streamed, by index into `messages`. */
   let open = -1;
   const tools = new Map<string, number>();
@@ -286,9 +294,11 @@ function makeThread(id: string) {
       }
       case "agent_start":
         setBusy(true);
+        setTurn({ verb: "Thinking", since: Date.now(), tokens: 0 });
         return;
       case "agent_end":
         setBusy(false);
+        setTurn(undefined);
         open = -1;
         // A finished call is not a task any more: keep the live ones and the
         // ones that ended in the last few seconds (the list lets them settle).
@@ -304,7 +314,11 @@ function makeThread(id: string) {
         return;
       }
       case "message_update": {
+        // pi reports cumulative usage as it streams; a provider that reports none leaves it at 0.
+        const used = (ev.usage as { totalTokens?: number } | undefined)?.totalTokens;
+        if (typeof used === "number" && used) setTurn((t) => (t ? { ...t, tokens: used } : t));
         const d = ev.assistantMessageEvent as { type: string; delta?: string } | undefined;
+        if (d?.type === "text_delta" && d.delta) doing("Writing");
         if (d?.type !== "text_delta" || !d.delta) return;
         if (open < 0) {
           push({ role: "assistant", text: d.delta, at: now() });
@@ -334,6 +348,8 @@ function makeThread(id: string) {
       case "tool_execution_start": {
         const args = ev.args as Record<string, unknown>;
         const name = ev.toolName as string;
+        // The verb names what is actually happening: "Running bash…", "Waiting on agent svelte…".
+        doing(name === "ask" ? `Waiting on ${args.to === "agent" ? `agent ${args.name ?? ""}`.trim() : args.to}` : `Running ${TOOL[name] ?? name}`);
         push({ role: "action", kind: name === "bash" ? "run" : "note", target: TOOL[name] ?? name, text: argOf(name, args), at: now(), pending: true, tool: name, args });
         tools.set(ev.toolCallId as string, messages.length - 1);
         if (bench) setTasks(produce((ts) => void ts.push({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, args), state: "running", started: Date.now(), output: "" })));
@@ -364,7 +380,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
+  return { id, messages, busy, turn, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
