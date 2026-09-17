@@ -113,7 +113,7 @@ ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86
 cp -r deploy/bench "$CTX/deploy/"
 mkdir -p "$CTX/harness"
 cp harness/package.json harness/package-lock.json "$CTX/harness/"
-cp -r harness/bench harness/pi "$CTX/harness/"
+cp -r harness/bench harness/pi harness/skills "$CTX/harness/"
 
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway controller:kloudlite-controller builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
   target=${t%%:*}; image=${t#*:}
