@@ -43,5 +43,21 @@
   `deploy/slo.md`, the web fixture, stage code in `bins/slo/src/stages/`.
 - Commit `Change an environment's services in place and probe it`.
 
-### Task 3: ship (main session)
+### Task 3: probe fixes from hourly-manual-0456 (bins/slo)
+- `k8s::BENCH_POD` is dead: a bench pod is named by its workspace id. Replace every probe use
+  (`stages/bench_tool.rs`, `stages/bench.rs` idle.wake, `stages/env_intercept/mod.rs`,
+  `stages/experience_teams/paused.rs`, `env.space.bench` if it shares the path) with the id from
+  `GET /v1/bench` (field `id`); delete the constant if nothing else reads it (the agent names the
+  pod from the Workspace, check first).
+- `bench.push.p95`: delete the push it made after measuring (`DELETE /v1/volumes/{bench volume}/snapshots/{id}`).
+- `request.approve`: pinch the probe owner's diskGb below its stamped usage via the admin write,
+  expect 409 on a create, then the request/approve flow as today; restore the quota in the
+  compensation. Mirror `quota.refused`'s pinch.
+- Teardown volume-delete 404: reproduce against a leaked `ws-*` volume owned by slo-hourly with
+  one pushed snapshot and no owners (e.g. `ws-e2f90f8bf8f20d4f`), find why
+  `snapshots_for_caller` answers 404 for the run's jwt, fix the right side (probe jwt/owner or api).
+- Gates: clippy + `bins/slo` tests; `deploy/slo.md` unchanged unless an id changes.
+- Commit `Find the bench pod by its id in every probe and stop the hourly's snapshot leak`.
+
+### Task 4: ship (main session)
 Standing flow; owner's bench pod restarted; hourly hand-started.
