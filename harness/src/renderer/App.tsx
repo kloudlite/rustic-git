@@ -668,8 +668,9 @@ export function App() {
     // handshake at the edge (measured 2026-09-17), and the bench's own answers were never the
     // slow part. Live updates still arrive over the events socket.
     const boot = (await window.harness.benchBootstrap(cur()).catch(() => undefined)) as
-      | { sessions?: Session[]; plans?: { session: string; items: unknown[] }[]; procs?: unknown[]; tasks?: { row?: unknown }[]; exchanges?: unknown[]; messages?: { messages: unknown[] } }
+      | { model?: string; sessions?: Session[]; plans?: { session: string; items: unknown[] }[]; procs?: unknown[]; tasks?: { row?: unknown }[]; exchanges?: unknown[]; messages?: { messages: unknown[] } }
       | undefined;
+    if (boot?.model) live.setBenchModel(boot.model);
     if (boot?.sessions) setSessions(reconcile(boot.sessions));
     for (const r of boot?.plans ?? []) live.onEvent({ type: "plan", ...r });
     if (boot?.procs) live.onEvent({ type: "procs", rows: boot.procs });

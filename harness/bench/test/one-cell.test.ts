@@ -72,3 +72,18 @@ test("every duration this pane animates at is a token", () => {
   // An infinite animation must never be left to run at 1ms: that is a strobe, not less motion.
   assert.match(css, /animation-iteration-count: 1 !important;/);
 });
+
+/**
+ * ONE status row under the composer. The owner saw the same `Build · model` twice — a turn footer
+ * hard against the composer and the composer's own row — and two statements of one fact read as
+ * two facts (2026-09-17, side by side with opencode).
+ */
+test("the composer carries exactly one status row, and the footer says where you are", () => {
+  const src = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.equal(src.split('data-slot="composer-status"').length - 1, 1);
+  // The idle footer names the path, not the mode again.
+  assert.match(src, /fallback=\{<span class="min-w-0 truncate" title=\{thread\(\)\?\.name\}>\{where\(\)\}<\/span>\}/);
+  // opencode's own composer padding (`session-composer-region.tsx:102`), and the theme's accent rail.
+  assert.match(src, /border-l-2 border-accent bg-input/);
+  assert.match(src, /class="flex items-start px-4 pt-3 pb-1\.5 font-mono"/);
+});

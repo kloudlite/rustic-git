@@ -16,8 +16,8 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { modeLine } from "../rows";
-import { HINTS } from "../keys";
+import { modeLine, modeParts, modelOfThread } from "../rows";
+import { KEYS } from "../keys";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
 
@@ -112,12 +112,16 @@ export function Chat(props: {
    * only the bench's showed "no model" in a workspace tab (owner, 2026-09-17). pi's status line
    * first while it is up, then the row, then the bench's default.
    */
-  const modelName = () => {
-    const said = L().status().split(" · ")[0];
-    return /^not started$/i.test(said) ? undefined : said || thread()?.model || props.machine.model;
-  };
+  const modelName = () => modelOfThread(thread()?.model ?? props.machine.model, live.benchModel());
   /** One string for the mode, the model and the level, used in all three places. */
   const line = () => modeLine(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
+  /** Where this thread works, as the footer says it: `~/workspaces/<name>` or the bench's own dir. */
+  const where = () => {
+    const t = thread();
+    if (!t) return "~";
+    return t.kind === "workspace" || t.kind === "ephemeral" ? `~/workspaces/${t.name}` : "~/workspaces/bench";
+  };
+  const parts = () => modeParts(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
   const [pick, setPick] = createSignal(0);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
@@ -574,8 +578,11 @@ export function Chat(props: {
 
           {/* The composer is a block with the same accent rail a person's message has: what you
               type and what you typed read as the same thing. */}
-          <div ref={composerBox} class="pane flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
-            <div class="flex items-start px-3 pt-2 pb-1.5 font-mono">
+          {/* `px-4 py-3` is opencode's own composer padding
+              (`packages/app/src/pages/session/composer/session-composer-region.tsx:102`), and the
+              rail is the theme's accent rather than a blue of its own. */}
+          <div ref={composerBox} class="pane flex flex-col border-l-2 border-accent bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
+            <div class="flex items-start px-4 pt-3 pb-1.5 font-mono">
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
@@ -669,12 +676,22 @@ export function Chat(props: {
                 </For>
               </div>
             </Show>
-            {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
-            <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono">
-              {/* The same string the turn footer and the footer bar show; the key hint lives with
-                  the other key hints, not here. */}
-              <span class="text-accent">{line().split(" · ")[0]}</span>
-              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {line().split(" · ").slice(1).join(" · ")}</span>
+            {/* One blank line, then the status row: mode, what answers, and how hard it thinks.
+                This is the ONLY status under the composer — the turn footer belongs to a finished
+                turn in the transcript, and two of them said one fact twice (owner, 2026-09-17). */}
+            <div data-slot="composer-status" class="flex min-w-0 items-center gap-1.5 px-4 pt-3 pb-3 font-mono">
+              <span class="shrink-0 text-accent">{parts().mode}</span>
+              <span class="shrink-0 text-subtle">·</span>
+              <span class="shrink-0 text-fg" title={L().status()}>{parts().model}</span>
+              <Show when={parts().provider}>{(p) => <span class="shrink-0 text-subtle">{p()}</span>}</Show>
+              <Show when={parts().level}>
+                {(l) => (
+                  <>
+                    <span class="shrink-0 text-subtle">·</span>
+                    <span class="shrink-0 font-bold text-warning">{l()}</span>
+                  </>
+                )}
+              </Show>
             </div>
           </div>
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}
@@ -683,7 +700,9 @@ export function Chat(props: {
           <div class="pane flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-subtle">
             <Show
               when={L().busy()}
-              fallback={<span class="min-w-0 truncate">{line()}</span>}
+              /* Idle, the left of the footer says WHERE you are — the session's own path — not the
+                 mode again (opencode's `footer.tsx:52`, `directory()` in the muted text). */
+              fallback={<span class="min-w-0 truncate" title={thread()?.name}>{where()}</span>}
             >
               {/* A retry says what failed and which attempt this is; `retrying - attempt #2`. */}
               <Show when={L().retry()}>
@@ -709,7 +728,9 @@ export function Chat(props: {
                 </span>
               )}
             </Show>
-            <For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>
+            {/* The one key the footer names, the way opencode names it: the chord in the text
+                colour, what it does muted. */}
+            <span class="shrink-0"><span class="font-bold text-fg">{KEYS.palette.keys.toLowerCase().replace("^", "ctrl+")}</span> <span class="text-subtle">commands</span></span>
           </div>
         </div>
         {props.shell}

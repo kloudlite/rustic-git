@@ -109,6 +109,13 @@ export function discard(id: string) {
   setDiscarded((d) => new Set(d).add(id));
 }
 
+/**
+ * The bench's DEFAULT model (`GET /bootstrap`'s `model`, the fleet's `KL_MODEL`). A window that
+ * opens before any session row has loaded still has to name what will answer.
+ */
+const [benchModel, setBenchModel] = createSignal<string | undefined>();
+export { benchModel, setBenchModel };
+
 /** Whether /events is up; false until main says otherwise. Offline, every thread reads and nothing sends. */
 const [connected, setConnected] = createSignal(false);
 const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({ ok: true });

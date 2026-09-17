@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
-import { displayModel, modeLine, procsOf, sessionOf } from "../../src/renderer/rows.ts";
+import { displayModel, modeLine, modeParts, modelOfThread, procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { AUTO_YES, MODES, onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
@@ -235,9 +235,28 @@ test("shift+tab cycles the three modes, and only own-file edits are answered for
 test("the mode, the model and the level read the same everywhere", () => {
   // Two formats for one fact is what the owner saw: "✻ Accept edits · no model" in the footer and
   // "⏵⏵ accept edits on (⇧tab to cycle) · no model" in the composer.
-  assert.equal(modeLine("build", "deepseek/deepseek-v4-flash", "low"), "Build · DeepSeek V4 Flash · low");
-  assert.equal(modeLine("accept-edits", "deepseek/deepseek-v4-flash", "low"), "Accept edits · DeepSeek V4 Flash · low");
-  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan · Claude Opus 5", "the level shows only once it is known");
+  // The provider follows the model, as opencode says it: `DeepSeek V4 Flash DeepSeek`.
+  assert.equal(modeLine("build", "deepseek/deepseek-v4-flash", "low"), "Build · DeepSeek V4 Flash DeepSeek · low");
+  assert.equal(modeLine("accept-edits", "deepseek/deepseek-v4-flash", "low"), "Accept edits · DeepSeek V4 Flash DeepSeek · low");
+  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan · Claude Opus 5 Anthropic", "the level shows only once it is known");
   // A session whose row has a model shows it; only a session with none at all says so.
   assert.equal(modeLine("build", undefined), "Build · no model");
+  assert.deepEqual(modeParts("build", "deepseek/deepseek-v4-flash", "low"), {
+    mode: "Build", model: "DeepSeek V4 Flash", provider: "DeepSeek", level: "low",
+  });
+});
+
+/**
+ * The bench thread said "no model" with a model in its own row and a default on the bench
+ * (owner, 2026-09-17, side by side with opencode). The chain is the fix, and this is the chain.
+ */
+test("the model is the session's, then the bench's default, and only then none", () => {
+  assert.equal(modelOfThread("deepseek/deepseek-v4", "deepseek/deepseek-v4-flash"), "deepseek/deepseek-v4");
+  assert.equal(modelOfThread(undefined, "deepseek/deepseek-v4-flash"), "deepseek/deepseek-v4-flash");
+  assert.equal(modelOfThread("", "deepseek/deepseek-v4-flash"), "deepseek/deepseek-v4-flash");
+  // pi's own pre-start status is not a model, whichever end of the chain it turns up at.
+  assert.equal(modelOfThread("not started", "deepseek/deepseek-v4-flash"), "deepseek/deepseek-v4-flash");
+  assert.equal(modelOfThread("not started", "not started"), undefined);
+  assert.equal(modelOfThread(undefined, undefined), undefined);
+  assert.equal(modeLine("build", modelOfThread(undefined, "deepseek/deepseek-v4-flash")), "Build · DeepSeek V4 Flash DeepSeek");
 });

@@ -110,6 +110,11 @@ export class Bench {
     return this.opts.readOnly;
   }
 
+  /** What answers here when a session names nothing of its own — the fleet's `KL_MODEL`. */
+  get model(): string {
+    return this.opts.model;
+  }
+
   onEvent(fn: (ev: BenchEvent & { pi?: string }) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);

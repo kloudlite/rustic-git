@@ -206,3 +206,19 @@ test("GET /sessions/{id}/tools answers what that session can call, and 404s an i
     await t.down();
   }
 });
+
+/**
+ * A window has to name what will answer before any session row has loaded. Without this the bench
+ * thread's composer said "no model" while the bench had one all along (owner, 2026-09-17).
+ */
+test("the bench's default model is on /healthz and /bootstrap", async () => {
+  const t = await up();
+  try {
+    assert.equal((await health(t.base)).model, "fake/m");
+    const boot = await (await fetch(t.base + "/bootstrap")).json();
+    assert.equal(boot.model, "fake/m");
+    assert.ok(Array.isArray(boot.sessions));
+  } finally {
+    await t.down();
+  }
+});

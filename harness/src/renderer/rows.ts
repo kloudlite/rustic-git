@@ -79,12 +79,45 @@ const MODEL_NAMES: Record<string, string> = {
   "anthropic/claude-haiku-5": "Claude Haiku 5",
   "openai/gpt-5": "GPT-5",
 };
+/** Provider slugs as a person writes them; anything else is titlecased from the slug. */
+const PROVIDERS: Record<string, string> = { deepseek: "DeepSeek", anthropic: "Anthropic", openai: "OpenAI", google: "Google", openrouter: "OpenRouter", ollama: "Ollama" };
+
 export function displayModel(id: string | undefined): string {
   const t = (id ?? "").trim();
   // "not started" is pi's own status before a child is up: it is not a model, and saying it where
   // the model goes told the owner his session had none (2026-09-17).
   if (!t || /^not started$/i.test(t)) return "no model";
   return MODEL_NAMES[t] ?? t.split("/").pop() ?? t;
+}
+
+/** The provider behind a model id, said as opencode says it — after the name, muted. */
+export function displayProvider(id: string | undefined): string | undefined {
+  const slug = (id ?? "").split("/")[0].trim();
+  if (!slug || !(id ?? "").includes("/")) return undefined;
+  return PROVIDERS[slug] ?? slug[0].toUpperCase() + slug.slice(1);
+}
+
+/**
+ * Which model this thread actually runs, in the order the answer is known: the session's own row
+ * first, then the bench's default (`GET /bootstrap`'s `model`, the fleet's `KL_MODEL`), and only
+ * with neither is there no model. pi's status line is NOT in the chain — it says "not started"
+ * before the child is up, and that is how the bench thread came to claim it had no model
+ * (owner, 2026-09-17).
+ */
+export function modelOfThread(row: string | undefined, benchDefault: string | undefined): string | undefined {
+  const clean = (v: string | undefined) => (v && !/^not started$/i.test(v.trim()) ? v.trim() : undefined);
+  return clean(row) ?? clean(benchDefault);
+}
+
+/** The status row's parts, so each can carry its own weight and colour. */
+export type ModeParts = { mode: string; model: string; provider?: string; level?: string };
+export function modeParts(mode: string, model: string | undefined, level?: string): ModeParts {
+  return {
+    mode: mode === "accept-edits" ? "Accept edits" : mode[0].toUpperCase() + mode.slice(1),
+    model: displayModel(model),
+    provider: displayProvider(model),
+    level,
+  };
 }
 
 
@@ -95,6 +128,6 @@ export function displayModel(id: string | undefined): string {
  * there all along in the session's own row.
  */
 export function modeLine(mode: string, model: string | undefined, level?: string): string {
-  const name = mode === "accept-edits" ? "Accept edits" : mode[0].toUpperCase() + mode.slice(1);
-  return [name, displayModel(model), level].filter(Boolean).join(" · ");
+  const p = modeParts(mode, model, level);
+  return [p.mode, [p.model, p.provider].filter(Boolean).join(" "), p.level].filter(Boolean).join(" · ");
 }

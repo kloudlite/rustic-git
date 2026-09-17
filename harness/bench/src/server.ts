@@ -61,7 +61,9 @@ export function serve(
     const m = req.method ?? "GET";
     try {
       const p = segments(u.pathname);
-      if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
+      // `model` is the bench's DEFAULT model. A window that opens before any session row has loaded
+      // still has to name what will answer; without it the composer said "no model" (owner, 2026-09-17).
+      if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, model: bench.model, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
         if (p.length === 1 && m === "POST") return send(res, 201, await bench.create());
@@ -173,6 +175,7 @@ export function serve(
       if (m === "GET" && u.pathname === "/bootstrap") {
         const session = u.searchParams.get("session") ?? undefined;
         return send(res, 200, {
+          model: bench.model,
           sessions: bench.sessions.all(),
           plans: bench.plans.all(),
           procs: bench.procs.all(),
