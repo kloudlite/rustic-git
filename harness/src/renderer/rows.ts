@@ -2,7 +2,36 @@
  * Pure readings of the bench's rows, kept free of Solid and `window` so
  * `node --test` can hold them (bench/test/renderer-rows.test.ts).
  */
-export type SessionRow = { id: string; name: string; seq: number; lastActive?: number; archived?: boolean; file?: string; kind?: string };
+export type SessionRow = { id: string; name: string; seq: number; lastActive?: number; archived?: boolean; file?: string; kind?: string; workspace?: string; tree?: string };
+
+/**
+ * An agent session, as the sidebar nests it under the workspace it works in (spec §4.5): the row
+ * is the SESSION, the workspace is the one whose pod it runs in, and the tree is its own working
+ * directory inside it. An agent is no longer a clone of the machine — there is nothing under the
+ * workspace but its trees — so this replaces the `-eph-` clone matching `nestWorkspaces` did.
+ *
+ * The state is read from the ask it is answering: an open exchange is work in flight, a settled one
+ * is what became of it. Nothing here invents a state the bench has not written.
+ */
+export type AgentRow = { id: string; agent: string; workspace: string; tree?: string; task: string; state: "running" | "waiting" | "done" | "failed" };
+export function agentRows(
+  sessions: readonly SessionRow[],
+  exchanges: readonly { session: string; workspace: string; dir: "in" | "out"; text: string; state: string }[] = [],
+): AgentRow[] {
+  return sessions
+    .filter((s) => s.kind === "ephemeral" && s.workspace && !s.archived)
+    .map((s) => {
+      const agent = s.id.replace(/^e-/, "");
+      // The ask was recorded against the AGENT's name, which is what routes a report back to it.
+      const ask = exchanges.filter((e) => e.dir === "out" && e.workspace === agent).at(-1);
+      const state: AgentRow["state"] =
+        ask?.state === "failed" ? "failed" : ask?.state === "done" ? "done" : ask?.state === "running" ? "running" : "waiting";
+      return { id: s.id, agent, workspace: s.workspace!, ...(s.tree ? { tree: s.tree } : {}), task: ask?.text?.split("\n")[0]?.slice(0, 80) ?? agent, state };
+    });
+}
+
+/** What an agent's row is called in the sidebar: its name and what became of its ask (spec §4.5). */
+export const agentLabel = (a: { agent: string; state: string }): string => `${a.agent} · ${a.state}`;
 
 /** The sidebar's sessions: a workspace or ephemeral thread is the bench's too, but never listed here. */
 export const benchSessions = <T extends SessionRow>(rows: T[]): T[] => rows.filter((r) => (r.kind ?? "bench") === "bench");
@@ -200,71 +229,6 @@ export function modeLine(mode: string, model: string | undefined, thinking?: str
   // and joining them read as the model said twice — "DeepSeek V4 Flash DeepSeek" (owner, on the
   // fleet). `modeParts().provider` is still there for the callers that draw a segment.
   return [p.mode, p.model, p.thinking, p.effort].filter(Boolean).join(" · ");
-}
-
-/**
- * A clone is a CHILD of the workspace it was cut from, not a top-level machine. The api lists both
- * flat, and an agent's clone is named `<parent>-eph-<hex>` — by the parent's ID when the deferred
- * `kl_workspace_clone` path made it, by its NAME when a person did — so both are matched
- * (owner, 2026-09-17: `ws-30b60ec83f5ff77f-eph-5m…` sat at the top level by its id).
- *
- * Pure, and the tree the sidebar and the tab picker both draw.
- */
-export type Nested<T> = { row: T; clones: { row: T; agent?: string }[] };
-
-const CLONE = /^(.*)-eph-([a-z0-9]+)$/i;
-
-export function nestWorkspaces<T extends { id: string; name?: string }>(
-  rows: readonly T[],
-  /** What the bench knows: the agent working in each clone, by the clone's id. */
-  agents: Record<string, string> = {},
-): Nested<T>[] {
-  const byId = new Map(rows.map((w) => [w.id, w] as const));
-  const byName = new Map(rows.filter((w) => w.name).map((w) => [w.name!, w] as const));
-  const out: Nested<T>[] = [];
-  const at = new Map<string, Nested<T>>();
-  const parentOf = (w: T): T | undefined => {
-    const m = CLONE.exec(w.name ?? w.id) ?? CLONE.exec(w.id);
-    if (!m) return undefined;
-    const key = m[1];
-    const p = byId.get(key) ?? byName.get(key);
-    return p && p.id !== w.id ? p : undefined;
-  };
-  // Parents first, so a clone always has somewhere to go.
-  for (const w of rows) {
-    if (parentOf(w)) continue;
-    const node = { row: w, clones: [] as { row: T; agent?: string }[] };
-    at.set(w.id, node);
-    out.push(node);
-  }
-  for (const w of rows) {
-    const p = parentOf(w);
-    if (!p) continue;
-    const node = at.get(p.id);
-    const child = { row: w, agent: agents[w.id] };
-    // A clone whose parent is not in the list is still a machine of its own, not a lost row.
-    if (node) node.clones.push(child);
-    else out.push({ row: w, clones: [] });
-  }
-  return out;
-}
-
-/**
- * What a clone's row is called: the AGENT working in it, and nothing else. The owner saw
- * `probe-frontend-ws-nrt…` — the agent's name with the clone's own id trailing it — which is two
- * names for one row and unreadable at any width (2026-09-17).
- */
-export function cloneLabel(agent: string | undefined, id: string, parent?: string): string {
-  const raw = (agent ?? "").trim();
-  const bare = raw
-    // The clone's id, however it was appended: `-eph-<hex>`, the parent's id, or the clone's own.
-    .replace(/-eph-[a-z0-9]+$/i, "")
-    .replace(/-ws-[a-z0-9]{6,}$/i, "")
-    .replace(new RegExp(`-?${id.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}$`, "i"), "")
-    .replace(parent ? new RegExp(`-?${parent.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}$`, "i") : /$^/, "")
-    .replace(/[-_]+$/, "")
-    .trim();
-  return bare || "clone";
 }
 
 /**

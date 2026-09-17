@@ -22,6 +22,8 @@ import { deletedIn, dimmed, isDir, rowTone, statusBadge, type FsChange } from ".
  */
 export function FsTree(props: {
   scope: string;
+  /** Which tree of that workspace: absent is its own working directory (spec §4.4). */
+  tree?: string;
   /** Open paths, keyed by path and owned by the panel — never by a row object. */
   open: Set<string>;
   /** What differs from the branch, for the rows a tree cannot show. */
@@ -38,8 +40,8 @@ export function FsTree(props: {
   const [rows] = createResource(
     // `fsChanged` is in the key so a directory the watch patched is redrawn from the cache; the
     // fetch itself is a cache hit, not a second read.
-    () => ({ scope: props.scope, path: props.path, v: live.fsChanged() }),
-    async (k) => (await live.fsTree(k.scope, k.path))?.entries ?? [],
+    () => ({ scope: props.scope, tree: props.tree, path: props.path, v: live.fsChanged() }),
+    async (k) => (await live.fsTree(k.scope, k.path, k.tree))?.entries ?? [],
   );
   /** Directories first, then files, each alphabetical — the order an editor's explorer uses. */
   const listed = () =>
@@ -77,6 +79,7 @@ export function FsTree(props: {
         <Show when={p.dir && open()}>
           <FsTree
             scope={props.scope}
+            tree={props.tree}
             open={props.open}
             changes={props.changes}
             committed={props.committed}

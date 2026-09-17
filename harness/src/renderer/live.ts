@@ -971,6 +971,11 @@ if (typeof window !== "undefined" && window.harness?.watch)
     if (applyWatch(scope, ev) === "resync") refetchFs(scope);
   });
 
+/**
+ * Which TREE of the workspace a read is about (spec §4.4). Absent is the workspace's own working
+ * directory; an agent session's views pass its tree, and the tool server confines to it. It rides
+ * as an ordinary query parameter, so it is part of the cache key without a second map.
+ */
 async function fsGet<T>(scope: string, what: string, params: Record<string, string> = {}): Promise<T | undefined> {
   const q = new URLSearchParams({ scope, ...params }).toString();
   const key = `${what}?${q}`;
@@ -980,9 +985,9 @@ async function fsGet<T>(scope: string, what: string, params: Record<string, stri
   return r;
 }
 /** One directory of a workspace's tree; no path means its root. */
-export const fsTree = (scope: string, path?: string) => fsGet<{ entries?: FsEntry[] }>(scope, "tree", path ? { path } : {});
+export const fsTree = (scope: string, path?: string, tree?: string) => fsGet<{ entries?: FsEntry[] }>(scope, "tree", { ...(path ? { path } : {}), ...(tree ? { tree } : {}) });
 /** What differs from the branch — and whether it is a git repository at all. */
-export const fsChanges = (scope: string) => fsGet<FsChanges>(scope, "changes");
+export const fsChanges = (scope: string, tree?: string) => fsGet<FsChanges>(scope, "changes", tree ? { tree } : {});
 
 /** One file, as the bench's envelope carries it: text, or named and measured when it is not. */
 export type FsFile = { text?: string; binary?: true; mime?: string; bytes?: number; etag?: string; notModified?: true };
@@ -1010,12 +1015,22 @@ export async function fsFile(scope: string, path: string): Promise<FsFile | unde
  */
 export type FsCommit = { hash: string; short: string; subject: string; author: string; at: string; files: { path: string; status: string; from?: string }[] };
 /** What this branch has COMMITTED, for the second half of the CHANGES tab. */
-export const fsLog = (scope: string, n = 20) => fsGet<{ repo: boolean; commits?: FsCommit[] }>(scope, "log", { n: String(n) });
+export const fsLog = (scope: string, n = 20, tree?: string) => fsGet<{ repo: boolean; commits?: FsCommit[] }>(scope, "log", { n: String(n), ...(tree ? { tree } : {}) });
 
 /** One file's diff against the branch, as the tool server writes it. */
-export const fsDiff = (scope: string, path: string) => fsGet<{ diff?: string; binary?: boolean }>(scope, "diff", { path });
+export const fsDiff = (scope: string, path: string, tree?: string) => fsGet<{ diff?: string; binary?: boolean }>(scope, "diff", { path, ...(tree ? { tree } : {}) });
+
+/**
+ * What this tree has that main does not: `git diff main...HEAD`, run read-only inside the tree by
+ * the bench (spec §4.5). Not cached — it is asked for by a click, and what it answers is exactly
+ * the state at that moment.
+ */
+export const fsAgainstMain = async (scope: string, tree: string): Promise<{ diff?: string; error?: string } | undefined> =>
+  (await window.harness.bench("GET", `/fs/against-main?${new URLSearchParams({ scope, tree }).toString()}`).catch(() => undefined)) as
+    | { diff?: string; error?: string }
+    | undefined;
 
 /** One path's own facts: kind, size, mime. */
-export const fsStat = (scope: string, path: string) => fsGet<{ kind?: string; size?: number; mime?: string }>(scope, "stat", { path });
+export const fsStat = (scope: string, path: string, tree?: string) => fsGet<{ kind?: string; size?: number; mime?: string }>(scope, "stat", { path, ...(tree ? { tree } : {}) });
 /** Forget what was read: after a write, or when a workspace is reopened. */
 export const forgetFs = () => (fsCache.clear(), tags.clear());

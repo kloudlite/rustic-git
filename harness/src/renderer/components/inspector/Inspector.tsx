@@ -1,4 +1,4 @@
-import { For, Show, createMemo } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import { Icon } from "../../ui/Icon";
 import * as live from "../../live";
 import { Heading, Field, Empty } from "../../ui/parts";
@@ -6,6 +6,8 @@ import { sessionOf } from "../../rows";
 import { Badge } from "../../ui/Badge";
 import { Button } from "../../ui/Button";
 import { AGENT } from "../status";
+import { FileDiff } from "../results/FileDiff";
+import { patchFiles } from "../results/diff";
 import { MachineView } from "./MachineView";
 import { Tasks } from "./Tasks";
 import { Processes } from "./Processes";
@@ -19,6 +21,8 @@ export function Inspector(props: {
   onOpenShell: (scope: string) => void;
   onOpenTask: (id: string) => void;
   onOpenFile: (path: string, status?: string) => void;
+  /** Which tree an agent session works in, by session id — the bench's answer, not a guess. */
+  treeOf?: (session: string) => string | undefined;
 }) {
   const found = createMemo<{ ws?: Workspace; eph?: Ephemeral }>(() => {
     for (const ws of props.machine.workspaces) {
@@ -54,7 +58,7 @@ export function Inspector(props: {
         <WorkspaceView ws={found().ws!} onOpenShell={props.onOpenShell} onOpenFile={props.onOpenFile} />
       </Show>
       <Show when={found().eph}>
-        <EphemeralView eph={found().eph!} ws={found().ws!} onOpenFile={props.onOpenFile} />
+        <EphemeralView eph={found().eph!} ws={found().ws!} tree={props.treeOf?.(found().eph!.id)} onOpenFile={props.onOpenFile} />
       </Show>
     </aside>
   );
@@ -145,7 +149,7 @@ function WorkspaceView(props: { ws: Workspace; onOpenShell: (scope: string) => v
  * it folds the result back into the workspace it was cut from itself. Nothing
  * here is a control.
  */
-function EphemeralView(props: { eph: Ephemeral; ws: Workspace; onOpenFile: (path: string, status?: string) => void }) {
+function EphemeralView(props: { eph: Ephemeral; ws: Workspace; tree?: string; onOpenFile: (path: string, status?: string) => void }) {
   const t = () => totals(props.eph.changes);
   const st = () => AGENT[props.eph.state];
   const tone = () =>
@@ -156,14 +160,35 @@ function EphemeralView(props: { eph: Ephemeral; ws: Workspace; onOpenFile: (path
         : props.eph.state === "waiting"
           ? "warning"
           : "neutral";
+  /**
+   * What this agent has that main does not, asked for by a click (spec §4.5). A read-only
+   * `git diff main...HEAD` inside its tree: the one thing a person needs before deciding whether
+   * the work is mergeable, and the reason a tree outlives its report.
+   */
+  const [against, setAgainst] = createSignal<{ diff?: string; error?: string } | "asking" | undefined>();
+  const showDiff = async () => {
+    if (!props.tree) return;
+    setAgainst("asking");
+    setAgainst((await live.fsAgainstMain(props.ws.id, props.tree)) ?? { error: "the workspace did not answer" });
+  };
 
   return (
     <WorkView
+      // Its files are the WORKSPACE's tool server, confined to its own tree: the same pod, one
+      // working directory further in. Before trees there was no scope here at all and the tab was
+      // empty.
+      scope={props.ws.id}
+      tree={props.tree}
       files={props.eph.files ?? props.ws.files}
       changes={props.eph.changes}
       packages={props.ws.packages}
       inherited={props.ws.name}
       against={`${props.ws.name} @ ${props.ws.branch}`}
+      changeActions={
+        <Show when={props.tree}>
+          <Button variant="ghost" size="sm" title="What this agent has that main does not" onClick={showDiff}>Diff against main</Button>
+        </Show>
+      }
       onOpenFile={props.onOpenFile}
       overview={
         <>
@@ -187,8 +212,24 @@ function EphemeralView(props: { eph: Ephemeral; ws: Workspace; onOpenFile: (path
             <span class="text-created">+{t().add}</span> <span class="text-deleted">−{t().del}</span>
             <span class="text-muted"> · {props.eph.changes.length} {props.eph.changes.length === 1 ? "file" : "files"}</span>
           </Field>
-          <Show when={props.eph.state === "failed"}>
-            <Empty tone="danger">typecheck failed: Property 'build' does not exist on type 'Overview'</Empty>
+          <Show when={against()}>
+            {(got) => (
+              <>
+                <Heading>Against main</Heading>
+                <Show when={got() !== "asking"} fallback={<Empty>reading…</Empty>}>
+                  <Show
+                    when={(got() as { diff?: string }).diff?.trim()}
+                    fallback={<Empty tone={(got() as { error?: string }).error ? "danger" : undefined}>{(got() as { error?: string }).error ?? "Nothing this branch has that main does not."}</Empty>}
+                  >
+                    {(text) => (
+                      <div class="px-5 pt-1 pb-4">
+                        <For each={patchFiles(text())}>{(f) => <FileDiff file={f} />}</For>
+                      </div>
+                    )}
+                  </Show>
+                </Show>
+              </>
+            )}
           </Show>
         </>
       }

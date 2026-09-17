@@ -360,7 +360,7 @@ test("the files tree draws folders as folders, and keeps its open state outside 
  */
 test("changes has a second section for what is already committed", () => {
   const work = fs.readFileSync(path.resolve("src/renderer/components/inspector/WorkView.tsx"), "utf8");
-  assert.match(work, /live\.fsLog\(k\.scope, 20\)/, "the commits are read from the tool server, not invented");
+  assert.match(work, /live\.fsLog\(k\.scope, 20, k\.tree\)/, "the commits are read from the tool server, for THIS tree, not invented");
   assert.match(work, /title="Committed this session"/);
   // Folded away by default: what is NOT committed is what a person reads first.
   assert.match(work, /title="Committed this session"[\s\S]{0,200}closed/);

@@ -142,3 +142,38 @@ test("the branch's commits come through with what each one touched", async () =>
     await tools.close();
   }
 });
+
+/**
+ * "Diff against main" (spec §4.5). It is an EXEC, so it does not go through the read-only `/fs/*`
+ * pass-through: one route, one fixed argv, and a tree name checked before anything is dialled. A
+ * general exec proxy here would be a shell for anything holding the bench's port.
+ */
+test("against-main runs one fixed read-only diff in the named tree, and refuses anything else", async () => {
+  const sent: { url: string; body: string }[] = [];
+  const tools = await toolServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      sent.push({ url: req.url ?? "", body: b });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ exit_code: 0, stdout: "diff --git a/x b/x\n", stderr: "" }));
+    });
+  });
+  const t = await up(tools.address);
+  try {
+    const got = await (await fetch(`${t.base}/fs/against-main?scope=${WS}&tree=audit-1`)).json();
+    assert.deepEqual(got, { diff: "diff --git a/x b/x\n" });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].url, "/tools/exec");
+    assert.deepEqual(JSON.parse(sent[0].body).cmd, ["git", "diff", "main...HEAD"], "the argv is ours, never the client's");
+    assert.equal(JSON.parse(sent[0].body).tree, "audit-1");
+    assert.equal(JSON.parse(sent[0].body).detach, undefined, "a job, never a process left running");
+
+    // A tree name that is a path, a scope that is not a workspace: refused before anything is dialled.
+    for (const q of [`scope=${WS}&tree=../../etc`, `scope=${WS}&tree=`, `scope=bench&tree=x`, `scope=nope&tree=x`])
+      assert.equal((await fetch(`${t.base}/fs/against-main?${q}`)).status, 400, q);
+    assert.equal(sent.length, 1, "and nothing more reached the tool server");
+  } finally {
+    await t.down();
+    await tools.close();
+  }
+});

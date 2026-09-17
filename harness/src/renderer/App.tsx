@@ -19,7 +19,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
-import { benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
+import { agentRows, benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
 
@@ -41,7 +41,26 @@ export function App() {
   const [snapshots, setSnapshots] = createSignal<Snapshot[]>([]);
   const [wsNote, setWsNote] = createSignal<string | undefined>(LOADING);
   const [envNote, setEnvNote] = createSignal<string | undefined>(LOADING);
-  const machine = createMemo(() => ({ ...MACHINE, owner: who(), goal: "", todos: [], workspaces: workspaces() }));
+  /**
+   * The workspaces, with each one's AGENTS nested under it (spec §4.5). An agent works in a tree of
+   * the workspace now, not in a clone of it, so its row comes from the bench's own session list
+   * rather than from a second `/v1` workspace whose name happened to end in `-eph-`.
+   */
+  const machine = createMemo(() => {
+    const agents = agentRows(sessions as unknown as SessionRow[], live.exchanges);
+    return {
+      ...MACHINE,
+      owner: who(),
+      goal: "",
+      todos: [],
+      workspaces: workspaces().map((w) => ({
+        ...w,
+        ephemerals: agents
+          .filter((a) => a.workspace === w.id)
+          .map((a) => ({ id: a.id, task: a.task, agent: a.agent, state: a.state, started: "", changes: [] })),
+      })),
+    };
+  });
 
   // Environments belong to the team, not the machine, and WHICH one this space follows is the
   // platform's answer (`/v1/me/environments`), not a choice this window keeps: every device and
@@ -935,13 +954,6 @@ export function App() {
         </Show>
         <Show when={leftOpen() && view() === "workspaces"}>
           <MachinePanel
-            /* Which agent works in which clone: an ephemeral session is `e-<agent>` and its own
-               row names the workspace it runs in, so the tree can label a clone by its agent. */
-            agents={Object.fromEntries(
-              sessions
-                .filter((x) => (x as unknown as { kind?: string }).kind === "ephemeral" && (x as unknown as { workspace?: string }).workspace)
-                .map((x) => [(x as unknown as { workspace: string }).workspace, x.id.replace(/^e-/, "")]),
-            )}
             machine={machine()}
             team={teamName()}
             sessions={live_()}
@@ -1031,6 +1043,8 @@ export function App() {
           <Inspector
             machine={planned()}
             selected={selected()}
+            /* Which tree an agent session works in: the bench's own row, never derived from a name. */
+            treeOf={(id) => (sessions.find((x) => x.id === id) as unknown as { tree?: string } | undefined)?.tree}
             onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
             onOpenFile={(path, status) => {

@@ -52,3 +52,30 @@ test("a dropped stream is one full read, not a patch", async () => {
   assert.deepEqual(await names("src"), ["again.ts"], "everything held is dropped, so the next draw reads");
   assert.equal(reads.length, before + 1, "and reads exactly once");
 });
+
+/**
+ * An agent session's views read ITS tree of the workspace, not the workspace's own (spec §4.5).
+ * The scope names the pod; the tree names the working directory inside it, and the two are a
+ * different cache entry — reading one must never answer with the other's files.
+ */
+test("a tree's reads carry ?tree= and are cached apart from the workspace's own", async () => {
+  answer = (path) => ({ entries: [{ name: path.includes("tree=audit-1") ? "agent.ts" : "main.ts", kind: "file" }] });
+  const before = reads.length;
+  assert.deepEqual(((await live.fsTree(SCOPE, "lib", "audit-1"))?.entries ?? []).map((e) => e.name), ["agent.ts"]);
+  assert.match(reads.at(-1)!, /[?&]tree=audit-1\b/);
+
+  // The workspace's own read is a SECOND entry, with no tree at all.
+  assert.deepEqual(((await live.fsTree(SCOPE, "lib"))?.entries ?? []).map((e) => e.name), ["main.ts"]);
+  assert.ok(!/tree=/.test(reads.at(-1)!), reads.at(-1));
+  assert.equal(reads.length, before + 2, "two reads, because they are two directories");
+
+  // Changes and the log carry it too: the CHANGES tab of an agent shows the agent's git status.
+  await live.fsChanges(SCOPE, "audit-1");
+  assert.match(reads.at(-1)!, /^\/fs\/changes\?.*tree=audit-1/);
+  await live.fsLog(SCOPE, 20, "audit-1");
+  assert.match(reads.at(-1)!, /^\/fs\/log\?.*tree=audit-1/);
+
+  // "Diff against main" is its own route: one fixed argv the bench runs, never a command from here.
+  await live.fsAgainstMain(SCOPE, "audit-1");
+  assert.equal(reads.at(-1), `/fs/against-main?scope=${SCOPE}&tree=audit-1`);
+});

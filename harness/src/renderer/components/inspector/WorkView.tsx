@@ -26,6 +26,8 @@ export function WorkView(props: {
   changes: Change[];
   /** The workspace whose tool server holds the files; absent for a view with none. */
   scope?: string;
+  /** Which tree of it: an agent session's own, absent for the workspace's own (spec §4.4). */
+  tree?: string;
   packages?: Package[];
   inherited?: string;   // an ephemeral shows its source workspace's packages, read-only
   against: string;
@@ -40,8 +42,8 @@ export function WorkView(props: {
    * `FsTree`'s own business, one directory at a time.
    */
   const [diff] = createResource(
-    () => (tab() === "files" && props.scope ? { scope: props.scope, v: live.fsChanged() } : undefined),
-    (k) => live.fsChanges(k.scope),
+    () => (tab() === "files" && props.scope ? { scope: props.scope, tree: props.tree, v: live.fsChanged() } : undefined),
+    (k) => live.fsChanges(k.scope, k.tree),
   );
   /**
    * The workspace's files follow its own watch while it is on show: the tree, the changes and the
@@ -64,8 +66,8 @@ export function WorkView(props: {
    * committed saw an empty CHANGES tab with no sign of where the work went (owner, 2026-09-18).
    */
   const [log] = createResource(
-    () => (tab() === "files" && props.scope ? { scope: props.scope, v: live.fsChanged() } : undefined),
-    (k) => live.fsLog(k.scope, 20),
+    () => (tab() === "files" && props.scope ? { scope: props.scope, tree: props.tree, v: live.fsChanged() } : undefined),
+    (k) => live.fsLog(k.scope, 20, k.tree),
   );
   const commits = () => log()?.commits ?? [];
   const [open, setOpen] = createSignal(new Set<string>());
@@ -135,6 +137,7 @@ export function WorkView(props: {
               {(scope) => (
                 <FsTree
                   scope={scope()}
+                  tree={props.tree}
                   open={open()}
                   changes={diff()?.changes}
                   committed={committedPaths(commits())}

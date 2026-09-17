@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isCardAnswer, isCommandLine, seedExchanges, setWorkspaceNames, waitingFor } from "../../src/renderer/live.ts";
-import { COMMITTED_TONE, STATUS_TONE, argLine, benchSessions, changeLetter, cloneLabel, committedPaths, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
+import { COMMITTED_TONE, STATUS_TONE, argLine, benchSessions, changeLetter, committedPaths, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, agentRows, agentLabel, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -47,45 +47,35 @@ test("refusal: offline and sessionless refuse everything; unwritable refuses onl
 });
 
 /**
- * A clone belongs under the workspace it was cut from. The api lists both flat and the owner saw
- * `ws-30b60ec83f5ff77f-eph-5m3k1p` sitting at the top level by its id (2026-09-17) — the deferred
- * clone path names a clone after the parent's ID, a person's after its NAME, so both must match.
+ * An agent belongs under the workspace it works in, and it is a SESSION there — a tree of that
+ * workspace, not a clone of it (spec §4.5). The old nesting matched `-eph-` workspace names, which
+ * no longer exist; a row that matched nothing sat at the top level as a machine of its own.
  */
-test("workspaces nest their clones, by the parent's id or its name", () => {
-  const rows = [
-    { id: "ws-30b60ec83f5ff77f", name: "svelte-frontend" },
-    { id: "ws-30b60ec83f5ff77f-eph-5m3k1p", name: "ws-30b60ec83f5ff77f-eph-5m3k1p" },
-    { id: "ws-api", name: "api" },
-    { id: "ws-api-clone", name: "api-eph-9q2z" },
-    { id: "ws-alone", name: "alone" },
+test("agent sessions nest under the workspace they work in, labelled by name and state", () => {
+  const sessions = [
+    { id: "bench", name: "bench", seq: 1 },
+    { id: "w-ws-api", name: "api", seq: 0, kind: "workspace", workspace: "ws-api" },
+    { id: "e-audit-1", name: "audit", seq: 0, kind: "ephemeral", workspace: "ws-api", tree: "audit-1" },
+    { id: "e-upgrade-2", name: "upgrade", seq: 0, kind: "ephemeral", workspace: "ws-svelte", tree: "upgrade-2" },
+    { id: "e-gone-3", name: "gone", seq: 0, kind: "ephemeral", workspace: "ws-api", tree: "gone-3", archived: true },
   ];
-  const tree = nestWorkspaces(rows, { "ws-30b60ec83f5ff77f-eph-5m3k1p": "audit-1" });
-  assert.deepEqual(tree.map((n) => n.row.id), ["ws-30b60ec83f5ff77f", "ws-api", "ws-alone"], "only real machines at the top");
-  assert.deepEqual(tree[0].clones.map((c) => c.row.id), ["ws-30b60ec83f5ff77f-eph-5m3k1p"], "matched by the parent's id");
-  assert.equal(tree[0].clones[0].agent, "audit-1", "and labelled by the agent working in it");
-  assert.deepEqual(tree[1].clones.map((c) => c.row.id), ["ws-api-clone"], "matched by the parent's name");
-  assert.equal(tree[2].clones.length, 0);
-  // An orphan clone is still a machine, not a row that disappears.
-  const orphan = nestWorkspaces([{ id: "ws-x-eph-1", name: "gone-eph-1" }]);
-  assert.deepEqual(orphan.map((n) => n.row.id), ["ws-x-eph-1"]);
-});
+  const exchanges = [
+    { session: "bench", workspace: "audit-1", dir: "out" as const, text: "audit the routes\nand the middleware", state: "running" },
+    { session: "bench", workspace: "upgrade-2", dir: "out" as const, text: "upgrade to svelte 5", state: "done" },
+  ];
+  const rows = agentRows(sessions, exchanges);
+  assert.deepEqual(rows.map((r) => [r.id, r.workspace, r.tree, r.state]), [
+    ["e-audit-1", "ws-api", "audit-1", "running"],
+    ["e-upgrade-2", "ws-svelte", "upgrade-2", "done"],
+  ], "a closed agent leaves the tree; the others keep the workspace they work IN");
+  assert.equal(rows[0].task, "audit the routes", "one line of the ask, never the whole brief");
 
-/**
- * A clone row is called after the AGENT working in it, and nothing else: the owner saw
- * `└ ⬡ probe-frontend-ws-nrt…  clone ●` — the agent's name with the clone's id trailing it
- * (2026-09-17). No id fragment ever reaches the label.
- */
-test("a clone is labelled by its agent, never by its id", () => {
-  assert.equal(cloneLabel("probe-frontend", "ws-nrt6k2", "ws-parent"), "probe-frontend");
-  assert.equal(cloneLabel("probe-frontend-ws-nrt6k2p9", "ws-nrt6k2p9", "ws-parent"), "probe-frontend", "the clone's own id comes off");
-  assert.equal(cloneLabel("audit-1-eph-5m3k1p", "ws-x", "ws-parent"), "audit-1", "and so does an -eph- suffix");
-  assert.equal(cloneLabel("svelte-ws-parent", "ws-x", "ws-parent"), "svelte", "and the parent's id");
-  // Nothing known: the row says what it is, with no tag to repeat it.
-  assert.equal(cloneLabel(undefined, "ws-x"), "clone");
-  assert.equal(cloneLabel("   ", "ws-x"), "clone");
-  // Whatever comes out, no hex fragment survives.
-  for (const label of [cloneLabel("probe-frontend-ws-nrt6k2p9", "ws-nrt6k2p9"), cloneLabel("x-eph-9q2z", "ws-y")])
-    assert.ok(!/ws-[a-z0-9]{6,}|-eph-/.test(label), label);
+  // An agent with no ask recorded yet is waiting, not running: nothing has been said about it.
+  assert.equal(agentRows([sessions[2]])[0].state, "waiting");
+  // Only a bench session is a session in the list; a thread never stands in for one.
+  assert.deepEqual(benchSessions(sessions).map((s) => s.id), ["bench"]);
+
+  assert.equal(agentLabel({ agent: "audit-1", state: "running" }), "audit-1 · running");
 });
 
 test("a proposal is titled by the tool's own verb", () => {

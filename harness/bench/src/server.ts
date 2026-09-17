@@ -316,6 +316,27 @@ export function serve(
         return send(res, 200, bench.import(b.items ?? [], b.loose ?? []));
       }
       /**
+       * `GET /fs/against-main?scope=&tree=` — the ONE exec the desktop may ask for: what a
+       * subagent's tree has done that the workspace's main branch has not (spec §4.5). It is a
+       * fixed argv, never a command from the client: a general exec proxy here would be a shell
+       * for anything with the bench's port, which is the boundary §3.1 exists to hold.
+       */
+      if (p[0] === "fs" && m === "GET" && p[1] === "against-main" && p.length === 2) {
+        const scope = u.searchParams.get("scope") ?? "";
+        const tree = u.searchParams.get("tree") ?? "";
+        if (!SCOPE_RE.test(scope) || !/^[a-z0-9-]{1,32}$/.test(tree)) return send(res, 400, { error: "a workspace and one of its trees" });
+        const addr = await resolveTools(scope);
+        const r = await fetch(`http://${addr}/tools/exec`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tree, cmd: ["git", "diff", "main...HEAD"], timeout_ms: 30_000 }),
+        }).catch(() => undefined);
+        if (!r) return send(res, 502, { error: "the workspace's tools did not answer" });
+        const out = (await r.json().catch(() => ({}))) as { stdout?: string; stderr?: string; exit_code?: number; error?: string };
+        if (!r.ok) return send(res, r.status, { error: out.error ?? "the tool server refused" });
+        return send(res, 200, { diff: out.stdout ?? "", ...(out.exit_code ? { error: (out.stderr ?? "").trim().split("\n").slice(-1)[0] } : {}) });
+      }
+      /**
        * A workspace's own files, read-only, proxied from its tool server's `/fs/*`
        * (`crates/ide/src/fs/`): the console renders a workspace from these, and nothing here
        * interprets them. The desktop's Files tab showed nothing because nobody ever asked
