@@ -55,7 +55,8 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
 
   onMount(() => {
     term = new Terminal({
-      fontFamily: "Menlo, 'SF Mono', Monaco, 'Lilex', ui-monospace, monospace",
+      // The same face as the pane: a terminal beside it in a different mono reads as a second product.
+      fontFamily: "'IBM Plex Mono', Menlo, 'SF Mono', Monaco, ui-monospace, monospace",
       fontSize: 13,
       lineHeight: 1.2,
       letterSpacing: 0,

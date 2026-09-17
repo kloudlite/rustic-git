@@ -52,6 +52,6 @@ function Bar() {
   );
 }
 
-void Promise.all([document.fonts.load('13px "IBM Plex Sans"'), document.fonts.load("13px Lilex")])
+void Promise.all([document.fonts.load('13px "IBM Plex Sans"'), document.fonts.load('13px "IBM Plex Mono"')])
   .catch(() => undefined)
   .then(() => render(() => <Bar />, document.getElementById("root")!));

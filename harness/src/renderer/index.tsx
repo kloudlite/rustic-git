@@ -29,6 +29,6 @@ function Gate() {
 // fallback font and the intro, then everything swapped. Load the two faces
 // the UI is set in before anything renders; a face that fails to load does
 // not hold the app hostage (the fallback stack is there for that).
-void Promise.all([document.fonts.load('13px "IBM Plex Sans"'), document.fonts.load("13px Lilex")])
+void Promise.all([document.fonts.load('13px "IBM Plex Sans"'), document.fonts.load('13px "IBM Plex Mono"')])
   .catch(() => undefined)
   .then(() => render(() => <Gate />, document.getElementById("root")!));

@@ -332,7 +332,7 @@
      that animates a size or a position property lays the page out per frame. */
   --motion: 140ms;
   --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
-  --font-mono: "Lilex", Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", monospace;
+  --font-mono: "IBM Plex Mono", Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", monospace;
   /* No 10px anywhere: VS Code's smallest UI text is 11px (badges, status bar). */
   --text-2xs: 11px;
   --text-2xs--line-height: 16px;
