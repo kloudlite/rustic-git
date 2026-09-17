@@ -8,17 +8,44 @@ import { INFO_TOOLS } from "../src/rpc-child.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 /**
  * An agent is an ask to a session that did not exist a moment ago: fresh context, one task, its
  * answer back to whoever started it. Several run at once because each has its own session.
  */
+/**
+ * What the platform was asked for, per test: the tree path is the bench's own `/v1` call, and the
+ * one assertion that matters most here is a NEGATIVE — an agent never clones a workspace (spec §4.1).
+ */
+type Seen = { method: string; path: string; body?: unknown };
 const up = async (name: string) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), name));
-  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const seen: Seen[] = [];
+  // A stand-in tool server: it answers `/fs/stat` for any tree, which is how the bench learns the
+  // node agent has cut one.
+  const tools = createServer((req, res) => (res.writeHead(200, { "content-type": "application/json" }), res.end("{}")));
+  await new Promise<void>((ok) => tools.listen(0, "127.0.0.1", ok));
+  const at = `127.0.0.1:${(tools.address() as AddressInfo).port}`;
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    resolveTools: async () => at,
+    platform: async (method, p, body) => (seen.push({ method, path: p, body }), { status: method === "POST" ? 202 : 202, data: null }),
+  });
   const srv = await serve(bench, 0);
   await bench.start();
-  return { dir, bench, srv, base: `http://127.0.0.1:${srv.port}`, down: async () => (await srv.close(), await bench.stop(), fs.rmSync(dir, { recursive: true, force: true })) };
+  return {
+    dir,
+    bench,
+    srv,
+    seen,
+    base: `http://127.0.0.1:${srv.port}`,
+    down: async () => (await srv.close(), await bench.stop(), await new Promise<void>((ok) => tools.close(() => ok())), fs.rmSync(dir, { recursive: true, force: true })),
+  };
 };
 const post = (base: string, p: string, body: unknown) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -43,7 +70,7 @@ test("an agent runs in its own ephemeral session and reports back to whoever sta
     assert.match(t.bench.exchanges.bySession(caller).find((e) => e.dir === "in")!.text, /audit the routes/);
 
     // Closing one takes its transcript with it.
-    assert.deepEqual(await (await fetch(`${t.base}/agents/audit-1`, { method: "DELETE" })).json(), { closed: "audit-1" });
+    assert.deepEqual(await (await fetch(`${t.base}/agents/audit-1`, { method: "DELETE" })).json(), { closed: "audit-1", workspace: "api", tree: "audit-1" });
     assert.equal(t.bench.sessions.get("e-audit-1"), undefined);
 
     // A caller that is not a live session cannot start one.
@@ -105,29 +132,53 @@ test("the plan is kept per session, ticked by text, and published to the desktop
   }
 });
 
-test("an isolated agent works in a clone, and closing it says which clone to delete", async () => {
-  const t = await up("bench-iso-");
+test("an agent works in a TREE of the workspace, and never a clone of it", async () => {
+  const t = await up("bench-tree-");
   try {
     const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
-    // The extension clones first and hands the clone's id here; the session then targets the CLONE's
-    // tool server, which is what keeps two agents changing files at once out of each other's way.
-    const r = await post(t.base, "/agents", { task: "upgrade to svelte 5", workspace: "svelte-app", clone: "svelte-app-eph-9f2a", name: "upgrade-1", from: caller });
+    const r = await post(t.base, "/agents", { task: "upgrade to svelte 5", workspace: "svelte-app", name: "upgrade-1", from: caller });
     assert.equal(r.status, 202);
-    const started = (await r.json()) as { session: string; name: string; clone?: string };
-    assert.deepEqual([started.session, started.name, started.clone], ["e-upgrade-1", "upgrade-1", "svelte-app-eph-9f2a"]);
-    // Its hands are the CLONE's, not its own name: the name is only the session key.
-    assert.equal(t.bench.sessions.get("e-upgrade-1")!.target, "svelte-app-eph-9f2a");
-    assert.equal(t.bench.sessions.get("e-upgrade-1")!.workspace, "svelte-app-eph-9f2a", "its session lives under the clone");
-    assert.equal(t.bench.cloneOf("upgrade-1"), "svelte-app-eph-9f2a");
+    const started = (await r.json()) as { session: string; name: string; tree: string };
+    assert.deepEqual([started.session, started.name, started.tree], ["e-upgrade-1", "upgrade-1", "upgrade-1"]);
 
-    // Two at once, each in its own clone.
-    await post(t.base, "/agents", { task: "audit the routes", workspace: "svelte-app", clone: "svelte-app-eph-77bb", name: "audit-2", from: caller });
+    // The tree was asked for through /v1, and NOTHING was cloned: no second workspace, no pod.
+    assert.deepEqual(t.seen, [{ method: "POST", path: "/v1/workspaces/svelte-app/trees", body: { name: "upgrade-1" } }]);
+    assert.ok(!t.seen.some((x) => x.path.includes("/clone")), JSON.stringify(t.seen));
+
+    // Its hands are the WORKSPACE's — the same pod, the same tool server — confined to its tree.
+    const row = t.bench.sessions.get("e-upgrade-1")!;
+    assert.equal(row.target, "svelte-app");
+    assert.equal(row.workspace, "svelte-app");
+    assert.equal(row.tree, "upgrade-1");
+    assert.deepEqual(t.bench.treeOf("upgrade-1"), { workspace: "svelte-app", tree: "upgrade-1" });
+
+    // Two at once, each in its own tree of the one workspace.
+    await post(t.base, "/agents", { task: "audit the routes", workspace: "svelte-app", name: "audit-2", from: caller });
     assert.deepEqual(t.bench.agentsOf(caller).sort(), ["audit-2", "upgrade-1"]);
 
-    // Closing one names its clone, which is the agent's scratch and goes with it.
-    assert.deepEqual(await (await fetch(`${t.base}/agents/upgrade-1`, { method: "DELETE" })).json(), { closed: "upgrade-1", clone: "svelte-app-eph-9f2a" });
-    assert.equal(t.bench.cloneOf("upgrade-1"), undefined);
+    // Closing one gives its tree back through /v1; the other's is untouched.
+    assert.deepEqual(await (await fetch(`${t.base}/agents/upgrade-1`, { method: "DELETE" })).json(), { closed: "upgrade-1", workspace: "svelte-app", tree: "upgrade-1" });
+    assert.equal(t.bench.treeOf("upgrade-1"), undefined);
+    assert.ok(t.seen.some((x) => x.method === "DELETE" && x.path === "/v1/workspaces/svelte-app/trees/upgrade-1"), JSON.stringify(t.seen));
     assert.deepEqual(t.bench.agentsOf(caller), ["audit-2"]);
+  } finally {
+    await t.down();
+  }
+});
+
+/**
+ * A tree a person closes is gone; one an agent merely FINISHED in stays (spec §4.1). The old clone
+ * path deleted it on DONE, which threw away the diff before anybody had read it.
+ */
+test("a finished agent keeps its tree until the person closes it", async () => {
+  const t = await up("bench-tree-life-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    // The fake echoes its prompt, so the report's first word is the prompt's.
+    await post(t.base, "/agents", { task: "DONE — pushed branch fix-login", workspace: "api", name: "done-1", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "its report");
+    assert.deepEqual(t.bench.treeOf("done-1"), { workspace: "api", tree: "done-1" });
+    assert.ok(!t.seen.some((x) => x.method === "DELETE"), "nothing was given back on its own");
   } finally {
     await t.down();
   }
@@ -244,30 +295,6 @@ test("a workspace with no session still answers a question, from the tools witho
     await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "the answer");
     // Answering a question never opened a session for it.
     assert.equal(t.bench.sessions.get("w-cold"), undefined, "no session was created to answer a question");
-  } finally {
-    await t.down();
-  }
-});
-
-test("an agent that finishes loses its copy; one that is blocked keeps it", async () => {
-  const t = await up("bench-clone-life-");
-  try {
-    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
-    const dropped: unknown[] = [];
-    t.bench.onEvent((ev) => ev.type === "clone-dropped" && dropped.push(ev));
-
-    // The fake echoes its prompt, so the report's first word is the prompt's.
-    await post(t.base, "/agents", { task: "DONE — pushed branch fix-login", workspace: "api", clone: "api-eph-1111", name: "done-1", from: caller });
-    await until(() => dropped.length > 0, 5_000, "the finished agent's copy going");
-    assert.deepEqual(dropped, [{ type: "clone-dropped", agent: "done-1", clone: "api-eph-1111" }]);
-    assert.equal(t.bench.cloneOf("done-1"), undefined);
-
-    // BLOCKED keeps it: the caller may answer and send it back in.
-    dropped.length = 0;
-    await post(t.base, "/agents", { task: "BLOCKED no ssh host", workspace: "api", clone: "api-eph-2222", name: "stuck-1", from: caller });
-    await until(() => t.bench.exchanges.bySession(caller).filter((e) => e.dir === "in").length === 2, 5_000, "its report");
-    assert.deepEqual(dropped, [], "a blocked agent's copy stays");
-    assert.equal(t.bench.cloneOf("stuck-1"), "api-eph-2222");
   } finally {
     await t.down();
   }

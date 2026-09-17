@@ -13,7 +13,7 @@ function triple(t?: Triple): Triple {
 
 export type SessionKind = "bench" | "workspace" | "ephemeral";
 /** `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools. */
-export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; thinking?: Thinking; effort?: Effort; kind?: SessionKind; workspace?: string; target?: string; found?: string[] };
+export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; thinking?: Thinking; effort?: Effort; kind?: SessionKind; workspace?: string; target?: string; tree?: string; found?: string[] };
 
 type Stored = SessionRow[] | { nextSeq: number; rows: SessionRow[] };
 
@@ -106,12 +106,12 @@ export class SessionList {
    * an ephemeral id is not scoped by its workspace, so a reuse under another would hand back the first one's file.
    * seq 0 keeps a thread out of create()'s numbering.
    */
-  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string; thinking?: Thinking; effort?: Effort }): SessionRow {
+  thread(t: { kind: "workspace" | "ephemeral"; workspace: string; eph?: string; target: string; file: string; model?: string; thinking?: Thinking; effort?: Effort; tree?: string }): SessionRow {
     const id = this.threadId(t);
     const have = this.get(id);
     if (have) return { ...have };
     const now = Date.now();
-    const row: SessionRow = { id, name: t.kind === "workspace" ? t.workspace : `${t.workspace} · ${t.eph}`, seq: 0, file: t.file, created: now, lastActive: now, archived: false, ...triple(t), kind: t.kind, workspace: t.workspace, target: t.target };
+    const row: SessionRow = { id, name: t.kind === "workspace" ? t.workspace : `${t.workspace} · ${t.eph}`, seq: 0, file: t.file, created: now, lastActive: now, archived: false, ...triple(t), kind: t.kind, workspace: t.workspace, target: t.target, ...(t.tree ? { tree: t.tree } : {}) };
     this.rows.push(row);
     this.save();
     return { ...row };

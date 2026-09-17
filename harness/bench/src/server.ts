@@ -204,17 +204,23 @@ export function serve(
         if (p.length === 1 && m === "POST") {
           const b = await body(req);
           if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
-          return send(res, 202, await bench.agent(String(b.workspace ?? ""), String(b.task ?? ""), String(b.name ?? ""), b.from, b.clone ? String(b.clone) : undefined, b.model ? String(b.model) : undefined));
+          try {
+            return send(res, 202, await bench.agent(String(b.workspace ?? ""), String(b.task ?? ""), String(b.name ?? ""), b.from, b.model ? String(b.model) : undefined));
+          } catch (e) {
+            // A tree that could not be cut is the whole dispatch: there is no session to report
+            // into, so the caller's tool answers the sentence rather than a half-started agent.
+            return send(res, 409, { error: (e as Error).message });
+          }
         }
-        // Closing one is removing its session: an agent's transcript is its own and goes with it.
-        // Its clone, if it had one, is scratch — the caller keeps whatever it wanted from it.
+        // Closing one is removing its session: an agent's transcript is its own and goes with it,
+        // and so does its TREE — through `/v1`, by the bench, because nothing else holds the name.
         if (p.length === 2 && m === "DELETE") {
-          const clone = bench.cloneOf(p[1]);
-          // Let it stop its own turn first; then its session and its scratch go.
+          const where = bench.treeOf(p[1]);
+          // Let it stop its own turn first; then its session and its working directory go.
           await bench.abortAgent(p[1]).catch(() => undefined);
           await bench.remove(`e-${p[1]}`, true).catch(() => undefined);
-          bench.forgetClone(p[1]);
-          return send(res, 200, { closed: p[1], clone });
+          await bench.dropTree(p[1]).catch(() => undefined);
+          return send(res, 200, { closed: p[1], ...(where ?? {}) });
         }
       }
       // The person's memory. A workspace session has no bench filesystem, so it saves through here

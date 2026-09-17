@@ -56,6 +56,43 @@ test("a call goes to the looked-up address, a dead address is looked up once mor
   srv.close();
 });
 
+/**
+ * `ws.tree_pinned`. A session works in ONE tree, and which one is the bench's decision, not the
+ * model's: an agent that said `tree: "main"` — deliberately or by copying an example — would be
+ * editing the person's own working directory from inside a subagent. The pin is a rewrite, not a
+ * default, and it is applied in one place so no tool can be added past it.
+ */
+test("ws.tree_pinned: every call carries the session's tree, and one that names another is rewritten", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      seen.push(`${req.url} ${b}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+
+  const pinned = new ToolServer("api", async () => at, "upgrade-1");
+  await pinned.call(toIde("ls", {}));
+  await pinned.call({ tool: "read", args: { path: "src/a.rs", tree: "main" } });
+  await pinned.call({ tool: "read", args: { path: "src/a.rs", tree: "somebody-else" } });
+  assert.deepEqual(
+    seen.map((x) => JSON.parse(x.slice(x.indexOf(" ") + 1)).tree),
+    ["upgrade-1", "upgrade-1", "upgrade-1"],
+    seen.join("\n"),
+  );
+
+  // A session with no tree — the workspace's own — sends none, and the tool server reads that as main.
+  seen.length = 0;
+  await new ToolServer("api", async () => at).call(toIde("ls", {}));
+  assert.equal(JSON.parse(seen[0].slice(seen[0].indexOf(" ") + 1)).tree, undefined, seen[0]);
+  srv.close();
+});
+
 test("with neither KL_TOOLS_ADDRESS nor KL_TEAM set, resolving refuses before any api call", async () => {
   const savedTeam = process.env.KL_TEAM;
   const savedAddr = process.env.KL_TOOLS_ADDRESS;

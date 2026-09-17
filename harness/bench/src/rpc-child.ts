@@ -45,7 +45,7 @@ export const INFO_TOOLS = "read,grep,find,ls";
 /** One row of `get_available_models`, reduced to what the picker draws. */
 export type ModelInfo = { id: string; name: string; provider: string; thinking: boolean; effort: boolean };
 
-export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean; thinking?: string; effort?: string };
+export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; tree?: string; ephemeral?: boolean; info?: boolean; thinking?: string; effort?: string };
 
 export class RpcChild {
   readonly id: string;
@@ -152,7 +152,10 @@ export class RpcChild {
     // has no tool server, so the model was told to start `bench-…` to make a build work
     // (owner, 2026-09-18).
     const env = { ...process.env, KL_SESSION: this.id, ...(o.effort ? { PI_EFFORT: o.effort } : {}), ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}),
-      ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}), ...childTraceEnv() };
+      ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}),
+      // Which TREE of that workspace this session's hands act on. The extension pins it onto every
+      // call rather than trusting the model to pass it (spec §4.4).
+      ...(o.tree ? { KL_TREE: o.tree } : {}), ...childTraceEnv() };
     const c2 = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     const child = c2;
     this.child = child;

@@ -295,11 +295,18 @@ export class ToolServer {
   private workspace: string;
   private resolve: (ws: string) => Promise<string>;
   private address?: string;
-  constructor(workspace: string, resolve: (ws: string) => Promise<string>) {
+  /** The tree of that workspace this session works in; absent is the workspace itself. */
+  private tree?: string;
+  constructor(workspace: string, resolve: (ws: string) => Promise<string>, tree?: string) {
     this.workspace = workspace;
     this.resolve = resolve;
+    this.tree = tree;
   }
   async call(c: IdeCall, signal?: AbortSignal): Promise<{ status: number; body: any }> {
+    // PINNED, not defaulted: the bench decides which tree a session acts on, and a call whose
+    // arguments name another one — main included — is rewritten before it is sent (spec §4.4).
+    // The tool server confines for itself; this is the half that says WHICH tree to confine to.
+    if (this.tree) c = { ...c, args: { ...c.args, tree: this.tree } };
     // A stale address (a restarted pod, or a workspace not yet ready) surfaces as either a
     // connection failure here or a 409 from the tool server itself; both clear the cached
     // address and ask /v1 once more before giving up, same as a 409 from /v1's own answer
@@ -428,7 +435,10 @@ export default function (pi: ExtensionAPI) {
               // An agent answers once, to somebody who cannot see what it did. The status is the
               // first thing they read, and it is the difference between "take it" and "look again".
               "You are an AGENT: one task, given in full at the start, and one report at the end. Whoever sent it cannot see your work — only your final message.",
-              "You have your own copy of the workspace. Do the task there. When done, commit on a branch named after you and push it (or open a pull request through the tools), then report with the branch or pull. Your copy is deleted after your report.",
+              // The numbers are the tool server's, handed to every command it runs as `PORT` and
+              // `KL_PORT_RANGE` (spec §4.6); repeating them here would be a second copy to go stale.
+              "You have a block of ports of your own: a command you run is given PORT and KL_PORT_RANGE, and anything outside that block belongs to somebody else. Bind what $PORT says, never a number you picked.",
+              "You have your own working directory, cut from this workspace's: your own copy of every file, with the caches already warm. Do the task there. When done, commit on a branch named after you and push it (or open a pull request through the tools), then report with the branch or pull. Your directory and this transcript stay until the person closes you, so nothing you did is lost if you are blocked.",
               "End with a report in this shape, leading with one of these four:",
               "DONE — it is done and verified. DONE_WITH_CONCERNS — done, but say what worries you. NEEDS_CONTEXT — you cannot finish without something only they have; say exactly what. BLOCKED — something stops you; say what and what you tried.",
               "Then: one line on what you did, the commits or files if any, a one-line test summary, and concerns. A thing you changed but could not verify is \"changed, unverified\".",
@@ -455,7 +465,7 @@ export default function (pi: ExtensionAPI) {
       ].join("\n"),
     );
   }
-  const server = new ToolServer(ws, resolveFromApi);
+  const server = new ToolServer(ws, resolveFromApi, process.env.KL_TREE || undefined);
   const reg = (name: string, label: string, description: string, parameters: ReturnType<typeof Type.Object>) =>
     pi.registerTool({
       name,

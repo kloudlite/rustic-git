@@ -673,22 +673,15 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       if (a.to === "agent") {
         const name = `${slug(a.name ?? a.task.split(/\s+/).slice(0, 3).join("-"))}-${Math.random().toString(36).slice(2, 8)}`;
         const where = a.workspace ?? own;
-        // ISOLATED: its own copy of the machine, so two agents changing files at once cannot
-        // trip over each other and a refactor that goes wrong is thrown away with the clone.
-        // Its OWN copy by default (§22): two agents changing files at once cannot trip over each
-        // other, and a refactor that goes wrong is thrown away with the clone.
-        let clone: string | undefined;
-        if (!a.shared && where) {
-          const made = await call("POST", `/v1/workspaces/${encodeURIComponent(where)}/clone`, { name: `${where}-eph-${Math.random().toString(36).slice(2, 8)}` });
-          if (made.status >= 400) return { ...text(`${made.status}: ${typeof made.data === "string" ? made.data : JSON.stringify(made.data)}`), isError: true };
-          clone = String((made.data as { id?: string } | null)?.id ?? "");
-        }
-        // The brief IS the agent's world: it has no history of this conversation, so what is not
-        // written here it cannot know (the fleet's own lesson, 486 dispatches deep).
+        // ISOLATED, and no second machine: the bench asks the workspace for a TREE of itself — a
+        // nested snapshot inside the same pod — so two agents changing files at once cannot trip
+        // over each other, a refactor that goes wrong is thrown away with the tree, and the caches
+        // are already warm (spec §4.1). The bench cuts it and waits; there is no session until
+        // there is somewhere to work.
         const task = [a.task, a.brief].filter(Boolean).join("\n\n");
-        const r = await benchCall("POST", "/agents", { task, workspace: where, clone, name, model: a.model, from: process.env.KL_SESSION });
+        const r = await benchCall("POST", "/agents", { task, workspace: where, name, model: a.model, from: process.env.KL_SESSION });
         if (!r.ok) return { ...text(String(r.data?.error ?? "the bench could not start it")), isError: true };
-        return text(`agent ${name} started${clone ? ` in clone ${clone}` : ""}`);
+        return text(`agent ${name} started`);
       }
       // A live agent by name RESUMES it — "one more thing", "fix round" — with everything it has
       // done still in front of it; the bench routes on the name, so one verb covers both.
@@ -698,13 +691,12 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       return text(kind === "info" ? `asked ${a.to}; it answers from a read-only copy without stopping` : `queued in ${a.to}'s session; its reply arrives here`);
     },
   );
+  // Closing is a PROPOSAL like every other state change (spec §4.3): it is gated in the catalogue,
+  // so the card, the wait and the person's yes are `makeReg`'s, not a second path here.
   reg("ask_close", { name: Type.String({ description: "the agent's name" }) }, async (a) => {
     const r = await benchCall("DELETE", `/agents/${encodeURIComponent(a.name)}`);
     if (!r.ok) return { ...text(String(r.data?.error ?? "no such agent")), isError: true };
-    // A clone is the agent's scratch: it goes with the agent, and nobody is asked about it.
-    const clone = r.data?.clone as string | undefined;
-    if (clone) await call("DELETE", `/v1/workspaces/${encodeURIComponent(clone)}`);
-    return text(`agent ${a.name} closed${clone ? `; clone ${clone} deleted` : ""}`);
+    return text(`agent ${a.name} closed`);
   });
 }
 

@@ -59,6 +59,8 @@ export type BenchOpts = {
   listWorkspaces?: () => Promise<{ id: string; name?: string; packages?: string[] }[]>;
   /** The connected environment's services, for the architecture document's first version (§24). */
   listServices?: () => Promise<{ name: string; image?: string; ports?: (number | { port?: number })[] }[]>;
+  /** `/v1`, for the one thing the bench asks of it itself: a subagent's tree. Tests pass a fake. */
+  platform?: (method: string, path: string, body?: unknown) => Promise<{ status: number; data: unknown }>;
 };
 
 /** Tool calls that change something: what makes a turn "work" rather than a look around. */
@@ -84,6 +86,9 @@ const COMPACT_AT = 0.8;
 const COMPACT_TOKENS = 160_000;
 /** How long an agent gets to stop its own turn before its child is taken away. */
 const ABORT_WAIT_MS = 10_000;
+/** How long a tree may take to appear before the dispatch is refused, and how often it is asked. */
+const TREE_READY_MS = 60_000;
+const TREE_POLL_MS = 500;
 const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
@@ -119,7 +124,7 @@ const isBench = (s: SessionRow) => (s.kind ?? "bench") === "bench";
 /** A session id the bench mints: never a path walk, never a btw fork. */
 const SESSION_ID = /^(bench|s-\d+|[we]-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$/;
 /** `file` is accepted and ignored: import always rewrites it to the copied file. */
-const IMPORT_FIELDS = new Set(["id", "name", "seq", "created", "lastActive", "archived", "model", "thinking", "effort", "kind", "workspace", "target", "file"]);
+const IMPORT_FIELDS = new Set(["id", "name", "seq", "created", "lastActive", "archived", "model", "thinking", "effort", "kind", "workspace", "target", "tree", "file"]);
 
 /**
  * One person's bench in one team: the list, a pi per open session, and the
@@ -280,7 +285,10 @@ export class Bench {
     const file = thread ? s.file : s.file && fs.existsSync(s.file) ? s.file : undefined;
     const dir = thread ? path.dirname(s.file!) : path.join(this.opts.dir, "sessions");
     const t = this.rowTriple(s);
-    return { dir, file, tools: thread ? s.target : undefined, model: t.model ?? this.opts.model, thinking: t.thinking, effort: t.effort, bin: this.opts.bin, extDir: this.opts.extDir };
+    // `tree` is the session's, pinned on every ide call the child makes; `ephemeral` is what tells
+    // an agent it is one. Both are properties of the ROW, so a bench restart re-spawns the child
+    // into the same working directory rather than into the workspace's own.
+    return { dir, file, tools: thread ? s.target : undefined, tree: s.tree, ephemeral: s.kind === "ephemeral", model: t.model ?? this.opts.model, thinking: t.thinking, effort: t.effort, bin: this.opts.bin, extDir: this.opts.extDir };
   }
 
   /**
@@ -660,10 +668,9 @@ export class Bench {
       void this.send(id, CONTRACTS_BOUNCE).catch(() => undefined);
     }
     this.transitionAsk(a, answer ? "done" : "failed");
-    // An agent that finished has nothing left to keep: its work is on a branch, and its copy of
-    // the workspace goes (§22). One that is BLOCKED or NEEDS_CONTEXT keeps it — the caller may
-    // answer and send it back in.
-    if (a.agent && /^(DONE|DONE_WITH_CONCERNS)\b/.test(answer.trim())) void this.dropClone(a.workspace).catch(() => undefined);
+    // A finished agent keeps its tree and its session: the person reads the transcript, opens the
+    // diff, and closes it when the work is merged and clear (spec §4.1). Nothing is dropped on an
+    // outcome, good or bad.
     const back = this.exchanges.record({ id: `${a.exchange}-in`, session: a.from, workspace: a.workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: a.exchange });
     this.emit({ type: "exchange", row: back });
     // The asking session may be gone by now (removed, archived): an answer nobody is waiting for is dropped, not thrown.
@@ -958,7 +965,8 @@ export class Bench {
   /**
    * Which WORKSPACE a session's processes and tasks belong to (owner, 2026-09-17). Every bench
    * session shares the bench's own machine; a workspace session — and the agents working in it —
-   * share that workspace; a clone is its own. It is never the session id: two bench sessions must
+   * share that workspace, an agent included — it works in a TREE of it, not a second workspace, so
+   * its processes and tasks are that workspace's. It is never the session id: two bench sessions must
    * see the same dev server.
    */
   workspaceOf(id: string): string {
@@ -1238,19 +1246,19 @@ export class Bench {
    *
    * Several run at once because each has its own session; the caller carries on meanwhile.
    */
-  async agent(to: string, task: string, name: string, from: string, clone?: string, model?: string): Promise<{ session: string; exchange: string; name: string; clone?: string }> {
+  async agent(to: string, task: string, name: string, from: string, model?: string): Promise<{ session: string; exchange: string; name: string; tree: string }> {
     this.refuse(true);
     if (typeof task !== "string" || !task.trim()) throw new Error("an agent needs a task");
     if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
-    // The workspace it works in, and the clone it may work in instead, are IDs before any child
-    // exists — an agent bound to a name has no hands (owner, 2026-09-17).
+    // The workspace it works in is an ID before any child exists — an agent bound to a name has no
+    // hands (owner, 2026-09-17).
     const { id: workspace } = await this.resolveWorkspace(to);
-    const parent = clone ? (await this.resolveWorkspace(clone)).id : undefined;
-    // An ISOLATED agent works in a clone of the caller's machine: `openEphemeral` targets whatever
-    // workspace it is given, so the session's tools run on the CLONE's tool server, not the caller's.
-    const s = await this.openEphemeral(parent ?? workspace, name);
+    // Its own TREE of that workspace, not a second workspace: a nested snapshot inside the same
+    // pod, cut by the node agent on this ask, with the caches already warm (spec §4.1).
+    const tree = await this.cutTree(workspace, name);
+    const s = await this.openEphemeral(workspace, name, tree);
+    this.trees.set(name, { workspace, tree, from });
     if (model && this.sessions.get(s.id)?.model !== model) this.write(() => this.sessions.update(s.id, { model }));
-    if (parent) this.clones.set(name, { clone: parent, from });
     const exchange = `agent-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: task, state: "queued" }));
     this.emit({ type: "exchange", row });
@@ -1268,7 +1276,7 @@ export class Bench {
       this.transitionAsk({ exchange, from, workspace: name }, "failed");
       throw e;
     }
-    return { session: s.id, exchange, name, clone: parent };
+    return { session: s.id, exchange, name, tree };
   }
 
   /**
@@ -1292,26 +1300,74 @@ export class Bench {
     await ended;
   }
 
-  /** Which agents are working in a clone, so closing one — or its caller — takes the clone with it. */
-  private clones = new Map<string, { clone: string; from: string }>();
-  /** The clone an agent is working in, if any: the desktop says "in clone <name>" and the close deletes it. */
-  cloneOf(name: string): string | undefined {
-    return this.clones.get(name)?.clone;
+  /** The tree each live agent works in, by agent name, so a close takes it back. */
+  private trees = new Map<string, { workspace: string; tree: string; from: string }>();
+  /** The tree an agent is working in, if any: the close deletes it and the sidebar labels it. */
+  treeOf(name: string): { workspace: string; tree: string } | undefined {
+    const t = this.trees.get(name);
+    return t && { workspace: t.workspace, tree: t.tree };
   }
   /** Agents whose caller is this session: removing a session closes what it started. */
   agentsOf(session: string): string[] {
-    return [...this.clones.entries()].filter(([, v]) => v.from === session).map(([name]) => name);
+    return [...this.trees.entries()].filter(([, v]) => v.from === session).map(([name]) => name);
   }
-  forgetClone(name: string): void {
-    this.clones.delete(name);
+  forgetTree(name: string): void {
+    this.trees.delete(name);
   }
 
-  /** The clone an agent worked in, deleted through /v1 — its work is on a branch by now. */
-  private async dropClone(name: string): Promise<void> {
-    const clone = this.clones.get(name)?.clone;
-    if (!clone) return;
-    this.clones.delete(name);
-    this.emit({ type: "clone-dropped", agent: name, clone });
+  /**
+   * `/v1`: the one platform call the bench makes for itself. Everything else a session does to the
+   * platform is a `kl_*` tool in a child; a tree is not, because the session that will work in it
+   * does not exist until it is ready.
+   */
+  private v1(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
+    const call = this.opts.platform ?? ((m: string, q: string, b?: unknown) => import("../../pi/kloudlite.ts").then((x) => x.call(m, q, b)));
+    return call(method, p, body);
+  }
+
+  /**
+   * Cut the agent's tree and wait for it to be usable. `/v1` writes spec and answers 202; what
+   * matters here is not the CR but whether the tools work in it, so the wait asks the workspace's
+   * own tool server — which serves a tree only once the subvolume exists (`Trees::resolve`). That
+   * is the same fact `status.trees[name].ready` carries, observed where it is about to be used.
+   */
+  private async cutTree(workspace: string, name: string): Promise<string> {
+    const r = await this.v1("POST", `/v1/workspaces/${encodeURIComponent(workspace)}/trees`, { name });
+    if (r.status >= 400) throw new Error(typeof r.data === "string" ? r.data : `the platform would not cut a tree (${r.status})`);
+    const until = Date.now() + TREE_READY_MS;
+    for (;;) {
+      if (await this.treeServed(workspace, name)) return name;
+      if (Date.now() > until) throw new Error(`the workspace did not make a working directory for ${name} in time`);
+      await new Promise((ok) => setTimeout(ok, TREE_POLL_MS).unref?.());
+    }
+  }
+
+  /** Whether the workspace's tool server serves this tree yet: a read of its root, nothing more. */
+  private async treeServed(workspace: string, tree: string): Promise<boolean> {
+    try {
+      const at = this.opts.resolveTools ? await this.opts.resolveTools(workspace) : await (await import("../../pi/workspace-tools.ts")).resolveFromApi(workspace);
+      const r = await fetch(`http://${at}/fs/stat?tree=${encodeURIComponent(tree)}&path=.`);
+      return r.ok;
+    } catch {
+      // Not answering yet is not a refusal: the pod may still be coming up, and the cap is the bound.
+      return false;
+    }
+  }
+
+  /** The tree the agent's ports live in, said once, at the top of its brief (spec §4.6). */
+  private treeBrief(tree: string, task: string): string {
+    return `${task}
+
+Your working directory is the tree ${tree} of this workspace; the main tree owns the ports outside your block.`;
+  }
+
+  /** The tree an agent worked in, given back through `/v1`. Its work is on a branch by now. */
+  async dropTree(name: string): Promise<void> {
+    const t = this.trees.get(name);
+    if (!t) return;
+    this.trees.delete(name);
+    await this.v1("DELETE", `/v1/workspaces/${encodeURIComponent(t.workspace)}/trees/${encodeURIComponent(t.tree)}`).catch(() => undefined);
+    this.emit({ type: "tree-dropped", agent: name, workspace: t.workspace, tree: t.tree });
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */
@@ -1566,11 +1622,11 @@ export class Bench {
     return this.openThread("workspace", ws);
   }
 
-  async openEphemeral(ws: string, eph: string): Promise<SessionRow> {
-    return this.openThread("ephemeral", ws, eph);
+  async openEphemeral(ws: string, eph: string, tree?: string): Promise<SessionRow> {
+    return this.openThread("ephemeral", ws, eph, tree);
   }
 
-  private openThread(kind: "workspace" | "ephemeral", ws: string, eph?: string): SessionRow {
+  private openThread(kind: "workspace" | "ephemeral", ws: string, eph?: string, tree?: string): SessionRow {
     // Checked before either id becomes a path.
     for (const x of kind === "workspace" ? [ws] : [ws, eph]) if (typeof x !== "string" || !WS_ID.test(x)) throw new Error(`not a workspace id: ${x}`);
     this.refuse(true);
@@ -1583,7 +1639,7 @@ export class Bench {
       // An agent's hands are the WORKSPACE's, never its own name: `eph` is the session key and
       // nothing else. Binding tools to it made every agent's first command answer "workspace
       // <agent-name>: not found" and every kl_pkg_* 404 (owner, four agents, 2026-09-17).
-      return this.sessions.thread({ kind, workspace: ws, eph, target: ws, file, model: this.opts.model });
+      return this.sessions.thread({ kind, workspace: ws, eph, target: ws, file, model: this.opts.model, tree });
     });
     if (s.archived) throw new Error(`session ${s.id} is archived; restore it to send`);
     this.open(s);
