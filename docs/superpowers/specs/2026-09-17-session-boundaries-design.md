@@ -354,7 +354,21 @@ Rules:
 7. **Sweep every 30 s** advances deadlines, reaps orphans (an exchange whose session is archived),
    and marks background tasks whose process is gone `lost`. Every transition is one line in
    `exchanges.jsonl` and one row in the Queue tab with its age; nothing is silent.
-8. **On the fleet** `bench.ask.settles` (a reply without the tag still settles), `bench.ask.idle`
+8. **The same lifecycle covers what a session waits on that is not a session** (owner, 05:10 IST:
+   "there will be such issues around background processes, jobs, other workspaces, etc."):
+   - a **process** the model started: `running → exited(code) | lost` — lost when the tool server
+     no longer knows it (pod restart) or the pod is gone; the session that started it is told once
+     with the last lines, and the row says so; never "running" for a process nobody can find;
+   - a **background task** (job): the same, plus a deadline the task named (`timeout`) after which it
+     is `expired` and told;
+   - **another workspace** an ask or watch depends on: when that workspace is stopped, idled,
+     deleted or its node dies, every open exchange on it is settled `blocked: "workspace stopped"`
+     (or restarted on wake when the person's ask is still wanted — the bench asks the person once),
+     and a watch on its process ends; the bench learns this from the `Workspace` status it already
+     watches, not from a timeout;
+   - a **tree** a subagent works in: deleting the tree settles its session's open exchanges the
+     same way.
+9. **On the fleet** `bench.ask.settles` (a reply without the tag still settles), `bench.ask.idle`
    (a workspace that goes quiet is nudged then expired) and `bench.restart.keeps_asks` (an open ask
    survives a bench restart) hold this.
 
