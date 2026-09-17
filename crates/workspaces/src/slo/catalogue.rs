@@ -162,13 +162,14 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 14] = [
+const BENCH_IDS: [&str; 15] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
     "bench.idle.wake",
     "bench.session.roundtrip",
     "bench.tools.own_hands",
+    "bench.proposal.asked",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.tool.token",
@@ -613,6 +614,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.idle.wake", feature: "Benches", sli: "With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged", target: bound(480_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.session.roundtrip", feature: "Benches", sli: "A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages`", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tools.own_hands", feature: "Benches", sli: "A bench session's tools are its own workspace's — the seven ide tools plus `process` and `kl_workspace_ask`, on `127.0.0.1:7788`, with pi's builtins off", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.proposal.asked", feature: "Benches", sli: "A bench session's platform write is asked first: the proposal names the change, a no declines it, and nothing is created", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.exchange.both_views", feature: "Benches", sli: "An exchange reads back by `?session=` and by `?workspace=`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.two_clients", feature: "Benches", sli: "Two WebSockets on one session see the same events in the same order", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.token", feature: "Benches", sli: "The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },

@@ -71,9 +71,10 @@ pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
 /// but they need the same bench, so they skip with the same reasons.
-const SESSION_IDS: [&str; 7] = [
+const SESSION_IDS: [&str; 8] = [
     "bench.session.roundtrip",
     "bench.tools.own_hands",
+    "bench.proposal.asked",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.shell.roundtrip",
@@ -398,6 +399,9 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.tools.own_hands") {
         own_hands(c).await;
     }
+    if c.walks("bench.proposal.asked") {
+        proposal_asked(c).await;
+    }
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
@@ -539,6 +543,83 @@ fn judge_tools(body: &str) -> Result<()> {
         bail!("pi's builtins are on: they would run in the bench container");
     }
     Ok(())
+}
+
+/// `bench.proposal.asked`: a change the person did not agree to does not happen.
+///
+/// The whole of §9 in one sample: the model is told to create a workspace, the bench holds the
+/// QUESTION rather than the call, the probe answers NO, and then the two things that matter — the
+/// tool said it was declined, and `/v1` has no such workspace. A gate that asks and then acts
+/// anyway is exactly the failure this exists to catch, so the api read is the assertion, not the
+/// transcript.
+const PROPOSAL_CEILING: Duration = Duration::from_secs(120);
+
+async fn proposal_asked(c: &mut Ctx) {
+    let name = format!("{}-proposal", c.prefix());
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let nm = no_model.clone();
+    let region = c.cfg.region.clone();
+    c.step("bench.proposal.asked", PROPOSAL_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let list = super::api(c, "/v1/workspaces");
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            let prompt = format!(
+                "Call the tool kl_workspace_create exactly once with name \"{name}\" and region \"{region}\". Whatever it answers, then reply with exactly the word done."
+            );
+            // The turn does not end until the question is answered, so the answer is given from
+            // here WHILE it runs — the same shape `answering` has, with the opposite answer and
+            // one assertion in the middle: the question named this workspace.
+            let seen: Arc<Mutex<Option<String>>> = Default::default();
+            let asked = seen.clone();
+            let want = name.clone();
+            let _declining = AbortOnDrop(tokio::spawn(async move {
+                loop {
+                    if let Ok((200, body)) = through(port, "/proposals").await {
+                        if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&body) {
+                            for p in rows {
+                                let (Some(id), Some(summary)) = (p["id"].as_str(), p["summary"].as_str()) else { continue };
+                                if summary.contains(&want) {
+                                    *asked.lock().unwrap() = Some(summary.to_string());
+                                }
+                                let _ = through_with(port, reqwest::Method::POST, &format!("/proposals/{id}"), Some(json!({"answer": "no"}))).await;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }));
+            let turn = one_turn(port, &sid, &prompt, &nm).await;
+            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
+            turn?;
+            let summary = seen.lock().unwrap().clone();
+            let Some(summary) = summary else {
+                bail!("no proposal named {name}: a platform write ran without asking, or the model never called the tool");
+            };
+            if !summary.contains(&name) {
+                bail!("the question does not name the workspace: {}", super::clip(&summary));
+            }
+            // The one that cannot be argued with: the api never heard of it.
+            let made = get(c, &list, &jwt).await.context("could not list the workspaces")?;
+            if made.as_array().is_some_and(|ws| ws.iter().any(|w| w["name"] == name.as_str())) {
+                bail!("{name} was created although the person said no");
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+    // Cloned out of the guard before the await, like `exchanges` — a `MutexGuard` held across one
+    // is a future the borrow checker will not take.
+    let why = no_model.lock().unwrap().clone();
+    if let Some(why) = why {
+        c.demote_to_skip("bench.proposal.asked", &format!("{NO_MODEL}: {}", super::clip(&why)));
+    }
 }
 
 /// Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
@@ -744,6 +825,37 @@ async fn shell_workspace(c: &mut Ctx) {
     }
 }
 
+/// Say yes to every proposal the bench is holding, until the caller drops this.
+///
+/// Since 2026-09-17 every `kl_*` write is a QUESTION: the extension publishes it and blocks on
+/// `/proposals/{id}/wait` for up to ten minutes, and an unanswered question is a no. A probe that
+/// prompts a turn into a platform write is the person in that conversation, so it answers — spawned
+/// beside the turn rather than after it, because the turn does not end until the answer lands.
+fn answering(port: u16) -> AbortOnDrop<()> {
+    AbortOnDrop(tokio::spawn(async move {
+        loop {
+            if let Ok((200, body)) = through(port, "/proposals").await {
+                for id in proposal_ids(&body) {
+                    let _ = through_with(port, reqwest::Method::POST, &format!("/proposals/{id}"), Some(json!({"answer": "yes"}))).await;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }))
+}
+
+/// The ids in a `GET /proposals` body. A body that is not the listing names nothing — never an
+/// error: this runs beside a turn whose own failure is the sample.
+fn proposal_ids(body: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p["id"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// `bench.exchange.both_views` has no bound (availability only), so this caps one tool call plus a
 /// one-word reply: the round trip's own 60 s target, doubled for the extra model step.
 const EXCHANGE_CEILING: Duration = Duration::from_secs(120);
@@ -793,6 +905,10 @@ async fn exchanges(c: &mut Ctx, sid: Option<String>) {
     c.step("bench.exchange.both_views", EXCHANGE_CEILING, move |c| {
         async move {
             let (_child, port) = forward(c).await?;
+            // `kl_workspace_start` is a gated write now, and its tool call does not return until
+            // somebody answers the question — so the answer has to come from here, while the turn
+            // is still running.
+            let _answering = answering(port);
             let mut rows: Vec<Value> = Vec::new();
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
             for _ in 0..2 {
@@ -858,6 +974,10 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             if status != 200 {
                 bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&row));
             }
+            // A workspace session's `kl_env_*`/`kl_environment_*` are gated the same way; the
+            // prompt below asks for `bash` only, but a model that reaches for one of those would
+            // otherwise hang this turn to the ten-minute cap rather than failing it.
+            let _answering = answering(port);
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
             let mut last = Ok(());
             for _ in 0..2 {
@@ -1390,6 +1510,21 @@ mod tests {
         assert!(!lists_session("bench unreachable", "probe-hourly-1"));
     }
 
+    /// `GET /proposals` is a listing of ids; anything else names nothing, and never fails the turn
+    /// it runs beside.
+    #[test]
+    fn proposal_ids_are_read_from_the_listing_and_nothing_else() {
+        let body = json!([
+            {"id": "p-1", "session": "s-1", "tool": "kl_workspace_create", "summary": "Create workspace x"},
+            {"id": "p-2", "session": "s-1", "tool": "kl_workspace_stop", "summary": "Stop workspace y"},
+        ])
+        .to_string();
+        assert_eq!(proposal_ids(&body), ["p-1", "p-2"]);
+        assert!(proposal_ids("[]").is_empty());
+        assert!(proposal_ids("bench unreachable").is_empty());
+        assert!(proposal_ids(&json!({"error": "no"}).to_string()).is_empty());
+    }
+
     /// The ruling this id exists for, both halves: the eight own-machine tools and `kl_workspace_ask`
     /// must be there, and they must run on the bench's OWN workspace tool server with pi's builtins
     /// off. A list that satisfies the names while running in the bench container is the regression.
@@ -1429,9 +1564,9 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        // Ten now: `ws.terminal.persists` files its own skip when there is no bench to read, and
-        // `bench.tools.own_hands` is one of `SESSION_IDS`.
-        assert_eq!(c.steps.len(), 10);
+        // Eleven now: `ws.terminal.persists` files its own skip when there is no bench to read,
+        // and `bench.tools.own_hands` and `bench.proposal.asked` are both `SESSION_IDS`.
+        assert_eq!(c.steps.len(), 11);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
         assert_eq!(run_state(true, false, &c.steps), RunState::Skipped);
