@@ -13,6 +13,8 @@ export type Emit = (ev: Record<string, unknown> & { type: string; pi?: string })
 // `total` is the bench's own message count: once a session outgrows the kept
 // tail, the tail's length is no longer the index `after=` needs.
 type Cache = { base: string; sessions: unknown[]; exchanges: unknown[]; messages: Record<string, { total: number; tail: unknown[] }> };
+/** What a window asks for when it opens a thread it has never seen. */
+const OPEN_WITH = 60;
 const KEEP_MESSAGES = 200;
 const KEEP_EXCHANGES = 500;
 export type PtySession = { name: string; windows: number; attached: number; created: number };
@@ -235,7 +237,10 @@ export class BenchClient {
     if (!this.up) return have.tail;
     const at = `/sessions/${encodeURIComponent(session)}/messages`;
     try {
-      const r = await this.rest<{ messages: unknown[]; total: number }>("GET", `${at}?after=${have.total}`);
+      // With nothing cached, ask for the NEWEST page rather than the whole history: a long thread
+      // otherwise reads every message back through pi before the window can draw anything.
+      const q = have.total ? `after=${have.total}` : `tail=${OPEN_WITH}`;
+      const r = await this.rest<{ messages: unknown[]; total: number }>("GET", `${at}?${q}`);
       // A shorter history than the cache means it was cleared or compacted:
       // start over rather than append to a history that no longer exists.
       const all = r.total < have.total ? (await this.rest<{ messages: unknown[] }>("GET", at)).messages : [...have.tail, ...r.messages];

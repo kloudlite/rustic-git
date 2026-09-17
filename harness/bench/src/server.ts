@@ -82,7 +82,7 @@ export function serve(
         // a bench session to its own workspace's hands (`bench.tools.own_hands`); pi's own RPC has
         // no tool listing.
         if (p.length === 3 && m === "GET" && p[2] === "tools") return send(res, 200, bench.tools(p[1]));
-        if (p.length === 3 && m === "GET" && p[2] === "messages") return send(res, 200, await bench.messages(p[1], n("after"), n("limit")));
+        if (p.length === 3 && m === "GET" && p[2] === "messages") return send(res, 200, await bench.messages(p[1], n("after"), n("limit"), n("tail")));
         if (p.length === 3 && m === "POST" && p[2] === "btw") return send(res, 200, await bench.btw(p[1], String((await body(req)).question ?? "")));
         if (p.length === 3 && m === "GET" && p[2] === "btw") return send(res, 200, bench.listBtw(p[1]));
       }

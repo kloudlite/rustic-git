@@ -214,3 +214,24 @@ test("boot skips a thread row with no file instead of crash-looping", async () =
     await b.stop();
   }
 });
+
+test("opening a long thread reads the newest page, not the whole history", async () => {
+  const b = mk();
+  try {
+    await b.start();
+    const id = b.sessions.all().find((s) => !s.archived)!.id;
+    for (let i = 0; i < 40; i++) await b.rpc(id, { type: "prompt", message: `prompt ${i}` });
+
+    const all = await b.messages(id);
+    assert.equal(all.messages.length, all.total, "everything, when everything is asked for");
+
+    // What a window asks for when it opens a thread it has never seen.
+    const page = await b.messages(id, 0, undefined, 20);
+    assert.equal(page.messages.length, 20);
+    assert.equal(page.total, all.total);
+    assert.equal(page.from, all.total - 20, "and where they begin, so the older ones can be asked for");
+    assert.deepEqual(page.messages, all.messages.slice(-20));
+  } finally {
+    await b.stop();
+  }
+});

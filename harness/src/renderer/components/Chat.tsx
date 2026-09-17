@@ -89,23 +89,16 @@ export function Chat(props: {
   // The live state behind this thread: the bench's, a side session's, or an
   // idle one for a recorded thread (nothing arrives on it, so it stays quiet).
   const L = () => live.thread(thread()?.pi ?? "");
-  // A long session reads in sittings: a gap of more than half an hour between
-  // two messages starts a new one, and every sitting but the latest folds to
-  // one line — what it covered and when — until it is opened. The transcript
-  // stays a page, not a scroll through the week.
-  const GAP = 30 * 60 * 1000;
-  const sittings = createMemo(() => {
-    const out: Message[][] = [];
-    let last: number | undefined;
-    for (const m of blocks()) {
-      if (!out.length || (m.ts && last && m.ts - last > GAP)) out.push([]);
-      out[out.length - 1].push(m);
-      if (m.ts) last = m.ts;
-    }
-    return out;
-  });
-  const [opened, setOpened] = createSignal(new Set<number>());
-  const isOpen = (i: number) => i === sittings().length - 1 || opened().has(i);
+  /**
+   * Only the newest rows are drawn. Opening a 22-prompt thread used to render every row before the
+   * first paint — a markdown parse and a highlight pass each — and the pane sat blank for seconds
+   * (owner, 2026-09-17). The rest are one muted line that loads them when asked.
+   */
+  const PAGE = 60;
+  const [shown, setShown] = createSignal(PAGE);
+  createEffect(() => (void thread()?.id, setShown(PAGE)));
+  const earlier = () => Math.max(0, blocks().length - shown());
+  const visible = createMemo(() => (earlier() ? blocks().slice(-shown()) : blocks()));
   let hist = -1;     // how far back ↑ has walked; -1 is the draft
   let draft = "";
   // `/` completion: the commands whose name starts with what is typed, shown
@@ -383,10 +376,15 @@ export function Chat(props: {
                 )}
               </Show>
             </div>
-            <For each={sittings()}>
-              {(sit, si) => (
-                <Show when={isOpen(si())} fallback={<Folded messages={sit} onOpen={() => setOpened((o) => new Set(o).add(si()))} />}>
-            <For each={segments(sit)}>
+            {/* Rows just continue; what is older is one line, not a divider with a summary. */}
+            <Show when={earlier()}>
+              {(n) => (
+                <button class="w-fit text-left text-subtle hover:text-fg" onClick={() => setShown((v) => v + PAGE * 4)}>
+                  ↑ {n()} earlier {n() === 1 ? "message" : "messages"}
+                </button>
+              )}
+            </Show>
+            <For each={segments(visible())}>
               {(seg) => (
                 <Show when={seg.kind === "one"} fallback={<ToolGroup rows={(seg as { rows: Action[] }).rows} />}>
                 {(() => { const b = (seg as { row: Message }).row; return (
@@ -434,9 +432,6 @@ export function Chat(props: {
                 </Show>
                 </Show>
                 ); })()}
-                </Show>
-              )}
-            </For>
                 </Show>
               )}
             </For>
@@ -742,31 +737,8 @@ function FirstRun(props: { team: string; onPick: (text: string) => void }) {
   );
 }
 
-const when = (ms: Message[]) => {
-  const first = ms.find((m) => m.ts)?.ts;
-  const last = [...ms].reverse().find((m) => m.ts)?.ts;
-  if (!first || !last) return "";
-  const d = new Date(first);
-  const day = d.toDateString() === new Date().toDateString() ? "today" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  return `${day} ${new Date(first).toTimeString().slice(0, 5)}–${new Date(last).toTimeString().slice(0, 5)}`;
-};
 
 /** A sitting that is folded: one line saying what it held, opened by a click. */
-function Folded(props: { messages: Message[]; onOpen: () => void }) {
-  const prompts = () => props.messages.filter((m) => m.role === "user").length;
-  const first = () => (props.messages.find((m) => m.role === "user") as { text?: string } | undefined)?.text ?? "";
-  return (
-    <button class="group -mx-3 flex items-center gap-3 rounded-sm px-3 py-1 text-left font-ui text-subtle hover:bg-hover hover:text-fg" onClick={props.onOpen} title="Open this sitting">
-      <span class="h-px w-6 shrink-0 bg-line-subtle" />
-      <span class="shrink-0 tabular-nums">{when(props.messages)}</span>
-      <span class="shrink-0">· {prompts()} {prompts() === 1 ? "prompt" : "prompts"}</span>
-      <span class="min-w-0 flex-1 truncate font-mono text-muted">{first()}</span>
-      <span class="h-px flex-1 bg-line-subtle" />
-    </button>
-  );
-}
-
-/** The time on a person's own row, right-aligned and quiet — the only clock the pane shows. */
 function Time(props: { at: string }) {
   return (
     <span class="shrink-0 pl-6 text-right leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
@@ -961,5 +933,18 @@ function Prose(props: { text: string; latest?: boolean }) {
   );
 }
 
-const render = (text: string) => marked.parse(text, { async: false, gfm: true, breaks: false }) as string;
+/**
+ * Markdown, parsed once per text. A transcript re-renders on every event — a new row, a token, a
+ * plan change — and re-parsing every answer each time is what made a long thread crawl. The cache
+ * is bounded because a streaming answer makes one entry per token otherwise.
+ */
+const PARSED = new Map<string, string>();
+const render = (text: string) => {
+  const had = PARSED.get(text);
+  if (had !== undefined) return had;
+  const html = marked.parse(text, { async: false, gfm: true, breaks: false }) as string;
+  if (PARSED.size > 400) PARSED.clear();
+  PARSED.set(text, html);
+  return html;
+};
 

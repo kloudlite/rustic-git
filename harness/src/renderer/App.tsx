@@ -628,9 +628,13 @@ export function App() {
     for (const x of live_()) void loadThread(x.id);
     if (!st.connected) return;
     await refreshSessions().catch(fail);
-    void bench<Record<string, unknown>[]>("GET", "/procs").then((rows) => live.onEvent({ type: "procs", rows }), fail);
-    void bench<{ session: string; items: unknown[] }[]>("GET", "/plans").then((rows) => rows.forEach((r) => live.onEvent({ type: "plan", ...r })), fail);
-    void bench<Record<string, unknown>[]>("GET", "/tasks").then((rows) => rows.forEach((row) => live.onEvent({ type: "task", row })), fail);
+    // These three are VIEWS the bench also pushes as events: a first read that fails (an older
+    // main with a narrower allow-list, a bench mid-restart) must not put an error in somebody's
+    // conversation — the next event fills them in. Only what a person ASKED for reports failure.
+    const quiet = () => undefined;
+    void bench<Record<string, unknown>[]>("GET", "/procs").then((rows) => live.onEvent({ type: "procs", rows }), quiet);
+    void bench<{ session: string; items: unknown[] }[]>("GET", "/plans").then((rows) => rows.forEach((r) => live.onEvent({ type: "plan", ...r })), quiet);
+    void bench<Record<string, unknown>[]>("GET", "/tasks").then((rows) => rows.forEach((row) => live.onEvent({ type: "task", row })), quiet);
   });
   // Slash commands the harness answers itself, before anything reaches pi;
   // what is not listed here (/bg, /cancel, /skill:…) goes through.

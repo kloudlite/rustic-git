@@ -25,7 +25,10 @@ test("a stopped session's transcript is read without starting an agent", () => {
   assert.deepEqual(ms.map((m) => m.role), ["user", "assistant"]);
 });
 
-test("page takes after as an index and limit as a count", () => {
-  assert.deepEqual(page([1, 2, 3, 4], 1, 2), { messages: [2, 3], total: 4 });
-  assert.deepEqual(page([1, 2], 5), { messages: [], total: 2 });
+test("page takes after as an index and limit as a count, and tail takes the newest", () => {
+  assert.deepEqual(page([1, 2, 3, 4], 1, 2), { messages: [2, 3], total: 4, from: 1 });
+  assert.deepEqual(page([1, 2], 5), { messages: [], total: 2, from: 5 });
+  // What a window opening a long thread asks for: the newest N, and where they begin.
+  assert.deepEqual(page([1, 2, 3, 4, 5], 0, undefined, 2), { messages: [4, 5], total: 5, from: 3 });
+  assert.deepEqual(page([1, 2], 0, undefined, 60), { messages: [1, 2], total: 2, from: 0 }, "a short thread is all of it");
 });

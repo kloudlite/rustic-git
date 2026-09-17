@@ -795,15 +795,15 @@ export class Bench {
     return c.send(cmd);
   }
 
-  async messages(id: string, after?: number, limit?: number): Promise<{ messages: unknown[]; total: number }> {
+  async messages(id: string, after?: number, limit?: number, tail?: number): Promise<{ messages: unknown[]; total: number; from: number }> {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`no session ${id}`);
     const c = this.children.get(id);
     if (c?.running()) {
       const r = await c.send({ type: "get_messages" });
-      return page((r.data as { messages?: unknown[] } | undefined)?.messages ?? [], after, limit);
+      return page((r.data as { messages?: unknown[] } | undefined)?.messages ?? [], after, limit, tail);
     }
-    return page(s.file && fs.existsSync(s.file) ? transcript(s.file) : [], after, limit);
+    return page(s.file && fs.existsSync(s.file) ? transcript(s.file) : [], after, limit, tail);
   }
 
   async archive(id: string): Promise<SessionRow> {
