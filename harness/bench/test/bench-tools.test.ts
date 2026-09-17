@@ -2156,3 +2156,78 @@ test("attaching a workspace to an environment is the space's verb, and says so",
   assert.match(id, /"Attach this workspace to that environment" is kl_env_switch/);
   assert.match(id, /never spend an ask looking for it/);
 });
+
+/**
+ * D6, round 2 (api-test-report): the ask still sat `running` for three minutes behind a card
+ * nobody owned — the note was written but no deadline counted it. The card is why the ask is quiet,
+ * so it IS the idle clock; if nobody ever answers it, the ask says that rather than nothing.
+ */
+test("an ask waiting on a card nobody answers ends saying so", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-d6-2-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    // The report's own card: a command the workspace raised while working on the ask.
+    (bench as never as { foldRow: (id: string, ev: unknown) => void }).foldRow(a.session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-d6", tool: "bash", args: { command: "ls -la" }, summary: "Run in ws-9e16: ls -la" })],
+    });
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("is waiting for your approval — open it")),
+      "the asking session is told where to answer it",
+    );
+
+    const state = () => bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state;
+    const t0 = Date.now();
+    await bench.sweepExchanges(t0 + 60_000);
+    assert.equal(state(), "running", "a card is a wait, not a failure");
+
+    // The idle window, then the grace: it ends as what it was, and the card is taken away so the
+    // workspace is not left blocked on a question with no asker.
+    await bench.sweepExchanges(t0 + 10 * 60_000 + 1);
+    await bench.sweepExchanges(t0 + 12 * 60_000 + 2);
+    assert.equal(state(), "blocked");
+    const why = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(
+      why.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("blocked: waiting for an approval nobody gave")),
+      "and says which wait it was",
+    );
+    assert.equal(bench.openProposals().some((p) => p.id === "p-d6"), false, "the card is gone with it");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("answering the card puts the ask back on its ordinary clock", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-d6-3-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+    (bench as never as { foldRow: (id: string, ev: unknown) => void }).foldRow(a.session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-d6b", tool: "bash", args: { command: "ls -la" }, summary: "Run in ws-9e16: ls -la" })],
+    });
+
+    const t0 = Date.now();
+    bench.answerProposal("p-d6b", "yes");
+    // Well past the window the CARD would have ended on, but the clock restarted at the answer.
+    await bench.sweepExchanges(t0 + 11 * 60_000);
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "running");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -165,7 +165,7 @@ export class Bench {
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
   /** Per exchange: when it entered its state, and whether it has already been redelivered or nudged. */
-  private clocks = new Map<string, { at: number; redelivered?: true; nudgedAt?: number }>();
+  private clocks = new Map<string, { at: number; redelivered?: true; nudgedAt?: number; card?: string }>();
   private sweeper?: ReturnType<typeof setInterval>;
   private procPoll?: ReturnType<typeof setInterval>;
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
@@ -512,7 +512,14 @@ export class Bench {
            * against the ask rather than looking like silence.
            */
           for (const a of this.asked.get(id) ?? []) {
-            this.tell(a.from, `[${a.name ?? a.workspace} ${a.exchange}] waiting for your approval: ${p.summary}`);
+            /**
+             * The card is WHY this ask is quiet, so the ask remembers it: the idle clock counts the
+             * wait, the asking session is told where to answer it, and if nobody ever does, the ask
+             * ends saying so rather than sitting `running` for minutes (api-test-report D6, twice).
+             */
+            const clock = this.clocks.get(a.exchange) ?? { at: Date.now() };
+            this.clocks.set(a.exchange, { ...clock, card: key });
+            this.tell(a.from, `[${a.name ?? a.workspace} ${a.exchange}] ${a.name ?? a.workspace} is waiting for your approval — open it: ${p.summary}`);
             const row = this.write(() => this.exchanges.record({ id: `${a.exchange}-card-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: `waiting for approval: ${p.summary}`, state: "note", ref: a.exchange }));
             this.emit({ type: "exchange", row });
           }
@@ -781,7 +788,16 @@ export class Bench {
         this.emit({ type: "exchange", row: { ...e, state: "running" } });
         continue;
       }
-      if (now - clock.nudgedAt >= ASK_NUDGE_GRACE_MS) this.settle(e, "expired", "the workspace went quiet");
+      if (now - clock.nudgedAt < ASK_NUDGE_GRACE_MS) continue;
+      // A card nobody answered is not a workspace that went quiet: say which it was, and take the
+      // card away, so the workspace is not left blocked on a question with no asker.
+      if (clock.card) {
+        const card = clock.card;
+        this.settle(e, "blocked", "waiting for an approval nobody gave");
+        if (!this.proposals.get(card)?.answer) this.answerProposal(card, "no");
+        continue;
+      }
+      this.settle(e, "expired", "the workspace went quiet");
     }
   }
 
@@ -1153,8 +1169,8 @@ export class Bench {
    * order. The tag carries the exchange and who asked, because the answer has to find its way back
    * to one of several senders and only the model knows which one it just answered.
    *
-   * ponytail: no deadline — a turn that never ends leaves its exchange `running` until the child
-   * exits. The upgrade is a timer per ask that fails the exchange and tells the asker so.
+   * Every state of it has a deadline (§3.9 rule 2), including the one where it is waiting on a card
+   * nobody is standing at (rule 2, D6).
    */
   async ask(to: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string; queued: number }> {
     this.refuse(true);
@@ -1245,6 +1261,9 @@ export class Bench {
     if (!p || !key) throw new Error(`no proposal ${id}`);
     if (p.answer !== undefined) throw new AlreadyAnswered(id, p.answer);
     p.answer = answer;
+    // The ask that was waiting on this card is waiting on work again: its idle clock restarts from
+    // the answer, not from whenever the card went up (D6).
+    for (const [exchange, c] of this.clocks) if (c.card === key) this.clocks.set(exchange, { at: Date.now() });
     // A no means the item the turn was on is not happening: the plan says so, with the reason.
     if (p.answer === "no") this.plan(p.session, { type: "declined" });
     // The answer reaches the model as the question tool's RESULT — `waitProposal` is what the tool
