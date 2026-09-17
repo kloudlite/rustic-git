@@ -1258,3 +1258,31 @@ test("switching environments takes the name a person uses", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * `skill {name:"workspaces"}` was answered `no skill workspaces; there are workspaces, …` ten times
+ * — a refusal that names the thing it is refusing (transcripts, 2026-09-18). A skill is asked for
+ * the way a person says it, and a name that IS installed can never come back as "no skill".
+ */
+test("a skill is found however it is named, and an unreadable one says so as itself", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const run = (a: any) => (tools.find((t) => t.name === "skill")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    for (const said of ["workspaces", "Workspaces", " workspaces ", "workspaces.md"]) {
+      const r = await run({ name: said });
+      assert.ok(!r.isError, `${said}: ${r.content[0].text}`);
+      assert.match(r.content[0].text as string, /^---\nname: workspaces\n/);
+    }
+    // A name nothing installs is still refused, with what there is.
+    const no = await run({ name: "kubernetes" });
+    assert.equal(no.isError, true);
+    assert.match(no.content[0].text, /no skill kubernetes; there are workspaces/);
+    // And no refusal ever lists the name it just refused.
+    const listed = /there are ([^\n]*)/.exec(no.content[0].text)?.[1] ?? "";
+    assert.ok(!listed.split(", ").includes("kubernetes"), listed);
+  } finally {
+    restore();
+  }
+});

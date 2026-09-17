@@ -389,8 +389,18 @@ const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "a
 /** Where the skills live beside the extension. Named in the error, because a missing directory in
  *  an image is the usual reason a skill "does not exist" (owner, 2026-09-17). */
 export const skillDir = () => path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
-function skillText(name: string): string | undefined {
-  if (!SKILLS.includes(name)) return undefined;
+/**
+ * A skill is asked for the way a person says it: `workspaces`, `Workspaces`, ` workspaces `, or the
+ * file's own `workspaces.md`. Ten calls in the transcripts were answered `no skill workspaces;
+ * there are workspaces, …` — a refusal that names the thing it is refusing (2026-09-18).
+ */
+export const skillName = (raw: string): string | undefined => {
+  const want = String(raw).trim().toLowerCase().replace(/\.md$/, "");
+  return SKILLS.find((n) => n === want);
+};
+function skillText(raw: string): string | undefined {
+  const name = skillName(raw);
+  if (!name) return undefined;
   try {
     return fs.readFileSync(path.join(skillDir(), `${name}.md`), "utf8");
   } catch {
@@ -557,6 +567,9 @@ export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
     const body = skillText(String(a.name));
     if (body) return text(body);
     const here = skillIndex().map((x) => x.name);
+    // A name this session lists but cannot read is a fact about the IMAGE, said as one — never
+    // "no skill workspaces; there are workspaces".
+    if (here.includes(skillName(String(a.name)) ?? "")) return { ...text(`${a.name} is installed but could not be read; say so to the person`), isError: true };
     // Loud, and with the path: "no skill workspaces" on a bench whose image ships no skills folder
     // is a fact about the image, not about the skill.
     return {
