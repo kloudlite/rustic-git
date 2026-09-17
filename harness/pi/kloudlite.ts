@@ -242,7 +242,7 @@ const PLATFORM = [
   "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
-  "An ask you are already waiting on is waited on: read it with kl_workspace_progress, or ask again. Never start, stop or restart a machine to move work along — it is already running.",
+  "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a machine to move work along — it is already running.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
@@ -773,7 +773,17 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
       benchCall("GET", "/procs").catch(() => ({ ok: false, data: [] })),
     ]);
     if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
-    const asks = (x.data as { dir: string; state: string; text: string }[]).filter((e) => e.dir === "out").map((e) => `  ${e.state}: ${String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").slice(0, 160)}`);
+    // ONE line per ask — state, how long, its first line — never the ask's body: the bench holds
+    // what things ARE, the workspace holds how they are done (owner, 2026-09-18). And an ask that is
+    // running WAKES this session when it answers, so polling it is six calls that learn nothing.
+    const asks = (x.data as { dir: string; state: string; text: string; ts?: number }[])
+      .filter((e) => e.dir === "out")
+      .map((e) => {
+        const first = String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").split("\n")[0].slice(0, 100);
+        const age = e.ts ? ` for ${Math.max(0, Math.round((Date.now() - e.ts) / 1000))}s` : "";
+        const wait = e.state === "running" || e.state === "queued" ? "; you will be told when it answers — do not poll" : "";
+        return `  ${e.state}${age}: ${first}${wait}`;
+      });
     const said = ((m.data as { messages?: Record<string, any>[] }).messages ?? []).slice(-10).flatMap((r) => {
       const c = r.content;
       if (r.role === "user") return [`  asked: ${(typeof c === "string" ? c : (c ?? []).map((b: any) => b.text ?? "").join("")).slice(0, 160)}`];

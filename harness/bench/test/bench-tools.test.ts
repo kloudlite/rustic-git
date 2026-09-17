@@ -385,7 +385,7 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
       out,
       [
         "asked of api:",
-        "  running: add a health endpoint",
+        "  running: add a health endpoint; you will be told when it answers — do not poll",
         // What is RUNNING there is part of the answer: the bench could not see a build it had asked
         // for and started building again (owner, 2026-09-18).
         "running there:",
@@ -1417,6 +1417,7 @@ test("progress asked by name reads the workspace's own thread", async () => {
     assert.ok(seen.includes("/exchanges?workspace=ws-632cf9f23d9f"), seen.join(" "));
     assert.ok(seen.includes("/workspaces/ws-632cf9f23d9f/messages?limit=10"), seen.join(" "));
     assert.match(out, /running: write the service/);
+    assert.match(out, /do not poll/, "an ask that is running wakes this session; polling it learns nothing");
     assert.doesNotMatch(out, /nothing yet/);
     assert.match(out, /kl container build -t backend:0\.1 \./, "what is running there, so it is not started twice");
   } finally {
@@ -1509,7 +1510,7 @@ test("the bench is never a workspace target, and never in a listing", async () =
 
 test("waiting on an ask is waiting, not restarting a machine", () => {
   // The model reached for `start` with an ask in flight; the identity now says what to do instead.
-  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on is waited on: read it with kl_workspace_progress, or ask again\. Never start, stop or restart a machine to move work along/);
+  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it, and never start, stop or restart a machine to move work along/);
 });
 
 /**
@@ -1548,5 +1549,41 @@ test("a workspace whose tools are unreachable never says where it tried", async 
     for (const leak of ["127.0.0.1", ":1", "fetch failed", "ECONNREFUSED"]) assert.ok(!said.includes(leak), `${leak} leaked: ${said}`);
   } finally {
     restore();
+  }
+});
+
+/**
+ * A `[reply <id>]` settles its ask wherever in the RUN it was said. A `[task … finished]` notice
+ * arriving mid-run starts another turn inside the same run, so the last assistant message was
+ * "Noted." and the tagged answer above it settled nothing: ask-5 sat running for 58 s while the
+ * asking session polled six times and re-did the build (owner, 2026-09-18).
+ */
+test("a reply settles its ask even when a later turn follows it in the same run", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-reply-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    // "hang" never ends its turn, so the ask is still outstanding when the run is handed over.
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    const reply = `[reply ${a.exchange}] Pushed. backend:latest, digest sha256:1296abcd`;
+    await (bench as never as { deliver: (id: string, m: unknown[]) => Promise<void> }).deliver(a.session, [
+      { role: "user", content: `[ask ${a.exchange} from ${asker}] hang` },
+      { role: "assistant", content: [{ type: "thinking", thinking: "the build finished" }, { type: "text", text: reply }] },
+      { role: "user", content: "[task build finished: exit 0]" },
+      // The turn that answered the NOTICE — the message the walk used to stop on.
+      { role: "assistant", content: [{ type: "text", text: "Noted." }] },
+    ]);
+
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "done", "the ask is settled, not left running");
+    const back = (await bench.messages(asker)).messages as { role: string; content: unknown }[];
+    const crossed = back.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
+    assert.match(crossed, /Pushed\./);
+    assert.ok(!/Noted\./.test(crossed), "what crosses is the reply, not the turn after it");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

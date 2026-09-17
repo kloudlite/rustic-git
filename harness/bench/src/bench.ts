@@ -430,7 +430,20 @@ export class Bench {
     }
     // This turn and no earlier one: the last answer, and the messages between it and the answer
     // before it. Scanning the whole transcript would find every ask ever sent, and answer them all.
-    const end = all.map((m) => m.role).lastIndexOf("assistant");
+    /**
+     * WHICH assistant message is the answer. The last one is the ordinary case — but a `[task …
+     * finished]` notice arriving mid-run starts another turn inside the SAME run, so the last
+     * message was "Noted." and the `[reply …]` two messages above it settled nothing: the ask sat
+     * `running` for a minute while the asking session polled six times and re-did the work
+     * (owner, 2026-09-18). A tagged answer for an ask this session actually owes is the answer,
+     * wherever in the run it was said.
+     */
+    const owed = (text: string) => {
+      const tag = /\[reply ([^\]]+)\]/.exec(text)?.[1];
+      return tag && queue.some((q) => q.exchange === tag) ? tag : undefined;
+    };
+    const tagged = all.map((m, i) => ({ i, role: m.role, text: said(m) })).filter((m) => m.role === "assistant" && owed(m.text));
+    const end = tagged.length ? tagged[tagged.length - 1].i : all.map((m) => m.role).lastIndexOf("assistant");
     const answer = said(all[end]);
     const turn = all.slice(0, end < 0 ? all.length : end).reverse();
     const stop = turn.findIndex((m) => m.role === "assistant");
