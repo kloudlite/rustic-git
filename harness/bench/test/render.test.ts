@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { TEXT_RENDER_IMMEDIATE, next, paced, step } from "../../src/renderer/components/results/paced.ts";
 import { badge, editFile, patchFiles, split } from "../../src/renderer/components/results/diff.ts";
 import { diagnostics, toolError, toolLine } from "../../src/renderer/components/results/toolline.ts";
+import { usage } from "../../src/renderer/live.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -133,4 +134,10 @@ test("an unknown tool gets opencode's generic line", () => {
   const l = toolLine("clickstack_sql", { query: "select 1", limit: 10, rows: true });
   assert.equal(l.verb, "Called `clickstack_sql`");
   assert.equal(l.arg, "select 1 limit=10 rows=true");
+});
+
+test("the footer says tokens, how full the window is, and what it cost", () => {
+  assert.equal(usage(12400, 1.2, 32000), "12.4K (39%) · $1.20");
+  assert.equal(usage(900, 0, undefined), "900");
+  assert.equal(usage(64000, undefined, 32000), "64K (100%)", "a window over its limit stops at 100");
 });

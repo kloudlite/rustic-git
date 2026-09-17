@@ -70,6 +70,11 @@ export function Chat(props: {
     () => props.threads.find((t) => t.id === props.threadId),
   );
   const blocks = () => thread()?.messages ?? [];
+  /** How many times escape has been pressed just now: two stops the turn. */
+  const [escapes, setEscapes] = createSignal(0);
+  let escTimer: ReturnType<typeof setTimeout> | undefined;
+  const [dockOpen, setDockOpen] = createSignal(true);
+  onCleanup(() => clearTimeout(escTimer));
   // The live state behind this thread: the bench's, a side session's, or an
   // idle one for a recorded thread (nothing arrives on it, so it stays quiet).
   const L = () => live.thread(thread()?.pi ?? "");
@@ -522,13 +527,31 @@ export function Chat(props: {
               them — a person could not tell a queued ask from a lost one. */}
           <Show when={L().queue.length || live.asksOf(L().id).length}>
             <div class="mb-2 flex flex-col gap-1 px-3 font-mono">
-              <For each={L().queue}>
+              {/* The dock says how many are waiting and shows the first when it is shut
+                  (`session-followup-dock.tsx:24`); a queue of six must not push the composer down. */}
+              <Show when={L().queue.length > 1}>
+                <button class="flex items-baseline gap-2 text-subtle hover:text-fg" onClick={() => setDockOpen((v) => !v)}>
+                  <Icon name={dockOpen() ? "chevronDown" : "chevronRight"} size={12} />
+                  {L().queue.length} queued
+                  <Show when={!dockOpen()}><span class="min-w-0 truncate text-muted">{L().queue[0].text}</span></Show>
+                </button>
+              </Show>
+              <For each={dockOpen() || L().queue.length <= 1 ? L().queue : []}>
                 {(q) => (
-                  <div class="flex flex-col">
+                  <div class="group/q flex flex-col">
                     <div class="flex items-start gap-2 text-muted">
-                      <span class="w-5 shrink-0 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>›</span>
+                      <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>QUEUED</span>
                       <span class="min-w-0 flex-1 truncate">{q.text}</span>
-                      <Show when={q.how === "steer"}><span class="shrink-0 text-subtle">steer</span></Show>
+                      <button class="shrink-0 text-subtle opacity-0 group-hover/q:opacity-100 hover:text-fg" onClick={() => live.sendNow(L().id, q.text)}>Send now</button>
+                      <button
+                        class="shrink-0 text-subtle opacity-0 group-hover/q:opacity-100 hover:text-fg"
+                        onClick={() => {
+                          const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+                          if (c) (c.value = q.text, fit(c), c.focus());
+                        }}
+                      >
+                        Edit
+                      </button>
                     </div>
                     {/* Why it is where it is: a queue that reorders itself without saying why is a mystery. */}
                     <Show when={q.reason}>{(r) => <span class="pl-7 text-subtle">{r()}</span>}</Show>
@@ -571,7 +594,19 @@ export function Chat(props: {
                     if (e.key === "ArrowDown") return (e.preventDefault(), setPick((p) => (p + 1) % matches().length));
                     if (e.key === "ArrowUp") return (e.preventDefault(), setPick((p) => (p - 1 + matches().length) % matches().length));
                     if (e.key === "Tab") return (e.preventDefault(), void accept(t));
-                    if (e.key === "Escape") return (e.preventDefault(), setTyped(""));
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      // While a turn runs, escape means STOP — but only on the second press
+                      // (`prompt/index.tsx:408`); the counter forgets after two seconds.
+                      if (L().busy()) {
+                        if (escapes() >= 1) { setEscapes(0); return live.interrupt(L().id); }
+                        setEscapes(1);
+                        clearTimeout(escTimer);
+                        escTimer = setTimeout(() => setEscapes(0), 2000);
+                        return;
+                      }
+                      return setTyped("");
+                    }
                     if (e.key === "Enter" && !e.shiftKey && matches()[pick()]?.name !== t.value.trim()) return (e.preventDefault(), e.stopPropagation(), void accept(t));
                   }
                   // ↑/↓ walk the prompts already sent, shell-style, but only
@@ -650,18 +685,27 @@ export function Chat(props: {
               when={L().busy()}
               fallback={<span class="min-w-0 truncate">{line()}</span>}
             >
+              {/* A retry says what failed and which attempt this is; `retrying - attempt #2`. */}
+              <Show when={L().retry()}>
+                {(r) => (
+                  <span class="min-w-0 truncate text-warning" title={r().message}>
+                    {r().message.slice(0, 80)}{r().message.length > 80 ? "…" : ""} [retrying · attempt #{r().attempt}]
+                  </span>
+                )}
+              </Show>
               <span class="animate-pulse text-accent">✳</span>
               <span class="text-muted">{verbAt(elapsed())}…</span>
               <span class="tabular-nums">({spinnerMeta(elapsed(), L().turn()?.tokens)})</span>
-              <span>esc to interrupt</span>
+              {/* `esc interrupt`, then `esc again to interrupt` once it has been pressed once. */}
+              <span classList={{ "text-accent": escapes() > 0 }}>esc <span class="text-subtle" classList={{ "text-accent": escapes() > 0 }}>{escapes() > 0 ? "again to interrupt" : "interrupt"}</span></span>
             </Show>
             <span class="flex-1" />
             <Show when={L().spend().tokens}>
               {(n) => (
-                <span class="shrink-0 tabular-nums">
-                  {n() > 1000 ? `${Math.round(n() / 100) / 10}K` : n()}
-                  <Show when={L().spend().context}>{(w) => <> ({Math.min(100, Math.round((n() / w()) * 100))}%)</>}</Show>
-                  <Show when={L().spend().cost}>{(c) => <> · ${c().toFixed(2)}</>}</Show>
+                <span class="flex shrink-0 items-center gap-1.5 tabular-nums">
+                  {/* How full the window is, drawn: a ring beside the number, 16px (§2.1). */}
+                  <Show when={L().spend().context}>{(w) => <ProgressCircle pct={Math.min(100, Math.round((n() / w()) * 100))} />}</Show>
+                  {live.usage(n(), L().spend().cost, L().spend().context)}
                 </span>
               )}
             </Show>
@@ -989,6 +1033,27 @@ function Step(props: { a: Action }) {
  * token: re-rendering the whole block per token is what flickered, and a
  * reader cannot tell 80 ms from 0.
  */
+/**
+ * How full the context window is, as a 16px ring (`SessionProgressIndicatorV2`): a percentage is a
+ * number to read, a ring is a glance. It warns past 70 and turns dangerous past 90, like every
+ * other proportion in this app.
+ */
+function ProgressCircle(props: { pct: number }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" class="shrink-0" aria-label={`${props.pct}% of the context window`}>
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" stroke-width="2" class="text-fg/15" />
+      <circle
+        cx="8" cy="8" r={r} fill="none" stroke="currentColor" stroke-width="2"
+        stroke-dasharray={`${(c * Math.min(100, props.pct)) / 100} ${c}`}
+        transform="rotate(-90 8 8)"
+        class={props.pct >= 90 ? "text-danger" : props.pct >= 70 ? "text-warning" : "text-accent"}
+      />
+    </svg>
+  );
+}
+
 /**
  * A line across the transcript — "Session compacted", "Interrupted"
  * (`MessageDivider`, `message-part.tsx:1635`). The turn did not say this; it happened to the turn.

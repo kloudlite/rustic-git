@@ -301,6 +301,8 @@ function makeThread(id: string) {
    * alive and on what — "Working…" for four minutes says neither.
    */
   const [turn, setTurn] = createSignal<{ verb: string; since: number; tokens: number } | undefined>();
+  /** The retry in flight, if any: which attempt, and what failed the time before. */
+  const [retry, setRetry] = createSignal<{ attempt: number; message: string } | undefined>();
   /** What this session has spent so far: pi reports it cumulatively, and the header shows it. */
   const [spend, setSpend] = createSignal<{ tokens: number; cost: number; context?: number }>({ tokens: 0, cost: 0 });
   const doing = (verb: string) => setTurn((t) => ({ verb, since: t?.since ?? Date.now(), tokens: t?.tokens ?? 0 }));
@@ -341,6 +343,13 @@ function makeThread(id: string) {
         setTurn({ verb: "Thinking", since: Date.now(), tokens: 0 });
         return;
       case "agent_end":
+        // A run that will be retried is not an answer: the footer says so, with the attempt, rather
+        // than going quiet and then surprising the person with a second turn (`session-retry.tsx`).
+        if (ev.willRetry === true) {
+          setRetry((r) => ({ attempt: (r?.attempt ?? 0) + 1, message: String((ev.error as { message?: string } | undefined)?.message ?? "") }));
+          return;
+        }
+        setRetry(undefined);
         setBusy(false);
         setTurn(undefined);
         open = -1;
@@ -442,7 +451,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, turn, spend, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, divider, sent, queued, queue, proposal, onEvent };
+  return { id, messages, busy, turn, retry, spend, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, divider, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
@@ -510,3 +519,26 @@ export function onEvent(ev: Ev & { pi?: string }) {
 // The bench, under the names everything already reads.
 const bench = thread("bench");
 export const { messages, busy, status, ready, attachments, attach, detach, takeAttachments, replay, note, sent } = bench;
+
+/**
+ * Two presses of escape stop the turn (`prompt/index.tsx:408`): one is too easy to hit by accident
+ * while reading, and a turn that dies because a person tapped a key is worse than one that runs a
+ * moment longer. The abort is pi's own, and the thread says so where the turn ended.
+ */
+export function interrupt(session: string) {
+  thread(session).divider("Interrupted");
+  void window.harness.pi({ type: "abort" }, session).catch((e: Error) => thread(session).note(e.message));
+}
+
+/** A queued line, sent now rather than in its turn: pi's `steer` puts it into the running turn. */
+export function sendNow(session: string, text: string) {
+  void window.harness.pi({ type: "steer", message: text }, session).catch((e: Error) => thread(session).note(e.message));
+}
+
+/** `12.4K (38%) · $1.20` — what the turn has spent, the way opencode's footer says it (`:268`). */
+const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+export function usage(tokens: number, cost?: number, context?: number): string {
+  const n = tokens > 1000 ? `${Math.round(tokens / 100) / 10}K` : String(tokens);
+  const pct = context ? ` (${Math.min(100, Math.round((tokens / context) * 100))}%)` : "";
+  return [`${n}${pct}`, cost ? money.format(cost) : ""].filter(Boolean).join(" · ");
+}
