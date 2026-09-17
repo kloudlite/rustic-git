@@ -123,3 +123,22 @@ next), ≤ 8 lines; the person's words forwarded, never rewritten into tool name
 the defect list ranked by severity, each with **repro**, **suspected file**, **fix plan** (what
 changes, the test that would hold it), and which implementer (harness / Rust) owns it. Under 400
 lines. Then hand back with a 15-line summary.
+
+## 10. Talking to a workspace session directly (owner, 05:45 IST)
+
+10.1 Open the session; "what is this project?" → answers from its own tree; no ask, no platform tool.
+10.2 "add a GET /health handler" → edit card (build mode); decline → nothing written; accept →
+     written; plan moved by the harness; the reply names files — correct here (the trim is for
+     bench-bound replies only).
+10.3 "run the tests" → exec card → process; "run the server in the background on 8080" → detached
+     process with a readable title in `/procs`; "stop it" → stopped, event card, no prompt echo.
+10.4 "install ripgrep here" → proposal on this workspace's packages, no name needed; "switch this
+     workspace to environment t-env" → own space; "create another workspace" → redirected: not
+     this session's job.
+10.5 Two person prompts + one bench ask arriving together → the person's order kept; the ask never
+     ahead of the person's first.
+10.6 Prompt mid-turn → steer vs queue; `{type:"abort"}` → "Interrupted" divider only.
+10.7 "spawn an agent to add tests" → today's clone path (report; SKIP for trees until Task 14).
+10.8 Hygiene: no `pi`, `/opt/harness`, absolute workspace paths in what it says; tree-relative only.
+10.9 Recreate the bench pod while a detached server runs → process survives, session resumes with
+     history, `/procs` still lists it.
