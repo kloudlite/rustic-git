@@ -22,6 +22,12 @@ while [ ! -x "$TTYD" ]; do
   waited=$((waited + 1))
 done
 
+# The person's own shell when the profile has published one, else a plain one: a terminal that
+# opens NOW beats a prompt that is prettier in a minute, and nothing about this container is worth
+# waiting for (spec §2.1 — it is the person's convenience).
+SHELL_BIN="$PROFILE/bin/zsh"
+[ -x "$SHELL_BIN" ] || SHELL_BIN=/bin/sh
+
 cd "$HOME"
 # `-W` is what makes the terminal WRITABLE: ttyd is read-only without it, which reads as "my
 # keystrokes do nothing" and is the one flag nobody guesses. `-i 0.0.0.0` because the only way in
@@ -34,4 +40,4 @@ exec "$TTYD" \
   -t disableLeaveAlert=true \
   -t 'fontFamily=IBM Plex Mono' \
   -t fontSize=13 \
-  "$PROFILE/bin/zsh" -l
+  "$SHELL_BIN" -l

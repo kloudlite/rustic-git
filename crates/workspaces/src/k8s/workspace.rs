@@ -349,14 +349,14 @@ pub fn shell_container(image: &str, ws_id: &str) -> Container {
         ]),
         resources: Some(quantities(&crate::model::shell_container_resources())),
         security_context: Some(hardened()),
-        // The port answers only once ttyd is actually listening; before that the prelude is still
-        // waiting for the profile, and a terminal dialled then would hang rather than say why.
-        readiness_probe: Some(Probe {
-            tcp_socket: Some(TCPSocketAction { port: IntOrString::Int(SHELL_PORT as i32), ..Default::default() }),
-            period_seconds: Some(2),
-            failure_threshold: Some(3),
-            ..Default::default()
-        }),
+        // NO readiness probe, deliberately. A pod's `Ready` condition is every container's, and
+        // the agent, `/v1` and every probe read that one condition — so a probe here would make
+        // the workspace's and the bench's readiness wait on the shell, which waits on the Nix
+        // profile, which on a fresh node is an evaluation and a fetch. That is exactly what
+        // happened: a new bench took over 118 s to report ready and two hourly ids timed out
+        // (2026-09-18). The shell is the person's convenience (spec §2.1) and must never gate the
+        // thing it sits beside; a terminal dialled before ttyd is listening is refused, which the
+        // desktop already renders as a shell that ended.
         ..Default::default()
     }
 }

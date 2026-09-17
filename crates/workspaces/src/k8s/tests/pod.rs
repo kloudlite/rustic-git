@@ -841,6 +841,11 @@ fn every_pod_carries_a_shell_that_sees_only_the_home() {
         assert!(!mounts.contains(&forbidden), "the shell must not mount {forbidden}: {mounts:?}");
     }
     assert_eq!(shell.ports.as_ref().unwrap()[0].container_port, crate::k8s::SHELL_PORT as i32);
+    // NO readiness probe: a pod's `Ready` is every container's, so a probe here would make the
+    // workspace wait on the shell, which waits on the Nix profile — a new bench took 118 s to
+    // report ready that way (2026-09-18). The shell never gates what it sits beside.
+    assert!(shell.readiness_probe.is_none(), "the shell must not gate the pod's readiness");
+    assert!(shell.startup_probe.is_none());
     assert_eq!(shell.image.as_deref(), Some("cr.example/shell:v1"), "the node's image, never a spec field");
     // No token reaches it, so the tool server's 401 is what refuses it (spec §2.5).
     assert!(!shell.env.as_ref().unwrap().iter().any(|e| e.name == "KL_TOOL_TOKEN_FILE"));
