@@ -17,7 +17,10 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
    * from a byte offset while it runs, so the view grows rather than re-reading.
    */
   const [log, setLog] = createSignal("");
+  // One offset per STREAM: stderr has its own (`next_err`, 81621d02). Following with stdout's alone
+  // re-read every stderr line on every poll, so a build's log grew by its whole history each second.
   let since = 0;
+  let sinceErr = 0;
   let following = false;
   createEffect(() => {
     if (props.task.tool !== "Process") return;
@@ -25,9 +28,10 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
     if (following) return;
     following = true;
     void window.harness
-      .bench<{ stdout: string; stderr: string; next: number }>("GET", `/procs/${encodeURIComponent(props.task.id)}/output?since=${since}`)
+      .bench<{ stdout: string; stderr: string; next: number; next_err?: number }>("GET", `/procs/${encodeURIComponent(props.task.id)}/output?since=${since}&sinceErr=${sinceErr}`)
       .then((r) => {
         since = r.next ?? since;
+        sinceErr = r.next_err ?? sinceErr;
         const add = [r.stdout, r.stderr].filter(Boolean).join("");
         if (add) setLog((t) => (t + add).slice(-200_000));
       })

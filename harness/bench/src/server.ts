@@ -241,7 +241,10 @@ export function serve(
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       // A process's log, followed from a byte offset: the desktop's detail view reads this while it runs.
-      if (p[0] === "procs" && p.length === 3 && p[2] === "output" && m === "GET") return send(res, 200, await bench.procOutput(p[1], Number(u.searchParams.get("since")) || 0));
+      if (p[0] === "procs" && p.length === 3 && p[2] === "output" && m === "GET")
+        // Both cursors: stdout's and stderr's. A reader that sends only `since` re-reads stderr from
+        // the start on every poll, which is what made a followed log look like it began again.
+        return send(res, 200, await bench.procOutput(p[1], Number(u.searchParams.get("since")) || 0, Number(u.searchParams.get("sinceErr")) || 0));
       // A person stopping a process or cancelling a task, straight from the desktop. Both used to
       // travel as `/proc-stop`/`/cancel` PROMPTS, which put them in pi's context and its session
       // file; as ordinary HTTP the model never sees them at all.

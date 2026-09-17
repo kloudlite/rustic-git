@@ -768,11 +768,17 @@ test("loading the extension calls no action method; the active set is applied on
 
 test("a background command that ends tells its session, and a watch sends the lines that match", async () => {
   let live: any[] = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "running", exit_code: null }];
-  let out = { stdout: "", stderr: "", next: 0 };
+  let out: Record<string, unknown> = { stdout: "", stderr: "", next: 0 };
+  /** What each `process_output` read asked for, so a test can say the cursors advance. */
+  const asked: { since: number; since_err: number }[] = [];
   const srv = http.createServer((req, res) => {
     let b = "";
     req.on("data", (d) => (b += d));
     req.on("end", () => {
+      if (req.url === "/tools/process_output") {
+        const body = JSON.parse(b || "{}") as { since?: number; since_err?: number };
+        asked.push({ since: body.since ?? 0, since_err: body.since_err ?? 0 });
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(req.url === "/tools/process_list" ? { processes: live } : req.url === "/tools/process_output" ? out : { state: "exited" }));
     });
@@ -788,7 +794,7 @@ test("a background command that ends tells its session, and a watch sends the li
 
     // A WATCH: only the matching lines, and only once each.
     bench.watchProc(ws.id, "p1", "error");
-    out = { stdout: "listening on 3000\nerror: cannot find module\nready", stderr: "", next: 64 };
+    out = { stdout: "listening on 3000\nerror: cannot find module\nready", stderr: "", next: 64, next_err: 0 };
     await (bench as any).sweepWatches();
     let said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
     const watched = said.filter((m) => String(m.content).startsWith("[watch"));
@@ -796,17 +802,19 @@ test("a background command that ends tells its session, and a watch sends the li
     assert.match(watched[0].content, /\[watch svelte dev server \/error\/\]\nerror: cannot find module/);
     assert.ok(!watched[0].content.includes("listening on 3000"), "only what matched");
 
-    // The tool server answers STDERR from byte 0 every time (`crates/ide/src/tools/exec.rs:192`), so
-    // a build's progress came back on every fire and the same `#N DONE` lines were sent again and
-    // again (owner, 2026-09-18). A line already said is not news.
-    out = { stdout: "", stderr: "error: cannot find module\n#5 DONE", next: 64 };
+    // Each stream has its own cursor (81621d02). A watch keeps both, so stderr is never re-read —
+    // a build's progress is all on stderr, and it used to come back whole on every fire, sending the
+    // same `#N DONE` lines again and again (owner, 2026-09-18).
+    out = { stdout: "", stderr: "error: cannot find module\n#5 DONE", next: 64, next_err: 40 };
     await (bench as any).sweepWatches();
+    assert.deepEqual(asked.at(-1), { since: 64, since_err: 0 }, "the first read of stderr starts at 0");
     await (bench as any).sweepWatches();
+    assert.deepEqual(asked.at(-1), { since: 64, since_err: 40 }, "and the next carries what the server answered");
     said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
-    assert.equal(said.filter((m) => String(m.content).startsWith("[watch")).length, 1, "still one, however many times the same line comes back");
+    assert.equal(said.filter((m) => String(m.content).startsWith("[watch")).length, 1, "nothing is said twice");
 
     // A line that IS new still gets through.
-    out = { stdout: "", stderr: "error: cannot find module\nerror: and another", next: 64 };
+    out = { stdout: "", stderr: "error: cannot find module\nerror: and another", next: 64, next_err: 80 };
     await (bench as any).sweepWatches();
     said = (await bench.messages(ws.id)).messages as { role: string; content: string }[];
     const all = said.filter((m) => String(m.content).startsWith("[watch"));
@@ -815,7 +823,7 @@ test("a background command that ends tells its session, and a watch sends the li
     assert.ok(!all[1].content.includes("cannot find module"), "and only the new one");
 
     // It ends: the session is TOLD, with the tail of what it printed.
-    out = { stdout: "error: cannot find module\nexiting", stderr: "", next: 99 };
+    out = { stdout: "error: cannot find module\nexiting", stderr: "", next: 99, next_err: 0 };
     live = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "exited", exit_code: 1 }];
     await (bench as any).sweepProcs();
     await until(async () => ((await bench.messages(ws.id)).messages as { content: string }[]).some((m) => String(m.content).startsWith("[task ")), 5_000, "the finish notice");

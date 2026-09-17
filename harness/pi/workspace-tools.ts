@@ -189,7 +189,10 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
         case "list":
           return { tool: "process_list", args: {} };
         case "logs":
-          return { tool: "process_output", args: { id: p.id, since: p.since ?? 0 } };
+          // ONE number for the model, two cursors underneath: stdout's and stderr's (81621d02).
+          // `next` is the pair packed back together, so the model hands back what it was given and
+          // neither stream is re-read — a build's stderr used to come back whole on every poll.
+          return { tool: "process_output", args: { id: p.id, ...splitCursor(p.since) } };
         case "stop":
           return { tool: "process_kill", args: { id: p.id, signal: p.signal } };
         case "write":
@@ -210,6 +213,19 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
       throw new Error(`no workspace tool ${name}`);
   }
 }
+
+/**
+ * The two output offsets as ONE number the model carries. A process has a cursor per stream
+ * (`since`/`next` for stdout, `since_err`/`next_err` for stderr, 81621d02), and asking a model to
+ * keep two would be two things to get wrong — so stderr's rides in the high half. The packing is
+ * ours alone: `next` is opaque to the model, which only ever hands back what it was given.
+ */
+const ERR_SHIFT = 2 ** 32;
+export const joinCursor = (out: number, err: number): number => err * ERR_SHIFT + out;
+export const splitCursor = (cursor: unknown): { since: number; since_err: number } => {
+  const n = Math.max(0, Math.floor(Number(cursor) || 0));
+  return { since: n % ERR_SHIFT, since_err: Math.floor(n / ERR_SHIFT) };
+};
 
 /**
  * Where the git fleet answers ssh. `WS_GIT_SSH_HOST` is the agent's own name for it and the pod is
@@ -245,7 +261,9 @@ export function fromIde(name: string, status: number, body: any, limit?: number)
         return text(body.processes.map((x: { id: string; state: string; exit_code?: number | null; cmd: string }) => `${x.id} ${x.state}${x.exit_code === null || x.exit_code === undefined ? "" : ` (exit ${x.exit_code})`} ${x.cmd}`).join("\n") || "nothing running");
       if (body.next !== undefined) {
         const out = [body.stdout, body.stderr].filter(Boolean).join("\n").trim();
-        return text(`${out}\n[${body.state}${body.exit_code === null || body.exit_code === undefined ? "" : ` exit ${body.exit_code}`}; next ${body.next}${body.dropped ? `, ${body.dropped} bytes dropped` : ""}]`.trim());
+        const dropped = Number(body.dropped ?? 0) + Number(body.dropped_err ?? 0);
+        const next = joinCursor(Number(body.next ?? 0), Number(body.next_err ?? 0));
+        return text(`${out}\n[${body.state}${body.exit_code === null || body.exit_code === undefined ? "" : ` exit ${body.exit_code}`}; next ${next}${dropped ? `, ${dropped} bytes dropped` : ""}]`.trim());
       }
       if (body.bytes !== undefined && body.path === undefined) return text(`wrote ${body.bytes} bytes to its stdin`);
       if (body.state !== undefined && body.exit_code === undefined && body.stdout === undefined) return text(`the process is ${body.state}`);
@@ -438,7 +456,7 @@ export default function (pi: ExtensionAPI) {
       command: Type.Optional(Type.String({ description: "action=start" })),
       id: Type.Optional(Type.String({ description: "the process, for logs/stop/write" })),
       title: Type.Optional(Type.String({ description: "short name people will see, e.g. \"svelte dev server\"" })),
-      since: Type.Optional(Type.Number({ description: "action=logs: the byte offset to read from (0 = the start)" })),
+      since: Type.Optional(Type.Number({ description: "action=logs: where to read from — 0 for the start, or the `next` a previous read answered with, which is how you get only what is new" })),
       data: Type.Optional(Type.String({ description: "action=write" })),
       signal: Type.Optional(StringEnum(["TERM", "KILL"])),
       pattern: Type.Optional(Type.String({ description: "action=watch: a regular expression; matching lines are sent to you as they appear" })),

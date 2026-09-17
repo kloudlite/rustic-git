@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, procTitle, shellNote, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, joinCursor, onlyWaits, procTitle, shellNote, splitCursor, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -221,8 +221,8 @@ test("a background command and the process tool are the tool server's own proces
   assert.deepEqual(toIde("bash", { command: "npm run dev", background: true }), { tool: "exec", args: { cmd: "npm run dev", detach: true } });
   assert.deepEqual(toIde("process", { action: "start", command: "vite" }), { tool: "exec", args: { cmd: "vite", detach: true } });
   assert.deepEqual(toIde("process", { action: "list" }), { tool: "process_list", args: {} });
-  assert.deepEqual(toIde("process", { action: "logs", id: "p1", since: 40 }), { tool: "process_output", args: { id: "p1", since: 40 } });
-  assert.deepEqual(toIde("process", { action: "logs", id: "p1" }), { tool: "process_output", args: { id: "p1", since: 0 } });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1", since: 40 }), { tool: "process_output", args: { id: "p1", since: 40, since_err: 0 } });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1" }), { tool: "process_output", args: { id: "p1", since: 0, since_err: 0 } });
   assert.deepEqual(toIde("process", { action: "stop", id: "p1", signal: "KILL" }), { tool: "process_kill", args: { id: "p1", signal: "KILL" } });
   assert.deepEqual(toIde("process", { action: "write", id: "p1", data: "y\n" }), { tool: "process_write", args: { id: "p1", data: "y\n" } });
   assert.throws(() => toIde("process", { action: "restart" }), /no process action restart/);
@@ -273,7 +273,7 @@ test("a background command reaches the tool server and is mirrored into the harn
     // Logs page by `since`, and a stop both kills and re-reads the table.
     const logs = await tools.process.execute("c2", { action: "logs", id: "p1", since: 9 }, undefined, undefined, ctx);
     assert.equal(logs.content[0].text, "listening\n[running; next 9]");
-    assert.deepEqual(seen.at(-1), { tool: "process_output", body: { id: "p1", since: 9 } });
+    assert.deepEqual(seen.at(-1), { tool: "process_output", body: { id: "p1", since: 9, since_err: 0 } });
     procs[0] = { ...procs[0], state: "exited", exit_code: 0 };
     await tools.process.execute("c3", { action: "stop", id: "p1" }, undefined, undefined, ctx);
     assert.deepEqual(seen.map((x) => x.tool).slice(-2), ["process_kill", "process_list"]);
@@ -446,4 +446,31 @@ test("the tool server client does not serialise: pi runs sibling calls at the sa
   } finally {
     srv.close();
   }
+});
+
+/**
+ * A process has a cursor per stream — `since`/`next` for stdout, `since_err`/`next_err` for stderr
+ * (81621d02). The model carries ONE number: two would be two things to get wrong, and before this
+ * the stderr half was read from 0 on every poll, so a build's log came back whole every time
+ * (owner, 2026-09-18).
+ */
+test("process logs: one cursor for the model, both offsets underneath", () => {
+  // The first read starts at the start of both.
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1" }), { tool: "process_output", args: { id: "p1", since: 0, since_err: 0 } });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1", since: 0 }).args, { id: "p1", since: 0, since_err: 0 });
+
+  // What a read answers with is what the next read asks for, and neither stream is re-read.
+  const answered = fromIde("process", 200, { stdout: "a\n", stderr: "b\n", next: 64, next_err: 40, state: "running", exit_code: null });
+  const next = Number(/next (\d+)/.exec(answered.content[0].text as string)![1]);
+  assert.deepEqual(splitCursor(next), { since: 64, since_err: 40 });
+  assert.deepEqual(toIde("process", { action: "logs", id: "p1", since: next }).args, { id: "p1", since: 64, since_err: 40 });
+
+  // Both streams' dropped bytes are one number to the person reading it.
+  assert.match(fromIde("process", 200, { stdout: "", stderr: "", next: 1, next_err: 2, dropped: 10, dropped_err: 5, state: "running" }).content[0].text as string, /15 bytes dropped/);
+
+  // The packing survives a large stdout offset (a 4 MiB ring is well inside the low half).
+  assert.deepEqual(splitCursor(joinCursor(4_194_304, 1_048_576)), { since: 4_194_304, since_err: 1_048_576 });
+  // Rubbish from a model is read as "from the start", never as NaN.
+  assert.deepEqual(splitCursor("nonsense"), { since: 0, since_err: 0 });
+  assert.deepEqual(splitCursor(-5), { since: 0, since_err: 0 });
 });

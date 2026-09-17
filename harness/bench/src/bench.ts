@@ -106,7 +106,7 @@ export class Bench {
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
   /** Patterns a session asked to be told about, by process id. */
-  private watching = new Map<string, { session: string; re: RegExp; since: number; pattern: string; said: Set<string> }>();
+  private watching = new Map<string, { session: string; re: RegExp; since: number; sinceErr: number; pattern: string; said: Set<string> }>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** The last thing a session SAID, so a turn that ended in a question is read as waiting. */
@@ -558,7 +558,7 @@ export class Bench {
    */
   watchProc(session: string, id: string, pattern: string): void {
     const re = new RegExp(pattern);
-    this.watching.set(id, { session, re, since: 0, pattern, said: new Set() });
+    this.watching.set(id, { session, re, since: 0, sinceErr: 0, pattern, said: new Set() });
     this.pollProcs();
   }
 
@@ -569,12 +569,14 @@ export class Bench {
         this.watching.delete(id);
         continue;
       }
-      const out = await this.procOutput(id, w.since).catch(() => undefined);
+      const out = await this.procOutput(id, w.since, w.sinceErr).catch(() => undefined);
       if (!out) continue;
+      // BOTH cursors. stderr used to be read from 0 on every poll (`crates/ide/src/tools/exec.rs`
+      // before 81621d02), so a build — whose progress is all on stderr — replayed the same
+      // `#N DONE` lines on every fire (owner, 2026-09-18). The dedupe below stays as belt and
+      // braces: a process that reprints a line is not the same thing as a cursor that never moved.
       w.since = out.next ?? w.since;
-      // `next` advances over STDOUT only — the tool server answers stderr from byte 0 every time
-      // (`crates/ide/src/tools/exec.rs:192`), so a build, which writes its progress there, replayed
-      // the same `#N DONE` lines on every fire (owner, 2026-09-18). A line already sent is not news.
+      w.sinceErr = out.next_err ?? w.sinceErr;
       const hit = [out.stdout, out.stderr]
         .filter(Boolean)
         .join("\n")
@@ -588,14 +590,22 @@ export class Bench {
     }
   }
 
-  /** A process's output, from the tool server that is running it: the desktop's log view reads this. */
-  async procOutput(id: string, since: number): Promise<{ stdout: string; stderr: string; next: number; state?: string; exit_code?: number | null }> {
+  /**
+   * A process's output, from the tool server that is running it: the desktop's log view reads this.
+   * The two streams have their own offsets (`since`/`next`, `since_err`/`next_err`, 81621d02), and a
+   * reader that keeps only one re-reads the other from the start for as long as the process lives.
+   */
+  async procOutput(
+    id: string,
+    since: number,
+    sinceErr = 0,
+  ): Promise<{ stdout: string; stderr: string; next: number; next_err?: number; state?: string; exit_code?: number | null }> {
     const row = this.procs.all().find((p) => p.id === id);
     if (!row) throw new Error(`no process ${id}`);
     const at = await this.toolsAddress(row.session);
-    const r = await fetch(`http://${at}/tools/process_output`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since }) });
+    const r = await fetch(`http://${at}/tools/process_output`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since, since_err: sinceErr }) });
     if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
-    return (await r.json()) as { stdout: string; stderr: string; next: number };
+    return (await r.json()) as { stdout: string; stderr: string; next: number; next_err?: number };
   }
 
   /**
