@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { asksOf, exchangesOf, onEvent, seedExchanges, thread, waitingOn } from "../../src/renderer/live.ts";
+import { asksOf, exchangesOf, onEvent, seedExchanges, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -145,4 +145,19 @@ test("a turn blocked in a tool is still busy", () => {
   assert.equal(t.busy(), true, "a person is waiting on this turn, so the composer must not send plainly");
   onEvent({ type: "agent_end", pi: "s-3", messages: [] } as never);
   assert.equal(t.busy(), false);
+});
+
+/**
+ * A call waiting on the PERSON is not a background task: the owner's panel listed
+ * `question {"header":"Clear stuck s…` as "Lost · 1m 11s", because nothing but an answer would
+ * ever end it (2026-09-17).
+ */
+test("a question makes no task row; work that runs does", () => {
+  const before = tasks.length;
+  onEvent({ type: "tool_execution_start", pi: "s-4", toolCallId: "q1", toolName: "question", args: { header: "Stuck sandboxes" } } as never);
+  assert.equal(tasks.length, before, "a question is the card in the composer, not a task");
+  onEvent({ type: "tool_execution_start", pi: "s-4", toolCallId: "b1", toolName: "bash", args: { command: "npm run dev" } } as never);
+  assert.equal(tasks.length, before + 1);
+  assert.equal(tasks[tasks.length - 1].tool, "Bash");
+  assert.equal(tasks[tasks.length - 1].session, "s-4", "and it belongs to the session that started it");
 });

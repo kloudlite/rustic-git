@@ -11,7 +11,7 @@ import { Heading } from "../../ui/parts";
  * then leaves; its log stays in the thread. A row is the tool and its
  * argument, the state and the clock; hover shows the cancel; click opens the log.
  */
-export function Tasks(props: { onOpen: (id: string) => void }) {
+export function Tasks(props: { onOpen: (id: string) => void; session: string }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
@@ -20,11 +20,12 @@ export function Tasks(props: { onOpen: (id: string) => void }) {
     const s = Math.max(0, Math.round(((t.ended ?? tick()) - t.started) / 1000));
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   };
-  const background = () => live.tasks.filter((t) => t.state === "background");
+  const mine = () => live.tasks.filter((t) => t.session === props.session);
+  const background = () => mine().filter((t) => t.state === "background");
   // Just ended after being backgrounded: shown dim for a few seconds, then gone.
-  const settling = () => live.tasks.filter((t) => t.n && t.ended && tick() - t.ended < 4000 && t.state !== "background" && t.state !== "lost");
+  const settling = () => mine().filter((t) => t.n && t.ended && tick() - t.ended < 4000 && t.state !== "background" && t.state !== "lost");
   // Found gone when the bench restarted: listed dim, never as running.
-  const lost = () => live.tasks.filter((t) => t.state === "lost");
+  const lost = () => mine().filter((t) => t.state === "lost");
 
   return (
     <Show when={background().length || settling().length || lost().length}>
@@ -36,6 +37,19 @@ export function Tasks(props: { onOpen: (id: string) => void }) {
     </Show>
   );
 }
+
+/** `{"header":"Clear stuck s…` is not a title. What a person can read is. */
+const taskArg = (arg: string | undefined) => {
+  const t = (arg ?? "").trim();
+  if (!t.startsWith("{")) return t;
+  try {
+    const o = JSON.parse(t) as Record<string, unknown>;
+    const said = ["command", "title", "name", "path", "task", "header", "query", "pattern"].map((k) => o[k]).find((v) => typeof v === "string" && v);
+    return String(said ?? Object.keys(o).join(", "));
+  } catch {
+    return t.replace(/[{}"]/g, "").slice(0, 60);
+  }
+};
 
 const DOT: Record<live.Task["state"], string> = { running: "bg-success", background: "bg-accent", done: "bg-subtle", failed: "bg-danger", cancelled: "bg-warning", lost: "bg-warning" };
 
@@ -56,7 +70,9 @@ function Group(props: { label?: string; items: live.Task[]; tone?: string; dim?:
             <span class="flex w-4 shrink-0 items-center justify-center"><span class={`size-1.5 rounded-full ${props.tone ?? DOT[t.state]}`} /></span>
             <div class="flex min-w-0 flex-1 flex-col">
               <span class="truncate font-mono text-sm leading-[18px]">
-                <span class="font-bold text-fg-strong">{t.tool}</span> <span class="text-fg">{t.arg}</span>
+                {/* A readable title: the verb and what it is on, never the raw JSON a tool was
+                    called with (owner, 2026-09-17). */}
+                <span class="font-bold text-fg-strong">{t.tool}</span> <span class="text-fg">{taskArg(t.arg)}</span>
               </span>
               <span class="flex items-center gap-1.5 text-xs leading-4 text-subtle">
                 <Show when={t.n}>{(n) => <span class="font-mono">#{n()}</span>}</Show>

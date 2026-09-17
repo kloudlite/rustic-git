@@ -38,7 +38,9 @@ export function Inspector(props: {
 
   return (
     <aside class="min-h-0 overflow-x-hidden overflow-y-auto border-l border-line bg-panel pb-4">
-      <Tasks onOpen={props.onOpenTask} />
+      {/* The tasks of THIS thread, as the processes below are: the bench session's rows appeared
+          under a workspace tab (owner, 2026-09-17). Same session, same rule. */}
+      <Tasks onOpen={props.onOpenTask} session={procSession()} />
       <Processes onOpen={props.onOpenTask} session={procSession()} />
       <Show when={!found().ws}>
         <MachineView machine={props.machine} session={session()} onOpenShell={props.onOpenShell} />

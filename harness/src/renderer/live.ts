@@ -474,7 +474,10 @@ function makeThread(id: string) {
         if (name === "question") return;
         push({ role: "action", kind: name === "bash" ? "run" : "note", target: TOOL[name] ?? name, text: argOf(name, args), at: now(), pending: true, tool: name, args });
         tools.set(ev.toolCallId as string, messages.length - 1);
-        if (bench) setTasks(produce((ts) => void ts.push({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, args), state: "running", started: Date.now(), output: "" })));
+        // Only work that runs on its own is a task; a call waiting on the person is the card in the
+        // composer, not a row in BACKGROUND TASKS (owner, 2026-09-17).
+        if (bench && name !== "question" && name !== "ask_close")
+          setTasks(produce((ts) => void ts.push({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, args), state: "running", started: Date.now(), output: "" })));
         open = -1;
         return;
       }

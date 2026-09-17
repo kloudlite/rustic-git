@@ -33,6 +33,9 @@ export type BenchOpts = {
   listServices?: () => Promise<{ name: string; image?: string; ports?: (number | { port?: number })[] }[]>;
 };
 
+/** Tool calls that wait on a PERSON, not on work: never tasks, never lost, never timed. */
+const WAITS = new Set(["question", "ask_close"]);
+
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
 const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
@@ -270,8 +273,13 @@ export class Bench {
       // Work is starting and nothing is marked doing: the first thing waiting is what this is.
       this.plan(id, { type: "working" });
       const name = ev.toolName as string;
-      const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
-      if (row) this.emit({ type: "task", row });
+      // A call WAITING ON THE PERSON is not a background task: the question is already in the
+      // composer, and the ledger showed it as "Lost · 1m 11s" because nothing but an answer would
+      // ever end it (owner, 2026-09-17). Tasks are work that runs on its own.
+      if (!WAITS.has(name)) {
+        const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
+        if (row) this.emit({ type: "task", row });
+      }
     }
     if (ev.type === "tool_execution_end") {
       const out = ((ev.result as { content?: { text?: string }[] } | undefined)?.content ?? []).map((c) => c.text ?? "").join("");
