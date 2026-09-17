@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { Architecture, parseContract, type Contract } from "./architecture.ts";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
@@ -27,7 +28,9 @@ export type BenchOpts = {
   /** A workspace's tool server address. Tests pass a fake; the real one asks /v1, loaded lazily so the bench's own routes never pull the extension in. */
   resolveTools?: (ws: string) => Promise<string>;
   /** The team's workspaces, for turning a NAME into an id. Tests pass a fake; the real one asks /v1. */
-  listWorkspaces?: () => Promise<{ id: string; name?: string }[]>;
+  listWorkspaces?: () => Promise<{ id: string; name?: string; packages?: string[] }[]>;
+  /** The connected environment's services, for the architecture document's first version (§24). */
+  listServices?: () => Promise<{ name: string; image?: string; ports?: (number | { port?: number })[] }[]>;
 };
 
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
@@ -76,6 +79,8 @@ export class Bench {
   readonly procs: Procs;
   readonly plans: Plans;
   readonly memories: Memories;
+  /** What runs where and what talks to what, for this space (§24). Shared by every session. */
+  readonly architecture: Architecture;
   readonly writable: Writable;
   private opts: BenchOpts;
   private children = new Map<string, RpcChild>();
@@ -109,6 +114,7 @@ export class Bench {
     this.procs = new Procs(opts.dir);
     this.plans = new Plans(opts.dir);
     this.memories = new Memories(opts.dir);
+    this.architecture = new Architecture(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
   }
 
@@ -145,6 +151,10 @@ export class Bench {
     // in both directions — a row this ledger calls lost is revived if its tool server still has it.
     if (this.procs.all().length) this.pollProcs();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
+    // The architecture document starts with the machines in it (§24): an empty document is one
+    // nobody writes, and one that already names the workspaces and services is one somebody
+    // corrects. It is written once and never overwritten from here again.
+    void this.seedArchitecture().catch(() => undefined);
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
 
@@ -923,6 +933,19 @@ export class Bench {
     if (named.length > 1) throw new Error(`${want} is the name of ${named.length} workspaces (${named.map((w) => w.id).join(", ")}); say which id`);
     // Known list, and it is not in it: say what there is, once, before anything is spawned.
     throw new Error(`no workspace ${want} — this team has ${rows.map((w) => w.name ?? w.id).join(", ")}`);
+  }
+
+  /** The first version of the architecture document, from what this bench can already see. */
+  async seedArchitecture(): Promise<void> {
+    if (this.opts.readOnly || this.architecture.read().trim()) return;
+    const list = this.opts.listWorkspaces ?? (() => import("../../pi/kloudlite.ts").then(async (m) => {
+      const team = process.env.KL_TEAM;
+      const r = await m.call("GET", `/v1/workspaces${team ? `?team=${encodeURIComponent(team)}` : ""}`);
+      return Array.isArray(r.data) ? (r.data as { id: string; name?: string }[]) : [];
+    }));
+    const workspaces = await list().catch(() => []);
+    const services = await (this.opts.listServices?.() ?? Promise.resolve([])).catch(() => []);
+    this.writable.run(() => this.architecture.seed({ workspaces, services }));
   }
 
   async openWorkspace(ws: string): Promise<SessionRow> {

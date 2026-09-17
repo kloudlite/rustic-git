@@ -291,10 +291,10 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  * platform tool stays REGISTERED — the proposals, the cards and the waits are unchanged — but
  * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
  */
-export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"];
+export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory", "architecture", "question"];
 
 /** What Plan mode leaves on: everything that reads, plus the plan itself. */
-export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "kl_capabilities", "kl_workspace_progress"];
+export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "architecture", "kl_capabilities", "kl_workspace_progress"];
 
 /** The six skills, read from beside the extension: product words, not tool lists. */
 const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
@@ -377,6 +377,35 @@ export function memoryTools(reg: ReturnType<typeof makeReg>) {
       if (!a.save) return { ...text("memory takes save (name, description, type, body) or forget (a name)"), isError: true };
       const r = await benchCall("POST", "/memory", a.save);
       return r.ok ? text(`saved ${a.save.name}`) : { ...text(String(r.data?.error ?? "it was not saved")), isError: true };
+    },
+  );
+}
+
+/**
+ * The space's architecture (§24): what runs where, what talks to what, and on which endpoints. The
+ * bench holds ONE document for the space and every session reads and writes it, because the
+ * question "which port does the api answer on" has one answer and it is not worth asking a
+ * workspace for.
+ *
+ * With no arguments it reads. With `set` it replaces one `##` section, so a workspace updates what
+ * it owns without touching anybody else's.
+ */
+export function architectureTools(reg: ReturnType<typeof makeReg>) {
+  reg(
+    "architecture",
+    {
+      set: Type.Optional(Type.Object({
+        section: Type.String({ description: "the `##` heading to replace or add — a component, a service, or `Contracts`" }),
+        text: Type.String({ description: "what that section says now, in markdown; contract level, never implementation detail" }),
+      })),
+    },
+    async (a) => {
+      if (!a.set) {
+        const r = await benchCall("GET", "/architecture");
+        return r.ok ? text(String(r.data?.text ?? "").trim() || "the architecture document is empty") : { ...text(String(r.data?.error ?? "it could not be read")), isError: true };
+      }
+      const r = await benchCall("PUT", "/architecture", a.set);
+      return r.ok ? text(`architecture: ${a.set.section} updated`) : { ...text(String(r.data?.error ?? "it was not written")), isError: true };
     },
   );
 }
@@ -810,6 +839,7 @@ export function tools(pi: ExtensionAPI) {
   if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, process.env.KL_WORKSPACE_ID);
   searchTools(reg, pi);
   memoryTools(reg);
+  architectureTools(reg);
   questionTool(reg);
   capabilities(reg);
   modeCommand(pi, PLAN_TOOLS);

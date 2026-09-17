@@ -187,6 +187,21 @@ export function serve(
           session,
         });
       }
+      /**
+       * The architecture document (§24): what runs where, and what talks to what. Read by every
+       * session and by the desktop's own page; written by the `architecture` tool and by the
+       * `contracts:` line of a work reply.
+       */
+      if (u.pathname === "/architecture") {
+        if (m === "GET") return send(res, 200, { text: bench.architecture.read(), contracts: bench.architecture.contracts() });
+        if (m === "PUT") {
+          const b = await body(req);
+          if (typeof b.section === "string" && typeof b.text === "string")
+            return send(res, 200, { text: bench.architecture.setSection(b.section, b.text) });
+          if (typeof b.text === "string") return send(res, 200, { text: bench.architecture.write(b.text) });
+          return send(res, 400, { error: "say `text`, or `section` and `text`" });
+        }
+      }
       if (m === "GET" && u.pathname === "/plans") return send(res, 200, bench.plans.all());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());

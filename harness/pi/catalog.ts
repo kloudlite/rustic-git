@@ -98,6 +98,7 @@ export const TOOLS: ToolSpec[] = [
 
   { name: "question", group: "workspace", summary: "Ask the person to choose, when only they can: a header, the question, and two to four ways forward.", effect: "read" },
   { name: "memory", group: "workspace", summary: "Remember something the person told you, or forget one that is no longer true.", effect: "read" },
+  { name: "architecture", group: "workspace", summary: "What runs where and what talks to what, for this space; `set` replaces one section.", effect: "read" },
 
   { name: "kl_capabilities", group: "platform", summary: "Everything you can do here, by name and effect. Read this instead of going looking.", effect: "read" },
 ];
