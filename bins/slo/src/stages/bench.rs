@@ -452,23 +452,6 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("agent.tree.run") {
         agent_tree_run(c).await;
     }
-/// `agent.tree.run`: the whole subagent lifecycle as a person drives it — dispatch, a tree, a
-/// report, and BOTH still standing afterwards, until a close takes them.
-///
-/// Filed as a skip, deliberately, until the harness's agent path runs on trees: today's
-/// `POST /agents` still clones a workspace per agent (`bench.cloneOf`, `forgetClone`), which is
-/// exactly what spec §4.3 removes. A probe written against that would go green on the behaviour
-/// this slice exists to delete, and then go red on the day it is fixed — worse than no probe,
-/// because it would be read as a regression. `Precondition`, so the run does not count it either
-/// way (a skip that read as a pass is the 2026-09-09 lesson).
-async fn agent_tree_run(c: &mut Ctx) {
-    c.skip_because(
-        "agent.tree.run",
-        "the bench still dispatches agents onto cloned workspaces; this id measures the tree path",
-        kloudlite_workspaces::history::slo::SkipReason::Precondition,
-    );
-}
-
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
@@ -626,6 +609,10 @@ fn judge_tools(body: &str) -> Result<()> {
 /// anyway is exactly the failure this exists to catch, so the api read is the assertion, not the
 /// transcript.
 const PROPOSAL_CEILING: Duration = Duration::from_secs(120);
+/// `agent.tree.run`: two model turns (the dispatch and the close), the subagent's own turn between
+/// them, a tree cut and a tree collected. The catalogue target is 300 s; this is that plus room for
+/// the step to say WHY rather than being cut off.
+const AGENT_TREE_CEILING: Duration = Duration::from_secs(320);
 
 async fn proposal_asked(c: &mut Ctx) {
     let name = format!("{}-proposal", c.prefix());
@@ -713,6 +700,168 @@ async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
             Err(_) => tracing::warn!("slo.bench.session.teardown timed out"),
         }
     }
+}
+
+/// `agent.tree.run`: the whole subagent lifecycle as a person drives it. Dispatch through the
+/// bench's own `ask` tool, the tree exists in `/v1` AND in the workspace that serves it, the
+/// agent's ide calls land in the tree and nowhere else, a report comes back, both the tree and the
+/// session STAY once it is done, and only `ask_close` takes them.
+///
+/// "Both stay" is the half worth the probe. Nothing is dropped on completion by design (spec
+/// §4.3): the person reads the transcript and the diff after a run that went wrong, and a tree
+/// swept on DONE would take the evidence with it. That is a silent regression — the id would still
+/// go green on dispatch-and-report — so it is asserted between the report and the close.
+///
+/// Driven from the bench rather than from `/v1` directly, because `/v1` cannot dispatch an agent:
+/// the tool is the bench's, the model calls it, and what this measures is that path end to end.
+async fn agent_tree_run(c: &mut Ctx) {
+    const ID: &str = "agent.tree.run";
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => return c.skip(ID, why),
+    };
+    // The agent works in a tree of a workspace, so the workspace's own tool server has to be
+    // serving before any of this means anything — the bench waits on it too (`GET /fs/stat`).
+    // A tree name is `[a-z0-9-]{1,32}` (`crd::tree_name_ok`), and a run id is neither bounded to
+    // that length nor guaranteed to be in that charset — so it is filtered and cut, not formatted.
+    let name = tree_name(&c.prefix());
+    let marker = format!("{}-agent", c.prefix());
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let (nm, ws_id, tree) = (no_model.clone(), ws.clone(), name.clone());
+    c.step(ID, AGENT_TREE_CEILING, move |c| {
+        let jwt = c.probe_jwt.clone();
+        let doc_url = super::api(c, &format!("/v1/workspaces/{ws_id}"));
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            // Every proposal answered yes: the dispatch itself is one, and so is the close.
+            let _answering = answering(port);
+            // `tool_search` first, like every other bench prompt: the `kl_*` and `ask` tools are
+            // DEFERRED, so naming one directly asks for a tool the session has not turned on.
+            let brief = format!(
+                "Call tool_search once with query \"dispatch an agent\", then call the tool it names \
+                 exactly once to start an agent named \"{tree}\" on workspace \"{ws_id}\", with the task: \
+                 write a file called {marker}.txt containing the word {marker} in your working directory, \
+                 then reply done. Wait for that agent to report, then reply with exactly the word done."
+            );
+            let turn = one_turn(port, &sid, &brief, &nm).await;
+            // The session is the person's window on the agent; it goes at the end whatever
+            // happened, but never before the assertions below have read it.
+            let outcome = async {
+                turn?;
+                // 1. `/v1` lists the tree the dispatch cut, ready, with the name the model used.
+                //    Read from the doc rather than from the bench, so a bench that invented a
+                //    local record and never called `/v1` fails here.
+                let doc = get(c, &doc_url, &jwt).await.context("could not read the workspace")?;
+                let row = tree_row(&doc, &tree).ok_or_else(|| {
+                    anyhow!("no tree named {tree} in the workspace doc: {}", super::clip(&doc.to_string()))
+                })?;
+                if row["ready"] != Value::Bool(true) {
+                    bail!("the tree is not ready: {row}");
+                }
+                // 2. And the node really cut it: the file the agent was told to write is under
+                //    `.agents/{tree}` and NOT in the workspace's own root. One assertion for both
+                //    halves of §4.4 — the tree is real, and it is not main.
+                let f = format!("{marker}.txt");
+                let (code, out, _) = super::workspace::ws_exec(
+                    c,
+                    &ws_id,
+                    &format!("cd /home/kl/workspaces/$KL_WORKSPACE && cat .agents/{tree}/{f} 2>&1; echo ---; ls {f} 2>&1"),
+                    Duration::from_secs(20),
+                )
+                .await?;
+                if code != 0 {
+                    bail!("could not look inside the tree: exit {code}");
+                }
+                let (in_tree, in_main) = out.split_once("---").unwrap_or((&out, ""));
+                if !in_tree.contains(&marker) {
+                    bail!("the agent's file is not in its tree; {f} read {:?}", in_tree.trim());
+                }
+                if !in_main.contains("No such file") && !in_main.contains("cannot access") {
+                    bail!("the agent wrote into the workspace root as well: {:?}", in_main.trim());
+                }
+                // 3. The report reached the calling session — a direct line, not a queue.
+                let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
+                if status != 200 {
+                    bail!("GET /sessions/{sid}/messages answered {status}");
+                }
+                answered(&body, &nm)?;
+                // 4. Nothing is dropped on completion: the tree is STILL there after the report.
+                let doc = get(c, &doc_url, &jwt).await.context("could not re-read the workspace")?;
+                if tree_row(&doc, &tree).is_none() {
+                    bail!("the tree was swept when the agent finished; it must stay until it is closed");
+                }
+                // 5. And the close is what takes it — through the same tool, so the proposal the
+                //    person answers is the one that deletes it.
+                let close = format!(
+                    "Call tool_search once with query \"close an agent\", then call the tool it names \
+                     exactly once to close the agent named \"{tree}\". Then reply with exactly the word done."
+                );
+                one_turn(port, &sid, &close, &nm).await?;
+                let gone = poll_until(Duration::from_secs(60), || async {
+                    get(c, &doc_url, &jwt).await.map(|d| tree_row(&d, &tree).is_none()).unwrap_or(false)
+                })
+                .await;
+                if !gone {
+                    bail!("the tree survived the close");
+                }
+                Ok(())
+            }
+            .await;
+            let _ = delete_session(port, &sid, TEARDOWN_BOUND).await;
+            outcome
+        }
+        .boxed()
+    })
+    .await;
+    // Bound out of the guard before the `if let`: holding a `MutexGuard` across the branch keeps
+    // the borrow alive past `no_model`'s own scope.
+    let why = no_model.lock().unwrap().clone();
+    if let Some(why) = why {
+        c.demote_to_skip(ID, &format!("{NO_MODEL}: {}", super::clip(&why)));
+    }
+}
+
+/// A run's prefix as a legal tree name: lowercase, `[a-z0-9-]` only, at most 32. The tail rather
+/// than the head, because a run id's entropy is at its end and two runs must not collide on one
+/// workspace's `.agents/`.
+fn tree_name(prefix: &str) -> String {
+    let kept: String = prefix
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || *ch == '-')
+        .collect();
+    let tail: String = kept.chars().rev().take(28).collect::<Vec<_>>().into_iter().rev().collect();
+    // Never leading `-` and never empty: both are names `/v1` refuses with a 422, which would
+    // report the probe's own bug as a platform failure.
+    format!("a-{}", tail.trim_start_matches('-'))
+}
+
+/// One tree row of a workspace doc, by name. `status.trees` as `/v1` serves it — the list is short
+/// (eight at most) so a scan is the whole lookup.
+fn tree_row<'a>(doc: &'a Value, name: &str) -> Option<&'a Value> {
+    doc["trees"].as_array()?.iter().find(|t| t["name"] == name)
+}
+
+/// Poll a condition to a deadline. The close is a proposal, then a `/v1` DELETE, then the agent's
+/// own pass — three hops, so the row goes some seconds after the turn says it is done.
+async fn poll_until<F, Fut>(bound: Duration, mut f: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + bound;
+    while Instant::now() < deadline {
+        if f().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    false
 }
 
 /// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
@@ -1371,6 +1520,19 @@ mod tests {
     use super::*;
     use crate::report::run_state;
     use kloudlite_workspaces::history::slo::RunState;
+
+    /// The name the dispatch asks `/v1` for has to pass `crd::tree_name_ok`, or the probe reports
+    /// its own 422 as a platform failure. Checked against that predicate itself, not against a
+    /// copy of the rule.
+    #[test]
+    fn a_runs_tree_name_is_one_v1_accepts() {
+        for prefix in ["run-abc123", "run-ABC-123", "run-", "run-0123456789012345678901234567890123456789", "x"] {
+            let n = tree_name(prefix);
+            assert!(kloudlite_workspaces::crd::tree_name_ok(&n), "{prefix:?} became {n:?}");
+        }
+        // The tail is kept, so two runs that share a prefix still differ.
+        assert_ne!(tree_name("run-aaaa1111"), tree_name("run-aaaa2222"));
+    }
 
     #[test]
     fn stub_health_and_totals_read() {
