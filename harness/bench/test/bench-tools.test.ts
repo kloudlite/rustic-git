@@ -595,7 +595,7 @@ test("twelve tools on, the rest one search away, and the six skills read", async
     assert.match(found.content[0].text, /kl_intercept — .*\[write\]; params: id, service, workspace, ports/);
     assert.ok(active().includes("kl_intercept"), active().join(","));
     // What the model should say when there is no tool, in the words it should use.
-    assert.equal((await run("tool_search", { query: "reboot the datacentre" })).content[0].text, "no tool for that; say so to the person");
+    assert.equal((await run("tool_search", { query: "reboot the datacentre" })).content[0].text, "no tool for that here; say so to the person");
 
     // The skills are product words, not tool lists, and each one loads from beside the extension.
     for (const name of ["workspaces", "environments", "snapshots", "repos", "images", "agents"]) {
@@ -820,5 +820,37 @@ test("a process the tool server still runs comes back, whatever the ledger said"
     await bench.stop();
     srv.close();
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A workspace session must be able to CALL what `tool_search` hands it. The owner's backend-rust
+ * session searched, got `kl_workspaces` and friends from the catalogue, and pi answered "Tool not
+ * found" on every one — they were never registered in that mode (2026-09-17).
+ */
+test("in a workspace, tool_search offers only what is registered — and it is callable", async () => {
+  const restore = withEnv({ KL_TOOLS_WORKSPACE: "ws-1", KL_WORKSPACE_ID: "ws-1", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, active, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+
+    const found = (await run("tool_search", { query: "workspace" })).content[0].text as string;
+    const names = found.split("\n").map((l) => l.split(" — ")[0]);
+    assert.ok(names.length, found);
+    // Everything offered is registered here, and on after the search.
+    for (const name of names) {
+      assert.ok(tools.some((t) => t.name === name), `${name} was offered but never registered`);
+      assert.ok(active().includes(name), `${name} was offered but not turned on`);
+    }
+    // A workspace may LOOK at the platform.
+    assert.ok(tools.some((t) => t.name === "kl_workspaces"), "a workspace can list workspaces");
+    assert.ok(tools.some((t) => t.name === "kl_environments"), "and environments");
+    // But not change somebody else's machine.
+    assert.ok(!tools.some((t) => t.name === "kl_workspace_delete"), "writes on other workspaces stay with the bench");
+    assert.ok(!tools.some((t) => t.name === "kl_workspace_create"));
+  } finally {
+    restore();
   }
 });

@@ -33,6 +33,9 @@ export type BenchOpts = {
   listServices?: () => Promise<{ name: string; image?: string; ports?: (number | { port?: number })[] }[]>;
 };
 
+/** Tool calls that change something: what makes a turn "work" rather than a look around. */
+const CHANGES = new Set(["write", "edit", "patch", "bash", "process", "ask"]);
+
 /** Tool calls that wait on a PERSON, not on work: never tasks, never lost, never timed. */
 const WAITS = new Set(["question", "ask_close"]);
 
@@ -103,6 +106,8 @@ export class Bench {
   private watching = new Map<string, { session: string; re: RegExp; since: number; pattern: string }>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
+  /** The last thing a session SAID, so a turn that ended in a question is read as waiting. */
+  private lastSaid = new Map<string, string>();
   /** Debounce per session: a burst of arrivals is one ordering, not one per message. */
   private triaging = new Map<string, ReturnType<typeof setTimeout>>();
   /** Sessions being summarised: one at a time, and never twice for the same growth. */
@@ -269,7 +274,11 @@ export class Bench {
       // Same here: this session's pi went, its processes did not.
     }
     if (ev.type === "tool_execution_start") {
-      this.turnCalls.set(id, { calls: (this.turnCalls.get(id)?.calls ?? 0) + 1, ...(this.turnCalls.get(id)?.nudged ? { nudged: true as const } : {}) });
+      // Only calls that CHANGE something count towards "this is work worth a plan": a read, a
+      // search or a question is not (owner, 2026-09-17).
+      const had = this.turnCalls.get(id);
+      const changed = CHANGES.has(String(ev.toolName ?? "")) || String(ev.toolName ?? "").startsWith("kl_");
+      this.turnCalls.set(id, { calls: (had?.calls ?? 0) + (changed ? 1 : 0), ...(had?.nudged ? { nudged: true as const } : {}) });
       // Work is starting and nothing is marked doing: the first thing waiting is what this is.
       this.plan(id, { type: "working" });
       const name = ev.toolName as string;
@@ -280,6 +289,11 @@ export class Bench {
         const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
         if (row) this.emit({ type: "task", row });
       }
+    }
+    if (ev.type === "message_end") {
+      const m = ev.message as { role?: string; content?: unknown } | undefined;
+      if (m?.role === "assistant")
+        this.lastSaid.set(id, typeof m.content === "string" ? m.content : (Array.isArray(m.content) ? m.content : []).map((c: { text?: string }) => c.text ?? "").join(""));
     }
     if (ev.type === "tool_execution_end") {
       const out = ((ev.result as { content?: { text?: string }[] } | undefined)?.content ?? []).map((c) => c.text ?? "").join("");
@@ -609,7 +623,7 @@ export class Bench {
     if (!turn || turn.nudged) return;
     // Something it is waiting on is not something it forgot: an outstanding ask keeps its item doing.
     const waiting = (this.asked.get(id)?.length ?? 0) > 0;
-    const line = waiting ? undefined : nudge(this.plans.get(id), turn.calls);
+    const line = waiting ? undefined : nudge(this.plans.get(id), turn.calls, this.lastSaid.get(id) ?? "");
     if (!line) return;
     this.turnCalls.set(id, { ...turn, nudged: true });
     void this.send(id, line).catch(() => undefined);

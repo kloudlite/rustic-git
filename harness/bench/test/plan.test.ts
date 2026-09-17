@@ -108,3 +108,25 @@ test("a conversation that fills its window is summarised, keeping the plan and w
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A turn that only asked something is not a turn that forgot its plan. The owner watched the
+ * harness nudge a one-line clarifying question, and then nudge again because the single item was
+ * "doing" while it waited on HIM (2026-09-17).
+ */
+test("no nudge for a turn that is asking, or an item that is waiting on a person", () => {
+  // Two changes is an errand; three is work.
+  assert.equal(nudge([], 2), undefined);
+  assert.equal(nudge([], 3), "[harness] write the plan for this work with the plan tool, then continue");
+  // The turn ended by asking the person: nothing to plan, nothing to tick.
+  assert.equal(nudge([], 5, "Which of the two sandboxes should I clear?"), undefined);
+  assert.equal(nudge(plan(["a", "doing"]), 5, "Do you want me to delete it?"), undefined);
+  // An item that IS the question is waiting, not forgotten.
+  assert.equal(nudge(plan(["ask karthik which region?", "doing"]), 5), undefined);
+  assert.equal(nudge(plan(["waiting on you to choose a region", "doing"]), 5), undefined);
+  // A real one still gets its line.
+  assert.equal(
+    nudge(plan(["migrate the schema", "doing"]), 5, "I have started the migration."),
+    "[harness] the plan still shows 1 item(s) doing — mark each done or later (with why) before you stop",
+  );
+});

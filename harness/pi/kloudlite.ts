@@ -131,7 +131,12 @@ const CAVEMAN = caveman();
 export function identity(hands: string, platform = true, memory = MEMORY): string {
   // Filled here, not at module load: `skillIndex` reads the files, and a const above them would run
   // before they are declared.
-  const platformText = PLATFORM.replace("%SKILLS%", skillIndex().map((s) => `- ${s.name} — ${s.description}`).join("\n"));
+  // Only the skills that are actually readable: telling a model about a skill its image does not
+  // ship is telling it to call something that answers "no skill" (owner, 2026-09-17).
+  const index = skillIndex();
+  const platformText = index.length
+    ? PLATFORM.replace("%SKILLS%", index.map((s) => `- ${s.name} — ${s.description}`).join("\n"))
+    : PLATFORM.split("\n").filter((l) => !l.includes("%SKILLS%") && !l.includes("load its skill")).join("\n");
   // The memory is the person's, so it rides in every session — including a fork, which has no
   // tools but may well be asked what the person prefers.
   return [hands, ...(platform ? [platformText] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
@@ -299,10 +304,13 @@ export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_
 
 /** The six skills, read from beside the extension: product words, not tool lists. */
 const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
+/** Where the skills live beside the extension. Named in the error, because a missing directory in
+ *  an image is the usual reason a skill "does not exist" (owner, 2026-09-17). */
+export const skillDir = () => path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
 function skillText(name: string): string | undefined {
   if (!SKILLS.includes(name)) return undefined;
   try {
-    return fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", `${name}.md`), "utf8");
+    return fs.readFileSync(path.join(skillDir(), `${name}.md`), "utf8");
   } catch {
     return undefined;
   }
@@ -340,6 +348,24 @@ function describeTool(pi: ExtensionAPI, name: string): string {
  */
 /** A question that is really a confirmation: the harness asks for those itself. */
 const CONFIRMING = /^\s*(confirm|do you want|proceed|are you sure|shall i|should i)\b/i;
+
+/**
+ * What a WORKSPACE session may read of the platform: the lists and the one-record reads, never a
+ * write on somebody else's machine. Its own machine's writes are `ownTools`.
+ */
+export function lookAround(reg: ReturnType<typeof makeReg>) {
+  const S = (d: string) => Type.String({ description: d });
+  const O = <T>(t: T) => Type.Optional(t as any);
+  const q = (o: Record<string, string | undefined>) => {
+    const p = Object.entries(o).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v!)}`);
+    return p.length ? `?${p.join("&")}` : "";
+  };
+  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/workspaces${q({ team: a.team })}`));
+  reg("kl_workspace", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}`));
+  reg("kl_workspace_snapshots", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}/snapshots`));
+  reg("kl_environments", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/environments${q({ team: a.team })}`));
+  reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
+}
 
 export function questionTool(reg: ReturnType<typeof makeReg>, pi?: ExtensionAPI) {
   reg(
@@ -440,9 +466,19 @@ export function modeCommand(pi: ExtensionAPI, planTools: string[]) {
 
 export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
   reg("skill", { name: Type.Optional(Type.String({ description: `${SKILLS.join(", ")}; absent lists them` })) }, async (a) => {
-    if (!a.name) return text(skillIndex().map((s) => `${s.name} — ${s.description}`).join("\n"));
+    if (!a.name) {
+      const index = skillIndex();
+      return index.length ? text(index.map((s) => `${s.name} — ${s.description}`).join("\n")) : { ...text(`no skills are installed — nothing readable in ${skillDir()}`), isError: true };
+    }
     const body = skillText(String(a.name));
-    return body ? text(body) : { ...text(`no skill ${a.name}; there are ${SKILLS.join(", ")}`), isError: true };
+    if (body) return text(body);
+    const here = skillIndex().map((x) => x.name);
+    // Loud, and with the path: "no skill workspaces" on a bench whose image ships no skills folder
+    // is a fact about the image, not about the skill.
+    return {
+      ...text(here.length ? `no skill ${a.name}; there are ${here.join(", ")}` : `no skills are installed — nothing readable in ${skillDir()}`),
+      isError: true,
+    };
   });
   reg("tool_search", { query: Type.String({ description: "what you want to do, in a word or two" }) }, async (a) => {
     const words = String(a.query).toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
@@ -450,11 +486,16 @@ export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
       const hay = `${t.name} ${t.summary} ${t.group}`.toLowerCase();
       return words.length ? words.every((w) => hay.includes(w)) || words.some((w) => t.name.includes(w)) : false;
     });
-    if (!hit.length) return text("no tool for that; say so to the person");
+    // ONLY what this session actually has. The catalogue is the whole platform; a workspace session
+    // registers a part of it, and offering a name pi never registered answered "Tool not found" on
+    // every call (owner, 2026-09-17).
+    const registered = new Set((pi.getAllTools?.() ?? []).map((t: { name: string } | string) => (typeof t === "string" ? t : t.name)));
+    const here = registered.size ? hit.filter((t) => registered.has(t.name)) : hit;
+    if (!here.length) return text("no tool for that here; say so to the person");
     // Activated for the rest of the session: pi applies an additive change before the next request.
     const active = pi.getActiveTools?.() ?? ALWAYS_ON;
-    pi.setActiveTools?.([...new Set([...active, ...hit.map((t) => t.name)])]);
-    return text(hit.map((t) => describeTool(pi, t.name)).join("\n"));
+    pi.setActiveTools?.([...new Set([...active, ...here.map((t) => t.name)])]);
+    return text(here.map((t) => describeTool(pi, t.name)).join("\n"));
   });
 }
 
@@ -889,6 +930,11 @@ export default function (pi: ExtensionAPI) {
     repoTools(reg);
     progressTool(reg);
     planTools(reg);
+    // A workspace may LOOK at the platform — which workspaces exist, what an environment runs —
+    // without being able to change anybody else's. Registered here, inactive until `tool_search`
+    // finds one (owner, 2026-09-17).
+    lookAround(reg);
+    architectureTools(reg);
     // An agent is a session with one task: it reports to whoever started it and starts nobody.
     if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
     searchTools(reg, pi);
