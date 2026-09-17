@@ -13,7 +13,7 @@ import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
 import { playDemo, wantsDemo } from "./demo";
-import { KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";
+import { UPSTREAM_KEYBINDS, upstream, KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";
 import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
@@ -513,6 +513,15 @@ export function App() {
     { id: "shell", group: "Suggested", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: keyHint(KEYS.shell), run: () => toggleShell() },
     { id: "env", group: "Suggested", label: envTab() ? "Close the environment" : "Open the environment", keys: keyHint(KEYS.environment), run: () => (setFile(undefined), setEnvTab((v) => !v)) },
     { id: "panel", group: "Suggested", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: keyHint(KEYS.panel), run: () => setLeftOpen((v) => !v) },
+    // opencode's own chords, from their vendored table: the commands we answer, named as they name
+    // them, so someone who came from opencode can find them by the name they already know.
+    ...UPSTREAM_KEYBINDS.filter((k) => OURS[k.command]).map((k) => ({
+      id: `oc:${k.command}`,
+      group: "opencode",
+      label: k.description,
+      keys: upstream(k.command) ?? k.keys,
+      run: OURS[k.command]!,
+    })),
     { id: "inspector", group: "Suggested", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: keyHint(KEYS.inspector), run: () => setRightOpen((v) => !v) },
     { id: "workspaces", group: "Suggested", label: "Switch workspace…", keys: keyHint(KEYS.workspaces), run: () => setPalette("workspaces") },
     { id: "go", group: "Suggested", label: "Go to…", keys: keyHint(KEYS.quickOpen), run: () => setPalette("go") },
@@ -561,6 +570,20 @@ export function App() {
     leaderTimer = setTimeout(() => setArmed(false), LEADER_FORGET_MS);
   };
   onCleanup(() => clearTimeout(leaderTimer));
+
+  /** Which of opencode's commands this app answers, and with what. */
+  const OURS: Record<string, (() => void) | undefined> = {
+    command_list: () => setPalette("commands"),
+    sidebar_toggle: () => setLeftOpen((v) => !v),
+    status_view: () => setRightOpen((v) => !v),
+    session_list: () => setPalette("go"),
+    session_new: newSession,
+    session_interrupt: () => live.interrupt(cur()),
+    session_compact: () => void pi({ type: "compact" }),
+    theme_list: cycleTheme,
+    model_list: () => setPalette("commands"),
+    agent_list: () => setRightOpen(true),
+  };
 
   const onKey = (e: KeyboardEvent) => {
     // A terminal owns the keyboard while it has focus: nothing here may take a key from it except

@@ -169,6 +169,7 @@ We already have `solid-js` (1.9, theirs is 1.9.10 **patched** — see risks) and
 | `ui/v2/components/toast-v2.tsx` | deleted | needs `solid-sonner`, imported by nothing in the closure |
 | `../../tsconfig.renderer.json` | `lib: ES2023, DOM.Iterable` | they use `findLast`, `toReversed`, NodeList iteration |
 | `../../vite.config.ts` | `worker: { format: "es" }` | rollup will not code-split an IIFE worker |
+| `keybinds.ts` | their `packages/tui/src/config/keybind.ts` transcribed as DATA | their file imports `@opentui/core`, `@opentui/keymap` and `effect` — a terminal runtime we do not run |
 
 The language list lives in `languages.ts`: ts/tsx/js/jsx/json/yaml/toml/rust/go/python/bash/sh/
 dockerfile/sql/html/css/md/diff and their aliases. Anything else highlights as plain text, which is
@@ -184,6 +185,20 @@ left comes from `@pierre/diffs`' own worker bundle, inside the dependency, not f
 | `kl_*` platform answers | a synthetic `text` part with the answer as a fenced `json` block | our `WorkspaceCard`/`QuotaCard`/`EnvironmentCard` have no part type; either register a harness part or keep the block |
 | process rows, memory, plan panel | the inspector, which stays ours | nothing — deliberate |
 | exchanges (asks in flight) | the queue dock above the composer, ours | fold into their followup dock when the composer lands |
+
+## Theme, fonts and keys
+
+- **Theme**: `src/renderer/theme.ts` calls their `applyTheme(one-dark.json, "one-dark")` at start
+  (`ui/theme/loader.ts`), which writes the resolved tokens into `<style id="opencode-theme">` and
+  stamps `data-theme`. Our own tokens moved to `data-scheme`, so the two coexist: their tokens rule
+  the pane, ours the sidebar, inspector and terminal. `setColorScheme()` follows our light/dark/system.
+- **Fonts**: IBM Plex reaches the port through THEIR variables — `--font-family-sans` and
+  `--font-family-mono` are re-pointed at our `--font-ui` / `--font-mono` in `app.css`, so no
+  vendored stylesheet is edited.
+- **Keys**: `opencode/keybinds.ts` is their whole `Definitions` table (162 commands) with
+  `LEADER_DEFAULT = "ctrl+x"`. `keys.ts` reads the leader from it, `chordOf()` expands `<leader>`,
+  and the palette lists every upstream command this app answers under its own name and chord. Our
+  ⌘ keys stay as the alias layer; both work.
 
 ## Order of work (one commit each)
 

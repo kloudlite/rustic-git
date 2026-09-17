@@ -9,7 +9,7 @@
    Layer 2, the @theme block: those values mapped into Tailwind's token
    namespaces, so `bg-panel`, `text-muted`, `border-line` exist as utilities and
    resolve through the vars. Because the mapping is `inline`, a utility points at
-   the var rather than copying its value, so swapping `data-theme` restyles the
+   the var rather than copying its value, so swapping `data-scheme` restyles the
    whole app without a single `dark:` variant in any component.
 
    Colour values are Zed's One Dark and One Light (zed/assets/themes/one), keyed
@@ -17,7 +17,7 @@
    ───────────────────────────────────────────────────────────────────────────── */
 
 :root,
-[data-theme="dark"] {
+[data-scheme="dark"] {
   color-scheme: dark;
 
   /* Zed's default One Dark (owner, 2026-09-17): the editor's own palette, so a bench beside
@@ -110,7 +110,7 @@
   --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 36%);   /* widget.shadow */
 }
 
-[data-theme="light"] {
+[data-scheme="light"] {
   color-scheme: light;
 
   /* One Light, the same roles. */
@@ -203,7 +203,7 @@
 /* Following the OS is the default: with no data-theme set, light applies only
    when the OS asks for it. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
+  :root:not([data-scheme="dark"]) {
     color-scheme: light;
     --bg: #ffffff;
     --raised: #f8f8f8;
@@ -558,4 +558,14 @@ textarea[data-composer] { caret-shape: block; caret-color: var(--accent); }
 
 @media (prefers-reduced-motion: reduce) {
   .springy, .arrive, .tick { animation: none; opacity: 1; filter: none; transform: none; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   The port's own variables (spec §23). opencode's components read
+   `--font-family-sans` / `--font-family-mono` (`ui/styles/theme.css:2-6`); this app is IBM Plex,
+   so the vendored pane gets IBM Plex through THEIR names rather than through an edit to their CSS.
+   ───────────────────────────────────────────────────────────────────────────── */
+:root {
+  --font-family-sans: var(--font-ui);
+  --font-family-mono: var(--font-mono);
 }

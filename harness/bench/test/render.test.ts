@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { usage } from "../../src/renderer/live.ts";
 import { KEYS, LEADER, keyHint, leaderIndex, underLeader } from "../../src/renderer/keys.ts";
 import { playDemo, wantsDemo } from "../../src/renderer/demo.ts";
+import { KEYBINDS, LEADER_DEFAULT, chordOf } from "../../src/renderer/opencode/keybinds.ts";
 
 test("the footer says tokens, how full the window is, and what it cost", () => {
   assert.equal(usage(12400, 1.2, 32000), "12.4K (39%) · $1.20");
@@ -38,4 +39,15 @@ test("the demo turn plays pi's own events, in order, and can be stopped", async 
   assert.equal(seen.length, after, "a stopped demo sends nothing more");
   assert.ok(wantsDemo("?motion-demo"));
   assert.ok(!wantsDemo("?other=1"));
+});
+
+test("the leader and its chords come from opencode's own table", () => {
+  assert.equal(LEADER_DEFAULT, "ctrl+x", "their `LeaderDefault` (keybind.ts:41)");
+  // Transcribed verbatim from their Definitions, so a chord lives in one place.
+  assert.equal(chordOf("command_list"), "ctrl+p");
+  assert.equal(chordOf("session_interrupt"), "escape");
+  assert.equal(chordOf("sidebar_toggle"), "ctrl+x b", "`<leader>b` with the leader expanded");
+  assert.equal(chordOf("session_compact"), "ctrl+x c");
+  assert.equal(chordOf("nothing_at_all"), undefined);
+  assert.ok(KEYBINDS.length > 100, "the whole table, not a handful");
 });
