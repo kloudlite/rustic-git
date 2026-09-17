@@ -92,6 +92,40 @@ mod tests {
     use super::*;
     use crate::watches::Watches;
 
+    /// A poll with the `next` the previous poll answered must return only what arrived AFTER it.
+    /// Every fire re-sent the whole ring, so a watch on a build's output repeated the same
+    /// `#N DONE` lines on every notification (workspace session, 2026-09-18). A cursor sent as a
+    /// string is the same question and must not read as "from the start".
+    #[tokio::test]
+    async fn polling_a_watch_with_its_cursor_returns_only_what_is_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let root = home.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let w = WatchTools { root, home, procs: Arc::new(Procs::default()), watches: Arc::new(Watches::default()) };
+        let v = w.call("watch", json!({ "cmd": "echo one; echo two; sleep 30" })).await.unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+
+        let mut first = json!({});
+        for _ in 0..100 {
+            first = w.call("watch_poll", json!({ "id": id })).await.unwrap();
+            if first["events"].as_array().is_some_and(|e| e.len() >= 2) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let events = first["events"].as_array().unwrap();
+        assert!(events.len() >= 2, "{first}");
+        let next = first["next"].as_u64().unwrap();
+
+        let again = w.call("watch_poll", json!({ "id": id, "since": next })).await.unwrap();
+        assert_eq!(again["events"].as_array().unwrap().len(), 0, "a cursor poll must not replay: {again}");
+        let quoted = w.call("watch_poll", json!({ "id": id, "since": next.to_string() })).await.unwrap();
+        assert_eq!(quoted["events"].as_array().unwrap().len(), 0, "a quoted cursor is the same cursor: {quoted}");
+
+        w.call("watch_stop", json!({ "id": id })).await.unwrap();
+    }
+
     #[tokio::test]
     async fn a_watch_refuses_a_non_string_argv_entry_and_a_non_string_path() {
         let tmp = tempfile::tempdir().unwrap();

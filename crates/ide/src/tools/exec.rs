@@ -154,7 +154,7 @@ impl ToolSet for Exec {
         vec![
             Tool { name: "exec", description: "Run a command in the workspace as the workspace user. cmd is a shell string or an argv array; cwd defaults to the workspace dir. Without detach it is a job: waits (timeout_ms, default 120000, max 600000) and answers exit_code, stdout, stderr; at the timeout it answers timed_out:true at once and the process group is killed behind the answer. head or tail keep only N lines of each stream; quiet answers the exit code alone (stderr's last 20 lines on failure). With detach:true it answers {id} and becomes a process for process_output / process_kill / GET /stream/process/{id}. pty is not supported in this version.", schema: obj(json!({ "cmd": {}, "cwd": {"type":"string"}, "env": {"type":"object"}, "timeout_ms": {"type":"integer"}, "head": {"type":"integer"}, "tail": {"type":"integer"}, "quiet": {"type":"boolean"}, "detach": {"type":"boolean"}, "pty": {"type":"boolean"} }), &["cmd"]) },
             Tool { name: "process_list", description: "Every detached process: id, cmd, started_at, state (running|exited), exit_code.", schema: obj(json!({}), &[]) },
-            Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). Answers stdout, stderr, next (offset), dropped, state, exit_code.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
+            Tool { name: "process_output", description: "A process's output since a byte offset (0 = from the start; the ring keeps the last 4 MiB). since addresses stdout and since_err addresses stderr; pass back the next and next_err from the previous answer to page. Answers stdout, stderr, next, next_err, dropped, dropped_err, state, exit_code.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"}, "since_err": {"type":"integer"} }), &["id"]) },
             Tool { name: "process_write", description: "Write to a process's stdin.", schema: obj(json!({ "id": {"type":"string"}, "data": {"type":"string"} }), &["id","data"]) },
             Tool { name: "process_kill", description: "Stop a process: TERM (default), then KILL after 5 s; or KILL.", schema: obj(json!({ "id": {"type":"string"}, "signal": {"type":"string","enum":["TERM","KILL"]} }), &["id"]) },
         ]
@@ -187,10 +187,15 @@ impl ToolSet for Exec {
                     let id = str_arg(&args, "id")?;
                     let p = self.procs.get(id).ok_or_else(|| ToolError::Failed(format!("no process {id}")))?;
                     let since = opt_u64(&args, "since").unwrap_or(0);
+                    // stderr has its own offset, answered as `next_err`: reading it from 0 on
+                    // every poll re-sent every warning a build had already printed, which is half
+                    // of what made a paged log look like it started over (2026-09-18). A caller
+                    // that sends only `since` keeps the old behaviour for stderr.
+                    let since_err = opt_u64(&args, "since_err").unwrap_or(0);
                     let g = p.lock().unwrap_or_else(|q| q.into_inner());
                     let (o, next, dropped) = g.out.read_since(since);
-                    let (e, _, _) = g.err.read_since(0);
-                    Ok(json!({ "stdout": String::from_utf8_lossy(&o), "stderr": String::from_utf8_lossy(&e), "next": next, "dropped": dropped, "state": g.state, "exit_code": g.exit_code }))
+                    let (e, next_err, dropped_err) = g.err.read_since(since_err);
+                    Ok(json!({ "stdout": String::from_utf8_lossy(&o), "stderr": String::from_utf8_lossy(&e), "next": next, "next_err": next_err, "dropped": dropped, "dropped_err": dropped_err, "state": g.state, "exit_code": g.exit_code }))
                 }
                 "process_write" => {
                     let id = str_arg(&args, "id")?;
@@ -270,6 +275,45 @@ mod tests {
         let (_t, x) = exec_set();
         let v = x.call("exec", json!({ "cmd": "sleep 5", "timeout_ms": 200 })).await.unwrap();
         assert_eq!(v["timed_out"], true);
+    }
+
+    /// Paging with the cursors the previous answer returned must repeat NOTHING — on either
+    /// stream. stderr had no cursor of its own and was re-read from byte 0 every call, so a build
+    /// (buildkit writes its progress to stderr) replayed its whole log on every poll and the
+    /// workspace model looped rebuilding the image (2026-09-18).
+    #[tokio::test]
+    async fn paging_a_process_with_the_returned_cursors_repeats_neither_stream() {
+        let (_t, x) = exec_set();
+        let v = x
+            .call("exec", json!({ "cmd": "echo out1; echo err1 >&2; sleep 30", "detach": true }))
+            .await
+            .unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let first = x.call("process_output", json!({ "id": id })).await.unwrap();
+        assert_eq!(first["stdout"], "out1\n");
+        assert_eq!(first["stderr"], "err1\n");
+        let (next, next_err) = (first["next"].as_u64().unwrap(), first["next_err"].as_u64().unwrap());
+        assert!(next > 0 && next_err > 0, "both streams answer a cursor: {first}");
+
+        // The same call again, with both cursors: nothing has been written since, so both are empty.
+        let again = x.call("process_output", json!({ "id": id, "since": next, "since_err": next_err })).await.unwrap();
+        assert_eq!(again["stdout"], "", "stdout must not repeat");
+        assert_eq!(again["stderr"], "", "stderr must not repeat");
+        assert_eq!(again["next"].as_u64(), Some(next));
+        assert_eq!(again["next_err"].as_u64(), Some(next_err));
+
+        // A cursor handed back as a STRING is the same question: a client that quoted it used to
+        // get the log from byte 0, silently.
+        let quoted = x
+            .call("process_output", json!({ "id": id, "since": next.to_string(), "since_err": next_err.to_string() }))
+            .await
+            .unwrap();
+        assert_eq!(quoted["stdout"], "");
+        assert_eq!(quoted["stderr"], "");
+
+        x.call("process_kill", json!({ "id": id })).await.unwrap();
     }
 
     #[tokio::test]

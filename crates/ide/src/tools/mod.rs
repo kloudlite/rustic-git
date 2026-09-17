@@ -91,8 +91,18 @@ pub(crate) fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolErr
 pub(crate) fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
+/// A non-negative integer argument, taken from a JSON number OR a decimal string.
+///
+/// `as_u64` alone answers `None` for `"16000"` and for `16000.0`, and every caller of this defaults
+/// to 0 on `None` — so a client that quoted its cursor got the log from byte 0 on every poll,
+/// silently, with no error to read (workspace session, 2026-09-18). A value that is neither is
+/// still `None`, because a cursor we cannot parse must not read as "from the start".
 pub(crate) fn opt_u64(args: &Value, key: &str) -> Option<u64> {
-    args.get(key).and_then(Value::as_u64)
+    match args.get(key)? {
+        Value::Number(n) => n.as_u64().or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
 }
 pub(crate) fn opt_bool(args: &Value, key: &str) -> bool {
     args.get(key).and_then(Value::as_bool).unwrap_or(false)
