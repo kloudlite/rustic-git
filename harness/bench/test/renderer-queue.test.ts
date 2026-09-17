@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { asksOf, exchangesOf, onEvent, seedExchanges, thread } from "../../src/renderer/live.ts";
+import { asksOf, exchangesOf, onEvent, seedExchanges, thread, waitingOn } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -120,4 +120,29 @@ test("an open proposal at connect becomes a question in its thread", () => {
   // The same row arriving twice is one question, not two cards.
   onEvent({ type: "proposal", row: { id: "q-mu5k0jez-b56s", session, tool: "question", summary: "Stuck sandboxes" } } as never);
   assert.equal(thread(session).messages.filter((m) => m.role === "question").length, 1);
+});
+
+/**
+ * A proposal belongs to the session that raised it, whatever a window is looking at. The owner's
+ * bench held one for `s-2` while the desktop showed nothing: the card lives in that thread's
+ * composer, so every other surface has to SAY the thread is waiting (2026-09-17).
+ */
+test("an open proposal marks its own thread, whichever session it is", () => {
+  onEvent({ type: "proposal", row: { id: "p-1", session: "s-2", tool: "kl_workspace_create", summary: "Create workspace new-workspace" } } as never);
+  assert.equal(waitingOn("s-2"), 1, "the session that raised it");
+  assert.equal(waitingOn("s-9"), 0, "and no other");
+  // Answering it clears the mark, in that thread alone.
+  onEvent({ type: "proposal", row: { id: "p-1", session: "s-2", tool: "kl_workspace_create", summary: "Create workspace new-workspace", answer: "yes" } } as never);
+  assert.equal(waitingOn("s-2"), 0);
+});
+
+test("a turn blocked in a tool is still busy", () => {
+  const t = thread("s-3");
+  onEvent({ type: "agent_start", pi: "s-3" } as never);
+  assert.equal(t.busy(), true);
+  // Nothing streams while a proposal waits: the only event is the tool starting.
+  onEvent({ type: "tool_execution_start", pi: "s-3", toolCallId: "c1", toolName: "kl_workspace_create", args: {} } as never);
+  assert.equal(t.busy(), true, "a person is waiting on this turn, so the composer must not send plainly");
+  onEvent({ type: "agent_end", pi: "s-3", messages: [] } as never);
+  assert.equal(t.busy(), false);
 });

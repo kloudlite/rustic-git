@@ -100,6 +100,15 @@ export const AUTO_YES = ["write", "edit"];
  */
 const [allowed, setAllowed] = createSignal<Record<string, string[]>>({});
 export const allowsTool = (session: string, tool: string) => (allowed()[session] ?? []).includes(tool);
+
+/**
+ * How many questions a thread is waiting on. A proposal belongs to the session that raised it —
+ * `s-2`, not whichever session a window happens to be looking at — so a tab that is not open, or
+ * not in front, has to SAY it is holding one (owner, 2026-09-17: the desktop showed no card at all
+ * while the bench held an open proposal for another session).
+ */
+export const waitingOn = (session: string) =>
+  thread(session).messages.filter((m) => m.role === "question" && !(m as { answer?: string }).answer).length;
 export function allowTool(session: string, tool: string) {
   setAllowed((a) => ({ ...a, [session]: [...new Set([...(a[session] ?? []), tool])] }));
 }
@@ -450,6 +459,10 @@ function makeThread(id: string) {
         return;
       }
       case "tool_execution_start": {
+        // A turn blocked in a tool — a proposal waiting on a person, a long command — is still a
+        // turn: nothing streams, and the desktop read that as idle, sent a plain prompt, and
+        // printed pi's refusal (owner, 2026-09-17).
+        setBusy(true);
         const args = ev.args as Record<string, unknown>;
         const name = ev.toolName as string;
         // The verb names what is actually happening: "Running bash…", "Waiting on agent svelte…".

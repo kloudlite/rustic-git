@@ -5,6 +5,7 @@ import { Button } from "../ui/Button";
 import { Heading, Row, Gutter, Empty } from "../ui/parts";
 import { AGENT, ROLE_SHORT } from "./status";
 import { cloneLabel, nestWorkspaces } from "../rows";
+import { waitingOn } from "../live";
 import { EnvironmentDock } from "./EnvironmentDock";
 import type { AgentState, Environment, Machine, Thread } from "../model";
 
@@ -101,6 +102,9 @@ export function MachinePanel(props: {
                 <Icon name="thread" size={12} class="mr-1.5 shrink-0 text-muted" />
                 <span class="min-w-0 flex-1 truncate pr-2">{x.name}</span>
                 <Show when={props.busy(x.id)}><span class="mr-1 size-1.5 shrink-0 rounded-full bg-success" title="working" /></Show>
+                {/* Waiting on a person: the card lives in that session's composer, and this is how
+                    a session nobody is looking at says it is blocked. */}
+                <Show when={waitingOn(x.id)}><span class="mr-1 size-1.5 shrink-0 rounded-full bg-accent" title="waiting on you" /></Show>
                 {/* Every session can be put away or deleted — the last one is
                     replaced by a fresh one rather than leaving nothing. */}
                 <button

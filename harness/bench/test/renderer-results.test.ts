@@ -260,3 +260,21 @@ test("the model is the session's, then the bench's default, and only then none",
   assert.equal(modelOfThread(undefined, undefined), undefined);
   assert.equal(modeLine("build", modelOfThread(undefined, "deepseek/deepseek-v4-flash")), "Build · DeepSeek V4 Flash DeepSeek");
 });
+
+/**
+ * Everything this app has no noun for counts as ONE kind. The owner saw
+ * "Made 2 tool calls, made 1 tool call, made 1 tool call · 3.0s" — one clause per platform tool
+ * name, which is the same fact said three times (2026-09-17).
+ */
+test("a turn's summary counts by kind, and unknown tools are one kind", () => {
+  const row = (tool: string): Parameters<typeof summary>[0][number] =>
+    ({ role: "action", kind: "note", tool, target: tool, text: "", at: "", ok: true }) as never;
+  assert.equal(
+    summary([row("kl_workspaces"), row("kl_workspaces"), row("kl_quota"), row("kl_volumes")], true),
+    "Made 4 tool calls",
+  );
+  // Named kinds keep their own nouns, in order.
+  assert.equal(summary([row("read"), row("read"), row("ls")], true), "Read 2 files, listed 1 directory");
+  assert.equal(summary([row("read"), row("kl_quota")], true), "Read 1 file, made 1 tool call");
+  assert.equal(summary([row("bash")]), "Running 1 shell command");
+});

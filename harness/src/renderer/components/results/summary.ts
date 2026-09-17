@@ -30,8 +30,14 @@ export function summary(rows: Action[], past = false): string {
   if (!rows.length) return "";
   // Aggregated by KIND, not by call: four agents dispatched in one turn read as "Asked 4 agents",
   // never as "made 1 tool call" four times over (owner, 2026-09-17).
+  // By KIND: every tool this app has no noun for is ONE bucket, not one bucket each. Three
+  // platform calls read as "Made 3 tool calls" — they came out as "Made 2 tool calls, made 1 tool
+  // call, made 1 tool call" because each name counted separately (owner, 2026-09-17).
   const byTool = new Map<string, number>();
-  for (const r of rows) byTool.set(r.tool ?? "", (byTool.get(r.tool ?? "") ?? 0) + 1);
+  for (const r of rows) {
+    const key = SHAPES[r.tool ?? ""] ? r.tool! : "";
+    byTool.set(key, (byTool.get(key) ?? 0) + 1);
+  }
   const parts = [...byTool].map(([tool, n], i) => {
     const s = SHAPES[tool] ?? OTHER;
     const noun = `${n} ${n === 1 ? s.one : s.many}`;

@@ -223,6 +223,11 @@ export function Chat(props: {
               >
                 <Icon name={TAB_ICON[t.kind]} class={t.kind === "ephemeral" || t.kind === "session" ? "text-muted" : "text-accent"} />
                 <span class="min-w-0 truncate">{t.name}</span>
+                {/* This thread is holding a question. The card is in ITS composer, so the tab has to
+                    say so — a question raised in another session was invisible (owner, 2026-09-17). */}
+                <Show when={t.pi && live.waitingOn(t.pi)}>
+                  <span class="ml-1 size-1.5 shrink-0 rounded-full bg-accent" title="waiting on you" />
+                </Show>
               </button>
               <button
                 class="shrink-0 rounded-sm p-0.5 text-subtle hover:bg-line hover:text-fg"

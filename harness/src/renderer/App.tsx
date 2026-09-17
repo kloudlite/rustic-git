@@ -812,7 +812,23 @@ export function App() {
       cmd.message = `The person sent a new message while you were working:\n${text || "(see image)"}`;
       L.queued(text, how);
     } else L.sent(text, atts.map((i) => i.n));
-    void window.harness.pi(cmd, pi).then((r) => void (r.success === false && L.note(String(r.error))), (e: Error) => L.note(e.message));
+    void window.harness
+      .pi(cmd, pi)
+      .then((r) => {
+        if (r.success !== false) return;
+        const why = String(r.error ?? "");
+        // pi refuses a plain prompt while a turn is in flight. That is not news for a person — it
+        // is a retry: the line goes in as a follow-up and is answered when the turn ends. The raw
+        // refusal ("Agent is already processing. Specify streamingBehavior…") used to be printed
+        // into the conversation (owner, 2026-09-17).
+        if (/already processing|streamingBehavior/i.test(why)) {
+          L.queued(text, "queue");
+          return void window.harness
+            .pi({ ...cmd, streamingBehavior: "follow_up" }, pi)
+            .then((again) => void (again.success === false && L.note(String(again.error))), (e: Error) => L.note(e.message));
+        }
+        L.note(why);
+      }, (e: Error) => L.note(e.message));
   };
 
   /** Dragging the drawer's top edge resizes it inside the pane it lives in. */
