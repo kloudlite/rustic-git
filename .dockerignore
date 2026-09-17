@@ -31,6 +31,7 @@
 # bench image installs the harness from its lockfile and runs bench/ and pi/ from source, so those
 # are admitted and nothing else of harness/ (node_modules, dist, the Electron app) is.
 !deploy/bench/
+!deploy/shell-image/
 !harness/package.json
 !harness/package-lock.json
 !harness/bench/
