@@ -30,6 +30,7 @@ COPY --from=deps /opt/harness/node_modules /opt/harness/node_modules
 COPY harness/bench/package.json /opt/harness/bench/package.json
 COPY harness/bench/src /opt/harness/bench/src
 COPY harness/pi /opt/harness/pi
+COPY harness/skills /opt/harness/skills
 # Node resolves the symlink, so bench/package.json's "type":"module" applies.
 RUN chmod 0755 /opt/harness/bench/src/main.ts \
     && ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench
