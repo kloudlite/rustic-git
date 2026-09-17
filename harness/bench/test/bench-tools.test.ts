@@ -1856,3 +1856,60 @@ test("a queued ask is given one more delivery, then blocked", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A reply settles by INTENT, not by tag alone (spec §3.9 rule 3). A workspace holding one ask has
+ * answered it when its turn ends, whatever it remembered to write at the front — the alternative is
+ * an exchange that waits out its deadline over a missing prefix.
+ */
+test("an untagged answer settles the one ask the session holds, and is told how to tag it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-intent-2-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    await (bench as never as { deliver: (id: string, m: unknown[]) => Promise<void> }).deliver(a.session, [
+      // The prompt the PERSON typed in the workspace's own tab: no `[ask …]` tag, so nothing in
+      // this turn names an exchange — and the session still holds exactly one.
+      { role: "user", content: "finish it off" },
+      { role: "assistant", content: [{ type: "text", text: "DONE — the service reports its version" }] },
+    ]);
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "done", "no tag, still answered");
+
+    // A LATE reply for an ask already settled is an update on it, never a second exchange.
+    const before = bench.exchanges.bySession(asker).length;
+    await (bench as never as { appendUpdate: (id: string, t: string) => void }).appendUpdate(a.exchange, "and the image is pushed");
+    const rows = bench.exchanges.bySession(asker);
+    assert.equal(rows.length, before + 1);
+    assert.equal(rows.find((e) => e.text.includes("the image is pushed"))!.ref, a.exchange, "it hangs off the ask it belongs to");
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "done", "and does not re-open it");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a turn that ends in an error blocks the ask with the plain sentence", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-err-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    const child = (bench as never as { children: Map<string, unknown> }).children.get(a.session);
+    (bench as never as { fold: (id: string, c: unknown, ev: unknown) => void }).fold(a.session, child, { type: "agent_end", error: "no API key for that model\nat provider.ts:1" });
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "blocked");
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    const said = told.map((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n");
+    assert.match(said, /blocked: no API key for that model/);
+    assert.ok(!said.includes("provider.ts"), "the first line of it, not its stack");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

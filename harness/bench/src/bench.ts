@@ -325,6 +325,17 @@ export class Bench {
     }
     if (ev.type === "agent_end") {
       this.turning.delete(id);
+      /**
+       * A turn that ended in an ERROR — the model refused, there is no key, a tool failed — answers
+       * nobody, and the ask it was for would otherwise wait out its deadline before anybody heard
+       * why (spec §3.9 rule 3). It settles `blocked` with the plain sentence instead.
+       */
+      const failed = typeof (ev as { error?: unknown }).error === "string" ? String((ev as { error?: string }).error) : undefined;
+      if (failed && ev.willRetry !== true) {
+        for (const a of this.asked.get(id) ?? []) this.settle({ id: a.exchange, session: a.from, workspace: a.workspace }, "blocked", failed.split("\n")[0].slice(0, 160));
+        this.asked.delete(id);
+        return;
+      }
       // `willRetry` means this run is not the answer yet — pi keeps going on its own.
       if (ev.willRetry !== true) void this.deliver(id, ev.messages as { role?: string; content?: unknown }[] | undefined);
       if (ev.willRetry !== true) this.keepPlanCurrent(id);
@@ -544,7 +555,23 @@ export class Bench {
     // An AGENT's session exists for one task and answers to one caller: every turn of it is that
     // answer, so it needs no tag. A workspace session is a conversation and does need one.
     const solo = queue.length === 1 && queue[0].agent;
-    if (!named && !asks.length && !solo) return;
+    /**
+     * A reply settles by INTENT, not by tag alone (spec §3.9 rule 3). A workspace turn that ends
+     * while it holds exactly one open ask has answered that ask, whatever it remembered to write at
+     * the front — the alternative is an exchange that waits out its deadline over a missing prefix.
+     * The tag stays the fast path, and the session is told once how to say it.
+     */
+    const byIntent = !named && !asks.length && !solo && queue.length === 1 && !!answer;
+    if (byIntent && !this.bounced.has(`tag:${queue[0].exchange}`)) {
+      this.bounced.add(`tag:${queue[0].exchange}`);
+      void this.send(id, `[harness] say \`[reply ${queue[0].exchange}]\` at the start of the answer so it reaches whoever asked`).catch(() => undefined);
+    }
+    if (!named && !asks.length && !solo && !byIntent) {
+      // Nothing in this turn answered anybody — but a TAGGED reply for an ask already settled is an
+      // update to it, not a turn that answered nobody: it is appended so the asking session sees it.
+      if (replied) this.appendUpdate(replied, answer);
+      return;
+    }
     // The tag is the truth; FIFO is the fallback when a turn took an ask whose id it dropped, or
     // when several asks were merged into one run.
     const at = Math.max(0, queue.findIndex((x) => x.exchange === named));
@@ -644,6 +671,19 @@ export class Bench {
       }
       if (now - clock.nudgedAt >= ASK_NUDGE_GRACE_MS) this.settle(e, "expired", "the workspace went quiet");
     }
+  }
+
+  /**
+   * A reply for an ask that is already settled: appended to it as an update, never a new exchange
+   * and never a second answer (spec §3.9 rule 3). A workspace that finishes late still has
+   * something worth saying, and dropping it silently is the same stale stop from the other end.
+   */
+  private appendUpdate(exchange: string, text: string): void {
+    const of = this.exchanges.recent(500).find((e) => e.id === exchange);
+    if (!of || !text.trim()) return;
+    const row = this.write(() => this.exchanges.record({ id: `${exchange}-late-${Date.now().toString(36)}`, session: of.session, workspace: of.workspace, dir: "in", text: text.slice(0, 2000), state: "note", ref: exchange }));
+    this.emit({ type: "exchange", row });
+    if (this.sessions.get(of.session)) void this.send(of.session, `[${of.workspace} ${exchange}] ${brief(text, of.workspace)}`).catch(() => undefined);
   }
 
   /** One ended exchange: the row, the plan and the asking session, in that order and always together. */
