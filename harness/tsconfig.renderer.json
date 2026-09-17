@@ -3,9 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // opencode's renderer uses `findLast`, `toReversed` and iterates NodeLists: it compiles against
-    // ES2023 and DOM.Iterable upstream, and this is a Chromium renderer, so it has both.
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "DOM"],
     "jsx": "preserve",
     "jsxImportSource": "solid-js",
     "strict": true,
@@ -14,35 +12,7 @@
     // `.ts` in a relative import: the node test runner resolves an extension, vite is happy either
     // way, and without it a module the tests load cannot import a sibling at all.
     "allowImportingTsExtensions": true,
-    "types": ["vite/client"],
-    // The vendored opencode tree imports itself by package name; these point those names at it.
-    // The same map lives in vite.config.ts — one for the compiler, one for the bundler.
-    "baseUrl": ".",
-    "paths": {
-      "@opencode-ai/session-ui/v2/prompt-input": ["src/renderer/opencode/session-ui/v2/components/prompt-input/index.tsx"],
-      "@opencode-ai/session-ui/v2/prompt-input/*": ["src/renderer/opencode/session-ui/v2/components/prompt-input/*"],
-      "@opencode-ai/session-ui/v2/*": ["src/renderer/opencode/session-ui/v2/components/*"],
-      "@opencode-ai/session-ui/pierre": ["src/renderer/opencode/session-ui/pierre/index.ts"],
-      "@opencode-ai/session-ui/pierre/*": ["src/renderer/opencode/session-ui/pierre/*"],
-      "@opencode-ai/session-ui/context": ["src/renderer/opencode/session-ui/context/index.ts"],
-      "@opencode-ai/session-ui/context/*": ["src/renderer/opencode/session-ui/context/*"],
-      "@opencode-ai/session-ui/*": ["src/renderer/opencode/session-ui/components/*"],
-      "@opencode-ai/ui/theme": ["src/renderer/opencode/ui/theme/index.ts"],
-      "@opencode-ai/ui/theme/*": ["src/renderer/opencode/ui/theme/*"],
-      "@opencode-ai/ui/context": ["src/renderer/opencode/ui/context/index.ts"],
-      "@opencode-ai/ui/context/*": ["src/renderer/opencode/ui/context/*"],
-      "@opencode-ai/ui/hooks": ["src/renderer/opencode/ui/hooks/index.ts"],
-      "@opencode-ai/ui/i18n/*": ["src/renderer/opencode/ui/i18n/*"],
-      "@opencode-ai/ui/icons/provider": ["src/renderer/opencode/ui/components/provider-icons/types.ts"],
-      "@opencode-ai/ui/icons/file-type": ["src/renderer/opencode/ui/components/file-icons/types.ts"],
-      "@opencode-ai/ui/icons/app": ["src/renderer/opencode/ui/components/app-icons/types.ts"],
-      "@opencode-ai/ui/v2/*": ["src/renderer/opencode/ui/v2/components/*"],
-      "@opencode-ai/ui/*": ["src/renderer/opencode/ui/components/*"],
-      "@opencode-ai/core/util/*": ["src/renderer/opencode/core/util/*"],
-      "@opencode-ai/sdk/v2": ["src/renderer/opencode/sdk/v2/types.ts"],
-      "@opencode-ai/sdk/v2/client": ["src/renderer/opencode/sdk/v2/types.ts"],
-      "@opencode-ai/client/promise": ["src/renderer/opencode/shims/client-promise.ts"]
-    }
+    "types": ["vite/client"]
   },
   "include": ["src/renderer", "src/preload.ts"]
 }

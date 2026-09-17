@@ -1,6 +1,4 @@
 import { createSignal, createEffect } from "solid-js";
-import { applyTheme, setColorScheme } from "@opencode-ai/ui/theme/loader";
-import oneDark from "@opencode-ai/ui/theme/themes/one-dark.json";
 
 /**
  * Theme mode. "system" is the default and sets no attribute, so the media query
@@ -28,22 +26,11 @@ function stored(): ThemeMode {
 
 const [mode, setMode] = createSignal<ThemeMode>(stored());
 
-/**
- * One Dark, through opencode's own loader (spec §23). Their theme JSON carries BOTH variants —
- * there is no `one-light.json` upstream — and `applyTheme` writes the resolved tokens into a
- * `<style id="opencode-theme">` and stamps `data-theme`. Our own `app.css` tokens keep the sidebar,
- * inspector and terminal; inside the pane their tokens are what the port reads.
- */
-applyTheme(oneDark as never, "one-dark");
-
 createEffect(() => {
   const m = mode();
   const root = document.documentElement;
-  // `data-theme` is their loader's now; ours is the colour scheme beside it, which is what our
-  // own stylesheet's light/dark blocks key off.
-  root.setAttribute("data-scheme", m === "system" ? "" : m);
-  if (m === "system") root.removeAttribute("data-scheme");
-  setColorScheme(m === "system" ? "auto" : m);
+  if (m === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", m);
   void window.harness?.setTheme?.(m);
 });
 

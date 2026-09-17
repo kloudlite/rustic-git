@@ -9,7 +9,7 @@
    Layer 2, the @theme block: those values mapped into Tailwind's token
    namespaces, so `bg-panel`, `text-muted`, `border-line` exist as utilities and
    resolve through the vars. Because the mapping is `inline`, a utility points at
-   the var rather than copying its value, so swapping `data-scheme` restyles the
+   the var rather than copying its value, so swapping `data-theme` restyles the
    whole app without a single `dark:` variant in any component.
 
    Colour values are Zed's One Dark and One Light (zed/assets/themes/one), keyed
@@ -17,7 +17,7 @@
    ───────────────────────────────────────────────────────────────────────────── */
 
 :root,
-[data-scheme="dark"] {
+[data-theme="dark"] {
   color-scheme: dark;
 
   /* Zed's default One Dark (owner, 2026-09-17): the editor's own palette, so a bench beside
@@ -110,7 +110,7 @@
   --shadow-overlay: 0 0 8px 2px rgb(0 0 0 / 36%);   /* widget.shadow */
 }
 
-[data-scheme="light"] {
+[data-theme="light"] {
   color-scheme: light;
 
   /* One Light, the same roles. */
@@ -203,7 +203,7 @@
 /* Following the OS is the default: with no data-theme set, light applies only
    when the OS asks for it. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-scheme="dark"]) {
+  :root:not([data-theme="dark"]) {
     color-scheme: light;
     --bg: #ffffff;
     --raised: #f8f8f8;
@@ -534,8 +534,36 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
    file it came from, and every one of them answers reduced motion.
    ───────────────────────────────────────────────────────────────────────────── */
 
-/* harness: the working indicator is opencode's own component now (it brings its own keyframes);
-   what stays here is the motion this app's chrome uses around the ported pane. */
+/* The working indicator: 5×5 dots, each on its own keyframe staggered in 12.5 % steps over
+   1200 ms (`session-progress-indicator-v2.css:1-14`). One keyframe with an animation-delay per
+   dot says the same thing as twenty-five generated keyframes and is twenty-five times less CSS.
+   ponytail: a delay is not a per-dot curve; if a dot ever needs its own shape, generate them. */
+[data-component="session-progress-indicator-v2"] { color: var(--subtle); display: block; flex-shrink: 0; }
+[data-component="session-progress-indicator-v2"] [data-dot] {
+  fill: currentColor;
+  opacity: 0.2;
+  animation: working-dot var(--motion-progress) ease-out infinite both;
+}
+@keyframes working-dot {
+  0%, 25% { opacity: 0.2; }
+  37.5% { opacity: 1; }
+  50% { opacity: 0.5; }
+  62.5%, 100% { opacity: 0.2; }
+}
+/* The stagger: an eighth of the loop per ring out from the middle. */
+[data-component="session-progress-indicator-v2"] [data-dot="12"] { animation-delay: 0ms; }
+[data-component="session-progress-indicator-v2"] [data-dot="6"],
+[data-component="session-progress-indicator-v2"] [data-dot="7"],
+[data-component="session-progress-indicator-v2"] [data-dot="8"],
+[data-component="session-progress-indicator-v2"] [data-dot="11"],
+[data-component="session-progress-indicator-v2"] [data-dot="13"],
+[data-component="session-progress-indicator-v2"] [data-dot="16"],
+[data-component="session-progress-indicator-v2"] [data-dot="17"],
+[data-component="session-progress-indicator-v2"] [data-dot="18"] { animation-delay: 150ms; }
+@media (prefers-reduced-motion: reduce) {
+  [data-component="session-progress-indicator-v2"] [data-dot] { animation: none; }
+  [data-component="session-progress-indicator-v2"] [data-dot="12"] { opacity: 1; }
+}
 
 /* A collapsible body and a row arriving: opencode springs these
    (`basic-tool.tsx:47`, visualDuration 0.35, bounce 0). A spring with no bounce reads as an
@@ -558,14 +586,4 @@ textarea[data-composer] { caret-shape: block; caret-color: var(--accent); }
 
 @media (prefers-reduced-motion: reduce) {
   .springy, .arrive, .tick { animation: none; opacity: 1; filter: none; transform: none; }
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   The port's own variables (spec §23). opencode's components read
-   `--font-family-sans` / `--font-family-mono` (`ui/styles/theme.css:2-6`); this app is IBM Plex,
-   so the vendored pane gets IBM Plex through THEIR names rather than through an edit to their CSS.
-   ───────────────────────────────────────────────────────────────────────────── */
-:root {
-  --font-family-sans: var(--font-ui);
-  --font-family-mono: var(--font-mono);
 }

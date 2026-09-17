@@ -18,8 +18,6 @@ export type Binding = {
   match: (e: KeyboardEvent) => boolean;
 };
 
-import { KEYBINDS, LEADER_DEFAULT, chordOf } from "./opencode/keybinds.ts";
-
 const meta = (e: KeyboardEvent) => e.metaKey || e.ctrlKey;
 const key = (e: KeyboardEvent, k: string) => e.key.toLowerCase() === k;
 
@@ -55,7 +53,7 @@ export const KEYS = {
  * is the session list, `ctrl+x 1…9` a session by slot. It forgets after three seconds, because a
  * leader that stays armed eats the next thing a person types.
  */
-export const LEADER: Binding = { keys: "^X", label: "leader", match: (e) => e.ctrlKey && !e.metaKey && !e.altKey && key(e, LEADER_DEFAULT.split("+").pop()!) };
+export const LEADER: Binding = { keys: "^X", label: "leader", match: (e) => e.ctrlKey && !e.metaKey && !e.altKey && key(e, "x") };
 export const LEADER_FORGET_MS = 3000;
 
 /** Which binding a key means while the leader is armed, if any. */
@@ -68,15 +66,6 @@ export function leaderIndex(e: KeyboardEvent): number | undefined {
   const n = Number(e.key);
   return n >= 1 && n <= 9 ? n - 1 : undefined;
 }
-
-/**
- * What opencode calls this command, if it has one: the vendored table is the source of truth for
- * the chord, and our own ⌘ key is the alias beside it (spec §23).
- */
-export const upstream = (command: string) => chordOf(command);
-
-/** Every command opencode binds, for the palette's "also known as" column. */
-export const UPSTREAM_KEYBINDS = KEYBINDS;
 
 /** Both ways of saying it, for the palette: `⌘B  ^X B`. A hidden alias is not an alias. */
 export const keyHint = (b: Binding): string => (b.leader ? `${b.keys}  ${LEADER.keys} ${b.leader.toUpperCase()}` : b.keys);
