@@ -142,37 +142,54 @@ COPY target/x86_64-unknown-linux-musl/${PROFILE}/kloudlite-intercept-proxy /klou
 ENTRYPOINT ["/kloudlite-intercept-proxy"]
 
 # The default workspace image: what `ws-{id}` runs when a workspace names no image of its own.
-# Stock alpine plus exactly what the platform itself needs and cannot get from Nix:
-#   - libstdc++/libgcc: VS Code Remote-SSH's Alpine server ships a musl `node` that still
-#     dlopens both; without them every connect downloads the server and dies with
-#     "Error relocating … libstdc++". Nix's copies are glibc-linked and useless to a musl binary.
-#   - the `kl` account to log in as and sshd's chroot dir (alpine already ships the `sshd`
-#     account it drops privileges to).
-#     busybox `adduser -D` writes `!` as the password, which sshd reads as "locked" and refuses
-#     even a valid key; `*` is "no password" and is not locked. The login shell is the Nix
-#     profile's zsh, mounted at run time — adduser does not check that the path exists yet.
+# debian:bookworm-slim, the same pinned base as every other stage here, and GLIBC is the whole
+# point (2026-09-17): it used to be alpine, and every tool a person actually uses comes from the
+# Nix profile, which is glibc-linked. npm's native-binding loaders (rolldown, rollup, esbuild's
+# optional peers) detect the libc by running `/usr/bin/ldd` and read "musl" from a musl base, then
+# install and dlopen the musl binding — which a glibc `node` cannot load: "Cannot find native
+# binding". A musl userland under a glibc toolchain is a lie the whole npm ecosystem believes.
+# Stock bookworm plus exactly what the platform itself needs and cannot get from Nix:
+#   - libstdc++6/libgcc-s1: VS Code Remote-SSH's server dlopens both, and bookworm-slim carries
+#     neither by default; without them every connect downloads the server and dies relocating.
+#     Nix cannot supply them to a foreign binary.
+#   - ca-certificates: the alpine base bundled them; a debian slim does not, and npm, `kl` and
+#     the credential helper all speak TLS.
+#   - node + npm from the official node image's `/usr/local`, not bookworm's `nodejs` (18):
+#     graft below declares `engines.node >= 20`. Same bookworm userland, built against it.
+#   - the docker CLI and its buildx plugin, as static binaries from their own upstream images —
+#     debian has no `docker-cli` package, only `docker.io`, which drags in the daemon.
+#   - the `kl` account to log in as, and sshd's `sshd` account and chroot dir, which the alpine
+#     base shipped and debian only gets with `openssh-server` — a package whose only useful part
+#     here would be those two, since sshd itself comes from the Nix profile at run time.
+#     `useradd -p '*'` writes "no password", NOT the `!` that sshd reads as "locked" and refuses
+#     even a valid key for. The login shell is the Nix profile's zsh, mounted at run time —
+#     useradd does not check that the path exists yet.
 #   - the greeting.
 # Everything a person actually uses (git, zsh, fish, starship, …) comes from the Nix profile the
 # agent builds per workspace and mounts read-only, so this image stays stock apart from the above.
 # Runtime steps that depend on mounts (chown of the volume, seeding rc files, exec sshd) live in
 # `k8s::prelude`, not here.
 # Pinned by digest like every other stage (2026-09-12 review #69): a tag is a pointer Docker Hub
-# can move, and this is the image a person's whole working day runs inside. Looked up 2026-09-12
-# with the same recipe as nixos/nix in deploy/k3s/agent-daemonset.yaml; the tag stays for humans.
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS workspace
+# can move, and this is the image a person's whole working day runs inside.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS workspace
 ARG PROFILE=release
-RUN apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx nodejs npm \
+COPY --from=node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 /usr/local/ /usr/local/
+COPY --from=docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d /usr/local/bin/docker /usr/bin/docker
+COPY --from=docker/buildx-bin:0.20.1@sha256:ead27bfcde6308a757b4a5a4a931937363c1fa0091f7e2994b9114521853cf69 /buildx /usr/libexec/docker/cli-plugins/docker-buildx
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/empty \
-    && adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl \
-    && sed -i 's/^kl:!:/kl:*:/' /etc/shadow \
+    && groupadd -g 1000 kl \
+    && useradd -u 1000 -g 1000 -m -d /home/kl -s /nix/profile/current/bin/zsh -p '*' kl \
+    && useradd -r -d /var/empty -s /usr/sbin/nologin -p '*' sshd \
     && printf '%s\n' 'Kloudlite workspace — you are kl (no root, no sudo).' > /etc/motd
 # The docker CLI's credential-helper protocol resolves `credHelpers.<host>: kl` to
 # `docker-credential-kl`, which reads the registry token `login_env`/`user_key_secret` keep fresh
 # on disk — no `docker login`, nothing long-lived, rotation is just the next Secret projection.
 COPY deploy/workspace-image/docker-credential-kl /usr/local/bin/docker-credential-kl
 RUN chmod 0755 /usr/local/bin/docker-credential-kl
-# `kl` is the workspace CLI (build, push). A musl binary because this stage is Alpine: the glibc
-# `target/release/*` the other stages copy would not even load here.
+# `kl` is the workspace CLI (build, push). Still the musl build, unchanged by the move to glibc:
+# a static musl binary runs anywhere, and it is the same artifact the bench image carries.
 COPY target/x86_64-unknown-linux-musl/${PROFILE}/kl /usr/local/bin/kl
 RUN chmod 0755 /usr/local/bin/kl
 # `/etc/profile.d`, not the seeded rc files under `k8s::prelude`: those are copied into the
@@ -183,18 +200,15 @@ COPY deploy/workspace-image/kl-build.sh /etc/profile.d/kl-build.sh
 # git's default `core.excludesFile`. `prelude` appends this block to the person's own file once;
 # a per-repository `.gitignore` line would be a diff they did not ask for, in every repository.
 COPY deploy/workspace-image/gitignore-global /etc/kloudlite/gitignore-global
-# Every named terminal runs in `tmux -L kl` (see `crates/ide/src/pty.rs`), so the config is the
-# image's rather than the person's: it is platform behaviour — a hidden status line, the
-# resurrect save under `{ws}/.cache/tmux` — and `~/.tmux.conf` still wins for their own bindings.
-COPY deploy/workspace-image/tmux.conf /etc/tmux.conf
 # graft, for `kl ide serve`: the graph of every symbol and call edge an outside agent asks about,
 # proxied from `graft mcp` and kept fresh by the server. Pinned; the image is the version.
 # tree-sitter's grammars are native modules: node-gyp needs python3, make and g++ for the install
 # and nothing after it, so the toolchain is added and removed in the one layer.
-RUN apk add --no-cache --virtual .gyp python3 make g++ \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
     && npm install -g @nanonets/graft@0.18.0 \
     && npm cache clean --force \
-    && apk del .gyp
+    && apt-get purge -y python3 make g++ && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 ENV DO_NOT_TRACK=1
 # No `USER kl`, unlike every other stage here, and that is the design rather than an omission
 # (2026-09-12 review #69): this image's entrypoint is `k8s::prelude`, which chowns the mounted
