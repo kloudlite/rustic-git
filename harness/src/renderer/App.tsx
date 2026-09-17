@@ -19,7 +19,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
-import { benchSessions, displayModel, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
+import { benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
 
@@ -646,6 +646,10 @@ export function App() {
         }
       | undefined;
     if (boot?.model) live.setBenchModel(boot.model);
+    // The catalogue ONCE at connect, so a model reads by its name everywhere — the footer showed
+    // the raw `deepseek-v4-flash-vision-exp` because only the `/model` picker had ever fetched it,
+    // and a person who never opened the picker never saw a readable name (owner, on the fleet).
+    void live.models().then((r) => noteModelNames(r.flatMap((p) => p.models.map((m) => ({ id: `${p.id}/${m.id}`, name: m.name })))), () => undefined);
     if (boot?.sessions) setSessions(reconcile(boot.sessions));
     for (const r of boot?.plans ?? []) live.onEvent({ type: "plan", ...r });
     if (boot?.procs) live.onEvent({ type: "procs", rows: boot.procs });

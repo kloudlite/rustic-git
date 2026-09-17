@@ -366,15 +366,21 @@ export function Chat(props: {
             once a person scrolls up — the terminal's behaviour, no script. */}
         <div
           ref={scroller}
-          // `justify-end` fills a SHORT session from the top: a reversed column stacks from the
-          // bottom, so a thread shorter than the pane sat pinned low with the upper 40% blank
-          // (owner's screenshot). It changes nothing once the content overflows.
-          class="pane relative flex min-w-0 flex-col-reverse justify-end overflow-x-clip overflow-y-auto px-9 pt-5 select-text"
+          // `min-h-0` so this flex child may actually be shorter than its content and scroll.
+          // NOT `justify-end`: in a reversed column that packs the items toward the visual top and
+          // the overflow then spills past the START edge, which no amount of scrolling reaches —
+          // the pane stopped scrolling entirely and the last line sat under the composer. A short
+          // thread is filled from the top by `mt-auto` on the column below, which is inert once the
+          // content overflows.
+          class="pane relative flex min-h-0 min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 select-text"
           style={{ "padding-bottom": `calc(var(--composer-h, 0px) + 16px)` }}
           classList={{ hidden: onFile() }}
           onScroll={() => { if (atBottom()) setBehind(false); }}
         >
-          <div ref={column} class="flex min-w-0 flex-col gap-4">
+          {/* `mt-auto` is what fills a SHORT session from the top: spare room in the reversed
+              column is taken above the content. With overflow there is no spare room, so it does
+              nothing and the scroll is the browser's own. */}
+          <div ref={column} class="mt-auto flex min-w-0 flex-col gap-4">
             {/* A thread with nothing in it yet is a first run: say what the bench
                 is for and offer a few first asks, which fill the prompt rather
                 than send — the person's words go first. */}

@@ -163,7 +163,19 @@ test("a session is shown whole", () => {
   const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
   // A reversed column stacks from the bottom; without this a short thread sat pinned low with the
   // upper 40% of the pane blank (owner's screenshot).
-  assert.match(chat, /flex-col-reverse justify-end/);
+  // NOT `justify-end`: on a reversed scroller it packs the overflow past the start edge, so a long
+  // session could not be scrolled at all and its last line sat under the composer. The scroller
+  // stays a plain reversed column that may shrink (`min-h-0`); a SHORT thread is filled from the
+  // top by `mt-auto` on the inner column, which is inert once the content overflows.
+  // The scroller's own class attribute — not the comment above it, which names `justify-end` to
+  // say why it must not come back.
+  const scrollerClass = /ref=\{scroller\}[\s\S]*?\n\s*class="([^"]+)"/.exec(chat)?.[1] ?? "";
+  assert.ok(scrollerClass, "the scroller's class list");
+  assert.ok(!/justify-end/.test(scrollerClass), "`justify-end` on the scroller silently kills scrolling");
+  assert.match(scrollerClass, /flex-col-reverse/);
+  assert.match(scrollerClass, /min-h-0/, "a flex child must be allowed to shrink before it can scroll");
+  assert.match(scrollerClass, /overflow-y-auto/);
+  assert.match(chat, /ref=\{column\} class="mt-auto/, "a short thread is filled from the top by the column, not the scroller");
   const client = fs.readFileSync(path.resolve("src/bench-client.ts"), "utf8");
   // Opening with a tail and never filling it in is what hid the first prompt.
   assert.match(client, /r\.total <= FULL_UNDER/, "a short session is read whole, not left on its tail");

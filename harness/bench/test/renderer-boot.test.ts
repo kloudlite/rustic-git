@@ -49,6 +49,57 @@ test("the desktop's renderer loads with no uncaught exception", { timeout: 60_00
         thrown.push(String(m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text));
     });
     await wait(6000);
+
+    /**
+     * The transcript must actually SCROLL. `justify-end` on the reversed scroller made a short
+     * thread fill from the top but packed the overflow past the start edge, so a long session
+     * could not be scrolled at all and its last line sat under the composer (owner, on the fleet).
+     * Measured in the real layout, because that bug is invisible to any unit test.
+     */
+    const answers = new Map<number, unknown>();
+    ws.on("message", (d) => {
+      const m = JSON.parse(d.toString()) as { id?: number; result?: { result?: { value?: unknown } } };
+      if (m.id && m.result) answers.set(m.id, m.result.result?.value);
+    });
+    const evaluate = async (expression: string) => {
+      const mine = ++id;
+      ws.send(JSON.stringify({ id: mine, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise: true } }));
+      for (let i = 0; i < 40 && !answers.has(mine); i++) await wait(50);
+      return answers.get(mine);
+    };
+    // Fill the scroller past its own height, then try to scroll it the way a person would.
+    const probe = await evaluate(`(() => {
+      const el = [...document.querySelectorAll('div')].find((d) => {
+        const s = getComputedStyle(d);
+        return s.flexDirection === 'column-reverse' && s.overflowY === 'auto' && d.clientHeight > 0;
+      });
+      if (!el) return { found: false };
+      const col = el.firstElementChild;
+      // Fill it well past its own height, in the column the rows actually live in.
+      const tall = document.createElement('div');
+      tall.style.height = (el.clientHeight * 3 + 600) + 'px';
+      (col || el).appendChild(tall);
+      const overflows = el.scrollHeight > el.clientHeight + 8;
+      const before = el.scrollTop;
+      el.scrollTop = -400;                       // a reversed column scrolls to negative
+      const moved = el.scrollTop !== before;
+      el.scrollTop = 0;                          // back to the newest row
+      tall.remove();
+      return { found: true, overflows, moved, atBottom: el.scrollTop === 0, justify: getComputedStyle(el).justifyContent };
+    })()`);
+    const p = probe as { found?: boolean; overflows?: boolean; moved?: boolean; atBottom?: boolean; justify?: string } | undefined;
+    // With no bench configured the window boots to the login screen, so the transcript is not
+    // mounted and there is nothing to measure. When it IS up, these are the regression itself:
+    // `justify-end` on a reversed scroller packs the overflow past the start edge, which no
+    // scrolling reaches — a long session could not be scrolled and its last line sat under the
+    // composer. A short thread is filled from the top by `mt-auto` on the column instead.
+    if (p?.found) {
+      assert.notEqual(p.justify, "flex-end", "`justify-end` on the scroller silently kills scrolling");
+      assert.ok(p.overflows, "the filled transcript must overflow its pane");
+      assert.ok(p.moved, "and it must scroll");
+      assert.ok(p.atBottom, "and come back to the newest row");
+    }
+
     ws.close();
     assert.deepEqual(thrown, [], `the renderer threw while loading:\n${thrown.join("\n---\n")}`);
   } finally {
