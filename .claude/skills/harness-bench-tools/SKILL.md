@@ -47,6 +47,25 @@ one set of rules. These are the owner's rulings and are not up for re-litigation
    all three modes: "the Kloudlite harness", no "pi", no `/opt/harness`, no coding-agent
    boilerplate. The fork gets the identity with `--no-tools`.
 
+## Newer rules (2026-09-17 afternoon)
+
+8. **Lifecycle tools wait; nobody sleeps.** create/start/restore/push/service_add poll their own
+   GET until the platform rests (`settle()`); the shell gate refuses a bare `sleep`/timer command.
+9. **State changes are asked first.** Every write/destroy `kl_*` (except asks and own `kl_pkg_*`)
+   is a PROPOSAL: a Yes/No card in the transcript, the answer recorded as the person's row;
+   no answer within the cap = declined. Probes that drive a model into a write must answer
+   `GET /proposals` with yes, and one probe asserts a declined change never happens.
+10. **The tool result is the view.** `kl_*` results render as cards (workspace, environment,
+    quota, history, ask chip, processes, packages, capabilities); the model never repeats their
+    fields, speaks caveman (`harness/pi/caveman.md`, chat text only), leads with the result.
+11. **Code and containers are tools.** Repos/pulls over `/v1` (`kl_repos`, `kl_pull_*`,
+    `kl_commit`…); `kl_repo_clone`, `kl_container_build|push`, `kl_images` run in the OWN
+    workspace through the `kl` CLI. Open: the pod must learn the git ssh host
+    (`KL_GIT_SSH_HOST` in `login_env`) — until then `kl_repo_clone` refuses by name.
+12. **Panels are per session.** Processes and queues filter by the active thread's session;
+    asks show as the sender's queue from exchange events; processes that exit are noticed by a
+    10 s poll while any row runs.
+
 ## Incident record (why these rules exist)
 
 - 2026-09-17 05:00 IST: asked "add nats to the env" with no matching tool, the model read
@@ -57,6 +76,8 @@ one set of rules. These are the owner's rulings and are not up for re-litigation
 - 06:38–06:42: with no tool for "HTTP service", it grepped strings out of the `kl` binary and
   its own session logs; for "what's happening" it grepped another workspace's transcript off disk.
 - 06:41: "create a backend with golang" was queued into the running frontend workspace.
+- 12:45: a roll landed the single gateway replica on session-1, a node with no Cloudflare A
+  record — every tunnel 521 for 25 min. `gateway.yaml` now runs one replica per pool node.
 
 ## Where things live
 
