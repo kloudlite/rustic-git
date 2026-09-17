@@ -1038,3 +1038,51 @@ test("no identity tells a model to talk about where it runs", () => {
     throw e;
   }
 });
+
+/**
+ * A tool `tool_search` found stays found for the rest of the SESSION, the way a deferred tool does
+ * in Claude Code — and a session outlives the process serving it. The owner's bench restarted
+ * mid-session and the next turn answered `tool kl_workspace_create not found` for a tool the model
+ * had already searched for and called (2026-09-18). The names live on the bench, and a starting
+ * session arms itself from them.
+ */
+test("a tool found by tool_search survives the turn, and the restart", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-found-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const srv = await serve(bench, 0);
+  await bench.start();
+  const id = bench.sessions.all().find((s) => !s.archived)!.id;
+  const restore = withEnv({
+    KL_WORKSPACE_ID: "bench-ada",
+    KL_TEAM: "acme",
+    KL_TOOLS_WORKSPACE: undefined,
+    KL_FORK: undefined,
+    KL_EPHEMERAL: undefined,
+    KL_SESSION: id,
+    KL_BENCH_URL: `http://127.0.0.1:${srv.port}`,
+  });
+  try {
+    const first = fakePi();
+    kloudlite(first.pi);
+    await first.start();
+    assert.ok(!first.active().includes("kl_workspace_create"), "it starts with the twelve");
+
+    const search = first.tools.find((t) => t.name === "tool_search")! as unknown as { execute: (...a: any[]) => Promise<any> };
+    await search.execute("c1", { query: "create workspace" }, undefined, undefined, undefined);
+    assert.ok(first.active().includes("kl_workspace_create"), first.active().join(","));
+    await until(() => bench.sessions.found(id).includes("kl_workspace_create"), 5_000, "the bench to have recorded it");
+
+    // The bench restarts: a NEW child, loading the extension from scratch, for the same session.
+    const next = fakePi();
+    kloudlite(next.pi);
+    await next.start();
+    assert.ok(next.active().includes("kl_workspace_create"), `a found tool is armed again: ${next.active().join(",")}`);
+    // And what it starts with is still there beside it.
+    for (const n of BENCH_ALWAYS_ON) assert.ok(next.active().includes(n), n);
+  } finally {
+    restore();
+    await srv.close();
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -571,9 +571,14 @@ export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
     const registered = new Set((pi.getAllTools?.() ?? []).map((t: { name: string } | string) => (typeof t === "string" ? t : t.name)));
     const here = registered.size ? hit.filter((t) => registered.has(t.name)) : hit;
     if (!here.length) return text("no tool for that here; say so to the person");
-    // Activated for the rest of the session: pi applies an additive change before the next request.
+    // Activated for the rest of the SESSION, which outlives this process: the bench restarted under
+    // the owner and the next turn answered `tool kl_workspace_create not found` for a tool the model
+    // had already called (owner, 2026-09-18). The names are recorded on the bench, which is what a
+    // starting session arms itself from.
     const active = pi.getActiveTools?.() ?? ALWAYS_ON;
-    pi.setActiveTools?.([...new Set([...active, ...here.map((t) => t.name)])]);
+    const names = here.map((t) => t.name);
+    pi.setActiveTools?.([...new Set([...active, ...names])]);
+    void rememberFound(names);
     return text(here.map((t) => describeTool(pi, t.name)).join("\n"));
   });
 }
@@ -1042,8 +1047,33 @@ export function tools(pi: ExtensionAPI) {
  * describing; activating is doing, and doing waits for a session.
  */
 function startWith(pi: ExtensionAPI, on: string[] = ALWAYS_ON) {
-  const set = () => pi.setActiveTools?.(on.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
-  pi.on("session_start", async () => void set());
+  const start = on.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1");
+  pi.on("session_start", async () => {
+    // What this session has already found is part of what it starts with: a tool_search hit lasts
+    // the session, and a bench restart is not the end of one.
+    const found = await foundHere();
+    const registered = new Set((pi.getAllTools?.() ?? []).map((t: { name: string } | string) => (typeof t === "string" ? t : t.name)));
+    const armed = found.filter((n) => !registered.size || registered.has(n));
+    pi.setActiveTools?.([...new Set([...start, ...armed])]);
+  });
+}
+
+/** The session this child is, as the bench named it at spawn; absent for anything not a session. */
+const ownSession = () => process.env.KL_SESSION;
+
+/** What `tool_search` has already turned on for this session, from the bench. */
+async function foundHere(): Promise<string[]> {
+  const id = ownSession();
+  if (!id) return [];
+  const r = await benchCall("GET", `/sessions/${encodeURIComponent(id)}/found`).catch(() => ({ ok: false, data: {} }));
+  return r.ok && Array.isArray(r.data?.found) ? (r.data.found as string[]) : [];
+}
+
+/** Record what a search just found, so the next session starts with it. Never fails a search. */
+async function rememberFound(names: string[]): Promise<void> {
+  const id = ownSession();
+  if (!id || !names.length) return;
+  await benchCall("POST", `/sessions/${encodeURIComponent(id)}/found`, { names }).catch(() => undefined);
 }
 
 /**

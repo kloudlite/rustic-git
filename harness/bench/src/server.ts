@@ -99,6 +99,18 @@ export function serve(
         // The person's pick for one session. `default: false` keeps the general default where it is
         // — a dispatch naming a model is not a person changing their mind (spec §1.2).
         if (p.length === 3 && m === "POST" && p[2] === "model") return send(res, 200, await bench.setModel(p[1], await body(req)));
+        /**
+         * What `tool_search` has turned on for this session, kept where it outlives the pi child:
+         * a found tool stays found for the rest of the session, across a bench restart. GET arms a
+         * starting session; POST records what a search just found and answers the whole set.
+         */
+        if (p.length === 3 && p[2] === "found" && (m === "GET" || m === "POST")) {
+          if (!bench.sessions.get(p[1])) return send(res, 404, { error: `no session ${p[1]}` });
+          if (m === "GET") return send(res, 200, { found: bench.sessions.found(p[1]) });
+          const b = await body(req);
+          const names = Array.isArray(b.names) ? (b.names as unknown[]).map(String) : [];
+          return send(res, 200, { found: bench.sessions.remember(p[1], names) });
+        }
       }
       if (m === "GET" && u.pathname === "/exchanges") {
         const s = u.searchParams.get("session"), w = u.searchParams.get("workspace");

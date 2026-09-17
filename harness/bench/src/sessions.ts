@@ -13,7 +13,7 @@ function triple(t?: Triple): Triple {
 
 export type SessionKind = "bench" | "workspace" | "ephemeral";
 /** `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools. */
-export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; thinking?: Thinking; effort?: Effort; kind?: SessionKind; workspace?: string; target?: string };
+export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; thinking?: Thinking; effort?: Effort; kind?: SessionKind; workspace?: string; target?: string; found?: string[] };
 
 type Stored = SessionRow[] | { nextSeq: number; rows: SessionRow[] };
 
@@ -62,6 +62,25 @@ export class SessionList {
     Object.assign(r, patch, { id: r.id });
     this.save();
     return { ...r };
+  }
+  /**
+   * Tools `tool_search` has turned on for this session. A found tool stays found for the rest of
+   * the session, and that has to outlive the pi child: the bench restarted under the owner and the
+   * next turn answered `tool kl_workspace_create not found` for a tool the model had already
+   * called (owner, 2026-09-18). Kept here rather than in the child because this is the only thing
+   * that survives it.
+   */
+  found(id: string): string[] {
+    return [...(this.get(id)?.found ?? [])];
+  }
+  /** Record names as found; answers the whole set, so a caller can arm from one call. */
+  remember(id: string, names: string[]): string[] {
+    const r = this.get(id);
+    if (!r) throw new Error(`no session ${id}`);
+    const all = new Set([...(r.found ?? []), ...names.filter((n) => typeof n === "string" && n)]);
+    r.found = [...all].sort();
+    this.save();
+    return [...r.found];
   }
   remove(id: string): void {
     this.rows = this.rows.filter((r) => r.id !== id);
