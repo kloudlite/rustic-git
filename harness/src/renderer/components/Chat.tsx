@@ -17,6 +17,10 @@ import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from 
 type Action = Extract<Message, { role: "action" }>;
 
 const KIND_GLYPH = { spawn: "+", run: "$", fold: "⇡", note: "…" } as const;
+/** A workspace's answer to an ask comes back as a prompt tagged with its name; the tag is a label. */
+const FROM_WS = /^\[from workspace ([^\]]+)\] /;
+const fromWorkspace = (t: string) => FROM_WS.exec(t)?.[1];
+const said = (t: string) => t.replace(FROM_WS, "");
 
 /**
  * Every tab is a thread, and every thread belongs to a node of the machine's
@@ -355,7 +359,13 @@ export function Chat(props: {
                     <div class="flex flex-col leading-[18px]">
                       <div class="-mx-3 flex items-start rounded-[2px] border border-request-line bg-request px-3 py-2">
                         <span class="w-5 shrink-0 font-bold text-accent">&gt;</span>
-                        <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">{(b as { text: string }).text}</span>
+                        <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
+                          {/* An answer a workspace sent back arrives as a prompt; the workspace is a label, not the message. */}
+                          <Show when={fromWorkspace((b as { text: string }).text)}>
+                            {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-2xs text-subtle">{w()}</span>}
+                          </Show>
+                          {said((b as { text: string }).text)}
+                        </span>
                         <Time at={(b as { at: string }).at} />
                       </div>
                       <For each={(b as { images?: number[] }).images ?? []}>

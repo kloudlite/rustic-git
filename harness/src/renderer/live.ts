@@ -156,7 +156,39 @@ function makeThread(id: string) {
   }
 
   function sent(text: string, images: number[] = []) {
-    push({ role: "user", text, at: now(), images });
+    // The echo the person sees as they hit enter. pi reports taking it a moment later, and THAT
+    // is the message with the real time; this row is stamped from it rather than duplicated.
+    push({ role: "user", text, at: now(), images, local: true });
+  }
+
+  /** The text of a message pi reports, whichever shape it is in. */
+  const textOf = (m: { content?: unknown }) =>
+    typeof m.content === "string" ? m.content : ((m.content as { text?: string }[] | undefined) ?? []).map((c) => c.text ?? "").join("");
+
+  /** The user message pi's last message_start already placed, so message_end does not place it twice. */
+  let placedUser = "";
+
+  /**
+   * The person's prompt, AT THE POINT PI TOOK IT. A queued line used to be echoed on
+   * `queue_update`, which pi sends after the turn it started has already streamed its first
+   * words — so the answer appeared above the question, dated when it was delivered rather than
+   * when it was typed. Here the stream position is the truth and `message.timestamp` is the time.
+   */
+  function userMessage(m: { content?: unknown; timestamp?: unknown } | undefined) {
+    const text = textOf(m ?? {});
+    if (!text.trim()) return;
+    const key = `${String(m?.timestamp ?? "")}\u0000${text}`;
+    if (key === placedUser) return;
+    placedUser = key;
+    const ts = typeof m?.timestamp === "number" ? m.timestamp : Date.now();
+    const at = new Date(ts).toTimeString().slice(0, 5);
+    // The local echo of this very prompt: stamp it instead of showing the line twice.
+    let i = -1;
+    for (let k = messages.length - 1; k >= 0 && i < 0; k--) if (messages[k].role === "user" && (messages[k] as { local?: true }).local && messages[k].text === text) i = k;
+    if (i >= 0) return setMessages(i, { at, ts, local: undefined } as never);
+    push({ role: "user", text, at, ts });
+    // A user message ends whatever assistant block was open: the next delta starts a new one.
+    open = -1;
   }
 
   /** The assistant message being streamed, by index into `messages`. */
@@ -178,11 +210,10 @@ function makeThread(id: string) {
         if (/error|missing|api key|not found/i.test(ev.text as string)) setStatus((ev.text as string).trim().slice(0, 120));
         return;
       case "queue_update": {
-        // pi is the truth: what it still holds stays; what it delivered is
-        // echoed into the transcript as the prompt it became.
+        // pi is the truth about what it still HOLDS, and nothing more: a line it has taken is
+        // echoed by `message_start`, at the point in the stream where it was taken. Echoing it
+        // here put the prompt after the answer to it, because pi reports the queue late.
         const held = new Set([...((ev.steering as string[]) ?? []), ...((ev.followUp as string[]) ?? [])]);
-        const gone = queue.filter((q) => !held.has(q.text));
-        gone.forEach((q) => push({ role: "user", text: q.text, at: now() }));
         setQueue(produce((q) => void q.splice(0, q.length, ...q.filter((x) => held.has(x.text)))));
         return;
       }
@@ -200,6 +231,11 @@ function makeThread(id: string) {
           ts.splice(0, ts.length, ...keep);
         }));
         return;
+      case "message_start": {
+        const m = ev.message as { role?: string; content?: unknown; timestamp?: unknown } | undefined;
+        if (m?.role === "user") userMessage(m);
+        return;
+      }
       case "message_update": {
         const d = ev.assistantMessageEvent as { type: string; delta?: string } | undefined;
         if (d?.type !== "text_delta" || !d.delta) return;
@@ -215,7 +251,9 @@ function makeThread(id: string) {
         open = -1;
         // A background task reporting in: shown as a note, the way the terminal
         // prints a job finishing.
-        const m = ev.message as { role?: string; customType?: string; content?: string } | undefined;
+        const m = ev.message as { role?: string; customType?: string; content?: any; timestamp?: unknown } | undefined;
+        // message_end is authoritative (rpc.md): a start that carried no content yet lands here.
+        if (m?.role === "user") userMessage(m);
         if (m?.role === "custom" && m.customType === "background-task" && typeof m.content === "string") {
           const [head, ...rest] = m.content.split("\n");
           const ok = !/exit [1-9]/.test(head);

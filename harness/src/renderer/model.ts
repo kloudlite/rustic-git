@@ -330,7 +330,8 @@ export type Machine = {
 };
 
 export type Message =
-  | { role: "user"; text: string; at: string; ts?: number; images?: number[] }
+  /** `local`: echoed the moment it was typed, before pi reported taking it; its time is not pi's yet. */
+  | { role: "user"; text: string; at: string; ts?: number; images?: number[]; local?: true }
   | { role: "assistant"; text: string; at: string; ts?: number }
   | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ts?: number; ok?: boolean; output?: string; pending?: boolean; tool?: string; args?: Record<string, unknown>; ms?: number };
 
