@@ -302,6 +302,19 @@ by the harness, not merely shortened: `outcome` (done / blocked / needs the pers
 file, path, command, digest or line of code is dropped from the bench copy; the full text stays
 with the workspace session and in the Queue card. `kl_workspace_progress` is one line per ask.
 
+
+### 3.8 An ask reports its decision, then its result (owner, 04:40 IST 18 Sep)
+
+"When I ask for a small change and push, the same message goes to the workspace session; it
+decides the change and tells the main session it is going ahead with a specific change; then it
+builds, and once built and pushed it informs the main agent that it is done." So: the bench
+forwards the person's intent as stated, in capability terms, never rewritten into tool names. The
+workspace answers an open ask with **reports** (`report {ask, kind, text}`): the first, `progress`,
+is its decision ("going ahead with …") — relayed to the bench and the person as a one-line update
+on the ask, never settling it; further `progress` lines as milestones land; the last, `done` or
+`blocked`, settles the ask with the shaped reply of §3.7. The bench waits between reports; it does
+not poll.
+
 ## 4. Subagents work in trees, not workspaces
 
 ### 4.1 Decisions
