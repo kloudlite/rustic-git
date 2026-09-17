@@ -196,3 +196,21 @@ export function cloneLabel(agent: string | undefined, id: string, parent?: strin
     .trim();
   return bare || "clone";
 }
+
+/**
+ * What a proposal's card is titled: the tool's own verb, in words. "Confirm" said nothing, and the
+ * card already carries the sentence underneath (owner's screenshot, 2026-09-17).
+ * `kl_workspace_create` → `Create workspace`, `edit` → `Edit`, `bash` → `Run`.
+ */
+const VERBS: Record<string, string> = { bash: "Run", process: "Run", write: "Write", edit: "Edit", patch: "Patch", read: "Read", ask: "Ask" };
+export function proposalHeader(tool: string | undefined, summary = ""): string {
+  const t = (tool ?? "").trim();
+  if (!t) return summary.split(/[.:]/)[0] || "Confirm";
+  if (VERBS[t]) return VERBS[t];
+  const parts = t.replace(/^kl_/, "").split("_");
+  // `workspace_create` reads as "Create workspace": the verb is last, and it leads.
+  const verb = parts.length > 1 ? parts.pop()! : "";
+  const subject = parts.join(" ");
+  const said = verb ? `${verb} ${subject}` : subject;
+  return said.charAt(0).toUpperCase() + said.slice(1);
+}

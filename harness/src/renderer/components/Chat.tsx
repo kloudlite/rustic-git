@@ -16,7 +16,7 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { modeLine, modeParts, modelOfThread } from "../rows";
+import { modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
 import { BoxCursor } from "./BoxCursor";
@@ -918,18 +918,20 @@ function Time(props: { at: string }) {
  * (`routes/session/index.tsx:2539` — `Asked {count} question`, then the answer pairs).
  */
 function Answered(props: { q: QuestionRow }) {
-  const asked = () => props.q.ask?.header ?? props.q.summary;
+  const asked = () => (props.q.tool === "question" ? (props.q.ask?.header ?? props.q.summary) : props.q.summary);
   return (
     <Show when={props.q.answer}>
       <div class="flex flex-col font-mono">
         <div class="flex items-baseline gap-2">
-          <span class="w-[2ch] shrink-0 text-muted">→</span>
-          <span class="text-muted">{props.q.tool === "question" ? "Asked 1 question" : "Asked to run"}</span>
+          <span class="w-[2ch] shrink-0 text-success">⏺</span>
+          <span class="min-w-0 flex-1 text-fg">You answered:</span>
           <Time at={props.q.at} />
         </div>
-        <div class="flex min-w-0 items-baseline gap-2 pl-[2ch]">
+        {/* One line per answer, muted: what was asked and what was said (§21's own record). */}
+        <div class="flex min-w-0 items-baseline gap-1 pl-[2ch] text-muted">
           <span class="shrink-0 text-subtle">⎿</span>
-          <span class="min-w-0 truncate text-muted">{asked()}</span>
+          <span class="shrink-0 text-subtle">·</span>
+          <span class="min-w-0 truncate">{asked()}</span>
           <span class="shrink-0 text-subtle">→</span>
           <span class="shrink-0 text-fg">{props.q.answer}</span>
         </div>
@@ -940,8 +942,12 @@ function Answered(props: { q: QuestionRow }) {
 
 function Question(props: { q: QuestionRow; session: string; onChat?: (text: string) => void }) {
   const answered = () => props.q.answer;
-  // Claude Code's shape (§21): a `☐ header` card, numbered options with descriptions, then two
-  // ways out of the choices — say something of your own, or talk about the question itself.
+  /**
+   * Claude Code's own shape (§21, observed live): `☐ Header`, a blank line, the question, then the
+   * options — the selected one marked `❯` in the accent with its label bold — each with its
+   * description on the next line, indented four cells and muted. No box, no background, no table:
+   * the composer block's rail is the only frame, and everything sits on the cell grid.
+   */
   const OPTIONS = () =>
     props.q.ask?.options?.length
       ? props.q.ask.options.map((o) => ({ key: o.label, label: o.label, hint: o.description }))
@@ -961,88 +967,87 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
   let card: HTMLDivElement | undefined;
   // The keyboard belongs to the card while it is open: 1…n, ↑/↓, Enter, Esc all land here.
   onMount(() => card?.focus());
+  /** `❯ ` on the row the keyboard is on, two spaces on every other: one grid, no bar. */
+  const Marker = (p: { on: boolean }) => (
+    <span class="w-[2ch] shrink-0 select-none" classList={{ "text-accent": p.on, "text-transparent": !p.on }}>❯</span>
+  );
   return (
-    <div ref={card} class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono"
+    <div
+      ref={card}
+      data-component="question-card"
+      class="flex flex-col px-4 py-2 font-mono outline-none"
       tabindex={0}
       onKeyDown={(e) => {
-        if (answered()) return;
+        if (answered() || typing()) return;
+        const n = Number(e.key);
+        if (n >= 1 && n <= rows()) return (e.preventDefault(), take(n - 1));
         if (e.key === "ArrowDown") return (e.preventDefault(), setPick((p) => (p + 1) % rows()));
         if (e.key === "ArrowUp") return (e.preventDefault(), setPick((p) => (p - 1 + rows()) % rows()));
-        if (e.key === "Enter" && !typing()) return (e.preventDefault(), take(pick()));
+        if (e.key === "Enter") return (e.preventDefault(), take(pick()));
         if (e.key === "Escape") return (e.preventDefault(), answer("no"));
       }}
     >
       <div class="flex items-baseline gap-2">
-        <span class="shrink-0 text-accent">☐</span>
-        <span class="min-w-0 flex-1 text-fg-strong">{props.q.ask?.header ?? "Confirm"}</span>
-        <Time at={props.q.at} />
+        <span class="shrink-0 text-subtle select-none">☐</span>
+        {/* A question names itself; a proposal is titled by the tool's own verb. No timestamp:
+            the card is a thing to answer, not a row in a log. */}
+        <span class="min-w-0 flex-1 font-bold text-fg-strong">{props.q.ask?.header ?? proposalHeader(props.q.tool, props.q.summary)}</span>
       </div>
-      <div class="pl-5 text-fg">{props.q.summary}</div>
-      {/* A QUESTION shows no argument table: its header, its sentence and its options ARE the
-          arguments, and printing them again spelled the same question three times over
-          (owner's screenshot, 2026-09-17). A PROPOSAL — a tool waiting for a yes — still shows what
-          it is about to do, because there the arguments are the thing being agreed to. */}
-      <Show when={props.q.tool !== "question" && props.q.args && Object.keys(props.q.args).length}>
-        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5">
-          <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
-            {([k, v]) => (
-              <div class="flex min-w-0 items-baseline gap-2">
-                <span class="w-24 shrink-0 truncate text-subtle">{k}</span>
-                <span class="min-w-0 truncate text-muted" title={typeof v === "object" ? JSON.stringify(v) : String(v)}>{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
-              </div>
-            )}
-          </For>
-        </div>
-      </Show>
-      {/* Answered, it collapses to the TUI's record: what was asked, and what was said
-          (`routes/session/index.tsx:2539` — `Asked {count} question`, then the answer). */}
-      <Show when={!answered()} fallback={
-        <div class="flex items-baseline gap-2 pl-5 text-subtle">
-          <span class="shrink-0">→ Asked 1 question</span>
-          <span class="min-w-0 flex-1 truncate text-muted">{answered()}</span>
-        </div>
-      }>
-        <div class="flex flex-col pl-5">
-          <For each={OPTIONS()}>
-            {(o, i) => (
-              <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === i(), "text-muted": pick() !== i() }} onMouseEnter={() => setPick(i())} onClick={() => take(i())}>
-                <span class="shrink-0 text-subtle">{i() + 1}.</span>
-                <span class="shrink-0">{o.label}</span>
-                <span class="min-w-0 truncate text-subtle">{o.hint}</span>
-              </button>
-            )}
-          </For>
-          <Show
-            when={typing()}
-            fallback={
-              <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === OPTIONS().length, "text-muted": pick() !== OPTIONS().length }} onMouseEnter={() => setPick(OPTIONS().length)} onClick={() => setTyping(true)}>
-                <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.</span>
-                <span>Type something.</span>
-              </button>
-            }
-          >
-            <div class="flex items-baseline gap-2">
-              <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.</span>
-              <input
-                autofocus
-                class="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-subtle"
-                placeholder="your answer"
-                value={own()}
-                onInput={(e) => setOwn(e.currentTarget.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && own().trim()) return (e.preventDefault(), e.stopPropagation(), answer(own().trim()));
-                  if (e.key === "Escape") return (e.preventDefault(), e.stopPropagation(), setTyping(false));
-                }}
-              />
-            </div>
-          </Show>
-          <button class="flex items-baseline gap-2 text-left" classList={{ "text-fg": pick() === OPTIONS().length + 1, "text-muted": pick() !== OPTIONS().length + 1 }} onMouseEnter={() => setPick(OPTIONS().length + 1)} onClick={() => take(OPTIONS().length + 1)}>
-            <span class="shrink-0 text-subtle">{OPTIONS().length + 2}.</span>
-            <span>Chat about this</span>
+      <div class="h-[var(--cell-lh)]" />
+      <div class="wrap-words whitespace-pre-wrap text-fg">{props.q.summary}</div>
+      <div class="h-[var(--cell-lh)]" />
+      <For each={OPTIONS()}>
+        {(o, i) => (
+          <div>
+            <button
+              class="flex w-full items-baseline text-left"
+              onMouseEnter={() => setPick(i())}
+              onClick={() => take(i())}
+            >
+              <Marker on={pick() === i()} />
+              <span class="shrink-0 text-subtle">{i() + 1}.&nbsp;</span>
+              <span class="min-w-0 flex-1 truncate" classList={{ "font-bold text-fg": pick() === i(), "text-muted": pick() !== i() }}>{o.label}</span>
+            </button>
+            <Show when={o.hint}>
+              <div class="pl-[4ch] wrap-words text-subtle">{o.hint}</div>
+            </Show>
+          </div>
+        )}
+      </For>
+      <div class="h-[var(--cell-lh)]" />
+      <Show
+        when={typing()}
+        fallback={
+          <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(OPTIONS().length)} onClick={() => setTyping(true)}>
+            <Marker on={pick() === OPTIONS().length} />
+            <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.&nbsp;</span>
+            <span classList={{ "font-bold text-fg": pick() === OPTIONS().length, "text-muted": pick() !== OPTIONS().length }}>Type something.</span>
           </button>
-          <div class="pt-1 text-subtle">Enter to select · ↑/↓ to navigate · Esc to cancel</div>
+        }
+      >
+        <div class="flex items-baseline">
+          <Marker on={true} />
+          <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.&nbsp;</span>
+          <input
+            autofocus
+            class="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-subtle"
+            placeholder="your answer"
+            value={own()}
+            onInput={(e) => setOwn(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && own().trim()) return (e.preventDefault(), e.stopPropagation(), answer(own().trim()));
+              if (e.key === "Escape") return (e.preventDefault(), e.stopPropagation(), setTyping(false));
+            }}
+          />
         </div>
       </Show>
+      <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(OPTIONS().length + 1)} onClick={() => take(OPTIONS().length + 1)}>
+        <Marker on={pick() === OPTIONS().length + 1} />
+        <span class="shrink-0 text-subtle">{OPTIONS().length + 2}.&nbsp;</span>
+        <span classList={{ "font-bold text-fg": pick() === OPTIONS().length + 1, "text-muted": pick() !== OPTIONS().length + 1 }}>Chat about this</span>
+      </button>
+      <div class="h-[var(--cell-lh)]" />
+      <div class="text-subtle">Enter to select · ↑/↓ to navigate · Esc to cancel</div>
     </div>
   );
 }

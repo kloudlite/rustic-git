@@ -28,6 +28,25 @@ const STEPS: [number, (id: string) => Record<string, unknown>][] = [
   [400, () => ({ type: "tool_execution_start", toolCallId: "d4", toolName: "edit", args: { path: "bins/agent/src/controller/run.rs", edits: [{ oldText: "        .watches(", newText: "        .watches_stream(" }] } })],
   [700, () => ({ type: "tool_execution_end", toolCallId: "d4", result: { output: "Successfully edited" } })],
   [300, (id) => ({ type: "queue_update", session: id, steering: ["and run the fleet probe after"], followUp: [] })],
+  // A question, so the card can be looked at without a model turn: it takes the composer's place
+  // exactly as a real one does, and answering it leaves the record behind.
+  [400, (id) => ({
+    type: "proposal",
+    row: {
+      id: `q-demo-${Date.now().toString(36)}`,
+      session: id,
+      tool: "question",
+      summary: "Two sandboxes have been starting for 40 minutes. What should I do with them?",
+      question: {
+        header: "Stuck sandboxes",
+        options: [
+          { label: "Start both", description: "stop and start them again, then watch for five minutes" },
+          { label: "Leave them", description: "they may be waiting on an image pull" },
+          { label: "Delete them", description: "nothing in them is pushed" },
+        ],
+      },
+    },
+  })],
   [800, () => ({ type: "agent_end", messages: [] })],
 ];
 

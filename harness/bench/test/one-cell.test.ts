@@ -152,9 +152,13 @@ test("a live question replaces the input, and the transcript keeps only the reco
   assert.match(chat, /\+\{waitingCount\(\) - 1\} more waiting/, "a second question is counted, not stacked");
   // The transcript renders the record component for a question row, not the card.
   assert.match(chat, /fallback=\{<Answered q=\{b as QuestionRow\} \/>\}/);
-  assert.match(chat, /Asked 1 question/);
-  // A question carries no argument table: its own text is the argument.
-  assert.match(chat, /props\.q\.tool !== "question" && props\.q\.args/);
+  assert.match(chat, /You answered:/, "§21's record: what you answered, then one line per answer");
+  // The card carries no argument table and no frame of its own: the composer's rail is the frame.
+  assert.ok(!/props\.q\.args/.test(chat), "no key/value dump in the card");
+  const card = chat.slice(chat.indexOf('data-component="question-card"'), chat.indexOf("Enter to select"));
+  assert.ok(!/border|bg-request|rounded/.test(card), "no border, no background, no rounding");
+  assert.ok(!/<Time /.test(card), "a card is a thing to answer, not a row in a log");
+  assert.match(card, /<Marker on=\{pick\(\) === i\(\)\} \/>/, "the selected row is marked (❯), not filled with a bar");
   // And no tool row is ever pushed for it.
   const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
   assert.match(live, /if \(name === "question"\) return;/);

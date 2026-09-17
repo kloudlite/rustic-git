@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState } from "../../src/renderer/rows.ts";
+import { benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -85,4 +85,12 @@ test("a clone is labelled by its agent, never by its id", () => {
   // Whatever comes out, no hex fragment survives.
   for (const label of [cloneLabel("probe-frontend-ws-nrt6k2p9", "ws-nrt6k2p9"), cloneLabel("x-eph-9q2z", "ws-y")])
     assert.ok(!/ws-[a-z0-9]{6,}|-eph-/.test(label), label);
+});
+
+test("a proposal is titled by the tool's own verb", () => {
+  assert.equal(proposalHeader("kl_workspace_create", "Create workspace test"), "Create workspace");
+  assert.equal(proposalHeader("kl_environment_service_add", "Add redis"), "Add environment service");
+  assert.equal(proposalHeader("edit"), "Edit");
+  assert.equal(proposalHeader("bash"), "Run");
+  assert.equal(proposalHeader(undefined, "Do the thing: now"), "Do the thing", "nothing known: the sentence's own head");
 });
