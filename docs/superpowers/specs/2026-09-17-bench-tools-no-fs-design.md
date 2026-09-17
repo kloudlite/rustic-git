@@ -374,3 +374,14 @@ says how: "info = a question about the workspace's code or state that changes no
   is NOT a plan item.
 - Identity line (bench): "Ask a workspace for information with kind: info — it answers from a
   read-only copy without stopping its work. Ask for work with kind: work."
+
+## 20. Parallel tool calls (owner, 2026-09-17 15:50 IST)
+
+Claude Code runs independent tool calls of one turn at once and shows them as one group row:
+`● Running 6 shell commands · 5m 10s…` with each command as a sub-row (`└ $ …  (5m 9s)`) that
+updates live. The harness does the same: when a turn issues several tool calls, the tool server
+runs them concurrently (each `bash`/`exec` is its own job already; the extension must not await
+them serially — issue all, await all), and the desktop folds consecutive tool rows of one turn
+into a group row with a count, the running verb, the group's elapsed time, and the sub-rows;
+the group collapses to its one line when done. Identity: "Independent commands go in one turn,
+together; they run at the same time."
