@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
-import { Plans, Procs, Tasks, type PlanItem, type ProcRow } from "./ledger.ts";
+import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
@@ -211,8 +211,14 @@ export class Bench {
       try {
         if (ev.widgetKey === "harness:plan" && line) {
           // What this session says it is going to do. The panel draws it; nothing else reads it.
-          const p = JSON.parse(line) as { items?: string[]; done?: string };
-          const items = p.done !== undefined ? this.plans.done(id, p.done) : this.plans.set(id, p.items ?? []);
+          const p = JSON.parse(line) as { set?: { text: string; state?: PlanState; why?: string }[]; done?: string; doing?: string; later?: { text: string; why?: string } };
+          const items = p.done !== undefined
+            ? this.plans.mark(id, p.done, "done")
+            : p.doing !== undefined
+              ? this.plans.mark(id, p.doing, "doing")
+              : p.later !== undefined
+                ? this.plans.mark(id, p.later.text, "later", p.later.why)
+                : this.plans.set(id, p.set ?? []);
           this.write(() => items);
           this.emit({ type: "plan", session: id, items });
         }
@@ -292,7 +298,10 @@ export class Bench {
     // somebody's ask done with an answer to a different question.
     const replied = /\[reply ([^\]]+)\]/.exec(answer)?.[1];
     const named = [replied, ...asks].find((x) => x && queue.some((q) => q.exchange === x));
-    if (!named && !asks.length) return;
+    // An AGENT's session exists for one task and answers to one caller: every turn of it is that
+    // answer, so it needs no tag. A workspace session is a conversation and does need one.
+    const solo = queue.length === 1 && queue[0].agent;
+    if (!named && !asks.length && !solo) return;
     // The tag is the truth; FIFO is the fallback when a turn took an ask whose id it dropped, or
     // when several asks were merged into one run.
     const at = Math.max(0, queue.findIndex((x) => x.exchange === named));

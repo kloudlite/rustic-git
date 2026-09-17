@@ -66,10 +66,13 @@ export const wsName = (id: string) => wsNames()[id] ?? id;
  * What each session said it would do. The PLAN panel used to draw a hardcoded empty list — pi has
  * no todo events of its own, so the plan comes from the model's own `kl_plan` through the bench.
  */
-const [plans, setPlans] = createStore<Record<string, { text: string; done?: true }[]>>({});
+export type PlanRow = { text: string; state: "todo" | "doing" | "done" | "later"; why?: string };
+const [plans, setPlans] = createStore<Record<string, PlanRow[]>>({});
 export { plans };
+/** The panel's own four states, which the tree already draws: a plan is a plan either way. */
+const PLAN_STATE = { todo: "pending", doing: "active", done: "done", later: "blocked" } as const;
 export const planOf = (session: string) =>
-  (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text, state: (x.done ? "done" : "pending") as "done" | "pending" }));
+  (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text, state: PLAN_STATE[x.state] ?? "pending", note: x.why }));
 
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
@@ -386,7 +389,7 @@ export function onEvent(ev: Ev & { pi?: string }) {
       return;
     }
     case "plan":
-      if (typeof ev.session === "string") setPlans(ev.session, (ev.items as { text: string; done?: true }[]) ?? []);
+      if (typeof ev.session === "string") setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
       return;
     case "exchange":
       // One row per publish: a record, or a transition of one already held.

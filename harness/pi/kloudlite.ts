@@ -144,7 +144,8 @@ const PLATFORM = [
   "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
-  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Write the plan first when the work has more than two steps, and tick items as they land.",
+  "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent.",
+  "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
@@ -349,14 +350,22 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
 /** The plan this session is working to: written once, ticked as it lands. */
 export function planTools(reg: ReturnType<typeof makeReg>) {
   const publish = (ctx: any, v: unknown) => ctx?.ui?.setWidget?.("harness:plan", [JSON.stringify(v)]);
+  const ITEM = Type.Object({ text: Type.String(), state: Type.Optional(Type.String({ description: "todo, doing, done or later" })), why: Type.Optional(Type.String({ description: "with later: why it is not now" })) });
   reg(
     "plan",
-    { items: Type.Optional(Type.Array(Type.String(), { description: "the steps, in order — writes the plan" })), done: Type.Optional(Type.String({ description: "a step that is finished — ticks it" })) },
+    {
+      set: Type.Optional(Type.Array(ITEM, { description: "the whole plan, in order — replaces it" })),
+      doing: Type.Optional(Type.String({ description: "the step being worked on now" })),
+      done: Type.Optional(Type.String({ description: "the step that just landed" })),
+      later: Type.Optional(Type.Object({ text: Type.String(), why: Type.String({ description: "why it is not being done now" }) }, { description: "a step pushed to later" })),
+    },
     async (a, _signal, ctx) => {
-      if (a.done !== undefined) return publish(ctx, { done: a.done }), text(`done: ${a.done}`);
-      if (!a.items?.length) return { ...text("plan takes items (the steps) or done (a step that landed)"), isError: true };
-      publish(ctx, { items: a.items });
-      return text(`plan: ${a.items.length} steps`);
+      // The person reads the PLAN panel, not a paragraph about the plan: one call keeps it current.
+      for (const [k, v] of [["done", a.done], ["doing", a.doing]] as const) if (v !== undefined) return publish(ctx, { [k]: v }), text(`${k}: ${v}`);
+      if (a.later) return publish(ctx, { later: a.later }), text(`later: ${a.later.text} (${a.later.why})`);
+      if (!a.set?.length) return { ...text("plan takes set (the steps), doing, done, or later"), isError: true };
+      publish(ctx, { set: a.set });
+      return text(`plan: ${a.set.length} steps`);
     },
   );
 }

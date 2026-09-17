@@ -70,7 +70,8 @@ export class Procs {
 }
 
 
-export type PlanItem = { text: string; done?: true };
+export type PlanState = "todo" | "doing" | "done" | "later";
+export type PlanItem = { text: string; state: PlanState; why?: string };
 
 /**
  * `/bench/plans.json`: what each session said it was going to do. The model writes it with
@@ -84,18 +85,24 @@ export class Plans {
     this.file = path.join(dir, "plans.json");
     this.rows = readJson<Record<string, PlanItem[]>>(this.file, {});
   }
-  set(session: string, items: string[]): PlanItem[] {
-    this.rows[session] = items.map((text) => ({ text }));
+  /** The whole plan, replaced. What was already done keeps its state when the text is unchanged. */
+  set(session: string, items: { text: string; state?: PlanState; why?: string }[]): PlanItem[] {
+    const before = this.rows[session] ?? [];
+    this.rows[session] = items.map((x) => ({ text: x.text, state: x.state ?? before.find((b) => b.text === x.text)?.state ?? "todo", ...(x.why ? { why: x.why } : {}) }));
     replaceJson(this.file, this.rows);
     return this.get(session);
   }
-  /** Tick by exact text, else by the first item that contains it — a model rarely quotes itself exactly. */
-  done(session: string, item: string): PlanItem[] {
+  /**
+   * One item moved. Matched by exact text, else by the first unfinished item that contains it — a
+   * model rarely quotes its own plan back word for word, and refusing on that is a tool that
+   * annoys rather than one that works.
+   */
+  mark(session: string, item: string, state: PlanState, why?: string): PlanItem[] {
     const list = this.rows[session] ?? [];
     const i = list.findIndex((x) => x.text === item);
-    const j = i >= 0 ? i : list.findIndex((x) => !x.done && x.text.toLowerCase().includes(item.toLowerCase()));
+    const j = i >= 0 ? i : list.findIndex((x) => x.state !== "done" && x.text.toLowerCase().includes(item.toLowerCase()));
     if (j < 0) throw new Error(`no plan item ${JSON.stringify(item)}`);
-    list[j].done = true;
+    list[j] = { ...list[j], state, ...(why ? { why } : {}) };
     replaceJson(this.file, this.rows);
     return this.get(session);
   }

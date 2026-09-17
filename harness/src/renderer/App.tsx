@@ -852,7 +852,7 @@ export function App() {
             the window, describing whatever the active pane has selected. */}
         <Show when={inspector()}>
           <Inspector
-            machine={machine()}
+            machine={planned()}
             selected={selected()}
             onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}

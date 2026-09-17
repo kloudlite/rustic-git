@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pickRenderer, processes, capabilities } from "../../src/renderer/components/results/pick.ts";
 import { procsOf, sessionOf } from "../../src/renderer/rows.ts";
+import { onEvent, planOf } from "../../src/renderer/live.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -46,4 +47,25 @@ test("the processes panel shows one session's, and a tab names its own session",
   assert.equal(sessionOf({ kind: "session", id: "s-2" }), "s-2");
   assert.equal(sessionOf({ kind: "workspace", id: "api" }), "w-api");
   assert.equal(sessionOf({ kind: "ephemeral", id: "api-eph-1" }), "e-api-eph-1");
+});
+
+test("a plan event fills the panel, with the doing item and the reason for a later one", () => {
+  onEvent({
+    type: "plan",
+    session: "s-plan",
+    items: [
+      { text: "clone the repo", state: "done" },
+      { text: "add the endpoint", state: "doing" },
+      { text: "open a pull request", state: "later", why: "the API is not merged yet" },
+      { text: "write the tests", state: "todo" },
+    ],
+  });
+  // The panel's own four states — the tree already draws these, so a plan needs no second shape.
+  assert.deepEqual(planOf("s-plan").map((t) => [t.text, t.state, t.note]), [
+    ["clone the repo", "done", undefined],
+    ["add the endpoint", "active", undefined],
+    ["open a pull request", "blocked", "the API is not merged yet"],
+    ["write the tests", "pending", undefined],
+  ]);
+  assert.deepEqual(planOf("nobody"), [], "a session with no plan has no plan, not a stale one");
 });
