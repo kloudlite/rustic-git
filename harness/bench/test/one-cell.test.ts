@@ -148,7 +148,9 @@ test("a live question replaces the input, and the transcript keeps only the reco
   const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
   // The card is inside the composer block, and the input is hidden while it is up.
   assert.match(chat, /<Show when=\{waiting\(\)\}>/);
-  assert.match(chat, /classList=\{\{ hidden: !!waiting\(\) \}\}/);
+  // The picker replaces the input the same way (spec §1.3): it is IN PLACE OF the composer, never
+  // stacked above it — the `❯` row stayed visible under the dialog on the fleet.
+  assert.match(chat, /classList=\{\{ hidden: !!waiting\(\) \|\| dialogOpen\(\) \}\}/);
   assert.match(chat, /\+\{waitingCount\(\) - 1\} more waiting/, "a second question is counted, not stacked");
   // The transcript renders the record component for a question row, not the card.
   assert.match(chat, /fallback=\{<Answered q=\{b as QuestionRow\} \/>\}/);

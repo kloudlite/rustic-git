@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, modeLine, modeParts, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -159,4 +159,27 @@ test("footer segments appear only when set", () => {
 test("the line joins only the segments that are there", () => {
   assert.equal(modeLine("build", "deepseek/deepseek-reasoner", "high", "max"), "Build \u00b7 deepseek-reasoner DeepSeek \u00b7 thinking high \u00b7 effort max");
   assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan \u00b7 Claude Opus 5 Anthropic");
+});
+
+/**
+ * The footer read `claude-fable-5-1` seconds after the owner picked a DeepSeek model on the fleet:
+ * Chat fell back to `props.machine.model`, which is the DEMO FIXTURE (`MACHINE.model`). The chain
+ * is the session's row, then the bench default, and then NOTHING — a fixture is never a fact about
+ * what is answering.
+ */
+test("an unknown model is no model, never the fixture", () => {
+  assert.equal(modelOfThread("deepseek/deepseek-reasoner", "deepseek/deepseek-chat"), "deepseek/deepseek-reasoner");
+  assert.equal(modelOfThread(undefined, "deepseek/deepseek-chat"), "deepseek/deepseek-chat");
+  assert.equal(modelOfThread(undefined, undefined), undefined);
+  assert.equal(displayModel(modelOfThread(undefined, undefined)), "no model");
+});
+
+/** The owner wants the readable name: pi's own catalogue beats the id it was picked by. */
+test("a picked model renders by the name pi gave it", () => {
+  assert.equal(displayModel("deepseek/deepseek-reasoner"), "deepseek-reasoner");
+  noteModelNames([{ id: "deepseek/deepseek-reasoner", name: "DeepSeek Reasoner" }]);
+  assert.equal(displayModel("deepseek/deepseek-reasoner"), "DeepSeek Reasoner");
+  assert.deepEqual(modeParts("build", "deepseek/deepseek-reasoner", "high"), {
+    mode: "Build", model: "DeepSeek Reasoner", provider: "DeepSeek", thinking: "thinking high",
+  });
 });

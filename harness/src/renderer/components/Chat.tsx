@@ -115,9 +115,14 @@ export function Chat(props: {
    * only the bench's showed "no model" in a workspace tab (owner, 2026-09-17). pi's status line
    * first while it is up, then the row, then the bench's default.
    */
-  const modelName = () => modelOfThread(thread()?.model ?? props.machine.model, live.benchModel());
+  // NEVER `props.machine.model`: that is the demo fixture (`MACHINE.model`, model.ts), and it is
+  // what showed `claude-fable-5-1` in the footer seconds after the owner picked a DeepSeek model
+  // on the fleet. The session's own row is the only truth; with nothing known, show nothing.
+  const modelName = () => modelOfThread(thread()?.model, live.benchModel());
   /** One string for the mode, the model and the level, used in all three places. */
   /** The SESSION's own thinking and effort, from its bench row; nothing invented when unset. */
+  /** Whether the picker holds the composer slot: it REPLACES the input row, never stacks over it. */
+  const dialogOpen = () => live.dialog() === "model" && !!L().id && !waiting();
   const thinkingOf = () => thread()?.thinking;
   const effortOf = () => thread()?.effort;
   const line = () => modeLine(live.mode(), modelName(), thinkingOf(), effortOf());
@@ -614,8 +619,8 @@ export function Chat(props: {
                 (owner, 2026-09-17). The mode row below stays where it is. */}
             {/* `/model` takes the input's place the same way a question does: compact, in the
                 composer slot, never a floating modal (spec §1.3). */}
-            <Show when={live.dialog() === "model" && L().id}>
-              <div class="px-1 py-1">
+            <Show when={dialogOpen()}>
+              <div class="px-4 py-2">
                 <ModelDialog session={L().id} model={modelName()} effort={effortOf()} onClose={() => (live.setDialog(undefined), composerEl()?.focus())} />
               </div>
             </Show>
@@ -636,7 +641,9 @@ export function Chat(props: {
                 </div>
               )}
             </Show>
-            <div class="flex items-start px-4 pt-3 pb-1.5 font-mono" classList={{ hidden: !!waiting() }}>
+            {/* IN PLACE OF, not above: the `❯ tell the bench what to do` row stayed visible under
+                the picker on the fleet, so the dialog hides it exactly as a question does. */}
+            <div class="flex items-start px-4 pt-3 pb-1.5 font-mono" classList={{ hidden: !!waiting() || dialogOpen() }}>
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}

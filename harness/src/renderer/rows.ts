@@ -83,6 +83,16 @@ const MODEL_NAMES: Record<string, string> = {
   "anthropic/claude-haiku-5": "Claude Haiku 5",
   "openai/gpt-5": "GPT-5",
 };
+/**
+ * Names pi itself gave us for `provider/model-id`, filled from `GET /models` when the picker loads
+ * (spec §1.3: the owner wants the readable name, not the raw id). A live catalogue beats the static
+ * map above, which only ever knew the handful of models that existed when it was written.
+ */
+const LIVE_MODEL_NAMES = new Map<string, string>();
+export function noteModelNames(rows: { id: string; name: string }[]): void {
+  for (const r of rows) if (r.id && r.name) LIVE_MODEL_NAMES.set(r.id, r.name);
+}
+
 /** Provider slugs as a person writes them; anything else is titlecased from the slug. */
 const PROVIDERS: Record<string, string> = { deepseek: "DeepSeek", anthropic: "Anthropic", openai: "OpenAI", google: "Google", openrouter: "OpenRouter", ollama: "Ollama" };
 
@@ -91,7 +101,7 @@ export function displayModel(id: string | undefined): string {
   // "not started" is pi's own status before a child is up: it is not a model, and saying it where
   // the model goes told the owner his session had none (2026-09-17).
   if (!t || /^not started$/i.test(t)) return "no model";
-  return MODEL_NAMES[t] ?? t.split("/").pop() ?? t;
+  return LIVE_MODEL_NAMES.get(t) ?? MODEL_NAMES[t] ?? t.split("/").pop() ?? t;
 }
 
 /** The provider behind a model id, said as opencode says it — after the name, muted. */

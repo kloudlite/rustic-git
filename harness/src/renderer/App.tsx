@@ -8,7 +8,7 @@ import { Chat, fit } from "./components/Chat";
 import { Inspector } from "./components/inspector/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
-import { makeTab, nextIndex, reconcile as reconcileTabs, scopeOfTab, sessionIndex, sessionsOfTab, type TermTab } from "./components/terminal/tabs";
+import { makeTab, nextIndex, scopeOfTab, type TermTab } from "./components/terminal/tabs";
 import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
@@ -329,85 +329,28 @@ export function App() {
   // The terminals of the tab the panel is showing. All stay mounted; only these
   // are visible, so switching tabs never drops a socket.
   const tabsHere = () => tabs().filter((t) => t.owner === selected());
-  // Which session tabs have had their scope's tmux listed at least once. The 5 s
-  // reconcile below is the truth after that.
-  const listed = new Set<string>();
-  // Owners with a `pty:open` in flight: a session that was just asked for is not
-  // listed yet, and reconciling against that listing would close the new tab.
-  const opening = new Set<string>();
-
   /**
-   * A terminal belongs to the session tab it was opened from, and its scope is
-   * that tab's — there is nothing to pick. The first open of a tab adopts
-   * whatever tmux already holds under this tab's name (another device, an
-   * earlier run of the app) instead of forking a second shell beside it.
+   * A terminal belongs to the session tab it was opened from, and its scope is that tab's. A tab
+   * IS a socket to the pod's shell sidecar (spec §2.3): there is nothing to adopt, nothing to
+   * reconcile and nothing to reattach — a new tab is a new shell, and a closed one is finished.
    */
-  const openShell = async (owner = selected()) => {
+  const openShell = (owner = selected()) => {
     const scopeId = scopeOfTab(machine(), owner);
     setDrawer(true);
-    opening.add(owner);
-    try {
-      const live = await window.harness.pty.sessions(scopeId).catch(() => []);
-      const names = live.map((s) => s.name);
-      if (!listed.has(owner)) {
-        listed.add(owner);
-        const mine = sessionsOfTab(names, owner);
-        if (mine.length) {
-          const made = mine.map((n) => makeTab(machine(), teamName(), owner, scopeId, sessionIndex(n, owner)));
-          setTabs((ts) => [...ts, ...made]);
-          setActive(made[made.length - 1].id);
-          return;
-        }
-      }
-      // A free index in BOTH the listing and the open tabs, so "+" never lands
-      // on a session somebody else's device is already holding.
-      const taken = [...names, ...tabs().filter((x) => x.owner === owner).map((x) => x.session)];
-      const t = makeTab(machine(), teamName(), owner, scopeId, nextIndex(taken, owner));
-      setTabs((ts) => [...ts, t]);
-      setActive(t.id);
-    } finally {
-      opening.delete(owner);
-    }
+    const taken = tabs().filter((x) => x.owner === owner).map((x) => x.session);
+    const t = makeTab(machine(), teamName(), owner, scopeId, nextIndex(taken, owner));
+    setTabs((ts) => [...ts, t]);
+    setActive(t.id);
   };
-  /** Drop a tab from the window. The view unmounts, which closes its socket; tmux is untouched. */
+  /** Drop a tab from the window; the view unmounts, which closes its socket and ends that shell. */
   const dropTab = (id: string) => {
     const rest = tabs().filter((t) => t.id !== id);
     setTabs(rest);
     if (rest.length === 0) setMaximised(false);
     else if (active() === id) setActive(rest[rest.length - 1].id);
   };
-  // The x ends the shell for good — tmux kill-session on the far side — because
-  // a person closing a terminal means it, while a dropped socket never does.
-  const closeTab = (id: string) => {
-    void window.harness.pty.kill(id);
-    dropTab(id);
-  };
-
-  /**
-   * Tabs mirror tmux sessions both ways: one opened on another device shows up
-   * here, and one killed there takes its tab with it. Listing is the only
-   * evidence — a tab is never killed by this, only dropped.
-   */
-  const syncTabs = async () => {
-    const cur = tabs().find((t) => t.id === active());
-    if (!cur || opening.has(cur.owner)) return;
-    const live = await window.harness.pty.sessions(cur.scope).catch(() => undefined);
-    if (!live || opening.has(cur.owner)) return;
-    const { add, remove } = reconcileTabs(tabs(), live.map((s) => s.name), cur.owner, Date.now());
-    if (!add.length && !remove.length) return;
-    const made = add.map((n) => makeTab(machine(), teamName(), cur.owner, cur.scope, sessionIndex(n, cur.owner)));
-    setTabs((ts) => [...ts.filter((t) => !remove.includes(t.id)), ...made]);
-    const rest = tabs();
-    if (!rest.some((t) => t.id === active())) setActive(rest[rest.length - 1]?.id ?? "");
-    if (rest.length === 0) setMaximised(false);
-  };
-  onMount(() => {
-    const beat = setInterval(() => void syncTabs(), 5_000);
-    onCleanup(() => clearInterval(beat));
-  });
-  // On a tab switch, and the moment the bench comes back: the listing is stale
-  // exactly when nobody was watching it.
-  createEffect(() => (active(), live.connected(), void untrack(() => syncTabs())));
+  // Closing a tab ends its shell, because the socket is the shell. Nothing outlives it.
+  const closeTab = (id: string) => dropTab(id);
 
   const closePanel = () => {
     setDrawer(false);
@@ -415,7 +358,7 @@ export function App() {
   };
   const shellShown = () => tabsHere().length > 0 && drawer();
   /** The Shell button and ⌘J are one gesture: open a shell here, bring the drawer back, or put it away. */
-  const toggleShell = () => void (shellShown() ? closePanel() : tabsHere().length ? setDrawer(true) : openShell());
+  const toggleShell = () => (shellShown() ? closePanel() : tabsHere().length ? setDrawer(true) : openShell());
 
   /** Back out of one layer at a time: a file, then the environment, then a
       maximised shell, then the shell. Nothing else swallows escape. */
