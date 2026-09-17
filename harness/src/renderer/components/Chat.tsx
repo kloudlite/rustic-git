@@ -35,7 +35,7 @@ function AgentReport(props: { report: { status?: string; head: string; body: str
         <Show when={props.report.status}>{(s) => <span class={`shrink-0 font-bold ${tone()}`}>{s()}</span>}</Show>
         <span class="min-w-0 flex-1">{props.report.head}</span>
         <Show when={props.report.body}>
-          <button class="shrink-0 text-xs text-subtle hover:text-fg" onClick={() => setOpen((v) => !v)}>{open() ? "less" : "more"}</button>
+          <button class="shrink-0 text-subtle hover:text-fg" onClick={() => setOpen((v) => !v)}>{open() ? "less" : "more"}</button>
         </Show>
       </span>
       <Show when={open() && props.report.body}>{(t) => <span class="pt-1 whitespace-pre-wrap text-muted">{t()}</span>}</Show>
@@ -196,9 +196,7 @@ export function Chat(props: {
               }}
               aria-selected={!away() && t.id === thread()?.id}
               title={TAB_TITLE[t.kind]}
-              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line pr-2 pl-3 text-base whitespace-nowrap text-muted
-                     hover:bg-bg aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
-                     aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
+              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line pr-2 pl-3 whitespace-nowrap text-muted hover:bg-bg aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
             >
               <button
                 class="flex min-w-0 flex-1 items-center gap-1.5 self-stretch"
@@ -226,9 +224,7 @@ export function Chat(props: {
             <div
               role="tab"
               aria-selected={true}
-              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 text-base whitespace-nowrap text-muted
-                     aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
-                     aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
+              class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 whitespace-nowrap text-muted aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
             >
               <Icon name="server" class="text-accent" />
               <span class="min-w-0 flex-1 truncate font-mono">{env().name}</span>
@@ -242,9 +238,7 @@ export function Chat(props: {
           <div
             role="tab"
             aria-selected={true}
-            class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 text-base whitespace-nowrap text-muted
-                   aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg
-                   aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
+            class="relative flex h-[35px] max-w-60 min-w-32 items-center gap-1.5 border-r border-line px-3 whitespace-nowrap text-muted aria-selected:-mb-px aria-selected:bg-bg aria-selected:text-fg aria-selected:before:absolute aria-selected:before:inset-x-0 aria-selected:before:top-0 aria-selected:before:h-px aria-selected:before:bg-focus"
           >
             <Icon name="settings" class="text-accent" />
             <span class="min-w-0 flex-1 truncate">settings</span>
@@ -270,7 +264,7 @@ export function Chat(props: {
         </Show>
       </div>
 
-      <div class="flex h-5.5 items-center gap-1 px-4 text-base whitespace-nowrap text-fg/80">
+      <div class="flex h-5.5 items-center gap-1 px-4 whitespace-nowrap text-fg/80">
         <Show
           when={!away()}
           fallback={
@@ -290,12 +284,12 @@ export function Chat(props: {
         <span>{thread()?.name}</span>
         <span class="flex-1" />
         <Show when={thread()?.pi && !live.connected()}>
-          <span class="mr-2 inline-flex items-center gap-1 text-xs text-warning" title="Showing what was last seen; nothing can be sent until the bench is back">
+          <span class="mr-2 inline-flex items-center gap-1 text-warning" title="Showing what was last seen; nothing can be sent until the bench is back">
             <span class="size-1.5 rounded-full bg-warning" /> bench offline
           </span>
         </Show>
         <Show when={readonly()}>
-          <span class="inline-flex items-center gap-1 text-xs text-muted">
+          <span class="inline-flex items-center gap-1 text-muted">
             <Icon name="lock" size={12} /> read-only
           </span>
         </Show>
@@ -328,7 +322,7 @@ export function Chat(props: {
           over the terminal, so the whole chat column is hidden while a shell
           has the tab to itself. */}
       <div class="grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)]" classList={{ hidden: props.shellFull }}>
-      <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono text-sm leading-[18px]">
+      <div class="grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto_auto] font-mono">
         {/* A file opens in place: the thread stays selected and the sidebar
             stays put, because reading a file is part of following the work
             rather than a separate place to be. */}
@@ -343,7 +337,7 @@ export function Chat(props: {
             once a person scrolls up — the terminal's behaviour, no script. */}
         <div
           ref={scroller}
-          class="relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 pb-4 select-text"
+          class="pane relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 pb-4 select-text"
           classList={{ hidden: onFile() }}
           onScroll={() => { if (atBottom()) setBehind(false); }}
         >
@@ -360,7 +354,7 @@ export function Chat(props: {
             {/* Where the thread begins, so the space above the first message reads
                 as the top of something rather than as nothing. */}
             {/* `# session` left, what it has spent right: the session view's own header. */}
-            <div class="flex items-baseline gap-3 pb-2 font-mono text-[13px] text-subtle" classList={{ hidden: blocks().length === 0 }}>
+            <div class="flex items-baseline gap-3 pb-2 font-mono text-subtle" classList={{ hidden: blocks().length === 0 }}>
               <span class="min-w-0 truncate text-fg-strong">
                 <span class="text-subtle"># </span>
                 {thread()?.kind === "machine" ? "bench" : thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "btw" ? "fork · read-only" : thread()?.name}
@@ -395,17 +389,17 @@ export function Chat(props: {
                           <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
                         </div>
                         {/* After every assistant turn: what answered, on what, in how long. */}
-                        <div class="pt-1 font-mono text-xs text-subtle">▣&nbsp; {mode()} · {modelName()}<Show when={(b as { ms?: number }).ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show></div>
+                        <div class="pt-1 font-mono text-subtle">▣&nbsp; {mode()} · {modelName()}<Show when={(b as { ms?: number }).ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show></div>
                       </div>
                     }
                   >
-                    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]">
+                    <div class="flex flex-col font-mono">
                       <div class="-mx-3 flex items-start border-l-2 border-request-line bg-request px-3 py-2">
                         <span class="w-4 shrink-0 font-bold text-accent">&gt;</span>
                         <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
                           {/* An answer a workspace sent back arrives as a prompt; the workspace is a label, not the message. */}
                           <Show when={fromWorkspace((b as { text: string }).text)}>
-                            {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-2xs text-subtle">{w()}</span>}
+                            {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-subtle">{w()}</span>}
                           </Show>
                           <Show when={fromAgent((b as { text: string }).text)} fallback={said((b as { text: string }).text)}>
                             {(r) => <AgentReport report={r()} />}
@@ -443,13 +437,13 @@ export function Chat(props: {
               <For each={matches()}>
                 {(c, i) => (
                   <button
-                    class="flex h-5.5 w-full items-center gap-3 px-3 text-left font-mono text-sm"
+                    class="flex h-5.5 w-full items-center gap-3 px-3 text-left font-mono"
                     classList={{ "bg-selected text-selected-fg": i() === pick(), "text-fg": i() !== pick() }}
                     onMouseMove={() => setPick(i())}
                     onMouseDown={(e) => { e.preventDefault(); accept(e.currentTarget.closest("main")!.querySelector<HTMLTextAreaElement>("textarea[data-composer]")!, i()); }}
                   >
                     <span class="w-28 shrink-0">{c.name}</span>
-                    <span class="min-w-0 truncate font-ui text-xs" classList={{ "text-muted": i() !== pick() }}>{c.help}</span>
+                    <span class="min-w-0 truncate font-ui" classList={{ "text-muted": i() !== pick() }}>{c.help}</span>
                   </button>
                 )}
               </For>
@@ -457,7 +451,7 @@ export function Chat(props: {
           </Show>
           <Show when={behind()}>
             <button
-              class="absolute -top-9 left-1/2 z-10 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-[2px] border border-widget-line bg-overlay px-3 text-xs text-fg shadow-overlay hover:bg-hover"
+              class="absolute -top-9 left-1/2 z-10 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-[2px] border border-widget-line bg-overlay px-3 text-fg shadow-overlay hover:bg-hover"
               onClick={toBottom}
             >
               <Icon name="chevronDown" size={12} /> Jump to latest
@@ -467,17 +461,17 @@ export function Chat(props: {
               answered yet. The asks were only ever in the bench's exchange log, so nothing showed
               them — a person could not tell a queued ask from a lost one. */}
           <Show when={L().queue.length || live.asksOf(L().id).length}>
-            <div class="mb-2 flex flex-col gap-1 px-3 font-mono text-sm">
+            <div class="mb-2 flex flex-col gap-1 px-3 font-mono">
               <For each={L().queue}>
                 {(q) => (
                   <div class="flex flex-col">
                     <div class="flex items-start gap-2 text-muted">
                       <span class="w-5 shrink-0 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>›</span>
                       <span class="min-w-0 flex-1 truncate">{q.text}</span>
-                      <Show when={q.how === "steer"}><span class="shrink-0 text-xs text-subtle">steer</span></Show>
+                      <Show when={q.how === "steer"}><span class="shrink-0 text-subtle">steer</span></Show>
                     </div>
                     {/* Why it is where it is: a queue that reorders itself without saying why is a mystery. */}
-                    <Show when={q.reason}>{(r) => <span class="pl-7 text-xs text-subtle">{r()}</span>}</Show>
+                    <Show when={q.reason}>{(r) => <span class="pl-7 text-subtle">{r()}</span>}</Show>
                   </div>
                 )}
               </For>
@@ -485,8 +479,8 @@ export function Chat(props: {
                 {(a) => (
                   <div class="flex items-start gap-2 text-muted">
                     <span class="w-5 shrink-0 text-subtle">›</span>
-                    <span class="shrink-0 text-xs text-subtle">{a.state}</span>
-                    <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-2xs text-muted">{a.workspace}</span>
+                    <span class="shrink-0 text-subtle">{a.state}</span>
+                    <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-muted">{a.workspace}</span>
                     <span class="min-w-0 flex-1 truncate">{a.text.replace(/^\[ask \S+ from [^\]]*\] /, "")}</span>
                   </div>
                 )}
@@ -497,16 +491,16 @@ export function Chat(props: {
 
           {/* The composer is a block with the same accent rail a person's message has: what you
               type and what you typed read as the same thing. */}
-          <div class="flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
-            <div class="flex items-start px-3 pt-2 pb-1.5 font-mono text-[13px]">
-              <span class="w-4 shrink-0 leading-5 text-accent">❯</span>
+          <div class="pane flex flex-col border-l-2 border-request-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
+            <div class="flex items-start px-3 pt-2 pb-1.5 font-mono">
+              <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
               <textarea
                 data-composer
                 disabled={thread()?.kind === "machine" && !thread()?.pi}
                 rows="1"
-                class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 leading-5 outline-none placeholder:text-subtle"
+                class="max-h-60 min-h-5 flex-1 resize-none border-0 bg-transparent p-0 outline-none placeholder:text-subtle"
                 placeholder={thread()?.kind === "machine" && !thread()?.pi ? "no session yet · start one with + beside Sessions" : thread()?.pi && !live.connected() ? "not connected" : thread()?.kind === "btw" ? "ask about the bench's work · nothing here changes anything" : readonly() ? "ask or discuss · this thread cannot change anything" : "tell the bench what to do"}
                 onInput={(e) => (fit(e.currentTarget), setTyped(e.currentTarget.value), setPick(0), (hist = -1))}
                 onKeyDown={(e) => {
@@ -581,7 +575,7 @@ export function Chat(props: {
               </div>
             </Show>
             {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
-            <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono text-xs">
+            <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono">
               <span class="text-accent">{mode()}</span>
               <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()} · {live.level()}</span>
             </div>
@@ -589,7 +583,7 @@ export function Chat(props: {
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}
           {/* The footer bar: what is running and how to stop it on the left, what it has spent and
               the way to the commands on the right. Idle it says where you are instead. */}
-          <div class="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-xs text-subtle">
+          <div class="pane flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-subtle">
             <Show
               when={L().busy()}
               fallback={<span class="min-w-0 truncate">{props.machine.id}{thread()?.kind === "workspace" ? ` · ${thread()?.name}` : ""}</span>}
@@ -651,30 +645,30 @@ function Home(props: { machine: Machine; team: string; onGo: (id: string) => voi
       <div class="w-full max-w-[820px]">
         <header class="mb-8 flex items-end gap-4 border-b border-line-subtle pb-5">
           <div class="min-w-0 flex-1">
-            <div class="text-2xs font-semibold uppercase text-subtle">{props.team} · {props.machine.owner.split("@")[0]}</div>
-            <h1 class="mt-1 text-md font-medium">Bench</h1>
-            <p class="mt-1 truncate text-sm text-muted">{props.machine.goal || "No goal yet. The first message sets it."}</p>
+            <div class="font-semibold uppercase text-subtle">{props.team} · {props.machine.owner.split("@")[0]}</div>
+            <h1 class="mt-1 font-medium">Bench</h1>
+            <p class="mt-1 truncate text-muted">{props.machine.goal || "No goal yet. The first message sets it."}</p>
           </div>
           <Button icon="workspace" onClick={props.onSwitch} title="⌘T">Open a workspace</Button>
         </header>
 
         <div class="grid grid-cols-[minmax(0,1fr)_240px] gap-12">
           <section>
-            <div class="mb-1.5 text-2xs font-semibold uppercase text-subtle">Open</div>
+            <div class="mb-1.5 font-semibold uppercase text-subtle">Open</div>
             <div class="flex flex-col">
               <button class={HOME_ROW} onClick={() => props.onGo(props.machine.id)}>
                 <Icon name="machine" size={14} class="shrink-0 text-accent" />
-                <span class="text-sm text-fg">Bench Thread</span>
-                <span class="min-w-0 flex-1 truncate text-xs text-subtle">the thread that changes things</span>
+                <span class="text-fg">Bench Thread</span>
+                <span class="min-w-0 flex-1 truncate text-subtle">the thread that changes things</span>
               </button>
               <For each={props.machine.workspaces}>
                 {(w) => (
                   <button class={HOME_ROW} onClick={() => props.onGo(w.id)}>
                     <Icon name="workspace" size={14} class={`shrink-0 ${w.state === "running" ? "text-accent" : "text-subtle"}`} />
-                    <span class="font-mono text-sm text-fg">{w.name}</span>
-                    <span class="min-w-0 flex-1 truncate font-mono text-xs text-subtle">{w.repo} · {w.branch}</span>
+                    <span class="font-mono text-fg">{w.name}</span>
+                    <span class="min-w-0 flex-1 truncate font-mono text-subtle">{w.repo} · {w.branch}</span>
                     <Show when={running(w)}>
-                      {(n) => <span class="inline-flex items-center gap-1.5 text-xs text-muted"><span class="size-1.5 rounded-full bg-success" />{n()} running</span>}
+                      {(n) => <span class="inline-flex items-center gap-1.5 text-muted"><span class="size-1.5 rounded-full bg-success" />{n()} running</span>}
                     </Show>
                   </button>
                 )}
@@ -683,13 +677,13 @@ function Home(props: { machine: Machine; team: string; onGo: (id: string) => voi
           </section>
 
           <section>
-            <div class="mb-1.5 text-2xs font-semibold uppercase text-subtle">Keys</div>
+            <div class="mb-1.5 font-semibold uppercase text-subtle">Keys</div>
             <div class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
               <For each={KEYS_SHOWN}>
                 {([k, label]) => (
                   <>
                     <Kbd>{k}</Kbd>
-                    <span class="text-xs text-muted">{label}</span>
+                    <span class="text-muted">{label}</span>
                   </>
                 )}
               </For>
@@ -711,11 +705,11 @@ const FIRST_ASKS = [
 
 function FirstRun(props: { team: string; onPick: (text: string) => void }) {
   return (
-    <div class="mb-6 flex flex-col gap-4 font-mono text-[13px]">
+    <div class="mb-6 flex flex-col gap-4 font-mono">
       {/* The wordmark, then what to type: an empty session says what it is for, not what it can do. */}
       <div class="pt-6 text-center">
-        <div class="text-lg font-bold tracking-wide text-fg-strong">kloudlite</div>
-        <div class="pt-1 text-xs text-subtle">your bench for {props.team}</div>
+        <div class="font-bold tracking-wide text-fg-strong">kloudlite</div>
+        <div class="pt-1 text-subtle">your bench for {props.team}</div>
       </div>
       <div class="flex flex-col gap-1">
         <For each={FIRST_ASKS}>
@@ -727,7 +721,7 @@ function FirstRun(props: { team: string; onPick: (text: string) => void }) {
           )}
         </For>
       </div>
-      <div class="text-xs text-subtle">● Tip: tab switches Build and Plan · ctrl+p for commands · / for a command by name</div>
+      <div class="text-subtle">● Tip: tab switches Build and Plan · ctrl+p for commands · / for a command by name</div>
     </div>
   );
 }
@@ -746,7 +740,7 @@ function Folded(props: { messages: Message[]; onOpen: () => void }) {
   const prompts = () => props.messages.filter((m) => m.role === "user").length;
   const first = () => (props.messages.find((m) => m.role === "user") as { text?: string } | undefined)?.text ?? "";
   return (
-    <button class="group -mx-3 flex items-center gap-3 rounded-sm px-3 py-1 text-left font-ui text-xs text-subtle hover:bg-hover hover:text-fg" onClick={props.onOpen} title="Open this sitting">
+    <button class="group -mx-3 flex items-center gap-3 rounded-sm px-3 py-1 text-left font-ui text-subtle hover:bg-hover hover:text-fg" onClick={props.onOpen} title="Open this sitting">
       <span class="h-px w-6 shrink-0 bg-line-subtle" />
       <span class="shrink-0 tabular-nums">{when(props.messages)}</span>
       <span class="shrink-0">· {prompts()} {prompts() === 1 ? "prompt" : "prompts"}</span>
@@ -759,7 +753,7 @@ function Folded(props: { messages: Message[]; onOpen: () => void }) {
 /** Where an opened sitting begins, so the gap before it still reads. */
 function SittingRule(props: { messages: Message[] }) {
   return (
-    <div class="flex items-center gap-3 pt-2 font-ui text-xs text-subtle">
+    <div class="flex items-center gap-3 pt-2 font-ui text-subtle">
       <span class="h-px flex-1 bg-line-subtle" />
       <span class="tabular-nums">{when(props.messages)}</span>
       <span class="h-px flex-1 bg-line-subtle" />
@@ -775,7 +769,7 @@ export function fit(t: HTMLTextAreaElement) {
 
 function Time(props: { at: string }) {
   return (
-    <span class="shrink-0 pl-6 text-right text-xs leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
+    <span class="shrink-0 pl-6 text-right leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
       {props.at}
     </span>
   );
@@ -797,14 +791,14 @@ function Question(props: { q: QuestionRow; session: string }) {
   const [pick, setPick] = createSignal(0);
   const answer = (a: "yes" | "no") => live.answerProposal(props.session, props.q.id, a);
   return (
-    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono text-[13px] leading-[19.5px]">
+    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono">
       <div class="flex items-baseline gap-2">
         <span class="shrink-0 text-accent">?</span>
         <span class="min-w-0 flex-1 text-fg">{props.q.summary}</span>
         <Time at={props.q.at} />
       </div>
       <Show when={props.q.args && Object.keys(props.q.args).length}>
-        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5 text-xs">
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5">
           <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
             {([k, v]) => (
               <div class="flex min-w-0 items-baseline gap-2">
@@ -815,7 +809,7 @@ function Question(props: { q: QuestionRow; session: string }) {
           </For>
         </div>
       </Show>
-      <Show when={!answered()} fallback={<div class="pl-5 text-xs text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}>
+      <Show when={!answered()} fallback={<div class="pl-5 text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}>
         <div class="flex flex-col pl-5">
           <For each={OPTIONS}>
             {(o, i) => (
@@ -835,7 +829,7 @@ function Question(props: { q: QuestionRow; session: string }) {
             <span class="shrink-0">3.</span>
             <span>Type your own answer</span>
           </div>
-          <div class="pt-1 text-xs text-subtle">↑↓ select&nbsp; enter submit&nbsp; esc dismiss</div>
+          <div class="pt-1 text-subtle">↑↓ select&nbsp; enter submit&nbsp; esc dismiss</div>
         </div>
       </Show>
     </div>
@@ -866,7 +860,7 @@ function Step(props: { a: Action }) {
   const tool = () => (props.a.target && !/\s/.test(props.a.target) ? props.a.target : undefined);
   const tone = () => (props.a.pending ? "text-subtle" : props.a.ok === false ? "text-danger" : "text-success");
   return (
-    <div class="flex flex-col leading-[18px]">
+    <div class="flex flex-col">
       {/* `⏺ Bash(cmd)` then `⎿  output` — the terminal's own shape, in the
           terminal's own face, nothing drawn that the terminal would not. */}
       <div class="flex cursor-pointer items-start" onClick={() => setShowOut((v) => !v)} title={showOut() ? "Fold the result" : "Show the result"}>
@@ -928,10 +922,10 @@ function Prose(props: { text: string; latest?: boolean }) {
     <div class="min-w-0 flex-1">
       <div class="prose" innerHTML={html()} />
       <Show when={folded()}>
-        <button class="mt-1 font-mono text-sm text-subtle hover:text-fg" onClick={() => setOpenAll(true)}>… +{lines() - 16} lines</button>
+        <button class="mt-1 font-mono text-subtle hover:text-fg" onClick={() => setOpenAll(true)}>… +{lines() - 16} lines</button>
       </Show>
       <Show when={openAll() && lines() > LONG}>
-        <button class="mt-1 font-mono text-sm text-subtle hover:text-fg" onClick={() => setOpenAll(false)}>… collapse</button>
+        <button class="mt-1 font-mono text-subtle hover:text-fg" onClick={() => setOpenAll(false)}>… collapse</button>
       </Show>
     </div>
   );

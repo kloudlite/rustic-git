@@ -39,21 +39,21 @@ export function ToolCall(props: { a: Action }) {
   // BLOCKS — their result is the thing you came to see, so it is not behind a click.
   const railed = () => a().tool === "edit" || a().tool === "bash" || a().tool === "write";
   return (
-    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
+    <div class="flex flex-col font-mono" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
       {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
-      <button class="group flex w-full items-baseline gap-2 py-px text-left leading-[19.5px]" onClick={() => setOpen((v) => !v)}>
+      <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
         <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-subtle"}`} classList={{ "animate-pulse": a().pending }}>{line().glyph}</span>
         <span class="min-w-0 flex-1 truncate text-muted">
           <Show when={line().verb}><span class="text-fg">{line().verb} </span></Show>
           {line().arg}
           <Show when={line().count}>{(c) => <span class="text-subtle"> ({c()})</span>}</Show>
         </span>
-        <span class="shrink-0 text-xs tabular-nums text-subtle">{took()}</span>
+        <span class="shrink-0 tabular-nums text-subtle">{took()}</span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
       {/* An agent says how much it did and where to watch it, the way opencode's subagent row does. */}
       <Show when={a().tool === "ask" && (a().args ?? {}).to === "agent"}>
-        <div class="pl-4 text-xs text-subtle">
+        <div class="pl-4 text-subtle">
           ↳ {a().pending ? "working" : "reported"}
           <Show when={a().ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show>
           <span class="pl-3">ctrl+x ↓ view agents</span>
@@ -153,7 +153,7 @@ function Out(props: { text: string; empty?: string; head?: number }) {
     <Show when={props.text.trim()} fallback={<div class="py-1 text-subtle">{props.empty ?? ""}</div>}>
       <pre class="m-0 py-1 whitespace-pre-wrap wrap-words font-[inherit] text-muted [tab-size:4]">{all() ? ls().join("\n") : folded()}</pre>
       <Show when={more()}>
-        <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : ls().length > HEAD ? `… ${ls().length - HEAD} more lines` : "… show all"}</button>
+        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : ls().length > HEAD ? `… ${ls().length - HEAD} more lines` : "… show all"}</button>
       </Show>
     </Show>
   );
@@ -173,7 +173,7 @@ function Code(props: { path: string; text: string; from: number; block?: CodeBlo
   const gutter = () => Math.max(2, String(block().lines[block().lines.length - 1]?.n ?? "").length);
   return (
     <Show when={props.text.trim()} fallback={<div class="py-1 text-subtle">(empty)</div>}>
-      <div class="my-1 flex items-baseline gap-2 text-xs text-subtle">
+      <div class="my-1 flex items-baseline gap-2 text-subtle">
         <span class="min-w-0 truncate text-muted">{props.path}</span>
         <span class="flex-1" />
         <span class="tabular-nums">{block().lines.length} lines</span>
@@ -188,7 +188,7 @@ function Code(props: { path: string; text: string; from: number; block?: CodeBlo
           )}
         </For>
       </div>
-      <div class="flex items-baseline gap-3 pb-1 text-xs">
+      <div class="flex items-baseline gap-3 pb-1">
         <Show when={block().lines.length > HEAD}>
           <button class="text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${block().lines.length - HEAD} more lines`}</button>
         </Show>
@@ -215,7 +215,7 @@ function Edits(props: { path: string; edits: { oldText: string; newText: string 
           </div>
         )}
       </For>
-      <Show when={props.result && !/^Successfully/.test(props.result)}><div class="text-xs text-subtle">{props.result}</div></Show>
+      <Show when={props.result && !/^Successfully/.test(props.result)}><div class="text-subtle">{props.result}</div></Show>
     </div>
   );
 }
@@ -245,7 +245,7 @@ function Hits(props: { text: string }) {
         </Show>
       </div>
       <Show when={(rows().length || plain().length) > HEAD}>
-        <button class="pb-1 text-xs text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${(rows().length || plain().length) - HEAD} more`}</button>
+        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${(rows().length || plain().length) - HEAD} more`}</button>
       </Show>
     </Show>
   );
@@ -303,7 +303,7 @@ function Record(props: { value: Record<string, unknown> }) {
           <Show when={str("state")}>{(st) => <span class={`size-1.5 rounded-full ${STATE[st()] ?? "bg-subtle"}`} title={st()} />}</Show>
           <Show when={str("name")}>{(n) => <span class="font-bold text-fg-strong">{n()}</span>}</Show>
           <Show when={str("id")}>{(id) => <span class="text-subtle">{id()}</span>}</Show>
-          <Show when={str("state")}>{(st) => <span class="text-xs text-muted">{st()}</span>}</Show>
+          <Show when={str("state")}>{(st) => <span class="text-muted">{st()}</span>}</Show>
         </div>
       </Show>
       <div class="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-x-8 gap-y-0.5">
@@ -319,7 +319,7 @@ function Record(props: { value: Record<string, unknown> }) {
       <For each={blocks()}>
         {([k, x]) => (
           <div>
-            <div class="mb-0.5 text-xs text-subtle">{k}</div>
+            <div class="mb-0.5 text-subtle">{k}</div>
             <Show when={Array.isArray(x)} fallback={<div class="ml-3 border-l border-line pl-3"><Record value={x as Record<string, unknown>} /></div>}>
               <div class="ml-3 border-l border-line pl-3"><Table rows={(x as Record<string, unknown>[]).filter(isObj)} /></div>
             </Show>
@@ -359,7 +359,7 @@ function Table(props: { rows: Record<string, unknown>[] }) {
   const c = () => cols(props.rows, COLS);
   return (
     <div class="my-1 overflow-x-auto">
-      <table class="border-collapse text-xs">
+      <table class="border-collapse">
         <thead>
           <tr><For each={c()}>{(k) => <th class="border-b border-line px-2 py-1 text-left font-bold text-fg-strong">{k}</th>}</For></tr>
         </thead>

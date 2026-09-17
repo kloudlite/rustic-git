@@ -6,7 +6,7 @@ import type { JSX } from "solid-js";
  * rather than as a panel dropped into it.
  */
 export function Card(props: { children: JSX.Element }) {
-  return <div class="my-1 flex flex-col gap-2 text-sm">{props.children}</div>;
+  return <div class="my-1 flex flex-col gap-2">{props.children}</div>;
 }
 
 const STATE: Record<string, string> = {
@@ -29,7 +29,7 @@ export function Field(props: { label: string; children: JSX.Element }) {
 }
 
 export function Pill(props: { children: JSX.Element; tone?: "plain" | "warn" }) {
-  return <span class={`rounded-[2px] px-1 text-2xs ${props.tone === "warn" ? "bg-warning-wash text-fg" : "bg-fg/10 text-muted"}`}>{props.children}</span>;
+  return <span class={`rounded-[2px] px-1 ${props.tone === "warn" ? "bg-warning-wash text-fg" : "bg-fg/10 text-muted"}`}>{props.children}</span>;
 }
 
 /** One proportion, drawn: the bar is the only chart here and it is two divs. */

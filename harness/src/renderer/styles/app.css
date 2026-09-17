@@ -321,6 +321,12 @@
   /* VS Code's own stacks: the workbench is the system face at 13px, the
      editor is Menlo at 12px with the golden 1.5 line height on the Mac. The
      vendored faces stay behind them for a machine that has neither. */
+  /* A terminal has ONE cell (owner, 2026-09-17: "for a terminal all font sizes will be same; only
+     color and weight vary"). The centre pane is a character grid: one size, one line height, and
+     every difference carried by weight, colour or case. */
+  --cell: 13px;
+  --cell-lh: 20px;
+
   /* One band for every transition in the app: long enough to read as movement,
      short enough never to be waited on. Transform and opacity only — anything
      that animates a size or a position property lays the page out per frame. */
@@ -419,35 +425,34 @@
 /* Everything in the centre pane is monospace (owner, 2026-09-17 17:10, superseding the UI-face
    prose above it): the pane is a session view in the shape of opencode's, and prose set in the UI
    face beside mono tool lines reads as two products. 13px/1.5 is Zed's own. */
-.prose { font-family: var(--font-mono); font-size: 13px; line-height: 19.5px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
+.prose { font-family: var(--font-mono); font-size: var(--cell); line-height: var(--cell-lh); min-width: 0; max-width: 100%; overflow-wrap: anywhere; contain: layout style; }
 .prose > * + * { margin-top: 8px; }
-.prose p, .prose li { line-height: 19.5px; }
+.prose p, .prose li { line-height: var(--cell-lh); }
 .prose ul, .prose ol { padding-left: 20px; }
 .prose li + li { margin-top: 2px; }
 .prose li::marker { color: var(--subtle); }
 .prose ul { list-style: disc; }
 .prose ol { list-style: decimal; }
-/* A heading in an answer is a label, not a title page: one step up at most. */
-.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; line-height: 20px; color: var(--fg-strong); }
-.prose h1 { font-size: 14px; margin-top: 14px; }
-.prose h2 { font-size: 13px; margin-top: 12px; }
-.prose h3, .prose h4 { font-size: 13px; margin-top: 12px; letter-spacing: 0.02em; color: var(--muted); text-transform: uppercase; }
+/* A heading is BOLD, not bigger: in a character grid there is no bigger. */
+.prose h1, .prose h2, .prose h3, .prose h4 { font-size: var(--cell); line-height: var(--cell-lh); font-weight: 700; color: var(--fg-strong); margin-top: var(--cell-lh); }
+.prose h3, .prose h4 { font-weight: 400; letter-spacing: 0.02em; color: var(--muted); text-transform: uppercase; }
 .prose > h1:first-child, .prose > h2:first-child, .prose > h3:first-child { margin-top: 0; }
 .prose hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
 .prose strong { font-weight: 700; color: var(--fg-strong); }
 .prose em { font-style: italic; color: var(--muted); }
 /* Inline code is a chip: mono, a shade behind it, and never wrapped in backticks
    a person can see. It sits ON the text line, so it must not grow the line box. */
-.prose code { font-family: var(--font-mono); font-size: 11px; line-height: 1; padding: 1px 4px; border-radius: 2px; background: var(--preformat); color: var(--preformat-fg); white-space: nowrap; }
+/* Inline code is the same cell, told apart by colour alone: a smaller chip breaks the grid. */
+.prose code { font-family: var(--font-mono); font-size: var(--cell); line-height: var(--cell-lh); color: var(--syn-string); white-space: pre-wrap; }
 .prose pre { max-width: 100%; margin: 10px 0; padding: 10px 12px; border-radius: 2px; background: var(--codeblock); overflow-x: auto; }
-.prose pre code { padding: 0; background: none; color: inherit; font-size: 12px; line-height: 18px; white-space: pre; }
+.prose pre code { padding: 0; background: none; color: inherit; font-size: var(--cell); line-height: var(--cell-lh); white-space: pre; }
 .prose a { color: var(--accent); text-decoration: none; }
 .prose a:hover { text-decoration: underline; }
 .prose blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--quote-line); background: var(--codeblock); color: var(--muted); }
-.prose table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 12px; line-height: 18px; margin: 8px 0; font-family: var(--font-mono); }
+.prose table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: var(--cell); line-height: var(--cell-lh); margin: var(--cell-lh) 0; font-family: var(--font-mono); }
 .prose thead th { background: var(--codeblock); font-weight: 700; color: var(--fg-strong); text-align: left; }
 .prose th, .prose td { padding: 6px 10px; border: 1px solid var(--line); vertical-align: top; }
-.prose td code, .prose th code { font-size: 11px; }
+
 .prose tr:nth-child(even) td { background: rgb(128 128 128 / 4%); }
 
 /* Layout guard: a grid or flex item defaults to a min-content width, and one
@@ -464,3 +469,8 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
 @media (prefers-reduced-motion: reduce) {
   .sweep { animation: none; width: 100%; }
 }
+
+/* The centre pane is one grid: everything inside it inherits the cell, and nothing inside it is
+   allowed to set a size of its own. A test greps the components for size classes; this is the
+   other half of that rule, for anything the classes do not reach. */
+.pane, .pane * { font-size: var(--cell); line-height: var(--cell-lh); }

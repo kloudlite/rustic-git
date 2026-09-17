@@ -29,7 +29,7 @@ export function QuotaCard(props: { data: Record<string, any> }) {
           )}
         </For>
       </div>
-      <Show when={disk()?.usedAt}>{(at) => <div class="text-xs text-subtle">disk measured {at()}</div>}</Show>
+      <Show when={disk()?.usedAt}>{(at) => <div class="text-subtle">disk measured {at()}</div>}</Show>
     </Card>
   );
 }

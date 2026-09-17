@@ -8,7 +8,7 @@ export function CapabilitiesList(props: { data: { group: string; tools: { name: 
       <For each={props.data}>
         {(g) => (
           <div class="flex flex-col gap-0.5">
-            <div class="text-xs text-subtle">{g.group}</div>
+            <div class="text-subtle">{g.group}</div>
             <For each={g.tools}>
               {(t) => (
                 <div class="flex min-w-0 items-baseline gap-2">

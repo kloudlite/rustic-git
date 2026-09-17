@@ -14,7 +14,7 @@ export function EnvironmentCard(props: { data: Record<string, any> }) {
         <Dot state={String(d().state ?? "")} />
         <span class="font-bold text-fg-strong">{d().name ?? d().id}</span>
         <span class="text-subtle">{d().id}</span>
-        <span class="text-xs text-muted">{d().state}</span>
+        <span class="text-muted">{d().state}</span>
       </div>
       <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-8 gap-y-0.5">
         <Show when={d().region}><Field label="region">{d().region}</Field></Show>
@@ -22,7 +22,7 @@ export function EnvironmentCard(props: { data: Record<string, any> }) {
         <Show when={d().placement}><Field label="node">{d().placement}</Field></Show>
       </div>
       <Show when={services().length} fallback={<span class="text-subtle">no services</span>}>
-        <table class="border-collapse text-xs">
+        <table class="border-collapse">
           <thead>
             <tr><For each={["service", "image", "ports", ""]}>{(h) => <th class="border-b border-line px-2 py-1 text-left font-bold text-fg-strong">{h}</th>}</For></tr>
           </thead>
@@ -50,7 +50,7 @@ export function EnvironmentCard(props: { data: Record<string, any> }) {
         </table>
       </Show>
       <Show when={intercepts().length}>
-        <div class="flex flex-wrap items-center gap-1 text-xs text-subtle">
+        <div class="flex flex-wrap items-center gap-1 text-subtle">
           intercepts
           <For each={intercepts()}>
             {(i) => <Pill tone="warn">{i.service} → {i.workspace}{i.ports?.length ? ` (${i.ports.map((p) => `${p.from}:${p.to}`).join(", ")})` : ""}</Pill>}
