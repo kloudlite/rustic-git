@@ -1,5 +1,5 @@
 //! The workspace-state routes a UI renders from: `/fs/tree`, `/fs/stat`, `/fs/file`, `/fs/git`,
-//! `/fs/changes`, `/fs/diff`. Separate from the tool API on purpose — an agent drives `/tools/*`,
+//! `/fs/changes`, `/fs/diff`, `/fs/log`. Separate from the tool API on purpose — an agent drives `/tools/*`,
 //! a console DRAWS from these — so nothing here enters the tool registry and `GET /tools` never
 //! lists them. Read-only; a write is a tool call and a git write is the session layer's decision.
 //!
@@ -201,6 +201,42 @@ pub async fn git_state(State(app): State<Arc<App>>, headers: HeaderMap) -> Respo
         "repo": true, "branch": st.branch, "head": st.head, "upstream": st.upstream,
         "ahead": st.ahead, "behind": st.behind, "dirty": !st.changes.is_empty(), "stashes": stashes,
     }))
+}
+
+/// `GET /fs/log?n=20`: the current branch's last `n` commits, newest first, each with the paths it
+/// touched. What the CHANGES tab draws "committed this session" from — a console read, never a
+/// tool, so nothing about it enters the tool registry.
+///
+/// `n` is capped: a log route that will walk as far as it is asked to is a way to spend a
+/// workspace's CPU from one request.
+#[derive(Deserialize)]
+pub struct LogQuery {
+    #[serde(default = "twenty")]
+    n: usize,
+}
+fn twenty() -> usize {
+    20
+}
+
+pub const MAX_LOG: usize = 200;
+
+pub async fn log(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<LogQuery>) -> Response {
+    if q.n == 0 || q.n > MAX_LOG {
+        return err(ToolError::Invalid(format!("n: 1 to {MAX_LOG}")));
+    }
+    // A directory that is not a repository ANSWERS, like every sibling here: a fresh workspace
+    // before its first `git init` is a normal thing to render, not an error.
+    let st = match git::status(&app.cfg.root, false).await {
+        Ok(s) => s,
+        Err(e) => return failed(e),
+    };
+    if !st.repo {
+        return conditional_json(&headers, &json!({ "repo": false, "commits": [] }));
+    }
+    match git::log(&app.cfg.root, q.n).await {
+        Ok(commits) => conditional_json(&headers, &json!({ "repo": true, "commits": commits })),
+        Err(e) => failed(e),
+    }
 }
 
 /// Status and line counts in one answer — the changes panel needs both and asks once.

@@ -46,6 +46,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/git", get(crate::fs::git_state))
         .route("/fs/changes", get(crate::fs::changes))
         .route("/fs/diff", get(crate::fs::diff))
+        .route("/fs/log", get(crate::fs::log))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
         // NO PTY route: a terminal is the SHELL SIDECAR's `ttyd` on 7790 now (spec §2.3), in its
@@ -277,10 +278,52 @@ mod tests {
         assert!(v["patch"].as_str().unwrap().contains("+fn a()"), "untracked diffs against /dev/null: {v}");
         assert_eq!(get(&app, "/fs/diff?against=main", None).await.0, 400);
 
+        // `/fs/log`: the branch's commits newest first, each with what it touched. The second
+        // commit renames a file and deletes another, so the A/M/D/R statuses are all exercised
+        // rather than only the easy one. The CHANGES tab draws "committed this session" from this.
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "two"]);
+        std::fs::rename(root.join("src/new.rs"), root.join("src/renamed.rs")).unwrap();
+        std::fs::remove_file(root.join("README.md")).unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "three"]);
+
+        let (s, etag, b) = get(&app, "/fs/log?n=2", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, v["repo"].as_bool()), (200, Some(true)));
+        let commits = v["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 2, "n bounds the walk: {v}");
+        assert_eq!(commits[0]["subject"], "three", "newest first");
+        assert_eq!(commits[1]["subject"], "two");
+        assert_eq!(commits[0]["author"], "t");
+        assert_eq!(commits[0]["short"].as_str().unwrap().len(), 8);
+        assert!(commits[0]["hash"].as_str().unwrap().starts_with(commits[0]["short"].as_str().unwrap()));
+        assert!(commits[0]["at"].as_str().unwrap().contains('T'), "RFC 3339: {}", commits[0]["at"]);
+        let touched: Vec<(&str, &str)> = commits[0]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["path"].as_str().unwrap(), f["status"].as_str().unwrap()))
+            .collect();
+        assert_eq!(touched, vec![("README.md", "D"), ("src/renamed.rs", "R")], "{}", commits[0]["files"]);
+        assert_eq!(commits[0]["files"][1]["from"], "src/new.rs", "a rename names where it came from");
+        // The first commit of a repository is diffed against the empty tree, not skipped.
+        let (_, _, b) = get(&app, "/fs/log?n=99", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let all = v["commits"].as_array().unwrap();
+        assert_eq!(all.last().unwrap()["subject"], "one");
+        assert_eq!(all.last().unwrap()["files"][0]["status"], "A", "a root commit adds its files");
+        assert_eq!(get(&app, "/fs/log?n=2", etag.as_deref()).await.0, 304);
+        assert_eq!(get(&app, "/fs/log?n=0", None).await.0, 400);
+        assert_eq!(get(&app, "/fs/log?n=201", None).await.0, 400);
+
         // Not a repository is an answer, not an error.
         let plain = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.join("workspaces"), home: home.clone(), graft_dir: None }));
         let (s, _, b) = get(&plain, "/fs/git", None).await;
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
         assert_eq!((s, v["repo"].as_bool()), (200, Some(false)));
+        let (s, _, b) = get(&plain, "/fs/log", None).await;
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, v["repo"].as_bool(), v["commits"].as_array().unwrap().len()), (200, Some(false), 0));
     }
 }

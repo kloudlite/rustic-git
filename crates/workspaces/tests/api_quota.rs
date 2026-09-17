@@ -158,9 +158,11 @@ async fn quota_reports_the_default_limits_and_the_computed_use() {
     assert_eq!(doc["used"]["diskGb"], 7, "{doc}");
     // The same pair, in the shape the console reads, with the stamp's own "as of" beside it.
     assert_eq!(doc["disk"], json!({"usedGb": 7, "limitGb": 100, "usedAt": "2026-09-17T04:00:00Z"}), "{doc}");
-    // Only the RUNNING one occupies capacity: 4 cores, 8Gi.
-    assert_eq!(doc["used"]["cpu"], 4);
-    assert_eq!(doc["used"]["memoryGb"], 8);
+    // Only the RUNNING one occupies capacity, and a running pod is now TWO containers: the
+    // workspace's own 4 cores / 8Gi plus the shell sidecar's 2 / 2Gi (`shell_pod_extra`), because
+    // quota charges limits and the sidecar has its own (2026-09-17, spec §2).
+    assert_eq!(doc["used"]["cpu"], 6);
+    assert_eq!(doc["used"]["memoryGb"], 10);
 }
 
 /// A team workspace is stamped with the person who made it and `spec.team`; it, its volume and
@@ -199,7 +201,8 @@ async fn a_team_workspace_counts_against_the_team_and_not_its_maker() {
     assert_eq!(team["used"]["workspaces"], 1, "{team}");
     assert_eq!(team["used"]["diskGb"], 1, "unstamped, so the floor — never the 40 GB ceiling: {team}");
     assert_eq!(team["used"]["snapshots"], 1, "{team}");
-    assert_eq!(team["used"]["cpu"], 4, "the running team workspace occupies the team's capacity: {team}");
+    // 4 + the shell sidecar's 2, the same pair as above: a running pod is two containers now.
+    assert_eq!(team["used"]["cpu"], 6, "the running team workspace occupies the team's capacity: {team}");
     let mine = read("karthik").await;
     assert_eq!(mine["used"]["workspaces"], 1, "the maker's own count skips the team's: {mine}");
     assert_eq!(mine["used"]["diskGb"], 1, "{mine}");

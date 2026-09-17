@@ -186,6 +186,113 @@ pub async fn status(root: &Path, with_ignored: bool) -> Result<Status, String> {
     .await
 }
 
+/// One commit of the current branch's history, with what it touched.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Commit {
+    pub hash: String,
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    /// RFC 3339, the commit's own time — so a replayed read is byte-identical, not merely close.
+    pub at: String,
+    pub files: Vec<CommitFile>,
+}
+
+/// `--name-status` semantics: `A` added, `M` modified, `D` deleted, `R` renamed (with `from`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CommitFile {
+    pub path: String,
+    pub status: char,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
+/// The current branch's last `n` commits, newest first, each with the paths it changed.
+///
+/// A root commit is diffed against the EMPTY tree rather than skipped: the first commit of a
+/// repository is the one a fresh workspace has, and rendering it with no files would be wrong
+/// exactly where a new person is looking. A merge is diffed against its FIRST parent, which is
+/// what `--name-status` shows and what "committed this session" means.
+pub async fn log(root: &Path, n: usize) -> Result<Vec<Commit>, String> {
+    blocking(root, move |root| {
+        let Some(repo) = open(&root) else { return Ok(Vec::new()) };
+        let Ok(head) = repo.head_id() else { return Ok(Vec::new()) };
+        let walk = repo.rev_walk([head]).all().map_err(|e| format!("git log: {e}"))?;
+        let mut out = Vec::with_capacity(n);
+        for info in walk.take(n) {
+            let info = info.map_err(|e| format!("git log: {e}"))?;
+            let commit = info.object().map_err(|e| format!("git log: {e}"))?;
+            let hash = commit.id().to_string();
+            let msg = commit.message().map_err(|e| format!("git log: {e}"))?;
+            let author = commit.author().map_err(|e| format!("git log: {e}"))?;
+            let time = commit.time().map_err(|e| format!("git log: {e}"))?;
+            out.push(Commit {
+                short: hash.chars().take(8).collect(),
+                hash,
+                subject: s(msg.summary().as_ref()),
+                author: s(author.name),
+                at: time.format(gix::date::time::format::ISO8601_STRICT).map_err(|e| format!("git log: {e}"))?,
+                files: commit_files(&repo, &commit)?,
+            });
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// What one commit changed against its first parent (or the empty tree, for a root commit).
+fn commit_files(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<Vec<CommitFile>, String> {
+    let new = commit.tree().map_err(|e| format!("git log: {e}"))?;
+    let old = match commit.parent_ids().next() {
+        Some(id) => repo
+            .find_commit(id)
+            .map_err(|e| format!("git log: {e}"))?
+            .tree()
+            .map_err(|e| format!("git log: {e}"))?,
+        None => repo.empty_tree(),
+    };
+    let mut rows = Vec::new();
+    old.changes()
+        .map_err(|e| format!("git log: {e}"))?
+        .for_each_to_obtain_tree(&new, |c| {
+            use gix::object::tree::diff::Change as C;
+            // FILES only, like `--name-status`: the walk also reports the DIRECTORY holding a
+            // changed file as modified, and listing `src` beside `src/renamed.rs` would put a row
+            // in the changes tab that no editor can open.
+            let is_tree = |m: gix::object::tree::EntryMode| m.is_tree();
+            let row = match c {
+                C::Addition { location, entry_mode, .. } => {
+                    if is_tree(entry_mode) {
+                        return Ok(gix::object::tree::diff::Action::Continue(()));
+                    }
+                    CommitFile { path: s(location), status: 'A', from: None }
+                }
+                C::Deletion { location, entry_mode, .. } => {
+                    if is_tree(entry_mode) {
+                        return Ok(gix::object::tree::diff::Action::Continue(()));
+                    }
+                    CommitFile { path: s(location), status: 'D', from: None }
+                }
+                C::Modification { location, entry_mode, .. } => {
+                    if is_tree(entry_mode) {
+                        return Ok(gix::object::tree::diff::Action::Continue(()));
+                    }
+                    CommitFile { path: s(location), status: 'M', from: None }
+                }
+                C::Rewrite { location, source_location, copy, .. } => CommitFile {
+                    path: s(location),
+                    status: if copy { 'C' } else { 'R' },
+                    from: Some(s(source_location)),
+                },
+            };
+            rows.push(row);
+            Ok::<_, std::convert::Infallible>(gix::object::tree::diff::Action::Continue(()))
+        })
+        .map_err(|e| format!("git log: {e}"))?;
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(rows)
+}
+
 /// Added and removed lines per changed path, worktree against HEAD; `None` is a binary file. An
 /// untracked file counts every line, a deleted one every line it had.
 /// The caller's `changes` (from its own `status` call): `/fs/changes` walked status TWICE for one
