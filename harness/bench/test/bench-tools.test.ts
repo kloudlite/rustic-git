@@ -7,6 +7,7 @@ import { TOOLS } from "../../pi/catalog.ts";
 import kloudlite, { identity, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
+import { WORKSPACE_TOOLS } from "../src/rpc-child.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
@@ -48,11 +49,15 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     restore();
   }
 
-  const back = withEnv({ KL_TOOLS_WORKSPACE: "api", KL_WORKSPACE_ID: undefined });
+  // A workspace session: its own machine's packages and its space's environment, nothing else —
+  // and exactly what `--tools` admits, or it would register tools it cannot call.
+  const back = withEnv({ KL_TOOLS_WORKSPACE: "api", KL_TEAM: "acme", KL_WORKSPACE_ID: undefined });
   try {
     const { pi, tools } = fakePi();
     kloudlite(pi);
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["kl_pkg_add", "kl_pkg_list", "kl_pkg_rm", "kl_pkg_update"]);
+    const registered = tools.map((t) => t.name).sort();
+    assert.deepEqual(registered, WORKSPACE_TOOLS.split(",").filter((t) => t.startsWith("kl_")).sort());
+    for (const no of ["kl_workspace_ask", "kl_environment_delete", "kl_workspace_delete", "kl_quota"]) assert.ok(!registered.includes(no), no);
   } finally {
     back();
   }
@@ -100,9 +105,12 @@ test("an ask opens the workspace's own session, queues there, and the answer com
     await until(() => bench.exchanges.bySession(asker).some((e) => e.dir === "in"), 5_000, "the answer");
     const rows = bench.exchanges.bySession(asker);
     assert.deepEqual(rows.map((e) => [e.workspace, e.dir, e.state]), [["api", "out", "done"], ["api", "in", "done"]]);
-    assert.equal(rows[1].text, "echo run the tests");
+    assert.match(rows[1].text, /^echo \[ask .+\] run the tests$/);
     const back = (await bench.messages(asker)).messages as { role: string; content: string }[];
-    assert.ok(back.some((m) => m.role === "user" && String(m.content).startsWith("[from workspace api] echo run the tests")), JSON.stringify(back));
+    assert.ok(back.some((m) => m.role === "user" && String(m.content).startsWith("[from workspace api] echo ")), JSON.stringify(back));
+    // The workspace session is told which ask it is answering and who asked.
+    const asked = (await bench.messages("w-api")).messages as { role: string; content: string }[];
+    assert.match(String(asked[0].content), /^\[ask ask-\d+-\w+ from .+\] run the tests$/);
   } finally {
     await srv.close();
     await bench.stop();
@@ -161,6 +169,51 @@ test("adding a service keeps every other service exactly as it was", async () =>
   } finally {
     restore();
     srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("asks queue per workspace: never refused, and a [reply id] answers the ask it names", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-queue-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const one = bench.sessions.all().find((s) => !s.archived)!.id;
+    const two = (await bench.create()).id;
+
+    // The first ask leaves the workspace session mid-turn ("hang" never ends its turn).
+    const a1 = await bench.ask("api", "hang", one);
+    // The second is taken anyway — an ask is never refused because that workspace is busy — and
+    // its turn answers the FIRST one by name, which is the only thing that can route it there.
+    const a2 = await bench.ask("api", `[reply ${a1.exchange}] the first one is done`, two);
+    assert.notEqual(a1.exchange, a2.exchange);
+
+    await until(() => bench.exchanges.bySession(one).some((e) => e.dir === "in"), 5_000, "session one's answer");
+    const back = bench.exchanges.bySession(one);
+    assert.equal(back.find((e) => e.id === a1.exchange)!.state, "done", "the ask it named settled");
+    assert.match(back.find((e) => e.dir === "in")!.text, /the first one is done/);
+    // The asker of the answering turn is still waiting: its own ask was not the one answered.
+    assert.deepEqual(bench.exchanges.bySession(two).map((e) => [e.dir, e.state]), [["out", "queued"]]);
+    const said = (await bench.messages(one)).messages as { role: string; content: string }[];
+    assert.ok(said.some((m) => String(m.content).startsWith("[from workspace api]")), JSON.stringify(said));
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a child that dies fails every ask it was still holding", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-queue-x-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    // "hang" never answers, so the ask stays outstanding; "crash" takes the child with it.
+    const held = await bench.ask("api", "hang", asker);
+    await bench.rpc("w-api", { type: "prompt", message: "crash" }).catch(() => undefined);
+    await until(() => bench.exchanges.bySession(asker).find((e) => e.id === held.exchange)?.state === "failed", 5_000, "the held ask fails");
+  } finally {
+    await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

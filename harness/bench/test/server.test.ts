@@ -185,3 +185,20 @@ test("a /pty upgrade with a scope that is neither the bench nor a workspace id i
     await t.down();
   }
 });
+
+test("GET /sessions/{id}/tools answers what that session can call, and 404s an id that is not one", async () => {
+  const t = await up();
+  try {
+    const created = await (await fetch(t.base + "/sessions", { method: "POST" })).json() as { id: string };
+    const r = await fetch(`${t.base}/sessions/${created.id}/tools`);
+    assert.equal(r.status, 200);
+    const { tools } = await r.json() as { tools: string[] };
+    // The seven are there, but they are the tool server's, run in the bench's OWN workspace — the
+    // built-ins, which would have run in the bench container, are what `--no-builtin-tools` removed.
+    for (const own of ["bash", "read", "write"]) assert.ok(tools.includes(own), `${own}: ${tools.join(",")}`);
+    assert.ok(tools.includes("kl_workspace_ask"), tools.join(","));
+    assert.equal((await fetch(t.base + "/sessions/nope/tools")).status, 404);
+  } finally {
+    await t.down();
+  }
+});

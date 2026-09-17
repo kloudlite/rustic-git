@@ -3,15 +3,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { call, tellItWhereItStands } from "./kloudlite.ts";
 
 /**
- * A workspace session's hands. pi runs in the bench pod; these seven tools run
- * in the workspace, as calls to its tool server (`kl ide serve`, crates/ide).
- * The names and parameters are pi's own, so the model sees the tools it knows;
- * the work is the tool server's. The address comes only from /v1, which answers
- * the workspace's owner and nobody else, and is asked again after a connection
- * error because a restarted pod has a new IP. Nothing here is a bench tool:
- * a workspace session starts with `--tools` naming exactly these.
+ * A session's hands on ONE machine. The agent runs in the bench pod; these seven
+ * tools run in that machine, as calls to its tool server (`kl ide serve`,
+ * crates/ide). The names and parameters are the agent's own, so the model sees
+ * the tools it knows; the work is the tool server's.
+ *
+ * Two ways in, and never a third — no session can name another workspace here,
+ * which is why asking one (`kl_workspace_ask`) is a queue and not a tool call:
+ *  - a WORKSPACE session: `KL_TOOLS_WORKSPACE` names the workspace, and the
+ *    address comes from /v1, which answers its owner and nobody else, asked
+ *    again after a connection error because a restarted pod has a new IP;
+ *  - a BENCH session: `KL_TOOLS_ADDRESS` is its own workspace container's tool
+ *    server on loopback (the bench pod's two containers share a network
+ *    namespace), so the bench has hands on its own machine and no other.
  */
-export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls";
 const MAX_EXEC_MS = 600_000;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const ADDR_RE = /^([A-Za-z0-9.-]+:\d{1,5}|\[[0-9a-fA-F:]+\]:\d{1,5})$/;
@@ -137,10 +142,19 @@ export async function resolveFromApi(ws: string): Promise<string> {
 }
 
 export default function (pi: ExtensionAPI) {
-  const ws = process.env.KL_TOOLS_WORKSPACE;
+  // A fixed address is a machine of its own (the bench's); `KL_WORKSPACE_ID` is only its name.
+  const ws = process.env.KL_TOOLS_WORKSPACE ?? (process.env.KL_TOOLS_ADDRESS ? (process.env.KL_WORKSPACE_ID ?? "this machine") : undefined);
   if (!ws) return;
-  // Same identity as a bench session: what differs is only whose hands these are.
-  tellItWhereItStands(pi, `Your tools all run inside workspace ${ws} — its files, its shell — and reach nothing else.`);
+  // A workspace session's identity line is this one; the bench's is `kloudlite.ts`'s, which knows
+  // about the rest of its hands and would otherwise be replaced by whichever extension loaded last.
+  if (process.env.KL_TOOLS_WORKSPACE) {
+    tellItWhereItStands(
+      pi,
+      `Your tools all run inside workspace ${ws}: its files, its shell, its packages (kl_pkg_*). You also manage the environment your space uses — kl_env_current, kl_env_switch, kl_env_clear, and kl_environments, kl_environment, kl_environment_service_add, kl_environment_service_rm, kl_intercept — because a service you need, or its traffic delivered here, is part of the work in front of you. Nothing else on the platform is yours to touch.
+
+Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with \`[reply <id>]\` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.`,
+    );
+  }
   const server = new ToolServer(ws, resolveFromApi);
   const reg = (name: string, label: string, description: string, parameters: ReturnType<typeof Type.Object>) =>
     pi.registerTool({

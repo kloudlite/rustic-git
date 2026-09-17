@@ -49,8 +49,9 @@ test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions
     await c.send({ type: "get_state" });
     const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
     const exts = argv.filter((_, i) => argv[i - 1] === "-e");
-    assert.deepEqual(exts, [path.join(ext, "kloudlite.ts")]);
-    // A bench session has no hands in its own pod: no builtin tools, and no allow-list to widen.
+    assert.deepEqual(exts, ["workspace-tools.ts", "kloudlite.ts"].map((f) => path.join(ext, f)));
+    // A bench session's hands are its own workspace's, never the bench container's: the built-ins
+    // are gone, and what is left is exactly what the two extensions register — no allow-list.
     assert.ok(argv.includes("--no-builtin-tools"), argv.join(" "));
     assert.equal(argv.indexOf("--tools"), -1);
   } finally {
@@ -58,4 +59,17 @@ test("HARNESS_PI_BIN and HARNESS_PI_EXT_DIR override where pi and its extensions
     for (const [k, v] of [["HARNESS_PI_BIN", saved.bin], ["HARNESS_PI_EXT_DIR", saved.ext], ["FAKE_PI_ARGV_FILE", saved.argv]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("tools() reads the argv: a bench session its own machine's plus the platform, a workspace session its allow-list, a fork none", () => {
+  const dir = "/tmp/bench-tools";
+  const bench = new RpcChild("s-1", { dir, model: "m" }, () => undefined).tools();
+  // The seven are the tool server's, in the bench's own workspace; the built-ins that would have
+  // run in the bench container are gone with `--no-builtin-tools`.
+  for (const own of ["bash", "read", "write"]) assert.ok(bench.includes(own), `${own}: ${bench.join(",")}`);
+  assert.ok(bench.includes("kl_workspace_ask"), bench.join(","));
+  const ws = new RpcChild("w-1", { dir, model: "m", file: "/tmp/x.jsonl", tools: "ws-1" }, () => undefined).tools();
+  assert.ok(ws.includes("bash") && ws.includes("kl_pkg_add"), ws.join(","));
+  assert.ok(!ws.includes("kl_workspace_ask"), "a workspace session drives nothing: " + ws.join(","));
+  assert.deepEqual(new RpcChild("b-1", { dir, model: "m", fork: "/tmp/x.jsonl" }, () => undefined).tools(), []);
 });

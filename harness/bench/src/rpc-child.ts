@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { childTraceEnv } from "./tracing.ts";
+import { TOOLS } from "../../pi/catalog.ts";
 
 /**
  * One session's pi, in RPC mode: JSONL over stdio. Framing is strict LF; Node's
@@ -10,15 +11,34 @@ import { childTraceEnv } from "./tracing.ts";
  * here remembers anything — reopening a session is `--session <file>`.
  */
 export type PiEvent = Record<string, unknown> & { type: string; id?: string };
+/**
+ * The bench's own workspace container's tool server. The two containers of a bench pod share a
+ * network namespace, so this is the same loopback address `pty.ts` splices a bench-scope shell to.
+ */
+export const BENCH_TOOLS = "127.0.0.1:7788";
 const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
  * A workspace or ephemeral session's tools: its own files and shell, on that
- * workspace's tool server, plus that machine's own packages. `--tools` is a
- * strict allow-list over EXTENSION tools too, so the kl_pkg_* four have to be
- * named here or `kloudlite.ts` registers them into a session that cannot call them.
+ * workspace's tool server, plus that machine's own packages and its space's
+ * environment. `--tools` is a strict allow-list over EXTENSION tools too, so
+ * every one `kloudlite.ts` registers in workspace mode has to be named here, or
+ * it is registered into a session that cannot call it.
  */
-export const WORKSPACE_TOOLS = "read,write,edit,bash,grep,find,ls,kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update";
+export const WORKSPACE_TOOLS = [
+  "read,write,edit,bash,grep,find,ls",
+  // its own machine
+  "kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update",
+  // and its space's environment: the person debugging here is the one who needs a service added
+  // or its traffic pointed at this workspace (owner, 2026-09-17).
+  "kl_env_current,kl_env_switch,kl_env_clear",
+  "kl_environments,kl_environment,kl_environment_service_add,kl_environment_service_rm,kl_intercept",
+].join(",");
+
+/** The built-in tools `--no-builtin-tools` takes away, and the same seven names `workspace-tools.ts`
+ *  registers in their place — running on a tool server, not here. Only `tools()` reads these. */
+const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
+const IDE_TOOLS = PI_BUILTINS;
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string };
@@ -42,28 +62,61 @@ export class RpcChild {
     return !!this.child;
   }
 
+  /**
+   * The child's whole argv but the binary — one place, because `tools()` answers what this session
+   * can call by READING it. A probe that asserts a bench session has no `bash` is then asserting
+   * about the process that runs, not about a second copy of the rules.
+   */
+  private args(extDir: string): string[] {
+    const o = this.opts;
+    // Every kind but the fork loads `workspace-tools.ts`; what differs is whose machine it points
+    // at. A workspace session names its workspace (`KL_TOOLS_WORKSPACE`, address from /v1); a bench
+    // session is handed `BENCH_TOOLS`, its OWN workspace container's tool server on loopback, so
+    // its hands are its own machine's and no other's — reaching a different workspace is
+    // `kl_workspace_ask`, a queue, never a tool call (owner, 2026-09-17).
+    //
+    // `--no-builtin-tools` stays either way: a built-in read or bash would run in the BENCH
+    // container, which is nobody's machine. It leaves exactly the extensions' tools, which for a
+    // bench session is already the whole right set — so there is no `--tools` allow-list to keep
+    // equal to the catalogue by hand.
+    // The btw fork answers one question from the transcript it forked: `--no-tools`, and
+    // `kloudlite.ts` loaded in fork mode purely so it is told what it is and registers nothing.
+    const exts = (o.fork ? ["kloudlite.ts"] : ["workspace-tools.ts", "kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
+    return ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : []), ...(o.fork || o.tools ? [] : ["--no-builtin-tools"])];
+  }
+
+  /**
+   * Every tool name this session can call, read off the argv above: `--no-tools` is none,
+   * `--tools` is exactly its allow-list, and otherwise it is the extension's catalogue plus pi's
+   * builtins — which `--no-builtin-tools` removes. Nothing here asks the child, because pi's RPC
+   * has no tool listing; what it does have is these flags, and they are what decide.
+   */
+  tools(extDir = this.opts.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi")): string[] {
+    const a = this.args(extDir);
+    if (a.includes("--no-tools")) return [];
+    const allow = a[a.indexOf("--tools") + 1];
+    if (a.includes("--tools")) return allow.split(",");
+    // Not the builtins: the same seven NAMES, registered by `workspace-tools.ts` and run on a tool
+    // server. `--no-builtin-tools` removes pi's own; these stay.
+    const ide = a.some((x) => x.endsWith("workspace-tools.ts")) ? IDE_TOOLS : [];
+    const ext = a.some((x) => x.endsWith("kloudlite.ts")) ? TOOLS.map((t) => t.name) : [];
+    return [...(a.includes("--no-builtin-tools") ? [] : PI_BUILTINS), ...ide, ...ext];
+  }
+
   start(): void {
     if (this.child) return;
     const o = this.opts;
     const bin = o.bin ?? process.env.HARNESS_PI_BIN ?? path.join(HARNESS, "node_modules", ".bin", "pi");
     // The image installs the whole harness tree at /opt/harness, so the relative defaults resolve there; the env names another layout.
     const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
-    // A workspace session loads its own tools, plus `kloudlite.ts` for that machine's own packages.
-    // A bench session loads the platform and NOTHING that runs here: `--no-builtin-tools` takes the
-    // built-in read/write/bash away and background.ts/process.ts are not loaded, because a bench
-    // session has no hands in the bench pod at all (owner, 2026-09-17) — work for a workspace is
-    // queued into that workspace's own session instead.
-    // The btw fork answers one question from the transcript it forked: `--no-tools`, and
-    // `kloudlite.ts` loaded in fork mode purely so it is told what it is and registers nothing.
-    const exts = (o.fork ? ["kloudlite.ts"] : o.tools ? ["workspace-tools.ts", "kloudlite.ts"] : ["kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
-    const args = ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.tools ? ["--tools", WORKSPACE_TOOLS] : []), ...(o.fork || o.tools ? [] : ["--no-builtin-tools"])];
+    const args = this.args(extDir);
     // KL_TEAM rides in from the bench's own env; the extension asks /v1 for the address, so nothing secret goes in argv.
     // The trace of the request that started this child; every tool call of its life joins it.
     // ponytail: one waterfall per child lifetime, unbounded; `workspace-tools.ts` stops sending it
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
     // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
-    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork ? { KL_FORK: "1" } : {}), ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork ? { KL_FORK: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

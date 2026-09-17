@@ -34,14 +34,15 @@ process.stdin.on("data", (d) => {
     if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
-    // A follow-up is queued beside the turn, not a turn of its own: recorded and acknowledged.
-    else if (cmd.type === "follow_up") { messages.push({ role: "user", content: cmd.message, timestamp: Date.now() }); ok(); }
-    else if (cmd.type === "prompt") {
-      if (cmd.message === "crash") process.exit(3);
+    // A follow-up is a prompt the real pi runs once the turn it arrived during settles; here it
+    // simply runs, which is what a test of the harness's own queueing needs to see.
+    else if (cmd.type === "prompt" || cmd.type === "follow_up") {
+      // endsWith, not equality: an ask arrives tagged, and a tagged "crash" is still a crash.
+      if (String(cmd.message).endsWith("crash")) process.exit(3);
       ok();
       messages.push({ role: "user", content: cmd.message, timestamp: Date.now() });
       out({ type: "agent_start" });
-      if (cmd.message === "hang") return; // never answers: for a bounded-wait timeout test
+      if (String(cmd.message).endsWith("hang")) return; // never answers: for a bounded-wait timeout test
       if (cmd.message === "task") { out({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "sleep 600" } }); return; } // a task left "running": no tool_execution_end
       if (cmd.message === "exchange") out({ type: "extension_ui_request", id: "w1", method: "setWidget", widgetKey: "harness:exchange", widgetLines: [JSON.stringify({ id: "e1", workspace: "api", dir: "out", text: "kl_workspace_start api", state: "sent" })] });
       if (cmd.message === "proc") {
@@ -50,8 +51,10 @@ process.stdin.on("data", (d) => {
         out({ type: "extension_ui_request", id: "w2", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "sleeper", command: "sleep 600", pid: child.pid, started: Date.now() }])] });
       }
       out({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo ${cmd.message}` } });
-      messages.push({ role: "assistant", content: [{ type: "text", text: `echo ${cmd.message}` }], timestamp: Date.now() });
-      out({ type: "agent_end" });
+      const answer = { role: "assistant", content: [{ type: "text", text: `echo ${cmd.message}` }], timestamp: Date.now() };
+      messages.push(answer);
+      // Real pi hands the run's own messages to agent_end (rpc.md); the harness reads the answer there.
+      out({ type: "agent_end", messages: [answer] });
     } else out({ type: "response", id: cmd.id, command: cmd.type, success: false, error: `fake pi: ${cmd.type}` });
   }
 });

@@ -84,7 +84,6 @@ const q = (o: Record<string, string | undefined>) => {
 export function identity(hands: string): string {
   return [
     "You are the Kloudlite harness: the person's bench on the Kloudlite platform.",
-    "You have no filesystem and no shell of your own — nothing you do touches the machine you run on, and there are no local files to read.",
     hands,
     "Those tools are the only way you can see or change anything. Never try to reach the platform another way, and never guess at what a tool would have told you.",
     "Say what you did and what came back, briefly, in the person's own terms.",
@@ -105,7 +104,7 @@ export function tellItWhereItStands(pi: ExtensionAPI, hands: string): void {
  * workspace's own session, which has its own hands and its own tab.
  */
 export const BENCH_HANDS = [
-  "You are yourself a workspace on the platform: a machine with its own packages and its own environment. \"Install X\", \"add a package\", \"switch the environment\" with no workspace named mean YOURS — kl_pkg_list, kl_pkg_add, kl_pkg_rm, kl_pkg_update, kl_env_current, kl_env_switch, kl_env_clear.",
+  "You are yourself a workspace on the platform: a machine with its own files, its own shell, its own packages and its own environment. read, write, edit, bash, grep, find and ls all run THERE — in your own workspace, never on the machine this conversation runs on, and never in any other workspace. \"Install X\", \"add a package\", \"switch the environment\" with no workspace named mean YOURS — kl_pkg_list, kl_pkg_add, kl_pkg_rm, kl_pkg_update, kl_env_current, kl_env_switch, kl_env_clear.",
   "You never change another workspace yourself. To have work done in one, use kl_workspace_ask with the workspace id and the request in plain words: it is queued into that workspace's own session, which does the work there and answers back to you. Say that you asked, and go on; the answer arrives as a message.",
   "The platform itself — workspaces, environments, volumes, quota, regions, requests — is reached only through the kl_* tools.",
 ].join("\n\n");
@@ -182,6 +181,53 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
   reg("kl_env_clear", {}, () => answer("DELETE", `/v1/me/environments/${encodeURIComponent(space)}`));
 }
 
+/**
+ * The space's environment. Every session that lives in a space may manage it — the bench and every
+ * workspace session alike (owner, 2026-09-17): the person debugging in a workspace is the person
+ * who needs a service added or its traffic pointed at them, and making them walk back to the bench
+ * for it is the same "no tool for this" that sent a model reading extension source.
+ *
+ * Creating, stopping, cloning, restoring and deleting an environment stay with the bench: those
+ * are about the space, not about the work in front of one workspace.
+ */
+function environmentTools(reg: ReturnType<typeof makeReg>) {
+  const S = (d: string) => Type.String({ description: d });
+  const O = <T>(t: T) => Type.Optional(t as any);
+  reg("kl_environments", { owner: O(S("owner slug to list for")) }, (a) => answer("GET", `/v1/environments${q({ owner: a.owner })}`));
+  reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
+  reg(
+    "kl_intercept",
+    {
+      id: S("environment id"),
+      service: S("service name in the environment"),
+      workspace: O(S("workspace id to deliver to; absent = clear the intercept")),
+      ports: O(Type.Array(Type.Object({ from: Type.Number(), to: Type.Number() }), { description: "port remaps: service port → workspace port" })),
+    },
+    (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
+  );
+  // PATCH takes the WHOLE list, so both of these read the environment first and pass every service
+  // they are not changing through VERBATIM. A tool that took "the list" and rebuilt each row from
+  // a narrower schema would silently drop a service's command, env or mounts — the model cannot
+  // see what it did not ask for. Removals take their StatefulSet with them; bytes stay on the volume.
+  const services = async (id: string): Promise<Record<string, any>[]> => {
+    const { status, data } = await call("GET", `/v1/environments/${encodeURIComponent(id)}`);
+    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+    return ((data as { services?: Record<string, any>[] } | null)?.services ?? []).slice();
+  };
+  const withServices = (id: string, next: Record<string, any>[]) => answer("PATCH", `/v1/environments/${encodeURIComponent(id)}`, { services: next });
+  reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a) => {
+    const have = await services(a.id);
+    const one = service(a.service);
+    return withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
+  });
+  reg("kl_environment_service_rm", { id: S("environment id"), name: S("the service to remove") }, async (a) => {
+    const have = await services(a.id);
+    const next = have.filter((s) => s.name !== a.name);
+    if (next.length === have.length) return { ...text(`${a.id} has no service ${a.name}`), isError: true };
+    return withServices(a.id, next);
+  });
+}
+
 export function tools(pi: ExtensionAPI) {
   const reg = makeReg(pi);
   const S = (d: string) => Type.String({ description: d });
@@ -227,8 +273,7 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_workspace_delete", { id: S("workspace id") }, (a) => answer("DELETE", `/v1/workspaces/${a.id}`));
 
   // environments
-  reg("kl_environments", { owner: O(S("owner slug to list for")) }, (a) => answer("GET", `/v1/environments${q({ owner: a.owner })}`));
-  reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
+  environmentTools(reg);
   reg(
     "kl_environment_create",
     { name: S("environment name"), region: S("region id"), owner: O(S("team slug; absent = personal")), services: Type.Array(SERVICE, { description: "services to run" }) },
@@ -238,37 +283,6 @@ export function tools(pi: ExtensionAPI) {
   reg("kl_environment_stop", { id: S("environment id") }, (a) => answer("POST", `/v1/environments/${a.id}/stop`));
   reg("kl_environment_push", { id: S("environment id"), message: O(S("what this snapshot is")) }, (a) => answer("POST", `/v1/environments/${a.id}/push`, { message: a.message }));
   reg("kl_environment_clone", { id: S("source environment id"), name: S("name for the clone") }, (a) => answer("POST", `/v1/environments/${a.id}/clone`, { name: a.name }));
-  reg(
-    "kl_intercept",
-    {
-      id: S("environment id"),
-      service: S("service name in the environment"),
-      workspace: O(S("workspace id to deliver to; absent = clear the intercept")),
-      ports: O(Type.Array(Type.Object({ from: Type.Number(), to: Type.Number() }), { description: "port remaps: service port → workspace port" })),
-    },
-    (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
-  );
-  // PATCH takes the WHOLE list, so both of these read the environment first and pass every service
-  // they are not changing through VERBATIM. A tool that took "the list" and rebuilt each row from
-  // a narrower schema would silently drop a service's command, env or mounts — the model cannot
-  // see what it did not ask for. Removals take their StatefulSet with them; bytes stay on the volume.
-  const services = async (id: string): Promise<Record<string, any>[]> => {
-    const { status, data } = await call("GET", `/v1/environments/${encodeURIComponent(id)}`);
-    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
-    return ((data as { services?: Record<string, any>[] } | null)?.services ?? []).slice();
-  };
-  const withServices = (id: string, next: Record<string, any>[]) => answer("PATCH", `/v1/environments/${encodeURIComponent(id)}`, { services: next });
-  reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a) => {
-    const have = await services(a.id);
-    const one = service(a.service);
-    return withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
-  });
-  reg("kl_environment_service_rm", { id: S("environment id"), name: S("the service to remove") }, async (a) => {
-    const have = await services(a.id);
-    const next = have.filter((s) => s.name !== a.name);
-    if (next.length === have.length) return { ...text(`${a.id} has no service ${a.name}`), isError: true };
-    return withServices(a.id, next);
-  });
   reg(
     "kl_environment_restore",
     { name: S("name for the restored environment"), snapshot_id: S("snapshot id to restore"), owner: O(S("team slug; absent = personal")), region: O(S("region to run in")), services: O(Type.Array(SERVICE, { description: "override the services the snapshot froze" })) },
@@ -316,8 +330,14 @@ export default function (pi: ExtensionAPI) {
   // A `btw` fork runs `--no-tools` over a copy of a session's transcript. It registers nothing —
   // it is loaded ONLY so it is told what it is, like every other session (owner, 2026-09-17).
   if (process.env.KL_FORK === "1") return tellItWhereItStands(pi, "You answer one question about this bench's work, from the transcript you were forked from. You have no tools: you can change nothing, and you cannot look anything up — answer from what is in front of you, or say it is not there.");
+  // The mode is which machine's session this is: a workspace names it, the bench is its own
+  // (`KL_WORKSPACE_ID`, whose tool server `workspace-tools.ts` is pointed at by address).
   const inWorkspace = process.env.KL_TOOLS_WORKSPACE;
-  if (inWorkspace) return ownTools(pi, inWorkspace, undefined);
+  if (inWorkspace) {
+    const reg = makeReg(pi);
+    ownTools(pi, inWorkspace, process.env.KL_TEAM, reg);
+    return environmentTools(reg);
+  }
   tools(pi);
   const own = process.env.KL_WORKSPACE_ID;
   if (own) ownTools(pi, own, process.env.KL_TEAM);

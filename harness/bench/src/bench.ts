@@ -4,11 +4,13 @@ import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Procs, Tasks, type ProcRow } from "./ledger.ts";
 import { page, transcript } from "./reader.ts";
-import { RpcChild, type PiEvent } from "./rpc-child.ts";
+import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
 import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
+/** One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in. */
+type Ask = { exchange: string; from: string; workspace: string };
 export type BenchOpts = { dir: string; readOnly: boolean; model: string; bin?: string; extDir?: string };
 
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
@@ -42,8 +44,8 @@ export class Bench {
   /** Sessions between agent_start and agent_end: a turn nobody watches still holds the bench up. */
   private turning = new Set<string>();
   private btwSeq = new Map<string, number>();
-  /** A workspace session's turn that some bench session is waiting on: its exchange, and who to answer. */
-  private asked = new Map<string, { exchange: string; from: string; workspace: string }>();
+  /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
+  private asked = new Map<string, Ask[]>();
   private askSeq = 0;
 
   constructor(opts: BenchOpts) {
@@ -90,9 +92,8 @@ export class Bench {
     await Promise.all(done);
   }
 
-  private open(s: SessionRow): RpcChild | undefined {
-    let c = this.children.get(s.id);
-    if (c?.running()) return c;
+  /** What this row's pi would be spawned with — `undefined` for a row that cannot be opened at all. */
+  private childOpts(s: SessionRow): ChildOpts | undefined {
     const thread = !isBench(s);
     // A thread row with no file (an old import, a hand edit) is skipped, never a crash-loop at boot.
     if (thread && !s.file) {
@@ -102,7 +103,28 @@ export class Bench {
     // pi creates a thread's file at the path it is given, so a thread's file need not exist yet.
     const file = thread ? s.file : s.file && fs.existsSync(s.file) ? s.file : undefined;
     const dir = thread ? path.dirname(s.file!) : path.join(this.opts.dir, "sessions");
-    const child: RpcChild = new RpcChild(s.id, { dir, file, tools: thread ? s.target : undefined, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, child, ev));
+    return { dir, file, tools: thread ? s.target : undefined, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir };
+  }
+
+  /**
+   * The tool names a session can call. Answered from the spawn options whether or not its pi is up,
+   * because it is a property of the session, not of a process that happens to be running — and a
+   * bench session must be answerable while it is idle, which is most of the time.
+   */
+  tools(id: string): string[] {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error(`no session ${id}`);
+    const o = this.childOpts(s);
+    if (!o) throw new Error(`no session ${id}`);
+    return new RpcChild(id, o, () => {}).tools();
+  }
+
+  private open(s: SessionRow): RpcChild | undefined {
+    let c = this.children.get(s.id);
+    if (c?.running()) return c;
+    const o = this.childOpts(s);
+    if (!o) return undefined;
+    const child: RpcChild = new RpcChild(s.id, o, (ev) => this.fold(s.id, child, ev));
     this.children.set(s.id, child);
     child.start();
     // The file name is pi's to choose; ask once so the list can reopen it.
@@ -130,7 +152,7 @@ export class Bench {
       void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
     }
     if (ev.type === "agent_start") {
-      const a = this.asked.get(id);
+      const a = this.asked.get(id)?.[0];
       if (a) this.transitionAsk(a, "running");
       this.turning.add(id);
       this.write(() => this.sessions.update(id, { lastActive: now }));
@@ -138,15 +160,13 @@ export class Bench {
     if (ev.type === "agent_end") {
       this.turning.delete(id);
       // `willRetry` means this run is not the answer yet — pi keeps going on its own.
-      if (ev.willRetry !== true) void this.deliver(id);
+      if (ev.willRetry !== true) void this.deliver(id, ev.messages as { role?: string; content?: unknown }[] | undefined);
     }
     if (ev.type === "exit") {
       this.turning.delete(id);
-      const a = this.asked.get(id);
-      if (a) {
-        this.asked.delete(id);
-        this.transitionAsk(a, "failed");
-      }
+      // Its pi is gone: nothing it was handed will ever be answered.
+      for (const a of this.asked.get(id) ?? []) this.transitionAsk(a, "failed");
+      this.asked.delete(id);
       // Only this session's pi went; the others still hold their commands.
       for (const row of this.write(() => this.tasks.markLost(id)) ?? []) this.emit({ type: "task", row });
       if (this.write(() => this.procs.markLost(id))?.length) this.emit({ type: "procs", rows: this.procs.all() });
@@ -196,24 +216,33 @@ export class Bench {
   }
 
   /**
-   * A workspace session finished a turn somebody asked for: the answer goes back
-   * into the asking session as a message, so the person sees one conversation
-   * rather than having to watch the other tab. A follow-up when that session is
-   * mid-turn, a prompt when it is not — the same choice as sending the ask.
+   * A workspace session finished a turn: the answer goes back into the session that asked for it,
+   * so the person sees one conversation rather than having to watch the other tab.
+   *
+   * WHICH ask it answers is the workspace session's own to say. It holds a queue and works through
+   * it in whatever order makes sense, so a turn that answers a specific one starts with
+   * `[reply <exchange>]`; without that tag the oldest outstanding ask is the one being answered,
+   * which is the ordinary case of a queue of one. Anything the model invents that is not an
+   * outstanding exchange of this workspace is ignored, not routed.
    */
-  private async deliver(id: string) {
-    const a = this.asked.get(id);
-    if (!a) return;
-    this.asked.delete(id);
+  private async deliver(id: string, ran?: { role?: string; content?: unknown }[]) {
+    const queue = this.asked.get(id);
+    if (!queue?.length) return;
     let answer = "";
     try {
-      const r = await this.children.get(id)?.send({ type: "get_messages" });
-      const all = ((r?.data as { messages?: unknown[] } | undefined)?.messages ?? []) as { role?: string; content?: unknown }[];
+      // THIS run's messages, which agent_end carries: the whole transcript would answer with
+      // whatever the session said last, and by now that may be a later turn's answer to somebody else.
+      const all = ran?.length ? ran : (((await this.children.get(id)?.send({ type: "get_messages" }))?.data as { messages?: unknown[] } | undefined)?.messages ?? []) as { role?: string; content?: unknown }[];
       const last = [...all].reverse().find((m) => m.role === "assistant");
       answer = typeof last?.content === "string" ? last.content : (Array.isArray(last?.content) ? last!.content : []).map((c: { text?: string }) => c.text ?? "").join("").trim();
     } catch {
-      /* the child went; the exchange still has to settle */
+      /* the child went; the head still has to settle */
     }
+    const tagged = /\[reply ([^\]]+)\]/.exec(answer)?.[1];
+    const at = tagged ? queue.findIndex((x) => x.exchange === tagged) : 0;
+    const a = queue[at >= 0 ? at : 0];
+    queue.splice(at >= 0 ? at : 0, 1);
+    if (!queue.length) this.asked.delete(id);
     this.transitionAsk(a, answer ? "done" : "failed");
     const back = this.exchanges.record({ id: `${a.exchange}-in`, session: a.from, workspace: a.workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: a.exchange });
     this.emit({ type: "exchange", row: back });
@@ -233,28 +262,34 @@ export class Bench {
    * it — created here if it has none — so the work happens where the hands and the history are,
    * and is visible in that workspace's tab rather than hidden inside the asking session.
    *
-   * ponytail: one outstanding ask per workspace and no deadline — a second is refused naming the
-   * first, and a turn that never ends leaves the exchange `running` forever. The upgrade is a
-   * queue per workspace session and a deadline that fails the exchange and says so to the asker.
+   * An ask is NEVER refused because that workspace is busy or already holds one (owner): it is
+   * handed over as a follow-up, pi holds the queue, and the session works through them in its own
+   * order. The tag carries the exchange and who asked, because the answer has to find its way back
+   * to one of several senders and only the model knows which one it just answered.
+   *
+   * ponytail: no deadline — a turn that never ends leaves its exchange `running` until the child
+   * exits. The upgrade is a timer per ask that fails the exchange and tells the asker so.
    */
-  async ask(workspace: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string }> {
+  async ask(workspace: string, text: string, from: string): Promise<{ session: string; exchange: string; workspace: string; queued: number }> {
     this.refuse(true);
     if (typeof text !== "string" || !text.trim()) throw new Error("an ask needs something to do");
-    if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    const asker = this.sessions.get(from);
+    if (!asker) throw new Error(`no session ${from}`);
     const s = await this.openWorkspace(workspace);
-    if (this.asked.has(s.id)) throw new Error(`${workspace} is already working on something asked of it`);
     const exchange = `ask-${++this.askSeq}-${Date.now().toString(36)}`;
     const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text, state: "queued" }));
     this.emit({ type: "exchange", row });
-    this.asked.set(s.id, { exchange, from, workspace });
+    const queue = this.asked.get(s.id) ?? [];
+    queue.push({ exchange, from, workspace });
+    this.asked.set(s.id, queue);
     try {
-      await this.send(s.id, text);
+      await this.send(s.id, `[ask ${exchange} from ${asker.name}] ${text}`);
     } catch (e) {
-      this.asked.delete(s.id);
+      this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
       this.transitionAsk({ exchange, from, workspace }, "failed");
       throw e;
     }
-    return { session: s.id, exchange, workspace };
+    return { session: s.id, exchange, workspace, queued: queue.length };
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */
