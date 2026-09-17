@@ -182,6 +182,16 @@ test("a prompt to a starting session is queued, not sent into silence", () => {
   assert.ok(!/L\.sent\(/.test(branch), "not as a sent message");
 });
 
+/**
+ * The Queue reads the exchange store, not `workspace.queue` — `toWorkspace()` fills that with `[]`
+ * by design, so the panel was empty for every session while the bench had rows (owner: s-7).
+ */
+test("the Queue shows what the session asked", () => {
+  const view = fs.readFileSync(path.resolve("src/renderer/components/inspector/MachineView.tsx"), "utf8");
+  assert.match(view, /const queue = \(\) => live\.queueOf\(props\.session\)/, "read from the exchange store");
+  assert.ok(!/w\.queue\.filter/.test(view), "`workspace.queue` is always empty: it is not the source");
+});
+
 test("clicking a session opens it", () => {
   const panel = fs.readFileSync(path.resolve("src/renderer/components/MachinePanel.tsx"), "utf8");
   assert.ok(!/i\(\) === 0 \? props\.machine\.id/.test(panel), "the first row is not the machine's id");

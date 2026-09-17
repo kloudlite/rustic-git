@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { asksOf, exchangesOf, noteConnected, onEvent, seedExchanges, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
+import { asksOf, exchangesOf, noteConnected, onEvent, queueOf, seedExchanges, setWorkspaceNames, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -243,4 +243,37 @@ test("a reconnect never paints offline; a real outage still does", async () => {
 
   // And the default `apply` resolves at call time, so the real signal is reachable.
   assert.doesNotThrow(() => noteConnected(true));
+});
+
+/**
+ * The inspector's Queue said "This session has not sent anything to a workspace yet" for s-7 while
+ * `GET /exchanges?session=s-7` answered a row. It read `workspace.queue`, which `toWorkspace()`
+ * always fills with `[]` — so it was empty for EVERY session. The rows live in the exchange store.
+ */
+test("a session with one out-exchange renders one queue row", () => {
+  setWorkspaceNames([{ id: "ws-632cf9f23d9f2fbf", name: "backend" }]);
+  seedExchanges([
+    { id: "info-1-mu5yn8wz", session: "s-7", workspace: "ws-632cf9f23d9f2fbf", dir: "out", text: "what is in this workspace now", state: "pending", ts: 2 },
+    // Another session's row, and an inbound one: neither is this session's queue.
+    { id: "x-2", session: "s-8", workspace: "ws-632cf9f23d9f2fbf", dir: "out", text: "not mine", state: "pending", ts: 3 },
+    { id: "x-3", session: "s-7", workspace: "ws-632cf9f23d9f2fbf", dir: "in", text: "a reply", state: "done", ts: 4 },
+  ]);
+  const q = queueOf("s-7");
+  assert.equal(q.length, 1, "one row: this session's outbound exchange");
+  assert.equal(q[0].text, "what is in this workspace now");
+  assert.equal(q[0].workspace, "backend", "named, not an unreadable id");
+  assert.equal(q[0].dir, "out");
+  assert.match(q[0].at, /^\d\d:\d\d$/, "the store keeps a timestamp; the row renders a clock");
+});
+
+/** An `info-*` row is an ask like any other, and a finished one still belongs in the record. */
+test("the queue keeps info asks and finished rows, in the order they happened", () => {
+  seedExchanges([
+    { id: "b", session: "s-71", workspace: "ws-1", dir: "out", text: "second", state: "done", ts: 20 },
+    { id: "a", session: "s-71", workspace: "ws-1", dir: "out", text: "first", state: "working", ts: 10 },
+    { id: "info-c", session: "s-71", workspace: "ws-1", dir: "out", text: "third", state: "pending", ts: 30 },
+  ]);
+  const q = queueOf("s-71");
+  assert.deepEqual(q.map((x) => x.text), ["first", "second", "third"], "oldest first");
+  assert.deepEqual(q.map((x) => x.state), ["working", "done", "pending"]);
 });

@@ -13,13 +13,13 @@ import type { Machine } from "../../model";
  * one place they are listed.
  */
 export function MachineView(props: { machine: Machine; session: string; onOpenShell: (scope: string) => void }) {
-  // This session's exchanges with the workspaces, as ONE queue in the order
-  // they happened — each row names its workspace; grouping by workspace would
-  // hide the order, which is what a queue is.
-  const queue = () =>
-    props.machine.workspaces
-      .flatMap((w) => w.queue.filter((x) => x.session === props.session).map((x) => ({ ...x, workspace: w.name })))
-      .sort((a, b) => a.at.localeCompare(b.at));
+  // This session's exchanges with the workspaces, as ONE queue in the order they happened — each
+  // row names its workspace; grouping by workspace would hide the order, which is what a queue is.
+  //
+  // Read from the EXCHANGE store, not from `workspace.queue`: `toWorkspace()` fills that with `[]`
+  // (it invents nothing the api has no field for), so the panel was empty for every session — the
+  // owner's s-7 said "has not sent anything" while the bench answered a row for it.
+  const queue = () => live.queueOf(props.session);
   const openCount = () => queue().filter((x) => x.state !== "done").length;
   const [tab, setTab] = createSignal<"overview" | "queue">("overview");
   const all = () => leaves(props.machine.todos);

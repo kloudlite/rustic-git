@@ -48,6 +48,29 @@ export function seedExchanges(rows: unknown[]) {
 }
 /** Everything said to and from one workspace. */
 export const exchangesOf = (workspace: string) => exchanges.filter((e) => e.workspace === workspace);
+/**
+ * Everything a session has sent to a workspace, newest last — its Queue. Read from the exchange
+ * store, which is keyed by session and folded on every `exchange` event; the panel used to read
+ * `workspace.queue`, which `toWorkspace()` always fills with `[]`, so it was empty for a session
+ * the bench had rows for (owner: s-7 with an `info-*` row on ws-632c…).
+ *
+ * `info-*` rows and done ones are included: the Queue is what was asked, not only what is pending.
+ */
+export const queueOf = (session: string) =>
+  exchanges
+    .filter((e) => e.session === session && e.dir === "out")
+    .slice()
+    .sort((a, b) => a.ts - b.ts)
+    .map((e) => ({
+      dir: e.dir,
+      text: e.text,
+      session: e.session,
+      // The store keeps a timestamp; the row renders a clock.
+      at: new Date(e.ts).toTimeString().slice(0, 5),
+      state: (e.state === "done" || e.state === "failed" ? "done" : e.state === "working" ? "working" : "pending") as "pending" | "working" | "done",
+      workspace: wsNames()[e.workspace] ?? e.workspace,
+    }));
+
 /** What a session has asked of a workspace and has not had back yet: its own queue. */
 export const asksOf = (session: string) => exchanges.filter((e) => e.session === session && e.dir === "out" && e.state !== "done" && e.state !== "failed");
 
