@@ -106,7 +106,7 @@ export class Bench {
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
   /** Patterns a session asked to be told about, by process id. */
-  private watching = new Map<string, { session: string; re: RegExp; since: number; pattern: string }>();
+  private watching = new Map<string, { session: string; re: RegExp; since: number; pattern: string; said: Set<string> }>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** The last thing a session SAID, so a turn that ended in a question is read as waiting. */
@@ -558,7 +558,7 @@ export class Bench {
    */
   watchProc(session: string, id: string, pattern: string): void {
     const re = new RegExp(pattern);
-    this.watching.set(id, { session, re, since: 0, pattern });
+    this.watching.set(id, { session, re, since: 0, pattern, said: new Set() });
     this.pollProcs();
   }
 
@@ -572,7 +572,18 @@ export class Bench {
       const out = await this.procOutput(id, w.since).catch(() => undefined);
       if (!out) continue;
       w.since = out.next ?? w.since;
-      const hit = [out.stdout, out.stderr].filter(Boolean).join("\n").split("\n").filter((l) => l.trim() && w.re.test(l)).slice(0, WATCH_MAX_LINES);
+      // `next` advances over STDOUT only — the tool server answers stderr from byte 0 every time
+      // (`crates/ide/src/tools/exec.rs:192`), so a build, which writes its progress there, replayed
+      // the same `#N DONE` lines on every fire (owner, 2026-09-18). A line already sent is not news.
+      const hit = [out.stdout, out.stderr]
+        .filter(Boolean)
+        .join("\n")
+        .split("\n")
+        .filter((l) => l.trim() && w.re.test(l) && !w.said.has(l))
+        .slice(0, WATCH_MAX_LINES);
+      for (const l of hit) w.said.add(l);
+      // A build prints thousands of lines; only what matched is remembered, and never unboundedly.
+      if (w.said.size > 2_000) w.said = new Set([...w.said].slice(-1_000));
       if (hit.length) await this.send(w.session, `[watch ${row.name} /${w.pattern}/]\n${hit.join("\n")}`).catch(() => undefined);
     }
   }
@@ -598,18 +609,21 @@ export class Bench {
     return s?.target || s?.workspace || process.env.KL_WORKSPACE_ID || "bench";
   }
 
-  /** Where a session's tools run: its workspace, or for a bench session its own container. */
+  /**
+   * Where a session's tools run: the workspace it names. A BENCH session names none — it has no
+   * tool server anywhere (spec §3.1) — so anything that needed one is a question about a session
+   * that never had hands, answered as that rather than dialled at the bench's own pod.
+   */
   private async toolsAddress(session: string): Promise<string> {
     const s = this.sessions.get(session);
     if (!s) throw new Error(`no session ${session}`);
     const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
-    return s.target ? await resolve(s.target) : BENCH_TOOLS;
+    return await resolve(s.target);
   }
 
   /**
-   * Stop a background process. It runs on a tool server — the session's own workspace, or, for a
-   * bench session, the bench pod's own workspace container over loopback — so this is the harness
-   * reaching the same place the tool did, never a command typed at the model.
+   * Stop a background process. It runs on a tool server — the session's own workspace — so this is
+   * the harness reaching the same place the tool did, never a command typed at the model.
    */
   async killProc(session: string, id: string): Promise<void> {
     const at = await this.toolsAddress(session);
@@ -1080,7 +1094,11 @@ export class Bench {
       const r = await m.call("GET", `/v1/workspaces${team ? `?team=${encodeURIComponent(team)}` : ""}`);
       return Array.isArray(r.data) ? (r.data as { id: string; name?: string }[]) : [];
     }));
-    const workspaces = await list().catch(() => []);
+    // Never the bench itself: the document is what the model reads to learn what machines exist,
+    // and a bench in it is a machine it will try to name (owner, 2026-09-18). `/v1` already hides
+    // them; a row from an older api or a custom lister must not get through either.
+    const own = process.env.KL_WORKSPACE_ID;
+    const workspaces = (await list().catch(() => [])).filter((w) => !(w as { bench?: unknown }).bench && w.id !== own && !/^bench-[0-9a-f]{8,}$/.test(w.id));
     const services = await (this.opts.listServices?.() ?? Promise.resolve([])).catch(() => []);
     this.writable.run(() => this.architecture.seed({ workspaces, services }));
   }
