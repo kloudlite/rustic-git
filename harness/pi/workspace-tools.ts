@@ -266,6 +266,13 @@ export function fromIde(name: string, status: number, body: any, limit?: number)
   }
 }
 
+/**
+ * One workspace's tool server, as a client. pi runs the sibling tool calls of an assistant message
+ * CONCURRENTLY (extensions.md: "in the default parallel tool execution mode, sibling tool calls
+ * from the same assistant message are preflighted sequentially, then executed concurrently"), so
+ * nothing here may serialise them: there is no queue and no in-flight promise, only the address
+ * cache, which two concurrent calls may fill twice and that costs one extra /v1 GET.
+ */
 export class ToolServer {
   private workspace: string;
   private resolve: (ws: string) => Promise<string>;

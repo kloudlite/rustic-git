@@ -5,6 +5,7 @@ import { displayModel, procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
+import { elapsed, segments, timing, verb } from "../../src/renderer/components/results/group.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -146,4 +147,31 @@ test("a model reads as its name, and pi's status is never mistaken for one", () 
   assert.equal(displayModel("not started"), "no model");
   assert.equal(displayModel(""), "no model");
   assert.equal(displayModel(undefined), "no model");
+});
+
+test("consecutive tool calls of one turn read as one group", () => {
+  const t = (tool: string, ts: number, ms?: number, pending?: true) => ({ role: "action" as const, kind: "run" as const, text: "", at: "", tool, ts, ms, pending });
+  const say = (text: string) => ({ role: "assistant" as const, text, at: "" });
+
+  // Six commands issued together are one decision, not six.
+  const six = Array.from({ length: 6 }, (_, i) => t("bash", 1000 + i));
+  const segs = segments([say("on it"), ...six, say("done")]);
+  assert.deepEqual(segs.map((s) => s.kind), ["one", "group", "one"]);
+  assert.equal((segs[1] as { rows: unknown[] }).rows.length, 6);
+  assert.equal(verb(six as never), "6 shell commands");
+
+  // One on its own stays as it was.
+  assert.deepEqual(segments([say("a"), t("bash", 1), say("b")]).map((s) => s.kind), ["one", "one", "one"]);
+  // A mixture is named for what it is, not for whichever came first.
+  assert.equal(verb([t("bash", 1), t("read", 2)] as never), "2 tool calls");
+  assert.equal(verb([t("read", 1), t("ls", 2)] as never), "2 reads");
+  assert.equal(verb([t("grep", 1), t("find", 2)] as never), "2 searches");
+
+  // The clock runs from the first start to the last end, and says so while anything is running.
+  // 1000→3000 and 1200→4200: first start to last end.
+  assert.deepEqual(timing([t("bash", 1000, 2000), t("bash", 1200, 3000)] as never, 9999), { running: false, ms: 3200 });
+  assert.deepEqual(timing([t("bash", 1000, undefined, true), t("bash", 1200, 500)] as never, 6000), { running: true, ms: 5000 });
+  assert.equal(elapsed(1400), "1.4s");
+  assert.equal(elapsed(12_000), "12s");
+  assert.equal(elapsed(310_000), "5m 10s");
 });

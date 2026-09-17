@@ -418,3 +418,30 @@ test("long output reminds the model that it is the only one reading it", async (
     srv.close();
   }
 });
+
+test("the tool server client does not serialise: pi runs sibling calls at the same time", async () => {
+  // extensions.md: sibling tool calls of one assistant message are "preflighted sequentially, then
+  // executed concurrently". Nothing in our client may put them back in a queue.
+  let inFlight = 0;
+  let most = 0;
+  const srv = http.createServer((req, res) => {
+    inFlight++;
+    most = Math.max(most, inFlight);
+    setTimeout(() => {
+      inFlight--;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ exit_code: 0, stdout: "ok", stderr: "" }));
+    }, 60);
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  try {
+    const server = new ToolServer("api", async () => at);
+    const began = Date.now();
+    await Promise.all(Array.from({ length: 5 }, (_, i) => server.call(toIde("bash", { command: `job ${i}` }))));
+    assert.ok(most >= 4, `only ${most} were in flight at once`);
+    assert.ok(Date.now() - began < 250, "five 60ms jobs took as long as five serial ones");
+  } finally {
+    srv.close();
+  }
+});

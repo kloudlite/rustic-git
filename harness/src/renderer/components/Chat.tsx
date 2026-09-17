@@ -11,6 +11,7 @@ import { FileView } from "./FileView";
 import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
+import { elapsed, segments, timing, verb } from "./results/group";
 import { displayModel } from "../rows";
 import { HINTS } from "../keys";
 import * as live from "../live";
@@ -385,8 +386,10 @@ export function Chat(props: {
             <For each={sittings()}>
               {(sit, si) => (
                 <Show when={isOpen(si())} fallback={<Folded messages={sit} onOpen={() => setOpened((o) => new Set(o).add(si()))} />}>
-            <For each={sit}>
-              {(b) => (
+            <For each={segments(sit)}>
+              {(seg) => (
+                <Show when={seg.kind === "one"} fallback={<ToolGroup rows={(seg as { rows: Action[] }).rows} />}>
+                {(() => { const b = (seg as { row: Message }).row; return (
                 <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} />}>
                 <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
@@ -429,6 +432,8 @@ export function Chat(props: {
                     </div>
                   </Show>
                 </Show>
+                </Show>
+                ); })()}
                 </Show>
               )}
             </For>
@@ -838,6 +843,45 @@ function Question(props: { q: QuestionRow; session: string }) {
 export function fit(t: HTMLTextAreaElement) {
   t.style.height = "0";
   t.style.height = t.value ? `${t.scrollHeight}px` : "";
+}
+
+/**
+ * Several tool calls of one turn, as one row. pi runs them concurrently, so they started together
+ * and they are read together: the group says what is happening and for how long, each sub-row says
+ * where it got to, and a finished group is one line again.
+ */
+function ToolGroup(props: { rows: Action[] }) {
+  const [now, setNow] = createSignal(Date.now());
+  const t = setInterval(() => setNow(Date.now()), 500);
+  onCleanup(() => clearInterval(t));
+  const state = () => timing(props.rows, now());
+  const [open, setOpen] = createSignal(true);
+  // A finished group folds itself away; a failure keeps it open, like a single row does.
+  createEffect(() => !state().running && !props.rows.some((r) => r.ok === false) && setOpen(false));
+  return (
+    <div class="flex flex-col">
+      <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
+        <span class={`w-4 shrink-0 ${state().running ? "text-accent" : props.rows.some((r) => r.ok === false) ? "text-danger" : "text-subtle"}`} classList={{ "animate-pulse": state().running }}>●</span>
+        <span class="min-w-0 flex-1 truncate text-muted">
+          <Show when={state().running} fallback={<>{verb(props.rows)}</>}>Running {verb(props.rows)}</Show>
+          <span class="text-subtle"> · {elapsed(state().ms)}{state().running ? "…" : ""}</span>
+        </span>
+        <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
+      </button>
+      <Show when={open()}>
+        <div class="flex flex-col pl-2">
+          <For each={props.rows}>
+            {(r) => (
+              <div class="flex min-w-0 items-baseline gap-1">
+                <span class="shrink-0 text-subtle">└</span>
+                <span class="min-w-0 flex-1"><ToolCall a={r} /></span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+    </div>
+  );
 }
 
 function Hint(props: { keys: string; children: string }) {
