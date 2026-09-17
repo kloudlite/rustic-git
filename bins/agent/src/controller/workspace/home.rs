@@ -42,7 +42,27 @@ pub(crate) fn ensure_shared_home(pool: &str, export: &str, owner: &str, uid: u32
     }
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    sweep_empty_workspace_mountpoints(&dir);
     Ok(())
+}
+
+/// `~/workspaces/{id}` is a MOUNT POINT, not a folder of the person's: the kubelet mkdirs it on
+/// the home before mounting the workspace's own subvolume over it, and the mkdir survives on the
+/// NFS home long after that pod is gone. The owner saw a stray `workspaces/bench` in his shell
+/// (2026-09-18) with the bench volume mounted elsewhere.
+///
+/// Only EMPTY directories go: a mounted one has the worktree's contents in it, and anything with
+/// bytes in it is the person's — never ours to delete. Best effort, so a home on a share that is
+/// briefly unreadable costs a reconcile nothing.
+fn sweep_empty_workspace_mountpoints(home: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(home.join("workspaces")) else { return };
+    for e in entries.flatten() {
+        // `remove_dir` on a non-empty directory is ENOTEMPTY, and on a mount point EBUSY: the
+        // check and the delete are the same syscall, so nothing races between them.
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir(e.path());
+        }
+    }
 }
 
 
@@ -148,6 +168,23 @@ pub(crate) mod home_tests {
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
         ensure_shared_home(&pool, "unused", "alice", 1000).unwrap();
         assert_eq!(std::fs::metadata(&ssh).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    /// An empty `~/workspaces/{id}` is the kubelet's leftover mount point and goes; one with
+    /// anything in it is either mounted right now or the person's own, and stays.
+    #[test]
+    fn empty_workspace_mount_points_are_swept_and_nothing_else_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = tmp.path().display().to_string();
+        let home = crate::homes_root(&pool).join("alice");
+        std::fs::create_dir_all(home.join("workspaces/bench")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces/ws-1/src")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces")).unwrap();
+        std::fs::write(home.join("workspaces/notes.txt"), "mine").unwrap();
+        ensure_shared_home(&pool, "unused", "alice", 1000).unwrap();
+        assert!(!home.join("workspaces/bench").exists(), "an empty mount point leftover goes");
+        assert!(home.join("workspaces/ws-1/src").exists(), "a workspace with contents stays");
+        assert!(home.join("workspaces/notes.txt").exists(), "a file of the person's is never touched");
     }
 
     /// The one-time move: the transcripts land in the volume, the lock is left behind, and the
