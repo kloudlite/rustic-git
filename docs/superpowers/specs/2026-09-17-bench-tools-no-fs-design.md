@@ -249,3 +249,25 @@ under `.bench/`. Desktop: Settings › Memory lists the index with delete.
   where; the clone is deleted with `ask_close` (or when the caller's session ends) after the
   person, or the caller, has taken what it wants (git push from the clone, or a `later` plan
   item). Not isolated = the agent shares the caller's workspace, as today.
+
+## 16. The centre pane looks like opencode, dressed in Zed (owner, 2026-09-17 17:10 IST)
+
+Reference: opencode's TUI session view. Everything in the centre pane is monospace (this
+supersedes §9's UI-face prose for the transcript; cards keep their structure but in mono).
+- **Header**: `# <session title>` left; right: tokens used · context % · cost, muted.
+- **Person's message**: a block with a 2 px left accent border and a slightly lighter background.
+- **Assistant text**: plain, no bullet rail, no card; paragraphs separated by one blank line.
+- **Tool calls**: one muted line each, glyph + verb + argument + result count:
+  `∗ Grep "homepage|home.*button" (18 matches)`, `→ Read path/to/file.tsx`, `$ npm test (exit 0)`,
+  `~ Asking questions…`, `⇢ ask svelte-frontend: …`, `◐ agent audit running 12s`. Click expands the
+  result (the code block/card from §8/§13). Consecutive tool lines group with no gaps.
+- **Turn footer**: `▣ <mode> · <model>` muted, one line, after each assistant turn.
+- **Composer**: block with the same left accent border; below the input one status row:
+  mode (accent), model, provider (muted). Footer bar: a dotted progress glyph while a turn runs,
+  `esc interrupt`, and the key hints (`⌘J shell`, `⌘L prompt`, `⌘K commands`) right-aligned.
+- **Theme**: Zed's default *One Dark* palette as tokens (background #282c33, surface #2f343e,
+  text #dce0e5, muted #838994, border #464b57, accent blue #74ade8, green #a1c181, red #d07277,
+  yellow #dec184, purple #b477cf) with a One Light counterpart for the light theme; fonts: Zed
+  Plex Mono for everything in the pane, Zed Plex Sans for the shell chrome (both OFL, vendored as
+  woff2 from zed-industries/zed `assets/fonts`). Line height 1.5, 13 px, 2-space glyph gutter.
+- Inspector and sidebar keep their layout, take the palette and Zed Plex Sans.
