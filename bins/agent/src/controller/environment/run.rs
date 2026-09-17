@@ -47,6 +47,7 @@ pub(crate) async fn run_environment(
         // type serves both reconcilers.
         git_ssh_host: &ctx.git_ssh_host,
         git_ssh_port: &ctx.git_ssh_port,
+        shell_image: &ctx.shell_image,
     };
     ensure_mounts(&id, &wt, &e.spec.services, ctx).await?;
     if let Some(action) = capacity_gate(e, deployments, &prev, gen, ctx).await? {

@@ -42,7 +42,7 @@ fn bench_pod(ready: bool, running: bool, exit: Option<i32>, since: &str) -> serd
             "containerStatuses": [{
                 // `started` is the startup probe's flip; `bench_pod` is the already-serving shape,
                 // and the never-started one is built inline by its own test below.
-                "name": "bench", "ready": ready, "started": true, "restartCount": 0, "image": "b", "imageID": "",
+                "name": "sessions", "ready": ready, "started": true, "restartCount": 0, "image": "b", "imageID": "",
                 "state": state,
                 "lastState": exit.map(|c| serde_json::json!({"terminated": {"exitCode": c, "message": "node-b", "finishedAt": since}})).unwrap_or(serde_json::Value::Null),
             }],
@@ -86,8 +86,10 @@ async fn a_running_bench_gets_one_pod_with_both_containers() {
     let sent = rec.sent("POST", PODS);
     assert_eq!(sent.len(), 1, "{:?}", rec.calls());
     let names: Vec<_> = sent[0]["spec"]["containers"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["workspace", "bench"], "{:?}", sent[0]["spec"]["containers"]);
-    let bench = &sent[0]["spec"]["containers"][1];
+    // A bench pod is the SESSIONS container and a terminal — no workspace container at all since
+    // 2026-09-17 (spec §2.2), so nothing on it serves tools, sshd or code.
+    assert_eq!(names, vec!["sessions", "shell"], "{:?}", sent[0]["spec"]["containers"]);
+    let bench = &sent[0]["spec"]["containers"][0];
     assert_eq!(bench["image"], ctx.bench_image.as_str());
     let env = bench["env"].as_array().unwrap();
     assert!(env.iter().any(|e| e["name"] == "KL_BENCH_IDLE_SECS" && e["value"] == idle_secs.as_str()), "{env:?}");

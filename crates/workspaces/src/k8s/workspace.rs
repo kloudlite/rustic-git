@@ -300,6 +300,68 @@ pub(super) fn host_dir(name: &str, path: String) -> Volume {
 }
 
 
+/// The SHELL sidecar (spec §2): a terminal for the person, beside the container that does the
+/// work, on every workspace and every bench pod.
+///
+/// What it mounts is the whole boundary: the HOME, the node-local `homecache` subPaths the home
+/// needs, and the workspace's Nix profile read-only — and NOT `workspaces`, not the live
+/// subvolume, not the tool token, not `/opt/harness`. "We are not providing access to the code
+/// directly via shell" (owner, 2026-09-17). Nothing here can exec into a sibling container either:
+/// the pod shares no process namespace.
+///
+/// The binaries a person types come from the profile, which is also why the image is nearly empty
+/// and its prelude WAITS for the profile symlink rather than failing without it.
+pub fn shell_container(image: &str, ws_id: &str) -> Container {
+    let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
+    Container {
+        name: SHELL_CONTAINER.to_string(),
+        image: Some(image.to_string()),
+        env: Some(vec![
+            var("HOME", HOME_DIR.to_string()),
+            // The same locale the workspace container sets, for the same reason: zsh without it
+            // has MULTIBYTE off and starship's prompt counts as three columns.
+            var("LANG", "C.UTF-8".to_string()),
+            var("XDG_CACHE_HOME", format!("{HOME_CACHE_DIR}/xdg")),
+            var("TMPDIR", format!("{HOME_CACHE_DIR}/tmp")),
+            // Shell history is node-local state, like the workspace container's: it must not
+            // travel with a snapshot, and the shell has no tree to put it in anyway.
+            var("HISTFILE", format!("{HOME_STATE_DIR}/shell-history")),
+            var("PATH", crate::packages::path_env(None)),
+            var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
+        ]),
+        ports: Some(vec![ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() }]),
+        volume_mounts: Some(vec![
+            // `HostToContainer` for the same reason the workspace container needs it: this binds a
+            // path inside the node's shared-home NFS mount, and a remount on the node must reach a
+            // running pod rather than leaving it pointing at a detached mount.
+            VolumeMount {
+                name: "home".to_string(),
+                mount_path: HOME_DIR.to_string(),
+                mount_propagation: Some("HostToContainer".to_string()),
+                ..Default::default()
+            },
+            VolumeMount { name: "homecache".to_string(), mount_path: HOME_CACHE_DIR.to_string(), sub_path: Some("cache".to_string()), ..Default::default() },
+            VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
+            // The store and this workspace's profile, read-only — the same two subPaths the
+            // workspace container gets, and the reason `ttyd`, `zsh` and `starship` exist here.
+            VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
+            VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/kloudlite/profiles/{ws_id}")), read_only: Some(true), ..Default::default() },
+        ]),
+        resources: Some(quantities(&crate::model::shell_container_resources())),
+        security_context: Some(hardened()),
+        // The port answers only once ttyd is actually listening; before that the prelude is still
+        // waiting for the profile, and a terminal dialled then would hang rather than say why.
+        readiness_probe: Some(Probe {
+            tcp_socket: Some(TCPSocketAction { port: IntOrString::Int(SHELL_PORT as i32), ..Default::default() }),
+            period_seconds: Some(2),
+            failure_threshold: Some(3),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+
 /// Per-container hardening. The namespace floor is `privileged` now (hostPath mounts require it),
 /// so PSA no longer refuses `hostNetwork`/`hostPID`/`hostIPC`, privileged containers or stray
 /// hostPath sources — `deploy/k3s/workspace-admission.yaml` is what refuses those instead, as a
@@ -575,7 +637,9 @@ pub fn workspace_pod(
         ];
     }
     let mut pod_spec = PodSpec {
-        containers: vec![Container {
+        containers: {
+        // A closure, not a value: a bench pod never builds this at all.
+        let workspace_container = || Container {
             name: "workspace".to_string(),
             image: Some(if default_image { ctx.default_image.to_string() } else { spec.image.clone() }),
             // Only the default image is told what to run: it is a near-stock debian:bookworm-slim,
@@ -677,10 +741,19 @@ pub fn workspace_pod(
             resources: Some(quantities(&spec.resources)),
             security_context: Some(hardened()),
             ..Default::default()
-        }]
-        .into_iter()
-        .chain(bench.map(|(image, idle)| bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host)))
-        .collect(),
+        };
+        // Every pod carries the shell sidecar; a BENCH pod carries nothing else beside it. The
+        // bench's own container is `sessions` now and holds only its state volume — there is no
+        // workspace container on a bench pod any more, so no tool server, no sshd and no code
+        // where the sessions run (spec §2.2).
+        let shell = shell_container(ctx.shell_image, ws_id);
+        match bench {
+            Some((image, idle)) => {
+                vec![bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host), shell]
+            }
+            None => vec![workspace_container(), shell],
+        }
+        },
         // Required, not optional, for a seeded workspace: the init container cannot clone without
         // the key.
         volumes: Some({

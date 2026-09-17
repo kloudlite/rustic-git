@@ -311,6 +311,7 @@ pub(crate) fn test_pod_ctx() -> kloudlite_workspaces::k8s::PodContext<'static> {
         api_url: "https://api.kloudlite.io",
         git_ssh_host: "git.khost.dev",
         git_ssh_port: "22",
+        shell_image: "cr.example/shell:v1",
         pool: "/pool",
         node_name: "node-a",
         owner_ref: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {

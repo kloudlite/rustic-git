@@ -16,7 +16,10 @@ use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 
 pub const BENCH_PORT: u16 = 7789;
 pub const BENCH_DIR: &str = "/bench";
-pub const BENCH_CONTAINER: &str = "bench";
+/// The container every session's pi runs in. Named `sessions` since 2026-09-17 (spec §2.2): a
+/// bench pod is `sessions` + `shell` and has no workspace container at all, so "the bench
+/// container" no longer means anything a person could point at.
+pub const BENCH_CONTAINER: &str = "sessions";
 pub const BENCH_TOOL_PATH: &str = "/etc/kloudlite/bench-tool";
 
 
@@ -59,6 +62,19 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         var("KL_TOOL_TOKEN_FILE", format!("{BENCH_TOOL_PATH}/token")),
         var("KLOUDLITE_OTLP_URL", OTLP_URL.to_string()),
         var("OTEL_SERVICE_NAME", "harness-bench".to_string()),
+        // The pod's OWN address, for the one thing in the pod the sessions container must reach:
+        // the SHELL sidecar's ttyd on `SHELL_PORT`, in the container beside it. 127.0.0.1 would
+        // work for a sidecar in the same network namespace, but the bench splices a terminal by
+        // ADDRESS and the same code path serves a workspace's shell on another pod — so it is
+        // handed the address rather than a special case (harness 067661a8).
+        EnvVar {
+            name: "KL_POD_IP".into(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector { field_path: "status.podIP".into(), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         EnvVar {
             name: "NODE_NAME".into(),
             value_from: Some(EnvVarSource {
@@ -94,9 +110,14 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         ]),
         env: Some(env),
         volume_mounts: Some(vec![
-            VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
-            // The LIVE worktree at the same path the workspace container sees it, which is what
-            // puts `.bench` inside the subvolume rather than beside it.
+            // NO `home`: the sessions container is a state store, not hands (spec §3.2). The
+            // person's home is the SHELL sidecar's, and a session that could read the home would
+            // have exactly the filesystem this design removes. `$HOME` still points at it so a
+            // library that insists on one has somewhere to look; nothing is mounted there.
+            //
+            // The LIVE worktree is the bench's OWN volume, and the only path here: it is where
+            // `.bench/` (plans, tasks, transcripts, memory) lives, which the harness reads for
+            // itself and no tool can list.
             VolumeMount { name: "live".to_string(), mount_path: dir, ..Default::default() },
             VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },

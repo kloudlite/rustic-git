@@ -205,6 +205,10 @@ pub struct Ctx {
     /// spec field on purpose — a bench follows the configured image on every start — and read once
     /// here like every other pod-template value, so a change takes effect on this agent's restart.
     pub bench_image: String,
+    /// `KLOUDLITE_SHELL_IMAGE`: the shell sidecar every workspace and bench pod carries. Like the
+    /// bench image, it is the NODE's (pinned with the agent), never a spec field — a pod that
+    /// chose its own terminal image would be a pod that chose what runs beside the person's code.
+    pub shell_image: String,
     /// `WS_INTERCEPT_PROXY_IMAGE`: the forwarder an intercepted service's proxy pod runs. Empty is
     /// NOT a panic, unlike `default_image`: a region whose DaemonSet has not been rolled yet must
     /// keep reconciling everything else, so an intercept settles `Off`/`ProxyImageUnset` instead.
@@ -336,6 +340,7 @@ impl Ctx {
         }
         let git_init_image = merged.git_init_image.clone();
         let bench_image = std::env::var("KLOUDLITE_BENCH_IMAGE").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| kloudlite_workspaces::model::DEFAULT_BENCH_IMAGE.to_string());
+        let shell_image = std::env::var("KLOUDLITE_SHELL_IMAGE").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| kloudlite_workspaces::model::DEFAULT_SHELL_IMAGE.to_string());
         let intercept_proxy_image = merged.intercept_proxy_image.clone();
         // Unbounded on purpose: the only senders are this agent's own finished operations, one
         // wake each, so the queue can never hold more than the operations in flight.
@@ -383,6 +388,7 @@ impl Ctx {
             runtime_class,
             default_image,
             bench_image,
+            shell_image,
             intercept_proxy_image,
             running: Mutex::new(HashMap::new()),
             region,

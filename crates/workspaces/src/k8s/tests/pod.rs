@@ -168,7 +168,7 @@ pub(crate) fn tenant_pods_run_under_the_sandbox_when_one_is_configured() {
     );
 
     // Unset means the host kernel, not a broken pod.
-    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io", git_ssh_host: "git.khost.dev", git_ssh_port: "22" };
+    let bare = PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: None, default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io", git_ssh_host: "git.khost.dev", git_ssh_port: "22", shell_image: "cr.example/shell:v1" };
     assert!(workspace_pod(&ws_spec(), "ws-1", "ws-1", &bare, None, None).unwrap().spec.unwrap().runtime_class_name.is_none());
 }
 
@@ -759,6 +759,7 @@ pub(crate) fn workspace_pod_refuses_a_name_that_is_not_a_name() {
         api_url: "https://api.kloudlite.io",
         git_ssh_host: "git.khost.dev",
         git_ssh_port: "22",
+        shell_image: "cr.example/shell:v1",
     };
     for hostile in ["../../etc", "a; touch /pwned", "", "..", "x'\nchown 0 /", &"n".repeat(64)] {
         let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
@@ -813,6 +814,7 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
         api_url: "https://api.kloudlite.io",
         git_ssh_host: "git.khost.dev",
         git_ssh_port: "22",
+        shell_image: "cr.example/shell:v1",
     };
     let spec: crate::crd::WorkspaceSpec = serde_json::from_value(serde_json::json!({
         "owner": "alice", "team": "", "name": "my-ws", "region": "r1",
@@ -825,12 +827,33 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
 }
 
 
+/// The shell sidecar's whole boundary, as mounts: the home, the node-local cache and state, and
+/// the profile — and NOT the workspace directory, the live subvolume, the keys or the token.
+/// "We are not providing access to the code directly via shell" (owner, 2026-09-17).
+#[test]
+fn every_pod_carries_a_shell_that_sees_only_the_home() {
+    let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
+    let spec = p.spec.unwrap();
+    let shell = spec.containers.iter().find(|c| c.name == crate::k8s::SHELL_CONTAINER).expect("a shell container");
+    let mounts: Vec<&str> = shell.volume_mounts.as_ref().unwrap().iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(mounts, ["home", "homecache", "homecache", "nix", "nix"], "{mounts:?}");
+    for forbidden in ["workspaces", "live", "user-key", "bench-tool", "attach"] {
+        assert!(!mounts.contains(&forbidden), "the shell must not mount {forbidden}: {mounts:?}");
+    }
+    assert_eq!(shell.ports.as_ref().unwrap()[0].container_port, crate::k8s::SHELL_PORT as i32);
+    assert_eq!(shell.image.as_deref(), Some("cr.example/shell:v1"), "the node's image, never a spec field");
+    // No token reaches it, so the tool server's 401 is what refuses it (spec §2.5).
+    assert!(!shell.env.as_ref().unwrap().iter().any(|e| e.name == "KL_TOOL_TOKEN_FILE"));
+}
+
 #[test]
 pub(crate) fn a_non_bench_pod_never_mounts_the_bench_tool_secret() {
     let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
     assert_eq!(p.metadata.labels.as_ref().unwrap()[KIND_LABEL], "workspace");
     let spec = p.spec.unwrap();
-    assert_eq!(spec.containers.len(), 1, "no bench container without spec.bench");
+    // The workspace container and the shell sidecar — no SESSIONS container without `spec.bench`.
+    let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["workspace", crate::k8s::SHELL_CONTAINER]);
     assert!(!spec.volumes.unwrap().iter().any(|v| v.name == "bench-tool" || v.secret.as_ref().and_then(|s| s.secret_name.as_deref()) == Some(crate::k8s::BENCH_TOOL_SECRET)));
     assert!(!spec.containers.iter().flat_map(|c| c.env.clone().unwrap_or_default()).any(|e| e.name == "KL_TOOL_TOKEN_FILE"));
 }

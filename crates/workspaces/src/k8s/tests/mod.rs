@@ -29,7 +29,7 @@ pub(super) fn owner_ref() -> OwnerReference {
 
 
 pub(super) fn ctx() -> PodContext<'static> {
-    PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io", git_ssh_host: "git.khost.dev", git_ssh_port: "22" }
+    PodContext { pool: "/mnt/wspool", node_name: "session-0", owner_ref: owner_ref(), runtime_class: Some("gvisor"), default_image: "ghcr.io/kloudlite/kloudlite-workspace:deadbeef", system: None, registry_host: "registry.kloudlite.io", api_url: "https://api.kloudlite.io", git_ssh_host: "git.khost.dev", git_ssh_port: "22", shell_image: "cr.example/shell:v1" }
 }
 
 
