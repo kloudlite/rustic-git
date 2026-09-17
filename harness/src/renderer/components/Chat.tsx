@@ -417,13 +417,25 @@ export function Chat(props: {
               <Icon name="chevronDown" size={12} /> Jump to latest
             </button>
           </Show>
-          <Show when={L().queue.length}>
+          {/* What this session is waiting on: lines pi still holds, and asks a workspace has not
+              answered yet. The asks were only ever in the bench's exchange log, so nothing showed
+              them — a person could not tell a queued ask from a lost one. */}
+          <Show when={L().queue.length || live.asksOf(L().id).length}>
             <div class="mb-2 flex flex-col gap-1 px-3 font-mono text-sm">
               <For each={L().queue}>
                 {(q) => (
                   <div class="flex items-start gap-2 text-muted">
                     <span class="w-12 shrink-0 text-xs text-subtle">{q.how === "steer" ? "steer" : "queued"}</span>
                     <span class="min-w-0 flex-1 truncate">{q.text}</span>
+                  </div>
+                )}
+              </For>
+              <For each={live.asksOf(L().id)}>
+                {(a) => (
+                  <div class="flex items-start gap-2 text-muted">
+                    <span class="w-12 shrink-0 text-xs text-subtle">{a.state}</span>
+                    <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-2xs text-muted">{a.workspace}</span>
+                    <span class="min-w-0 flex-1 truncate">{a.text.replace(/^\[ask \S+ from [^\]]*\] /, "")}</span>
                   </div>
                 )}
               </For>

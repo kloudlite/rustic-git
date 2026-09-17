@@ -351,3 +351,40 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     srv.close();
   }
 });
+
+test("a process that exits on its own is noticed within a poll", async () => {
+  let live: unknown[] = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "running", exit_code: null }];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.url === "/tools/process_list" ? { processes: live } : { state: "exited" }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-poll-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, resolveTools: async () => at });
+  const seen: unknown[] = [];
+  bench.onEvent((ev) => ev.type === "procs" && seen.push(ev.rows));
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    // What the extension publishes after a background command: the bench starts watching from here.
+    (bench as any).foldRow(ws.id, { type: "extension_ui_request", method: "setWidget", widgetKey: "harness:procs", widgetLines: [JSON.stringify([{ id: "p1", name: "npm run dev", command: "npm run dev", started: Date.now() }])] });
+    assert.equal(bench.procs.all().find((p) => p.id === "p1")!.ended, undefined);
+
+    // It dies between tool calls: nothing would ever say so without the poll.
+    live = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "exited", exit_code: 1 }];
+    await (bench as any).sweepProcs();
+    const row = bench.procs.all().find((p) => p.id === "p1")!;
+    assert.notEqual(row.ended, undefined, "ended");
+    assert.equal(row.code, 1, "with the code the tool server gave");
+    assert.ok(seen.length, "and the desktop is told");
+  } finally {
+    await bench.stop();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

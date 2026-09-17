@@ -51,6 +51,17 @@ export const exchangesOf = (workspace: string) => exchanges.filter((e) => e.work
 /** What a session has asked of a workspace and has not had back yet: its own queue. */
 export const asksOf = (session: string) => exchanges.filter((e) => e.session === session && e.dir === "out" && e.state !== "done" && e.state !== "failed");
 
+/**
+ * Workspace id → the name a person gave it. An intercept, an exchange and a process all name a
+ * workspace by id, and an id is unreadable and (truncated in a narrow row) indistinguishable from
+ * another — "ws-30b60ec8…" told the owner nothing about which workspace took his traffic.
+ */
+const [wsNames, setWsNames] = createSignal<Record<string, string>>({});
+export function setWorkspaceNames(rows: { id: string; name?: string }[]) {
+  setWsNames(Object.fromEntries(rows.map((w) => [w.id, w.name || w.id])));
+}
+export const wsName = (id: string) => wsNames()[id] ?? id;
+
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
 /** Sessions whose workspace messages were discarded with them; queues hide these. */

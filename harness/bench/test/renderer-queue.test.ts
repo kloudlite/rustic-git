@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { thread } from "../../src/renderer/live.ts";
+import { thread, onEvent, asksOf, exchangesOf, seedExchanges } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -49,4 +49,25 @@ test("a user message pi reports only at message_end is still placed", () => {
   t.onEvent({ type: "message_end", message: { role: "user", content: "[from workspace api] it is done", timestamp: took } });
   assert.deepEqual(t.messages.map((m) => [m.role, m.text]), [["user", "[from workspace api] it is done"]]);
   assert.equal(t.messages[0].ts, took);
+});
+
+test("the bench's exchange events are the session's queue, and settle when the answer lands", () => {
+  // Nothing rendered these: live.ts had no `exchange` case, so an ask was invisible until it was
+  // answered — and the answer, arriving as a prompt, was the first sign it had ever been sent.
+  const row = { ts: 1, id: "ask-1", session: "s-1", workspace: "api", dir: "out" as const, text: "[ask ask-1 from session 1] run the tests", state: "queued" };
+  onEvent({ type: "exchange", row });
+  assert.deepEqual(asksOf("s-1").map((e) => [e.workspace, e.state]), [["api", "queued"]]);
+
+  // A transition carries id and state alone; the row keeps its text.
+  onEvent({ type: "exchange", row: { ...row, state: "running" } });
+  assert.deepEqual(asksOf("s-1").map((e) => e.state), ["running"]);
+  assert.equal(asksOf("s-1")[0].text, row.text, "not overwritten by the transition");
+
+  onEvent({ type: "exchange", row: { ...row, state: "done" } });
+  assert.deepEqual(asksOf("s-1"), [], "an answered ask is not a queue any more");
+  assert.deepEqual(exchangesOf("api").map((e) => e.id), ["ask-1"], "but the workspace's log keeps it");
+
+  // A window opened mid-conversation starts from what the bench already holds.
+  seedExchanges([{ ts: 2, id: "ask-2", session: "s-9", workspace: "web", dir: "out", text: "build it", state: "running" }]);
+  assert.deepEqual(asksOf("s-9").map((e) => e.workspace), ["web"]);
 });

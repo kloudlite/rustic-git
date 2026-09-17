@@ -124,6 +124,8 @@ export function App() {
   const live_ = () => benchSessions(sessions).filter((x) => !x.archived);
   const archived = () => benchSessions(sessions).filter((x) => x.archived);
   createEffect(() => live.setSessionCount(live_().length));
+  // Ids are what every event names a workspace by; the name is what a person reads.
+  createEffect(() => live.setWorkspaceNames(workspaces()));
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
     return x && { id, name: x.name, kind: "session", readonly: !live.connected(), messages: [], pi: id };

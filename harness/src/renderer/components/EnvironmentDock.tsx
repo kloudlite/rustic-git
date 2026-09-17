@@ -3,6 +3,7 @@ import { Icon } from "../ui/Icon";
 import { Menu, MenuItem, MenuSep } from "../ui/Menu";
 import { Heading, Row, Gutter } from "../ui/parts";
 import { SERVICE } from "./status";
+import * as live from "../live";
 import type { Environment, Port } from "../model";
 
 /**
@@ -126,7 +127,14 @@ function PortTag(props: { port: Port; env: string; service: string }) {
         )}
       </Show>
       <Show when={props.port.intercept}>
-        {(ic) => <span class="text-accent">→ {ic().workspace}:{ic().port}</span>}
+        {/* The NAME, and the whole port: the port is what the person checks, so it never elides. */}
+        {(ic) => (
+          <span class="flex min-w-0 items-baseline text-accent">
+            <span class="shrink-0">→&nbsp;</span>
+            <span class="min-w-0 truncate" title={ic().workspace}>{live.wsName(ic().workspace)}</span>
+            <span class="shrink-0">:{ic().port}</span>
+          </span>
+        )}
       </Show>
     </span>
   );

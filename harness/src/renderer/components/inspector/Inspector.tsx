@@ -2,6 +2,7 @@ import { For, Show, createMemo } from "solid-js";
 import { Icon } from "../../ui/Icon";
 import * as live from "../../live";
 import { Heading, Field, Empty } from "../../ui/parts";
+import { sessionOf } from "../../rows";
 import { Badge } from "../../ui/Badge";
 import { Button } from "../../ui/Button";
 import { AGENT } from "../status";
@@ -31,11 +32,14 @@ export function Inspector(props: {
   // The bench row is session 1 ("bench"); a session tab is its own id; a
   // fork shows the bench's view.
   const session = () => (/^s-\d+$/.test(props.selected) ? props.selected : "bench");
+  /** Whose processes these are: a workspace tab has its own session, and its own dev server. */
+  const procSession = () =>
+    found().eph ? sessionOf({ kind: "ephemeral", id: found().eph!.id }) : found().ws ? sessionOf({ kind: "workspace", id: found().ws!.id }) : sessionOf({ kind: /^s-\d+$/.test(props.selected) ? "session" : "bench", id: props.selected });
 
   return (
     <aside class="min-h-0 overflow-x-hidden overflow-y-auto border-l border-line bg-panel pb-4">
       <Tasks onOpen={props.onOpenTask} />
-      <Processes onOpen={props.onOpenTask} />
+      <Processes onOpen={props.onOpenTask} session={procSession()} />
       <Show when={!found().ws}>
         <MachineView machine={props.machine} session={session()} onOpenShell={props.onOpenShell} />
       </Show>

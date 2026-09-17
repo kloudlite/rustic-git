@@ -24,6 +24,8 @@ export type BenchOpts = {
 const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
 const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
+/** How often a session with something running is asked what is still running. */
+const PROC_POLL_MS = 10_000;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 // A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
@@ -55,6 +57,7 @@ export class Bench {
   /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
+  private procPoll?: ReturnType<typeof setInterval>;
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -95,6 +98,8 @@ export class Bench {
   }
 
   async stop(): Promise<void> {
+    clearInterval(this.procPoll);
+    this.procPoll = undefined;
     const done = [...this.children.values()].map((c) => c.stop());
     this.children.clear();
     await Promise.all(done);
@@ -204,6 +209,9 @@ export class Bench {
           const rows = (line ? JSON.parse(line) : []) as Omit<ProcRow, "session">[];
           this.write(() => this.procs.snapshot(id, rows));
           this.emit({ type: "procs", rows: this.procs.all() });
+          // Something is running: from here the bench watches it, rather than waiting for the model
+          // to call a tool again before anyone learns it stopped.
+          if (rows.some((r) => r.ended === undefined)) this.pollProcs();
         }
         if (ev.widgetKey === "harness:exchange" && line) {
           const x = JSON.parse(line) as Partial<Exchange> & { id: string };
@@ -282,15 +290,60 @@ export class Bench {
   }
 
   /**
+   * A process that ended on its own. Nothing tells the bench: the extension publishes the table
+   * after a tool CALL, and a dev server that dies at 3am is between calls forever — the row stayed
+   * "running", the panel lied, and the idle clock never let the bench sleep. So while any session
+   * has a running row, its own tool server is asked every `PROC_POLL_MS`, and only then.
+   */
+  private pollProcs(): void {
+    if (this.procPoll) return;
+    this.procPoll = setInterval(() => void this.sweepProcs().catch(() => undefined), PROC_POLL_MS);
+    this.procPoll.unref?.();
+  }
+
+  private async sweepProcs(): Promise<void> {
+    const sessions = [...new Set(this.procs.all().filter((p) => p.ended === undefined).map((p) => p.session))];
+    if (!sessions.length) {
+      clearInterval(this.procPoll);
+      this.procPoll = undefined;
+      return;
+    }
+    for (const session of sessions) {
+      const live = await this.listProcs(session).catch(() => undefined);
+      if (!live) continue;
+      let moved = false;
+      for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) {
+        const now = live.find((x) => x.id === p.id);
+        // Gone from the tool server's list, or exited in it: either way it is over.
+        if (now && now.state !== "exited") continue;
+        moved = !!this.write(() => this.procs.transitionEnded(session, p.id, now?.exit_code ?? null)) || moved;
+      }
+      if (moved) this.emit({ type: "procs", rows: this.procs.all() });
+    }
+  }
+
+  private async listProcs(session: string): Promise<{ id: string; state?: string; exit_code?: number | null }[]> {
+    const at = await this.toolsAddress(session);
+    const r = await fetch(`http://${at}/tools/process_list`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    if (!r.ok) throw new Error(`process_list: ${r.status}`);
+    return ((await r.json()) as { processes?: { id: string; state?: string; exit_code?: number | null }[] }).processes ?? [];
+  }
+
+  /** Where a session's tools run: its workspace, or for a bench session its own container. */
+  private async toolsAddress(session: string): Promise<string> {
+    const s = this.sessions.get(session);
+    if (!s) throw new Error(`no session ${session}`);
+    const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
+    return s.target ? await resolve(s.target) : BENCH_TOOLS;
+  }
+
+  /**
    * Stop a background process. It runs on a tool server — the session's own workspace, or, for a
    * bench session, the bench pod's own workspace container over loopback — so this is the harness
    * reaching the same place the tool did, never a command typed at the model.
    */
   async killProc(session: string, id: string): Promise<void> {
-    const s = this.sessions.get(session);
-    if (!s) throw new Error(`no session ${session}`);
-    const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
-    const at = s.target ? await resolve(s.target) : BENCH_TOOLS;
+    const at = await this.toolsAddress(session);
     const r = await fetch(`http://${at}/tools/process_kill`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
     if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
     const row = this.write(() => this.procs.transitionEnded(session, id));

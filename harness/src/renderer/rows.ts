@@ -28,6 +28,25 @@ export function procLabel(p: { ended?: number; code?: number | null; lost?: true
 }
 
 /** The bench's 409 on delete names what is in flight; anything else is not a confirm. */
+/**
+ * The processes of ONE session. `/procs` is the whole bench's table — every session's rows — and
+ * the panel drew all of them, so a workspace's dev server appeared under the bench tab. A row with
+ * no session at all belongs to nothing and is shown nowhere.
+ */
+export function procsOf<T extends { session?: string }>(rows: readonly T[], session: string): T[] {
+  return rows.filter((p) => p.session === session);
+}
+
+/** Which session a selected thing runs its processes under: a workspace tab has its own thread. */
+export function sessionOf(sel: { kind: "bench" | "session" | "workspace" | "ephemeral"; id?: string }): string {
+  switch (sel.kind) {
+    case "session": return sel.id!;
+    case "workspace": return `w-${sel.id}`;
+    case "ephemeral": return `e-${sel.id}`;
+    default: return "bench";
+  }
+}
+
 export function inFlightItems(message: string): string[] | undefined {
   const at = message.indexOf("in flight: ");
   return at < 0 ? undefined : message.slice(at + 11).split(", ").filter(Boolean);

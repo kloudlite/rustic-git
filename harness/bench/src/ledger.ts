@@ -45,10 +45,11 @@ export class Procs {
     replaceJson(this.file, this.rows);
   }
   /** One row ended, because the harness itself stopped it; unknown ids are nothing to record. */
-  transitionEnded(session: string, id: string): ProcRow | undefined {
+  transitionEnded(session: string, id: string, code?: number | null): ProcRow | undefined {
     const r = this.rows.find((x) => x.session === session && x.id === id && x.ended === undefined);
     if (!r) return undefined;
     r.ended = Date.now();
+    if (code !== undefined) r.code = code;
     replaceJson(this.file, this.rows);
     return { ...r };
   }

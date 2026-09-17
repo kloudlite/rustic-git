@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as live from "../../live";
-import { procLabel, procState } from "../../rows";
+import { procLabel, procsOf, procState } from "../../rows";
 import { Icon } from "../../ui/Icon";
 import { Heading } from "../../ui/parts";
 
@@ -10,7 +10,7 @@ import { Heading } from "../../ui/parts";
  * one that exited shows its code for a minute and then goes. Hover shows the
  * stop; click opens the live log.
  */
-export function Processes(props: { onOpen: (id: string) => void }) {
+export function Processes(props: { onOpen: (id: string) => void; session: string }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
@@ -18,11 +18,13 @@ export function Processes(props: { onOpen: (id: string) => void }) {
     const s = Math.max(0, Math.round(((p.ended ?? tick()) - p.started) / 1000));
     return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   };
-  const running = () => live.procs.filter((p) => !p.ended).length;
+  // This session's, not the bench's whole table: a workspace's dev server is not the bench's.
+  const mine = () => procsOf(live.procs, props.session);
+  const running = () => mine().filter((p) => !p.ended).length;
   return (
-    <Show when={live.procs.length}>
+    <Show when={mine().length}>
       <Heading meta={running() ? `${running()} running` : undefined}>Processes</Heading>
-      <For each={live.procs}>
+      <For each={mine()}>
         {(p) => (
           <div
             class="group flex h-11 cursor-pointer items-center gap-2 px-3 hover:bg-hover"
@@ -40,7 +42,6 @@ export function Processes(props: { onOpen: (id: string) => void }) {
               <span class="flex items-center gap-1.5 text-xs leading-4 text-subtle">
                 <span class="font-mono">{p.id}</span>
                 <span>·</span>
-                <Show when={live.sessionCount() > 1 && p.session}><span class="font-mono">{p.session}</span><span>·</span></Show>
                 <span>{procLabel(p)}</span>
                 <span>·</span>
                 <span class="font-mono tabular-nums">{up(p)}</span>

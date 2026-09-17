@@ -2,6 +2,7 @@ import { For, Show, type JSX } from "solid-js";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { SERVICE } from "./status";
+import * as live from "../live";
 import type { Environment, Port, Snapshot } from "../model";
 
 /**
@@ -155,9 +156,10 @@ function PortTag(props: { port: Port; env: string; service: string }) {
       </Show>
       <Show when={props.port.intercept}>
         {(ic) => (
-          <span class="text-accent" title={`the environment still dials ${props.service}:${props.port.port}; traffic is delivered to ${ic().workspace}:${ic().port}`}>
-            <span class="px-1 text-subtle">→</span>
-            {ic().workspace}:{ic().port}
+          <span class="flex min-w-0 items-baseline text-accent" title={`the environment still dials ${props.service}:${props.port.port}; traffic is delivered to ${ic().workspace}:${ic().port}`}>
+            <span class="shrink-0 px-1 text-subtle">→</span>
+            <span class="min-w-0 truncate">{live.wsName(ic().workspace)}</span>
+            <span class="shrink-0">:{ic().port}</span>
           </span>
         )}
       </Show>
