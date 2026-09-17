@@ -27,6 +27,10 @@ const HARNESS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..",
  */
 export const WORKSPACE_TOOLS = [
   "read,write,edit,bash,grep,find,ls,process",
+  // code and containers, in this machine
+  "kl_repo_clone,kl_container_build,kl_container_push,kl_images",
+  // and the repositories themselves, over /v1
+  "kl_repos,kl_repo_create,kl_repo_branches,kl_pulls,kl_pull,kl_pull_create,kl_pull_merge,kl_pull_close,kl_compare,kl_commit",
   // its own machine
   "kl_pkg_list,kl_pkg_add,kl_pkg_rm,kl_pkg_update",
   // and its space's environment: the person debugging here is the one who needs a service added
@@ -40,7 +44,8 @@ export const WORKSPACE_TOOLS = [
  *  registers in their place — running on a tool server, not here. Only `tools()` reads these. */
 const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
 /** `process` has no built-in counterpart: long-running commands exist only on a tool server. */
-const IDE_TOOLS = [...PI_BUILTINS, "process"];
+/** What `workspace-tools.ts` registers — the machine's own hands, catalogue entries included. */
+export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone", "kl_container_build", "kl_container_push", "kl_images"];
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
 export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string };

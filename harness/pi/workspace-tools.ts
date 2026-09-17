@@ -137,6 +137,21 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
       return p.background
         ? { tool: "exec", args: { cmd: p.command, detach: true } }
         : { tool: "exec", args: { cmd: p.command, timeout_ms: Math.min(MAX_EXEC_MS, (p.timeout ?? 120) * 1000) } };
+    // Code and containers, run in THIS machine: a clone puts the work where the hands are, and a
+    // build runs where the context is. All of it is the workspace's own shell, not a second path.
+    case "kl_repo_clone": {
+      const [owner, name] = String(p.repo).split("/");
+      if (!owner || !name || name.includes("/")) throw new Error(`repository ${p.repo} is not owner/name`);
+      const host = gitSshHost();
+      // argv, never a shell string: a repo or a directory can then never splice a second command.
+      return { tool: "exec", args: { cmd: ["git", "clone", `ssh://git@${host}/${owner}/${name}.git`, ...(p.dir ? [String(p.dir)] : [])], timeout_ms: MAX_EXEC_MS } };
+    }
+    case "kl_container_build":
+      return { tool: "exec", args: { cmd: ["kl", "container", "build", "-t", String(p.tag), ...(p.dockerfile ? ["-f", String(p.dockerfile)] : []), String(p.context ?? ".")], detach: true } };
+    case "kl_container_push":
+      return { tool: "exec", args: { cmd: ["kl", "container", "push", String(p.from), String(p.to)], timeout_ms: MAX_EXEC_MS } };
+    case "kl_images":
+      return { tool: "exec", args: { cmd: ["kl", "container", "images", ...(p.owner ? [String(p.owner)] : [])], head: 200 } };
     case "process":
       switch (p.action) {
         case "start":
@@ -163,6 +178,17 @@ export function toIde(name: string, p: Record<string, any>): IdeCall {
   }
 }
 
+/**
+ * Where the git fleet answers ssh. `WS_GIT_SSH_HOST` is the agent's own name for it and the pod is
+ * given `KL_GIT_SSH_HOST` — if a build has not got it yet this refuses by NAME rather than guessing
+ * a hostname, because a clone from the wrong host is a confusing failure, not an obvious one.
+ */
+export function gitSshHost(env: NodeJS.ProcessEnv = process.env): string {
+  const h = env.KL_GIT_SSH_HOST || env.WS_GIT_SSH_HOST;
+  if (!h) throw new Error("this machine was not told where git lives (KL_GIT_SSH_HOST); clone by hand with the URL from the repository page, or ask an admin to set it");
+  return h;
+}
+
 export function fromIde(name: string, status: number, body: any, limit?: number): Result {
   // The tool server's own refusal is the whole answer: never the body around it.
   if (status >= 400) return text(String(body?.error ?? `the tool server answered ${status}`), true);
@@ -173,6 +199,10 @@ export function fromIde(name: string, status: number, body: any, limit?: number)
       return text(`wrote ${body.bytes} bytes to ${body.path}`);
     case "edit":
       return text(`applied ${body.applied} edit(s) to ${body.path}`);
+    case "kl_repo_clone":
+    case "kl_container_push":
+    case "kl_images":
+    case "kl_container_build":
     case "process":
     case "bash":
     case "ls": {
@@ -319,5 +349,19 @@ Work asked of you arrives tagged \`[ask <id> from <session>]\`. Several may be w
   );
   reg("grep", "Grep", "Regex search, gitignore-aware. path is a directory.", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), glob: Type.Optional(Type.String()), ignoreCase: Type.Optional(Type.Boolean()), literal: Type.Optional(Type.Boolean()), context: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }));
   reg("find", "Find", "Files matching a glob, gitignore-aware, newest first.", Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }));
+  reg(
+    "kl_repo_clone",
+    "Clone",
+    "Clone a repository (owner/name) into this machine over ssh, with the person's own key. dir is where it lands.",
+    Type.Object({ repo: Type.String({ description: "owner/name" }), dir: Type.Optional(Type.String()) }),
+  );
+  reg(
+    "kl_container_build",
+    "Build",
+    "Build an image from a context in this machine and push it, on the owner's builder. It runs in the background: the answer is a process id, and `process logs` shows how it is going.",
+    Type.Object({ context: Type.String({ description: "the build context directory" }), tag: Type.String({ description: "name:tag; it is pushed under your own owner" }), dockerfile: Type.Optional(Type.String()) }),
+  );
+  reg("kl_container_push", "Push image", "Copy an image the registry already holds to another tag.", Type.Object({ from: Type.String(), to: Type.String() }));
+  reg("kl_images", "Images", "Images in the registry, by owner.", Type.Object({ owner: Type.Optional(Type.String()) }));
   reg("ls", "List", "List a directory; directories end in /.", Type.Object({ path: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }));
 }

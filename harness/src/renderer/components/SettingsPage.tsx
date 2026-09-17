@@ -112,7 +112,7 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
 
           <Show when={page() === "tools"}>
             <Section id="tools" title="Tools" hint="what the bench can do; every write and delete is marked">
-              <For each={["workspace", "environment", "platform"] as const}>
+              <For each={["workspace", "environment", "code", "platform"] as const}>
                 {(g) => (
                   <>
                     <div class="mt-4 mb-1 text-2xs font-semibold uppercase text-subtle first:mt-0">{g}</div>

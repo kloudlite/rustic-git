@@ -8,7 +8,7 @@
  */
 export type ToolSpec = {
   name: string;
-  group: "workspace" | "environment" | "platform";
+  group: "workspace" | "environment" | "platform" | "code";
   summary: string;
   /** What the call does to the platform; a person decides on this. */
   effect: "read" | "write" | "destroy";
@@ -50,6 +50,22 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_pkg_add", group: "workspace", summary: "Add packages to this machine (`attr` or `attr@version`).", effect: "write" },
   { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from this machine.", effect: "write" },
   { name: "kl_pkg_update", group: "workspace", summary: "Re-resolve this machine's pinned packages to their newest allowed versions.", effect: "write" },
+
+  { name: "kl_repos", group: "code", summary: "Repositories you can see — yours, or an owner's with `owner`.", effect: "read" },
+  { name: "kl_repo_create", group: "code", summary: "Create a repository under you or a team.", effect: "write", ask: (a) => `Create repository ${a.owner ?? "you"}/${a.name}${a.visibility ? ` (${a.visibility})` : ""}` },
+  { name: "kl_repo_branches", group: "code", summary: "A repository's branches, and which is the default.", effect: "read" },
+  { name: "kl_repo_clone", group: "code", summary: "Clone a repository into this machine over ssh, with the person's own key.", effect: "write" },
+  { name: "kl_pulls", group: "code", summary: "Pull requests on a repository (`state` to narrow).", effect: "read" },
+  { name: "kl_pull", group: "code", summary: "One pull request in full.", effect: "read" },
+  { name: "kl_pull_create", group: "code", summary: "Open a pull request from head into base.", effect: "write", ask: (a) => `Open a pull request on ${a.repo}: ${a.head} → ${a.base} — ${a.title}` },
+  { name: "kl_pull_merge", group: "code", summary: "Merge a pull request (fast-forward, squash, merge or rebase).", effect: "write", ask: (a) => `Merge ${a.repo}#${a.number} (${a.method ?? "fast-forward"})` },
+  { name: "kl_pull_close", group: "code", summary: "Close a pull request without merging it.", effect: "write", ask: (a) => `Close ${a.repo}#${a.number} without merging` },
+  { name: "kl_compare", group: "code", summary: "What is on head that is not on base.", effect: "read" },
+  { name: "kl_commit", group: "code", summary: "Commit a patch straight onto a branch.", effect: "write", ask: (a) => `Commit onto ${a.repo}#${a.branch}: ${a.message}` },
+
+  { name: "kl_container_build", group: "code", summary: "Build an image from a context in this machine and push it, as a background process.", effect: "write" },
+  { name: "kl_container_push", group: "code", summary: "Copy an image the registry already holds to another tag.", effect: "write", ask: (a) => `Copy image ${a.from} to ${a.to}` },
+  { name: "kl_images", group: "code", summary: "Images in the registry, by owner.", effect: "read" },
 
   { name: "kl_workspaces", group: "workspace", summary: "List workspaces — yours, or a team's with `team`.", effect: "read" },
   { name: "kl_workspace", group: "workspace", summary: "One workspace in full: state, node, packages, its space's environment.", effect: "read" },

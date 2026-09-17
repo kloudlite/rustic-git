@@ -336,6 +336,42 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
 const RESTING_ENV = new Set(["stopped", "error", "failed", "deleted"]);
 const SERVICE_CAP = 180_000;
 
+/**
+ * Code, through `/v1` — the same routes the web reads. Every session has these: a workspace
+ * session is where the work happens, and a bench session opens the pull request for it.
+ *
+ * `repo` is `owner/name` everywhere, because that is what a person calls it and what every other
+ * surface prints; the two segments are encoded separately so a name can never walk the path.
+ */
+function repoTools(reg: ReturnType<typeof makeReg>) {
+  const S = (d: string) => Type.String({ description: d });
+  const O = <T>(t: T) => Type.Optional(t as any);
+  const R = S("repository as owner/name");
+  const at = (repo: string, rest = "") => {
+    const [owner, name] = String(repo).split("/");
+    if (!owner || !name || name.includes("/")) throw new Error(`repository ${repo} is not owner/name`);
+    return `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${rest}`;
+  };
+  reg("kl_repos", { owner: O(S("owner slug; absent = everything you can see")) }, (a) => answer("GET", `/v1/repos${q({ owner: a.owner })}`));
+  reg(
+    "kl_repo_create",
+    { name: S("repository name"), owner: O(S("team slug or your handle; absent = your own")), visibility: O(S("public or private; absent = private")), description: O(S("one line")) },
+    (a) => answer("POST", "/v1/repos", { owner: a.owner ?? process.env.KL_OWNER, name: a.name, visibility: a.visibility, description: a.description ?? "" }),
+  );
+  reg("kl_repo_branches", { repo: R }, (a) => answer("GET", at(a.repo, "/branches")));
+  reg("kl_pulls", { repo: R, state: O(S("open, merged or closed")), limit: O(Type.Number()) }, (a) => answer("GET", at(a.repo, `/pulls${q({ state: a.state, limit: a.limit ? String(a.limit) : undefined })}`)));
+  reg("kl_pull", { repo: R, number: Type.Number({ description: "pull request number" }) }, (a) => answer("GET", at(a.repo, `/pulls/${Number(a.number)}`)));
+  // The author is whoever is signed in; the api refuses to take it from the body, so it is not sent.
+  reg("kl_pull_create", { repo: R, title: S("what the change is"), head: S("branch with the change"), base: S("branch to merge into"), body: O(S("the description")) }, (a) =>
+    answer("POST", at(a.repo, "/pulls"), { title: a.title, head: a.head, base: a.base, body: a.body ?? "" }));
+  reg("kl_pull_merge", { repo: R, number: Type.Number(), method: O(S("fast-forward (default), squash, merge or rebase")) }, (a) =>
+    answer("POST", at(a.repo, `/pulls/${Number(a.number)}/merge${q({ strategy: a.method })}`)));
+  reg("kl_pull_close", { repo: R, number: Type.Number() }, (a) => answer("POST", at(a.repo, `/pulls/${Number(a.number)}/close`)));
+  reg("kl_compare", { repo: R, base: S("branch to compare against"), head: S("branch with the change") }, (a) => answer("GET", at(a.repo, `/compare${q({ base: a.base, head: a.head })}`)));
+  reg("kl_commit", { repo: R, branch: S("branch to commit onto"), message: S("commit message"), patch: S("a unified diff") }, (a) =>
+    answer("POST", at(a.repo, "/commits"), { branch: a.branch, message: a.message, patch: a.patch }));
+}
+
 function environmentTools(reg: ReturnType<typeof makeReg>) {
   const S = (d: string) => Type.String({ description: d });
   const O = <T>(t: T) => Type.Optional(t as any);
@@ -520,6 +556,7 @@ export function tools(pi: ExtensionAPI) {
     const claims = JSON.parse(Buffer.from(token().token.split(".")[1] ?? "", "base64url").toString() || "{}") as { sub?: string; team?: string; exp?: number };
     return text({ username: claims.sub, team: claims.team, expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : undefined });
   });
+  repoTools(reg);
   progressTool(reg);
   capabilities(reg);
 }
@@ -541,6 +578,7 @@ export default function (pi: ExtensionAPI) {
     const reg = makeReg(pi);
     ownTools(pi, inWorkspace, process.env.KL_TEAM, reg);
     environmentTools(reg);
+    repoTools(reg);
     progressTool(reg);
     return capabilities(reg);
   }

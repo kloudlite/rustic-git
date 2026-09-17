@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, onlyWaits, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, onlyWaits, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -356,5 +356,31 @@ test("a command that only waits is refused; a sleep inside real work is not", ()
   }
   for (const ok of ["npm test", "npm run dev & sleep 2; curl localhost:3000", "sleep 1 && npm test", "echo hi", "kl pkg list"]) {
     assert.equal(forbidden(ok), undefined, ok);
+  }
+});
+
+test("code and containers run in this machine, as argv the shell cannot splice", () => {
+  const saved = process.env.KL_GIT_SSH_HOST;
+  process.env.KL_GIT_SSH_HOST = "git.khost.dev";
+  try {
+    assert.deepEqual(toIde("kl_repo_clone", { repo: "kloudlite/rustic-git" }), {
+      tool: "exec",
+      args: { cmd: ["git", "clone", "ssh://git@git.khost.dev/kloudlite/rustic-git.git"], timeout_ms: 600_000 },
+    });
+    assert.deepEqual(toIde("kl_repo_clone", { repo: "ada/api", dir: "svc" }).args.cmd.slice(-1), ["svc"]);
+    assert.throws(() => toIde("kl_repo_clone", { repo: "notowner" }), /is not owner\/name/);
+    // A build is long: it detaches, and `process logs` is how it is watched.
+    assert.deepEqual(toIde("kl_container_build", { context: ".", tag: "api:1" }), { tool: "exec", args: { cmd: ["kl", "container", "build", "-t", "api:1", "."], detach: true } });
+    assert.deepEqual(toIde("kl_container_build", { context: "svc", tag: "api:1", dockerfile: "Dockerfile.dev" }).args.cmd, ["kl", "container", "build", "-t", "api:1", "-f", "Dockerfile.dev", "svc"]);
+    assert.deepEqual(toIde("kl_container_push", { from: "api:1", to: "api:latest" }).args.cmd, ["kl", "container", "push", "api:1", "api:latest"]);
+    assert.deepEqual(toIde("kl_images", {}).args.cmd, ["kl", "container", "images"]);
+    assert.deepEqual(toIde("kl_images", { owner: "acme" }).args.cmd, ["kl", "container", "images", "acme"]);
+    // The detached build answers an id, like every other background command.
+    assert.match(fromIde("kl_container_build", 200, { id: "p7" }).content[0].text, /process p7/);
+
+    delete process.env.KL_GIT_SSH_HOST;
+    assert.throws(() => gitSshHost({} as NodeJS.ProcessEnv), /was not told where git lives/);
+  } finally {
+    if (saved === undefined) delete process.env.KL_GIT_SSH_HOST; else process.env.KL_GIT_SSH_HOST = saved;
   }
 });

@@ -22,11 +22,12 @@ const propose = (bench: Bench, session: string, id: string, tool = "kl_workspace
   });
 
 test("the catalogue says which calls are asked about first", () => {
-  for (const yes of ["kl_workspace_create", "kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "kl_volume_delete"]) assert.equal(gated(yes), true, yes);
+  for (const yes of ["kl_workspace_create", "kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "kl_volume_delete", "kl_pull_merge", "kl_repo_create"]) assert.equal(gated(yes), true, yes);
   // A message to another session is not a change, and this machine's own packages are its own.
   for (const no of ["kl_workspace_ask", "kl_pkg_add", "kl_pkg_rm", "kl_workspaces", "kl_capabilities"]) assert.equal(gated(no), false, no);
   assert.equal(question("kl_workspace_create", { name: "svelte-backend", region: "centralindia-k3s", packages: ["nodejs", "go"] }), "Create workspace svelte-backend in centralindia-k3s with nodejs, go");
   assert.equal(question("kl_intercept", { id: "dev", service: "api", workspace: "w1" }), "Deliver api traffic in dev to workspace w1");
+  assert.equal(question("kl_pull_create", { repo: "ada/api", head: "fix", base: "main", title: "stop the churn" }), "Open a pull request on ada/api: fix → main — stop the churn");
 });
 
 test("yes runs it, no declines it, and an unanswered question is a no", async () => {

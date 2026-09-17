@@ -7,7 +7,7 @@ import { TOOLS } from "../../pi/catalog.ts";
 import kloudlite, { identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
-import { WORKSPACE_TOOLS } from "../src/rpc-child.ts";
+import { IDE_TOOLS, WORKSPACE_TOOLS } from "../src/rpc-child.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
@@ -38,7 +38,9 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const registered = tools.map((t) => t.name).sort();
-    assert.deepEqual(registered, TOOLS.map((t) => t.name).sort());
+    // `kloudlite.ts` registers the catalogue except the entries that run ON this machine —
+    // those are `workspace-tools.ts`'s, because they go to a tool server rather than to /v1.
+    assert.deepEqual(registered, TOOLS.map((t) => t.name).filter((n) => !IDE_TOOLS.includes(n)).sort());
     assert.equal(new Set(registered).size, registered.length, "no tool is registered twice");
     // The shell is gone: nothing a bench session can call runs in the bench pod.
     for (const gone of ["bash", "read", "write", "edit", "grep", "find", "ls", "process"]) assert.ok(!registered.includes(gone), gone);
@@ -56,7 +58,7 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const registered = tools.map((t) => t.name).sort();
-    assert.deepEqual(registered, WORKSPACE_TOOLS.split(",").filter((t) => t.startsWith("kl_")).sort());
+    assert.deepEqual(registered, WORKSPACE_TOOLS.split(",").filter((t) => t.startsWith("kl_") && !IDE_TOOLS.includes(t)).sort());
     for (const no of ["kl_workspace_ask", "kl_environment_delete", "kl_workspace_delete", "kl_quota"]) assert.ok(!registered.includes(no), no);
   } finally {
     back();
