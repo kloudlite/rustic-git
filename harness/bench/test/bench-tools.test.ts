@@ -1759,3 +1759,100 @@ test("archiving a session clears its plan and settles what it was waiting on", a
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * Every state has a deadline (spec §3.9 rule 2), and nothing expires silently: the row moves, the
+ * plan moves, and the asking session is told. The clock is a parameter so this walks it instead of
+ * waiting ten minutes.
+ */
+test("a queued ask is redelivered once then blocked; a quiet one is nudged then expired", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-deadline-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    const state = () => bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state;
+    await until(() => state() === "running", 5_000, "the ask running");
+
+    const t0 = Date.now();
+    // Quiet, but not long enough: nothing happens, which is as important as the timeout itself.
+    await bench.sweepExchanges(t0 + 60_000);
+    assert.equal(state(), "running");
+
+    // Ten minutes of silence: asked about once, still running — the person sees it, nobody gives up.
+    await bench.sweepExchanges(t0 + 10 * 60_000 + 1);
+    assert.equal(state(), "running", "a nudge is a question, not a verdict");
+    // The nudge is queued for the workspace session (it is mid-turn); what matters here is that
+    // the ask is still open and the grace has started, not where the line sits in a queue.
+
+    // Two more minutes and no answer: expired, and the asker is told.
+    await bench.sweepExchanges(t0 + 12 * 60_000 + 2);
+    assert.equal(state(), "expired");
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("expired: the workspace went quiet")), "and the asking session is told");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("progress resets the idle clock, so a workspace that talks is never expired", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-idle-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    const state = () => bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state;
+    await until(() => state() === "running", 5_000, "the ask running");
+
+    const t0 = Date.now();
+    await bench.report(a.session, a.exchange, "progress", "going ahead with: add the endpoint, build, push");
+    // Nine minutes after the ask, but only a moment after the report.
+    await bench.sweepExchanges(t0 + 9 * 60_000);
+    assert.equal(state(), "running");
+    // Even past the original deadline: the clock is the REPORT's, not the ask's.
+    await bench.sweepExchanges(t0 + 11 * 60_000);
+    assert.equal(state(), "running", "a session saying what it is doing is not a session gone quiet");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The other half of rule 2: an ask nobody took. It is delivered once more — a session may simply be
+ * busy — and then blocked, rather than sitting `queued` while the asker waits on a session that is
+ * never going to pick it up.
+ */
+test("a queued ask is given one more delivery, then blocked", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-queued-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    // A workspace whose session never takes it — recorded by hand rather than through `ask`, since
+    // a live child would start a turn and move the row while the clock is being walked.
+    const id = "ask-queued-1";
+    bench.exchanges.record({ id, session: asker, workspace: "api", dir: "out", text: "add the endpoint", state: "queued" });
+    const state = () => bench.exchanges.bySession(asker).find((e) => e.id === id)!.state;
+
+    const t0 = Date.now();
+    await bench.sweepExchanges(t0 + 30_000);
+    assert.equal(state(), "queued", "half a minute is not a verdict");
+
+    // Nobody is holding it, so there is no second delivery to make: it is blocked on the first pass
+    // past the deadline, which is the same promise — the asker never waits on silence.
+    await bench.sweepExchanges(t0 + 61_000);
+    assert.equal(state(), "blocked");
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("blocked: the workspace session did not pick it up")),
+      "and the asking session is told why",
+    );
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

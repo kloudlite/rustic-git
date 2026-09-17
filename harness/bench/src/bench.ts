@@ -62,6 +62,18 @@ const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
 const WATCH_MAX_LINES = 20;
+/**
+ * Deadlines, per state (spec §3.9 rule 2). Nothing waits forever, and nothing waits SILENTLY: the
+ * person sees the age on the card and the session is told what happened to its ask.
+ */
+/** Queued longer than this and the workspace session never took it: redeliver once, then blocked. */
+const ASK_PICKUP_MS = 60_000;
+/** Running with no progress for this long: the workspace is asked one line, and the card says so. */
+const ASK_IDLE_MS = 10 * 60_000;
+/** No answer to that one line: the ask is expired and the asking session is told. */
+const ASK_NUDGE_GRACE_MS = 2 * 60_000;
+/** How often deadlines are advanced, orphans reaped and lost work marked. */
+const SWEEP_MS = 30_000;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 /** A question about a workspace is a question, not a job: it answers or it does not. */
@@ -102,6 +114,9 @@ export class Bench {
   /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
+  /** Per exchange: when it entered its state, and whether it has already been redelivered or nudged. */
+  private clocks = new Map<string, { at: number; redelivered?: true; nudgedAt?: number }>();
+  private sweeper?: ReturnType<typeof setInterval>;
   private procPoll?: ReturnType<typeof setInterval>;
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
@@ -168,6 +183,7 @@ export class Bench {
     // a workspace was working left the ask `running` in the log with nobody waiting on it and
     // nobody able to settle it — the asking session waited forever (spec §3.9 rule 1).
     this.resumeAsks();
+    this.sweepOn();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create({ model: this.opts.model }));
     // The architecture document starts with the machines in it (§24): an empty document is one
     // nobody writes, and one that already names the workspaces and services is one somebody
@@ -211,6 +227,8 @@ export class Bench {
   async stop(): Promise<void> {
     clearInterval(this.procPoll);
     this.procPoll = undefined;
+    clearInterval(this.sweeper);
+    this.sweeper = undefined;
     const done = [...this.children.values()].map((c) => c.stop());
     this.children.clear();
     await Promise.all(done);
@@ -416,6 +434,9 @@ export class Bench {
   }
 
   private transitionAsk(a: { exchange: string; from: string; workspace: string }, state: string) {
+    // Every state change restarts that state's own clock, and a settled exchange has none.
+    if (state === "done" || state === "failed") this.clocks.delete(a.exchange);
+    else this.clocks.set(a.exchange, { at: Date.now() });
     // Work handed to somebody else is in the plan too: the asker's, since that is who is waiting.
     if (state === "done") this.plan(a.from, { type: "answered", exchange: a.exchange });
     if (state === "failed") this.plan(a.from, { type: "ask_failed", exchange: a.exchange, task: a.workspace });
@@ -440,6 +461,9 @@ export class Bench {
     if (!said) throw new Error("a report needs something to say");
     if (kind === "progress") {
       // The ask stays running: a decision is not an answer, and the asking session waits for one.
+      // Progress is part of the lifecycle (§3.9 rule 4): it resets the idle clock, so a workspace
+      // that says what it is doing is never nudged or expired for going quiet.
+      this.clocks.set(a.exchange, { at: Date.now() });
       const row = this.exchanges.record({ id: `${a.exchange}-note-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: said.slice(0, 2000), state: "note", ref: a.exchange });
       this.write(() => row);
       this.emit({ type: "exchange", row });
@@ -565,6 +589,74 @@ export class Bench {
       void this.sweepWatches().catch(() => undefined);
     }, PROC_POLL_MS);
     this.procPoll.unref?.();
+  }
+
+  /** The 30 s beat that advances every deadline; started with the bench, stopped with it. */
+  private sweepOn(): void {
+    if (this.sweeper) return;
+    this.sweeper = setInterval(() => void this.sweepExchanges().catch(() => undefined), SWEEP_MS);
+    this.sweeper.unref?.();
+  }
+
+  /**
+   * Deadlines (spec §3.9 rule 2). A `queued` ask the workspace never took is delivered once more
+   * and then blocked; a `running` ask that has gone quiet is asked about once and then expired. The
+   * asking session is told each time and the plan moves with it, because an exchange that changes
+   * state without a row changing is the person kept in the dark (owner, 2026-09-18).
+   *
+   * `now` is a parameter so a table test can walk the clock instead of waiting ten minutes.
+   */
+  async sweepExchanges(now = Date.now()): Promise<void> {
+    for (const e of this.exchanges.recent(500)) {
+      if (e.dir !== "out" || (e.state !== "queued" && e.state !== "running")) continue;
+      const clock = this.clocks.get(e.id) ?? { at: e.ts };
+      this.clocks.set(e.id, clock);
+      const holder = [...this.asked.entries()].find(([, q]) => q.some((x) => x.exchange === e.id))?.[0];
+      const age = now - clock.at;
+
+      if (e.state === "queued") {
+        if (age < ASK_PICKUP_MS) continue;
+        // Nobody is holding it at all — the session went, or never opened. There is no second
+        // delivery to make, and waiting again would be waiting on silence.
+        if (!holder) {
+          this.settle(e, "blocked", "the workspace session did not pick it up");
+          continue;
+        }
+        if (!clock.redelivered) {
+          // Once. A session that is simply busy gets its ask again; one that is gone does not
+          // answer either way, and the next pass says so rather than waiting again.
+          clock.redelivered = true;
+          clock.at = now;
+          await this.send(holder, `[ask ${e.id} from ${e.session}] ${e.text}`).catch(() => undefined);
+          continue;
+        }
+        this.settle(e, "blocked", "the workspace session did not pick it up");
+        continue;
+      }
+
+      // Running: quiet for too long is asked about once, then given up on.
+      if (clock.nudgedAt === undefined) {
+        if (age < ASK_IDLE_MS) continue;
+        clock.nudgedAt = now;
+        if (holder) await this.send(holder, `[harness] still on ${e.id}? report progress, done or blocked`).catch(() => undefined);
+        this.emit({ type: "exchange", row: { ...e, state: "running" } });
+        continue;
+      }
+      if (now - clock.nudgedAt >= ASK_NUDGE_GRACE_MS) this.settle(e, "expired", "the workspace went quiet");
+    }
+  }
+
+  /** One ended exchange: the row, the plan and the asking session, in that order and always together. */
+  private settle(e: { id: string; session: string; workspace: string }, state: string, why: string): void {
+    this.clocks.delete(e.id);
+    for (const [id, q] of this.asked) {
+      const left = q.filter((x) => x.exchange !== e.id);
+      if (left.length !== q.length) (left.length ? this.asked.set(id, left) : this.asked.delete(id));
+    }
+    this.write(() => this.exchanges.transition(e.id, state));
+    this.plan(e.session, { type: "ask_failed", exchange: e.id, task: e.workspace });
+    this.emit({ type: "exchange", row: this.exchanges.bySession(e.session).find((x) => x.id === e.id) });
+    if (this.sessions.get(e.session)) void this.send(e.session, `[${e.workspace} ${e.id}] ${state}: ${why}`).catch(() => undefined);
   }
 
   private async sweepProcs(): Promise<void> {
