@@ -23,6 +23,7 @@ export function ToolCall(props: { a: Action }) {
   // the one they were about to click anyway.
   const [open, setOpen] = createSignal(false);
   createEffect(() => props.a.ok === false && setOpen(true));
+  createEffect(() => (props.a.tool === "edit" || props.a.tool === "bash") && setOpen(true));
   const html = () => /^\s*<!doctype html|^\s*<html/i.test(a().output ?? "");
   const failed = () => a().ok === false || html();
   // While it runs: a spinner in the dot's place and a clock counting up, so
@@ -34,8 +35,11 @@ export function ToolCall(props: { a: Action }) {
   const took = () => (a().pending ? fmt(tick() - (a().ts ?? tick())) : a().ms !== undefined ? fmt(a().ms!) : "");
   const line = createMemo(() => toolLine(a().tool, a().args ?? {}, a().output, { pending: a().pending, ok: a().ok !== false, secs: a().pending ? Math.round((tick() - (a().ts ?? tick())) / 1000) : undefined }));
 
+  // opencode's contract (§16b): a read or a search is ONE line, but an edit and a command are rail
+  // BLOCKS — their result is the thing you came to see, so it is not behind a click.
+  const railed = () => a().tool === "edit" || a().tool === "bash" || a().tool === "write";
   return (
-    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]">
+    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
       {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
       <button class="group flex w-full items-baseline gap-2 py-px text-left leading-[19.5px]" onClick={() => setOpen((v) => !v)}>
         <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-subtle"}`} classList={{ "animate-pulse": a().pending }}>{line().glyph}</span>
@@ -47,8 +51,16 @@ export function ToolCall(props: { a: Action }) {
         <span class="shrink-0 text-xs tabular-nums text-subtle">{took()}</span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
+      {/* An agent says how much it did and where to watch it, the way opencode's subagent row does. */}
+      <Show when={a().tool === "ask" && (a().args ?? {}).to === "agent"}>
+        <div class="pl-4 text-xs text-subtle">
+          ↳ {a().pending ? "working" : "reported"}
+          <Show when={a().ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show>
+          <span class="pl-3">ctrl+x ↓ view agents</span>
+        </div>
+      </Show>
       <Show when={open()}>
-        <div class="ml-4 border-l border-line pl-3">
+        <div classList={{ "ml-4 border-l border-line pl-3": !railed(), "pl-4": railed() }}>
           <Show when={failed()} fallback={<Body a={a()} />}>
             <Fail text={a().output ?? ""} />
           </Show>

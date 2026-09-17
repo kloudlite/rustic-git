@@ -75,6 +75,18 @@ export const planOf = (session: string) =>
   // The harness tags an item it made for an ask with its exchange id; the person reads the words.
   (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text.split("\u0000")[0], state: PLAN_STATE[x.state] ?? "pending", note: x.why }));
 
+/**
+ * Build or Plan, and how hard the model thinks — opencode's `tab` and `ctrl+t`, on our own shapes.
+ * PLAN is read-only tools plus `plan`: a person who wants a plan before anything changes should be
+ * able to have one without trusting the model not to change anything.
+ */
+export type Mode = "build" | "plan";
+const [mode, setMode] = createSignal<Mode>("build");
+export { mode, setMode };
+export const LEVELS = ["low", "medium", "high"] as const;
+const [level, setLevel] = createSignal<(typeof LEVELS)[number]>("low");
+export { level, setLevel };
+
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
 /** Sessions whose workspace messages were discarded with them; queues hide these. */

@@ -37,9 +37,10 @@ export function toolLine(tool: string | undefined, args: Record<string, unknown>
     case "process":
       return { glyph: "◐", verb: "Process", arg: `${s("action")} ${s("title") || s("command") || s("id")}`.trim() };
     case "ask":
-      // An ask is somebody else's work: the line says who, and the answer arrives as a message.
+      // An agent is opencode's subagent row: a tick when it is done, a spinner while it runs, and
+      // its title — the report itself arrives as a message, in the person's own thread.
       return args.to === "agent"
-        ? { glyph: "◐", verb: "agent", arg: String(args.name ?? "").trim() || s("task"), count: state?.pending ? `running${state.secs ? ` ${state.secs}s` : ""}` : "started" }
+        ? { glyph: state?.pending ? "◐" : "✓", verb: "Agent —", arg: String(args.name ?? "").trim() || s("task"), count: state?.pending ? `running${state.secs ? ` ${state.secs}s` : ""}` : "started" }
         : { glyph: "⇢", verb: "ask", arg: `${String(args.to ?? "")}: ${s("task")}`, count: state?.pending ? "sending" : "queued" };
     case "plan":
       return { glyph: "▤", verb: "Plan", arg: args.done ? `done: ${String(args.done)}` : args.doing ? `doing: ${String(args.doing)}` : `${(args.set as unknown[] | undefined)?.length ?? 0} steps` };

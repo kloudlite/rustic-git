@@ -93,6 +93,9 @@ export function Chat(props: {
   const clock = setInterval(() => setNow(Date.now()), 1000);
   onCleanup(() => clearInterval(clock));
   const elapsed = () => Math.max(0, Math.round((now() - (L().turn()?.since ?? now())) / 1000));
+  const mode = () => (live.mode() === "plan" ? "Plan" : "Build");
+  // The model's own name, as pi reported it at startup ("<model> · <host>").
+  const modelName = () => (L().status() || props.machine.model).split(" · ")[0] || props.machine.model;
   const [pick, setPick] = createSignal(0);
   const matches = createMemo(() => {
     const m = /^(\/[a-z-]*)$/i.exec(typed());
@@ -366,12 +369,16 @@ export function Chat(props: {
                     when={b.role === "user"}
                     /* No rail and no card: an answer is text, and the pane is monospace. */
                     fallback={
-                      <div class="flex items-start">
-                        <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
+                      <div class="flex flex-col">
+                        <div class="flex items-start">
+                          <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
+                        </div>
+                        {/* After every assistant turn: what answered, on what, in how long. */}
+                        <div class="pt-1 font-mono text-xs text-subtle">▣&nbsp; {mode()} · {modelName()}<Show when={(b as { ms?: number }).ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show></div>
                       </div>
                     }
                   >
-                    <div class="flex flex-col leading-[18px]">
+                    <div class="flex flex-col font-mono text-[13px] leading-[19.5px]">
                       <div class="-mx-3 flex items-start border-l-2 border-request-line bg-request px-3 py-2">
                         <span class="w-4 shrink-0 font-bold text-accent">&gt;</span>
                         <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
@@ -552,19 +559,33 @@ export function Chat(props: {
             </Show>
             {/* Under the input: what it is and what it runs on. Mode in the accent, the rest quiet. */}
             <div class="flex min-w-0 items-center gap-2 px-3 pb-1.5 font-mono text-xs">
-              <span class="text-accent">{thread()?.kind === "btw" ? "fork" : thread()?.kind === "ephemeral" ? "agent" : thread()?.kind === "workspace" ? "workspace" : "bench"}</span>
-              <span class="min-w-0 truncate text-subtle" title={L().status()}>{L().status()}</span>
+              <span class="text-accent">{mode()}</span>
+              <span class="min-w-0 truncate text-subtle" title={L().status()}>· {modelName()} · {live.level()}</span>
             </div>
           </div>
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}
+          {/* The footer bar: what is running and how to stop it on the left, what it has spent and
+              the way to the commands on the right. Idle it says where you are instead. */}
           <div class="flex min-w-0 flex-wrap items-center gap-x-3.5 gap-y-1 px-3 pt-1.5 font-mono text-xs text-subtle">
-            <Show when={L().busy()} fallback={<span class="text-subtle">ready</span>}>
-              <span class="animate-pulse text-accent">⣾</span>
+            <Show
+              when={L().busy()}
+              fallback={<span class="min-w-0 truncate">{props.machine.id}{thread()?.kind === "workspace" ? ` · ${thread()?.name}` : ""}</span>}
+            >
+              <span class="animate-pulse text-accent">⬝■■■■■■⬝</span>
               <span class="text-muted">{L().turn()?.verb ?? "Thinking"}…</span>
               <span class="tabular-nums">{elapsed()}s</span>
               <span>esc interrupt</span>
             </Show>
             <span class="flex-1" />
+            <Show when={L().spend().tokens}>
+              {(n) => (
+                <span class="shrink-0 tabular-nums">
+                  {n() > 1000 ? `${Math.round(n() / 100) / 10}K` : n()}
+                  <Show when={L().spend().context}>{(w) => <> ({Math.min(100, Math.round((n() / w()) * 100))}%)</>}</Show>
+                  <Show when={L().spend().cost}>{(c) => <> · ${c().toFixed(2)}</>}</Show>
+                </span>
+              )}
+            </Show>
             <For each={HINTS}>{(b) => <Hint keys={b.keys}>{b.label}</Hint>}</For>
           </div>
         </div>
@@ -667,25 +688,23 @@ const FIRST_ASKS = [
 
 function FirstRun(props: { team: string; onPick: (text: string) => void }) {
   return (
-    <div class="mb-6 flex flex-col gap-5 font-ui">
-      <div>
-        <h2 class="text-md font-medium">Your bench for {props.team}</h2>
-        <p class="mt-1 max-w-[60ch] text-sm leading-relaxed text-muted">
-          Say what you want done. The bench sets that as its goal, makes a plan, and opens the workspaces
-          and agents it needs — you watch them appear on the left and read their work here.
-        </p>
+    <div class="mb-6 flex flex-col gap-4 font-mono text-[13px]">
+      {/* The wordmark, then what to type: an empty session says what it is for, not what it can do. */}
+      <div class="pt-6 text-center">
+        <div class="text-lg font-bold tracking-wide text-fg-strong">kloudlite</div>
+        <div class="pt-1 text-xs text-subtle">your bench for {props.team}</div>
       </div>
       <div class="flex flex-col gap-1">
-        <div class="text-2xs font-semibold uppercase text-subtle">Try</div>
         <For each={FIRST_ASKS}>
           {(t) => (
-            <button class="flex h-6.5 w-fit max-w-full items-center gap-2 rounded-[2px] border border-btn2-line bg-btn2 px-3 text-left text-fg hover:bg-btn2-hover" onClick={() => props.onPick(t)}>
+            <button class="flex w-fit max-w-full items-baseline gap-2 text-left text-muted hover:text-fg" onClick={() => props.onPick(t)}>
               <span class="text-accent">❯</span>
               <span class="truncate">{t}</span>
             </button>
           )}
         </For>
       </div>
+      <div class="text-xs text-subtle">● Tip: tab switches Build and Plan · ctrl+p for commands · / for a command by name</div>
     </div>
   );
 }
@@ -746,15 +765,23 @@ function Time(props: { at: string }) {
  */
 function Question(props: { q: QuestionRow; session: string }) {
   const answered = () => props.q.answer;
+  // Numbered options, arrows to move, enter to take one — opencode's shape, and the shape a person
+  // already knows from every terminal prompt. Nothing changes until one is chosen.
+  const OPTIONS = [
+    { key: "yes", label: "Yes", hint: "do it now" },
+    { key: "no", label: "No", hint: "leave it alone" },
+  ] as const;
+  const [pick, setPick] = createSignal(0);
+  const answer = (a: "yes" | "no") => live.answerProposal(props.session, props.q.id, a);
   return (
-    <div class="my-1 flex flex-col gap-2 rounded-[2px] border border-request-line bg-request px-3 py-2 font-ui text-sm">
+    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono text-[13px] leading-[19.5px]">
       <div class="flex items-baseline gap-2">
-        <span class="shrink-0 font-bold text-accent">?</span>
+        <span class="shrink-0 text-accent">?</span>
         <span class="min-w-0 flex-1 text-fg">{props.q.summary}</span>
         <Time at={props.q.at} />
       </div>
       <Show when={props.q.args && Object.keys(props.q.args).length}>
-        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 font-mono text-xs">
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5 text-xs">
           <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
             {([k, v]) => (
               <div class="flex min-w-0 items-baseline gap-2">
@@ -765,14 +792,27 @@ function Question(props: { q: QuestionRow; session: string }) {
           </For>
         </div>
       </Show>
-      <Show
-        when={!answered()}
-        fallback={<div class="text-xs text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}
-      >
-        <div class="flex items-center gap-2">
-          <Button size="sm" onClick={() => live.answerProposal(props.session, props.q.id, "yes")}>Yes</Button>
-          <Button size="sm" variant="ghost" onClick={() => live.answerProposal(props.session, props.q.id, "no")}>No</Button>
-          <span class="text-xs text-subtle">nothing changes until you answer</span>
+      <Show when={!answered()} fallback={<div class="pl-5 text-xs text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}>
+        <div class="flex flex-col pl-5">
+          <For each={OPTIONS}>
+            {(o, i) => (
+              <button
+                class="flex items-baseline gap-2 text-left"
+                classList={{ "text-fg": pick() === i(), "text-muted": pick() !== i() }}
+                onMouseEnter={() => setPick(i())}
+                onClick={() => answer(o.key)}
+              >
+                <span class="shrink-0 text-subtle">{i() + 1}.</span>
+                <span class="shrink-0">{o.label}</span>
+                <span class="min-w-0 truncate text-subtle">{o.hint}</span>
+              </button>
+            )}
+          </For>
+          <div class="flex items-baseline gap-2 text-subtle">
+            <span class="shrink-0">3.</span>
+            <span>Type your own answer</span>
+          </div>
+          <div class="pt-1 text-xs text-subtle">↑↓ select&nbsp; enter submit&nbsp; esc dismiss</div>
         </div>
       </Show>
     </div>
