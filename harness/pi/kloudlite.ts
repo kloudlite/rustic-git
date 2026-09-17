@@ -245,17 +245,17 @@ const PLATFORM = [
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
-  "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
+  "More than one step? The plan tool is the FIRST call, before any other. Mark each item doing then done as you go, and anything you push to later as later with the reason. The person reads the plan, not your text.",
   "",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
   "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
-  "Never mention hosts, URLs, routes, ports, status codes or where you run; say what you could not do for the person and what you need from them.",
+  "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
   "Independent commands go in one turn, together; they run at the same time.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
-  "Answer in one line, then only the facts needed. A thing you changed but could not verify is \"changed, unverified\" — never a claim that it works.",
+  "Answer in one line, then only the facts needed — eight lines at most, no code blocks and no tables. The tool result is already on screen; never repeat its fields. A thing you changed but could not verify is \"changed, unverified\" — never a claim that it works.",
 ].join("\n");
 
 /** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
@@ -270,6 +270,9 @@ export const BENCH_HANDS = [
   // Spec §3.1 and §3.5, verbatim: the bench session has no hands and no directory at all.
   "You have no filesystem or shell where you run. Every read, edit and command is a tool call that names a workspace and a tree.",
   "You have no working directory. Name a workspace.",
+  // §3.5's own paragraph, which was in the workspace identity and not in this one: 53 assistant
+  // rows named a host, a port or a container path to the person (transcripts, 2026-09-18).
+  "Every path you give or receive is relative to a working directory. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out. Never repeat a path a tool printed that starts with a slash.",
 ].join("\n");
 
 
@@ -460,8 +463,10 @@ export function questionTool(reg: ReturnType<typeof makeReg>, pi?: ExtensionAPI)
       // through the harness, so a hand-made "Do you want me to…" is one prompt too many — and it
       // arrives without the tool's own arguments to judge it by (owner, 2026-09-17).
       const confirming = CONFIRMING.test(a.header ?? "") || CONFIRMING.test(a.question ?? "");
-      const canDoItself = (pi?.getActiveTools?.() ?? []).some((t: string | { name: string }) => gated(typeof t === "string" ? t : t.name));
-      if (confirming && canDoItself)
+      // Whether the tool that would ask is armed YET is not the point: a confirmation is one prompt
+      // too many either way, and half the questions in the transcripts were confirmations of a tool
+      // that simply had not been searched for (2026-09-18).
+      if (confirming)
         return { ...text("not needed: call the tool, the harness will ask the person for you. Use question only when they must choose between real alternatives you cannot decide."), isError: true };
       const id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool: "question", args: a, summary: a.question, question: { header: a.header, options: a.options, multi: a.multi } })]);
@@ -570,7 +575,7 @@ export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
     // every call (owner, 2026-09-17).
     const registered = new Set((pi.getAllTools?.() ?? []).map((t: { name: string } | string) => (typeof t === "string" ? t : t.name)));
     const here = registered.size ? hit.filter((t) => registered.has(t.name)) : hit;
-    if (!here.length) return text("no tool for that here; say so to the person");
+    if (!here.length) return text("no tool for that here; say so to the person, and do not search again for the same thing");
     // Activated for the rest of the SESSION, which outlives this process: the bench restarted under
     // the owner and the next turn answered `tool kl_workspace_create not found` for a tool the model
     // had already called (owner, 2026-09-18). The names are recorded on the bench, which is what a
@@ -579,7 +584,9 @@ export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
     const names = here.map((t) => t.name);
     pi.setActiveTools?.([...new Set([...active, ...names])]);
     void rememberFound(names);
-    return text(here.map((t) => describeTool(pi, t.name)).join("\n"));
+    // A search hit lasts the SESSION. Without being told so the model searched the same verb
+    // again every turn — "list workspaces" six times across six sessions (transcripts, 2026-09-18).
+    return text([...here.map((t) => describeTool(pi, t.name)), "these are on for the rest of this session; call them, do not search for them again"].join("\n"));
   });
 }
 
@@ -650,18 +657,23 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
 /** The plan this session is working to: written once, ticked as it lands. */
 export function planTools(reg: ReturnType<typeof makeReg>) {
   const publish = (ctx: any, v: unknown) => ctx?.ui?.setWidget?.("harness:plan", [JSON.stringify(v)]);
-  const ITEM = Type.Object({ text: Type.String(), state: Type.Optional(Type.String({ description: "todo, doing, done or later" })), why: Type.Optional(Type.String({ description: "with later: why it is not now" })) });
+  const ITEM = Type.Object({ text: Type.String({ minLength: 3, description: "the step, as the person would read it" }), state: Type.Optional(Type.String({ description: "todo, doing, done or later" })), why: Type.Optional(Type.String({ description: "with later: why it is not now" })) });
   reg(
     "plan",
     {
       set: Type.Optional(Type.Array(ITEM, { description: "the whole plan, in order — replaces it" })),
       doing: Type.Optional(Type.String({ description: "the step being worked on now" })),
       done: Type.Optional(Type.String({ description: "the step that just landed" })),
-      later: Type.Optional(Type.Object({ text: Type.String(), why: Type.String({ description: "why it is not being done now" }) }, { description: "a step pushed to later" })),
+      later: Type.Optional(Type.Object({ text: Type.String(), why: Type.String({ description: "why it is not being done now" }) }, { description: "a step pushed to later, as {text, why} — not a sentence" })),
     },
     async (a, _signal, ctx) => {
       // The person reads the PLAN panel, not a paragraph about the plan: one call keeps it current.
-      for (const [k, v] of [["done", a.done], ["doing", a.doing]] as const) if (v !== undefined) return publish(ctx, { [k]: v }), text(`${k}: ${v}`);
+      for (const [k, v] of [["done", a.done], ["doing", a.doing]] as const) {
+        if (v === undefined) continue;
+        // An empty string published an empty step and the panel showed a blank row (transcripts).
+        if (!String(v).trim()) return { ...text(`${k} needs the step's text, the same words the plan has`), isError: true };
+        return publish(ctx, { [k]: v }), text(`${k}: ${v}`);
+      }
       if (a.later) return publish(ctx, { later: a.later }), text(`later: ${a.later.text} (${a.later.why})`);
       if (!a.set?.length) return { ...text("plan takes set (the steps), doing, done, or later"), isError: true };
       publish(ctx, { set: a.set });
@@ -677,8 +689,10 @@ export function planTools(reg: ReturnType<typeof makeReg>) {
  * Both modes have it: a workspace session may have asked something of another one too.
  */
 export function progressTool(reg: ReturnType<typeof makeReg>) {
-  reg("kl_workspace_progress", { workspace: Type.String({ description: "workspace id" }) }, async (a) => {
-    const id = encodeURIComponent(a.workspace);
+  // `id`, like every other kl_workspace* tool: two keys for the same thing had the model calling
+  // `kl_workspace {"workspace": …}` twenty times (transcripts, 2026-09-18).
+  reg("kl_workspace_progress", { id: Type.String({ description: "workspace id or name" }) }, async (a) => {
+    const id = encodeURIComponent(a.id);
     const [x, m] = await Promise.all([benchCall("GET", `/exchanges?workspace=${id}`), benchCall("GET", `/workspaces/${id}/messages?limit=10`)]);
     if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
     const asks = (x.data as { dir: string; state: string; text: string }[]).filter((e) => e.dir === "out").map((e) => `  ${e.state}: ${String(e.text).replace(/^\[ask \S+ from [^\]]*\] /, "").slice(0, 160)}`);
@@ -689,7 +703,7 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
       // A tool call is what it is DOING; the prose is what it thinks about it. Both, briefly.
       return (c as any[] ?? []).map((b) => (b.type === "toolCall" ? `  ran ${b.name}` : b.text ? `  said: ${String(b.text).slice(0, 160)}` : "")).filter(Boolean);
     });
-    return text([`asked of ${a.workspace}:`, ...(asks.length ? asks : ["  nothing outstanding"]), `its session, latest last:`, ...(said.length ? said : ["  nothing yet"])].join("\n"));
+    return text([`asked of ${a.id}:`, ...(asks.length ? asks : ["  nothing outstanding"]), `its session, latest last:`, ...(said.length ? said : ["  nothing yet"])].join("\n"));
   });
 }
 
@@ -699,13 +713,29 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
  * PATCH takes the WHOLE list — "add nats" has to keep what is already there.
  */
 /**
+ * An id, or the NAME a person calls it, for the tools registered outside `tools()`. Every other
+ * environment tool takes either, and `kl_env_switch` taking only an id is why `{"environment":
+ * "devstack"}` answered 404 and had to be retried by id (transcripts, 2026-09-18).
+ */
+async function resolveNamed(kind: "workspaces" | "environments", idOrName: string): Promise<string> {
+  const r = await call("GET", `/v1/${kind}`);
+  const rows = (Array.isArray(r.data) ? r.data : []) as { id?: string; name?: string }[];
+  if (rows.some((x) => x.id === idOrName)) return idOrName;
+  const hit = rows.filter((x) => x.name === idOrName);
+  if (hit.length === 1) return hit[0].id!;
+  if (hit.length > 1) throw new Error(`${hit.length} ${kind} are called ${idOrName}; name it by id (${hit.map((x) => x.id).join(", ")})`);
+  // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours.
+  return idOrName;
+}
+
+/**
  * The SPACE's environment, which belongs to the person and not to any one machine: a bench session
  * keeps these even though it has no machine of its own (spec §3.1 removes hands, not the platform).
  */
 export function spaceTools(reg: ReturnType<typeof makeReg>, space: string | undefined) {
   if (!space) return;
   reg("kl_env_current", {}, () => answer("GET", "/v1/me/environments"));
-  reg("kl_env_switch", { environment: Type.String({ description: "environment id owned by this space" }) }, (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: a.environment }));
+  reg("kl_env_switch", { environment: Type.String({ description: "environment id or name" }) }, async (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: await resolveNamed("environments", String(a.environment)) }));
   reg("kl_env_clear", {}, () => answer("DELETE", `/v1/me/environments/${encodeURIComponent(space)}`));
 }
 
@@ -779,7 +809,7 @@ export function ownTools(pi: ExtensionAPI, own: string, space: string | undefine
   if (!space) return;
   // A person's space follows ONE environment; this machine and every workspace in it resolve its services by bare name.
   reg("kl_env_current", {}, () => answer("GET", "/v1/me/environments"));
-  reg("kl_env_switch", { environment: Type.String({ description: "environment id owned by this space" }) }, (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: a.environment }));
+  reg("kl_env_switch", { environment: Type.String({ description: "environment id or name" }) }, async (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: await resolveNamed("environments", String(a.environment)) }));
   reg("kl_env_clear", {}, () => answer("DELETE", `/v1/me/environments/${encodeURIComponent(space)}`));
 }
 

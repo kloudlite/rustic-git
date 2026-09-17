@@ -109,7 +109,7 @@ test("the system prompt is the harness's own, and says only what the model must 
       /never save a conclusion about the harness's own behaviour — report that instead\./,
       /Do what is asked, directly\. No checks first\./,
       /Only the tools reach the platform\. Never change anything the person did not ask for\./,
-      /Answer in one line, then only the facts needed\./,
+      /Answer in one line, then only the facts needed — eight lines at most, no code blocks and no tables\./,
     ]) assert.match(prompt, rule);
 
     // Mechanism is NOT prompt text: it happens whether the model knows about it or not.
@@ -379,7 +379,7 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
   try {
     const { pi, tools } = fakePi();
     kloudlite(pi);
-    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { workspace: "api" }, undefined, undefined, undefined)).content[0].text as string;
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "api" }, undefined, undefined, undefined)).content[0].text as string;
     assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/workspaces/api/messages?limit=10"]);
     assert.equal(out, ["asked of api:", "  running: add a health endpoint", "its session, latest last:", "  asked: [ask ask-1-x from session 1] add a health endpoint", "  ran edit", "  said: added /healthz"].join("\n"));
   } finally {
@@ -602,7 +602,11 @@ test("a bench session starts with what it can use, the rest one search away, and
     assert.match(found.content[0].text, /kl_intercept — .*\[write\]; params: id, service, workspace, ports/);
     assert.ok(active().includes("kl_intercept"), active().join(","));
     // What the model should say when there is no tool, in the words it should use.
-    assert.equal((await run("tool_search", { query: "reboot the datacentre" })).content[0].text, "no tool for that here; say so to the person");
+    // A miss says so AND says not to come back with the same words: "list workspaces" was searched
+    // six times across six sessions (transcripts, 2026-09-18).
+    assert.equal((await run("tool_search", { query: "reboot the datacentre" })).content[0].text, "no tool for that here; say so to the person, and do not search again for the same thing");
+    // A hit says the names are armed for the session, which is the other half of the same lesson.
+    assert.match((await run("tool_search", { query: "intercept" })).content[0].text, /these are on for the rest of this session; call them, do not search for them again$/);
 
     // The skills are product words, not tool lists, and each one loads from beside the extension.
     for (const name of ["workspaces", "environments", "snapshots", "repos", "images", "agents"]) {
@@ -844,7 +848,8 @@ test("in a workspace, tool_search offers only what is registered — and it is c
     const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
 
     const found = (await run("tool_search", { query: "workspace" })).content[0].text as string;
-    const names = found.split("\n").map((l) => l.split(" — ")[0]);
+    // The last line is the session note, not a tool.
+    const names = found.split("\n").filter((l) => l.includes(" — ")).map((l) => l.split(" — ")[0]);
     assert.ok(names.length, found);
     // Everything offered is registered here, and on after the search.
     for (const name of names) {
@@ -938,7 +943,7 @@ test("a bench session has no filesystem, no shell and no machine of its own", as
     assert.deepEqual(active().slice().sort(), BENCH_ALWAYS_ON.slice().sort());
     // Searching for a shell finds nothing, in the words the model should use with the person.
     const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
-    assert.equal((await run("tool_search", { query: "shell" })).content[0].text, "no tool for that here; say so to the person");
+    assert.equal((await run("tool_search", { query: "shell" })).content[0].text, "no tool for that here; say so to the person, and do not search again for the same thing");
     // And what it says it can do never promises files or a shell.
     const can = (await run("kl_capabilities", {})).content[0].text as string;
     assert.match(can, /you have no files and no shell of your own/);
@@ -1023,7 +1028,7 @@ test("a failed platform call says what failed, not where", () => {
 });
 
 test("no identity tells a model to talk about where it runs", () => {
-  const rule = "Never mention hosts, URLs, routes, ports, status codes or where you run; say what you could not do for the person and what you need from them.";
+  const rule = "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.";
   assert.ok(identity(BENCH_HANDS).includes(rule), "the bench identity");
   const restore = withEnv({ KL_TOOLS_WORKSPACE: "ws-1", KL_WORKSPACE_ID: "ws-1", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
   try {
@@ -1115,6 +1120,138 @@ test("a create answers as soon as the workspace is ready, not once it happens to
     assert.match(r.content[0].text, /ready/);
     assert.doesNotMatch(r.content[0].text, /still /);
     assert.equal(reads, 2, "it stopped asking the moment the workspace was ready");
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * What nineteen sessions of transcripts caught the model doing, fixed where the owner asked the
+ * weight to sit: in a schema, a description or one identity line (2026-09-18).
+ */
+test("a tool says what it needs: the attribute rule, the key, the question rule", () => {
+  const create = TOOLS.find((t) => t.name === "kl_workspace_create")!;
+  // Two creates passed language names — `kl_pkg_add` says the rule and `kl_workspace_create` did not.
+  assert.match(create.summary, /nixpkgs attributes \(rustc, cargo, nodejs_22, go, python3\), never language names/);
+  const question = TOOLS.find((t) => t.name === "question")!;
+  // Three questions were asked with `architecture` and `memory` sitting unread and always on.
+  assert.match(question.summary, /Read `architecture` and `memory` first; if either answers it, do not ask\./);
+
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const params = (n: string) => (tools.find((t) => t.name === n)!.parameters as any).properties;
+    // One key for a workspace: 20 calls used `workspace` where the schema wanted `id`.
+    assert.ok(params("kl_workspace_progress").id, "kl_workspace_progress takes id");
+    assert.equal(params("kl_workspace_progress").workspace, undefined, "and not a second name for it");
+    for (const n of ["kl_workspace", "kl_workspace_start", "kl_workspace_stop", "kl_workspace_delete"]) assert.ok(params(n).id, n);
+    // An environment is named the way every other environment tool names it.
+    assert.match(params("kl_env_switch").environment.description, /environment id or name/);
+    // A step a person can read, and `later` as the object it is.
+    assert.equal(params("plan").set.items.properties.text.minLength, 3);
+    assert.match(params("plan").later.description, /as \{text, why\} — not a sentence/);
+  } finally {
+    restore();
+  }
+});
+
+test("the identity carries the tree-relative rule and the length ceiling", () => {
+  const id = identity(BENCH_HANDS);
+  // §3.5's paragraph was in the workspace identity and missing from the bench's, and 53 rows named
+  // a host, a port or a container path to the person.
+  assert.match(id, /Every path you give or receive is relative to a working directory\./);
+  assert.match(id, /Never repeat a path a tool printed that starts with a slash\./);
+  // 29 bench replies ran over eight lines, five with fenced code or tables.
+  assert.match(id, /eight lines at most, no code blocks and no tables/);
+  // Plan-first is its own instruction, not a clause: every one of seven sessions had to be nudged.
+  assert.match(id, /More than one step\? The plan tool is the FIRST call, before any other\./);
+});
+
+test("a plan step needs its words, and a confirmation is refused before the tool is armed", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, { ui: {} });
+    const blank = await run("plan", { doing: "" });
+    assert.equal(blank.isError, true);
+    assert.match(blank.content[0].text, /doing needs the step's text, the same words the plan has/);
+
+    // `kl_workspace_delete` is registered and NOT armed — which is exactly when a confirmation was
+    // slipping through, five of ten questions in the transcripts.
+    const confirm = await run("question", { header: "Confirm delete", question: "Delete workspace new-workspace?", options: [{ label: "yes", description: "" }, { label: "no", description: "" }] });
+    assert.equal(confirm.isError, true);
+    assert.match(confirm.content[0].text, /call the tool, the harness will ask the person for you/);
+  } finally {
+    restore();
+  }
+});
+
+/**
+ * §4.1's own case, from `ws-408ff2ea30c161a9/thread.jsonl`: `kl_workspaces` was searched, called,
+ * and answered `Tool kl_workspaces not found` four times. Fixed in 8242f488; held here so the
+ * transcript's own sequence cannot regress.
+ */
+test("the transcripts' own case: search kl_workspaces, call it, and it is still there next turn", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-armed-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const srv = await serve(bench, 0);
+  await bench.start();
+  const id = bench.sessions.all().find((s) => !s.archived)!.id;
+  const restore = withEnv({ KL_TOOLS_WORKSPACE: "api", KL_TOOLS_ADDRESS: undefined, KL_WORKSPACE_ID: "ws-408ff2ea30c161a9", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined, KL_SESSION: id, KL_BENCH_URL: `http://127.0.0.1:${srv.port}` });
+  try {
+    const first = fakePi();
+    kloudlite(first.pi);
+    await first.start();
+    const search = first.tools.find((t) => t.name === "tool_search")! as unknown as { execute: (...a: any[]) => Promise<any> };
+    const r = await search.execute("c1", { query: "list workspaces" }, undefined, undefined, undefined);
+    assert.match(r.content[0].text as string, /kl_workspaces/);
+    assert.ok(first.active().includes("kl_workspaces"), first.active().join(","));
+    await until(() => bench.sessions.found(id).includes("kl_workspaces"), 5_000, "the bench to have recorded it");
+
+    const next = fakePi();
+    kloudlite(next.pi);
+    await next.start();
+    assert.ok(next.active().includes("kl_workspaces"), `still armed for the session: ${next.active().join(",")}`);
+  } finally {
+    restore();
+    await srv.close();
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `kl_env_switch {"environment":"devstack"}` answered 404 and had to be retried by id, while every
+ * other environment tool took either (transcripts, 2026-09-18). It resolves a name now, and refuses
+ * an ambiguous one rather than picking.
+ */
+test("switching environments takes the name a person uses", async () => {
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/environments" && m === "GET") return [{ id: "env-1", name: "devstack" }, { id: "env-2", name: "twin" }, { id: "env-3", name: "twin" }];
+    return { ok: true };
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-env-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const run = (a: any) => (tools.find((t) => t.name === "kl_env_switch")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    await run({ environment: "devstack" });
+    assert.equal(api.seen.find((x) => x.m === "PUT")!.body.environment, "env-1", "the name became the id on the wire");
+    api.seen.length = 0;
+    await run({ environment: "env-2" });
+    assert.equal(api.seen.find((x) => x.m === "PUT")!.body.environment, "env-2", "an id still works");
+    // Two of a name is refused, never guessed — the same rule every other tool follows.
+    const clash = await run({ environment: "twin" });
+    assert.equal(clash.isError, true);
+    assert.match(clash.content[0].text, /2 environments are called twin/);
   } finally {
     restore();
     api.srv.close();
