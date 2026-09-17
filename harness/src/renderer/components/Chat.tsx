@@ -12,6 +12,8 @@ import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
 import { elapsed, segments, timing, verb } from "./results/group";
+import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
+import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
 import { modeLine } from "../rows";
@@ -381,6 +383,7 @@ export function Chat(props: {
                     : <ToolGroup rows={(seg as { rows: Action[] }).rows} />
                 }>
                 {(() => { const b = (seg as { row: Message }).row; return (
+                <Show when={b.role !== "divider"} fallback={<Divider text={(b as { text: string }).text} />}>
                 <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} onChat={(t) => {
                   const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
                   if (c) (c.value = t, fit(c), c.focus());
@@ -395,15 +398,31 @@ export function Chat(props: {
                        to have typed. An answer is plain text. */
                     fallback={
                       <Show when={b.role === "user"} fallback={
-                      <div class="flex flex-col">
-                        <div class="flex items-start">
+                      <Show
+                        when={(b as { kind?: string }).kind !== "reasoning"}
+                        /* Thinking is the model working, not what it decided: plain, dimmed, apart
+                           (`message-part.tsx:1759` — no header, no fold on the web). */
+                        fallback={
+                          <div data-component="reasoning-part" class="flex items-start text-muted italic">
+                            <Prose text={(b as { text: string }).text} latest={false} />
+                          </div>
+                        }
+                      >
+                      <div data-component="text-part" class="group/text flex flex-col">
+                        <div data-slot="text-part-body" class="flex items-start">
                           <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
+                          {/* Copy the answer itself — the one action on a text part (`:1654`). */}
+                          <Copy text={(b as { text: string }).text} />
                         </div>
                         {/* After every assistant turn: what answered, on what, in how long. */}
                         <div class="pt-1 font-mono text-subtle">
-                          ✻&nbsp; {(b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : line()}
+                          ✻&nbsp; {[
+                            (b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : line(),
+                            (b as { interrupted?: true }).interrupted ? "Interrupted" : "",
+                          ].filter(Boolean).join(" · ")}
                         </div>
                       </div>
+                      </Show>
                       }>
                         {(() => {
                           const n = notification((b as { text: string }).text)!;
@@ -438,7 +457,13 @@ export function Chat(props: {
                           <Show when={fromWorkspace((b as { text: string }).text)}>
                             {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-subtle">{w()}</span>}
                           </Show>
-                          {said((b as { text: string }).text)}
+                          <For each={mentions(said((b as { text: string }).text))}>
+                            {(seg) => (
+                              <Show when={seg.type !== "text"} fallback={seg.text}>
+                                <span data-highlight={seg.type} class="rounded-[2px] bg-accent/15 px-0.5 text-accent">{seg.text}</span>
+                              </Show>
+                            )}
+                          </For>
                         </span>
                         <Time at={(b as { at: string }).at} />
                       </div>
@@ -452,6 +477,7 @@ export function Chat(props: {
                       </For>
                     </div>
                   </Show>
+                </Show>
                 </Show>
                 </Show>
                 ); })()}
@@ -963,7 +989,40 @@ function Step(props: { a: Action }) {
  * token: re-rendering the whole block per token is what flickered, and a
  * reader cannot tell 80 ms from 0.
  */
-function Prose(props: { text: string; latest?: boolean }) {
+/**
+ * A line across the transcript — "Session compacted", "Interrupted"
+ * (`MessageDivider`, `message-part.tsx:1635`). The turn did not say this; it happened to the turn.
+ */
+function Divider(props: { text: string }) {
+  return (
+    <div data-component="compaction-part" class="flex items-center gap-2 py-1 text-subtle">
+      <span data-slot="compaction-part-line" class="h-px flex-1 bg-fg/10" />
+      <span data-slot="compaction-part-label" class="shrink-0">{props.text}</span>
+      <span data-slot="compaction-part-line" class="h-px flex-1 bg-fg/10" />
+    </div>
+  );
+}
+
+/** The one action on an answer: take it. Shows only on hover, and says so once it has. */
+function Copy(props: { text: string }) {
+  const [done, setDone] = createSignal(false);
+  return (
+    <button
+      class="ml-2 shrink-0 self-start text-subtle opacity-0 group-hover/text:opacity-100 hover:text-fg"
+      title="Copy"
+      onClick={() => {
+        void navigator.clipboard.writeText(props.text);
+        setDone(true);
+        setTimeout(() => setDone(false), 1200);
+      }}
+    >
+      {done() ? "copied" : "copy"}
+    </button>
+  );
+}
+
+function Prose(props: { text: string; latest?: boolean; streaming?: boolean }) {
+  const streaming = () => props.streaming !== false;
   // A long answer that is not the one being read folds to its head, with the
   // rest a click away; the latest answer is always whole.
   const LONG = 40;
@@ -971,18 +1030,28 @@ function Prose(props: { text: string; latest?: boolean }) {
   const [openAll, setOpenAll] = createSignal(false);
   const folded = () => !props.latest && !openAll() && lines() > LONG;
   const shown = () => (folded() ? props.text.split("\n").slice(0, 16).join("\n") : props.text);
-  const [html, setHtml] = createSignal(render(shown()));
+  /**
+   * Streaming text grows by WORDS on a 24 ms tick (opencode's `createPacedValue`,
+   * `message-part.tsx:252`): raw deltas lurch, and a page that catches up one word at a time reads
+   * like writing. A burst over 512 characters, a rewrite, or a finished message lands whole.
+   */
+  const [paced_, setPaced] = createSignal(shown());
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = () => {
+    timer = undefined;
+    const want = untrack(shown);
+    const have = untrack(paced_);
+    const nextText = paced(want, have, !!props.latest && untrack(streaming));
+    if (nextText === undefined) return;
+    setPaced(nextText);
+    if (nextText.length < want.length) timer = setTimeout(tick, TEXT_RENDER_PACE_MS);
+  };
   createEffect(() => {
-    const text = shown();
-    if (timer) return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      setHtml(render(untrack(shown)));
-    }, 80);
-    void text;
+    void shown();
+    if (!timer) timer = setTimeout(tick, TEXT_RENDER_PACE_MS);
   });
   onCleanup(() => clearTimeout(timer));
+  const html = () => render(paced_());
   return (
     <div class="min-w-0 flex-1">
       <div class="prose" innerHTML={html()} />

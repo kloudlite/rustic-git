@@ -236,6 +236,11 @@ function makeThread(id: string) {
   }
 
   /** A line from the harness itself, on the rail, the way a shell answers a builtin. */
+  /** A line across the transcript, not a message: what happened to the turn itself. */
+  function divider(text: string) {
+    push({ role: "divider", text, at: now() });
+  }
+
   function note(text: string) {
     push({ role: "action", kind: "note", target: "harness", text: text.split("\n")[0], at: now(), ok: true, output: text.includes("\n") ? text : undefined });
   }
@@ -302,6 +307,8 @@ function makeThread(id: string) {
 
   /** The assistant message being streamed, by index into `messages`. */
   let open = -1;
+  /** The reasoning block being streamed, the same way — thinking and answer stream side by side. */
+  let reasoning = -1;
   const tools = new Map<string, number>();
 
   function onEvent(ev: Ev) {
@@ -359,7 +366,21 @@ function makeThread(id: string) {
         }
         const d = ev.assistantMessageEvent as { type: string; delta?: string } | undefined;
         if (d?.type === "text_delta" && d.delta) doing("Writing");
+        // Thinking is its own block, kept apart from the answer: it is the model working, and it
+        // must never be read as what it decided.
+        if (d?.type === "thinking_delta" && d.delta) {
+          doing("Thinking");
+          if (reasoning < 0) {
+            push({ role: "assistant", text: d.delta, at: now(), kind: "reasoning" });
+            reasoning = messages.length - 1;
+            open = -1;
+          } else {
+            setMessages(reasoning, "text" as never, ((t: string) => t + d.delta!) as never);
+          }
+          return;
+        }
         if (d?.type !== "text_delta" || !d.delta) return;
+        reasoning = -1;
         if (open < 0) {
           push({ role: "assistant", text: d.delta, at: now() });
           open = messages.length - 1;
@@ -370,6 +391,7 @@ function makeThread(id: string) {
       }
       case "message_end": {
         open = -1;
+        reasoning = -1;
         // A background task reporting in: shown as a note, the way the terminal
         // prints a job finishing.
         const m = ev.message as { role?: string; customType?: string; content?: any; timestamp?: unknown } | undefined;
@@ -420,7 +442,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, turn, spend, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
+  return { id, messages, busy, turn, spend, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, divider, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
@@ -454,7 +476,7 @@ export function onEvent(ev: Ev & { pi?: string }) {
     case "compacted":
       // The conversation was summarised and carried on: one row, so a person is not left
       // wondering where the middle of their transcript went.
-      if (typeof ev.session === "string") thread(ev.session).note("⟲ compacted — the conversation was summarised to keep going");
+      if (typeof ev.session === "string") thread(ev.session).divider("Session compacted");
       return;
     case "plan": {
       if (typeof ev.session !== "string") return;
