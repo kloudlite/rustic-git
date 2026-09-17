@@ -285,7 +285,18 @@ pub(crate) fn only_bench_pods_in_the_namespace_reach_the_tool_port() {
     assert_eq!(from.len(), 1);
     assert!(from[0].namespace_selector.is_none(), "this namespace only");
     assert_eq!(from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()[KIND_LABEL], "bench");
-    assert_eq!(rule.ports.as_ref().unwrap(), &vec![k8s_openapi::api::networking::v1::NetworkPolicyPort { protocol: Some("TCP".into()), port: Some(IntOrString::Int(IDE_PORT as i32)), end_port: None }]);
+    // Both ports, and only these two: the tool server and the shell sidecar's ttyd. The desktop
+    // reaches a workspace's terminal by splicing through the person's own bench, so the same peer
+    // that may call the tool server may dial 7790 — and nobody else may dial either (spec §2.3).
+    let port = |p: u16| k8s_openapi::api::networking::v1::NetworkPolicyPort {
+        protocol: Some("TCP".into()),
+        port: Some(IntOrString::Int(p as i32)),
+        end_port: None,
+    };
+    assert_eq!(rule.ports.as_ref().unwrap(), &vec![port(IDE_PORT), port(SHELL_PORT)]);
+    // Named for the fence it is: nothing outside this namespace's bench may dial either port, and
+    // the shell's is admitted only because the desktop reaches a terminal through that same bench.
+    assert_eq!(rule.ports.as_ref().unwrap().len(), 2, "no third port slipped in");
 }
 
 

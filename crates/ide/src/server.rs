@@ -5,7 +5,6 @@ use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTool
 use crate::watches::Watches;
 use crate::Config;
 use axum::{extract::{DefaultBodyLimit, State}, routing::{get, post}, Json, Router};
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 pub struct App {
@@ -14,10 +13,6 @@ pub struct App {
     pub procs: Arc<Procs>,
     pub watches: Arc<Watches>,
     pub graft: Arc<Graft>,
-    /// Live PTYs; the ceiling is `pty::MAX_SHELLS`.
-    pub shells: AtomicUsize,
-    /// The named terminals, which outlive their sockets (`pty::Sessions`).
-    pub ptys: crate::pty::Sessions,
 }
 
 impl App {
@@ -36,7 +31,7 @@ impl App {
             Box::new(WatchTools { root: cfg.root.clone(), home: cfg.home.clone(), procs: procs.clone(), watches: watches.clone() }),
             Box::new(GraftTools { graft: graft.clone(), procs: procs.clone() }),
         ]);
-        App { cfg, registry, procs, watches, graft, shells: AtomicUsize::new(0), ptys: crate::pty::Sessions::default() }
+        App { cfg, registry, procs, watches, graft }
     }
 }
 
@@ -53,11 +48,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/diff", get(crate::fs::diff))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
-        // Not a tool and never listed by `/tools`: a terminal, not something a session calls.
-        .route("/stream/pty", get(crate::pty::handler))
-        // The named terminals themselves: what exists, and killing one on purpose.
-        .route("/stream/pty/sessions", get(crate::pty::sessions))
-        .route("/stream/pty/sessions/{name}", axum::routing::delete(crate::pty::kill_session))
+        // NO PTY route: a terminal is the SHELL SIDECAR's `ttyd` on 7790 now (spec §2.3), in its
+        // own container with the home and nothing else. The tool server used to carry one, with
+        // named sessions and replay; a dropped connection is a new shell instead, and the tool
+        // server is only tools again.
         // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
         // themselves accept up to `MAX_BYTES` (2026-09-12).
         // One server span per request, named by the route TEMPLATE (`/tools/{name}`, `/fs/file`),
@@ -144,6 +138,19 @@ mod tests {
         let names: Vec<_> = got.iter().map(|s| s.name.to_string()).collect();
         assert_eq!(names, vec!["GET /stream/process/{id}"]);
         assert!(!format!("{got:?}").contains("p-123"));
+    }
+
+    /// The tool server carries NO terminal (spec §2.3, 2026-09-17): a terminal is the shell
+    /// sidecar's ttyd on 7790, in a container with the home and no code, no token and no tools.
+    /// The three PTY routes and their named-session table are gone, and this is what keeps a
+    /// convenience from quietly putting one back.
+    #[tokio::test]
+    async fn no_pty_route() {
+        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: "/home/kl/workspaces/api".into(), home: "/home/kl".into(), graft_dir: None };
+        let app = Arc::new(App::new(cfg));
+        for path in ["/stream/pty", "/stream/pty/sessions", "/stream/pty/sessions/probe-1"] {
+            assert_eq!(send(&app, axum::http::Request::get(path), axum::body::Body::empty()).await, 404, "{path}");
+        }
     }
 
     #[tokio::test]

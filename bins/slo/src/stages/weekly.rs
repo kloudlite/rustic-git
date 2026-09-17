@@ -858,7 +858,6 @@ mod tests {
                 "srv.lanes",
                 "gw.caps",
                 "bench.survives.reschedule",
-                "ws.terminal.persists",
             ]
         );
         // A missing precondition is a skip, never a second count of a failure recorded elsewhere.

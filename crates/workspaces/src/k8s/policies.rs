@@ -266,6 +266,9 @@ pub fn allow_bench_tools(ns: &str, owner: &str, owner_ref: &OwnerReference) -> N
         owner,
         owner_ref,
         json!({
+            // The TOOL server's pod only — a bench serves no tools. The SHELL port below is on
+            // this pod too, and on the bench's own pod; the bench pod's own shell is reached
+            // through `allow_gateway_bench`'s peer, which already admits the gateway.
             "podSelector": { "matchExpressions": [
                 { "key": WORKSPACE_LABEL, "operator": "Exists" },
                 { "key": KIND_LABEL, "operator": "NotIn", "values": ["bench"] },
@@ -273,7 +276,13 @@ pub fn allow_bench_tools(ns: &str, owner: &str, owner_ref: &OwnerReference) -> N
             "policyTypes": ["Ingress"],
             "ingress": [{
                 "from": [{ "podSelector": { "matchLabels": { KIND_LABEL: "bench" } } }],
-                "ports": [{ "protocol": "TCP", "port": IDE_PORT }],
+                // `SHELL_PORT` beside `IDE_PORT` (spec §2.3): the desktop reaches a workspace's
+                // terminal by splicing through the person's own bench, so the same peer that may
+                // call the tool server may dial ttyd — and nothing else may dial either.
+                "ports": [
+                    { "protocol": "TCP", "port": IDE_PORT },
+                    { "protocol": "TCP", "port": SHELL_PORT },
+                ],
             }],
         }),
     )
