@@ -114,13 +114,20 @@ export function modelOfThread(row: string | undefined, benchDefault: string | un
 }
 
 /** The status row's parts, so each can carry its own weight and colour. */
-export type ModeParts = { mode: string; model: string; provider?: string; level?: string };
-export function modeParts(mode: string, model: string | undefined, level?: string): ModeParts {
+export type ModeParts = { mode: string; model: string; provider?: string; thinking?: string; effort?: string };
+/**
+ * Spec §1.3: a segment that does not apply is ABSENT, never shown as `—`. The key is left off
+ * entirely rather than set to undefined, so a caller comparing parts sees the same shape the
+ * footer draws.
+ */
+export function modeParts(mode: string, model: string | undefined, thinking?: string, effort?: string): ModeParts {
+  const provider = displayProvider(model);
   return {
     mode: mode === "accept-edits" ? "Accept edits" : mode[0].toUpperCase() + mode.slice(1),
     model: displayModel(model),
-    provider: displayProvider(model),
-    level,
+    ...(provider ? { provider } : {}),
+    ...(thinking ? { thinking: `thinking ${thinking}` } : {}),
+    ...(effort ? { effort: `effort ${effort}` } : {}),
   };
 }
 
@@ -131,9 +138,9 @@ export function modeParts(mode: string, model: string | undefined, level?: strin
  * (⇧tab to cycle) · no model" (owner, 2026-09-17): two formats for one fact, and a model that was
  * there all along in the session's own row.
  */
-export function modeLine(mode: string, model: string | undefined, level?: string): string {
-  const p = modeParts(mode, model, level);
-  return [p.mode, [p.model, p.provider].filter(Boolean).join(" "), p.level].filter(Boolean).join(" · ");
+export function modeLine(mode: string, model: string | undefined, thinking?: string, effort?: string): string {
+  const p = modeParts(mode, model, thinking, effort);
+  return [p.mode, [p.model, p.provider].filter(Boolean).join(" "), p.thinking, p.effort].filter(Boolean).join(" · ");
 }
 
 /**

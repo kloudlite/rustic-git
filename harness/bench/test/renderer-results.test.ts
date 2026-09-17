@@ -236,13 +236,13 @@ test("the mode, the model and the level read the same everywhere", () => {
   // Two formats for one fact is what the owner saw: "✻ Accept edits · no model" in the footer and
   // "⏵⏵ accept edits on (⇧tab to cycle) · no model" in the composer.
   // The provider follows the model, as opencode says it: `DeepSeek V4 Flash DeepSeek`.
-  assert.equal(modeLine("build", "deepseek/deepseek-v4-flash", "low"), "Build · DeepSeek V4 Flash DeepSeek · low");
-  assert.equal(modeLine("accept-edits", "deepseek/deepseek-v4-flash", "low"), "Accept edits · DeepSeek V4 Flash DeepSeek · low");
+  assert.equal(modeLine("build", "deepseek/deepseek-v4-flash", "low"), "Build · DeepSeek V4 Flash DeepSeek · thinking low");
+  assert.equal(modeLine("accept-edits", "deepseek/deepseek-v4-flash", "low"), "Accept edits · DeepSeek V4 Flash DeepSeek · thinking low");
   assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan · Claude Opus 5 Anthropic", "the level shows only once it is known");
   // A session whose row has a model shows it; only a session with none at all says so.
   assert.equal(modeLine("build", undefined), "Build · no model");
   assert.deepEqual(modeParts("build", "deepseek/deepseek-v4-flash", "low"), {
-    mode: "Build", model: "DeepSeek V4 Flash", provider: "DeepSeek", level: "low",
+    mode: "Build", model: "DeepSeek V4 Flash", provider: "DeepSeek", thinking: "thinking low",
   });
 });
 

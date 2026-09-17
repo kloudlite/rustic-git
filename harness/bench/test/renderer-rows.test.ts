@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, modeLine, modeParts, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -140,4 +140,23 @@ test("a process row gets its title at render, whatever the ledger stored", () =>
   // No title at all: the command, first line only.
   assert.equal(procName({ command: "cargo watch -x test\n" }), "cargo watch -x test");
   assert.equal(procName({ command: "" }), "");
+});
+
+/**
+ * Spec §1.3: `deepseek/deepseek-reasoner · thinking high · effort max`. A segment that does not
+ * apply is ABSENT, never a dash — the footer says what is set and nothing about what is not.
+ */
+test("footer segments appear only when set", () => {
+  assert.deepEqual(modeParts("build", "deepseek/deepseek-reasoner", "high", undefined), {
+    mode: "Build", model: "deepseek-reasoner", provider: "DeepSeek", thinking: "thinking high",
+  });
+  assert.deepEqual(modeParts("build", "deepseek/deepseek-chat", undefined, "max"), {
+    mode: "Build", model: "deepseek-chat", provider: "DeepSeek", effort: "effort max",
+  });
+  assert.deepEqual(modeParts("build", undefined), { mode: "Build", model: "no model" });
+});
+
+test("the line joins only the segments that are there", () => {
+  assert.equal(modeLine("build", "deepseek/deepseek-reasoner", "high", "max"), "Build \u00b7 deepseek-reasoner DeepSeek \u00b7 thinking high \u00b7 effort max");
+  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan \u00b7 Claude Opus 5 Anthropic");
 });

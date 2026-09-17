@@ -27,7 +27,8 @@ export const KEYS = {
   steer: { keys: "⌘↩", label: "steer now", match: (e) => meta(e) && e.key === "Enter" && (e.target as HTMLElement | null)?.hasAttribute("data-composer") === true },
   composer: { keys: "⌘L", label: "prompt", hint: true, match: (e) => meta(e) && key(e, "l") },
   shell: { keys: "⌘J", label: "shell", hint: true, match: (e) => meta(e) && key(e, "j") },
-  environment: { keys: "⌘E", label: "environment", match: (e) => meta(e) && key(e, "e") },
+  // ⌘ only, not `meta()`: ^E is the effort cycle below, and `meta()` matches ctrl too.
+  environment: { keys: "⌘E", label: "environment", match: (e) => e.metaKey && key(e, "e") },
   panel: { keys: "⌘B", label: "workspaces", leader: "b", match: (e) => meta(e) && !e.altKey && key(e, "b") },
   inspector: { keys: "⌘⌥B", label: "inspector", leader: "s", match: (e) => meta(e) && e.altKey && key(e, "b") },
   prevThread: { keys: "⌘[", label: "previous thread", match: (e) => meta(e) && e.key === "[" },
@@ -41,10 +42,13 @@ export const KEYS = {
   split: { keys: "⌘\\", label: "split right", match: (e) => meta(e) && e.key === "\\" },
   focusPane: { keys: "⌘⌥→", label: "next pane", match: (e) => meta(e) && e.altKey && e.key === "ArrowRight" },
   find: { keys: "⌘F", label: "find", match: (e) => meta(e) && key(e, "f") },
-  workspaces: { keys: "⌘T", label: "switch workspace", match: (e) => meta(e) && key(e, "t") },
+  // ⌘ only, for the same reason: ^T cycles the thinking level (spec §1.1, as in opencode).
+  workspaces: { keys: "⌘T", label: "switch workspace", match: (e) => e.metaKey && key(e, "t") },
   // opencode's own three, on our shapes: Build/Plan, how hard the model thinks, and the palette.
   mode: { keys: "⇧tab", label: "cycle mode", hint: true, match: (e) => e.key === "Tab" && e.shiftKey && !meta(e) && !e.altKey },
-  level: { keys: "^T", label: "thinking level", match: (e) => e.ctrlKey && !e.metaKey && key(e, "t") },
+  thinking: { keys: "^T", label: "thinking level", match: (e) => e.ctrlKey && !e.metaKey && key(e, "t") },
+  // Renderer-only, both of them: they move the SESSION's fields through the bench, never a key pi sees.
+  effort: { keys: "^E", label: "effort", match: (e) => e.ctrlKey && !e.metaKey && key(e, "e") },
   palette: { keys: "^P", label: "commands", leader: "p", hint: true, match: (e) => e.ctrlKey && !e.metaKey && key(e, "p") },
 } as const satisfies Record<string, Binding>;
 

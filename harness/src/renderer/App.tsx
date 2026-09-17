@@ -131,6 +131,11 @@ export function App() {
   createEffect(() => live.setWorkspaceNames(workspaces()));
   /** A thread's own model, from the bench's session row — a workspace tab is not the bench. */
   const modelOf = (id: string) => (sessions.find((y) => y.id === id) as { model?: string } | undefined)?.model;
+  /** The session's remembered thinking and effort, from the same row (spec §1.2). */
+  const tripleOf = (id: string) => {
+    const r = sessions.find((y) => y.id === id) as { thinking?: string; effort?: string } | undefined;
+    return { thinking: r?.thinking, effort: r?.effort };
+  };
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
     // The model is the SESSION's, from sessions.json: a window that opened after the child started
@@ -205,7 +210,7 @@ export function App() {
       .map((t) => (t.kind === "session" ? { ...t, readonly: !live.connected() } : t))
       // Every thread carries its own session's model: a workspace tab is not the bench, and
       // reading only the bench's row showed "no model" in one (owner, 2026-09-17).
-      .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages, model: t.model ?? modelOf(t.pi) } : t));
+      .map((t) => (t.pi ? { ...t, messages: live.thread(t.pi).messages, model: t.model ?? modelOf(t.pi), ...tripleOf(t.pi) } : t));
   const threads = createMemo(() => threadsOf(pane()));
   const setSelectedRaw = (id: string) => setPanes(activePane(), "sel", id);
   const setSelected = (id: string) => {
@@ -507,11 +512,9 @@ export function App() {
       live.setMode(next);
       void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
     } },
-    { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: keyHint(KEYS.level), run: () => {
-      const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
-      live.noteLevel(next);
-      void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
-    } },
+    { id: "model", group: "Suggested", label: "Model…", keys: "/model", run: () => live.setDialog("model") },
+    { id: "thinking", group: "Suggested", label: "Thinking level (cycle)", keys: keyHint(KEYS.thinking), run: () => cycleThinking() },
+    { id: "effort", group: "Suggested", label: "Effort (cycle)", keys: keyHint(KEYS.effort), run: () => cycleEffort() },
     { id: "composer", group: "Suggested", label: "Focus the prompt", keys: keyHint(KEYS.composer), run: () => composer()?.focus() },
     { id: "shell", group: "Suggested", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: keyHint(KEYS.shell), run: () => toggleShell() },
     { id: "env", group: "Suggested", label: envTab() ? "Close the environment" : "Open the environment", keys: keyHint(KEYS.environment), run: () => (setFile(undefined), setEnvTab((v) => !v)) },
@@ -609,19 +612,19 @@ export function App() {
       void pi({ type: "prompt", message: `/mode ${next === "plan" ? "plan" : "build"}` })?.catch(() => undefined);
       return;
     }
-    // How hard the model thinks, cycled: pi's own `set_thinking_level`.
-    if (hit(KEYS.level)) {
-      stop();
-      const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
-      live.noteLevel(next);
-      void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
-      return;
-    }
+    // How hard the model thinks, and how hard it tries — both cycled through the BENCH, so the
+    // session remembers them and the general default moves with the pick (spec §1.2). Neither key
+    // is ever sent to pi from here.
+    if (hit(KEYS.thinking)) return (stop(), cycleThinking());
+    if (hit(KEYS.effort)) return (stop(), cycleEffort());
     if (hit(KEYS.quickOpen)) return (stop(), void setPalette("go"));
     if (hit(KEYS.workspaces)) return (stop(), void setPalette("workspaces"));
     if (hit(KEYS.find)) return (stop(), openFind());
     if (hit(KEYS.settings)) return (stop(), openSettings());
     if (palette()) return;
+    // The dialog owns escape while it is open: without this, a focus that had drifted off the card
+    // would abort the turn instead of closing the picker.
+    if (hit(KEYS.back) && live.dialog()) return (stop(), void live.setDialog(undefined));
     if (hit(KEYS.back) && find() !== undefined) return closeFind();
 
     if (hit(KEYS.shell)) return (stop(), toggleShell());
@@ -730,7 +733,15 @@ export function App() {
     "/new": { help: "open another session beside this one", run: newSession },
     "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
     "/abort": { help: "stop what this session is doing", run: () => void pi({ type: "abort" }) },
-    "/model": { help: "switch model: /model provider/id", run: (arg) => { const [provider, modelId] = arg.split("/"); if (provider && modelId) void pi({ type: "set_model", provider, modelId }); else L().note("usage: /model provider/id"); } },
+    // The picker IS the surface (spec §1.1): a bare `/model` opens it, and `provider/id` still
+    // takes a direct pick for somebody who knows what they want.
+    "/model": { help: "pick the model, thinking level and effort", local: true, run: (arg) => {
+      const id = curThread()?.pi;
+      if (!arg.trim()) return void live.setDialog("model");
+      if (!id) return void L().note("open a session first");
+      if (!/^[^/]+\/.+$/.test(arg.trim())) return void L().note("usage: /model, or /model provider/id");
+      void live.setModel(id, { model: arg.trim() });
+    } },
     "/settings": { help: "open settings", local: true, run: () => openSettings() },
     "/btw": {
       help: "ask one question of a read-only fork of this session: /btw <question>",
@@ -772,6 +783,23 @@ export function App() {
     { name: "/cancel", help: "kill a running or backgrounded command: /cancel #N" },
     ...machine().plugins.filter((p) => p.kind === "skill" && p.enabled).map((p) => ({ name: `/${p.name}`, help: (p as { summary: string }).summary })),
   ]);
+
+  /**
+   * The current thread's triple, cycled one step. `^T` is offered only the levels THIS model takes;
+   * `^E` only when the model has an effort at all, so a key never sets a knob the model cannot take.
+   */
+  const curThread = () => threads().find((t) => t.id === selected());
+  const cycle = <T extends string>(all: readonly T[], cur: string | undefined) => all[(Math.max(0, all.indexOf(cur as T)) + 1) % all.length];
+  const cycleThinking = () => {
+    const t = curThread();
+    if (!t?.pi) return;
+    void live.setModel(t.pi, { thinking: cycle(live.THINKING, t.thinking) });
+  };
+  const cycleEffort = () => {
+    const t = curThread();
+    if (!t?.pi) return;
+    void live.setModel(t.pi, { effort: cycle(live.EFFORT, t.effort) });
+  };
 
   /** The active pane's composer: every pane has one, so a global id would always find the first. */
   const composer = () => document.querySelector<HTMLTextAreaElement>(`[data-pane="${activePane()}"] textarea[data-composer]`);

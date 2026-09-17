@@ -120,6 +120,40 @@ const [levelKnown, setLevelKnown] = createSignal(false);
 export { levelKnown };
 export const noteLevel = (l: (typeof LEVELS)[number]) => (setLevel(l), setLevelKnown(true));
 
+/** Spec §1.2: the levels pi takes, and the effort levels a model that has one takes. */
+export const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const EFFORT = ["low", "medium", "high", "max"] as const;
+export type ModelRow = { id: string; name: string; thinking: boolean; effort: boolean };
+export type ProviderRow = { id: string; label: string; wired: boolean; models: ModelRow[] };
+
+/**
+ * `GET /models` once per window: pi's own snapshot of what the configured credentials reach, plus
+ * every provider it supports. Cached because the dialog re-opens far more often than the answer
+ * changes, and an empty answer is not cached — a bench with no child up yet lists no models, and
+ * caching that would leave the picker empty for the life of the window.
+ */
+const [providers, setProviders] = createSignal<ProviderRow[]>([]);
+export { providers };
+export async function models(): Promise<ProviderRow[]> {
+  if (providers().some((p) => p.models.length)) return providers();
+  const r = (await window.harness.bench("GET", "/models").catch(() => undefined)) as { providers?: ProviderRow[] } | undefined;
+  const rows = r?.providers ?? [];
+  if (rows.length) setProviders(rows);
+  return rows;
+}
+
+/** Which dialog takes the composer's place, if any. One at a time, like the permission prompt. */
+const [dialog, setDialog] = createSignal<"model" | undefined>();
+export { dialog, setDialog };
+
+/**
+ * A person's pick, for one session. The bench writes the session's fields AND the general default
+ * (spec §1.2) and re-applies the triple to the live child, so nothing here has to talk to pi.
+ */
+export async function setModel(session: string, patch: { model?: string; thinking?: string; effort?: string }): Promise<void> {
+  await window.harness.bench("POST", `/sessions/${session}/model`, patch).catch((e: Error) => thread(session).note(e.message));
+}
+
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
 /** Sessions whose workspace messages were discarded with them; queues hide these. */

@@ -17,6 +17,7 @@ import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
 import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
+import { ModelDialog } from "./ModelDialog";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
 import { BoxCursor } from "./BoxCursor";
@@ -116,14 +117,17 @@ export function Chat(props: {
    */
   const modelName = () => modelOfThread(thread()?.model ?? props.machine.model, live.benchModel());
   /** One string for the mode, the model and the level, used in all three places. */
-  const line = () => modeLine(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
+  /** The SESSION's own thinking and effort, from its bench row; nothing invented when unset. */
+  const thinkingOf = () => thread()?.thinking;
+  const effortOf = () => thread()?.effort;
+  const line = () => modeLine(live.mode(), modelName(), thinkingOf(), effortOf());
   /** Where this thread works, as the footer says it: `~/workspaces/<name>` or the bench's own dir. */
   const where = () => {
     const t = thread();
     if (!t) return "~";
     return t.kind === "workspace" || t.kind === "ephemeral" ? `~/workspaces/${t.name}` : "~/workspaces/bench";
   };
-  const parts = () => modeParts(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
+  const parts = () => modeParts(live.mode(), modelName(), thinkingOf(), effortOf());
   const [pick, setPick] = createSignal(0);
   /** Questions still waiting on this person: the newest is shown, the rest are counted. */
   const open_ = () => blocks().filter((b): b is QuestionRow => b.role === "question" && !(b as QuestionRow).answer);
@@ -608,6 +612,13 @@ export function Chat(props: {
             {/* A question takes the input's place while it is open: there is nothing to type until
                 it is answered, and a card floating in the transcript left the caret somewhere else
                 (owner, 2026-09-17). The mode row below stays where it is. */}
+            {/* `/model` takes the input's place the same way a question does: compact, in the
+                composer slot, never a floating modal (spec §1.3). */}
+            <Show when={live.dialog() === "model" && L().id}>
+              <div class="px-1 py-1">
+                <ModelDialog session={L().id} model={modelName()} effort={effortOf()} onClose={() => (live.setDialog(undefined), composerEl()?.focus())} />
+              </div>
+            </Show>
             <Show when={waiting()}>
               {(q) => (
                 <div class="px-1 py-1">
@@ -734,14 +745,15 @@ export function Chat(props: {
               <span class="shrink-0 text-subtle">·</span>
               <span class="shrink-0 text-fg" title={L().status()}>{parts().model}</span>
               <Show when={parts().provider}>{(p) => <span class="shrink-0 text-subtle">{p()}</span>}</Show>
-              <Show when={parts().level}>
-                {(l) => (
+              {/* A segment that does not apply is absent, never a dash (spec §1.3). */}
+              <For each={[parts().thinking, parts().effort].filter(Boolean)}>
+                {(seg) => (
                   <>
                     <span class="shrink-0 text-subtle">·</span>
-                    <span class="shrink-0 font-bold text-warning">{l()}</span>
+                    <span class="shrink-0 font-bold text-warning">{seg}</span>
                   </>
                 )}
-              </Show>
+              </For>
             </div>
           </div>
           {/* The footer bar: what is running, how to stop it, and the keys — one line, always there. */}

@@ -254,7 +254,7 @@ export type Snapshot = {
 /** A thread belongs to a node of the machine's tree: the machine's own is the
     one that changes things, a workspace's is where that copy is worked, an
     ephemeral's is a log to watch — nobody drives one. */
-export type Thread = { id: string; name: string; kind: "machine" | "session" | "workspace" | "ephemeral" | "btw"; readonly: boolean; messages: Message[]; pi?: string; session?: string; model?: string };
+export type Thread = { id: string; name: string; kind: "machine" | "session" | "workspace" | "ephemeral" | "btw"; readonly: boolean; messages: Message[]; pi?: string; session?: string; model?: string; thinking?: string; effort?: string };
 
 export type TodoState = "done" | "active" | "blocked" | "pending";
 // A plan is a tree: a step may hold sub-steps. A parent's state is derived from
