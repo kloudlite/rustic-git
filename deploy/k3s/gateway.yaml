@@ -94,7 +94,12 @@ spec:
   # this only once the counts live somewhere every replica reads (a per-workspace Lease on the
   # k3s API, or the api as the counter); `the_gateway_runs_one_replica_while_it_counts_in_memory`
   # in the gateway crate pins it. A restart is a few seconds of "reconnect", nothing more.
-  replicas: 1
+  # One per pool node, and it MUST stay equal to the pool's node count: the Cloudflare A records
+  # name specific nodes, and with fewer replicas a roll can land the only pod on a node no record
+  # names (2026-09-17 12:45 IST: one replica landed on session-1, which has no record — every
+  # tunnel answered 521 for 25 min). Anti-affinity spreads them; a node without a record just
+  # holds a spare.
+  replicas: 3
   strategy:
     type: Recreate
   selector:
