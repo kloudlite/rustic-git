@@ -94,12 +94,11 @@ spec:
   # this only once the counts live somewhere every replica reads (a per-workspace Lease on the
   # k3s API, or the api as the counter); `the_gateway_runs_one_replica_while_it_counts_in_memory`
   # in the gateway crate pins it. A restart is a few seconds of "reconnect", nothing more.
-  # One per pool node, and it MUST stay equal to the pool's node count: the Cloudflare A records
-  # name specific nodes, and with fewer replicas a roll can land the only pod on a node no record
-  # names (2026-09-17 12:45 IST: one replica landed on session-1, which has no record — every
-  # tunnel answered 521 for 25 min). Anti-affinity spreads them; a node without a record just
-  # holds a spare.
-  replicas: 3
+  # ONE replica: tunnel caps and spent tokens are counted in this process's memory (tunnel.rs).
+  # The Cloudflare A records name specific nodes, so the pod is pinned to those (nodeAffinity
+  # below) — on 2026-09-17 12:45 IST the single pod landed on session-1, which has no record,
+  # and every tunnel answered 521 for 25 min. Adding a pool node = add its record AND its name.
+  replicas: 1
   strategy:
     type: Recreate
   selector:
@@ -123,6 +122,14 @@ spec:
         - key: kloudlite.io/role
           operator: Exists
       affinity:
+        # Only nodes the `ws-<region>` A records point at (deploy/k3s/README.md, Gateway step 1).
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: [session-0, env-0]
         podAntiAffinity:
           # Required, not preferred: two replicas on one node is one CrashLoop and one silently
           # unreachable node, which reads as "Cloudflare is flaky" rather than as a scheduling bug.
