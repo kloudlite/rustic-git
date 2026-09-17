@@ -5,6 +5,9 @@ import type { Message } from "../model";
 import { ResultCard, pickRenderer } from "./results";
 import { grepBlock, plainBlock, readBlock, type CodeBlock } from "./results/code";
 import { toolLine } from "./results/toolline";
+import { FileDiff } from "./results/FileDiff";
+import { editFile, patchFiles } from "./results/diff";
+import { defaultOpen } from "./results/opencode-map";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -23,7 +26,9 @@ export function ToolCall(props: { a: Action }) {
   // the one they were about to click anyway.
   const [open, setOpen] = createSignal(false);
   createEffect(() => props.a.ok === false && setOpen(true));
-  createEffect(() => (props.a.tool === "edit" || props.a.tool === "bash") && setOpen(true));
+  // What opens itself, per opencode's own policy: a shell and an edit are the thing you came to
+  // see; a patch that only deletes is not (`part-default-open.ts:19`).
+  createEffect(() => defaultOpen(props.a.tool, true, true, deletionOnly()) && setOpen(true));
   const html = () => /^\s*<!doctype html|^\s*<html/i.test(a().output ?? "");
   const failed = () => a().ok === false || html();
   // While it runs: a spinner in the dot's place and a clock counting up, so
@@ -33,6 +38,10 @@ export function ToolCall(props: { a: Action }) {
   onCleanup(() => clearInterval(timer));
   const fmt = (ms: number) => (ms < 1000 ? `${Math.max(0, Math.round(ms))}ms` : `${(ms / 1000).toFixed(1)}s`);
   const took = () => (a().pending ? fmt(tick() - (a().ts ?? tick())) : a().ms !== undefined ? fmt(a().ms!) : "");
+  const deletionOnly = () => {
+    const files = patchFiles(String((props.a.args ?? {}).patch ?? (props.a.args ?? {}).diff ?? ""));
+    return files.length > 0 && files.every((f) => f.type === "delete");
+  };
   const line = createMemo(() => toolLine(a().tool, a().args ?? {}, a().output, { pending: a().pending, ok: a().ok !== false, secs: a().pending ? Math.round((tick() - (a().ts ?? tick())) / 1000) : undefined }));
 
   // opencode's contract (§16b): a read or a search is ONE line, but an edit and a command are rail
@@ -115,10 +124,14 @@ function Body(props: { a: Action }) {
     <Show when={!a().pending} fallback={<Show when={a().output}><Out text={a().output!} /></Show>}>
       <Switch tool={a().tool}>
         {{
-          bash: () => <Out text={plainBlock(a().output ?? "").lines.map((l) => l.text).join("\n")} empty="(no output)" />,
+          // The command and what it printed, one verbatim block (`message-part.tsx:2091`): a
+          // person reading a shell row wants to copy both, and the `$` is how they tell them apart.
+          bash: () => <Shell cmd={String(g().command ?? g().cmd ?? "")} out={plainBlock(a().output ?? "").lines.map((l) => l.text).join("\n")} />,
           read: () => <Code path={String(g().path ?? "")} text={a().output ?? ""} from={Number(g().offset ?? 1)} block={readBlock(a().output ?? "")} />,
           write: () => <Code path={String(g().path ?? "")} text={String(g().content ?? "")} from={1} />,
           edit: () => <Edits path={String(g().path ?? "")} edits={(g().edits as { oldText: string; newText: string }[]) ?? []} result={a().output} />,
+          // A patch is many files at once; each is its own accordion, and a delete stays shut.
+          patch: () => <Patch text={String(g().patch ?? g().diff ?? a().output ?? "")} />,
           grep: () => <Hits text={a().output ?? ""} />,
           find: () => <Hits text={a().output ?? ""} />,
           ls: () => <Hits text={a().output ?? ""} />,
@@ -201,24 +214,43 @@ function Code(props: { path: string; text: string; from: number; block?: CodeBlo
   );
 }
 
-/** An edit as the diff it is: what left in red, what came in green. */
+/** An edit as the diff it is, under the file's own sticky header; one hunk per replacement. */
 function Edits(props: { path: string; edits: { oldText: string; newText: string }[]; result?: string }) {
-  const lang = () => languageOf(props.path);
   return (
     <div class="my-1 flex flex-col gap-2">
-      <For each={props.edits}>
-        {(e) => (
-          <div class="overflow-x-auto rounded-[2px] bg-codeblock py-1">
-            <For each={e.oldText.replace(/\s+$/, "").split("\n")}>
-              {(l) => <div class="flex bg-danger-wash"><span class="w-6 shrink-0 text-center text-deleted select-none">−</span><span class="whitespace-pre" innerHTML={highlight(l, lang())} /></div>}
-            </For>
-            <For each={e.newText.replace(/\s+$/, "").split("\n")}>
-              {(l) => <div class="flex bg-success-wash"><span class="w-6 shrink-0 text-center text-created select-none">+</span><span class="whitespace-pre" innerHTML={highlight(l, lang())} /></div>}
-            </For>
-          </div>
-        )}
-      </For>
+      <FileDiff file={editFile(props.path, props.edits)} />
       <Show when={props.result && !/^Successfully/.test(props.result)}><div class="text-subtle">{props.result}</div></Show>
+    </div>
+  );
+}
+
+/** A unified patch: one accordion per file, with `Created` / `Deleted` / `Moved` where it applies. */
+function Patch(props: { text: string }) {
+  const files = createMemo(() => patchFiles(props.text));
+  return (
+    <Show when={files().length} fallback={<Out text={props.text} />}>
+      <Show when={files().length > 1}>
+        <div class="py-1 text-subtle">{files().length} files</div>
+      </Show>
+      <For each={files()}>{(f) => <FileDiff file={f} />}</For>
+    </Show>
+  );
+}
+
+/** The shell body: `$ command`, a blank line, then what it printed — and a copy of the lot. */
+function Shell(props: { cmd: string; out: string }) {
+  const text = () => `$ ${props.cmd}${props.out.trim() ? `\n\n${props.out}` : ""}`;
+  const [done, setDone] = createSignal(false);
+  return (
+    <div data-slot="bash-scroll" class="group/shell relative min-w-0">
+      <button
+        data-slot="bash-copy"
+        class="absolute top-1 right-1 rounded-[2px] bg-fg/10 px-1 text-subtle opacity-0 group-hover/shell:opacity-100 hover:text-fg"
+        onClick={() => { void navigator.clipboard.writeText(text()); setDone(true); setTimeout(() => setDone(false), 2000); }}
+      >
+        {done() ? "copied" : "copy"}
+      </button>
+      <Out text={text()} empty="(no output)" head={9} />
     </div>
   );
 }

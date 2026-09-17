@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { TEXT_RENDER_IMMEDIATE, next, paced, step } from "../../src/renderer/components/results/paced.ts";
+import { badge, editFile, patchFiles, split } from "../../src/renderer/components/results/diff.ts";
 import { mentions, typeLabel } from "../../src/renderer/components/results/mentions.ts";
 
 test("pacing steps by size", () => {
@@ -47,4 +48,59 @@ test("an attachment is named by its type", () => {
   assert.equal(typeLabel("image/png"), "Image");
   assert.equal(typeLabel("application/pdf"), "PDF");
   assert.equal(typeLabel(undefined), "File");
+});
+
+test("a unified patch is read per file", () => {
+  const text = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,3 +1,3 @@",
+    " keep",
+    "-old",
+    "+new",
+    "--- /dev/null",
+    "+++ b/src/added.ts",
+    "@@ -0,0 +1,2 @@",
+    "+one",
+    "+two",
+    "--- a/src/gone.ts",
+    "+++ /dev/null",
+    "@@ -1 +0,0 @@",
+    "-bye",
+    "--- a/src/old-name.ts",
+    "+++ b/src/new-name.ts",
+    "@@ -1 +1 @@",
+    " same",
+  ].join("\n");
+  const files = patchFiles(text);
+  assert.deepEqual(files.map((f) => [f.path, f.type, f.additions, f.deletions]), [
+    ["src/a.ts", "edit", 1, 1],
+    ["src/added.ts", "add", 2, 0],
+    ["src/gone.ts", "delete", 0, 1],
+    ["src/new-name.ts", "move", 0, 0],
+  ]);
+  assert.equal(files[3].from, "src/old-name.ts");
+  assert.deepEqual(badge(files[1]), { text: "Created", type: "added" });
+  assert.deepEqual(badge(files[2]), { text: "Deleted", type: "removed" });
+  assert.deepEqual(badge(files[3]), { text: "Moved", type: "modified" });
+  assert.equal(badge(files[0]), undefined);
+  // Line numbers follow the hunk header, both sides.
+  const a = files[0].lines;
+  assert.deepEqual(a[0], { kind: "sep", text: "@@ -1,3 +1,3 @@" });
+  assert.deepEqual(a[1], { kind: "context", text: "keep", old: 1, new: 1 });
+  assert.deepEqual(a[2], { kind: "del", text: "old", old: 2 });
+  assert.deepEqual(a[3], { kind: "add", text: "new", new: 2 });
+});
+
+test("an edit becomes one hunk per replacement", () => {
+  const f = editFile("a/b.ts", [
+    { oldText: "x", newText: "y" },
+    { oldText: "p\nq", newText: "r" },
+  ]);
+  assert.equal(f.additions, 2);
+  assert.equal(f.deletions, 3);
+  assert.equal(f.lines.filter((l) => l.kind === "sep").length, 1, "a separator between the two, not before the first");
+  assert.deepEqual(split("a/b.ts"), { dir: "a/", name: "b.ts" });
+  assert.deepEqual(split("b.ts"), { dir: "", name: "b.ts" });
 });
