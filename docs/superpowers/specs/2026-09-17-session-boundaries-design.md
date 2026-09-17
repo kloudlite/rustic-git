@@ -103,6 +103,21 @@ nothing else changes here.
 - Bench test: a restarted bench re-applies each session's triple on `session_start`.
 - Renderer test: footer segments present/absent by model capability.
 
+
+### 1.5 What enters the transcript and what enters the session (owner, 00:50–01:05 IST 18 Sep)
+
+- The transcript shows: the person's prompts, the model's text and reasoning, tool rows, question
+  and proposal cards, and one quiet DIVIDER line per state change that matters when reading later
+  — `Model changed to <display name>`, `Thinking <level>`, `Effort <level>`, `Session compacted`,
+  `Interrupted`. Nothing else: no slash-command echo, no harness notes, no plan-change lines
+  (the PLAN panel is the surface), no error lines (errors are a footer status).
+- **pi's session file and the model's context receive none of it.** Dividers are renderer state
+  from bench events; `/proc-stop` and `/cancel` are bench HTTP calls, never prompts.
+- When the model genuinely needs an outcome of the person's action (a process it started was
+  stopped, a task cancelled), the bench delivers a structured `custom` message
+  (`harness:event`, `{kind, id, title, by:"person"}`) on the model's next turn, drawn as the compact
+  result card tool rows use — never a slash string, never a user-role message.
+
 ## 2. The shell is a sidecar
 
 ### 2.1 Decisions
