@@ -182,6 +182,15 @@ pub struct Workspace {
     /// shown: without it the web could only learn "attached" from an intercept's own refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_environment: Option<String>,
+    /// The subagent trees the NODE has cut, verbatim from `status.trees` — never `spec.trees`,
+    /// which is only what was asked for. The two differ for as long as a cut takes, and that gap
+    /// is what a caller waits on: the bench polls this until the tree it asked for reads `ready`.
+    ///
+    /// `crd::TreeStatus` itself rather than a doc struct beside it: it is already the four fields
+    /// §4.2 names, in camelCase, with `reason` omitted when there is none — a parallel type would
+    /// be a second thing to keep in step, for no field anyone would want to hide.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trees: Vec<crate::crd::TreeStatus>,
 }
 
 /// A `crd::Lock` as the web sees it.

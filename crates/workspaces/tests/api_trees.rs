@@ -195,3 +195,62 @@ async fn someone_elses_workspace_is_404() {
     assert_eq!(cut(&s, "fix-auth").await.status(), 404);
     assert!(written(&s).is_empty(), "nothing written");
 }
+
+/// `GET /v1/workspaces/{id}` lists what the NODE cut, not what was asked for (spec §4.2). The two
+/// differ for as long as a cut takes, and the harness waits on exactly this difference: it polls
+/// until the tree it asked for reads `ready`.
+///
+/// `reason` rides along because a cut can fail — a full pool, a lock held — and the agent retries
+/// it on the next pass. Without it a person watching a tree that never turns ready has nothing to
+/// read but the absence of a row.
+#[tokio::test]
+async fn the_workspace_doc_lists_the_trees_the_node_cut() {
+    let mut ws = ws_obj(json!([{"name": "fix-auth", "created": "2026-09-17T00:00:00Z"}]), "running");
+    ws["status"]["trees"] = json!([
+        {"name": "fix-auth", "path": "/home/kl/workspaces/ws-1/.agents/fix-auth", "ready": true},
+        {"name": "sad", "path": "/home/kl/workspaces/ws-1/.agents/sad", "ready": false, "reason": "no space left on device"},
+    ]);
+    let s = server(vec![
+        get(format!("{API}/workspaces/ws-1"), ws),
+        get(
+            format!("{API}/snapshots"),
+            json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
+        ),
+    ])
+    .await;
+    let doc: Value = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        doc["trees"],
+        json!([
+            {"name": "fix-auth", "path": "/home/kl/workspaces/ws-1/.agents/fix-auth", "ready": true},
+            {"name": "sad", "path": "/home/kl/workspaces/ws-1/.agents/sad", "ready": false, "reason": "no space left on device"},
+        ]),
+        "{doc}"
+    );
+}
+
+/// A workspace nobody has asked a tree of carries no `trees` key at all, rather than an empty
+/// array: every other optional list on this doc is omitted the same way, and a reader that sees
+/// the key can trust it means something.
+#[tokio::test]
+async fn a_workspace_with_no_trees_omits_the_field() {
+    let s = server(routes(json!([]), "running")).await;
+    let doc: Value = reqwest::Client::new()
+        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .bearer_auth(token(&s.jwt))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(doc.get("trees").is_none(), "{doc}");
+}

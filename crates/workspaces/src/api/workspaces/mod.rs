@@ -118,6 +118,7 @@ pub(super) fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace 
             .and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::ATTACHED && c.status == "True"))
             .map(|c| c.message.clone())
             .filter(|m| !m.is_empty()),
+        trees: st.map(|s| s.trees.clone()).unwrap_or_default(),
         id,
     }
 }
