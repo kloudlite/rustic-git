@@ -345,3 +345,17 @@ What Claude Code does, and what the harness does for it:
 10. **Reporting to the person**: lead with the result; failures with cause and fix; never claim a
     fleet fact unverified. Already in the identity (caveman + brevity); add: "A thing you changed
     but could not verify is 'changed, unverified'".
+
+## 18. Replies to the bench are to the point (owner, 2026-09-17 18:15 IST)
+
+The bench session is a planner and orchestrator; it does not hold the code. A workspace session
+owns its code and answers the bench like a teammate at standup, never with a code dump:
+- A reply to an ask is ≤ 8 lines: status word first (`done` / `partial` / `blocked`), what changed
+  (files by NAME, not content), how it was verified (one line), what is left or what it needs.
+  No code blocks, no diffs, no command output, no step-by-step narrative. Details stay in the
+  workspace session's own transcript, where the person can read them in that tab.
+- Mechanism, not only prompt: the bench truncates a `[reply]` to 12 lines / 1,200 chars before
+  delivering it (the full text stays in the workspace transcript and behind the reply row's
+  fold) and strips fenced code blocks from what the bench session receives.
+- The workspace identity says so verbatim; the bench identity says: "You do not read code. Ask
+  the workspace; its reply tells you what changed and where."
