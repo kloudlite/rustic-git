@@ -784,5 +784,30 @@ async function fsGet<T>(scope: string, what: string, params: Record<string, stri
 export const fsTree = (scope: string, path?: string) => fsGet<{ entries?: FsEntry[] }>(scope, "tree", path ? { path } : {});
 /** What differs from the branch — and whether it is a git repository at all. */
 export const fsChanges = (scope: string) => fsGet<FsChanges>(scope, "changes");
+
+/** One file, as the bench's envelope carries it: text, or named and measured when it is not. */
+export type FsFile = { text?: string; binary?: true; mime?: string; bytes?: number; etag?: string; notModified?: true };
+
+/**
+ * A file's contents. The ETag is kept per path and sent back on the next read, so a file that has
+ * not changed costs a 304 and no bytes — and the text already held is what is shown.
+ */
+const tags = new Map<string, { etag?: string; file: FsFile }>();
+export async function fsFile(scope: string, path: string): Promise<FsFile | undefined> {
+  const key = `${scope}:${path}`;
+  const had = tags.get(key);
+  const q = new URLSearchParams({ scope, path, ...(had?.etag ? { etag: had.etag } : {}) }).toString();
+  const got = (await window.harness.bench("GET", `/fs/file?${q}`).catch(() => undefined)) as FsFile | undefined;
+  if (!got) return had?.file;
+  if (got.notModified) return had?.file;
+  tags.set(key, { etag: got.etag, file: got });
+  return got;
+}
+
+/** One file's diff against the branch, as the tool server writes it. */
+export const fsDiff = (scope: string, path: string) => fsGet<{ diff?: string; binary?: boolean }>(scope, "diff", { path });
+
+/** One path's own facts: kind, size, mime. */
+export const fsStat = (scope: string, path: string) => fsGet<{ kind?: string; size?: number; mime?: string }>(scope, "stat", { path });
 /** Forget what was read: after a write, or when a workspace is reopened. */
-export const forgetFs = () => fsCache.clear();
+export const forgetFs = () => (fsCache.clear(), tags.clear());

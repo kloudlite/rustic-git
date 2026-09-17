@@ -46,7 +46,7 @@ export function serve(
   maxBody = MAX_BODY,
   // Tests pass a fake; the real one is loaded lazily so the bench's own routes never pull pi's SDK in.
   opts: { resolveTools?: (ws: string) => Promise<string> } = {},
-): Promise<{ port: number; close(): Promise<void> }> {
+): Promise<{ port: number; close(): Promise<void>; server: http.Server; sweepOnce(): void }> {
   const resolveTools = opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
   const body = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
     let s = "";
@@ -261,8 +261,36 @@ export function serve(
         if (scope !== "bench" && !SCOPE_RE.test(scope)) return send(res, 400, { error: `bad scope ${JSON.stringify(scope)}` });
         const addr = scope === "bench" ? LOCAL_TOOLS : await resolveTools(scope);
         const rest = p.slice(1).join("/");
-        const q = new URLSearchParams([...u.searchParams].filter(([k]) => k !== "scope")).toString();
-        const r = await fetch(`http://${addr}/fs/${rest}${q ? `?${q}` : ""}`).catch((e: Error) => ({ ok: false, status: 502, text: async () => e.message }) as unknown as Response);
+        // `etag` is ours, not the tool server's: it becomes the conditional header, so a file the
+        // desktop already holds costs a 304 and no bytes.
+        const etag = u.searchParams.get("etag") ?? undefined;
+        const q = new URLSearchParams([...u.searchParams].filter(([k]) => k !== "scope" && k !== "etag")).toString();
+        const r = await fetch(`http://${addr}/fs/${rest}${q ? `?${q}` : ""}`, {
+          headers: etag ? { "if-none-match": etag } : undefined,
+        }).catch((e: Error) => ({ ok: false, status: 502, headers: new Headers(), text: async () => e.message, arrayBuffer: async () => new ArrayBuffer(0) }) as unknown as Response);
+        /**
+         * `/fs/file` answers the FILE — bytes with a content type and an ETag — while every other
+         * route answers JSON. One envelope carries either over the tunnel, so the desktop has the
+         * text, what kind of file it is, and the tag to ask again with.
+         */
+        if (rest.split("?")[0] === "file") {
+          const tag = r.headers?.get?.("etag") ?? undefined;
+          if (r.status === 304) return send(res, 200, { notModified: true, etag: tag });
+          const mime = r.headers?.get?.("content-type") ?? "application/octet-stream";
+          const body = Buffer.from(await r.arrayBuffer());
+          if (r.status >= 400) {
+            let why: unknown = body.toString("utf8");
+            try {
+              why = JSON.parse(String(why));
+            } catch {
+              /* a tool server that answered text answers text */
+            }
+            return send(res, r.status, why as never);
+          }
+          // Text is sent as text; anything else is named and measured, never streamed into a view.
+          const text = /^text\/|json|javascript|xml|^application\/(x-)?(sh|toml|yaml)/.test(mime) ? body.toString("utf8") : undefined;
+          return send(res, 200, { etag: tag, mime, bytes: body.length, ...(text === undefined ? { binary: true } : { text }) });
+        }
         const text = await r.text();
         let data: unknown = text;
         try {
@@ -285,8 +313,36 @@ export function serve(
     }
   });
 
+  // The client pool keeps a connection warm for 15 s (`keepAliveMsecs`), but Node's server default
+  // is 5 s — so the pooled socket was dropped every ~6 s and the next REST call paid a fresh token
+  // mint and handshake. The server must outlive the client's idle, not the other way round.
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 70_000;
+
   const wss = new WebSocketServer({ noServer: true, maxPayload: maxBody });
   const events = new Set<WebSocket>();
+  /** Whether each events socket answered the last sweep's ping. */
+  const alive = new Map<WebSocket, boolean>();
+  /** One heartbeat round; the timer below is just this on a schedule, and a test can step it. */
+  const sweepOnce = () => {
+    for (const w of events) {
+      // It missed a whole round: terminate rather than keep writing into a socket nobody reads.
+      if (alive.get(w) === false) {
+        events.delete(w);
+        alive.delete(w);
+        w.terminate();
+        continue;
+      }
+      alive.set(w, false);
+      try {
+        w.ping();
+      } catch {
+        /* the close handler cleans up */
+      }
+    }
+  };
+  const sweep = setInterval(sweepOnce, 30_000);
+  sweep.unref?.();
   const rpcClients = new Map<string, Set<WebSocket>>();
   const unsubscribe = bench.onEvent((ev) => {
     idle.check();
@@ -349,7 +405,11 @@ export function serve(
       }
       if (!rpc) {
         events.add(w);
-        w.on("close", () => events.delete(w));
+        // The standard ws heartbeat. A socket the edge or a dead laptop left HALF-OPEN still looks
+        // writable, so events were being sent into it forever; the sweep closes it instead.
+        alive.set(w, true);
+        w.on("pong", () => alive.set(w, true));
+        w.on("close", () => (events.delete(w), alive.delete(w)));
         return;
       }
       if (!rpcClients.has(rpc)) rpcClients.set(rpc, new Set());
@@ -377,9 +437,12 @@ export function serve(
     server.listen(port, host, () => {
       resolve({
         port: (server.address() as { port: number }).port,
+        server,
+        sweepOnce,
         close: () =>
           new Promise<void>((r) => {
             unsubscribe();
+            clearInterval(sweep);
             for (const w of wss.clients) w.terminate();
             server.closeAllConnections();
             server.close(() => r());

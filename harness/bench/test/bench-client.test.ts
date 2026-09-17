@@ -125,3 +125,32 @@ test("a tunnel nonce rides every REST request and WebSocket upgrade; the cache i
     fs.rmSync(cacheFile, { force: true });
   }
 });
+
+/**
+ * The desktop's `/events` socket was reaped by the Cloudflare edge after ~100 s of no
+ * client→server traffic (`bins/gateway/src/tunnel.rs:23`): 79–136 s in the gateway logs, ~25 times
+ * an hour, on a pod that was never touched. The client now pings, so the edge sees traffic.
+ */
+test("the client pings its events socket, and stops when it closes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-ping-"));
+  const cacheFile = path.join(dir, "cache.json");
+  const b = await run(path.join(dir, "bench"), 0);
+  const c = new BenchClient(`http://127.0.0.1:${b.port}`, () => {}, cacheFile);
+  try {
+    c.start();
+    await until(() => c.connected(), 5_000, "the client to connect");
+    // The keep-alive timer is armed for as long as the socket is up...
+    const timer = (c as unknown as { ping?: NodeJS.Timeout }).ping;
+    assert.ok(timer, "a ping interval is running while /events is open");
+    // ...and the bench answers a ping, which is what the edge needs to see.
+    const ev = (c as unknown as { events: { ping(): void; once(e: string, f: () => void): void } }).events;
+    await new Promise<void>((r) => (ev.once("pong", () => r()), ev.ping()));
+    // Closing the client stops it: nothing is left pinging a socket that is gone.
+    c.close();
+    assert.equal((c as unknown as { ping?: NodeJS.Timeout }).ping, undefined);
+  } finally {
+    c.close();
+    await stop(b.c);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

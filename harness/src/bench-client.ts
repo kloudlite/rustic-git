@@ -51,6 +51,8 @@ export class BenchClient {
   private closed = false;
   private backoff = 1000;
   private timer?: NodeJS.Timeout;
+  /** Keeps `/events` alive past the edge's ~100 s idle reap; cleared whenever the socket goes. */
+  private ping?: NodeJS.Timeout;
   private sockets = new Map<string, WebSocket>();
   private waiting = new Map<string, { w: WebSocket; done: (r: Record<string, unknown>) => void }>();
   private seq = 0;
@@ -153,6 +155,19 @@ export class BenchClient {
     w.on("open", async () => {
       this.backoff = 1000;
       this.setUp(true);
+      // The Cloudflare edge reaps a WebSocket after ~100 s with no CLIENT→server traffic
+      // (`bins/gateway/src/tunnel.rs:23`). `/events` is server→client only, so it was being cut
+      // every 79–136 s — about 25 times an hour — and every cut cost a token mint and a fresh
+      // handshake. sshd's ClientAliveInterval covers ssh; nothing covered the bench.
+      clearInterval(this.ping);
+      this.ping = setInterval(() => {
+        try {
+          w.ping();
+        } catch {
+          /* the close handler is what reconnects; a failed ping is not its own error */
+        }
+      }, 30_000);
+      this.ping.unref?.();
       // A reconnect means new sockets: warm them before the resync asks for everything at once.
       this.warm();
       try {
@@ -190,6 +205,8 @@ export class BenchClient {
     });
     w.on("close", () => {
       if (this.events !== w) return;
+      clearInterval(this.ping);
+      this.ping = undefined;
       this.setUp(false);
       for (const s of this.sockets.values()) s.terminate();
       this.sockets.clear();
@@ -205,6 +222,8 @@ export class BenchClient {
   close(): void {
     this.closed = true;
     clearTimeout(this.timer);
+    clearInterval(this.ping);
+    this.ping = undefined;
     this.events?.terminate();
     for (const s of this.sockets.values()) s.terminate();
     this.sockets.clear();

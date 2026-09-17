@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { asksOf, exchangesOf, onEvent, seedExchanges, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
+import { asksOf, exchangesOf, noteConnected, onEvent, seedExchanges, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -196,4 +196,28 @@ test("a question on a workspace session is a card, not a tool row", () => {
   const rows = thread(ws).messages;
   assert.ok(rows.some((m) => m.role === "question"), "the card is drawn on the workspace thread");
   assert.ok(!rows.some((m) => m.role === "action" && (m as { tool?: string }).tool === "question"), "and no generic `Called question` row beside it");
+});
+
+/**
+ * The `/events` socket was reaped by the Cloudflare edge every 79–136 s (nothing pinged on that
+ * path), and each reconnect painted "bench offline" for the fraction of a second it took — about
+ * 25 times an hour on a pod that was never down. A drop has to LAST to be an outage.
+ */
+test("a reconnect never paints offline; a real outage still does", async () => {
+  const seen: boolean[] = [];
+  const apply = (v: boolean) => void seen.push(v);
+  // The flicker: down and straight back up inside the window.
+  noteConnected(false, apply, 40);
+  noteConnected(true, apply, 40);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(seen, [true], "up is immediate, and it cancelled the pending offline");
+
+  // A drop that lasts is reported, once.
+  seen.length = 0;
+  noteConnected(false, apply, 40);
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(seen, [false]);
+
+  // And the default `apply` resolves at call time, so the real signal is reachable.
+  assert.doesNotThrow(() => noteConnected(true));
 });

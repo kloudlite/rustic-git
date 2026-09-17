@@ -222,3 +222,52 @@ test("the bench's default model is on /healthz and /bootstrap", async () => {
     await t.down();
   }
 });
+
+/**
+ * Nothing pinged on `/events`, so the Cloudflare edge reaped the socket after ~100 s of no
+ * client→server traffic (`bins/gateway/src/tunnel.rs:23`) — 79–136 s in the gateway logs, ~25
+ * times an hour, on a pod that was never restarted. The heartbeat runs both ways: the client pings
+ * to keep the edge open, and the server terminates a socket that stops answering rather than
+ * writing events into one nobody reads.
+ */
+test("the events socket is kept alive, and a half-open one is terminated", async () => {
+  const t = await up();
+  try {
+    const w = t.ws("/events");
+    await opened(w);
+    // The server answers a client ping, which is what keeps the edge from reaping the socket.
+    const ponged = new Promise<void>((r) => w.once("pong", () => r()));
+    w.ping();
+    await ponged;
+
+    // A socket that never answers is swept; one that does is kept. The sweep is on a 30 s timer, so
+    // the behaviour is exercised directly rather than by waiting for it.
+    // A socket that ANSWERS survives every round: two sweeps, still open.
+    t.srv.sweepOnce();
+    await new Promise((r) => setTimeout(r, 50));
+    t.srv.sweepOnce();
+    assert.equal(w.readyState, w.OPEN, "a socket that pongs is kept");
+
+    // One that stops answering is terminated rather than written into forever. A real half-open
+    // socket still LOOKS writable, which is the whole problem; here the pong simply never arrives,
+    // so two rounds pass with the flag unset.
+    w.removeAllListeners("ping");
+    w.on("ping", () => {}); // swallowed: no pong goes back, as from a dead peer
+    t.srv.sweepOnce(); // marks it unanswered
+    t.srv.sweepOnce(); // and it missed the round: terminate
+    await until(() => w.readyState === w.CLOSED || w.readyState === w.CLOSING, 5_000, "the half-open socket to be closed");
+  } finally {
+    await t.down();
+  }
+});
+
+/** The pool keeps a connection warm for 15 s; Node's 5 s default dropped it every ~6 s. */
+test("the server outlives the client's idle", async () => {
+  const t = await up();
+  try {
+    assert.ok(t.srv.server.keepAliveTimeout >= 65_000, `keepAliveTimeout ${t.srv.server.keepAliveTimeout}`);
+    assert.ok(t.srv.server.headersTimeout > t.srv.server.keepAliveTimeout, "headers must outlast keep-alive");
+  } finally {
+    await t.down();
+  }
+});
