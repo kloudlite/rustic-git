@@ -128,9 +128,26 @@ function caveman(): string[] {
 }
 const CAVEMAN = caveman();
 
-export function identity(hands: string, platform = true): string {
-  return [hands, ...(platform ? [PLATFORM] : []), ...CAVEMAN].join("\n\n");
+export function identity(hands: string, platform = true, memory = MEMORY): string {
+  // The memory is the person's, so it rides in every session — including a fork, which has no
+  // tools but may well be asked what the person prefers.
+  return [hands, ...(platform ? [PLATFORM] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
 }
+
+/**
+ * The memory index, read once at load from beside the session files. A workspace session reads the
+ * same file: it is the person's memory, and the bench folder travels with their machine.
+ */
+function memoryIndex(): string {
+  const dir = process.env.KL_BENCH_DIR || (process.env.KL_WORKSPACE ? path.join(process.env.KL_WORKSPACE, ".bench") : "");
+  if (!dir) return "";
+  try {
+    return fs.readFileSync(path.join(dir, "memory", "MEMORY.md"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+const MEMORY = memoryIndex();
 
 /**
  * What the model must know, and nothing else. Everything operational — how a proposal is answered,
@@ -147,6 +164,7 @@ const PLATFORM = [
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
+  "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
   "Answer in one line, then only the facts needed.",
@@ -265,7 +283,7 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  * platform tool stays REGISTERED — the proposals, the cards and the waits are unchanged — but
  * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
  */
-export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "plan", "skill", "tool_search"];
+export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "plan", "skill", "tool_search", "memory"];
 
 /** The six skills, read from beside the extension: product words, not tool lists. */
 const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
@@ -289,6 +307,34 @@ function describeTool(pi: ExtensionAPI, name: string): string {
  * `skill` and `tool_search`: the two ways out of the twelve. A search that finds nothing says so
  * in the words the model should then use with the person, rather than leaving it to invent a tool.
  */
+/**
+ * What the person told us, kept for every session afterwards. The bench owns the files — a
+ * workspace session has no bench filesystem — so this is one call through the same door.
+ */
+export function memoryTools(reg: ReturnType<typeof makeReg>) {
+  reg(
+    "memory",
+    {
+      save: Type.Optional(Type.Object({
+        name: Type.String({ description: "lowercase words with dashes, e.g. deploys-from-the-pod" }),
+        description: Type.String({ description: "one line; this is what you will see in the index later" }),
+        type: Type.String({ description: "user (a preference), feedback (a correction), project (how their work is set up), reference (a fact)" }),
+        body: Type.String({ description: "the memory itself; for feedback and project, **Why:** … **How to apply:** …" }),
+      })),
+      forget: Type.Optional(Type.String({ description: "the name of a memory that is no longer true" })),
+    },
+    async (a) => {
+      if (a.forget) {
+        const r = await benchCall("DELETE", `/memory/${encodeURIComponent(a.forget)}`);
+        return r.ok ? text(`forgot ${a.forget}`) : { ...text(String(r.data?.error ?? "no such memory")), isError: true };
+      }
+      if (!a.save) return { ...text("memory takes save (name, description, type, body) or forget (a name)"), isError: true };
+      const r = await benchCall("POST", "/memory", a.save);
+      return r.ok ? text(`saved ${a.save.name}`) : { ...text(String(r.data?.error ?? "it was not saved")), isError: true };
+    },
+  );
+}
+
 export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
   reg("skill", { name: Type.String({ description: SKILLS.join(", ") }) }, async (a) => {
     const body = skillText(String(a.name));
@@ -674,8 +720,9 @@ export function tools(pi: ExtensionAPI) {
   planTools(reg);
   if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, process.env.KL_WORKSPACE_ID);
   searchTools(reg, pi);
+  memoryTools(reg);
   capabilities(reg);
-  // Twelve to start with; the rest are one `tool_search` away.
+  // Thirteen to start with; the rest are one `tool_search` away.
   pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
 }
 
@@ -703,6 +750,7 @@ export default function (pi: ExtensionAPI) {
     // An agent is a session with one task: it reports to whoever started it and starts nobody.
     if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
     searchTools(reg, pi);
+    memoryTools(reg);
     capabilities(reg);
     return pi.setActiveTools?.(ALWAYS_ON.filter((n) => n !== "ask" || process.env.KL_EPHEMERAL !== "1"));
   }

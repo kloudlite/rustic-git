@@ -21,7 +21,7 @@ export type ToolSpec = {
 };
 
 /** Which tools never ask: a message to another session, and this machine's own packages. */
-const UNGATED = new Set(["ask", "plan", "skill", "tool_search", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
+const UNGATED = new Set(["ask", "plan", "skill", "tool_search", "memory", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
 
 /** Whether a call has to be asked about first: it changes somebody's platform state (spec §9). */
 export function gated(name: string): boolean {
@@ -95,6 +95,8 @@ export const TOOLS: ToolSpec[] = [
   { name: "plan", group: "workspace", summary: "Write the plan for this work, and tick steps as they land.", effect: "read" },
   { name: "skill", group: "workspace", summary: "What a part of the platform is and the verbs it has: workspaces, environments, snapshots, repos, images, agents.", effect: "read" },
   { name: "tool_search", group: "workspace", summary: "Find the tool for a platform verb, by what you want to do. It answers the names and parameters, and turns them on.", effect: "read" },
+
+  { name: "memory", group: "workspace", summary: "Remember something the person told you, or forget one that is no longer true.", effect: "read" },
 
   { name: "kl_capabilities", group: "platform", summary: "Everything you can do here, by name and effect. Read this instead of going looking.", effect: "read" },
 ];

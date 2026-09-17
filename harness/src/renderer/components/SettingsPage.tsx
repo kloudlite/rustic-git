@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../ui/Icon";
 import { Button } from "../ui/Button";
-import { Kbd } from "../ui/parts";
+import { Empty, Kbd } from "../ui/parts";
 import { KEYS } from "../keys";
 import { PROVIDERS, type Machine, type Plugin } from "../model";
 import { TOOLS } from "../../../pi/catalog";
@@ -21,17 +21,21 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
   const of = (k: Plugin["kind"]) => props.machine.plugins.filter((p) => p.kind === k && hit(p.name, p.from));
   const keys = () => Object.values(KEYS).filter((b) => hit(b.label, b.keys));
 
-  type Page = "model" | "providers" | "tools" | "skills" | "mcp" | "hooks" | "keys" | "account" | "discover";
+  type Page = "model" | "providers" | "tools" | "memory" | "skills" | "mcp" | "hooks" | "keys" | "account" | "discover";
   const PAGES: { id: Page; label: string }[] = [
     { id: "model", label: "Model" },
     { id: "providers", label: "Providers" },
     { id: "tools", label: "Tools" },
+    { id: "memory", label: "Memory" },
     { id: "skills", label: "Skills" },
     { id: "mcp", label: "MCP servers" },
     { id: "hooks", label: "Hooks" },
     { id: "keys", label: "Keyboard" },
     { id: "account", label: "Account" },
   ];
+  type Memory = { name: string; description: string; type: string };
+  const [memories, setMemories] = createSignal<Memory[]>([]);
+  void window.harness.bench<Memory[]>("GET", "/memory").then(setMemories, () => undefined);
   const [who, setWho] = createSignal("");
   const [api, setApi] = createSignal("");
   const [team, setTeam] = createSignal("");
@@ -128,6 +132,22 @@ export function SettingsPage(props: { machine: Machine; open?: { id: string } })
               </For>
             </Section>
           </Show>
+          <Show when={page() === "memory"}>
+          {/* What the machine has been told about this person, and the one thing a person wants to
+              do with it: read it, and delete the bits that are no longer true. */}
+          <Section id="memory" title="Memory" hint="what the machine remembers about you, across every session">
+            <Show when={memories().length} fallback={<Empty>Nothing remembered yet.</Empty>}>
+              <For each={memories().filter((m) => hit(m.name, m.description))}>
+                {(m) => (
+                  <Row name={m.name} detail={m.description} from={m.type} mono>
+                    <Button variant="ghost" size="sm" icon="x" title="Forget this" onClick={() => void window.harness.bench("DELETE", `/memory/${encodeURIComponent(m.name)}`).then((rows) => setMemories(rows as Memory[]), () => undefined)} />
+                  </Row>
+                )}
+              </For>
+            </Show>
+          </Section>
+          </Show>
+
           <Show when={page() === "skills"}>
           <Section id="skills" title="Skills" hint="a prompt the machine follows when told /name" action={<Button icon="plus" size="sm">Add</Button>}>
             <For each={of("skill")}>

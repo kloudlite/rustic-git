@@ -3,6 +3,7 @@ import path from "node:path";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
+import { Memories, type Memory } from "./memory.ts";
 import { nudge, reduce, type PlanEvent } from "./plan.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
@@ -50,6 +51,7 @@ export class Bench {
   readonly tasks: Tasks;
   readonly procs: Procs;
   readonly plans: Plans;
+  readonly memories: Memories;
   readonly writable: Writable;
   private opts: BenchOpts;
   private children = new Map<string, RpcChild>();
@@ -76,6 +78,7 @@ export class Bench {
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
     this.plans = new Plans(opts.dir);
+    this.memories = new Memories(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
   }
 

@@ -94,6 +94,7 @@ test("the system prompt is the harness's own, and says only what the model must 
       /Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell\./,
       /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
+      /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\. Never save what a tool can answer\./,
       /Do what is asked, directly\. No checks first\./,
       /Only the tools reach the platform\. Never change anything the person did not ask for\./,
       /Answer in one line, then only the facts needed\./,
