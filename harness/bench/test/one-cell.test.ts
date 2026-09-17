@@ -8,9 +8,13 @@ import path from "node:path";
  * color and weight vary"). Nothing in the centre pane may set a size of its own — difference is
  * carried by weight, colour and case. This greps for the ways a size creeps back in.
  */
+/**
+ * Since the port (spec §23) the transcript is opencode's own code and owns its own typography —
+ * their 14/13px ramp, not ours. What is left of OUR pane is the chrome around it, and the one-cell
+ * rule still governs that.
+ */
 const PANE = [
   "src/renderer/components/Chat.tsx",
-  "src/renderer/components/ToolCall.tsx",
   ...fs.readdirSync("src/renderer/components/results").filter((f) => f.endsWith(".tsx")).map((f) => `src/renderer/components/results/${f}`),
 ];
 const FORBIDDEN = [/\btext-(2xs|xs|sm|base|md|lg|xl)\b/, /\btext-\[\d+px\]/, /font-size\s*:/, /\bleading-\[[\d.]+px\]/];
@@ -94,9 +98,7 @@ test("the composer carries exactly one status row, and the footer says where you
  */
 test("motion is tokenised, cited and reduced-motion safe", () => {
   const css = fs.readFileSync(path.resolve("src/renderer/styles/app.css"), "utf8");
-  for (const cls of ["working-dot", "spring-in", "arrive", "tick"]) assert.ok(css.includes(`@keyframes ${cls}`), `${cls} is missing`);
-  // The dot grid pins its middle dot when motion is reduced, as its own stylesheet does.
-  assert.match(css, /\[data-dot="12"\] \{ opacity: 1; \}/);
+  for (const cls of ["spring-in", "arrive", "tick"]) assert.ok(css.includes(`@keyframes ${cls}`), `${cls} is missing`);
   assert.match(css, /\.springy, \.arrive, \.tick \{ animation: none;/);
   // The composer's caret is a block.
   assert.match(css, /textarea\[data-composer\] \{ caret-shape: block;/);

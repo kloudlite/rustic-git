@@ -4,8 +4,6 @@ import { pickRenderer, processes, capabilities } from "../../src/renderer/compon
 import { displayModel, modeLine, modeParts, modelOfThread, procsOf, sessionOf } from "../../src/renderer/rows.ts";
 import { AUTO_YES, MODES, onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
-import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
-import { elapsed, segments, timing, verb } from "../../src/renderer/components/results/group.ts";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "../../src/renderer/components/results/summary.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
@@ -106,44 +104,6 @@ test("grep rows split into path, line and match; terminal output loses its escap
   assert.deepEqual(plainBlock(coloured), { lines: [{ text: "ready in 300ms" }], footer: "exit 0" });
 });
 
-test("a tool call is one muted line: glyph, verb, argument, what came back", () => {
-  const line = (tool: string, args: Record<string, unknown>, out?: string, state?: { pending?: boolean; secs?: number }) => renderLine(toolLine(tool, args, out, state));
-  // The spec's own examples.
-  assert.equal(line("grep", { pattern: "homepage|home.*button" }, Array(18).fill("a.ts:1: x").join("\n")), '∗ Grep "homepage|home.*button" (18 matches)');
-  assert.equal(line("read", { path: "/home/kl/workspaces/api/path/to/file.tsx" }, "   1\tx"), "→ Read path/to/file.tsx (1 line)");
-  assert.equal(line("bash", { command: "npm test" }, "ok\n[exit 0]"), "$ npm test (exit 0)");
-  assert.equal(line("ask", { to: "svelte-frontend", task: "run the tests" }), "⇢ ask svelte-frontend: run the tests (queued)");
-  assert.equal(line("ask", { to: "agent", name: "audit" }, undefined, { pending: true, secs: 12 }), "◐ Audit Task (running 12s)");
-  assert.equal(line("ask", { to: "agent", name: "audit" }), "✓ Audit Task (started)");
-  // `{Agent} Task — {description}` is opencode's own subagent grammar (`index.tsx:2317`).
-  assert.equal(line("ask", { to: "agent", name: "audit", task: "check the routes" }), "✓ Audit Task — check the routes (started)");
-  // A failure keeps its exit code, and a running command says so rather than lying about one.
-  assert.equal(line("bash", { command: "npm test" }, "boom\n[exit 1]"), "$ npm test (exit 1)");
-  assert.equal(line("bash", { command: "npm run dev" }, undefined, { pending: true }), "$ npm run dev (running)");
-  // The always-on tools read as themselves; a platform tool falls back to its own name and subject.
-  assert.equal(line("plan", { set: [1, 2, 3] }), "▤ Plan 3 steps");
-  assert.equal(line("plan", { done: "clone the repo" }), "▤ Plan done: clone the repo");
-  assert.equal(line("kl_workspace_create", { name: "svelte-backend" }), "~ workspace create svelte-backend");
-  assert.equal(line("edit", { path: "src/a.ts", edits: [1, 2] }), "✎ Edit src/a.ts (2 edits)");
-});
-
-test("an agent's reply reads as status + one line, with the rest folded", () => {
-  const r = report("[from agent audit-1] DONE_WITH_CONCERNS — 3 routes have no auth check\nsrc/a.ts:12\nsrc/b.ts:40");
-  assert.deepEqual([r.status, r.head], ["DONE_WITH_CONCERNS", "3 routes have no auth check"]);
-  assert.equal(r.body, "src/a.ts:12\nsrc/b.ts:40");
-  // Every status is recognised, and the longest wins over its own prefix.
-  assert.equal(report("DONE: it is done").status, "DONE");
-  assert.equal(report("DONE_WITH_CONCERNS: hmm").status, "DONE_WITH_CONCERNS");
-  assert.equal(report("BLOCKED no ssh host").status, "BLOCKED");
-  assert.equal(report("NEEDS_CONTEXT which repo?").status, "NEEDS_CONTEXT");
-  // An agent that ignored the contract still reads: no status, all body.
-  assert.deepEqual(report("[from agent x] i had a look around\nand found nothing"), { status: undefined, head: "i had a look around", body: "and found nothing", left: undefined });
-  // What it left behind is what the person will go and take.
-  assert.equal(report("DONE — pushed branch fix-login").left, "fix-login");
-  assert.equal(report("DONE_WITH_CONCERNS — opened pull ada/api#12").left, "ada/api#12");
-  assert.equal(report("BLOCKED no ssh host").left, undefined);
-});
-
 test("a model reads as its name, and pi's status is never mistaken for one", () => {
   assert.equal(displayModel("deepseek/deepseek-v4-flash"), "DeepSeek V4 Flash");
   assert.equal(displayModel("anthropic/claude-opus-5"), "Claude Opus 5");
@@ -154,33 +114,6 @@ test("a model reads as its name, and pi's status is never mistaken for one", () 
   assert.equal(displayModel("not started"), "no model");
   assert.equal(displayModel(""), "no model");
   assert.equal(displayModel(undefined), "no model");
-});
-
-test("consecutive tool calls of one turn read as one group", () => {
-  const t = (tool: string, ts: number, ms?: number, pending?: true) => ({ role: "action" as const, kind: "run" as const, text: "", at: "", tool, ts, ms, pending });
-  const say = (text: string) => ({ role: "assistant" as const, text, at: "" });
-
-  // Six commands issued together are one decision, not six.
-  const six = Array.from({ length: 6 }, (_, i) => t("bash", 1000 + i));
-  const segs = segments([say("on it"), ...six, say("done")]);
-  assert.deepEqual(segs.map((s) => s.kind), ["one", "group", "one"]);
-  assert.equal((segs[1] as { rows: unknown[] }).rows.length, 6);
-  assert.equal(verb(six as never), "6 shell commands");
-
-  // One on its own stays as it was.
-  assert.deepEqual(segments([say("a"), t("bash", 1), say("b")]).map((s) => s.kind), ["one", "one", "one"]);
-  // A mixture is named for what it is, not for whichever came first.
-  assert.equal(verb([t("bash", 1), t("read", 2)] as never), "2 tool calls");
-  assert.equal(verb([t("read", 1), t("ls", 2)] as never), "2 reads");
-  assert.equal(verb([t("grep", 1), t("find", 2)] as never), "2 searches");
-
-  // The clock runs from the first start to the last end, and says so while anything is running.
-  // 1000→3000 and 1200→4200: first start to last end.
-  assert.deepEqual(timing([t("bash", 1000, 2000), t("bash", 1200, 3000)] as never, 9999), { running: false, ms: 3200 });
-  assert.deepEqual(timing([t("bash", 1000, undefined, true), t("bash", 1200, 500)] as never, 6000), { running: true, ms: 5000 });
-  assert.equal(elapsed(1400), "1.4s");
-  assert.equal(elapsed(12_000), "12s");
-  assert.equal(elapsed(310_000), "5m 10s");
 });
 
 test("the live summary says what is happening, then what happened", () => {

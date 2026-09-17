@@ -1,6 +1,3 @@
-// harness: proves the vendored opencode tree compiles, resolves and bundles. It goes away when the
-// centre pane mounts the real thing (spec §23, step 4).
-import "./opencode/smoke";
 import { Show, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import "./fonts.css";
