@@ -66,7 +66,11 @@ pub fn valid_pin(pin: &str) -> bool {
 /// fallback, not the value the cluster runs. Prepended, never written into `spec.packages`, so it
 /// stays the platform's to change and a person cannot remove it from one workspace.
 pub const DEFAULT_BASE_PACKAGES: &str =
-    "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils";
+    "bashInteractive zsh fish starship coreutils git openssh curl less which gnugrep gnused findutils ttyd bubblewrap";
+// `ttyd` is the SHELL SIDECAR's whole program — the shell image carries no terminal of its own and
+// waits for this profile to publish one — and `bubblewrap` is what wraps every tree exec. Both
+// arrived in one edit on purpose: each new base package is a profile rebuild on every workspace in
+// the fleet, and two rebuilds for two names a week apart is the avoidable half of that cost.
 
 pub fn base_packages(settings: &crate::controller::Settings) -> Vec<String> {
     settings.load().base_packages.split_whitespace().map(str::to_string).collect()

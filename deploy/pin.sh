@@ -45,7 +45,14 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-shell kloudlite-intercept-proxy kloudlite-slo; do
+  # The shell image is OPTIONAL while it is landing: a SHA built before `image.yml` grew its stage
+  # has no package, and a hard failure here would block every unrelated roll — the same reasoning
+  # the controller's manifest carries below. It becomes mandatory by simply existing.
+  if [ "$img" = kloudlite-shell ] && ! digest_of "$img" "$SHA" >/dev/null 2>&1; then
+    echo "note: no ghcr.io/kloudlite/kloudlite-shell:$SHA yet — leaving its pin alone" >&2
+    continue
+  fi
   # Only an image that is actually pinned is demanded. The controller's manifest
   # (k3s/controller.yaml) lands after its Dockerfile stage does, and a SHA built before that stage
   # existed has no controller package at all — a hard failure here would block every unrelated
@@ -94,6 +101,9 @@ pin 'kloudlite-intercept-proxy' "$SHA" "${DIGEST[kloudlite-intercept-proxy]}" k3
 # (KLOUDLITE_BENCH_IMAGE in the DaemonSet's env), never a workload of ours — the api does not read
 # it at all since a bench became a Workspace.
 pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" k3s/agent-daemonset.yaml
+# The shell sidecar, the same way: the agent puts it on every workspace and bench pod
+# (KLOUDLITE_SHELL_IMAGE), so it is the DaemonSet's env and never an `image:` line of ours.
+[ -z "${DIGEST[kloudlite-shell]:-}" ] || pin 'kloudlite-shell' "$SHA" "${DIGEST[kloudlite-shell]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 

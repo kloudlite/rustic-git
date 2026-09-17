@@ -274,3 +274,14 @@ jobs:
           tags: |
             ghcr.io/kloudlite/kloudlite-bench:latest
             ghcr.io/kloudlite/kloudlite-bench:${{ github.sha }}
+      # The shell sidecar every workspace and bench pod carries: `kl`, the rc files and ttyd from
+      # the workspace's own Nix profile. Same context again, for the same kl-musl artifact.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/shell-image/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/kloudlite/kloudlite-shell:latest
+            ghcr.io/kloudlite/kloudlite-shell:${{ github.sha }}
