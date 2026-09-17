@@ -29,7 +29,13 @@ deprived of exec tool too. it should use workspace ide tools directly".
    exchange (`dir: "out"`, state `queued`), sends the text as a prompt to that child (`followUp`
    when it is mid-turn), transitions the exchange to `running` on its `agent_start` and `done` /
    `failed` on `agent_end`, and delivers that turn's final assistant text back into the asking
-   session as a follow-up prompt prefixed `[from workspace <name>]`. The tool answers at once:
+   session as a follow-up prompt prefixed `[from workspace <name>]`. Asks are never refused for being busy (owner, 06:20 IST: "any message sent to workspace
+   session should be queued and workspace session will choose its own priorities and send back
+   message to the bench session that sent the message"): every ask is queued into the workspace
+   session as a message tagged `[ask <exchange> from <asking session name>]`, pi holds the queue,
+   the workspace session works through them in its own order, and each finished turn's answer
+   goes back to the session that sent the ask it answered (FIFO per workspace; an answer naming
+   `[reply <exchange>]` in its text is matched by that id instead). The tool answers at once:
    "queued in <name>'s session; its reply arrives here". The workspace session (its own pi, its
    own tools) is what does the work, visible in that workspace's tab.
 2a. **Its own workspace is the default target.** The bench IS a workspace (`KL_WORKSPACE_ID`).
