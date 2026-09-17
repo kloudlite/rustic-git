@@ -44,6 +44,21 @@ export class Procs {
     this.rows = [...this.rows.filter((r) => r.session !== session), ...rows.map((r) => ({ ...r, session }))];
     replaceJson(this.file, this.rows);
   }
+  /**
+   * A row the tool server still lists as running. The fleet had two live dev servers marked lost by
+   * the old rule (a pi exit used to mean a dead process), and nothing ever revived them: a sweep
+   * that only ends rows can never correct itself.
+   */
+  revive(session: string, id: string): ProcRow | undefined {
+    const r = this.rows.find((x) => x.session === session && x.id === id);
+    if (!r || (r.ended === undefined && !r.lost)) return undefined;
+    delete r.ended;
+    delete r.lost;
+    delete r.code;
+    replaceJson(this.file, this.rows);
+    return { ...r };
+  }
+
   /** One row ended, because the harness itself stopped it; unknown ids are nothing to record. */
   transitionEnded(session: string, id: string, code?: number | null, lost = false): ProcRow | undefined {
     const r = this.rows.find((x) => x.session === session && x.id === id && x.ended === undefined);

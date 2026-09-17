@@ -130,8 +130,9 @@ export class Bench {
     // A new process holds none of the old one's children.
     for (const row of this.write(() => this.tasks.markLost()) ?? []) this.emit({ type: "task", row });
     // A process runs on the WORKSPACE's tool server, not inside pi: a bench restart says nothing
-    // about it (the owner watched a live dev server marked "lost 13m"). The poll re-syncs instead.
-    this.pollProcs();
+    // about it (the owner watched a live dev server marked "lost 13m"). The poll re-syncs instead,
+    // in both directions — a row this ledger calls lost is revived if its tool server still has it.
+    if (this.procs.all().length) this.pollProcs();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
     for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
   }
@@ -395,7 +396,9 @@ export class Bench {
   }
 
   private async sweepProcs(): Promise<void> {
-    const sessions = [...new Set(this.procs.all().filter((p) => p.ended === undefined).map((p) => p.session))];
+    // Every session with a row, running or not: a row marked lost is exactly the one that needs
+    // asking about, and only its own tool server can say.
+    const sessions = [...new Set(this.procs.all().map((p) => p.session))];
     if (!sessions.length && !this.watching.size) {
       clearInterval(this.procPoll);
       this.procPoll = undefined;
@@ -418,6 +421,10 @@ export class Bench {
       }
       this.unreachable.delete(session);
       let moved = false;
+      // Alive after all: the tool server is running it, whatever this ledger said.
+      for (const p of this.procs.all().filter((x) => x.session === session && (x.ended !== undefined || x.lost))) {
+        if (live.some((l) => l.id === p.id && l.state !== "exited")) moved = !!this.write(() => this.procs.revive(session, p.id)) || moved;
+      }
       for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) {
         const now = live.find((x) => x.id === p.id);
         // Gone from the tool server's list, or exited in it: either way it is over.

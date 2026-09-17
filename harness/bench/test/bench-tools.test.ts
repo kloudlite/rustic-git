@@ -780,3 +780,42 @@ test("a background command that ends tells its session, and a watch sends the li
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a process the tool server still runs comes back, whatever the ledger said", async () => {
+  // The fleet's own state: two live dev servers marked lost by the old rule, and nothing that
+  // could ever correct it — a sweep that only ends rows cannot revive one.
+  const live = [{ id: "p1", cmd: "npm run dev", started_at: new Date().toISOString(), state: "running", exit_code: null }];
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.url === "/tools/process_list" ? { processes: live } : {}));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const at = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-revive-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE, resolveTools: async () => at });
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    // A ledger that already believes it is gone.
+    bench.procs.snapshot(ws.id, [{ id: "p1", name: "svelte dev server", command: "npm run dev", started: 1, ended: 2, lost: true }]);
+    assert.equal(bench.procs.all().find((p) => p.id === "p1")!.lost, true);
+
+    await (bench as any).sweepProcs();
+    const row = bench.procs.all().find((p) => p.id === "p1")!;
+    assert.equal(row.lost, undefined, "it is running; nothing about it is lost");
+    assert.equal(row.ended, undefined);
+
+    // And the other direction still holds: gone from the list, without an exit, is lost.
+    live.length = 0;
+    await (bench as any).sweepProcs();
+    assert.equal(bench.procs.all().find((p) => p.id === "p1")!.lost, true);
+  } finally {
+    await bench.stop();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
