@@ -21,5 +21,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # The buildx metadata file: created, not named and hoped for — see `Cmd::Build` in main.rs.
 tempfile = { workspace = true }
+# `kl container images` speaks the registry's own wire: Basic, exactly as the credential helper
+# hands it to docker.
+base64 = { workspace = true }
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 serde_json = { workspace = true }

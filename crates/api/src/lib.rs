@@ -303,6 +303,9 @@ pub async fn serve(
         .route("/v1/repos/{owner}/{name}/pulls/{number}/merge", axum::routing::post(merge_pull))
         // Deleting a branch. The refs listing the page reads comes through the browse proxy;
         // only the delete needs a gate of its own.
+        // The branch listing the refs page reads comes through the browse proxy; this is the one
+        // a CLI or a tool calls, shaped (name, head, default) rather than raw refs.
+        .route("/v1/repos/{owner}/{name}/branches", axum::routing::get(list_branches))
         .route(
             "/v1/repos/{owner}/{name}/branches/{branch}",
             axum::routing::delete(delete_branch),

@@ -12,6 +12,7 @@
 mod api;
 mod docker;
 mod env;
+mod images;
 mod pkg;
 mod refs;
 
@@ -76,6 +77,13 @@ enum ContainerCmd {
     Push {
         src: String,
         dst: Vec<String>,
+    },
+    /// What the registry already holds under you: every image and its tags
+    Images {
+        /// Another owner you push under (a team). The catalog is per CREDENTIAL, so this narrows
+        /// what this workspace's own credential can see.
+        #[arg(long)]
+        owner: Option<String>,
     },
 }
 
@@ -163,6 +171,12 @@ fn real_main() -> Result<(), String> {
 /// The two verbs that drive `docker buildx`: the credential helper and the builder are set up
 /// here and nowhere else, so `kl pkg`/`kl env` never wait on a builder that is starting.
 fn container(cmd: ContainerCmd) -> Result<(), String> {
+    // A listing is a registry read: no buildx, no credential helper, and no waiting on a builder
+    // that may be cold — the two verbs below are what need those.
+    if let ContainerCmd::Images { owner } = &cmd {
+        let host = env("KL_REGISTRY_HOST")?;
+        return images::list(&images::Registry::from_env()?, &host, owner.as_deref());
+    }
     // Refused before anything touches docker: the sentence is the whole point of the verb.
     if let ContainerCmd::Push { dst, .. } = &cmd {
         if dst.is_empty() {
@@ -204,6 +218,8 @@ fn container(cmd: ContainerCmd) -> Result<(), String> {
             }
             Ok(())
         }
+        // Answered above, before docker was touched.
+        ContainerCmd::Images { .. } => Ok(()),
         ContainerCmd::Push { src, dst } => {
             let src = refs::expand(&src, &host, &owner);
             for d in dst {
@@ -257,6 +273,14 @@ mod tests {
             assert!(help.contains(v), "{v} missing from:\n{help}");
         }
         assert!(!help.contains("ide"), "ide should be hidden:\n{help}");
+    }
+
+    #[test]
+    fn images_parses_with_and_without_an_owner() {
+        assert!(Cli::try_parse_from(["kl", "container", "images"]).is_ok());
+        assert!(Cli::try_parse_from(["kl", "container", "images", "--owner", "acme"]).is_ok());
+        // It takes no positional: a repository name would read as a filter this verb does not have.
+        assert!(Cli::try_parse_from(["kl", "container", "images", "web"]).is_err());
     }
 
     #[test]

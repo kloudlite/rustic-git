@@ -506,6 +506,62 @@ pub(crate) async fn set_protection(
 /// one string is not worth the edge it would add to the graph.
 const DEFAULT_BRANCH: &str = "main";
 
+/// `GET /v1/repos/{owner}/{name}/branches` — every branch, its head commit, and which one is the
+/// default.
+///
+/// The listing itself is the owning node's `/api/{o}/{n}/refs`, the same read the web's branch page
+/// makes, so visibility and authorization are that path's and this tier adds nothing of its own.
+/// What it shapes: tags dropped, `refs/heads/` stripped, and `default` stamped from
+/// `DEFAULT_BRANCH` — the one fact the refs answer does not carry, and the same constant
+/// `branch_delete` refuses on, so the flag and the refusal can never disagree.
+pub(crate) async fn list_branches(
+    State(api): State<Arc<Api>>,
+    axum::extract::Path((owner, name)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Err(r) = settings_caller(&api, &headers, &owner, &name).await {
+        return r;
+    }
+    branches_of(&api, &owner, &name).await
+}
+
+/// Everything after the gate, so it can be exercised against a canned node — the same split
+/// `branch_delete` is written in, and for the same reason.
+pub(crate) async fn branches_of(api: &Api, owner: &str, name: &str) -> Response {
+    let url = format!("{}/api/{}/{}/refs", api.upstream, encode(owner), encode(name));
+    let r = match to_owner(api, api.client.get(url), Some(owner)).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if !r.status().is_success() {
+        tracing::error!(reason = "refs", owner = %owner, name = %name, status = r.status().as_u16(), "upstream.request.failed");
+        return (StatusCode::BAD_GATEWAY, "could not read the branches").into_response();
+    }
+    let refs: Vec<serde_json::Value> = match serde_json::from_str(&text_bounded(r).await) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(reason = "refs", owner = %owner, name = %name, error = %e, "upstream.request.failed");
+            return (StatusCode::BAD_GATEWAY, "could not read the branches").into_response();
+        }
+    };
+    let out: Vec<serde_json::Value> = refs
+        .iter()
+        .filter(|r| r["kind"] == "branch")
+        .filter_map(|r| {
+            // `refs/heads/` is how the node spells them; a ref that is not under it is not a
+            // branch whatever its `kind` said, and is dropped rather than shown under a name that
+            // would not resolve.
+            let name = r["name"].as_str()?.strip_prefix("refs/heads/")?;
+            Some(serde_json::json!({
+                "name": name,
+                "oid": r["oid"].as_str().unwrap_or_default(),
+                "default": name == DEFAULT_BRANCH,
+            }))
+        })
+        .collect();
+    axum::Json(out).into_response()
+}
+
 /// `DELETE /v1/repos/{owner}/{name}/branches/{branch}?oid=<hex>`.
 ///
 /// Axum has already percent-decoded `{branch}`, so `feat%2Fx` arrives as `feat/x` and decoding it
@@ -828,6 +884,65 @@ mod tests {
 
     /// A well-formed object id, so every case below fails for the reason it is about.
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A node answering the refs listing, and whether the forward named the owner.
+    async fn refs_node(refs: serde_json::Value, status: u16) -> String {
+        use axum::routing::get;
+        let app = axum::Router::new().route(
+            "/api/{owner}/{name}/refs",
+            get(move |headers: axum::http::HeaderMap| async move {
+                // A private repo is opened by the node only as its owner; the real one 401s an
+                // anonymous read, so the fake does too.
+                if headers.get(kloudlite_core::peer::OWNER_HEADER).and_then(|v| v.to_str().ok()) != Some("alice") {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!([]))).into_response();
+                }
+                (StatusCode::from_u16(status).unwrap(), axum::Json(refs)).into_response()
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        url
+    }
+
+    async fn branches_against(refs: serde_json::Value, status: u16) -> (StatusCode, serde_json::Value) {
+        let mut api = test_api_with_secret("s").await;
+        api.upstream = refs_node(refs, status).await;
+        let r = branches_of(&api, "alice", "web").await;
+        let code = r.status();
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        (code, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// `GET /v1/repos/{o}/{n}/branches`: branches only, short names, and the default flagged from
+    /// the same constant the delete refuses on.
+    #[tokio::test]
+    async fn branches_are_shaped_from_the_nodes_refs() {
+        let refs = serde_json::json!([
+            {"kind": "branch", "name": "refs/heads/main", "oid": OID},
+            {"kind": "branch", "name": "refs/heads/feat/x", "oid": OID},
+            {"kind": "tag", "name": "refs/tags/v1", "oid": OID},
+            // Not under `refs/heads/` whatever it claims to be: it would not resolve as a branch.
+            {"kind": "branch", "name": "HEAD", "oid": OID},
+        ]);
+        let (status, body) = branches_against(refs, 200).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!([
+                {"name": "main", "oid": OID, "default": true},
+                {"name": "feat/x", "oid": OID, "default": false},
+            ])
+        );
+    }
+
+    /// A node that could not answer is a 502 with a sentence, never an empty listing — "this
+    /// repository has no branches" is a different fact and the caller must not be told it.
+    #[tokio::test]
+    async fn an_unreadable_refs_listing_is_not_an_empty_one() {
+        let (status, _) = branches_against(serde_json::json!([]), 500).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
 
     #[tokio::test]
     async fn a_branch_delete_is_forwarded_with_its_oid() {
