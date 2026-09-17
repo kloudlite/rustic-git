@@ -320,6 +320,10 @@
   /* VS Code's own stacks: the workbench is the system face at 13px, the
      editor is Menlo at 12px with the golden 1.5 line height on the Mac. The
      vendored faces stay behind them for a machine that has neither. */
+  /* One band for every transition in the app: long enough to read as movement,
+     short enough never to be waited on. Transform and opacity only — anything
+     that animates a size or a position property lays the page out per frame. */
+  --motion: 140ms;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", "IBM Plex Sans", sans-serif;
   --font-mono: Menlo, Monaco, "SF Mono", Consolas, "Droid Sans Mono", "Courier New", "Lilex", monospace;
   /* No 10px anywhere: VS Code's smallest UI text is 11px (badges, status bar). */
@@ -376,8 +380,16 @@
   ::-webkit-scrollbar-thumb:hover { background: rgb(121 121 121 / 70%); }
   ::-webkit-scrollbar-thumb:active { background: rgb(191 191 191 / 40%); }
 
+  /* Reduced motion: transitions collapse, and a LOOPING animation stops rather than
+     running a thousand times a second — `animation-duration: 1ms` on an infinite spinner
+     is not less motion, it is a strobe. Anything decorative is simply off. */
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+    *, *::before, *::after {
+      transition-duration: 1ms !important;
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+    }
+    .animate-spin, .animate-pulse { animation: none !important; opacity: 1 !important; }
   }
 }
 

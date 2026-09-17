@@ -21,7 +21,7 @@ export function Segmented<T extends string>(props: {
             aria-selected={props.value === s.value}
             onClick={() => props.onChange(s.value)}
             class="-mb-px flex h-8 items-center gap-1.5 border-b border-transparent px-2.5 text-sm text-muted
-                   transition-colors duration-100 ease-out-quick hover:text-fg
+                   transition-[color,background-color] duration-[var(--motion)] ease-out-quick hover:text-fg
                    aria-selected:border-accent aria-selected:text-fg"
           >
             {s.label}

@@ -270,8 +270,9 @@ function Row(props: { name: string; from?: string; detail?: string; mono?: boole
 
 function Switch(props: { on: boolean }) {
   return (
-    <button role="switch" aria-checked={props.on} class="relative h-3.5 w-6 shrink-0 rounded-full bg-active transition-colors aria-checked:bg-accent" title={props.on ? "Disable" : "Enable"}>
-      <span class="absolute top-0.5 left-0.5 size-2.5 rounded-full bg-fg transition-transform" classList={{ "translate-x-2.5": props.on }} />
+    <button role="switch" aria-checked={props.on} class="relative h-3.5 w-6 shrink-0 rounded-full bg-active transition-[background-color] duration-[var(--motion)] ease-out-quick aria-checked:bg-accent" title={props.on ? "Disable" : "Enable"}>
+      {/* Transform only: the knob moves without the track relaying out around it. */}
+      <span class="absolute top-0.5 left-0.5 size-2.5 rounded-full bg-fg transition-transform duration-[var(--motion)] ease-out-quick" classList={{ "translate-x-2.5": props.on }} />
     </button>
   );
 }

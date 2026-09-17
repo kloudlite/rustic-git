@@ -6,7 +6,7 @@ type Variant = "default" | "primary" | "ghost" | "danger" | "icon";
 
 const BASE =
   "inline-flex items-center justify-center gap-1.5 rounded-[2px] whitespace-nowrap " +
-  "transition-colors duration-100 ease-out-quick disabled:text-disabled";
+  "transition-[color,background-color,border-color] duration-[var(--motion)] ease-out-quick disabled:text-disabled";
 
 const VARIANT: Record<Variant, string> = {
   default: "border border-btn2-line bg-btn2 text-fg hover:bg-btn2-hover disabled:opacity-50",

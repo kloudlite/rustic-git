@@ -173,13 +173,16 @@ export function TerminalView(props: { tab: TermTab; visible: boolean; onExited?:
     });
   });
 
-  // A hidden terminal cannot measure itself, so refit and refocus on show.
+  // A hidden terminal cannot measure itself, so refit and refocus on show — on the next FRAME,
+  // not the next microtask: a microtask runs before the browser has laid the shown element out, so
+  // the fit measured the box it had while hidden and the first frame came back the wrong size.
   createEffect(() => {
     if (props.visible && term) {
-      queueMicrotask(() => {
+      const raf = requestAnimationFrame(() => {
         fit.fit();
         term.focus();
       });
+      onCleanup(() => cancelAnimationFrame(raf));
     }
   });
 

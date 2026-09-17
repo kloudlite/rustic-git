@@ -452,7 +452,7 @@ export function Chat(props: {
               <span class="text-subtle">(esc to interrupt · ^B to background a command)</span>
             </div>
           </Show>
-          <div class="flex flex-col rounded-[2px] border border-input-line bg-input transition-colors duration-100 focus-within:border-focus">
+          <div class="flex flex-col rounded-[2px] border border-input-line bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
             <div class="flex items-start px-3 pt-2 pb-1.5">
               <span class="w-5 shrink-0 leading-5 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
