@@ -153,6 +153,28 @@ test("the status line shows exactly one working indicator", () => {
  * are happening" when a highlight could be in either of two columns. Every row shares one gutter
  * and one name column, so nothing shifts between a header and a model.
  */
+/**
+ * The transcript carries the CONVERSATION and nothing else (owner: "check what all is getting into
+ * history. remove such unnecessary things"). A command echo, a plan repeat and a failed desktop
+ * call are not conversation; a state change worth reading back is a quiet divider.
+ */
+test("only the conversation reaches the transcript", () => {
+  const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
+  const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
+  // A local command runs without ever being pushed as a row.
+  assert.ok(!/live\.thread\(pi\)\.sent\(text\)/.test(app), "a local command is not something the person said");
+  // Stop and cancel go to the bench as HTTP: as prompts they landed in pi's context and session file.
+  assert.ok(!/\/proc-stop \$\{|\/cancel \$\{/.test(live), "no slash string is ever sent to pi from the renderer");
+  assert.match(live, /bench\("POST", `\/procs\/\$\{p\.id\}\/stop`/);
+  assert.match(live, /bench\("POST", `\/tasks\/\$\{t\.id\}\/cancel`/);
+  // The plan panel is the surface for the plan; it is not repeated into the transcript.
+  assert.ok(!/Todo: \$\{/.test(live), "the PLAN panel is the surface");
+  // A change worth reading back is a divider, derived from the bench's rows — never a message.
+  assert.match(live, /divider\(`Model changed to \$\{name\}`\)/);
+  assert.match(live, /divider\(`Thinking \$\{t\.thinking\}`\)/);
+  assert.match(live, /divider\(`Effort \$\{t\.effort\}`\)/);
+});
+
 test("the model dialog is one grouped list on a shared gutter", () => {
   const dlg = fs.readFileSync(path.resolve("src/renderer/components/ModelDialog.tsx"), "utf8");
   // The cursor row is a full-width bar at NORMAL weight — never a bar AND bold.

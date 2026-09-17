@@ -147,8 +147,26 @@ export async function models(): Promise<ProviderRow[]> {
  * A turn stamps these onto the message it produced, so the footer of an OLD turn keeps saying what
  * actually answered it rather than following the live pick (owner, on the fleet).
  */
-const sessionTriples = new Map<string, { thinking?: string; effort?: string }>();
-export const noteSessionTriple = (id: string, t: { thinking?: string; effort?: string }) => void sessionTriples.set(id, t);
+const sessionTriples = new Map<string, { model?: string; thinking?: string; effort?: string }>();
+
+/**
+ * The bench's row for a session, as it arrives. A turn stamps this onto the message it produced,
+ * and a CHANGE draws one divider — the quiet line the transcript already uses for `Interrupted` and
+ * `Session compacted`. It is renderer state derived from a bench event: nothing here is written to
+ * pi's session file or shown to the model (owner: "don't spoil the session with this data").
+ * The first sighting of a session is not a change, so opening a window draws nothing.
+ *
+ * `name` is the model's readable name, passed IN: this module is loaded by node:test, where an
+ * extensionless `./rows` import does not resolve (Vite resolves it, Node does not).
+ */
+export function noteTriple(id: string, t: { model?: string; thinking?: string; effort?: string }, name = t.model): void {
+  const had = sessionTriples.get(id);
+  sessionTriples.set(id, t);
+  if (!had) return;
+  if (t.model && t.model !== had.model) thread(id).divider(`Model changed to ${name}`);
+  if (t.thinking && t.thinking !== had.thinking) thread(id).divider(`Thinking ${t.thinking}`);
+  if (t.effort && t.effort !== had.effort) thread(id).divider(`Effort ${t.effort}`);
+}
 
 /** Which dialog takes the composer's place, if any. One at a time, like the permission prompt. */
 const [dialog, setDialog] = createSignal<"model" | undefined>();
@@ -159,7 +177,7 @@ export { dialog, setDialog };
  * (spec §1.2) and re-applies the triple to the live child, so nothing here has to talk to pi.
  */
 export async function setModel(session: string, patch: { model?: string; thinking?: string; effort?: string }): Promise<void> {
-  await window.harness.bench("POST", `/sessions/${session}/model`, patch).catch((e: Error) => thread(session).note(e.message));
+  await window.harness.bench("POST", `/sessions/${session}/model`, patch).catch((e: Error) => setStatusNote(e.message));
 }
 
 const [sessionCount, setSessionCount] = createSignal(1);
@@ -178,6 +196,20 @@ export function discard(id: string) {
 const [benchModel, setBenchModel] = createSignal<string | undefined>();
 export { benchModel, setBenchModel };
 
+/**
+ * A transient failure, shown in the composer footer beside the retry status and gone on its own.
+ * These used to be `note()` rows in the transcript — a failed bench call is a fact about the
+ * DESKTOP, not part of the conversation, and it was being written into the session's history.
+ */
+const [statusNote, setStatusNote_] = createSignal<string | undefined>();
+export { statusNote };
+let statusTimer: ReturnType<typeof setTimeout> | undefined;
+export function setStatusNote(text: string | undefined, ms = 6000) {
+  clearTimeout(statusTimer);
+  setStatusNote_(text);
+  if (text) statusTimer = setTimeout(() => setStatusNote_(undefined), ms);
+}
+
 /** Whether /events is up; false until main says otherwise. Offline, every thread reads and nothing sends. */
 const [connected, setConnected] = createSignal(false);
 const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({ ok: true });
@@ -190,18 +222,33 @@ export { connected, setConnected, writable };
 export function answerProposal(session: string, id: string, answer: string) {
   thread(session).proposal({ id, tool: "", summary: "", answer });
   thread(session).sent(answer);
-  void window.harness.bench("POST", `/proposals/${id}`, { answer }).catch((e: Error) => thread(session).note(e.message));
+  void window.harness.bench("POST", `/proposals/${id}`, { answer }).catch((e: Error) => setStatusNote(e.message));
 }
 
+/**
+ * A person stopping a process. Plain HTTP to the bench: as a `/proc-stop` PROMPT it sat in pi's
+ * context and in its session file, so every reopen replayed it as something the person had said
+ * (owner: "don't spoil the session with this data").
+ */
 export function stopProc(p: Proc) {
-  if (p.session) void window.harness.pi({ type: "prompt", message: `/proc-stop ${p.id}` }, p.session).catch((e: Error) => thread(p.session!).note(e.message));
+  if (p.session) void window.harness.bench("POST", `/procs/${p.id}/stop`, { session: p.session }).catch((e: Error) => setStatusNote(e.message));
 }
 
+/** Likewise a person cancelling a task: recorded by the bench, never spoken to the model. */
 export function cancel(t: Task) {
   const i = taskIndex(t.id);
   if (i >= 0) setTasks(i, { state: "cancelled" });
-  void window.harness.pi({ type: "prompt", message: `/cancel ${t.n ? `#${t.n}` : t.id}` }, t.session).catch((e: Error) => thread(t.session).note(e.message));
+  void window.harness.bench("POST", `/tasks/${t.id}/cancel`, {}).catch((e: Error) => setStatusNote(e.message));
 }
+
+/**
+ * A slash line is a COMMAND, not something the person said. None of them is ever a transcript row —
+ * not the ones the renderer handles (`/model`, `/clear`, …) and not the ones the harness sends to
+ * pi on the person's behalf (`/proc-stop`, `/cancel`), which pi also writes into the session file,
+ * so the replay would render them again on every reopen (owner, on the fleet: `> /model 23:56`).
+ * Applied at every door a user row can come through: the local echo, pi's own report, and replay.
+ */
+export const isCommandLine = (text: string): boolean => /^\s*\//.test(text);
 
 const now = () => new Date().toTimeString().slice(0, 5);
 const argOf = (name: string, args: Record<string, unknown>) =>
@@ -270,7 +317,7 @@ function makeThread(id: string) {
       if (m.role === "user") {
         const c = m.content;
         const text = typeof c === "string" ? c : (c as { type: string; text?: string }[]).map((x) => x.text ?? "").join("");
-        if (text.trim()) out.push({ role: "user", text, at, ts });
+        if (text.trim() && !isCommandLine(text)) out.push({ role: "user", text, at, ts });
       } else if (m.role === "assistant") {
         for (const c of m.content as Record<string, unknown>[]) {
           if (c.type === "text" && (c.text as string).trim()) out.push({ role: "assistant", text: c.text as string, at, ts });
@@ -331,6 +378,7 @@ function makeThread(id: string) {
   function sent(text: string, images: number[] = []) {
     // The echo the person sees as they hit enter. pi reports taking it a moment later, and THAT
     // is the message with the real time; this row is stamped from it rather than duplicated.
+    if (isCommandLine(text)) return;
     push({ role: "user", text, at: now(), images, local: true });
   }
 
@@ -349,7 +397,7 @@ function makeThread(id: string) {
    */
   function userMessage(m: { content?: unknown; timestamp?: unknown } | undefined) {
     const text = textOf(m ?? {});
-    if (!text.trim()) return;
+    if (!text.trim() || isCommandLine(text)) return;
     const key = `${String(m?.timestamp ?? "")}\u0000${text}`;
     if (key === placedUser) return;
     placedUser = key;
@@ -608,10 +656,8 @@ export function onEvent(ev: Ev & { pi?: string }) {
       if (typeof ev.session !== "string") return;
       const before = plans[ev.session];
       setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
-      // The plan changing is worth a row: it is the model saying what it is going to do.
-      const now = plans[ev.session] ?? [];
-      const said = (rows: PlanRow[] | undefined) => (rows ?? []).map((x) => `${x.state}:${x.text}`).join("|");
-      if (said(before) !== said(now) && now.length) thread(ev.session).note(`Todo: ${now.map((x) => `${x.state === "done" ? "✓" : x.state === "doing" ? "▸" : x.state === "later" ? "↷" : "☐"} ${x.text.split("\u0000")[0]}`).join("  ")}`);
+      // The PLAN panel is the surface for this: a `Todo: …` row repeated the panel into the
+      // transcript on every plan change and pushed the conversation down.
       return;
     }
     case "exchange":
@@ -644,12 +690,12 @@ export const { messages, busy, status, ready, attachments, attach, detach, takeA
  */
 export function interrupt(session: string) {
   thread(session).divider("Interrupted");
-  void window.harness.pi({ type: "abort" }, session).catch((e: Error) => thread(session).note(e.message));
+  void window.harness.pi({ type: "abort" }, session).catch((e: Error) => setStatusNote(e.message));
 }
 
 /** A queued line, sent now rather than in its turn: pi's `steer` puts it into the running turn. */
 export function sendNow(session: string, text: string) {
-  void window.harness.pi({ type: "steer", message: text }, session).catch((e: Error) => thread(session).note(e.message));
+  void window.harness.pi({ type: "steer", message: text }, session).catch((e: Error) => setStatusNote(e.message));
 }
 
 /** `12.4K (38%) · $1.20` — what the turn has spent, the way opencode's footer says it (`:268`). */

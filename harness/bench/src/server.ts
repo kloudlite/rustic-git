@@ -221,6 +221,16 @@ export function serve(
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       // A process's log, followed from a byte offset: the desktop's detail view reads this while it runs.
       if (p[0] === "procs" && p.length === 3 && p[2] === "output" && m === "GET") return send(res, 200, await bench.procOutput(p[1], Number(u.searchParams.get("since")) || 0));
+      // A person stopping a process or cancelling a task, straight from the desktop. Both used to
+      // travel as `/proc-stop`/`/cancel` PROMPTS, which put them in pi's context and its session
+      // file; as ordinary HTTP the model never sees them at all.
+      if (p[0] === "procs" && p.length === 3 && p[2] === "stop" && m === "POST") {
+        const b = await body(req);
+        if (typeof b.session !== "string" || !bench.sessions.get(b.session)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.session ?? null)}` });
+        await bench.killProc(b.session, p[1]);
+        return send(res, 200, { stopped: p[1] });
+      }
+      if (p[0] === "tasks" && p.length === 3 && p[2] === "cancel" && m === "POST") return send(res, 200, bench.cancelTask(p[1]));
       // Tell this session about lines of a running process that match a pattern.
       if (p[0] === "procs" && p.length === 3 && p[2] === "watch" && m === "POST") {
         const b = await body(req);

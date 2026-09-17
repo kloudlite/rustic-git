@@ -77,3 +77,31 @@ test("an effort-only pick keeps the session's model", async () => {
   assert.equal(row.effort, "low");
   await b.down();
 });
+
+/**
+ * Owner: "don't spoil the session with this data". A person stopping a process or cancelling a task
+ * is an HTTP call to the bench; pi must never be sent a prompt/steer/follow_up for it, because such
+ * a message lands in its context AND its session file, and the reopen replays it forever.
+ */
+test("stopping and cancelling never speak to the model", async () => {
+  const b = await startBench();
+  try {
+    const a = (await post(b, "/sessions", {})) as { id: string };
+    const log = path.join(b.cmds, `commands-${a.id}.json`);
+    await until(() => fs.existsSync(log), 5_000, "the child to start");
+    const before = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
+    assert.equal(before.filter((c) => ["prompt", "steer", "follow_up"].includes(c.type)).length, 0);
+
+    const r = await fetch(`${b.base}/tasks/nope/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    assert.equal(r.status, 400, "an unknown task is an error, not a prompt");
+
+    const after = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
+    assert.deepEqual(
+      after.filter((c) => ["prompt", "steer", "follow_up"].includes(c.type)),
+      [],
+      "no command of these actions is ever spoken to the model",
+    );
+  } finally {
+    await b.down();
+  }
+});

@@ -19,7 +19,7 @@ import { Palette, type PaletteItem } from "./components/Palette";
 import { Confirm } from "./ui/Confirm";
 import { Icon } from "./ui/Icon";
 import * as live from "./live";
-import { benchSessions, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
+import { benchSessions, displayModel, inFlightItems, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
 
@@ -137,8 +137,14 @@ export function App() {
     return { thinking: r?.thinking, effort: r?.effort };
   };
   // A turn stamps the triple that was in force when it ENDED, so live.ts needs it by session id.
+  // The same pass draws a DIVIDER when a pick actually lands — derived from the bench's own rows,
+  // never a message: what changed is worth reading back, the keypress that changed it is not
+  // (owner: "if we need to show something show properly like model changed etc").
   createEffect(() => {
-    for (const r of sessions) live.noteSessionTriple(r.id, { thinking: (r as { thinking?: string }).thinking, effort: (r as { effort?: string }).effort });
+    for (const r of sessions) {
+      const row = r as { id: string; model?: string; thinking?: string; effort?: string };
+      live.noteTriple(row.id, { model: row.model, thinking: row.thinking, effort: row.effort }, row.model ? displayModel(row.model) : undefined);
+    }
   });
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
@@ -146,7 +152,7 @@ export function App() {
     // never saw pi's `started` event, and read its status ("not started") as the model's name.
     return x && { id, name: x.name, kind: "session", readonly: !live.connected(), messages: [], pi: id, model: (x as { model?: string }).model };
   };
-  const fail = (e: Error) => live.thread(cur()).note(e.message);
+  const fail = (e: Error) => live.setStatusNote(e.message);
   const loadThread = async (id: string) => live.thread(id).replay(await window.harness.benchMessages(id));
   // A workspace tab is its thread on the bench: open it there (idempotent),
   // then read its history. An ephemeral is watched, never driven: it only
@@ -161,9 +167,9 @@ export function App() {
     const skip = !route || refusal({ type: "new_session" }, { session: t.pi, connected: live.connected(), writable: live.writable() });
     void (async () => {
       const sid = skip ? t.pi! : (await bench<Session>("POST", route)).id;
-      if (sid !== t.pi) return L.note(`the bench opened ${sid}, not ${t.pi}`);
+      if (sid !== t.pi) return live.setStatusNote(`the bench opened ${sid}, not ${t.pi}`);
       await loadThread(sid);
-    })().catch((e: Error) => L.note(openNote(e.message)));
+    })().catch((e: Error) => live.setStatusNote(openNote(e.message)));
   };
   const newSession = () =>
     void bench<Session>("POST", "/sessions").then(async (s) => {
@@ -425,10 +431,10 @@ export function App() {
   /** Every pi call the harness makes goes through here: a refusal or a failure is a note, never silence. */
   const pi = (cmd: Record<string, unknown> & { type: string }, id = cur()) => {
     const why = refusal(cmd, { session: id, connected: live.connected(), writable: live.writable() });
-    if (why) return void live.thread(id).note(why);
+    if (why) return void live.setStatusNote(why);
     return window.harness.pi(cmd, id).then(
-      (r) => (r.success === false ? (live.thread(id).note(String(r.error)), undefined) : r),
-      (e: Error) => void live.thread(id).note(e.message),
+      (r) => (r.success === false ? (live.setStatusNote(String(r.error)), undefined) : r),
+      (e: Error) => void live.setStatusNote(e.message),
     );
   };
   const placeItems = createMemo<PaletteItem[]>(() => {
@@ -475,14 +481,14 @@ export function App() {
     { id: "abort", group: "Session", label: "Stop this session", run: () => void pi({ type: "abort" }) },
     { id: "newSession", group: "Session", label: "New session", run: newSession },
     { id: "benchImport", group: "Session", label: "Import this laptop's sessions into the bench", run: () => {
-      if (!live.connected() || !live.writable().ok) return void live.thread(cur()).note("not connected to the bench; nothing was sent");
+      if (!live.connected() || !live.writable().ok) return void live.setStatusNote("not connected to the bench; nothing was sent");
       const raw = localStorage.getItem("harness.sessions");
-      if (!raw) return void live.thread(cur()).note("nothing to import: this laptop has no local session list");
+      if (!raw) return void live.setStatusNote("nothing to import: this laptop has no local session list");
       void window.harness.benchImport(JSON.parse(raw) as { id: string; name: string; seq: number; lastActive?: number; archived?: boolean }[]).then((r) => {
         localStorage.setItem("harness.sessions.imported", String(Date.now()));
-        live.thread(cur()).note(r.added.length ? `imported ${r.added.length} sessions and ${r.files} files` : "already imported: the bench has every session");
+        live.setStatusNote(r.added.length ? `imported ${r.added.length} sessions and ${r.files} files` : "already imported: the bench has every session");
         return refreshSessions();
-      }, (e: Error) => live.thread(cur()).note(e.message));
+      }, (e: Error) => live.setStatusNote(e.message));
     } },
     { id: "deleteSession", label: "Delete this session", run: () => deleteSession(cur()) },
     { id: "archiveSession", label: "Archive this session", run: () => archiveSession(cur()) },
@@ -616,7 +622,7 @@ export function App() {
   });
   void window.harness.benchState().then(async (st) => {
     live.setConnected(st.connected);
-    if (!st.configured) return void live.thread("bench").note("not connected to your bench yet");
+    if (!st.configured) return void live.setStatusNote("not connected to your bench yet");
     // Cold and offline: the cached list and messages, read-only until connected.
     setSessions(reconcile(st.sessions as Session[]));
     // The asks already in flight: a window opened mid-conversation shows the queue, not a blank.
@@ -671,11 +677,11 @@ export function App() {
       void (L.busy() ? pi({ type: "abort" })?.catch(() => undefined) : Promise.resolve())
         ?.then(() => pi({ type: "new_session" }))
         ?.then((r) => {
-          if (r?.success === false) return L.note(`clear refused: ${String(r.error ?? "pi would not start a new session")}`);
+          if (r?.success === false) return live.setStatusNote(`clear refused: ${String(r.error ?? "pi would not start a new session")}`);
           L.replay([]);
-          L.note("new session");
+          live.setStatusNote("new session");
         })
-        ?.catch((e: Error) => L.note(e.message));
+        ?.catch((e: Error) => live.setStatusNote(e.message));
     } },
     "/new": { help: "open another session beside this one", run: newSession },
     "/compact": { help: "summarise the older part of this session", run: () => void pi({ type: "compact" }) },
@@ -685,8 +691,8 @@ export function App() {
     "/model": { help: "pick the model, thinking level and effort", local: true, run: (arg) => {
       const id = curThread()?.pi;
       if (!arg.trim()) return void live.setDialog("model");
-      if (!id) return void L().note("open a session first");
-      if (!/^[^/]+\/.+$/.test(arg.trim())) return void L().note("usage: /model, or /model provider/id");
+      if (!id) return void live.setStatusNote("open a session first");
+      if (!/^[^/]+\/.+$/.test(arg.trim())) return void live.setStatusNote("usage: /model, or /model provider/id");
       void live.setModel(id, { model: arg.trim() });
     } },
     "/settings": { help: "open settings", local: true, run: () => openSettings() },
@@ -694,9 +700,9 @@ export function App() {
       help: "ask one question of a read-only fork of this session: /btw <question>",
       run: (arg) => {
         const from = cur();
-        if (!arg.trim()) return L().note("usage: /btw <question> — one question, one answer, nothing changed");
+        if (!arg.trim()) return live.setStatusNote("usage: /btw <question> — one question, one answer, nothing changed");
         // The fork's read tools run on the bench pod: on a workspace thread they would read the wrong machine.
-        if (/^[we]-/.test(from ?? "")) return L().note("btw is only for bench sessions");
+        if (/^[we]-/.test(from ?? "")) return live.setStatusNote("btw is only for bench sessions");
         const id = `btw-${++sideSeq}`;
         setSides((ts) => [...ts, { id, name: `btw · ${arg.slice(0, 40)}`, kind: "btw", readonly: true, messages: [], pi: id, session: from }]);
         // Beside the session when there is room for a second pane, else a tab.
@@ -716,7 +722,7 @@ export function App() {
             side.replay(a.entries);
             side.setStatus("answered");
           },
-          (e: Error) => (side.note(e.message), side.setStatus("no answer")),
+          (e: Error) => (live.setStatusNote(e.message), side.setStatus("no answer")),
         );
       },
     },
@@ -760,14 +766,17 @@ export function App() {
     const entry = slash && SLASH[slash[1].toLowerCase()];
     // /btw posts through the bench REST and needs it up too, but writes nothing pi-side.
     const why = entry?.local ? undefined : refusal({ type: entry && slash![1].toLowerCase() === "/btw" ? "get_state" : "prompt" }, { session: pi, connected: live.connected(), writable: live.writable() });
-    if (why && c) return void live.thread(pi ?? "").note(why);
+    if (why && c) return void live.setStatusNote(why);
     // The harness's own commands act on the selected session; typed in a
     // read-only fork they go to that fork's pi like any other line.
     if (slash && SLASH[slash[1].toLowerCase()] && c && pi && !pi.startsWith("btw-")) {
       c.value = "";
       fit(c);
       c.dispatchEvent(new Event("input", { bubbles: true })); // the composer's own state (completion) follows the value
-      live.thread(pi).sent(text);
+      // A local command leaves NO transcript row: it is a thing the person did to the desktop, not
+      // something they said to the model, and `> /model 23:56` sat in the history as if it were
+      // (owner, on the fleet). Only a prompt becomes a row. A command that has something to show
+      // says it itself — `/help` notes, `/btw` writes into its own fork's thread.
       SLASH[slash[1].toLowerCase()].run(slash[2]);
       return;
     }
@@ -802,10 +811,10 @@ export function App() {
           L.queued(text, "queue");
           return void window.harness
             .pi({ ...cmd, streamingBehavior: "follow_up" }, pi)
-            .then((again) => void (again.success === false && L.note(String(again.error))), (e: Error) => L.note(e.message));
+            .then((again) => void (again.success === false && live.setStatusNote(String(again.error))), (e: Error) => live.setStatusNote(e.message));
         }
-        L.note(why);
-      }, (e: Error) => L.note(e.message));
+        live.setStatusNote(why);
+      }, (e: Error) => live.setStatusNote(e.message));
   };
 
   /** Dragging the drawer's top edge resizes it inside the pane it lives in. */

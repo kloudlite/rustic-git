@@ -764,6 +764,17 @@ export function Chat(props: {
               <span class="shrink-0 text-subtle">·</span>
               <span class="shrink-0 text-fg" title={L().status()}>{parts().model}</span>
               <Show when={parts().provider}>{(p) => <span class="shrink-0 text-subtle">{p()}</span>}</Show>
+              {/* A transient failure from the DESKTOP — a refused call, a bad usage — lives here
+                  and fades. These were `note()` rows written into the session's history, which is
+                  not where a fact about the desktop belongs. */}
+              <Show when={live.statusNote()}>
+                {(n) => (
+                  <>
+                    <span class="shrink-0 text-subtle">·</span>
+                    <span class="min-w-0 truncate text-warning" title={n()}>{n()}</span>
+                  </>
+                )}
+              </Show>
               {/* A segment that does not apply is absent, never a dash (spec §1.3). */}
               <For each={[parts().thinking, parts().effort].filter(Boolean)}>
                 {(seg) => (

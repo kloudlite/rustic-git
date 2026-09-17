@@ -289,7 +289,7 @@ ipcMain.handle("pi", async (_e, cmd: unknown, id: unknown) => {
 // reaches anything else through this.
 const SID = "(bench|btw-\\d+|[swe]-[a-z0-9]([a-z0-9-]*[a-z0-9])?)";
 export const BENCH_ROUTES = new RegExp(
-  `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw|model)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/(btw|tools)$|^GET /(tasks|procs|proposals|plans|healthz|models|defaults)$|^GET /bootstrap(\\?session=${SID}(&tail=\\d+)?)?$|^GET /procs/[\\w.-]+/output(\\?since=\\d+)?$|^POST /proposals/[\\w.-]+$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^GET /memory$|^DELETE /memory/[\\w.-]+$|^GET /memory/[\\w.-]+$|^GET /fs/[\\w.-]+(\\?[^\\s]*)?$|^POST /import$|^POST /workspaces/[a-z0-9-]+(/eph/[a-z0-9-]+)?/session$`,
+  `^(GET|POST) /sessions$|^POST /sessions/${SID}/(archive|restore|btw|model)$|^DELETE /sessions/${SID}$|^GET /sessions/${SID}/(btw|tools)$|^GET /(tasks|procs|proposals|plans|healthz|models|defaults)$|^GET /bootstrap(\\?session=${SID}(&tail=\\d+)?)?$|^GET /procs/[\\w.-]+/output(\\?since=\\d+)?$|^POST /proposals/[\\w.-]+$|^POST /procs/[\\w.-]+/stop$|^POST /tasks/[\\w.-]+/cancel$|^GET /exchanges\\?(session|workspace)=[\\w.-]+$|^GET /memory$|^DELETE /memory/[\\w.-]+$|^GET /memory/[\\w.-]+$|^GET /fs/[\\w.-]+(\\?[^\\s]*)?$|^POST /import$|^POST /workspaces/[a-z0-9-]+(/eph/[a-z0-9-]+)?/session$`,
 );
 ipcMain.handle("bench", async (_e, method: unknown, p: unknown, body: unknown) => {
   if (typeof method !== "string" || typeof p !== "string" || !BENCH_ROUTES.test(`${method} ${p}`)) throw new Error(`not a bench route: ${String(method)} ${String(p)}`);

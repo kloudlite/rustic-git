@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { isCommandLine } from "../../src/renderer/live.ts";
 import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, pickerRows, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
@@ -233,4 +234,14 @@ test("the cursor never lands on a header", () => {
   assert.ok(selectable.length > 0);
   for (const i of selectable) assert.equal(rows[i].kind, "model");
   assert.ok(!selectable.includes(0), "row 0 is the DeepSeek header");
+});
+
+/**
+ * A slash line is a COMMAND, never something the person said. `> /model 23:56` sat in the history
+ * as if it were (owner, on the fleet), and `/proc-stop` also reached pi's session file, so a
+ * reopen replayed it. The predicate guards the local echo, pi's own report, and the replay fold.
+ */
+test("no slash line is ever a transcript row", () => {
+  for (const t of ["/model", "/clear", "/compact", " /proc-stop p1", "/cancel #1", "/help"]) assert.equal(isCommandLine(t), true, t);
+  for (const t of ["fix the router", "what does / mean", "a/b", ""]) assert.equal(isCommandLine(t), false, JSON.stringify(t));
 });

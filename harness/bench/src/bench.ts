@@ -620,6 +620,23 @@ export class Bench {
   }
 
   /**
+   * A task cancelled by a PERSON, from the desktop. It is recorded here and never spoken to the
+   * model: a `/cancel #3` sent as a prompt landed in pi's context and in its session file, so every
+   * reopen replayed it as something the person had said (owner: "don't spoil the session with this
+   * data"). A task pi is running inside its own turn is still cancelled through the extension
+   * command in `remove()` — that one is pi's to act on.
+   */
+  cancelTask(id: string): { id: string; state: string } {
+    const t = this.tasks.all().find((x) => x.id === id);
+    if (!t) throw new Error(`no task ${id}`);
+    if (t.state === "running" || t.state === "background") {
+      const row = this.write(() => this.tasks.transition({ id, state: "cancelled", ended: Date.now() }));
+      if (row) this.emit({ type: "task", row });
+    }
+    return { id, state: "cancelled" };
+  }
+
+  /**
    * A turn ended with the plan out of date — an item still `doing`, or real work done with no plan
    * at all. The harness says so ONCE, as a follow-up the model answers with a `plan` call: the
    * model forgetting is the common case, and a panel that lies is worse than a line of nagging.
