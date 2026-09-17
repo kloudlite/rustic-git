@@ -359,3 +359,18 @@ owns its code and answers the bench like a teammate at standup, never with a cod
   fold) and strips fenced code blocks from what the bench session receives.
 - The workspace identity says so verbatim; the bench identity says: "You do not read code. Ask
   the workspace; its reply tells you what changed and where."
+
+## 19. Two kinds of message: work and information (owner, 2026-09-17 15:15 IST)
+
+`ask` gains `kind: "work" | "info"` (default `work`; the model must choose, the tool description
+says how: "info = a question about the workspace's code or state that changes nothing").
+- **work**: as today — queued into the workspace's own session, FIFO, fork-ordered, done there.
+- **info**: never touches the workspace session's queue or turn. The bench FORKS the workspace's
+  running session (`--fork` of its transcript, read-only tools only — read/grep/find/ls — plus
+  its context, KL_FORK identity) and asks the question there; the fork answers once, in the §18
+  short shape, and is discarded. Many info asks run in parallel; the workspace session is never
+  interrupted. If the workspace has no session yet, the fork is of an empty session in that
+  workspace (tools only, no history). The reply row says `[info from <name>]`. Plan: an info ask
+  is NOT a plan item.
+- Identity line (bench): "Ask a workspace for information with kind: info — it answers from a
+  read-only copy without stopping its work. Ask for work with kind: work."
