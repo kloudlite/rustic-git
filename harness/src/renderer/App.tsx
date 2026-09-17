@@ -240,6 +240,8 @@ export function App() {
   const closeThread = (id: string) => {
     const pi = paneOf(id);
     if (pi < 0) return;
+    // The tab goes and so does what it had open: the file was drawing over the next tab.
+    setFiles(id, undefined);
     const list = panes[pi].open;
     const i = list.indexOf(id);
     const rest = list.filter((x) => x !== id);
@@ -304,9 +306,17 @@ export function App() {
   // A file opens as a tab too: reading one is a subject of its own, not a
   // property of the workspace it came from.
   // A file is opened FROM somewhere: the scope says which workspace's tool server holds it.
-  const [file, setFile] = createSignal<{ path: string; status?: string; scope?: string } | undefined>(
-    hashView.endsWith("/diff") ? { path: "bins/agent/src/controller/run.rs", status: "M" } : undefined,
+  //
+  // It belongs to the TAB it was opened in, not to the window: as one global signal it outlived the
+  // tab that opened it and drew over the next one (owner: a Dockerfile still showing after its tab
+  // was closed). Keyed by thread id, so it also follows a tab moved between panes, comes back when
+  // the tab is selected again, and goes when the tab does.
+  type OpenFile = { path: string; status?: string; scope?: string };
+  const [files, setFiles] = createStore<Record<string, OpenFile | undefined>>(
+    hashView.endsWith("/diff") ? { [first]: { path: "bins/agent/src/controller/run.rs", status: "M" } } : {},
   );
+  const file = () => files[selected()];
+  const setFile = (f: OpenFile | undefined, id = selected()) => setFiles(id, f);
   // A task's log opens in place like a file does; a process is shown through
   // the same page, its ring of output as the "output" and its uptime as the clock.
   const asTask = (p?: live.Proc): live.Task | undefined =>
