@@ -5,8 +5,9 @@ import { Icon } from "../../ui/Icon";
 import { Empty } from "../../ui/parts";
 import { FileTree } from "./FileTree";
 import { FsTree } from "./FsTree";
-import { changeLetter } from "../../rows";
+import { changeLetter, committedPaths } from "../../rows";
 import { ChangeList } from "./ChangeList";
+import { CommitList } from "./CommitList";
 import { PackageList } from "./PackageList";
 import type { Package, Change, FileNode } from "../../model";
 
@@ -58,6 +59,15 @@ export function WorkView(props: {
    * live poll, on a tab switch — and a fold whose state lived in the fetched data snapped shut
    * every time (owner, 2026-09-18). A Set is enough; the rows are redrawn from it.
    */
+  /**
+   * What this branch has COMMITTED, under what is still uncommitted. A person who had just
+   * committed saw an empty CHANGES tab with no sign of where the work went (owner, 2026-09-18).
+   */
+  const [log] = createResource(
+    () => (tab() === "files" && props.scope ? { scope: props.scope, v: live.fsChanged() } : undefined),
+    (k) => live.fsLog(k.scope, 20),
+  );
+  const commits = () => log()?.commits ?? [];
   const [open, setOpen] = createSignal(new Set<string>());
   const toggle = (path: string) =>
     setOpen((was) => {
@@ -110,12 +120,28 @@ export function WorkView(props: {
             </Empty>
           </Show>
         </Fold>
+        {/* The second section: what is already in, newest first. Folded away by default — a person
+            reads what they have not committed first. */}
+        <Show when={commits().length}>
+          <Fold title="Committed this session" meta={<span class="text-subtle">{commits().length}</span>} closed>
+            <CommitList commits={commits()} onOpen={props.onOpenFile} />
+          </Fold>
+        </Show>
         <Fold title="Files" meta={<span class="text-subtle">{props.against}</span>}>
           <div class="py-0.5">
             {/* A workspace reads its own tree from its tool server; a view with none (the fixtures,
                 an ephemeral's source) keeps the static one. */}
             <Show when={props.scope} fallback={<Show when={props.files.length} fallback={<Empty>No files.</Empty>}><FileTree nodes={props.files} onOpen={props.onOpenFile} /></Show>}>
-              {(scope) => <FsTree scope={scope()} open={open()} changes={diff()?.changes} onToggle={toggle} onOpen={props.onOpenFile} />}
+              {(scope) => (
+                <FsTree
+                  scope={scope()}
+                  open={open()}
+                  changes={diff()?.changes}
+                  committed={committedPaths(commits())}
+                  onToggle={toggle}
+                  onOpen={props.onOpenFile}
+                />
+              )}
             </Show>
           </div>
         </Fold>
@@ -128,8 +154,8 @@ export function WorkView(props: {
 }
 
 /** A section of the explorer: a header that folds it, its meta on the right. */
-function Fold(props: { title: string; meta?: JSX.Element; actions?: JSX.Element; children: JSX.Element }) {
-  const [open, setOpen] = createSignal(true);
+function Fold(props: { title: string; meta?: JSX.Element; actions?: JSX.Element; closed?: boolean; children: JSX.Element }) {
+  const [open, setOpen] = createSignal(!props.closed);
   return (
     <section class="group/fold border-b border-line-subtle last:border-b-0">
       <div class="flex h-6 items-center gap-1 pr-2 pl-2">

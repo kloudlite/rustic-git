@@ -110,3 +110,35 @@ test("the other fs routes are passed through as the JSON they are", async () => 
     await tools.close();
   }
 });
+
+/**
+ * `/fs/log` is proxied like every other console read (`crates/ide/src/fs/mod.rs`, 8d0ed194): the
+ * CHANGES tab's second half draws from it, and a person who had just committed saw an empty panel
+ * before it existed (owner, 2026-09-18).
+ */
+test("the branch's commits come through with what each one touched", async () => {
+  const seen: string[] = [];
+  const tools = await toolServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json", etag: '"log-1"' });
+    res.end(
+      JSON.stringify({
+        repo: true,
+        commits: [
+          { hash: "a".repeat(40), short: "aaaaaaa", subject: "Add the service", author: "ada", at: "2026-09-18T04:00:00Z", files: [{ path: "src/main.go", status: "A" }] },
+          { hash: "b".repeat(40), short: "bbbbbbb", subject: "Rename it", author: "ada", at: "2026-09-18T03:00:00Z", files: [{ path: "go.mod", status: "R", from: "gomod" }] },
+        ],
+      }),
+    );
+  });
+  const b = await up(tools.address);
+  try {
+    const r = await (await fetch(`${b.base}/fs/log?scope=ws-0123456789abcdef&n=20`)).json() as { commits: { subject: string; files: { path: string; status: string; from?: string }[] }[] };
+    assert.equal(seen[0], "/fs/log?n=20", "the count travels; the scope is the bench's own business");
+    assert.deepEqual(r.commits.map((c) => c.subject), ["Add the service", "Rename it"]);
+    assert.deepEqual(r.commits[1].files[0], { path: "go.mod", status: "R", from: "gomod" }, "a rename keeps where it came from");
+  } finally {
+    await b.down();
+    await tools.close();
+  }
+});

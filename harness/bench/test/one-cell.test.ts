@@ -351,5 +351,21 @@ test("the files tree draws folders as folders, and keeps its open state outside 
   // And the panel owns the set, so a refetch cannot shut a fold.
   const view = fs.readFileSync(path.resolve("src/renderer/components/inspector/WorkView.tsx"), "utf8");
   assert.match(view, /const \[open, setOpen\] = createSignal\(new Set<string>\(\)\)/);
-  assert.match(view, /<FsTree scope=\{scope\(\)\} open=\{open\(\)\} changes=\{diff\(\)\?\.changes\} onToggle=\{toggle\}/);
+  assert.match(view, /<FsTree[\s\S]{0,240}open=\{open\(\)\}[\s\S]{0,240}changes=\{diff\(\)\?\.changes\}/);
+});
+
+/**
+ * The CHANGES tab's second half. A person who had just committed saw an empty panel and no sign of
+ * where the work went (owner, 2026-09-18): the commits are that sign, drawn from `/fs/log`.
+ */
+test("changes has a second section for what is already committed", () => {
+  const work = fs.readFileSync(path.resolve("src/renderer/components/inspector/WorkView.tsx"), "utf8");
+  assert.match(work, /live\.fsLog\(k\.scope, 20\)/, "the commits are read from the tool server, not invented");
+  assert.match(work, /title="Committed this session"/);
+  // Folded away by default: what is NOT committed is what a person reads first.
+  assert.match(work, /title="Committed this session"[\s\S]{0,200}closed/);
+  // And the tree tints what those commits touched, so the two halves agree.
+  assert.match(work, /committed=\{committedPaths\(commits\(\)\)\}/);
+  const list = fs.readFileSync(path.resolve("src/renderer/components/inspector/CommitList.tsx"), "utf8");
+  assert.match(list, /statusBadge\(f\.status\)/, "a commit's files carry the same letters as the uncommitted list");
 });

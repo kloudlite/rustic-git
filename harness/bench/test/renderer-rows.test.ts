@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isCardAnswer, isCommandLine } from "../../src/renderer/live.ts";
-import { argLine, benchSessions, changeLetter, cloneLabel, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
+import { COMMITTED_TONE, STATUS_TONE, argLine, benchSessions, changeLetter, cloneLabel, committedPaths, deletedIn, dimmed, displayModel, exchangeText, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, rowTone, statusBadge, turnMeta } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -347,4 +347,26 @@ test("deleted files are put back into the listing they belong to", () => {
   assert.deepEqual(deletedIn(changes, undefined).map((d) => d.name), ["README.md"], "the root's own");
   assert.deepEqual(deletedIn(changes, "src")[0].letter, "D");
   assert.deepEqual(deletedIn([], "src"), []);
+});
+
+/**
+ * The CHANGES tab has two halves: what is not committed, and what this session's commits took. A
+ * path that only appears in the second is tinted softer — it is history, not work in progress
+ * (owner, 2026-09-18).
+ */
+test("a committed path is tinted softer than an uncommitted one", () => {
+  const commits = [
+    { files: [{ path: "src/main.ts", status: "M" }, { path: "src/new.ts", status: "A" }] },
+    { files: [{ path: "README.md", status: "M" }] },
+  ];
+  const touched = committedPaths(commits);
+  assert.deepEqual([...touched].sort(), ["README.md", "src/main.ts", "src/new.ts"]);
+
+  // Uncommitted wins: a file changed again since the commit reads as changed.
+  assert.equal(rowTone("M", false, true), STATUS_TONE.M);
+  // Committed alone is the softer tone, and no tone at all without either.
+  assert.equal(rowTone(undefined, false, true), COMMITTED_TONE);
+  assert.equal(rowTone(undefined, false, false), "");
+  // Ignored is dim whatever else is true of it.
+  assert.equal(rowTone("M", true, true), "text-subtle");
 });

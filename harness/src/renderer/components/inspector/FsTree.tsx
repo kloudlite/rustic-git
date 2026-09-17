@@ -26,6 +26,8 @@ export function FsTree(props: {
   open: Set<string>;
   /** What differs from the branch, for the rows a tree cannot show. */
   changes?: readonly FsChange[];
+  /** Paths this session's commits touched: tinted softer, since they are history, not work. */
+  committed?: ReadonlySet<string>;
   onToggle: (path: string) => void;
   onOpen: (path: string, status?: string) => void;
   path?: string;
@@ -65,7 +67,7 @@ export function FsTree(props: {
             <Icon name={p.dir ? "folder" : "file"} size={16} class={p.ignored ? "text-subtle" : "text-muted"} />
           </Gutter>
           {/* Tinted by its git state, dimmed when ignored — the CHANGES list's own tokens. */}
-          <span class={`min-w-0 flex-1 truncate px-1 ${rowTone(p.letter, p.ignored)}`}>{p.name}</span>
+          <span class={`min-w-0 flex-1 truncate px-1 ${rowTone(p.letter, p.ignored, props.committed?.has(here()))}`}>{p.name}</span>
           <Show when={statusBadge(p.letter)}>
             {(b) => <span class={`shrink-0 pr-1 font-mono text-2xs ${rowTone(p.letter, p.ignored)}`}>{b()}</span>}
           </Show>
@@ -77,6 +79,7 @@ export function FsTree(props: {
             scope={props.scope}
             open={props.open}
             changes={props.changes}
+            committed={props.committed}
             onToggle={props.onToggle}
             onOpen={props.onOpen}
             path={here()}

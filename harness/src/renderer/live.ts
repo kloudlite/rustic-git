@@ -976,6 +976,15 @@ export async function fsFile(scope: string, path: string): Promise<FsFile | unde
   return got;
 }
 
+/**
+ * `/fs/log`, in the tool server's own words (`crates/ide/src/fs/git.rs:191`): the branch's last `n`
+ * commits, newest first, each with what it touched. `status` is `--name-status`'s letter and a
+ * rename carries where it came from.
+ */
+export type FsCommit = { hash: string; short: string; subject: string; author: string; at: string; files: { path: string; status: string; from?: string }[] };
+/** What this branch has COMMITTED, for the second half of the CHANGES tab. */
+export const fsLog = (scope: string, n = 20) => fsGet<{ repo: boolean; commits?: FsCommit[] }>(scope, "log", { n: String(n) });
+
 /** One file's diff against the branch, as the tool server writes it. */
 export const fsDiff = (scope: string, path: string) => fsGet<{ diff?: string; binary?: boolean }>(scope, "diff", { path });
 

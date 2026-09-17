@@ -382,11 +382,19 @@ export const STATUS_TONE: Record<string, string> = {
 };
 
 /** The tone for one row: ignored is dim whatever else it is, then the git letter's own. */
-export const rowTone = (letter: string | undefined, ignored?: boolean): string =>
-  ignored ? "text-subtle" : letter ? (STATUS_TONE[letter] ?? "") : "";
+export const rowTone = (letter: string | undefined, ignored?: boolean, committed?: boolean): string =>
+  ignored ? "text-subtle" : letter ? (STATUS_TONE[letter] ?? "") : committed ? COMMITTED_TONE : "";
 
 /** The badge a row shows at its end: `?` reads as `U` for untracked, as source control does. */
 export const statusBadge = (letter: string | undefined): string | undefined => (letter === "?" ? "U" : letter || undefined);
+
+/**
+ * A path that is not different from the branch but WAS changed by one of this session's commits.
+ * The tree tints it softer than an uncommitted change: it is history, not work in progress.
+ */
+export const COMMITTED_TONE = "text-modified/60";
+export const committedPaths = (commits: readonly { files: { path: string }[] }[]): Set<string> =>
+  new Set(commits.flatMap((c) => c.files.map((f) => f.path)));
 
 /**
  * Paths a listing must show that the tree cannot: a DELETED file is not on disk, so it is
