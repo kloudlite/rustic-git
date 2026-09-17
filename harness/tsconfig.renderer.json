@@ -9,6 +9,9 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
+    // `.ts` in a relative import: the node test runner resolves an extension, vite is happy either
+    // way, and without it a module the tests load cannot import a sibling at all.
+    "allowImportingTsExtensions": true,
     "types": ["vite/client"]
   },
   "include": ["src/renderer", "src/preload.ts"]

@@ -12,7 +12,8 @@ import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
 import { elapsed, segments, timing, verb } from "./results/group";
-import { notification, spinnerMeta, subjects, summary, turnFooter, verbAt } from "./results/summary";
+import { ContextGroup } from "./results/ContextGroup";
+import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
 import { modeLine } from "../rows";
 import { HINTS } from "../keys";
 import * as live from "../live";
@@ -25,28 +26,6 @@ const KIND_GLYPH = { spawn: "+", run: "$", fold: "⇡", note: "…" } as const;
 /** A workspace's answer to an ask comes back as a prompt tagged with its name; the tag is a label. */
 const FROM_WS = /^\[from workspace ([^\]]+)\] /;
 const fromWorkspace = (t: string) => FROM_WS.exec(t)?.[1];
-const FROM_AGENT = /^\[from agent ([^\]]+)\] /;
-const fromAgent = (t: string) => (FROM_AGENT.test(t) ? report(t) : undefined);
-
-/** Status and one line; the rest is a click away — a report is read, not scrolled past. */
-function AgentReport(props: { report: { status?: string; head: string; body: string; left?: string } }) {
-  const [open, setOpen] = createSignal(false);
-  const tone = () => (props.report.status === "DONE" ? "text-success" : props.report.status === "BLOCKED" ? "text-danger" : "text-warning");
-  return (
-    <span class="flex min-w-0 flex-col">
-      <span class="flex min-w-0 items-baseline gap-2">
-        <Show when={props.report.status}>{(s) => <span class={`shrink-0 font-bold ${tone()}`}>{s()}</span>}</Show>
-        <span class="min-w-0 flex-1">{props.report.head}</span>
-        {/* What it left behind, where a person will look for it. */}
-        <Show when={props.report.left}>{(l) => <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-muted">{l()}</span>}</Show>
-        <Show when={props.report.body}>
-          <button class="shrink-0 text-subtle hover:text-fg" onClick={() => setOpen((v) => !v)}>{open() ? "less" : "more"}</button>
-        </Show>
-      </span>
-      <Show when={open() && props.report.body}>{(t) => <span class="pt-1 whitespace-pre-wrap text-muted">{t()}</span>}</Show>
-    </span>
-  );
-}
 const said = (t: string) => t.replace(FROM_WS, "");
 
 /**
@@ -396,7 +375,11 @@ export function Chat(props: {
             </Show>
             <For each={segments(visible())}>
               {(seg) => (
-                <Show when={seg.kind === "one"} fallback={<ToolGroup rows={(seg as { rows: Action[] }).rows} />}>
+                <Show when={seg.kind === "one"} fallback={
+                  seg.kind === "context"
+                    ? <ContextGroup rows={(seg as { rows: Action[] }).rows} />
+                    : <ToolGroup rows={(seg as { rows: Action[] }).rows} />
+                }>
                 {(() => { const b = (seg as { row: Message }).row; return (
                 <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} onChat={(t) => {
                   const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
@@ -429,6 +412,8 @@ export function Chat(props: {
                               <div class="flex min-w-0 items-baseline gap-2">
                                 <span class="w-4 shrink-0 text-success">⏺</span>
                                 <span class="min-w-0 flex-1 truncate text-fg">{n.verb}</span>
+                                <Show when={report((b as { text: string }).text).status}>{(st) => <span class="shrink-0 text-muted">{st()}</span>}</Show>
+                                <Show when={report((b as { text: string }).text).left}>{(l) => <span class="shrink-0 rounded-[2px] bg-fg/10 px-1 text-muted">{l()}</span>}</Show>
                                 <Time at={(b as { at: string }).at} />
                               </div>
                               <Show when={n.detail}>
@@ -453,9 +438,7 @@ export function Chat(props: {
                           <Show when={fromWorkspace((b as { text: string }).text)}>
                             {(w) => <span class="mr-1.5 rounded-[2px] bg-fg/10 px-1 text-subtle">{w()}</span>}
                           </Show>
-                          <Show when={fromAgent((b as { text: string }).text)} fallback={said((b as { text: string }).text)}>
-                            {(r) => <AgentReport report={r()} />}
-                          </Show>
+                          {said((b as { text: string }).text)}
                         </span>
                         <Time at={(b as { at: string }).at} />
                       </div>
@@ -919,18 +902,6 @@ function ToolGroup(props: { rows: Action[] }) {
         </span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
-      {/* While it runs, the ⎿ sub-lines say what each call is on; the rows themselves come when
-          it is opened, which is also when it has something to show. */}
-      <Show when={state().running && !open()}>
-        <For each={subjects(props.rows)}>
-          {(t) => (
-            <div class="flex min-w-0 items-baseline gap-1 text-subtle">
-              <span class="shrink-0">⎿</span>
-              <span class="min-w-0 truncate">{t}</span>
-            </div>
-          )}
-        </For>
-      </Show>
       <Show when={open()}>
         <div class="flex flex-col pl-2">
           <For each={props.rows}>

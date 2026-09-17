@@ -474,3 +474,19 @@ main > *, main [role="tabpanel"], .transcript, .transcript > * { min-width: 0; }
    allowed to set a size of its own. A test greps the components for size classes; this is the
    other half of that rule, for anything the classes do not reach. */
 .pane, .pane * { font-size: var(--cell); line-height: var(--cell-lh); }
+
+/* opencode's TextShimmer (`ui/src/components/text-shimmer.css`), at its own constants: a title that
+   is still moving says "not finished" where a static one says nothing. Reduced motion takes the
+   colour and drops the movement. */
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.shimmer {
+  background: linear-gradient(90deg, var(--muted) 40%, var(--fg-strong) 50%, var(--muted) 60%);
+  background-size: 360% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1200ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer { animation: none; background: none; color: var(--fg); }
+}

@@ -1,3 +1,4 @@
+import { isContext } from "./opencode-map.ts";
 import type { Message } from "../../model";
 
 type Action = Extract<Message, { role: "action" }>;
@@ -10,7 +11,7 @@ type Action = Extract<Message, { role: "action" }>;
  *
  * Pure, so the grouping is a table test rather than a screenshot.
  */
-export type Segment = { kind: "one"; row: Message } | { kind: "group"; rows: Action[] };
+export type Segment = { kind: "one"; row: Message } | { kind: "group"; rows: Action[] } | { kind: "context"; rows: Action[] };
 
 const isTool = (m: Message): m is Action => m.role === "action" && !!(m as Action).tool;
 
@@ -19,7 +20,10 @@ export function segments(blocks: Message[]): Segment[] {
   const out: Segment[] = [];
   let run: Action[] = [];
   const flush = () => {
-    if (run.length > 1) out.push({ kind: "group", rows: run });
+    // Consecutive read/glob/grep/list are opencode's CONTEXT group, whatever else they are
+    // (`message-part.tsx:607`); anything else of two or more is our own parallel group.
+    if (run.length && run.every((r) => isContext(r.tool))) out.push({ kind: "context", rows: run });
+    else if (run.length > 1) out.push({ kind: "group", rows: run });
     else if (run.length === 1) out.push({ kind: "one", row: run[0] });
     run = [];
   };
