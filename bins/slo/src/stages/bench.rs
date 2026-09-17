@@ -73,7 +73,7 @@ pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// but they need the same bench, so they skip with the same reasons.
 const SESSION_IDS: [&str; 7] = [
     "bench.session.roundtrip",
-    "bench.tools.no_fs",
+    "bench.tools.own_hands",
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.shell.roundtrip",
@@ -395,8 +395,8 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.shell.roundtrip") {
         shell_roundtrip(c).await;
     }
-    if c.walks("bench.tools.no_fs") {
-        no_fs(c).await;
+    if c.walks("bench.tools.own_hands") {
+        own_hands(c).await;
     }
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
@@ -471,14 +471,20 @@ async fn sessions(c: &mut Ctx) {
     drop_sessions(c, sid.into_iter().chain(thread)).await;
 }
 
-/// `bench.tools.no_fs`: a bench session has no hands in the bench pod.
+/// `bench.tools.own_hands`: a bench session's hands are its OWN workspace's, and nobody else's.
+///
+/// Not "no hands at all" — that was one ruling earlier on 2026-09-17 and it was superseded: a bench
+/// session has read/write/edit/bash/grep/find/ls and `process`, all running on its own workspace
+/// container's tool server (`127.0.0.1:7788`), with pi's builtins off so nothing can run in the
+/// BENCH container. Another workspace is reached only by `kl_workspace_ask`, a queue.
 ///
 /// Its own session rather than the round trip's, because this needs no model: the tenant holding no
-/// provider key skips every prompted id, and "the model ran with a shell" is exactly the regression
-/// that must still be caught on that run. Read from the bench itself — pi's RPC has no tool listing,
-/// so `GET /sessions/{id}/tools` answers from the argv its child is spawned with.
-async fn no_fs(c: &mut Ctx) {
-    c.step("bench.tools.no_fs", Duration::from_secs(30), move |c| {
+/// provider key skips every prompted id, and "the model ran with a shell in the wrong place" is
+/// exactly the regression that must still be caught on that run. Read from the bench itself — pi's
+/// RPC has no tool listing, so `GET /sessions/{id}/tools` answers from the argv and env its child
+/// is spawned with.
+async fn own_hands(c: &mut Ctx) {
+    c.step("bench.tools.own_hands", Duration::from_secs(30), move |c| {
         async move {
             let (_child, port) = forward(c).await?;
             let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
@@ -498,21 +504,39 @@ async fn no_fs(c: &mut Ctx) {
     .await;
 }
 
-/// No hands in the pod, and the one tool that gets work done in a workspace.
+/// The eight tools that act on the bench's own machine, the one that reaches another workspace, and
+/// the two facts that say WHERE the eight run — which the names alone cannot show.
+const OWN_HANDS: [&str; 9] =
+    ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "kl_workspace_ask"];
+/// `k8s::BENCH_TOOLS` on the harness side: the workspace container's tool server, same pod.
+const OWN_TOOL_SERVER: &str = "127.0.0.1:7788";
+
 fn judge_tools(body: &str) -> Result<()> {
-    let tools: Vec<String> = serde_json::from_str::<Value>(body)?["tools"]
+    let doc: Value = serde_json::from_str(body)?;
+    let tools: Vec<String> = doc["tools"]
         .as_array()
         .context("no `tools` array")?
         .iter()
         .map(|t| t.as_str().unwrap_or_default().to_string())
         .collect();
-    for gone in ["bash", "read", "write"] {
-        if tools.iter().any(|t| t == gone) {
-            bail!("a bench session still has `{gone}`: {}", tools.join(", "));
+    for want in OWN_HANDS {
+        if !tools.iter().any(|t| t == want) {
+            bail!("a bench session has no `{want}`: {}", tools.join(", "));
         }
     }
-    if !tools.iter().any(|t| t == "kl_workspace_ask") {
-        bail!("a bench session has no `kl_workspace_ask`: {}", tools.join(", "));
+    // A direct tool onto ANOTHER workspace's tool server is the shape the owner ruled out: work
+    // there is queued into that workspace's own session, never driven from here.
+    if let Some(direct) = tools.iter().find(|t| t.starts_with("kl_ws_")) {
+        bail!("a bench session drives another workspace directly through `{direct}`");
+    }
+    // Without these two the names above are satisfied by a session running them in the BENCH
+    // container, which is nobody's machine — the very thing `--no-builtin-tools` exists to stop.
+    match doc["toolsAddress"].as_str() {
+        Some(OWN_TOOL_SERVER) => {}
+        other => bail!("a bench session's tools run on {other:?}, not its own workspace's {OWN_TOOL_SERVER}"),
+    }
+    if doc["builtinTools"] != Value::Bool(false) {
+        bail!("pi's builtins are on: they would run in the bench container");
     }
     Ok(())
 }
@@ -1369,6 +1393,38 @@ mod tests {
         assert!(!lists_session("bench unreachable", "probe-hourly-1"));
     }
 
+    /// The ruling this id exists for, both halves: the eight own-machine tools and `kl_workspace_ask`
+    /// must be there, and they must run on the bench's OWN workspace tool server with pi's builtins
+    /// off. A list that satisfies the names while running in the bench container is the regression.
+    #[test]
+    fn own_hands_wants_the_names_and_where_they_run() {
+        let ok = json!({
+            "tools": ["read", "write", "edit", "bash", "grep", "find", "ls", "process",
+                      "kl_workspace_ask", "kl_pkg_add"],
+            "toolsAddress": "127.0.0.1:7788",
+            "builtinTools": false,
+        });
+        assert!(judge_tools(&ok.to_string()).is_ok());
+        let without = |name: &str| {
+            let mut v = ok.clone();
+            v["tools"] = json!(ok["tools"].as_array().unwrap().iter().filter(|t| *t != name).collect::<Vec<_>>());
+            judge_tools(&v.to_string())
+        };
+        assert!(without("bash").is_err(), "a bench session with no hands passed");
+        assert!(without("process").is_err());
+        assert!(without("kl_workspace_ask").is_err());
+        let mut elsewhere = ok.clone();
+        elsewhere["toolsAddress"] = json!("10.0.0.7:7788");
+        assert!(judge_tools(&elsewhere.to_string()).is_err(), "another workspace's tool server passed");
+        let mut builtins = ok.clone();
+        builtins["builtinTools"] = json!(true);
+        assert!(judge_tools(&builtins.to_string()).is_err(), "hands in the bench container passed");
+        let mut driving = ok.clone();
+        driving["tools"] = json!(["read", "write", "edit", "bash", "grep", "find", "ls", "process",
+                                  "kl_workspace_ask", "kl_ws_exec"]);
+        assert!(judge_tools(&driving.to_string()).is_err(), "a direct tool onto another workspace passed");
+    }
+
     #[tokio::test]
     async fn a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped() {
         let mut c = crate::testkit::ctx().await;
@@ -1377,7 +1433,7 @@ mod tests {
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
         // Ten now: `ws.terminal.persists` files its own skip when there is no bench to read, and
-        // `bench.tools.no_fs` is one of `SESSION_IDS`.
+        // `bench.tools.own_hands` is one of `SESSION_IDS`.
         assert_eq!(c.steps.len(), 10);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);

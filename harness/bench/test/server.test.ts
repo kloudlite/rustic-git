@@ -192,7 +192,11 @@ test("GET /sessions/{id}/tools answers what that session can call, and 404s an i
     const created = await (await fetch(t.base + "/sessions", { method: "POST" })).json() as { id: string };
     const r = await fetch(`${t.base}/sessions/${created.id}/tools`);
     assert.equal(r.status, 200);
-    const { tools } = await r.json() as { tools: string[] };
+    const { tools, toolsAddress, builtinTools } = await r.json() as { tools: string[]; toolsAddress?: string; builtinTools: boolean };
+    // Where they RUN is the half the names cannot show: its own workspace container's tool server,
+    // on loopback, with pi's own builtins off.
+    assert.equal(toolsAddress, "127.0.0.1:7788");
+    assert.equal(builtinTools, false);
     // The seven are there, but they are the tool server's, run in the bench's OWN workspace — the
     // built-ins, which would have run in the bench container, are what `--no-builtin-tools` removed.
     for (const own of ["bash", "read", "write"]) assert.ok(tools.includes(own), `${own}: ${tools.join(",")}`);

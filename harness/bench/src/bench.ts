@@ -115,16 +115,16 @@ export class Bench {
   }
 
   /**
-   * The tool names a session can call. Answered from the spawn options whether or not its pi is up,
-   * because it is a property of the session, not of a process that happens to be running — and a
-   * bench session must be answerable while it is idle, which is most of the time.
+   * What a session can call and where those calls run. Answered from the spawn options whether or
+   * not its pi is up, because it is a property of the session, not of a process that happens to be
+   * running — and a bench session must be answerable while it is idle, which is most of the time.
    */
-  tools(id: string): string[] {
+  tools(id: string): ReturnType<RpcChild["hands"]> {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`no session ${id}`);
     const o = this.childOpts(s);
     if (!o) throw new Error(`no session ${id}`);
-    return new RpcChild(id, o, () => {}).tools();
+    return new RpcChild(id, o, () => {}).hands();
   }
 
   private open(s: SessionRow): RpcChild | undefined {

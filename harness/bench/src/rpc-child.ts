@@ -104,6 +104,24 @@ export class RpcChild {
     return [...(a.includes("--no-builtin-tools") ? [] : PI_BUILTINS), ...ide, ...ext];
   }
 
+  /**
+   * `tools()` plus the two facts that say WHERE they run: the tool-server address this session's
+   * child is handed, and whether pi's own builtins are on. A bench session's hands are its own
+   * workspace container's (`BENCH_TOOLS`) with the builtins off — the tool NAMES alone cannot tell
+   * that from a session running them in the bench container, which is what the fleet probe checks.
+   */
+  hands(): { tools: string[]; toolsAddress?: string; builtinTools: boolean } {
+    const o = this.opts;
+    const extDir = o.extDir ?? process.env.HARNESS_PI_EXT_DIR ?? path.join(HARNESS, "pi");
+    return {
+      tools: this.tools(extDir),
+      // The same condition the spawn env below is built from: a workspace session resolves its
+      // address from /v1 instead, and a fork has no tools at all.
+      toolsAddress: o.fork || o.tools ? undefined : BENCH_TOOLS,
+      builtinTools: !this.args(extDir).includes("--no-builtin-tools"),
+    };
+  }
+
   start(): void {
     if (this.child) return;
     const o = this.opts;

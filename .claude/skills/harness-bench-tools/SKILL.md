@@ -56,4 +56,4 @@ bench pod. Three kinds of session, three tool sets. The rulings below are the ow
 - The system prompt test still finds no "pi" and no "/opt/harness".
 - A new write on a workspace from the bench? Stop: it goes through `kl_workspace_ask`.
 - Gates: `cd harness && npm run typecheck && npm run bench:test && npm run build`.
-- Probes `bench.tools.no_fs` and `bench.shell.workspace` hold it on the fleet.
+- Probes `bench.tools.own_hands` and `bench.shell.workspace` hold it on the fleet.

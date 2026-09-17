@@ -78,9 +78,10 @@ export function serve(
         }
         if (p.length === 3 && m === "POST" && p[2] === "archive") return send(res, 200, await bench.archive(p[1]));
         if (p.length === 3 && m === "POST" && p[2] === "restore") return send(res, 200, await bench.restore(p[1]));
-        // What this session can call. Read by the fleet probe that holds a bench session to having
-        // no hands in the pod (`bench.tools.no_fs`); pi's own RPC has no tool listing.
-        if (p.length === 3 && m === "GET" && p[2] === "tools") return send(res, 200, { tools: bench.tools(p[1]) });
+        // What this session can call AND where those calls run. Read by the fleet probe that holds
+        // a bench session to its own workspace's hands (`bench.tools.own_hands`); pi's own RPC has
+        // no tool listing.
+        if (p.length === 3 && m === "GET" && p[2] === "tools") return send(res, 200, bench.tools(p[1]));
         if (p.length === 3 && m === "GET" && p[2] === "messages") return send(res, 200, await bench.messages(p[1], n("after"), n("limit")));
         if (p.length === 3 && m === "POST" && p[2] === "btw") return send(res, 200, await bench.btw(p[1], String((await body(req)).question ?? "")));
         if (p.length === 3 && m === "GET" && p[2] === "btw") return send(res, 200, bench.listBtw(p[1]));
