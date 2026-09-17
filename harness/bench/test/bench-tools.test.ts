@@ -1379,3 +1379,33 @@ test("progress asked by name reads the workspace's own thread", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * The tool declared `ports: [{from, to}]` while `/v1` takes `crd::PortMap` — `{service, workspace}`
+ * — so every remap was a 422 naming a field the model could not see, and it guessed three shapes in
+ * a row (transcripts, 2026-09-18). The schema is `/v1`'s, and the description says which is which.
+ */
+test("an intercept's port remap is named the way /v1 names it", async () => {
+  const api = fakeApi(() => ({ ok: true }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-ports-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const t = tools.find((x) => x.name === "kl_intercept")!;
+    const port = (t.parameters as any).properties.ports.items.properties;
+    assert.ok(port.service && port.workspace, JSON.stringify(Object.keys(port)));
+    assert.equal(port.from, undefined, "`from`/`to` is not what /v1 takes");
+    assert.match((t.parameters as any).properties.ports.description, /\{service, workspace\}/);
+    assert.match(TOOLS.find((x) => x.name === "kl_intercept")!.summary, /\{service, workspace\}/);
+    // And what goes on the wire is exactly what was given.
+    await (t as any).execute("c1", { id: "env-1", service: "api", workspace: "ws-1", ports: [{ service: 8080, workspace: 3000 }] }, undefined, undefined, undefined);
+    assert.deepEqual(api.seen.find((x) => x.m === "POST")!.body.ports, [{ service: 8080, workspace: 3000 }]);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

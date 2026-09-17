@@ -889,7 +889,10 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
       id: S("environment id"),
       service: S("service name in the environment"),
       workspace: O(S("workspace id to deliver to; absent = clear the intercept")),
-      ports: O(Type.Array(Type.Object({ from: Type.Number(), to: Type.Number() }), { description: "port remaps: service port → workspace port" })),
+      // `/v1`'s own shape (`crd::PortMap`): the service's port and the workspace's. The tool
+      // declared `{from, to}`, so every call was a 422 naming a field the model could not see, and
+      // it guessed three shapes in a row (transcripts, 2026-09-18).
+      ports: O(Type.Array(Type.Object({ service: Type.Number({ description: "the port callers already dial on the service" }), workspace: Type.Number({ description: "the port the workspace listens on" }) }), { description: "port remaps, as {service, workspace}; absent forwards every port 1:1" })),
     },
     (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
   );
