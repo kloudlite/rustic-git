@@ -878,8 +878,15 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
 
 /** Per-verb ceilings: long enough for a real create on a cold node, short enough to answer. */
 const CAP = { create: 180_000, start: 180_000, restore: 180_000, push: 120_000 };
-/** A workspace or environment that has stopped moving: running, stopped, or broken. */
-const RESTING = new Set(["running", "stopped", "error", "failed", "deleted"]);
+/**
+ * A workspace or environment that has stopped moving, in `/v1`'s OWN words (`crd::Phase::as_str`).
+ *
+ * `ready` is the one a create ends at — the pod is up and the person can work — and it was missing
+ * here, so `kl_workspace_create backend` sat polling for 129 s over a workspace `/v1` had called
+ * ready with a running pod at ~100 s, and only stopped when the phase happened to move or the cap
+ * ran out (owner, 2026-09-18). A state this app does not know is a state it waits out.
+ */
+const RESTING = new Set(["ready", "running", "stopped", "idle", "unavailable", "error", "failed", "deleted"]);
 
 export function tools(pi: ExtensionAPI) {
   const reg = makeReg(pi);

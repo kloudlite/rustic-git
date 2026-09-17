@@ -1086,3 +1086,38 @@ test("a tool found by tool_search survives the turn, and the restart", async () 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A create ANSWERS when the workspace is ready. `ready` is `/v1`'s own word for a workspace whose
+ * pod is up (`crd::Phase::as_str`), and it was not in the set of states this app treats as settled —
+ * so `kl_workspace_create backend` polled for 129 s over a workspace `/v1` had called ready with a
+ * running pod at about 100 s (owner, 2026-09-18). A state we do not know is a state we wait out.
+ */
+test("a create answers as soon as the workspace is ready, not once it happens to say running", async () => {
+  let reads = 0;
+  const api = fakeApi((m, url) => {
+    if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "r1" };
+    if (url === "/v1/workspaces" && m === "POST") return { id: "ws-632cf9f2", state: "creating" };
+    if (url === "/v1/workspaces/ws-632cf9f2") return { id: "ws-632cf9f2", state: ++reads === 1 ? "creating" : "ready", access: "ready" };
+    return {};
+  });
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-ready-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_OWNER: "ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const create = tools.find((t) => t.name === "kl_workspace_create")! as unknown as { execute: (...a: any[]) => Promise<any> };
+    const r = await create.execute("c1", { name: "backend", packages: ["go"] }, undefined, undefined, undefined);
+    assert.ok(!r.isError, JSON.stringify(r));
+    // The final document, not "still creating after 129s": the tool settled on `ready`.
+    assert.match(r.content[0].text, /ready/);
+    assert.doesNotMatch(r.content[0].text, /still /);
+    assert.equal(reads, 2, "it stopped asking the moment the workspace was ready");
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
