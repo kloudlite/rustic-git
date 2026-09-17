@@ -87,11 +87,17 @@ test("a conversation that fills its window is summarised, keeping the plan and w
     // Under the mark: nothing happens, because compaction is a cost and a risk.
     await (bench as any).compactIfFull(id, 100, 1000);
     assert.deepEqual(rows, []);
+    // No window reported: a fixed token count is the fallback, not a guess at how big it is.
+    await (bench as any).compactIfFull(id, 100_000, undefined);
+    assert.deepEqual(rows, [], "100k is under the fallback");
+    await (bench as any).compactIfFull(id, 170_000, undefined);
+    assert.equal(rows.length, 1, "past it, the same summary happens");
+    rows.length = 0;
 
     // Past it: pi is asked to summarise, and TOLD what must survive.
     await (bench as any).compactIfFull(id, 850, 1000);
     const said = ((await bench.rpc(id, { type: "get_state" })).data as { compacted: string[] }).compacted;
-    assert.equal(said.length, 1, JSON.stringify(said));
+    assert.equal(said.length, 2, "the fallback above and this one");
     assert.match(said[0], /the plan, with state: add the endpoint \(doing\)/);
     assert.ok(!said[0].includes("clone the repo"), "what is done is not what must survive");
     assert.match(said[0], /nothing is outstanding/);

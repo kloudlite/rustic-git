@@ -145,6 +145,8 @@ export function serve(
         // Its clone, if it had one, is scratch — the caller keeps whatever it wanted from it.
         if (p.length === 2 && m === "DELETE") {
           const clone = bench.cloneOf(p[1]);
+          // Let it stop its own turn first; then its session and its scratch go.
+          await bench.abortAgent(p[1]).catch(() => undefined);
           await bench.remove(`e-${p[1]}`, true).catch(() => undefined);
           bench.forgetClone(p[1]);
           return send(res, 200, { closed: p[1], clone });

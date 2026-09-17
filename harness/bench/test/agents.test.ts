@@ -162,3 +162,34 @@ test("an agent can be given its own model", async () => {
     await t.down();
   }
 });
+
+test("closing a working agent lets it stop its own turn first", async () => {
+  const t = await up("bench-abort-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    // "hang" never ends its turn: the agent is still working when the close arrives.
+    await post(t.base, "/agents", { task: "hang", workspace: "api", name: "slow-1", from: caller });
+    await until(() => t.bench.busy(), 5_000, "it is working");
+
+    const closed = await fetch(`${t.base}/agents/slow-1`, { method: "DELETE" });
+    assert.equal(closed.status, 200);
+    assert.equal(t.bench.sessions.get("e-slow-1"), undefined, "its session goes with it");
+    assert.equal(t.bench.busy(), false, "and nothing of it is left running");
+  } finally {
+    await t.down();
+  }
+});
+
+test("an agent that is not working is closed without waiting for anything", async () => {
+  const t = await up("bench-abort-idle-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    await post(t.base, "/agents", { task: "quick job", workspace: "api", name: "fast-1", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "its report");
+    const began = Date.now();
+    await fetch(`${t.base}/agents/fast-1`, { method: "DELETE" });
+    assert.ok(Date.now() - began < 2_000, "an idle agent is not waited on");
+  } finally {
+    await t.down();
+  }
+});

@@ -33,6 +33,14 @@ const TRIAGE_DEBOUNCE_MS = 3_000;
 const TRIAGE_TIMEOUT_MS = 60_000;
 /** How full the window may get before the conversation is summarised and carried on. */
 const COMPACT_AT = 0.8;
+/**
+ * The fallback when a provider reports no context window: compact at this many cumulative tokens.
+ * 160k is under the smallest window any model we run has, so it is early rather than late — a
+ * summary that was not needed costs one call; one that came too late costs the conversation.
+ */
+const COMPACT_TOKENS = 160_000;
+/** How long an agent gets to stop its own turn before its child is taken away. */
+const ABORT_WAIT_MS = 10_000;
 const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** At most this many matching lines per watch message: a watch is a signal, not a log pipe. */
@@ -208,7 +216,9 @@ export class Bench {
       // Between turns is the only safe moment to summarise: mid-turn would rewrite what the model
       // is holding while it is using it.
       const u = (ev.usage ?? (ev as { data?: { usage?: unknown } }).data?.usage) as { totalTokens?: number; contextWindow?: number } | undefined;
-      if (ev.willRetry !== true && u?.totalTokens && u.contextWindow) void this.compactIfFull(id, u.totalTokens, u.contextWindow);
+      // A provider that reports no window still reports tokens: the fallback is a count, not a guess
+      // at how big its window is.
+      if (ev.willRetry !== true && u?.totalTokens) void this.compactIfFull(id, u.totalTokens, u.contextWindow);
     }
     if (ev.type === "exit") {
       this.turning.delete(id);
@@ -500,8 +510,9 @@ export class Bench {
    * and the instruction says what must survive: the plan, what is still outstanding, and what the
    * person has told us — everything else is recoverable, those three are not.
    */
-  private async compactIfFull(id: string, used: number, window: number) {
-    if (!window || used / window < COMPACT_AT || this.compacting.has(id)) return;
+  private async compactIfFull(id: string, used: number, window?: number) {
+    const full = window ? used / window >= COMPACT_AT : used >= COMPACT_TOKENS;
+    if (!full || this.compacting.has(id)) return;
     this.compacting.add(id);
     const plan = this.plans.get(id).filter((x) => x.state !== "done");
     const open = (this.asked.get(id) ?? []).map((a) => a.workspace);
@@ -701,6 +712,27 @@ export class Bench {
       throw e;
     }
     return { session: s.id, exchange, name, clone };
+  }
+
+  /**
+   * Stop an agent that is still working, before its session goes. `remove()` cancels its tasks and
+   * kills the child, but a turn mid-flight would be killed rather than ended — an abort lets it
+   * stop its own tool calls first, and the wait is capped because a child that will not stop is
+   * being killed anyway (§17.9).
+   */
+  async abortAgent(name: string, capMs = ABORT_WAIT_MS): Promise<void> {
+    const id = `e-${name}`;
+    const c = this.children.get(id);
+    if (!c?.running() || !this.turning.has(id)) return;
+    const ended = new Promise<void>((resolve) => {
+      const off = this.onEvent((ev) => {
+        if (ev.pi === id && (ev.type === "agent_end" || ev.type === "exit")) (off(), clearTimeout(t), resolve());
+      });
+      const t = setTimeout(() => (off(), resolve()), capMs);
+      t.unref?.();
+    });
+    await c.send({ type: "abort" }).catch(() => undefined);
+    await ended;
   }
 
   /** Which agents are working in a clone, so closing one — or its caller — takes the clone with it. */
