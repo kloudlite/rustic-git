@@ -105,3 +105,23 @@ rendered view using structured outputs … use caveman skill to reduce the amoun
   strings exact, never drop negations, no invented abbreviations, no arrows, auto-clarity for
   warnings and irreversible actions. Applies to the model's chat text only — code, files, commit
   messages and anything written into a workspace stay normal prose.
+
+## 9. State changes are asked first (owner, 2026-09-17 13:30 IST: "when ever we are changing the
+state of the system … properly prompt the user about what's happening as question and answer")
+
+- Every `kl_*` tool with effect write or destroy — except `kl_workspace_ask` (a message) and the
+  own-machine `kl_pkg_*` — is a PROPOSAL, not a call. `makeReg`'s execute publishes
+  `harness:proposal` `{id, tool, args, summary}` (summary from a per-tool one-liner in the
+  catalogue: "Create workspace svelte-backend in centralindia-k3s with nodejs, go") and then
+  long-polls the bench (`GET /proposals/{id}/wait`, honouring the tool's AbortSignal, 10 min cap).
+  The desktop renders the proposal as a question card in the transcript — title, the summary, the
+  fields, Yes / No — and answers `POST /proposals/{id} {answer}`. Yes → the extension runs the
+  call and the result renders as its card; No → the tool answers "declined by the person" and the
+  model stops. The answer is recorded as a user row ("yes" / "no") so the transcript reads as a
+  conversation. Unanswered at the cap → declined.
+- The model's text around a proposal is one line saying why; it never re-lists the fields.
+- Prose is rendered as prose: the transcript's assistant text uses the UI face, not monospace;
+  inline code stays a chip; lists tight; no raw markdown symbols.
+- Motion: every transition is transform/opacity only, 120–160 ms, `prefers-reduced-motion`
+  honoured; streaming text must not reflow earlier rows (fixed row heights for action rows,
+  `content-visibility` where cheap); drawer and tab switches never drop frames from layout thrash.
