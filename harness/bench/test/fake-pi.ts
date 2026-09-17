@@ -21,6 +21,17 @@ if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({ type: "session
 // env var to a path; writing it here never touches the RPC stream, so it
 // cannot shift the event order a real client's test asserts on.
 if (process.env.FAKE_PI_ARGV_FILE) fs.writeFileSync(process.env.FAKE_PI_ARGV_FILE, JSON.stringify(argv));
+// Every command this child was sent, for a test that asserts what the bench applies on start.
+// Keyed by the session the bench spawned it for (KL_SESSION), never by pid: the file has to be
+// findable before the child is.
+// Opt-in like FAKE_PI_ARGV_FILE, and never under --session-dir: a file there would keep a thread's
+// directory from being removed when its last session goes.
+const cmdLog = process.env.FAKE_PI_CMD_DIR && process.env.KL_SESSION ? path.join(process.env.FAKE_PI_CMD_DIR, `commands-${process.env.KL_SESSION}.json`) : undefined;
+const seenCmds: unknown[] = [];
+const FAKE_MODELS = [
+  { id: "deepseek-chat", name: "DeepSeek Chat", provider: "deepseek", reasoning: false },
+  { id: "deepseek-reasoner", name: "DeepSeek Reasoner", provider: "deepseek", reasoning: true, thinkingLevelMap: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null } },
+];
 const messages: unknown[] = [];
 const queued: string[] = [];
 const steering: string[] = [];
@@ -34,10 +45,15 @@ process.stdin.on("data", (d) => {
   while ((at = buf.indexOf("\n")) >= 0) {
     const cmd = JSON.parse(buf.slice(0, at));
     buf = buf.slice(at + 1);
+    seenCmds.push(cmd);
+    if (cmdLog) fs.writeFileSync(cmdLog, JSON.stringify(seenCmds));
     const ok = (data?: unknown) => out({ type: "response", id: cmd.id, command: cmd.type, success: true, data });
     if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM, compacted });
     else if (cmd.type === "get_messages") ok({ messages });
     else if (cmd.type === "abort") ok();
+    else if (cmd.type === "get_available_models") ok({ models: FAKE_MODELS });
+    else if (cmd.type === "set_model") { const found = FAKE_MODELS.find((m) => m.provider === cmd.provider && m.id === cmd.modelId); if (found) ok(found); else out({ type: "response", id: cmd.id, command: cmd.type, success: false, error: `Model not found: ${cmd.provider}/${cmd.modelId}` }); }
+    else if (cmd.type === "set_thinking_level") ok();
     // A new session is a new FILE: the harness has to follow the child to it.
     else if (cmd.type === "new_session") { file = path.join(dir, `fake-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jsonl`); fs.writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: path.basename(file, ".jsonl"), timestamp: new Date().toISOString(), cwd: process.cwd() }) + "\n"); messages.length = 0; ok({ cancelled: false }); }
     else if (cmd.type === "compact") { compacted.push(String(cmd.customInstructions ?? "")); ok({ summary: "…", tokensBefore: 100, estimatedTokensAfter: 20 }); }

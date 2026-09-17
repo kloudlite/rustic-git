@@ -10,6 +10,8 @@ import { order, question as triageQuestion } from "./triage.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
+import { Defaults, type Triple } from "./defaults.ts";
+import { allProviders } from "./providers.ts";
 import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
@@ -85,6 +87,7 @@ export class Bench {
   readonly procs: Procs;
   readonly plans: Plans;
   readonly memories: Memories;
+  readonly defaults: Defaults;
   /** What runs where and what talks to what, for this space (§24). Shared by every session. */
   readonly architecture: Architecture;
   readonly writable: Writable;
@@ -124,6 +127,7 @@ export class Bench {
     this.procs = new Procs(opts.dir);
     this.plans = new Plans(opts.dir);
     this.memories = new Memories(opts.dir);
+    this.defaults = new Defaults(opts.dir);
     this.architecture = new Architecture(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
   }
@@ -192,7 +196,8 @@ export class Bench {
     // pi creates a thread's file at the path it is given, so a thread's file need not exist yet.
     const file = thread ? s.file : s.file && fs.existsSync(s.file) ? s.file : undefined;
     const dir = thread ? path.dirname(s.file!) : path.join(this.opts.dir, "sessions");
-    return { dir, file, tools: thread ? s.target : undefined, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir };
+    const t = this.rowTriple(s);
+    return { dir, file, tools: thread ? s.target : undefined, model: t.model ?? this.opts.model, thinking: t.thinking, effort: t.effort, bin: this.opts.bin, extDir: this.opts.extDir };
   }
 
   /**
@@ -208,6 +213,16 @@ export class Bench {
     return new RpcChild(id, o, () => {}).hands();
   }
 
+  /**
+   * What this session answers with: its own fields, with the general default filling whatever it
+   * does not name (spec §1.2, resolution order 1 then 2 — pi's own default is rung 3 and is what is
+   * left when neither names a model).
+   */
+  rowTriple(s: SessionRow): Triple {
+    const d = this.defaults.get();
+    return { model: s.model ?? d.model, thinking: s.thinking ?? d.thinking, effort: s.effort ?? d.effort };
+  }
+
   private open(s: SessionRow): RpcChild | undefined {
     let c = this.children.get(s.id);
     if (c?.running()) return c;
@@ -218,6 +233,9 @@ export class Bench {
     child.start();
     // The file name is pi's to choose; ask once so the list can reopen it.
     void child.send({ type: "get_state" }).catch(() => undefined);
+    // Every start re-applies the triple, so a restarted bench comes back on the same model without
+    // the person noticing (spec §1.2). Fire-and-forget: a child that dies on start has nothing to set.
+    void child.applyTriple(this.rowTriple(s)).catch(() => undefined);
     return child;
   }
 
@@ -886,12 +904,47 @@ export class Bench {
     if (write && !this.writable.ok()) throw new Error(`the bench folder is not writable: ${this.writable.reason()}; prompts are refused until it is`);
   }
 
-  async create(): Promise<SessionRow> {
+  /**
+   * A person's create with no triple of its own takes the general default; one that NAMES a model
+   * (a workspace session dispatching an agent) keeps the default where it is — `default: false`.
+   */
+  async create(body: Partial<Triple> & { default?: boolean } = {}): Promise<SessionRow> {
     this.refuse(true);
-    const s = this.writable.run(() => this.sessions.create({ model: this.opts.model }));
+    const pick: Triple = { model: body.model, thinking: body.thinking, effort: body.effort };
+    const named = pick.model !== undefined || pick.thinking !== undefined || pick.effort !== undefined;
+    if (named && body.default !== false) this.write(() => this.defaults.set(pick));
+    const t: Triple = { ...this.defaults.get(), ...Object.fromEntries(Object.entries(pick).filter(([, v]) => v !== undefined)) };
+    const s = this.writable.run(() => this.sessions.create({ model: t.model ?? this.opts.model, thinking: t.thinking, effort: t.effort }));
     this.open(s);
     this.emit({ type: "sessions" });
     return s;
+  }
+
+  /**
+   * A person's pick: the session's fields AND, unless the caller says otherwise, the general
+   * default. Applied to the live child at once so the next turn uses it; effort reaches pi only at
+   * the next start (the locked pi has no RPC for it — see `RpcChild.applyTriple`).
+   */
+  async setModel(id: string, body: Partial<Triple> & { default?: boolean }): Promise<SessionRow> {
+    this.refuse(true);
+    if (!this.sessions.get(id)) throw new Error(`no session ${id}`);
+    const pick: Triple = { model: body.model, thinking: body.thinking, effort: body.effort };
+    if (body.default !== false) this.write(() => this.defaults.set(pick));
+    const row = this.writable.run(() => this.sessions.update(id, pick));
+    await this.children.get(id)?.applyTriple(this.rowTriple(row));
+    this.emit({ type: "sessions" });
+    return row;
+  }
+
+  /**
+   * The picker's catalogue: every provider pi supports, with the models of the ones a live child
+   * can actually list. Answered from any running child — `get_available_models` is pi's own
+   * snapshot of what the configured credentials reach, not a property of one session.
+   */
+  async models(): Promise<{ providers: { id: string; label: string; wired: boolean; models: { id: string; name: string; thinking: boolean; effort: boolean }[] }[] }> {
+    const child = [...this.children.values()].find((c) => c.running());
+    const rows = child ? await child.models().catch(() => []) : [];
+    return { providers: allProviders().map((p) => ({ ...p, models: rows.filter((m) => m.provider === p.id).map(({ id, name, thinking, effort }) => ({ id, name, thinking, effort })) })) };
   }
 
   async rpc(id: string, cmd: Record<string, unknown>): Promise<PiEvent> {

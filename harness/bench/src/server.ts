@@ -66,7 +66,7 @@ export function serve(
       if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, model: bench.model, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
-        if (p.length === 1 && m === "POST") return send(res, 201, await bench.create());
+        if (p.length === 1 && m === "POST") return send(res, 201, await bench.create(await body(req).catch(() => ({}))));
         if (p.length === 2 && m === "DELETE") {
           const b = await body(req);
           try {
@@ -87,6 +87,9 @@ export function serve(
         if (p.length === 3 && m === "GET" && p[2] === "messages") return send(res, 200, await bench.messages(p[1], n("after"), n("limit"), n("tail")));
         if (p.length === 3 && m === "POST" && p[2] === "btw") return send(res, 200, await bench.btw(p[1], String((await body(req)).question ?? "")));
         if (p.length === 3 && m === "GET" && p[2] === "btw") return send(res, 200, bench.listBtw(p[1]));
+        // The person's pick for one session. `default: false` keeps the general default where it is
+        // — a dispatch naming a model is not a person changing their mind (spec §1.2).
+        if (p.length === 3 && m === "POST" && p[2] === "model") return send(res, 200, await bench.setModel(p[1], await body(req)));
       }
       if (m === "GET" && u.pathname === "/exchanges") {
         const s = u.searchParams.get("session"), w = u.searchParams.get("workspace");
@@ -202,6 +205,9 @@ export function serve(
           return send(res, 400, { error: "say `text`, or `section` and `text`" });
         }
       }
+      // The picker's catalogue, and the general default it opens on.
+      if (m === "GET" && u.pathname === "/models") return send(res, 200, await bench.models());
+      if (m === "GET" && u.pathname === "/defaults") return send(res, 200, bench.defaults.get());
       if (m === "GET" && u.pathname === "/plans") return send(res, 200, bench.plans.all());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());

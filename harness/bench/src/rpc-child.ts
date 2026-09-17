@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { childTraceEnv } from "./tracing.ts";
 import { TOOLS } from "../../pi/catalog.ts";
+import type { Triple } from "./defaults.ts";
 
 /**
  * One session's pi, in RPC mode: JSONL over stdio. Framing is strict LF; Node's
@@ -43,7 +44,10 @@ export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone", "kl_contai
 /** `tools`: the workspace whose tool server runs this session's tools. */
 /** `info`: a READ-ONLY fork that answers one question about a workspace, on that workspace's tool server. */
 export const INFO_TOOLS = "read,grep,find,ls";
-export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean; ownWorkspace?: boolean };
+/** One row of `get_available_models`, reduced to what the picker draws. */
+export type ModelInfo = { id: string; name: string; provider: string; thinking: boolean; effort: boolean };
+
+export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean; ownWorkspace?: boolean; thinking?: string; effort?: string };
 
 export class RpcChild {
   readonly id: string;
@@ -136,7 +140,7 @@ export class RpcChild {
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
     // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
-    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), // Which machine this session's hands are on, and whose packages `kl_pkg_*` act on.
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.effort ? { PI_EFFORT: o.effort } : {}), ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), // Which machine this session's hands are on, and whose packages `kl_pkg_*` act on.
       ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools, KL_WORKSPACE_ID: o.tools } : {}),
       ...(o.ownWorkspace ? { KL_TOOLS_ADDRESS: BENCH_TOOLS } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
@@ -166,6 +170,38 @@ export class RpcChild {
       const t = setTimeout(() => (c.kill("SIGKILL"), resolve()), timeoutMs).unref();
       c.once("exit", () => (clearTimeout(t), resolve()));
       c.kill();
+    });
+  }
+
+  /**
+   * The session's triple, sent to a live child. `set_model` takes `{provider, modelId}` and nothing
+   * else — the locked pi (0.85.1) has no effort option on it and no `capabilities.effort` on a
+   * model; effort is carried to the extension in the spawn env (`PI_EFFORT`) instead, so it is
+   * applied at the next start rather than mid-session. A model pi does not know is an error
+   * response, not a throw: the person picked from a list a restarted bench may no longer offer.
+   */
+  async applyTriple(t: Triple): Promise<void> {
+    if (!this.running()) return;
+    if (t.model) {
+      const at = t.model.indexOf("/");
+      if (at > 0) await this.send({ type: "set_model", provider: t.model.slice(0, at), modelId: t.model.slice(at + 1) }).catch(() => undefined);
+    }
+    if (t.thinking) await this.send({ type: "set_thinking_level", level: t.thinking }).catch(() => undefined);
+  }
+
+  /**
+   * What this child's pi can be set to. `thinking` is pi's own `reasoning`; `effort` is a level of
+   * it this model actually maps (`thinkingLevelMap` marks an unsupported one null), which is what
+   * decides whether the picker shows an effort row at all (spec §1.1: never a knob the model
+   * cannot take).
+   */
+  async models(): Promise<ModelInfo[]> {
+    if (!this.running()) return [];
+    const ev = await this.send({ type: "get_available_models" }).catch(() => undefined);
+    const rows = (ev?.data as { models?: Record<string, unknown>[] } | undefined)?.models ?? [];
+    return rows.map((m) => {
+      const map = (m.thinkingLevelMap ?? {}) as Record<string, unknown>;
+      return { id: String(m.id), name: String(m.name ?? m.id), provider: String(m.provider ?? ""), thinking: m.reasoning === true, effort: m.reasoning === true && Object.values(map).some((v) => v !== null && v !== undefined) };
     });
   }
 

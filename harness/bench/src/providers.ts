@@ -13,10 +13,15 @@ import path from "node:path";
  * whole credential IS a key; the ones needing extra env (Bedrock, Azure,
  * Cloudflare, Vertex) and the OAuth-only ones are left to pi's own `/login`.
  */
-export const PROVIDERS: { id: string; label: string }[] = [
+/**
+ * `wired` is "a person can pick a model here TODAY". Only DeepSeek has credentials on the fleet
+ * (spec §1.1); the rest are listed so the picker shows the whole shape of what pi supports and
+ * dims what is not configured, rather than pretending the world is one provider.
+ */
+export const PROVIDERS: { id: string; label: string; wired?: boolean }[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
-  { id: "deepseek", label: "DeepSeek" },
+  { id: "deepseek", label: "DeepSeek", wired: true },
   { id: "google", label: "Google Gemini" },
   { id: "xai", label: "xAI" },
   { id: "openrouter", label: "OpenRouter" },
@@ -33,6 +38,24 @@ export const PROVIDERS: { id: string; label: string }[] = [
   { id: "minimax", label: "MiniMax" },
   { id: "opencode", label: "OpenCode Zen" },
 ];
+
+/**
+ * The rest of pi's providers: their whole credential is env values or an OAuth flow, not a key, so
+ * pi's own `/login` configures them and `setProvider` must never accept one — they are deliberately
+ * NOT in `PROVIDERS`, which is the key-writing trust boundary. The `/model` picker lists them so
+ * the person sees the whole shape of what pi supports, dimmed and unpickable.
+ */
+export const EXTERNAL_PROVIDERS: { id: string; label: string }[] = [
+  { id: "amazon-bedrock", label: "Amazon Bedrock" },
+  { id: "azure-openai-responses", label: "Azure OpenAI" },
+  { id: "google-vertex", label: "Google Vertex AI" },
+  { id: "anthropic-oauth", label: "Anthropic (Claude Pro/Max)" },
+  { id: "github-copilot", label: "GitHub Copilot" },
+  { id: "openai-codex", label: "OpenAI Codex" },
+];
+
+/** Every provider the picker lists, wired or not. Only DeepSeek is wired on the fleet (spec §1.1). */
+export const allProviders = (): { id: string; label: string; wired: boolean }[] => [...PROVIDERS, ...EXTERNAL_PROVIDERS].map((p) => ({ id: p.id, label: p.label, wired: ("wired" in p && p.wired) === true }));
 
 type Entry = { type?: string; key?: string } & Record<string, unknown>;
 
@@ -63,7 +86,7 @@ function save(file: string, data: Record<string, Entry>) {
 
 export function listProviders(file = authPath()) {
   const data = load(file);
-  return PROVIDERS.map((p) => ({ ...p, configured: data[p.id]?.type === "api_key" && typeof data[p.id]?.key === "string" && data[p.id].key !== "" }));
+  return PROVIDERS.map((p) => ({ ...p, wired: p.wired === true, configured: data[p.id]?.type === "api_key" && typeof data[p.id]?.key === "string" && data[p.id].key !== "" }));
 }
 
 export function setProvider(id: string, apiKey: unknown, file = authPath()) {
