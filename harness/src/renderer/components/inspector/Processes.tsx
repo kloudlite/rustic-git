@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
 import * as live from "../../live";
-import { procLabel, procsOf, procState } from "../../rows";
+import { procLabel, procName, procsOf, procState } from "../../rows";
 import { Icon } from "../../ui/Icon";
 import { Heading } from "../../ui/parts";
 
@@ -39,7 +39,7 @@ export function Processes(props: { onOpen: (id: string) => void; session: string
             </span>
             <div class="flex min-w-0 flex-1 flex-col">
               <span class="truncate font-mono text-sm leading-[18px]">
-                <span class="font-bold text-fg-strong">{p.name}</span> <span class="text-muted">{p.command}</span>
+                <span class="font-bold text-fg-strong">{procName(p)}</span> <span class="text-muted">{p.command}</span>
               </span>
               <span class="flex items-center gap-1.5 text-xs leading-4 text-subtle">
                 <span class="font-mono">{p.id}</span>

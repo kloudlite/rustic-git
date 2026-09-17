@@ -253,3 +253,22 @@ export function exchangeText(text: string): string {
   }
   return said.split("\n")[0].slice(0, 120);
 }
+
+/**
+ * A process row's title, derived where it is DRAWN. Rows written before the tool server learned to
+ * title them carry the raw command as their name (`cd /home/kl/workspaces/svelte-fro…`), and a
+ * ledger written yesterday cannot be fixed by a rule added today (owner, 2026-09-17).
+ *
+ * Same rule as the tool server's own `procTitle`: a `cd X && Y` reads as `X: Y`.
+ */
+export function procName(row: { name?: string; command?: string }): string {
+  const command = String(row.command ?? "").trim();
+  const name = String(row.name ?? "").trim();
+  // A name that is just the command again is not a title.
+  const titled = name && name !== command && !name.startsWith("cd ");
+  if (titled) return name.slice(0, 60);
+  const cd = /^cd\s+([^\s;&|]+)\s*(?:&&|;)\s*([\s\S]*)$/.exec(command || name);
+  const where = cd ? cd[1].replace(/\/+$/, "").split("/").filter(Boolean).pop() : "";
+  const what = (cd ? cd[2] : command || name).trim().split("\n")[0];
+  return (where ? `${where}: ${what}` : what).slice(0, 60);
+}

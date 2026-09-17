@@ -99,6 +99,7 @@ function WorkspaceView(props: { ws: Workspace; onOpenShell: (scope: string) => v
   const t = () => totals(props.ws.changes);
   return (
     <WorkView
+      scope={props.ws.id}
       files={props.ws.files}
       changes={props.ws.changes}
       packages={props.ws.packages}

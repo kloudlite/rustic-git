@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -127,4 +127,17 @@ test("an exchange row reads as who and what, never as a tool call's JSON", () =>
   assert.equal(exchangeText('kl_workspace_create {"name":"backend-rust","packages":["rust"]}'), "Workspace create");
   // Long tasks are one line.
   assert.equal(exchangeText("first line\nsecond line"), "first line");
+});
+
+test("a process row gets its title at render, whatever the ledger stored", () => {
+  // A row written before the tool server titled them: the command IS the name.
+  assert.equal(
+    procName({ name: "cd /home/kl/workspaces/svelte-frontend && npm run dev", command: "cd /home/kl/workspaces/svelte-frontend && npm run dev" }),
+    "svelte-frontend: npm run dev",
+  );
+  // A real title is kept.
+  assert.equal(procName({ name: "dev server", command: "npm run dev" }), "dev server");
+  // No title at all: the command, first line only.
+  assert.equal(procName({ command: "cargo watch -x test\n" }), "cargo watch -x test");
+  assert.equal(procName({ command: "" }), "");
 });

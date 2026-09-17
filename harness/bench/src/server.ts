@@ -230,6 +230,28 @@ export function serve(
           return send(res, r.code, r.body);
         }
       }
+      /**
+       * A workspace's own files, read-only, proxied from its tool server's `/fs/*`
+       * (`crates/ide/src/fs/`): the console renders a workspace from these, and nothing here
+       * interprets them. The desktop's Files tab showed nothing because nobody ever asked
+       * (owner, 2026-09-17).
+       */
+      if (p[0] === "fs" && m === "GET" && p.length >= 2) {
+        const scope = u.searchParams.get("scope") ?? "";
+        if (scope !== "bench" && !SCOPE_RE.test(scope)) return send(res, 400, { error: `bad scope ${JSON.stringify(scope)}` });
+        const addr = scope === "bench" ? LOCAL_TOOLS : await resolveTools(scope);
+        const rest = p.slice(1).join("/");
+        const q = new URLSearchParams([...u.searchParams].filter(([k]) => k !== "scope")).toString();
+        const r = await fetch(`http://${addr}/fs/${rest}${q ? `?${q}` : ""}`).catch((e: Error) => ({ ok: false, status: 502, text: async () => e.message }) as unknown as Response);
+        const text = await r.text();
+        let data: unknown = text;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          /* a tool server that answered text answers text */
+        }
+        return send(res, r.status || 502, data as never);
+      }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
       const msg = (e as Error).message;

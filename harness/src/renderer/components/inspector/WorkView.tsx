@@ -1,5 +1,6 @@
-import { Show, createSignal, type JSX } from "solid-js";
+import { Show, createResource, createSignal, type JSX } from "solid-js";
 import { Segmented } from "../../ui/Segmented";
+import * as live from "../../live";
 import { Icon } from "../../ui/Icon";
 import { Empty } from "../../ui/parts";
 import { FileTree } from "./FileTree";
@@ -20,6 +21,8 @@ export function totals(cs: Change[]) {
 export function WorkView(props: {
   files: FileNode[];
   changes: Change[];
+  /** The workspace whose tool server holds the files; absent for a view with none. */
+  scope?: string;
   packages?: Package[];
   inherited?: string;   // an ephemeral shows its source workspace's packages, read-only
   against: string;
@@ -28,7 +31,19 @@ export function WorkView(props: {
   onOpenFile: (path: string, status?: string) => void;
 }) {
   const [tab, setTab] = createSignal<View>(((location.hash.split("/")[1] === "changes" ? "files" : location.hash.split("/")[1]) as View) || "overview");
-  const sum = () => totals(props.changes);
+  /**
+   * The workspace's own files, read when the tab is opened. `files`/`changes` from the model are
+   * the fallback for a view that has no tool server (an ephemeral's source, the fixtures).
+   */
+  const [tree] = createResource(() => (tab() === "files" && props.scope ? props.scope : undefined), async (scope) => (await live.fsTree(scope))?.entries ?? []);
+  const [diff] = createResource(() => (tab() === "files" && props.scope ? props.scope : undefined), (scope) => live.fsChanges(scope));
+  const nodes = (): FileNode[] =>
+    tree()?.length ? tree()!.map((e) => ({ name: e.name, dir: e.dir, children: e.dir ? [] : undefined })) : props.files;
+  const changes = (): Change[] =>
+    diff()?.changes?.length
+      ? diff()!.changes.map((c) => ({ path: c.path, status: (c.status ?? "M") as Change["status"], add: c.add ?? 0, del: c.del ?? 0 }))
+      : props.changes;
+  const sum = () => totals(changes());
 
   return (
     <>
@@ -37,7 +52,7 @@ export function WorkView(props: {
         onChange={setTab}
         items={[
           { value: "overview", label: "Overview" },
-          { value: "files", label: "Files", count: props.changes.length || undefined },
+          { value: "files", label: "Files", count: changes().length || undefined },
           ...(props.packages ? [{ value: "packages" as const, label: "Packages", count: props.packages.length || undefined }] : []),
         ]}
       />
@@ -48,15 +63,21 @@ export function WorkView(props: {
       <Show when={tab() === "files"}>
         <Fold
           title="Changes"
-          meta={<Show when={props.changes.length}><span class="text-created">+{sum().add}</span> <span class="text-deleted">−{sum().del}</span></Show>}
-          actions={<Show when={props.changes.length}>{props.changeActions}</Show>}
+          meta={<Show when={changes().length}><span class="text-created">+{sum().add}</span> <span class="text-deleted">−{sum().del}</span></Show>}
+          actions={<Show when={changes().length}>{props.changeActions}</Show>}
         >
-          <Show when={props.changes.length === 0} fallback={<ChangeList changes={props.changes} onOpen={props.onOpenFile} />}>
-            <Empty>Nothing differs from {props.against}.</Empty>
+          <Show when={changes().length === 0} fallback={<ChangeList changes={changes()} onOpen={props.onOpenFile} />}>
+            {/* A workspace that is not a git repository has nothing to differ FROM: saying
+                "nothing differs from ." was the tool server's `repo: false` read as a branch. */}
+            <Empty>{diff() && diff()!.repo === false ? "Not a git repository." : `Nothing differs from ${props.against}.`}</Empty>
           </Show>
         </Fold>
         <Fold title="Files" meta={<span class="text-subtle">{props.against}</span>}>
-          <div class="py-0.5"><FileTree nodes={props.files} onOpen={props.onOpenFile} /></div>
+          <div class="py-0.5">
+            <Show when={nodes().length} fallback={<Empty>{tree.loading ? "reading…" : "No files."}</Empty>}>
+              <FileTree nodes={nodes()} onOpen={props.onOpenFile} />
+            </Show>
+          </div>
         </Fold>
       </Show>
       <Show when={tab() === "packages" && props.packages}>

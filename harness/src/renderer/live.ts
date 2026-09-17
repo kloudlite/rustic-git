@@ -599,3 +599,30 @@ export function usage(tokens: number, cost?: number, context?: number): string {
   const pct = context ? ` (${Math.min(100, Math.round((tokens / context) * 100))}%)` : "";
   return [`${n}${pct}`, cost ? money.format(cost) : ""].filter(Boolean).join(" · ");
 }
+
+/**
+ * A workspace's own files, read from its tool server through the bench (`/fs/tree`, `/fs/changes`).
+ * The desktop drew an empty FILES section and "Nothing differs from ." because nobody ever asked
+ * for them — `toWorkspace()` filled both with `[]` (owner, 2026-09-17).
+ *
+ * Cached per workspace and per directory, because a tree is asked for again every time a fold
+ * opens, and the answer carries an ETag the tool server would rather we reused.
+ */
+export type FsEntry = { name: string; dir?: boolean; path?: string };
+export type FsChanges = { changes: { path: string; status?: string; add?: number; del?: number }[]; repo: boolean };
+
+const fsCache = new Map<string, unknown>();
+async function fsGet<T>(scope: string, what: string, params: Record<string, string> = {}): Promise<T | undefined> {
+  const q = new URLSearchParams({ scope, ...params }).toString();
+  const key = `${what}?${q}`;
+  if (fsCache.has(key)) return fsCache.get(key) as T;
+  const r = (await window.harness.bench("GET", `/fs/${what}?${q}`).catch(() => undefined)) as T | undefined;
+  if (r !== undefined) fsCache.set(key, r);
+  return r;
+}
+/** One directory of a workspace's tree; no path means its root. */
+export const fsTree = (scope: string, path?: string) => fsGet<{ entries?: FsEntry[] }>(scope, "tree", path ? { path } : {});
+/** What differs from the branch — and whether it is a git repository at all. */
+export const fsChanges = (scope: string) => fsGet<FsChanges>(scope, "changes");
+/** Forget what was read: after a write, or when a workspace is reopened. */
+export const forgetFs = () => fsCache.clear();
