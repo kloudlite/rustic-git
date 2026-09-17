@@ -174,3 +174,31 @@ skills simple.")
   behind the tools; never an unasked write; no pre-checks; brevity + caveman. Everything
   operational (proposals, rendering, tags) is mechanism, not prompt text, except the one line
   about `[ask]` tags a workspace session needs.
+
+## 12. Agents, the way Claude Code does it (owner, 2026-09-17 15:20 IST: "the behaviour of the
+bench sessions should be exactly similar to that of claude code … creates agents, and branch out")
+
+Claude Code's shape, mapped onto the harness:
+- **Agent** (fresh context, one task, own tools, runs in the background, reports back once) =
+  `kl_agent {task, workspace?, name?}`. It opens an EPHEMERAL session (`openEphemeral`) in the named
+  workspace (default: the caller's own machine), seeds it with the identity plus ONLY the task text,
+  runs it to completion, and delivers its final answer back to the caller as `[from agent <name>]
+  …`. Several may run at once; the caller continues meanwhile. An agent cannot spawn agents. Its
+  transcript is an ephemeral tab in the desktop (exists today) and closes when the caller is done
+  with it (`kl_agent_close`). Answer to the caller at dispatch: "agent <name> started" — one line.
+- **Fork** (inherits context, read-only, one question) = the existing `btw`, surfaced to the model
+  as nothing: it is the person's verb, not the model's.
+- **Teammate** (persistent, its own memory) = `kl_workspace_ask` into a workspace's own session.
+- **Plan / todo** = `kl_plan {items}` and `kl_plan_done {item}` feeding the inspector's GOAL and
+  PLAN panels (MachineView/PlanTree already draw them); goal = the first message, as today.
+- **Prompt guidance** (three lines, in the identity): "Independent work that does not need your
+  context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run
+  agents in parallel when tasks are independent. Write the plan first when the work has more than
+  two steps, and tick items as they land."
+- **UI behaviour follows the same shape** (owner, 15:25 IST: "ui behaviour should also be
+  similar. it should show loading, queuing.. etc"): while a turn runs, one status line under the
+  transcript — a spinner glyph, a changing verb ("Thinking…", "Running bash…", "Waiting on agent
+  svelte…"), elapsed seconds and tokens so far; prompts typed meanwhile appear beneath it as
+  queued rows (›) in order and move into the transcript when taken; tool rows collapse to one line
+  with a chevron, expanded on click; an agent shows as a row with its name, state and elapsed,
+  its report folded under it; a question card blocks the status line until answered.
