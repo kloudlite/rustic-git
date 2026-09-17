@@ -390,3 +390,31 @@ test("a process row reads as a name, not an argv", () => {
   assert.equal(procTitle("  cargo watch -x test  "), "cargo watch -x test");
   assert.equal(procTitle("cd x && " + "a".repeat(200)).length, 60, "a row is a row, not a paragraph");
 });
+
+test("long output reminds the model that it is the only one reading it", async () => {
+  const many = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+  const srv = http.createServer((req, res) => {
+    let b = "";
+    req.on("data", (d) => (b += d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(req.url!.endsWith("/exec") ? { exit_code: 0, stdout: many, stderr: "" } : { content: "short\n" }));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
+  process.env.KL_TOOLS_ADDRESS = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  process.env.KL_TOOLS_WORKSPACE = "api";
+  const tools: Record<string, { execute: (...a: any[]) => Promise<any> }> = {};
+  try {
+    workspaceTools({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
+    const big = await tools.bash.execute("c1", { command: "cat log" }, undefined, undefined, undefined);
+    assert.equal(big.content.at(-1).text, "only you see this output; relay what the person needs");
+    // A short answer gets no lecture.
+    const small = await tools.read.execute("c2", { path: "a.ts" }, undefined, undefined, undefined);
+    assert.ok(!small.content.some((c: { text: string }) => c.text.includes("only you see this")), JSON.stringify(small));
+  } finally {
+    for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    srv.close();
+  }
+});

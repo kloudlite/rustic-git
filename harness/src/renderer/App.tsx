@@ -716,10 +716,12 @@ export function App() {
     c.dispatchEvent(new Event("input", { bubbles: true }));
     const cmd: Record<string, unknown> = { type: "prompt", message: text || "(see image)" };
     if (images.length) cmd.images = images;
-    // Sent while it runs: a follow-up waits for the turn to end; a steer is
-    // delivered before the next model call. The queue shows either until then.
+    // A PERSON's message mid-turn is a steer, and is announced as one: the model sees that they
+    // said something while it was working and answers it in the same turn, rather than finding it
+    // at the back of a queue behind three agent reports (§17.4). Asks and replies stay follow-ups.
     if (L.busy()) {
-      cmd.streamingBehavior = how === "steer" ? "steer" : "followUp";
+      cmd.streamingBehavior = "steer";
+      cmd.message = `The person sent a new message while you were working:\n${text || "(see image)"}`;
       L.queued(text, how);
     } else L.sent(text, atts.map((i) => i.n));
     void window.harness.pi(cmd, pi).then((r) => void (r.success === false && L.note(String(r.error))), (e: Error) => L.note(e.message));

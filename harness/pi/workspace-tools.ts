@@ -19,6 +19,8 @@ import { call, tellItWhereItStands } from "./kloudlite.ts";
  *    namespace), so the bench has hands on its own machine and no other.
  */
 const MAX_EXEC_MS = 600_000;
+/** Past this, the model is reminded that it is the only one reading. */
+const LONG_OUTPUT_LINES = 40;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const ADDR_RE = /^([A-Za-z0-9.-]+:\d{1,5}|\[[0-9a-fA-F:]+\]:\d{1,5})$/;
 function validAddress(addr: string, source: string): string {
@@ -379,7 +381,11 @@ export default function (pi: ExtensionAPI) {
           // call that could have changed it, because nothing else tells the bench a process exists.
           if (PROCESS_TOOLS.has(c.tool) || c.args.detach) await publishProcs(server, ctx, signal);
           const out = fromIde(name, r.status, r.body, p.limit);
-          return note ? { ...out, content: [...out.content, { type: "text" as const, text: note }] } : out;
+          // Only the model sees this. A person watching reads the ROW, not the 400 lines behind it,
+          // so an answer that says "as you can see above" is an answer to nobody (§17.5).
+          const long = out.content.map((c) => c.text).join("\n").split("\n").length > LONG_OUTPUT_LINES;
+          const trailers = [note, long ? "only you see this output; relay what the person needs" : undefined].filter(Boolean) as string[];
+          return trailers.length ? { ...out, content: [...out.content, ...trailers.map((t) => ({ type: "text" as const, text: t }))] } : out;
         } catch (e) {
           return text((e as Error).message, true);
         }
