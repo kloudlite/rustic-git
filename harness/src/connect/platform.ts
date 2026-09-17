@@ -26,6 +26,12 @@ export type ApiEnvironment = {
   serviceStatus: ApiServiceStatus[];
   intercepts: ApiIntercept[];
 };
+/**
+ * `GET /v1/repos` (`crates/api/src/repos.rs`, `RepoOut`). The listing comes from the object-store
+ * markers, so it carries what a marker knows and NOTHING more: there is no default branch and no
+ * last-updated here — reading a repo's HEAD would mean opening its database on its owning node.
+ */
+export type ApiRepo = { id: string; owner: string; name: string; public: boolean; description?: string; createdAt?: number };
 export type ApiSnapshot = { id: string; message?: string; createdAt?: string; phase: string; services?: number };
 
 type Obj = Record<string, unknown>;
@@ -119,6 +125,30 @@ function toSnapshot(o: Obj): ApiSnapshot {
     phase: str(o, "phase", w),
     services: isObj(st) && st.kind === "environment" && Array.isArray(st.services) ? st.services.length : undefined,
   };
+}
+
+const toRepo = (o: Obj): ApiRepo => {
+  const w = "repo";
+  const at = o.created_at;
+  return {
+    // `_id` is `{owner}/{name}`; the api renames it in serde, so it is read under that name.
+    id: typeof o._id === "string" && o._id ? o._id : `${str(o, "owner", w)}/${str(o, "name", w)}`,
+    owner: str(o, "owner", w),
+    name: str(o, "name", w),
+    public: o.public === true,
+    description: optStr(o, "description", w),
+    createdAt: typeof at === "number" ? at : undefined,
+  };
+};
+
+/**
+ * `GET /v1/repos?owner=` — the repos under one owner, a team slug or a person's handle. The api
+ * requires `owner` (400 without it) and answers 404 for an owner the caller may not act under.
+ */
+export async function listRepos(api: string, token: string, owner: string): Promise<ApiRepo[]> {
+  const v = await getJson(api, token, `/v1/repos?owner=${segment(owner)}`);
+  if (!Array.isArray(v)) throw bad("repo list");
+  return list(v, "repo", toRepo);
 }
 
 /** `GET /v1/workspaces?team=` — the caller's own workspaces in that team. */

@@ -1,5 +1,5 @@
-import type { ApiEnvironment, ApiSnapshot, ApiWorkspace } from "../connect/platform";
-import type { Environment, ServiceState, Snapshot, Workspace } from "./model";
+import type { ApiEnvironment, ApiRepo, ApiSnapshot, ApiWorkspace } from "../connect/platform";
+import type { Environment, Repo, ServiceState, Snapshot, Workspace } from "./model";
 
 /** The /v1 shapes main hands over, as the panels' own types. Nothing here invents a value: what
     the API has no field for (queue, agents, files, changes, a port's protocol) stays empty. */
@@ -24,6 +24,22 @@ export function toWorkspace(w: ApiWorkspace): Workspace {
     ephemerals: [],
     files: [],
     changes: [],
+  };
+}
+
+/**
+ * A listed repo. `name` is `{owner}/{name}` because that is what a workspace's `repo` field holds
+ * and what the panel counts copies by. No branch and no last-updated: the listing has neither, and
+ * the panel that invented them is what showed a fixture (owner, on the fleet).
+ */
+export function toRepo(r: ApiRepo, team: string): Repo {
+  return {
+    id: r.id,
+    teamId: team,
+    name: r.name.includes("/") ? r.name : `${r.owner}/${r.name}`,
+    ...(r.description ? { description: r.description } : {}),
+    ...(r.createdAt ? { created: r.createdAt } : {}),
+    ...(r.public ? {} : { private: true }),
   };
 }
 

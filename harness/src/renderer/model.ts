@@ -262,13 +262,20 @@ export type TodoState = "done" | "active" | "blocked" | "pending";
 export type Todo = { id: string; text: string; state?: TodoState; eph?: string; note?: string; children?: Todo[] };
 
 /** A repository the team has on the platform; a workspace is cut from one. */
-export type Repo = { id: string; teamId: string; name: string; branch: string; updated: string; private?: boolean };
+/**
+ * A repo as the platform lists it (`GET /v1/repos`, `RepoOut`). `branch` and `updated` are NOT
+ * here: the listing is built from object-store markers, which know nothing of a repo's HEAD, and
+ * inventing either is how the panel came to show a fixture (owner: repos listed as empty for a
+ * team that had them). `created` is what a marker does know.
+ */
+export type Repo = { id: string; teamId: string; name: string; description?: string; created?: number; private?: boolean };
+/** The offline demo's repos; the real panel lists what `GET /v1/repos` answers. */
 export const REPOS: Repo[] = [
-  { id: "r-rustic-git", teamId: "t-kloudlite", name: "kloudlite/rustic-git", branch: "master", updated: "1h ago", private: true },
-  { id: "r-harness", teamId: "t-kloudlite", name: "kloudlite/harness", branch: "main", updated: "3h ago", private: true },
-  { id: "r-infra", teamId: "t-kloudlite", name: "kloudlite/infra", branch: "main", updated: "2d ago", private: true },
-  { id: "r-docs", teamId: "t-kloudlite", name: "kloudlite/docs", branch: "main", updated: "1w ago" },
-  { id: "r-labs", teamId: "t-labs", name: "labs/playground", branch: "main", updated: "4d ago" },
+  { id: "kloudlite/rustic-git", teamId: "t-kloudlite", name: "kloudlite/rustic-git", private: true },
+  { id: "kloudlite/harness", teamId: "t-kloudlite", name: "kloudlite/harness", private: true },
+  { id: "kloudlite/infra", teamId: "t-kloudlite", name: "kloudlite/infra", private: true },
+  { id: "kloudlite/docs", teamId: "t-kloudlite", name: "kloudlite/docs" },
+  { id: "labs/playground", teamId: "t-labs", name: "labs/playground" },
 ];
 
 /** An image in the team's registry, with the tags it carries. */

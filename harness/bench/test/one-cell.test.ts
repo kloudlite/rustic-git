@@ -159,6 +159,25 @@ test("the status line shows exactly one working indicator", () => {
  * call are not conversation; a state change worth reading back is a quiet divider.
  */
 /** The whole session is visible: filled from the top when short, and read whole when it is small. */
+/**
+ * The panel lists what the platform answers. It said "No repositories in this team yet" for a team
+ * that had them, because `App.tsx` rendered the `REPOS` fixture and nothing fetched.
+ */
+test("repositories come from the platform, never the fixture", () => {
+  const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
+  assert.ok(!/\bREPOS\b/.test(app), "the demo fixture is not what the panel lists");
+  assert.match(app, /platform\.repos\(\)/, "the team's repos are fetched");
+  assert.match(app, /repos=\{repos\(\)\}/, "and rendered from that fetch");
+  // A failed read says so; it must never fall back to rows nobody has.
+  const fetchLine = /platform\.repos\(\)[^\n]*/.exec(app)?.[0] ?? "";
+  assert.match(fetchLine, /setStatusNote/, "an error shows in the footer");
+  assert.ok(!/REPOS/.test(fetchLine), "and adds no fixture rows");
+
+  const panel = fs.readFileSync(path.resolve("src/renderer/components/TeamPanel.tsx"), "utf8");
+  // The two fields the listing does not have, and which the old panel drew.
+  assert.ok(!/r\.branch|r\.updated/.test(panel), "a row says nothing rather than inventing a branch or a date");
+});
+
 test("a session is shown whole", () => {
   const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
   // A reversed column stacks from the bottom; without this a short thread sat pinned low with the

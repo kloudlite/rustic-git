@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AuthState } from "./auth/controller";
 import type { Team } from "./connect/bench";
-import type { ApiEnvironment, ApiSnapshot, ApiWorkspace } from "./connect/platform";
+import type { ApiEnvironment, ApiRepo, ApiSnapshot, ApiWorkspace } from "./connect/platform";
 
 /**
  * The only surface the renderer sees. Every call is a request to the main
@@ -60,6 +60,7 @@ const harness = {
   platform: {
     workspaces: (): Promise<ApiWorkspace[]> => ipcRenderer.invoke("platform:workspaces"),
     environments: (): Promise<ApiEnvironment[]> => ipcRenderer.invoke("platform:environments"),
+    repos: (): Promise<ApiRepo[]> => ipcRenderer.invoke("platform:repos"),
     environment: (id: string): Promise<ApiEnvironment> => ipcRenderer.invoke("platform:environment", id),
     snapshots: (volume: string): Promise<ApiSnapshot[]> => ipcRenderer.invoke("platform:snapshots", volume),
     /** The connected team's space: which environment its pods follow, chosen on the platform. */

@@ -4,7 +4,7 @@ import { Heading, Row, Gutter, Empty } from "../ui/parts";
 import type { Image, Repo, Workspace } from "../model";
 
 /** The team's repositories: what a workspace is cut from. */
-export function ReposPanel(props: { repos: Repo[]; workspaces: Workspace[] }) {
+export function ReposPanel(props: { repos: Repo[]; workspaces: Workspace[]; onOpen?: (r: Repo) => void }) {
   return (
     <nav class="flex min-h-0 flex-col border-r border-line bg-panel">
       <div class="flex-1 overflow-x-hidden overflow-y-auto pb-3">
@@ -15,13 +15,15 @@ export function ReposPanel(props: { repos: Repo[]; workspaces: Workspace[] }) {
             const copies = () => props.workspaces.filter((w) => w.repo === r.name).length;
             const [owner, name] = r.name.split("/");
             return (
-              <Row class="group h-9" title={`${r.name} · ${r.branch} · updated ${r.updated}`}>
+              <Row class="group h-9" title={[r.name, r.description].filter(Boolean).join(" · ")} onClick={() => props.onOpen?.(r)}>
                 <Gutter><Icon name="repo" size={14} class="text-muted" /></Gutter>
                 <div class="flex min-w-0 flex-1 flex-col px-1 leading-tight">
                   <span class="truncate text-fg"><span class="text-subtle">{owner}/</span>{name}</span>
+                  {/* The listing has no HEAD to read, so there is no branch and no last-updated
+                      here — only what a marker knows. A row says nothing rather than inventing it. */}
                   <span class="flex items-center gap-1.5 font-mono text-2xs text-subtle">
-                    <span>{r.branch}</span><span>·</span><span>{r.updated}</span>
-                    <Show when={copies()}><span>·</span><span>{copies()} {copies() === 1 ? "workspace" : "workspaces"}</span></Show>
+                    <Show when={r.description}>{(d) => <span class="truncate">{d()}</span>}</Show>
+                    <Show when={copies()}><Show when={r.description}><span>·</span></Show><span>{copies()} {copies() === 1 ? "workspace" : "workspaces"}</span></Show>
                   </span>
                 </div>
                 <Show when={r.private}><Icon name="lock" size={11} class="shrink-0 text-subtle" /></Show>

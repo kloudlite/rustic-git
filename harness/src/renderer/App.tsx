@@ -9,8 +9,8 @@ import { Inspector } from "./components/inspector/Inspector";
 import { StatusBar } from "./components/StatusBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { makeTab, nextIndex, scopeOfTab, type TermTab } from "./components/terminal/tabs";
-import { IMAGES, MACHINE, REPOS, threadOf, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
-import { LOADING, ipcError, toEnvironment, toSnapshot, toWorkspace } from "./platform";
+import { IMAGES, MACHINE, threadOf, type Repo, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
+import { LOADING, ipcError, toEnvironment, toRepo, toSnapshot, toWorkspace } from "./platform";
 import type { Team } from "../connect/bench";
 import { cycleMotion, motionChoice } from "./components/Motion";
 import { playDemo, wantsDemo } from "./demo";
@@ -34,6 +34,9 @@ export function App() {
   // The team's real workspaces and environments, read by main from /v1. What the API has no field
   // for — the bench's goal and plan — stays empty rather than faked.
   const [workspaces, setWorkspaces] = createSignal<Workspace[]>([]);
+  // The team's repos, from `GET /v1/repos`. Empty until the first read answers: an empty list is
+  // "this team has none", and a FAILED read says so in the footer rather than showing a fixture.
+  const [repos, setRepos] = createSignal<Repo[]>([]);
   const [environments, setEnvironments] = createSignal<Environment[]>([]);
   const [snapshots, setSnapshots] = createSignal<Snapshot[]>([]);
   const [wsNote, setWsNote] = createSignal<string | undefined>(LOADING);
@@ -68,6 +71,8 @@ export function App() {
       await Promise.all([
         platform.workspaces().then((r) => (setWorkspaces(r.map(toWorkspace)), setWsNote(undefined)), (e) => setWsNote(ipcError(e))),
         platform.environments().then((r) => (setEnvironments(r.map((x) => toEnvironment(x, teamId()))), setEnvNote(undefined)), (e) => setEnvNote(ipcError(e))),
+        // Same beat as the workspaces, and cleared on a team switch by the same refresh.
+        platform.repos().then((r) => setRepos(r.map((x) => toRepo(x, teamId()))), (e) => live.setStatusNote(`repositories: ${ipcError(e)}`)),
         // A read that fails leaves the last known choice rather than disconnecting the window.
         platform.myEnvironment().then((id) => setConnected(id ?? ""), () => undefined),
       ]);
@@ -887,7 +892,21 @@ export function App() {
       >
         <ActivityBar view={view()} panelOpen={leftOpen()} onView={pickView} onSettings={() => openSettings()} onProfile={() => openSettings("account")} owner={machine().owner} />
         <Show when={leftOpen() && view() === "repos"}>
-          <ReposPanel repos={REPOS.filter((r) => r.teamId === teamId())} workspaces={machine().workspaces} />
+          <ReposPanel
+            repos={repos()}
+            workspaces={machine().workspaces}
+            onOpen={(r) => {
+              // The clone URL, copied. The desktop is told the API origin and nothing else — it
+              // knows no web address for a repo — so a link would be a guessed hostname. The clone
+              // URL is what a person actually wants to paste, and it is derived, not invented.
+              void window.harness.auth.api().then((api) => {
+                const url = `${api.replace(/\/+$/, "")}/${r.name}.git`;
+                return navigator.clipboard
+                  ?.writeText(url)
+                  .then(() => live.setStatusNote(`copied the clone URL for ${r.name}`), () => live.setStatusNote(url));
+              }, (e: Error) => live.setStatusNote(ipcError(e)));
+            }}
+          />
         </Show>
         <Show when={leftOpen() && view() === "registries"}>
           <RegistriesPanel images={IMAGES.filter((i) => i.teamId === teamId())} />
