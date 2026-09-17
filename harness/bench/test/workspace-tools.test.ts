@@ -4,7 +4,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import workspaceTools, { toIde, fromIde, forbidden, gitSshHost, joinCursor, onlyWaits, procTitle, shellNote, splitCursor, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
+import workspaceTools, { askLine, askPreview, toIde, fromIde, forbidden, gitSshHost, joinCursor, mutates, onlyWaits, procTitle, shellNote, splitCursor, ToolServer, resolveFromApi } from "../../pi/workspace-tools.ts";
 import kloudlite, { call } from "../../pi/kloudlite.ts";
 
 test("pi's tools become the tool server's calls", () => {
@@ -236,6 +236,25 @@ test("a background command and the process tool are the tool server's own proces
   assert.equal(fromIde("process", 200, { bytes: 2 }).content[0].text, "wrote 2 bytes to its stdin");
 });
 
+/**
+ * A bench that answers every proposal the way a test needs. Since 2026-09-18 a mutating ide tool
+ * asks first, exactly as a `kl_*` write does, so a test that runs one has to stand in for the
+ * person: `yes` for the ordinary path, `no` for a refusal.
+ */
+async function fakeAsker(answer: "yes" | "no" = "yes") {
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ answer }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const saved = process.env.KL_BENCH_URL;
+  process.env.KL_BENCH_URL = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  return () => {
+    if (saved === undefined) delete process.env.KL_BENCH_URL; else process.env.KL_BENCH_URL = saved;
+    srv.close();
+  };
+}
+
 test("a background command reaches the tool server and is mirrored into the harness's process table", async () => {
   const seen: { tool: string; body: any }[] = [];
   const procs = [{ id: "p1", cmd: "npm run dev", started_at: "2026-09-17T06:00:00Z", state: "running", exit_code: null }];
@@ -255,6 +274,7 @@ test("a background command reaches the tool server and is mirrored into the harn
     });
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const stopAsking = await fakeAsker("yes");
   const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
   process.env.KL_TOOLS_ADDRESS = `127.0.0.1:${(srv.address() as { port: number }).port}`;
   process.env.KL_TOOLS_WORKSPACE = "api";
@@ -280,6 +300,7 @@ test("a background command reaches the tool server and is mirrored into the harn
     assert.equal(JSON.parse(widgets["harness:procs"][0])[0].code, 0, "an exited process settles in the table");
   } finally {
     for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    stopAsking();
     srv.close();
   }
 });
@@ -404,6 +425,7 @@ test("long output reminds the model that it is the only one reading it", async (
     });
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const stopAsking = await fakeAsker("yes");
   const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
   process.env.KL_TOOLS_ADDRESS = `127.0.0.1:${(srv.address() as { port: number }).port}`;
   process.env.KL_TOOLS_WORKSPACE = "api";
@@ -417,6 +439,7 @@ test("long output reminds the model that it is the only one reading it", async (
     assert.ok(!small.content.some((c: { text: string }) => c.text.includes("only you see this")), JSON.stringify(small));
   } finally {
     for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    stopAsking();
     srv.close();
   }
 });
@@ -473,4 +496,101 @@ test("process logs: one cursor for the model, both offsets underneath", () => {
   // Rubbish from a model is read as "from the start", never as NaN.
   assert.deepEqual(splitCursor("nonsense"), { since: 0, since_err: 0 });
   assert.deepEqual(splitCursor(-5), { since: 0, since_err: 0 });
+});
+
+/**
+ * A session's HANDS ask the way its platform writes always have (owner, 2026-09-18: "it should
+ * follow the same rules when mutating states and editing files"). A file written, a command run and
+ * a workspace created are one rule now; a read is still a read.
+ */
+test("what mutates asks first; what reads does not", () => {
+  for (const [name, p] of [
+    ["write", { path: "a.ts" }],
+    ["edit", { path: "a.ts" }],
+    ["patch", { diff: "--- a" }],
+    ["bash", { command: "rm -rf build" }],
+    ["process", { action: "start", command: "npm run dev" }],
+    ["process", { action: "stop", id: "p1" }],
+    ["process", { action: "write", id: "p1", data: "y" }],
+  ] as [string, Record<string, unknown>][])
+    assert.equal(mutates(name, p), true, `${name} ${JSON.stringify(p)}`);
+
+  for (const [name, p] of [
+    ["read", { path: "a.ts" }],
+    ["grep", { pattern: "x" }],
+    ["find", { pattern: "*.ts" }],
+    ["ls", {}],
+    ["process", { action: "logs", id: "p1" }],
+    ["process", { action: "list" }],
+  ] as [string, Record<string, unknown>][])
+    assert.equal(mutates(name, p), false, `${name} ${JSON.stringify(p)}`);
+});
+
+test("the card says what it would do, and shows enough to judge it by", () => {
+  // The path for a file, the command for anything that runs — never the tool's own name.
+  assert.equal(askLine("api", "write", { path: "src/main.ts" }), "Write src/main.ts in api");
+  assert.equal(askLine("api", "edit", { path: "src/main.ts" }), "Edit src/main.ts in api");
+  assert.equal(askLine("api", "bash", { command: "npm test\nnext line" }), "Run in api: npm test");
+  assert.equal(askLine("api", "process", { action: "start", command: "npm run dev" }), "Run in api: npm run dev");
+  assert.equal(askLine("api", "process", { action: "stop", id: "p1" }), "Stop process p1 in api");
+
+  // The body: a write shows what it would write, an edit shows it as a diff, a command is itself.
+  assert.equal(askPreview("write", { content: "hello" }), "hello");
+  assert.equal(askPreview("edit", { edits: [{ oldText: "a", newText: "b" }] }), "- a\n+ b");
+  assert.equal(askPreview("bash", { command: "npm test" }), "npm test");
+  assert.equal(askPreview("read", { path: "a.ts" }), undefined);
+  // A huge file is cut: the card is something to read, not the file itself.
+  const long = askPreview("write", { content: "x".repeat(5_000) })!;
+  assert.ok(long.length < 2_100 && long.endsWith("…"), String(long.length));
+});
+
+/**
+ * End to end: an edit in BUILD mode raises the card and waits on it, and a no is a no — the tool
+ * server is never called at all.
+ */
+test("an edit waits for the person, and a refusal never reaches the workspace", async () => {
+  const reached: string[] = [];
+  const srv = http.createServer((req, res) => {
+    reached.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ path: "a.ts", bytes: 5 }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const saved = { a: process.env.KL_TOOLS_ADDRESS, w: process.env.KL_TOOLS_WORKSPACE };
+  process.env.KL_TOOLS_ADDRESS = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+  process.env.KL_TOOLS_WORKSPACE = "api";
+  const tools: Record<string, { execute: (...a: any[]) => Promise<any> }> = {};
+  try {
+    workspaceTools({ registerTool: (t: { name: string }) => (tools[t.name] = t as never), on: () => undefined } as never);
+
+    // NO: the card is drawn, the person declines, and nothing is written.
+    const stopNo = await fakeAsker("no");
+    const cards: unknown[] = [];
+    const ctx = { ui: { setWidget: (_k: string, lines: string[]) => cards.push(JSON.parse(lines[0])) } };
+    const declined = await tools.write.execute("c1", { path: "a.ts", content: "hello" }, undefined, undefined, ctx);
+    stopNo();
+    assert.equal(declined.isError, true);
+    assert.match(declined.content[0].text, /declined by the person/);
+    assert.deepEqual(reached, [], "a refused write never reaches the workspace");
+    const card = cards[0] as { tool: string; summary: string; preview: string };
+    assert.equal(card.tool, "write");
+    assert.equal(card.summary, "Write a.ts in api");
+    assert.equal(card.preview, "hello", "the card shows what it would write");
+
+    // YES: it runs, once.
+    const stopYes = await fakeAsker("yes");
+    const done = await tools.write.execute("c2", { path: "a.ts", content: "hello" }, undefined, undefined, ctx);
+    stopYes();
+    assert.ok(!done.isError, JSON.stringify(done));
+    assert.deepEqual(reached, ["/tools/write"]);
+
+    // A READ is never asked about: no card, and it reaches the workspace with no bench at all.
+    const before = cards.length;
+    await tools.read.execute("c3", { path: "a.ts" }, undefined, undefined, ctx);
+    assert.equal(cards.length, before, "a read draws no card");
+    assert.deepEqual(reached, ["/tools/write", "/tools/read"]);
+  } finally {
+    for (const [k, v] of [["KL_TOOLS_ADDRESS", saved.a], ["KL_TOOLS_WORKSPACE", saved.w]] as const) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    srv.close();
+  }
 });

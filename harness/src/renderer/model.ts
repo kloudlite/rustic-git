@@ -346,7 +346,7 @@ export type Message =
   /** A line across the transcript: "Session compacted", "Interrupted" (`session-turn.tsx:293`). */
   | { role: "divider"; text: string; at: string; ts?: number }
   /** A question the harness is waiting on: nothing changes until the person answers it (spec §9). */
-  | { role: "question"; id: string; tool: string; summary: string; args?: Record<string, unknown>; ask?: { header: string; options: { label: string; description: string }[]; multi?: boolean }; answer?: string; at: string; ts?: number }
+  | { role: "question"; id: string; tool: string; summary: string; /** What the card shows under the line: a diff, the file, the command. */ preview?: string; args?: Record<string, unknown>; ask?: { header: string; options: { label: string; description: string }[]; multi?: boolean }; answer?: string; at: string; ts?: number }
   | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ts?: number; ok?: boolean; output?: string; pending?: boolean; tool?: string; args?: Record<string, unknown>; ms?: number };
 
 export const MACHINE: Machine = {

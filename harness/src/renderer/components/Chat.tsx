@@ -1086,6 +1086,11 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
             <div class="font-bold text-fg-strong">{verb()}</div>
             {/* What it would act on, values only. */}
             <div class="truncate text-muted">{argLine(props.q.args, props.q.summary)}</div>
+            {/* What it would actually do: the diff, the file, the command. A person asked to agree
+                to an edit has to be able to read the edit (owner, 2026-09-18). */}
+            <Show when={props.q.preview}>
+              {(p) => <div class="max-h-40 overflow-auto whitespace-pre-wrap text-muted">{p()}</div>}
+            </Show>
             <div class="text-fg">Do you want to proceed?</div>
             <div class="h-[var(--cell-lh)]" />
             <For each={OPTIONS()}>{(o, i) => <Option i={i()} label={o.label} />}</For>

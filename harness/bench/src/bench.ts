@@ -116,7 +116,7 @@ export class Bench {
   /** Sessions being summarised: one at a time, and never twice for the same growth. */
   private compacting = new Set<string>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
-  private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
+  private proposals = new Map<string, { session: string; tool: string; summary: string; preview?: string; args: unknown; question?: unknown; answer?: string; wake: (() => void)[] }>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -348,9 +348,11 @@ export class Bench {
         }
         if (ev.widgetKey === "harness:proposal" && line) {
           // A tool asking to run: recorded here, drawn by the desktop, answered by a person.
-          const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string; question?: unknown };
-          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, args: p.args, question: p.question, wake: [] });
-          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary, question: p.question } });
+          // `preview` is what the card shows under its line — a diff, the file, the command — so a
+          // person asked to agree to an edit can read the edit (owner, 2026-09-18).
+          const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string; preview?: string; question?: unknown };
+          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
+          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary, preview: p.preview, question: p.question } });
         }
         if (ev.widgetKey === "harness:procs") {
           const ws = this.workspaceOf(id);

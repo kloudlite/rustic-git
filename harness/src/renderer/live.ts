@@ -114,7 +114,10 @@ export const MODES: Mode[] = ["build", "plan", "accept-edits"];
 const [mode, setMode] = createSignal<Mode>("build");
 export { mode, setMode };
 /** What accept-edits may answer for the person. Everything else still asks. */
-export const AUTO_YES = ["write", "edit"];
+// accept-edits answers for the FILE tools only. A command is not an edit: it can reach the network,
+// delete a tree or start a server, and "accept edits" never meant "accept anything" (owner,
+// 2026-09-18).
+export const AUTO_YES = ["write", "edit", "patch"];
 
 /**
  * Tools this person has said "don't ask again" about, for this session only. It is the permission
@@ -450,10 +453,10 @@ function makeThread(id: string) {
    * A tool asking to run. It sits in the transcript as a question and stays there once answered —
    * the record of what was agreed to is the conversation itself.
    */
-  function proposal(row: { id: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: string; question?: unknown }) {
+  function proposal(row: { id: string; tool: string; summary: string; preview?: string; args?: Record<string, unknown>; answer?: string; question?: unknown }) {
     const i = messages.findIndex((m) => m.role === "question" && (m as { id: string }).id === row.id);
     if (i >= 0) return void setMessages(i, { answer: row.answer } as never);
-    push({ role: "question", id: row.id, tool: row.tool, summary: row.summary, args: row.args, ask: row.question as never, at: now() });
+    push({ role: "question", id: row.id, tool: row.tool, summary: row.summary, preview: row.preview, args: row.args, ask: row.question as never, at: now() });
   }
 
   /** A line from the harness itself, on the rail, the way a shell answers a builtin. */
@@ -743,7 +746,7 @@ export function onEvent(ev: Ev & { pi?: string }) {
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
     case "proposal": {
-      const row = ev.row as { id: string; session: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: string; question?: unknown };
+      const row = ev.row as { id: string; session: string; tool: string; summary: string; preview?: string; args?: Record<string, unknown>; answer?: string; question?: unknown };
       if (!row?.session) return;
       thread(row.session).proposal(row);
       // In accept-edits, a change to this machine's own files is answered without asking.

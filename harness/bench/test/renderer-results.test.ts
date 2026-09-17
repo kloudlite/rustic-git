@@ -225,8 +225,9 @@ test("shift+tab cycles the three modes, and only own-file edits are answered for
   assert.equal(next("build"), "plan");
   assert.equal(next("plan"), "accept-edits");
   assert.equal(next("accept-edits"), "build", "and round again");
-  // Accept-edits is about THIS machine's files. A platform write is a decision, not an edit.
-  assert.deepEqual(AUTO_YES, ["write", "edit"]);
+  // Accept-edits is about THIS machine's files. A platform write is a decision, not an edit, and
+  // neither is a command: `bash` can reach the network or delete a tree (owner, 2026-09-18).
+  assert.deepEqual(AUTO_YES, ["write", "edit", "patch"]);
   for (const never of ["kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "bash", "ask"]) {
     assert.ok(!AUTO_YES.includes(never), `${never} must still ask`);
   }

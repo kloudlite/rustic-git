@@ -1,6 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { asksOf, exchangesOf, noteConnected, onEvent, queueOf, seedExchanges, setWorkspaceNames, tasks, thread, waitingOn } from "../../src/renderer/live.ts";
+/** The renderer reads the bench through `window.harness`; a test answers for it. */
+const answered: string[] = [];
+(globalThis as { window?: unknown }).window = {
+  harness: {
+    bench: async (m: string, p: string, b?: unknown) => {
+      if (m === "POST" && p.startsWith("/proposals/")) answered.push(`${p.split("/")[2]}=${(b as { answer: string }).answer}`);
+      return {};
+    },
+  },
+};
+
+const live = await import("../../src/renderer/live.ts");
+const { asksOf, exchangesOf, noteConnected, onEvent, queueOf, seedExchanges, setWorkspaceNames, tasks, thread, waitingOn } = live;
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -276,4 +288,40 @@ test("the queue keeps info asks and finished rows, in the order they happened", 
   const q = queueOf("s-71");
   assert.deepEqual(q.map((x) => x.text), ["first", "second", "third"], "oldest first");
   assert.deepEqual(q.map((x) => x.state), ["working", "done", "pending"]);
+});
+
+/**
+ * The modes in the footer decide what a mutating tool costs a person. Build asks about everything
+ * that changes; accept-edits answers the FILE tools for them and still asks about a command, which
+ * can reach the network or delete a tree; "don't ask again" is that tool, this session, gone at
+ * restart (owner, 2026-09-18: hands follow the same rules as platform writes).
+ */
+test("accept-edits answers an edit, never a command; and a yes-always is per tool and session", () => {
+  const ws = "w-modes";
+  answered.length = 0;
+  try {
+    live.setMode("accept-edits");
+    onEvent({ type: "proposal", row: { id: "q-edit", session: ws, tool: "edit", summary: "Edit a.ts in api" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes"], "an edit is agreed to for them");
+
+    onEvent({ type: "proposal", row: { id: "q-bash", session: ws, tool: "bash", summary: "Run in api: rm -rf build" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes"], "a command still asks: accept-edits never meant accept anything");
+
+    // Build mode: the edit asks too.
+    live.setMode("build");
+    onEvent({ type: "proposal", row: { id: "q-edit-2", session: ws, tool: "edit", summary: "Edit b.ts in api" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes"], "in build, every change asks");
+
+    // "Don't ask again for this tool": the NEXT one is answered, and only for that tool.
+    live.allowTool(ws, "bash");
+    onEvent({ type: "proposal", row: { id: "q-bash-2", session: ws, tool: "bash", summary: "Run in api: npm test" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes", "q-bash-2=yes"]);
+    onEvent({ type: "proposal", row: { id: "q-write", session: ws, tool: "write", summary: "Write c.ts in api" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes", "q-bash-2=yes"], "one tool's standing yes is not another's");
+    // And it belongs to THIS session.
+    onEvent({ type: "proposal", row: { id: "q-other", session: "w-other", tool: "bash", summary: "Run in web: npm test" } } as never);
+    assert.deepEqual(answered, ["q-edit=yes", "q-bash-2=yes"], "nor another session's");
+  } finally {
+    live.setMode("build");
+  }
 });

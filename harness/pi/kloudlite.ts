@@ -355,8 +355,18 @@ export function capabilities(reg: ReturnType<typeof makeReg>) {
  * socket dropped.
  */
 const PROPOSAL_CAP_MS = 10 * 60_000;
-async function propose(id: string, tool: string, args: Record<string, any>, ctx: { ui?: { setWidget?: (k: string, lines: string[]) => void } } | undefined, signal?: AbortSignal): Promise<boolean> {
-  ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool, args, summary: question(tool, args) })]);
+export async function propose(
+  id: string,
+  tool: string,
+  args: Record<string, any>,
+  ctx: { ui?: { setWidget?: (k: string, lines: string[]) => void } } | undefined,
+  signal?: AbortSignal,
+  /** The one line the person reads, when the catalogue has no `ask` for this tool. */
+  summary?: string,
+  /** What the card shows under that line: a diff, a file's first lines, the command. */
+  preview?: string,
+): Promise<boolean> {
+  ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool, args, summary: summary ?? question(tool, args), preview })]);
   try {
     const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal });
     return r.ok && ((await r.json()) as { answer?: string }).answer === "yes";

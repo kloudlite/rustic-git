@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { call, tellItWhereItStands } from "./kloudlite.ts";
+import { call, propose, tellItWhereItStands } from "./kloudlite.ts";
 
 /**
  * A session's hands on ONE machine. The agent runs in the bench pod; these seven
@@ -348,6 +348,61 @@ export async function resolveFromApi(ws: string): Promise<string> {
   throw new Error(d && typeof d === "object" && d.error ? d.error : `workspace ${ws}: ${typeof d === "string" ? d : r.status}`);
 }
 
+/**
+ * What a session's HANDS ask about first.
+ *
+ * A `kl_*` write has always been proposed — the card in place of the composer, the person's yes —
+ * and the tools that change this machine's own files and run its commands did not (owner,
+ * 2026-09-18: "it should follow the same rules when mutating states and editing files"). They do
+ * now, through the same path, so one rule covers a workspace created and a file written.
+ *
+ * Reads never ask (`read`, `grep`, `find`, `ls`, and `process logs`/`list`): nothing changes, and a
+ * card in front of every read is a card nobody reads. Plan mode does not reach here at all — those
+ * tools are not active in it (`PLAN_TOOLS`), which is a refusal before a call is made.
+ */
+const ASKS = new Set(["write", "edit", "patch", "bash", "kl_repo_clone", "kl_container_build", "kl_container_push"]);
+/** Of `process`, only what starts, stops or writes to something; reading its logs is a read. */
+const PROCESS_ASKS = new Set(["start", "stop", "write", "kill"]);
+
+export function mutates(name: string, p: Record<string, any>): boolean {
+  if (name === "process") return PROCESS_ASKS.has(String(p.action ?? ""));
+  return ASKS.has(name);
+}
+
+/** The line the person reads on the card: the path for a file, the command for anything that runs. */
+export function askLine(ws: string, name: string, p: Record<string, any>): string {
+  switch (name) {
+    case "write":
+      return `Write ${p.path} in ${ws}`;
+    case "edit":
+      return `Edit ${p.path} in ${ws}`;
+    case "patch":
+      return `Patch ${ws}`;
+    case "bash":
+      return `Run in ${ws}: ${String(p.command ?? "").split("\n")[0].slice(0, 120)}`;
+    case "process":
+      if (p.action === "start") return `Run in ${ws}: ${String(p.command ?? "").split("\n")[0].slice(0, 120)}`;
+      return `${p.action === "write" ? "Write to" : "Stop"} process ${p.id} in ${ws}`;
+    default:
+      return `${name} in ${ws}`;
+  }
+}
+
+/** What the card shows under that line: enough to judge it by, never the whole file. */
+export function askPreview(name: string, p: Record<string, any>): string | undefined {
+  const cut = (t: string, n = 2_000) => (t.length > n ? `${t.slice(0, n)}\n…` : t);
+  if (name === "write") return cut(String(p.content ?? ""));
+  if (name === "edit")
+    return cut(
+      ((p.edits as { oldText?: string; newText?: string }[] | undefined) ?? [])
+        .map((e) => `${String(e.oldText ?? "").split("\n").map((l) => `- ${l}`).join("\n")}\n${String(e.newText ?? "").split("\n").map((l) => `+ ${l}`).join("\n")}`)
+        .join("\n\n"),
+    );
+  if (name === "patch") return cut(String(p.diff ?? p.patch ?? ""));
+  if (name === "bash" || (name === "process" && p.action === "start")) return String(p.command ?? "");
+  return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
   // A fixed address is a machine of its own (the bench's); `KL_WORKSPACE_ID` is only its name.
   const ws = process.env.KL_TOOLS_WORKSPACE ?? (process.env.KL_TOOLS_ADDRESS ? (process.env.KL_WORKSPACE_ID ?? "this machine") : undefined);
@@ -401,12 +456,18 @@ export default function (pi: ExtensionAPI) {
       label,
       description: `${description} Runs in workspace ${ws}.`,
       parameters,
-      async execute(_toolCallId, params, signal, _update, ctx) {
+      async execute(toolCallId, params, signal, _update, ctx) {
         const p = params as Record<string, any>;
         // Before the call, not after: a refused read must never reach the tool server at all.
         for (const r of reaches(name, p)) {
           const no = forbidden(r);
           if (no) return text(no, true);
+        }
+        // The same rule a platform write follows: the person is asked, and only then does it run.
+        // In accept-edits the desktop answers the file tools for them; a command still asks.
+        if (mutates(name, p)) {
+          const ok = await propose(`p-${toolCallId}`, name, p, ctx, signal, askLine(ws, name, p), askPreview(name, p));
+          if (!ok) return text("declined by the person", true);
         }
         try {
           // A watch is the harness's own: nothing to run in the workspace, only a standing request.
