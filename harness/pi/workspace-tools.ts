@@ -357,6 +357,9 @@ export default function (pi: ExtensionAPI) {
               "",
             ]
           : []),
+        "Never ask a question to confirm an action. Call the tool; the harness asks the person for you. Use question only when the person must choose between real alternatives you cannot decide.",
+        "Packages are nixpkgs attributes, not language names: rustc and cargo for Rust, nodejs_22 for Node, go, python3, bun, pnpm, jdk21, gcc. `attr@version` pins one.",
+        "",
         "When you answer an ask, answer like a teammate at standup, at most 8 lines: status first (done / partial / blocked), what changed by file NAME, how you verified in one line, what is left or what you need. No code, no diffs, no command output — those stay here in your own transcript.",
         "",
         "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",

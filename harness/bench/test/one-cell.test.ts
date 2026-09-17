@@ -165,8 +165,9 @@ test("a live question replaces the input, and the transcript keeps only the reco
   assert.match(chat, /don't ask again for \$\{verb\(\)\.toLowerCase\(\)\} this session/);
   assert.match(chat, /No, and tell the bench what to do differently \(esc\)/);
   assert.equal((chat.match(/h-\[var\(--cell-lh\)\]/g) ?? []).length, 2, "one blank line per shape, no more air");
-  // A question's descriptions sit beside their option, not on a line of their own.
-  assert.match(chat, /&nbsp;&nbsp;— \{h\(\)\}/);
+  // A question's descriptions sit UNDER their option, indented four cells and muted: inline was
+  // unreadable at the column (owner, 2026-09-17).
+  assert.match(chat, /pl-\[4ch\] wrap-words whitespace-pre-wrap text-subtle/);
   // Option 2 is a standing yes for this tool, for this session only.
   assert.match(chat, /live\.allowTool\(props\.session, props\.q\.tool\)/);
   assert.match(chat, /<Marker on=\{pick\(\) === p\.i\} \/>/, "the selected row is marked (❯), not filled with a bar");

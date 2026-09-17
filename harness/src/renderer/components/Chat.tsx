@@ -995,10 +995,12 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
     <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(p.i)} onClick={() => take(p.i)}>
       <Marker on={pick() === p.i} />
       <span class="shrink-0 text-subtle">{p.i + 1}.&nbsp;</span>
-      <span class="min-w-0 truncate" classList={{ "text-fg": pick() === p.i, "text-muted": pick() !== p.i }}>{p.label}</span>
-      {/* A description belongs beside its option, not on a line of its own. */}
-      <Show when={p.hint}>{(h) => <span class="min-w-0 shrink truncate text-subtle">&nbsp;&nbsp;— {h()}</span>}</Show>
+      <span class="min-w-0 truncate" classList={{ "font-bold text-fg": pick() === p.i, "text-muted": pick() !== p.i }}>{p.label}</span>
     </button>
+  );
+  /** A description sits UNDER its option, indented four cells and muted; inline was unreadable. */
+  const Hint = (p: { text?: string }) => (
+    <Show when={p.text}>{(h) => <div class="pl-[4ch] wrap-words whitespace-pre-wrap text-subtle">{h()}</div>}</Show>
   );
   return (
     <div
@@ -1035,7 +1037,14 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
         </div>
         <div class="wrap-words whitespace-pre-wrap text-fg">{props.q.summary}</div>
         <div class="h-[var(--cell-lh)]" />
-        <For each={OPTIONS()}>{(o, i) => <Option i={i()} label={o.label} hint={(o as { hint?: string }).hint} />}</For>
+        <For each={OPTIONS()}>
+          {(o, i) => (
+            <>
+              <Option i={i()} label={o.label} />
+              <Hint text={(o as { hint?: string }).hint} />
+            </>
+          )}
+        </For>
         <Show
           when={typing()}
           fallback={<Option i={OPTIONS().length} label="Type something." />}

@@ -96,7 +96,7 @@ export const TOOLS: ToolSpec[] = [
   { name: "skill", group: "workspace", summary: "What a part of the platform is and the verbs it has: workspaces, environments, snapshots, repos, images, agents.", effect: "read" },
   { name: "tool_search", group: "workspace", summary: "Find the tool for a platform verb, by what you want to do. It answers the names and parameters, and turns them on.", effect: "read" },
 
-  { name: "question", group: "workspace", summary: "Ask the person to choose, when only they can: a header, the question, and two to four ways forward.", effect: "read" },
+  { name: "question", group: "workspace", summary: "Ask the person to CHOOSE between real alternatives you cannot decide. Never to confirm an action — call the tool and the harness asks for you.", effect: "read" },
   { name: "memory", group: "workspace", summary: "Remember something the person told you, or forget one that is no longer true.", effect: "read" },
   { name: "architecture", group: "workspace", summary: "What runs where and what talks to what, for this space; `set` replaces one section.", effect: "read" },
 

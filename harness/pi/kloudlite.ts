@@ -171,6 +171,7 @@ const PLATFORM = [
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
+  "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
   "Independent commands go in one turn, together; they run at the same time.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
@@ -337,7 +338,10 @@ function describeTool(pi: ExtensionAPI, name: string): string {
  * the desktop already draws a card and holds the tool until somebody answers — and the answer
  * comes back both as the tool's result and as their own row in the transcript.
  */
-export function questionTool(reg: ReturnType<typeof makeReg>) {
+/** A question that is really a confirmation: the harness asks for those itself. */
+const CONFIRMING = /^\s*(confirm|do you want|proceed|are you sure|shall i|should i)\b/i;
+
+export function questionTool(reg: ReturnType<typeof makeReg>, pi?: ExtensionAPI) {
   reg(
     "question",
     {
@@ -347,6 +351,13 @@ export function questionTool(reg: ReturnType<typeof makeReg>) {
       multi: Type.Optional(Type.Boolean({ description: "more than one may be chosen" })),
     },
     async (a, signal, ctx) => {
+      // A CONFIRMATION is not a question: every tool that changes something already asks the person
+      // through the harness, so a hand-made "Do you want me to…" is one prompt too many — and it
+      // arrives without the tool's own arguments to judge it by (owner, 2026-09-17).
+      const confirming = CONFIRMING.test(a.header ?? "") || CONFIRMING.test(a.question ?? "");
+      const canDoItself = (pi?.getActiveTools?.() ?? []).some((t: string | { name: string }) => gated(typeof t === "string" ? t : t.name));
+      if (confirming && canDoItself)
+        return { ...text("not needed: call the tool, the harness will ask the person for you. Use question only when they must choose between real alternatives you cannot decide."), isError: true };
       const id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool: "question", args: a, summary: a.question, question: { header: a.header, options: a.options, multi: a.multi } })]);
       const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal }).catch(() => undefined);
@@ -840,7 +851,7 @@ export function tools(pi: ExtensionAPI) {
   searchTools(reg, pi);
   memoryTools(reg);
   architectureTools(reg);
-  questionTool(reg);
+  questionTool(reg, pi);
   capabilities(reg);
   modeCommand(pi, PLAN_TOOLS);
   startWith(pi);
@@ -882,7 +893,7 @@ export default function (pi: ExtensionAPI) {
     if (process.env.KL_EPHEMERAL !== "1") agentTools(reg, inWorkspace);
     searchTools(reg, pi);
     memoryTools(reg);
-    questionTool(reg);
+    questionTool(reg, pi);
     capabilities(reg);
     modeCommand(pi, PLAN_TOOLS);
     return startWith(pi);
