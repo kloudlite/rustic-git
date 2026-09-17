@@ -98,7 +98,16 @@ export function serve(
         if (p.length === 3 && m === "GET" && p[2] === "btw") return send(res, 200, bench.listBtw(p[1]));
         // The person's pick for one session. `default: false` keeps the general default where it is
         // — a dispatch naming a model is not a person changing their mind (spec §1.2).
-        if (p.length === 3 && m === "POST" && p[2] === "model") return send(res, 200, await bench.setModel(p[1], await body(req)));
+        if (p.length === 3 && m === "POST" && p[2] === "model") {
+          try {
+            return send(res, 200, await bench.setModel(p[1], await body(req)));
+          } catch (e) {
+            // A model the provider does not carry: named, with what it does carry, so the picker
+            // can say so rather than leaving a session that answers nothing (D1).
+            if ((e as Error).name === "NoSuchModel") return send(res, 409, { error: (e as Error).message, known: (e as { known?: string[] }).known ?? [] });
+            throw e;
+          }
+        }
         /**
          * What `tool_search` has turned on for this session, kept where it outlives the pi child:
          * a found tool stays found for the rest of the session, across a bench restart. GET arms a

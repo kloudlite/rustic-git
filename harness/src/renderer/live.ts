@@ -741,6 +741,14 @@ export function onEvent(ev: Ev & { pi?: string }) {
       return void noteConnected(ev.connected === true);
     // Main saying something transient — a bench route that refused and is being re-minted. It is a
     // fact about the DESKTOP, so it goes to the composer footer and never into the transcript.
+    // A turn the model PROVIDER refused. Said in the transcript as a divider — it is a fact about
+    // this turn, worth reading back — and in the footer, because it is why nothing came back.
+    case "turn_error": {
+      const at = typeof ev.session === "string" ? ev.session : undefined;
+      if (!at) return;
+      thread(at).divider(`The model refused this turn: ${String(ev.text ?? "").slice(0, 160)}`);
+      return void setStatusNote(`the model refused this turn: ${String(ev.text ?? "").slice(0, 120)}`);
+    }
     case "status":
       return void setStatusNote(typeof ev.text === "string" ? ev.text : undefined);
     case "writable":

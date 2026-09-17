@@ -16,6 +16,15 @@ import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 
+/** A model pick the provider has never heard of: refused with 409, naming what it does carry. */
+export class NoSuchModel extends Error {
+  readonly known: string[];
+  constructor(model: string, known: string[]) {
+    super(`no such model ${JSON.stringify(model)}`);
+    this.name = "NoSuchModel";
+    this.known = known;
+  }
+}
 /**
  * One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in.
  * `workspace` is always the ID — it is a path segment, a session key and an env var — and `name`
@@ -1286,12 +1295,33 @@ export class Bench {
   async setModel(id: string, body: Partial<Triple> & { default?: boolean }): Promise<SessionRow> {
     this.refuse(true);
     if (!this.sessions.get(id)) throw new Error(`no session ${id}`);
+    // A model the provider cannot answer with is NOT a pick. Unvalidated, `deepseek/nope-9000` was
+    // accepted with a 200, every turn then died with an empty `agent_end` (the provider's 400 went
+    // only to the session file), and the bad id wrote through to the bench-wide default — so every
+    // session created after it was born dead, and putting a good model back did not revive one
+    // (api-test-report D1). Refused here, before anything is written.
+    if (body.model !== undefined) {
+      const known = await this.models().catch(() => undefined);
+      const all = known?.providers.flatMap((p) => p.models.map((m) => `${p.id}/${m.id}`)) ?? [];
+      // Only when the catalogue could actually be read: a bench with no child up yet lists nothing,
+      // and refusing every pick because we could not ask is worse than the bug.
+      if (all.length && !all.includes(body.model)) throw new NoSuchModel(body.model, all);
+    }
     // Only what the body names moves: an effort-only pick wiped the model once (Object.assign
     // copies an explicit undefined), and the footer read "no model" after the person chose one.
     const pick = Object.fromEntries(Object.entries({ model: body.model, thinking: body.thinking, effort: body.effort }).filter(([, v]) => v !== undefined)) as Triple;
     if (body.default !== false) this.write(() => this.defaults.set(pick));
     const row = this.writable.run(() => this.sessions.update(id, pick));
-    await this.children.get(id)?.applyTriple(this.rowTriple(row));
+    // A model CHANGE re-arms the child. `set_model` alone did not: a session poisoned by a bad pick
+    // kept answering empty forever even after a good model was put back, while a fresh session on
+    // the same model worked (api-test-report D1). The child is dropped and reopened, so the next
+    // turn runs on a session that has actually taken the new model.
+    const child = this.children.get(id);
+    if (body.model !== undefined && child?.running()) {
+      await child.stop().catch(() => undefined);
+      this.children.delete(id);
+      this.open(row);
+    } else await child?.applyTriple(this.rowTriple(row));
     this.emit({ type: "sessions" });
     return row;
   }

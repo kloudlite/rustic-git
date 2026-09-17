@@ -168,3 +168,70 @@ test("answering a proposal speaks no prompt to the model", async () => {
     await b.down();
   }
 });
+
+/**
+ * D1 (CRITICAL, api-test-report 7.3). `POST /sessions/{id}/model {"model":"deepseek/nope-9000"}`
+ * answered 200, the next turn died with an empty `agent_end` (the provider's 400 only in the
+ * session file), and the bad pick wrote THROUGH to `/defaults` — so every session created after it
+ * was born dead, and correcting the row did not revive one. A model nobody can answer with is not
+ * a pick: it is refused, and nothing is written.
+ */
+test("a model that does not exist is refused, and never reaches the row or the defaults", async () => {
+  const b = await startBench();
+  try {
+    const before = (await get(b, "/defaults")) as Record<string, unknown>;
+    const a = (await post(b, "/sessions", {})) as { id: string };
+    const r = await fetch(`${b.base}/sessions/${a.id}/model`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/nope-9000" }),
+    });
+    assert.equal(r.status, 409, "an unknown model is refused");
+    const said = ((await r.json()) as { error?: string }).error ?? "";
+    assert.match(said, /no such model/i);
+    // Nothing was written: not the session's row, and above all not the bench-wide default.
+    const row = ((await get(b, "/sessions")) as { id: string; model?: string }[]).find((x) => x.id === a.id)!;
+    assert.notEqual(row.model, "deepseek/nope-9000", "the row keeps the model that works");
+    assert.deepEqual(await get(b, "/defaults"), before, "the default is untouched: new sessions are not born dead");
+  } finally {
+    await b.down();
+  }
+});
+
+/** A model the catalogue DOES carry is still accepted, so the guard is not a wall. */
+test("a known model is still picked", async () => {
+  const b = await startBench();
+  try {
+    const a = (await post(b, "/sessions", {})) as { id: string };
+    const row = (await post(b, `/sessions/${a.id}/model`, { model: "deepseek/deepseek-chat" })) as Record<string, unknown>;
+    assert.equal(row.model, "deepseek/deepseek-chat");
+    assert.equal(((await get(b, "/defaults")) as Record<string, unknown>).model, "deepseek/deepseek-chat");
+  } finally {
+    await b.down();
+  }
+});
+
+/**
+ * D1, second half: a turn the PROVIDER refused must never look like an empty answer. pi reports it
+ * as `stopReason: "error"` with `errorMessage` on the message, not as `agent_end.error`, so reading
+ * only the latter left the caller and the person with silence and an empty bench log.
+ */
+test("a provider error on a turn is surfaced, never silence", async () => {
+  const b = await startBench();
+  try {
+    const seen: Record<string, unknown>[] = [];
+    b.bench.onEvent((ev) => void seen.push(ev as Record<string, unknown>));
+    const session = b.bench.sessions.all().find((s) => !s.archived)!.id;
+    (b.bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+      type: "agent_end",
+      messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "400: The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed nope-9000." }],
+    });
+    const err = seen.find((e) => e.type === "turn_error");
+    assert.ok(err, "the refusal reaches the person as a turn error");
+    assert.match(String(err!.text), /nope-9000/, "and says what the provider actually said");
+    assert.equal(err!.session, session);
+  } finally {
+    await b.down();
+  }
+});
+
