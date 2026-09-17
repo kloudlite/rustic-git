@@ -858,47 +858,29 @@ function Hint(props: { keys: string; children: string }) {
 }
 
 /**
- * A tool call, the way the terminal prints it: `⏺ Bash(cmd)` on one line, the
- * result hanging under it on a `⎿` rail — the first lines, then `… +N lines`
- * that opens on click. A call still running shows a dim dot; a failed one red.
+ * A line from the harness itself — a note, a background task reporting in — in the same shape as
+ * every other row in the pane: `~ harness: pi exited (1)`, with whatever else it had behind a
+ * chevron. No bullet, no bold label, no parentheses round the message.
  */
 function Step(props: { a: Action }) {
-  const [openOut, setOpenOut] = createSignal(false);
-  const [showOut, setShowOut] = createSignal(true); // the call line folds its result away
-  const HEAD = 5;
+  const [open, setOpen] = createSignal(false);
   const lines = () => (props.a.output ?? "").replace(/\s+$/, "").split("\n");
-  const more = () => Math.max(0, lines().length - HEAD);
-  const shown = () => (openOut() ? lines() : lines().slice(0, HEAD));
-  const tool = () => (props.a.target && !/\s/.test(props.a.target) ? props.a.target : undefined);
-  const tone = () => (props.a.pending ? "text-subtle" : props.a.ok === false ? "text-danger" : "text-success");
+  // One muted line, the shape every other row in the pane has: a glyph, who, what. The `●` rail and
+  // the bold label were the last of the old shapes (owner, 2026-09-17: `● harness(pi exited (1))`).
   return (
     <div class="flex flex-col">
-      {/* `⏺ Bash(cmd)` then `⎿  output` — the terminal's own shape, in the
-          terminal's own face, nothing drawn that the terminal would not. */}
-      <div class="flex cursor-pointer items-start" onClick={() => setShowOut((v) => !v)} title={showOut() ? "Fold the result" : "Show the result"}>
-        <span class={`w-5 shrink-0 ${tone()}`} classList={{ "animate-pulse": props.a.pending }}>⏺</span>
-        <span class="min-w-0 flex-1 wrap-words whitespace-pre-wrap text-fg">
-          <Show when={tool()} fallback={<><Show when={props.a.target}><span class="font-bold text-fg-strong">{props.a.target} </span></Show>{props.a.text}</>}>
-            <span class="font-bold text-fg-strong">{tool()}</span><span class="text-subtle">(</span>{props.a.text}<span class="text-subtle">)</span>
-          </Show>
+      <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
+        <span class={`w-4 shrink-0 ${props.a.pending ? "text-accent" : props.a.ok === false ? "text-danger" : "text-subtle"}`} classList={{ "animate-pulse": props.a.pending }}>~</span>
+        <span class="min-w-0 flex-1 truncate text-muted">
+          <Show when={props.a.target}>{(t) => <span class="text-fg">{t().toLowerCase()}: </span>}</Show>
+          {props.a.text}
         </span>
-      </div>
-      <Show when={(props.a.output !== undefined || props.a.pending) && showOut()}>
-        <div class="flex items-start" classList={{ "text-muted": props.a.ok !== false, "text-danger": props.a.ok === false }}>
-          <span class="w-5 shrink-0 pl-2 text-subtle">⎿</span>
-          <div class="min-w-0 flex-1 pl-1">
-            <Show when={!props.a.pending} fallback={<span class="text-accent">Running…</span>}>
-              <Show when={props.a.output} fallback={<span class="text-subtle">(No output)</span>}>
-                <pre class="m-0 whitespace-pre-wrap wrap-words font-[inherit]">{shown().join("\n")}</pre>
-                <Show when={more()}>
-                  <button class="text-subtle hover:text-fg" onClick={(e) => (e.stopPropagation(), setOpenOut((v) => !v))}>
-                    {openOut() ? "… collapse" : `… +${more()} ${more() === 1 ? "line" : "lines"}`}
-                  </button>
-                </Show>
-              </Show>
-            </Show>
-          </div>
-        </div>
+        <Show when={props.a.output}>
+          <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
+        </Show>
+      </button>
+      <Show when={open() && props.a.output}>
+        <pre class="m-0 pl-6 whitespace-pre-wrap wrap-words font-[inherit] text-muted [tab-size:4]">{lines().join("\n")}</pre>
       </Show>
     </div>
   );
