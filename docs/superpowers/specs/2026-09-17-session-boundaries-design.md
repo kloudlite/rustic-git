@@ -317,6 +317,47 @@ not poll. Every message that crosses sessions — asks, reports, briefs — is c
 preamble, no restating what the receiver already holds, the person's words plus at most one line
 the receiver cannot know (owner, 04:45 IST).
 
+
+### 3.9 Nothing waits forever: one lifecycle for every handoff (owner, 05:00 IST 18 Sep: "cover all
+kinds of scenarios and plan to avoid such stale stops")
+
+Every handoff the bench makes — an **ask** to a workspace, an **agent** dispatch, a **proposal** or
+**question** to the person, a **watch** on a process, a **wait** on `/v1` (create → ready) — is an
+*exchange* with the same state machine, persisted, swept, and visible:
+
+`queued → running → (progress)* → done | blocked | expired | cancelled`
+
+Rules:
+
+1. **Persisted, not in memory.** The exchange table is `exchanges.jsonl` folded on boot (today the
+   `asked` map, watches and proposals live only in memory and a bench restart forgets them). After a
+   restart every open exchange is re-checked, never assumed.
+2. **Every state has a deadline.** `queued` longer than 60 s (the workspace session never took it) →
+   re-deliver once, then `blocked: "workspace session did not pick it up"`. `running` with no
+   `progress` for `ask_idle_secs` (default 10 min) → the bench asks the workspace session one line
+   ("still on ask-5?") and shows "quiet for 10 min" on the card; no reply within 2 min → `expired`,
+   the bench session is told, the person sees it. A proposal or question open past 30 min shows
+   "waiting since …"; it never expires on its own (the person's call), but it is cancelled when the
+   session is archived.
+3. **A reply settles by intent, not by tag alone.** The `[reply <id>]` tag is the fast path; if the
+   workspace's turn ends with an open ask and no tag, the turn's final assistant text is taken as
+   the reply and the workspace is bounced once ("say `[reply <id>]`"). A reply for an already
+   settled ask is appended as an update, never a new exchange. A workspace turn that ends in an
+   error (model refused, no key, tool failure) settles the ask `blocked` with the error's plain
+   sentence.
+4. **Progress is part of the lifecycle** (§3.8): a `report progress` resets the idle clock and is
+   shown on the card; the bench never polls.
+5. **Watches are bounded**: a matched line is said once; a watch ends with its process; a watch
+   fires at most `watch_max_fires` (20) times, then says so and stops.
+6. **Duplicates are one exchange**: an ask with the same text to the same workspace while one is
+   open joins the open one (the bench is told "already asked, ask-5").
+7. **Sweep every 30 s** advances deadlines, reaps orphans (an exchange whose session is archived),
+   and marks background tasks whose process is gone `lost`. Every transition is one line in
+   `exchanges.jsonl` and one row in the Queue tab with its age; nothing is silent.
+8. **On the fleet** `bench.ask.settles` (a reply without the tag still settles), `bench.ask.idle`
+   (a workspace that goes quiet is nudged then expired) and `bench.restart.keeps_asks` (an open ask
+   survives a bench restart) hold this.
+
 ## 4. Subagents work in trees, not workspaces
 
 ### 4.1 Decisions
