@@ -508,9 +508,9 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
         "{}",
         cmd[2]
     );
-    // sshd exits on a missing privsep directory or a missing `sshd` user, and stock alpine has
-    // neither.
-    // The accounts and chroot dir are the image's (Dockerfile `workspace`), not the prelude's.
+    // sshd exits on a missing privsep directory or a missing `sshd` user, and stock
+    // debian:bookworm-slim has neither. Both are the image's (`useradd` in the Dockerfile's
+    // `workspace` stage), never something the prelude creates at start.
     assert!(!cmd[2].contains("adduser"), "{}", cmd[2]);
     assert_eq!(c.image.as_deref(), Some("ghcr.io/kloudlite/kloudlite-workspace:deadbeef"), "the pinned image, not the marker");
     assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 22);
@@ -578,7 +578,7 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     // `~/workspaces` is the pod's own emptyDir: root chowns that mount point and nothing else.
     assert!(prelude.contains("chown 1000:1000 $H $H/workspaces\n"), "{prelude}");
     assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -Rh 1000:1000 /home/kl/workspaces/"), "{prelude}");
-    // The prompt and the profile's PATH, for both shells; the greeting replaces alpine's.
+    // The prompt and the profile's PATH, for both shells; the greeting replaces the base image's.
     assert!(prelude.contains("starship init zsh"), "{prelude}");
     // Coloured `ls` in both shells: coreutils' ls is plain until LS_COLORS and --color say
     // otherwise, and a login that cannot tell a directory from a file feels broken.

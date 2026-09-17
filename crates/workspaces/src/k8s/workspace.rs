@@ -113,13 +113,10 @@ pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, regist
 ///
 /// The shell is zsh from the Nix profile (with fish alongside and starship for the prompt), so
 /// `WS_BASE_PACKAGES` must keep `zsh fish starship`; the profile is mounted before this runs.
-/// The two apk packages are for VS Code Remote-SSH: its Alpine server ships a musl `node`
-/// that still dlopens libstdc++ and libgcc_s, which stock alpine lacks — without them every
-/// connect downloads the server and dies with "Error relocating … libstdc++". Nix cannot
-/// supply them (its libstdc++ is glibc-linked). Best effort: no network at boot is not a
-/// reason to refuse the shell.
-/// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
-/// even a valid key; `*` is "no password" and is not locked. `~/workspaces/<id>` is chowned every
+/// libstdc++6/libgcc-s1 for VS Code Remote-SSH (its server dlopens both) are the IMAGE's, installed
+/// at build time since the base moved to debian:bookworm-slim — the prelude installs nothing.
+/// The accounts are the image's too: `useradd -p '*'` writes "no password", NOT the `!` that sshd
+/// reads as "account locked" and refuses even a valid key for. `~/workspaces/<id>` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 ///
@@ -135,8 +132,8 @@ pub(super) fn login_env(ws_id: &str, name: &str, owner: &str, team: &str, regist
 /// because the home is now persistent and the person owns every byte of it between starts:
 /// `mv ~/.config x; ln -s /etc ~/.config` would otherwise make the next start `chown` and write
 /// through `/etc` as root, and the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. The
-/// seed runs from a heredoc on `su`'s stdin (busybox `su -c` would need the printf quoting nested
-/// a second time), with `set -e` of its own so a failed seed still stops the pod.
+/// seed runs from a heredoc on `su`'s stdin rather than `su -c` (which would need the printf
+/// quoting nested a second time), with `set -e` of its own so a failed seed still stops the pod.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
 /// persistent home hostPath and the rc files are seeded only if absent, so a person's own edits survive
 /// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
@@ -541,12 +538,12 @@ pub fn workspace_pod(
         containers: vec![Container {
             name: "workspace".to_string(),
             image: Some(if default_image { ctx.default_image.to_string() } else { spec.image.clone() }),
-            // Only the default image is told what to run: it is a bare alpine, and sshd from its
-            // Nix profile is both what keeps it alive and how people get in. A user's own image
-            // keeps its entrypoint — we cannot know what it expects to run, and overriding it
-            // would break every image that starts a daemon.
-            // Everything a bare alpine lacks for sshd and a login is made at start (see
-            // `prelude`) rather than baked into an image, so the default image stays stock alpine.
+            // Only the default image is told what to run: it is a near-stock debian:bookworm-slim,
+            // and sshd from its Nix profile is both what keeps it alive and how people get in. A
+            // user's own image keeps its entrypoint — we cannot know what it expects to run, and
+            // overriding it would break every image that starts a daemon.
+            // Everything a bare debian lacks for a login — the rc files, the profile, the caches —
+            // is made at start (see `prelude`) rather than baked in, so the image stays near-stock.
             command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude(&spec.name)]),
             ports: default_image.then(|| {
                 vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
