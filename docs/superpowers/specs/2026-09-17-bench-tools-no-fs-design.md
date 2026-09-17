@@ -271,3 +271,33 @@ supersedes §9's UI-face prose for the transcript; cards keep their structure bu
   Plex Mono for everything in the pane, Zed Plex Sans for the shell chrome (both OFL, vendored as
   woff2 from zed-industries/zed `assets/fonts`). Line height 1.5, 13 px, 2-space glyph gutter.
 - Inspector and sidebar keep their layout, take the palette and Zed Plex Sans.
+
+### 16b. Observed in opencode 1.18.31 (tmux, 2026-09-17 17:40 IST) — the contract to replicate
+
+- **Empty session**: wordmark centred; composer block with a left rail `┃`, placeholder
+  `Ask anything… "Fix a TODO in the codebase"`, second line `Build · <model> <provider> · low`,
+  bottom rule `▀▀▀`; under it right-aligned `tab agents  ctrl+p commands`; a `● Tip …` line;
+  footer: `<cwd>:<branch>` left, `⊙ 3 MCP /status` and version right.
+- **Person's message**: rail block `┃  text` (one blank rail line above and below).
+- **Assistant text**: plain, indented to the rail's text column, no glyph.
+- **Tool lines**: read/glob/grep are ONE muted line `→ Read index.ts`; **edit** is a rail block
+  `← Edit index.ts` followed by the diff with line numbers and `+`/`-` rows inside the rail;
+  **bash** is a rail block `$ ls -a && wc -l index.ts` with its output lines inside the rail;
+  **question** is a rail block: the question, numbered options with a one-line description each,
+  `3. Type your own answer`, hint `↑↓ select  enter submit  esc dismiss`; **subagent** is
+  `✓ Explore Task — <title>` then `↳ 1 toolcall · 2.3s` then `ctrl+x down view subagents`, its
+  report as plain text after; while running the ✓ is a spinner glyph.
+- **Queued message** typed mid-turn shows as a rail block at the point where it was taken.
+- **Turn footer** after every assistant turn: `▣  <mode> · <model> · 5.2s` (muted; elapsed).
+- **Composer** while running: same block; **footer bar**: animated `⬝■■■■■■⬝` spinner + `esc
+  interrupt` left; `70.0K (7%) · $0.01  ctrl+p commands` right. Idle: cwd left, hints right.
+- **Sidebar (right)**: session title (auto-named from the first message), `Context` block
+  (`69,738 tokens`, `7% used`, `$0.01 spent`), MCP list with connection dots, LSP, cwd:branch.
+- **Keys**: `tab` cycles mode Build/Plan (shown in composer and turn footer); `ctrl+t` cycles the
+  model variant (low/high); `ctrl+p` opens a command palette overlaid on the right: Search box,
+  groups Suggested / Session, each row with its shortcut (`ctrl+x l` switch session, `ctrl+x n`
+  new, `ctrl+x m` switch model, `ctrl+r` rename, `ctrl+x g` jump to message, fork, compact,
+  undo, hide sidebar); `/` opens a slash menu listing commands with descriptions; `esc`
+  interrupts.
+Map: mode ↔ our bench/plan-only toggle (plan mode = read-only tools + plan tool); variants ↔ model
+thinking level; MCP list ↔ our tool servers / connected workspaces; `ctrl+x down` ↔ agent tabs.
