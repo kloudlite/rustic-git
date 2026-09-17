@@ -333,6 +333,8 @@ export type Message =
   /** `local`: echoed the moment it was typed, before pi reported taking it; its time is not pi's yet. */
   | { role: "user"; text: string; at: string; ts?: number; images?: number[]; local?: true }
   | { role: "assistant"; text: string; at: string; ts?: number }
+  /** A question the harness is waiting on: nothing changes until the person answers it (spec §9). */
+  | { role: "question"; id: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: "yes" | "no"; at: string; ts?: number }
   | { role: "action"; kind: "spawn" | "run" | "fold" | "note"; text: string; target?: string; at: string; ts?: number; ok?: boolean; output?: string; pending?: boolean; tool?: string; args?: Record<string, unknown>; ms?: number };
 
 export const MACHINE: Machine = {

@@ -58,6 +58,8 @@ export class Bench {
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
   private procPoll?: ReturnType<typeof setInterval>;
+  /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
+  private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; answer?: "yes" | "no"; wake: (() => void)[] }>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -205,6 +207,12 @@ export class Bench {
     if (ev.type === "extension_ui_request" && ev.method === "setWidget") {
       const line = (ev.widgetLines as string[] | undefined)?.[0];
       try {
+        if (ev.widgetKey === "harness:proposal" && line) {
+          // A tool asking to run: recorded here, drawn by the desktop, answered by a person.
+          const p = JSON.parse(line) as { id: string; tool: string; args: unknown; summary: string };
+          if (!this.proposals.has(p.id)) this.proposals.set(p.id, { session: id, tool: p.tool, summary: p.summary, args: p.args, wake: [] });
+          this.emit({ type: "proposal", row: { id: p.id, session: id, tool: p.tool, args: p.args, summary: p.summary } });
+        }
         if (ev.widgetKey === "harness:procs") {
           const rows = (line ? JSON.parse(line) : []) as Omit<ProcRow, "session">[];
           this.write(() => this.procs.snapshot(id, rows));
@@ -389,6 +397,43 @@ export class Bench {
       throw e;
     }
     return { session: s.id, exchange, workspace, queued: queue.length };
+  }
+
+  /**
+   * The extension's side of a proposal: wait until a person answers, or until the cap. An unanswered
+   * question is a NO — the whole point is that nothing changes without somebody saying yes.
+   */
+  waitProposal(id: string, capMs: number, signal?: AbortSignal): Promise<"yes" | "no"> {
+    const p = this.proposals.get(id);
+    if (!p) return Promise.resolve("no");
+    if (p.answer) return Promise.resolve(p.answer);
+    return new Promise((resolve) => {
+      const done = (a: "yes" | "no") => {
+        clearTimeout(timer);
+        this.proposals.get(id)?.wake.splice(0);
+        resolve(a);
+      };
+      const timer = setTimeout(() => (this.answerProposal(id, "no"), done("no")), capMs);
+      timer.unref?.();
+      p.wake.push(() => done(this.proposals.get(id)?.answer ?? "no"));
+      // A client that went away takes its question with it; the tool call is over either way.
+      signal?.addEventListener("abort", () => done("no"), { once: true });
+    });
+  }
+
+  /** A person's answer. Idempotent: the first answer stands, and a second changes nothing. */
+  answerProposal(id: string, answer: "yes" | "no"): { id: string; answer: "yes" | "no" } {
+    const p = this.proposals.get(id);
+    if (!p) throw new Error(`no proposal ${id}`);
+    p.answer ??= answer;
+    this.emit({ type: "proposal", row: { id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
+    for (const w of p.wake.splice(0)) w();
+    return { id, answer: p.answer };
+  }
+
+  /** What is still being asked, for a window that opened after the question did. */
+  openProposals(): { id: string; session: string; tool: string; args: unknown; summary: string }[] {
+    return [...this.proposals.entries()].filter(([, p]) => !p.answer).map(([id, p]) => ({ id, session: p.session, tool: p.tool, args: p.args, summary: p.summary }));
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */

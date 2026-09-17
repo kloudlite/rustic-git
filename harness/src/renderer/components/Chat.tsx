@@ -15,6 +15,7 @@ import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
 
 type Action = Extract<Message, { role: "action" }>;
+type QuestionRow = Extract<Message, { role: "question" }>;
 
 const KIND_GLYPH = { spawn: "+", run: "$", fold: "⇡", note: "…" } as const;
 /** A workspace's answer to an ask comes back as a prompt tagged with its name; the tag is a label. */
@@ -343,6 +344,7 @@ export function Chat(props: {
                   <Show when={si() > 0}><SittingRule messages={sit} /></Show>
             <For each={sit}>
               {(b) => (
+                <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} />}>
                 <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
                   {/* A prompt is a command and reads like one; an answer is prose
                       and reads in the UI face, so the two turns are told apart by
@@ -378,6 +380,7 @@ export function Chat(props: {
                       </For>
                     </div>
                   </Show>
+                </Show>
                 </Show>
               )}
             </For>
@@ -710,6 +713,46 @@ function Time(props: { at: string }) {
     <span class="shrink-0 pl-6 text-right text-xs leading-[inherit] whitespace-nowrap tabular-nums text-subtle">
       {props.at}
     </span>
+  );
+}
+
+/**
+ * A tool asking to run (spec §9). It reads as what it is — a question with an answer — rather than
+ * as a dialog over the thread: the person says yes or no in the transcript, and the answer stays
+ * there as the record of what was agreed to. Nothing changes on the platform until they do.
+ */
+function Question(props: { q: QuestionRow; session: string }) {
+  const answered = () => props.q.answer;
+  return (
+    <div class="my-1 flex flex-col gap-2 rounded-[2px] border border-request-line bg-request px-3 py-2 font-ui text-sm">
+      <div class="flex items-baseline gap-2">
+        <span class="shrink-0 font-bold text-accent">?</span>
+        <span class="min-w-0 flex-1 text-fg">{props.q.summary}</span>
+        <Time at={props.q.at} />
+      </div>
+      <Show when={props.q.args && Object.keys(props.q.args).length}>
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 font-mono text-xs">
+          <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
+            {([k, v]) => (
+              <div class="flex min-w-0 items-baseline gap-2">
+                <span class="w-24 shrink-0 truncate text-subtle">{k}</span>
+                <span class="min-w-0 truncate text-muted" title={typeof v === "object" ? JSON.stringify(v) : String(v)}>{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+              </div>
+            )}
+          </For>
+        </div>
+      </Show>
+      <Show
+        when={!answered()}
+        fallback={<div class="text-xs text-subtle">{answered() === "yes" ? "you said yes" : "you said no"}</div>}
+      >
+        <div class="flex items-center gap-2">
+          <Button size="sm" onClick={() => live.answerProposal(props.session, props.q.id, "yes")}>Yes</Button>
+          <Button size="sm" variant="ghost" onClick={() => live.answerProposal(props.session, props.q.id, "no")}>No</Button>
+          <span class="text-xs text-subtle">nothing changes until you answer</span>
+        </div>
+      </Show>
+    </div>
   );
 }
 

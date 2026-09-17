@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { TOOLS } from "./catalog.ts";
+import { TOOLS, gated, question } from "./catalog.ts";
 
 /**
  * The bench's hands on the platform: `/v1` as tools. Authentication is the
@@ -189,6 +189,13 @@ export function makeReg(pi: ExtensionAPI) {
       parameters: Type.Object(params),
       async execute(toolCallId, a, signal, _update, ctx) {
         const args = a as Record<string, any>;
+        // Changing somebody's platform is asked first (owner, 2026-09-17): the desktop draws the
+        // question, the person answers it, and only then does this run. A message to another
+        // session and this machine's own packages are not that, and are never gated.
+        if (gated(name)) {
+          const ok = await propose(`p-${toolCallId}`, name, args, ctx, signal);
+          if (!ok) return text("declined by the person");
+        }
         // A call that hands work to a workspace or environment is an exchange:
         // harness-bench records it in the bench's one log, where the session's
         // queue and the workspace's queue both read it.
@@ -230,6 +237,24 @@ export function capabilities(reg: ReturnType<typeof makeReg>) {
       ].join("\n"),
     );
   });
+}
+
+/**
+ * Ask before changing anything. The proposal is published on the one channel an extension has to
+ * the harness (`setWidget`), and the answer comes back through the bench, which holds the question
+ * until a person answers it in the desktop. Nothing is guessed: no answer inside the cap is a NO,
+ * and so is a bench that cannot be reached — a change nobody agreed to must not happen because a
+ * socket dropped.
+ */
+const PROPOSAL_CAP_MS = 10 * 60_000;
+async function propose(id: string, tool: string, args: Record<string, any>, ctx: { ui?: { setWidget?: (k: string, lines: string[]) => void } } | undefined, signal?: AbortSignal): Promise<boolean> {
+  ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool, args, summary: question(tool, args) })]);
+  try {
+    const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal });
+    return r.ok && ((await r.json()) as { answer?: string }).answer === "yes";
+  } catch {
+    return false;
+  }
 }
 
 /** Where harness-bench listens for its own extension; a test points this elsewhere. */

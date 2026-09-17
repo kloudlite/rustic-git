@@ -20,7 +20,7 @@ const MAX_BODY = 64 * 1024 * 1024;
 /** Split and decode a path; a bad escape or an id that could walk out of a folder (`..%2F`) is a 400, never a crash or a read elsewhere. */
 function segments(pathname: string): string[] {
   const p = pathname.split("/").filter(Boolean).map(decodeURIComponent);
-  if ((p[0] === "sessions" || p[0] === "workspaces") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
+  if ((p[0] === "sessions" || p[0] === "workspaces" || p[0] === "proposals") && p[1] !== undefined && (!/^[A-Za-z0-9._-]+$/.test(p[1]) || p[1] === "." || p[1] === ".."))
     throw new Error(`bad id ${JSON.stringify(p[1])}`);
   return p;
 }
@@ -118,6 +118,21 @@ export function serve(
           return send(res, 204);
         }
       }
+      // The proposal a tool is waiting on: the extension long-polls the wait, the desktop answers.
+      if (p[0] === "proposals" && p.length >= 2) {
+        const cap = Math.min(Number(u.searchParams.get("cap")) || 600_000, 600_000);
+        if (p.length === 3 && p[2] === "wait" && m === "GET") {
+          const ac = new AbortController();
+          req.on("close", () => ac.abort());
+          return send(res, 200, { answer: await bench.waitProposal(p[1], cap, ac.signal) });
+        }
+        if (p.length === 2 && m === "POST") {
+          const b = await body(req);
+          if (b.answer !== "yes" && b.answer !== "no") return send(res, 400, { error: "answer is yes or no" });
+          return send(res, 200, bench.answerProposal(p[1], b.answer));
+        }
+      }
+      if (m === "GET" && u.pathname === "/proposals") return send(res, 200, bench.openProposals());
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());
       if (m === "POST" && u.pathname === "/import") {

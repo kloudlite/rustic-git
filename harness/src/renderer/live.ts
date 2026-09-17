@@ -76,6 +76,16 @@ const [connected, setConnected] = createSignal(false);
 const [writable, setWritable] = createSignal<{ ok: boolean; reason?: string }>({ ok: true });
 export { connected, setConnected, writable };
 
+/**
+ * A person's answer to a proposal. The bench is holding the tool call until this lands; the answer
+ * is also said out loud in the thread, so the transcript reads as the conversation it was.
+ */
+export function answerProposal(session: string, id: string, answer: "yes" | "no") {
+  thread(session).proposal({ id, tool: "", summary: "", answer });
+  thread(session).sent(answer);
+  void window.harness.bench("POST", `/proposals/${id}`, { answer }).catch((e: Error) => thread(session).note(e.message));
+}
+
 export function stopProc(p: Proc) {
   if (p.session) void window.harness.pi({ type: "prompt", message: `/proc-stop ${p.id}` }, p.session).catch((e: Error) => thread(p.session!).note(e.message));
 }
@@ -177,6 +187,16 @@ function makeThread(id: string) {
     setReady(true);
   }
 
+  /**
+   * A tool asking to run. It sits in the transcript as a question and stays there once answered —
+   * the record of what was agreed to is the conversation itself.
+   */
+  function proposal(row: { id: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: "yes" | "no" }) {
+    const i = messages.findIndex((m) => m.role === "question" && (m as { id: string }).id === row.id);
+    if (i >= 0) return void setMessages(i, { answer: row.answer } as never);
+    push({ role: "question", id: row.id, tool: row.tool, summary: row.summary, args: row.args, at: now() });
+  }
+
   /** A line from the harness itself, on the rail, the way a shell answers a builtin. */
   function note(text: string) {
     push({ role: "action", kind: "note", target: "harness", text: text.split("\n")[0], at: now(), ok: true, output: text.includes("\n") ? text : undefined });
@@ -218,7 +238,7 @@ function makeThread(id: string) {
     const at = new Date(ts).toTimeString().slice(0, 5);
     // The local echo of this very prompt: stamp it instead of showing the line twice.
     let i = -1;
-    for (let k = messages.length - 1; k >= 0 && i < 0; k--) if (messages[k].role === "user" && (messages[k] as { local?: true }).local && messages[k].text === text) i = k;
+    for (let k = messages.length - 1; k >= 0 && i < 0; k--) if (messages[k].role === "user" && (messages[k] as { local?: true; text?: string }).local && (messages[k] as { text?: string }).text === text) i = k;
     if (i >= 0) return setMessages(i, { at, ts, local: undefined } as never);
     push({ role: "user", text, at, ts });
     // A user message ends whatever assistant block was open: the next delta starts a new one.
@@ -331,7 +351,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, onEvent };
+  return { id, messages, busy, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
@@ -351,6 +371,11 @@ export function onEvent(ev: Ev & { pi?: string }) {
       return void setConnected(ev.connected === true);
     case "writable":
       return void setWritable({ ok: ev.ok === true, reason: ev.reason as string | undefined });
+    case "proposal": {
+      const row = ev.row as { id: string; session: string; tool: string; summary: string; args?: Record<string, unknown>; answer?: "yes" | "no" };
+      if (row?.session) thread(row.session).proposal(row);
+      return;
+    }
     case "exchange":
       // One row per publish: a record, or a transition of one already held.
       if (ev.row) foldExchange(ev.row as Exchange);

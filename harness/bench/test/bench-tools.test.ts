@@ -163,6 +163,12 @@ test("adding a service keeps every other service exactly as it was", async () =>
     let b = "";
     req.on("data", (d) => (b += d));
     req.on("end", () => {
+      // The same server stands in for the bench too: a write is proposed first, and this person
+      // says yes. Without an answer the tool would decline itself, which is the point of §9.
+      if (req.url!.startsWith("/proposals")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        return void res.end(JSON.stringify({ answer: "yes" }));
+      }
       // A real api: the next GET sees what the last PATCH wrote.
       if (req.method === "PATCH") live = (patched = JSON.parse(b)).services;
       res.writeHead(200, { "content-type": "application/json" });
@@ -174,12 +180,14 @@ test("adding a service keeps every other service exactly as it was", async () =>
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-svc-"));
   fs.writeFileSync(path.join(dir, "token"), "t");
-  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_FORK: undefined, KL_TOOLS_WORKSPACE: undefined, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme" });
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_FORK: undefined, KL_TOOLS_WORKSPACE: undefined, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme" });
   try {
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
-    await tool("kl_environment_service_add").execute("c1", { id: "devstack", service: { name: "nats", image: "nats:2", ports: [4222] } }, undefined, undefined, undefined);
+    const added = await tool("kl_environment_service_add").execute("c1", { id: "devstack", service: { name: "nats", image: "nats:2", ports: [4222] } }, undefined, undefined, undefined);
+    assert.notEqual(added.content[0].text, "declined by the person", JSON.stringify(added));
     assert.deepEqual(patched.services[0], mongodb, "mongodb passed through verbatim");
     // The api has no serde default for these three: an omitted one is a 422, not an empty list.
     assert.deepEqual(patched.services[1], { name: "nats", image: "nats:2", command: [], env: {}, mounts: [], ports: [4222] });
