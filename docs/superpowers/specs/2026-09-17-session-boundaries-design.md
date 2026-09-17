@@ -291,6 +291,17 @@ three answers (yes · yes and don't ask again for this tool this session · no).
 everything mutating asks; **accept-edits** — file tools run unasked, commands still ask; **plan** —
 mutating tools refused. Reads never ask. The "don't ask again" memory is per session and per tool.
 
+
+### 3.7 Bench = semantics, workspace = implementation (owner, 04:25 IST 18 Sep)
+
+The bench session holds the semantic context — what exists, what it does, its contracts, its
+state — and never the implementation. The workspace session holds the implementation — files,
+code, commands, digests, ports. Every reply that crosses from a workspace to the bench is SHAPED
+by the harness, not merely shortened: `outcome` (done / blocked / needs the person), the
+`contracts:` line, `what changed for the person` in capability terms, `next`. Anything naming a
+file, path, command, digest or line of code is dropped from the bench copy; the full text stays
+with the workspace session and in the Queue card. `kl_workspace_progress` is one line per ask.
+
 ## 4. Subagents work in trees, not workspaces
 
 ### 4.1 Decisions
