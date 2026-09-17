@@ -3,6 +3,7 @@ import path from "node:path";
 import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
+import { nudge, reduce, type PlanEvent } from "./plan.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
@@ -62,6 +63,8 @@ export class Bench {
   private procPoll?: ReturnType<typeof setInterval>;
   /** Consecutive sweeps a session's tool server could not be asked; three is "gone", not "a blip". */
   private unreachable = new Map<string, number>();
+  /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
+  private turnCalls = new Map<string, { calls: number; nudged?: true }>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
   private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; answer?: "yes" | "no"; wake: (() => void)[] }>();
 
@@ -174,6 +177,7 @@ export class Bench {
       void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
     }
     if (ev.type === "agent_start") {
+      this.turnCalls.set(id, { calls: 0 });
       const a = this.asked.get(id)?.[0];
       if (a) this.transitionAsk(a, "running");
       this.turning.add(id);
@@ -183,6 +187,7 @@ export class Bench {
       this.turning.delete(id);
       // `willRetry` means this run is not the answer yet — pi keeps going on its own.
       if (ev.willRetry !== true) void this.deliver(id, ev.messages as { role?: string; content?: unknown }[] | undefined);
+      if (ev.willRetry !== true) this.keepPlanCurrent(id);
     }
     if (ev.type === "exit") {
       this.turning.delete(id);
@@ -194,6 +199,9 @@ export class Bench {
       // Same here: this session's pi went, its processes did not.
     }
     if (ev.type === "tool_execution_start") {
+      this.turnCalls.set(id, { calls: (this.turnCalls.get(id)?.calls ?? 0) + 1, ...(this.turnCalls.get(id)?.nudged ? { nudged: true as const } : {}) });
+      // Work is starting and nothing is marked doing: the first thing waiting is what this is.
+      this.plan(id, { type: "working" });
       const name = ev.toolName as string;
       const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
       if (row) this.emit({ type: "task", row });
@@ -254,7 +262,18 @@ export class Bench {
     }
   }
 
+  /** One event, one plan. Writes and publishes only when something actually moved. */
+  private plan(session: string, ev: PlanEvent) {
+    const next = reduce(this.plans.get(session), ev);
+    if (!next) return;
+    this.write(() => this.plans.set(session, next));
+    this.emit({ type: "plan", session, items: this.plans.get(session) });
+  }
+
   private transitionAsk(a: { exchange: string; from: string; workspace: string }, state: string) {
+    // Work handed to somebody else is in the plan too: the asker's, since that is who is waiting.
+    if (state === "done") this.plan(a.from, { type: "answered", exchange: a.exchange });
+    if (state === "failed") this.plan(a.from, { type: "ask_failed", exchange: a.exchange, task: a.workspace });
     this.write(() => this.exchanges.transition(a.exchange, state));
     this.emit({ type: "exchange", row: this.exchanges.bySession(a.from).find((e) => e.id === a.exchange) });
   }
@@ -405,6 +424,22 @@ export class Bench {
     if (row) this.emit({ type: "procs", rows: this.procs.all() });
   }
 
+  /**
+   * A turn ended with the plan out of date — an item still `doing`, or real work done with no plan
+   * at all. The harness says so ONCE, as a follow-up the model answers with a `plan` call: the
+   * model forgetting is the common case, and a panel that lies is worse than a line of nagging.
+   */
+  private keepPlanCurrent(id: string) {
+    const turn = this.turnCalls.get(id);
+    if (!turn || turn.nudged) return;
+    // Something it is waiting on is not something it forgot: an outstanding ask keeps its item doing.
+    const waiting = (this.asked.get(id)?.length ?? 0) > 0;
+    const line = waiting ? undefined : nudge(this.plans.get(id), turn.calls);
+    if (!line) return;
+    this.turnCalls.set(id, { ...turn, nudged: true });
+    void this.send(id, line).catch(() => undefined);
+  }
+
   /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
   private send(id: string, message: string): Promise<PiEvent> {
     return this.rpc(id, { type: this.turning.has(id) ? "follow_up" : "prompt", message });
@@ -436,6 +471,7 @@ export class Bench {
     const queue = this.asked.get(s.id) ?? [];
     queue.push({ exchange, from, workspace });
     this.asked.set(s.id, queue);
+    this.plan(from, { type: "asked", exchange, to: workspace, task: text });
     try {
       await this.send(s.id, `[ask ${exchange} from ${asker.name}] ${text}`);
     } catch (e) {
@@ -473,6 +509,8 @@ export class Bench {
     const p = this.proposals.get(id);
     if (!p) throw new Error(`no proposal ${id}`);
     p.answer ??= answer;
+    // A no means the item the turn was on is not happening: the plan says so, with the reason.
+    if (p.answer === "no") this.plan(p.session, { type: "declined" });
     this.emit({ type: "proposal", row: { id, session: p.session, tool: p.tool, args: p.args, summary: p.summary, answer: p.answer } });
     for (const w of p.wake.splice(0)) w();
     return { id, answer: p.answer };
@@ -502,6 +540,7 @@ export class Bench {
     const queue = this.asked.get(s.id) ?? [];
     queue.push({ exchange, from, workspace: name, agent: true });
     this.asked.set(s.id, queue);
+    this.plan(from, { type: "asked", exchange, to: name, task });
     try {
       // No tag and no history: an agent is given the task and nothing else, so its answer is the
       // answer to that task rather than to a conversation it was not part of.

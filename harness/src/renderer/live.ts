@@ -72,7 +72,8 @@ export { plans };
 /** The panel's own four states, which the tree already draws: a plan is a plan either way. */
 const PLAN_STATE = { todo: "pending", doing: "active", done: "done", later: "blocked" } as const;
 export const planOf = (session: string) =>
-  (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text, state: PLAN_STATE[x.state] ?? "pending", note: x.why }));
+  // The harness tags an item it made for an ask with its exchange id; the person reads the words.
+  (plans[session] ?? []).map((x, i) => ({ id: `${session}-${i}`, text: x.text.split("\u0000")[0], state: PLAN_STATE[x.state] ?? "pending", note: x.why }));
 
 const [sessionCount, setSessionCount] = createSignal(1);
 export { sessionCount, setSessionCount };
