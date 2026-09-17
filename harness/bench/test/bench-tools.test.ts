@@ -1988,3 +1988,58 @@ test("a watch stops after twenty fires, and says why", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * The lifecycle covers what a session waits on that is NOT a session (spec §3.9 rule 8): a process,
+ * a job, another workspace, a tree. None of them may leave a wait open with nothing said.
+ */
+test("a workspace that goes takes its open asks and its watches with it", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-wsgone-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "hang", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange && e.state === "running"), 5_000, "the ask running");
+
+    bench.workspaceGone("api", "workspace stopped");
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "blocked");
+    const told = (await bench.messages(asker)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("blocked: workspace stopped")),
+      "and the asking session is told which way it ended",
+    );
+    // A tree is a machine too: the same call ends an agent's waits when its tree is deleted.
+    const b = await bench.ask("api", "hang twice", asker);
+    bench.workspaceGone("api", "the tree was deleted");
+    assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === b.exchange)!.state, "blocked");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a job with nothing to say for an hour stops claiming to be running", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-job-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const session = bench.sessions.all().find((s) => !s.archived)!.id;
+    const t0 = Date.now();
+    bench.tasks.transition({ id: "t-1", session, tool: "Bash", arg: "npm run build", state: "background", started: t0 });
+
+    await bench.sweepExchanges(t0 + 30 * 60_000);
+    assert.equal(bench.tasks.all().find((t) => t.id === "t-1")!.state, "background", "half an hour is still work");
+
+    await bench.sweepExchanges(t0 + 61 * 60_000);
+    assert.equal(bench.tasks.all().find((t) => t.id === "t-1")!.state, "lost");
+    const told = (await bench.messages(session)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("expired: it has been running for an hour")),
+      "and the session hears once",
+    );
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

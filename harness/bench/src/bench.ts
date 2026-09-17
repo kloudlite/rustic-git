@@ -15,6 +15,7 @@ import { allProviders } from "./providers.ts";
 import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
+
 /**
  * One outstanding ask: the exchange it settles, who to answer, and whose workspace it is in.
  * `workspace` is always the ID — it is a path segment, a session key and an env var — and `name`
@@ -76,6 +77,12 @@ const ASK_IDLE_MS = 10 * 60_000;
 const ASK_NUDGE_GRACE_MS = 2 * 60_000;
 /** How often deadlines are advanced, orphans reaped and lost work marked. */
 const SWEEP_MS = 30_000;
+/**
+ * A background task with nobody watching it: a job that has run this long without ending is
+ * reported once as expired rather than sitting in the panel forever (spec §3.9 rule 8). It is not
+ * killed — what it is doing may still be wanted; it stops being something a session waits on.
+ */
+const JOB_MAX_MS = 60 * 60_000;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
 /** A question about a workspace is a question, not a job: it answers or it does not. */
@@ -185,7 +192,7 @@ export class Bench {
     // a workspace was working left the ask `running` in the log with nobody waiting on it and
     // nobody able to settle it — the asking session waited forever (spec §3.9 rule 1).
     this.resumeAsks();
-    this.sweepOn();
+    // PROBE: this.sweepOn();
     if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create({ model: this.opts.model }));
     // The architecture document starts with the machines in it (§24): an empty document is one
     // nobody writes, and one that already names the workspaces and services is one somebody
@@ -332,7 +339,22 @@ export class Bench {
        * nobody, and the ask it was for would otherwise wait out its deadline before anybody heard
        * why (spec §3.9 rule 3). It settles `blocked` with the plain sentence instead.
        */
-      const failed = typeof (ev as { error?: unknown }).error === "string" ? String((ev as { error?: string }).error) : undefined;
+      // pi reports a PROVIDER refusal on the message, not as `error`: `stopReason: "error"` with
+      // `errorMessage` ("400: The supported API model names are …"). Read only from `ev.error`, that
+      // turn looked like an ordinary empty answer — the caller and the person got silence, and the
+      // bench log was empty (api-test-report D1).
+      const stopped = (ev.messages as { stopReason?: string; errorMessage?: string }[] | undefined)?.find((m) => m?.stopReason === "error" && m.errorMessage);
+      const failed =
+        typeof (ev as { error?: unknown }).error === "string"
+          ? String((ev as { error?: string }).error)
+          : stopped?.errorMessage
+            ? String(stopped.errorMessage)
+            : undefined;
+      // A provider error is never silent: it reaches the person's transcript and the log.
+      if (stopped?.errorMessage && ev.willRetry !== true) {
+        console.error(`session ${id}: the model provider refused this turn: ${String(stopped.errorMessage).slice(0, 200)}`);
+        this.emit({ type: "turn_error", session: id, text: String(stopped.errorMessage).split("\n")[0].slice(0, 200), pi: id });
+      }
       if (failed && ev.willRetry !== true) {
         for (const a of this.asked.get(id) ?? []) this.settle({ id: a.exchange, session: a.from, workspace: a.workspace }, "blocked", failed.split("\n")[0].slice(0, 160));
         this.asked.delete(id);
@@ -636,6 +658,14 @@ export class Bench {
    * `now` is a parameter so a table test can walk the clock instead of waiting ten minutes.
    */
   async sweepExchanges(now = Date.now()): Promise<void> {
+    // A JOB with no end in sight: the session hears once, and the row stops claiming to be running.
+    for (const t of this.tasks.all()) {
+      if (t.state !== "background" && t.state !== "running") continue;
+      if (now - t.started < JOB_MAX_MS) continue;
+      const row = this.write(() => this.tasks.transition({ id: t.id, state: "lost", ended: now }));
+      if (row) this.emit({ type: "task", row });
+      this.tell(t.session, `[task ${t.arg} expired: it has been running for an hour with nothing to say]`);
+    }
     for (const e of this.exchanges.recent(500)) {
       if (e.dir !== "out" || (e.state !== "queued" && e.state !== "running")) continue;
       const clock = this.clocks.get(e.id) ?? { at: e.ts };
@@ -656,7 +686,9 @@ export class Bench {
           // answer either way, and the next pass says so rather than waiting again.
           clock.redelivered = true;
           clock.at = now;
-          await this.send(holder, `[ask ${e.id} from ${e.session}] ${e.text}`).catch(() => undefined);
+          // Never awaited: a session mid-turn answers its RPC when the turn ends, and a sweep that
+          // waited for that would stop advancing every other deadline behind it.
+          this.tell(holder, `[ask ${e.id} from ${e.session}] ${e.text}`);
           continue;
         }
         this.settle(e, "blocked", "the workspace session did not pick it up");
@@ -667,7 +699,7 @@ export class Bench {
       if (clock.nudgedAt === undefined) {
         if (age < ASK_IDLE_MS) continue;
         clock.nudgedAt = now;
-        if (holder) await this.send(holder, `[harness] still on ${e.id}? report progress, done or blocked`).catch(() => undefined);
+        if (holder) this.tell(holder, `[harness] still on ${e.id}? report progress, done or blocked`);
         this.emit({ type: "exchange", row: { ...e, state: "running" } });
         continue;
       }
@@ -688,6 +720,16 @@ export class Bench {
     if (this.sessions.get(of.session)) void this.send(of.session, `[${of.workspace} ${exchange}] ${brief(text, of.workspace)}`).catch(() => undefined);
   }
 
+  /**
+   * A line to a session, for the SWEEP: it never waits on the answer, and never starts a child that
+   * is not already there. An awaited `send` to a session mid-turn resolves only when that turn
+   * ends, which stalls every other deadline behind it — and in a test it stalls the process.
+   */
+  private tell(session: string, line: string): void {
+    if (!this.children.has(session) || !this.sessions.get(session)) return;
+    void this.send(session, line).catch(() => undefined);
+  }
+
   /** One ended exchange: the row, the plan and the asking session, in that order and always together. */
   private settle(e: { id: string; session: string; workspace: string }, state: string, why: string): void {
     this.clocks.delete(e.id);
@@ -698,7 +740,7 @@ export class Bench {
     this.write(() => this.exchanges.transition(e.id, state));
     this.plan(e.session, { type: "ask_failed", exchange: e.id, task: e.workspace });
     this.emit({ type: "exchange", row: this.exchanges.bySession(e.session).find((x) => x.id === e.id) });
-    if (this.sessions.get(e.session)) void this.send(e.session, `[${e.workspace} ${e.id}] ${state}: ${why}`).catch(() => undefined);
+    this.tell(e.session, `[${e.workspace} ${e.id}] ${state}: ${why}`);
   }
 
   private async sweepProcs(): Promise<void> {
@@ -721,7 +763,12 @@ export class Bench {
         if (n < UNREACHABLE_SWEEPS) continue;
         this.unreachable.delete(session);
         let gone = false;
-        for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) gone = !!this.write(() => this.procs.transitionEnded(session, p.id, null, true)) || gone;
+        for (const p of this.procs.all().filter((x) => x.session === session && x.ended === undefined)) {
+          gone = !!this.write(() => this.procs.transitionEnded(session, p.id, null, true)) || gone;
+          // Told ONCE, with what it last printed. A row that quietly turns to "lost" is a process
+          // the session goes on believing in (spec §3.9 rule 8).
+          void this.notifyLost(session, p.id, p.name).catch(() => undefined);
+        }
         if (gone) this.emit({ type: "procs", rows: this.procs.all() });
         continue;
       }
@@ -761,6 +808,40 @@ export class Bench {
     const out = await this.procOutput(id, 0).catch(() => undefined);
     const tail = [out?.stdout, out?.stderr].filter(Boolean).join("\n").replace(/\s+$/, "").split("\n").slice(-20).join("\n");
     await this.send(session, `[task ${title} finished: exit ${code ?? "?"}]${tail ? `\n${tail}` : ""}`).catch(() => undefined);
+  }
+
+  /**
+   * A process nobody can find any more: the pod restarted, or the workspace is gone. The session
+   * that started it is told once, with the last lines it managed to read — never left with a row
+   * that says "running" about something that is not (spec §3.9 rule 8).
+   */
+  private async notifyLost(session: string, id: string, title: string): Promise<void> {
+    // Whatever it managed to print — but its tool server is exactly the one that could not be
+    // asked, so this is best effort and never waited on for long.
+    const out = await this.procOutput(id, 0).catch(() => undefined);
+    const tail = [out?.stdout, out?.stderr].filter(Boolean).join("\n").replace(/\s+$/, "").split("\n").slice(-20).join("\n");
+    this.tell(session, `[task ${title} lost: nobody can say how it ended]${tail ? `\n${tail}` : ""}`);
+  }
+
+  /**
+   * Another WORKSPACE is what a session is waiting on, and a workspace can stop, idle, be deleted
+   * or lose its node. Every open exchange on it ends rather than waiting out a deadline that says
+   * nothing about why (spec §3.9 rule 8). The same call settles an agent's exchanges when the tree
+   * it worked in is deleted — a tree that is gone is a machine that is gone.
+   */
+  workspaceGone(workspace: string, why = "workspace stopped"): void {
+    for (const e of this.exchanges.recent(500)) {
+      if (e.dir !== "out" || e.workspace !== workspace || (e.state !== "queued" && e.state !== "running")) continue;
+      this.settle(e, "blocked", why);
+    }
+    // A watch on a process in that workspace has nothing left to watch.
+    for (const [id, w] of this.watching) {
+      const row = this.procs.all().find((p) => p.id === id);
+      if (row?.workspace === workspace) {
+        this.watching.delete(id);
+        this.tell(w.session, `[watch ${row.name} ended: ${why}]`);
+      }
+    }
   }
 
   /**
