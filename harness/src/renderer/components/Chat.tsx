@@ -428,10 +428,14 @@ export function Chat(props: {
             <div class="mb-2 flex flex-col gap-1 px-3 font-mono text-sm">
               <For each={L().queue}>
                 {(q) => (
-                  <div class="flex items-start gap-2 text-muted">
-                    <span class="w-5 shrink-0 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>›</span>
-                    <span class="min-w-0 flex-1 truncate">{q.text}</span>
-                    <Show when={q.how === "steer"}><span class="shrink-0 text-xs text-subtle">steer</span></Show>
+                  <div class="flex flex-col">
+                    <div class="flex items-start gap-2 text-muted">
+                      <span class="w-5 shrink-0 text-subtle" title={q.how === "steer" ? "steers the turn" : "waits its turn"}>›</span>
+                      <span class="min-w-0 flex-1 truncate">{q.text}</span>
+                      <Show when={q.how === "steer"}><span class="shrink-0 text-xs text-subtle">steer</span></Show>
+                    </div>
+                    {/* Why it is where it is: a queue that reorders itself without saying why is a mystery. */}
+                    <Show when={q.reason}>{(r) => <span class="pl-7 text-xs text-subtle">{r()}</span>}</Show>
                   </div>
                 )}
               </For>

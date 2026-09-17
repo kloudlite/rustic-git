@@ -5,6 +5,7 @@ import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
 import { Memories, type Memory } from "./memory.ts";
 import { nudge, reduce, type PlanEvent } from "./plan.ts";
+import { order, question as triageQuestion } from "./triage.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
@@ -27,6 +28,9 @@ const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write
 const argOf = (name: string, args: Record<string, unknown>) =>
   name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
 /** How often a session with something running is asked what is still running. */
+/** A burst of arrivals is one ordering; a fork that thinks too long is not worth waiting for. */
+const TRIAGE_DEBOUNCE_MS = 3_000;
+const TRIAGE_TIMEOUT_MS = 60_000;
 const PROC_POLL_MS = 10_000;
 const UNREACHABLE_SWEEPS = 3;
 /** How long a btw fork may run before it is stopped and the call rejects. */
@@ -67,6 +71,8 @@ export class Bench {
   private unreachable = new Map<string, number>();
   /** Tool calls in the turn a session is in, and whether it has already been nudged about this one. */
   private turnCalls = new Map<string, { calls: number; nudged?: true }>();
+  /** Debounce per session: a burst of arrivals is one ordering, not one per message. */
+  private triaging = new Map<string, ReturnType<typeof setTimeout>>();
   /** Questions a session is holding: the extension waits on one, a person in the desktop answers it. */
   private proposals = new Map<string, { session: string; tool: string; summary: string; args: unknown; answer?: "yes" | "no"; wake: (() => void)[] }>();
 
@@ -445,7 +451,56 @@ export class Bench {
 
   /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
   private send(id: string, message: string): Promise<PiEvent> {
-    return this.rpc(id, { type: this.turning.has(id) ? "follow_up" : "prompt", message });
+    const mid = this.turning.has(id);
+    const r = this.rpc(id, { type: mid ? "follow_up" : "prompt", message });
+    // Something joined a queue somebody is already working through: ask what to take first.
+    if (mid) this.triageSoon(id);
+    return r;
+  }
+
+  /**
+   * Order the queue of a session that is mid-turn, by asking a FORK of it: it has the context to
+   * know which reply unblocks the work and which question can wait, and it costs the running turn
+   * nothing. Debounced, because a burst of arrivals is one ordering.
+   *
+   * Steering is never touched: a steer is "change what you are doing NOW", and re-ordering that
+   * would be reordering an interruption.
+   */
+  private triageSoon(id: string, delayMs = TRIAGE_DEBOUNCE_MS) {
+    if (this.triaging.has(id) || this.opts.readOnly) return;
+    const t = setTimeout(() => {
+      this.triaging.delete(id);
+      void this.triageNow(id).catch(() => undefined);
+    }, delayMs);
+    t.unref?.();
+    this.triaging.set(id, t);
+  }
+
+  async triageNow(id: string): Promise<{ order: number[]; reasons: (string | undefined)[] } | undefined> {
+    const c = this.children.get(id);
+    if (!c?.running()) return undefined;
+    const taken = (await c.send({ type: "clear_queue" })).data as { steering?: string[]; followUp?: string[] } | undefined;
+    const steering = taken?.steering ?? [];
+    const items = taken?.followUp ?? [];
+    // Put steering straight back: it is an interruption, and order does not apply to it.
+    for (const m of steering) await c.send({ type: "steer", message: m }).catch(() => undefined);
+    if (items.length < 2) {
+      for (const m of items) await c.send({ type: "follow_up", message: m }).catch(() => undefined);
+      return undefined;
+    }
+    let ranked: { index: number; reason?: string }[] | undefined;
+    try {
+      const answer = await this.btw(id, triageQuestion(items), TRIAGE_TIMEOUT_MS);
+      const said = (answer.entries as { role?: string; content?: unknown }[]).filter((m) => m.role === "assistant");
+      ranked = order(said.map((m) => (typeof m.content === "string" ? m.content : ((m.content as { text?: string }[]) ?? []).map((x) => x.text ?? "").join(""))).join("\n"), items.length);
+    } catch {
+      /* a fork that failed orders nothing */
+    }
+    // Whatever went wrong, every message goes back in: the only rule is never to lose one.
+    const rows = ranked ?? items.map((_, index) => ({ index }));
+    for (const r of rows) await c.send({ type: "follow_up", message: items[r.index] }).catch(() => undefined);
+    this.emit({ type: "queue_order", session: id, items: rows.map((r) => ({ text: items[r.index], reason: r.reason })) });
+    return { order: rows.map((r) => r.index), reasons: rows.map((r) => r.reason) };
   }
 
   /**

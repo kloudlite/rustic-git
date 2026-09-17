@@ -217,9 +217,16 @@ function makeThread(id: string) {
 
   // What is waiting on the bench: pi's own queue, as it reports it. A line the
   // person queued is shown here, not in the transcript, until pi delivers it.
-  const [queue, setQueue] = createStore<{ text: string; how: "queue" | "steer" }[]>([]);
+  const [queue, setQueue] = createStore<{ text: string; how: "queue" | "steer"; reason?: string }[]>([]);
   function queued(text: string, how: "queue" | "steer") {
     setQueue(produce((q) => void q.push({ text, how })));
+  }
+  /** The order a fork of this session chose, and why — shown under each row so it is not a mystery. */
+  function reorder(rows: { text: string; reason?: string }[]) {
+    setQueue(produce((q) => {
+      const rest = q.filter((x) => !rows.some((r) => r.text === x.text));
+      q.splice(0, q.length, ...rows.map((r) => ({ text: r.text, how: "queue" as const, reason: r.reason })), ...rest);
+    }));
   }
 
   function sent(text: string, images: number[] = []) {
@@ -380,7 +387,7 @@ function makeThread(id: string) {
     }
   }
 
-  return { id, messages, busy, turn, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
+  return { id, messages, busy, turn, reorder, status, setStatus, ready, attachments, attach, detach, takeAttachments, replay, note, sent, queued, queue, proposal, onEvent };
 }
 
 export type Attachment = { id: string; n: number; mimeType: string; data: string; url: string };
@@ -405,6 +412,9 @@ export function onEvent(ev: Ev & { pi?: string }) {
       if (row?.session) thread(row.session).proposal(row);
       return;
     }
+    case "queue_order":
+      if (typeof ev.session === "string") thread(ev.session).reorder((ev.items as { text: string; reason?: string }[]) ?? []);
+      return;
     case "plan":
       if (typeof ev.session === "string") setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
       return;

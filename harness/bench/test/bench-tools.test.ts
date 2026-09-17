@@ -222,17 +222,20 @@ test("asks queue per workspace: never refused, and a [reply id] answers the ask 
 
     // The first ask leaves the workspace session mid-turn ("hang" never ends its turn).
     const a1 = await bench.ask("api", "hang", one);
+    await until(() => bench.exchanges.bySession(one)[0].state === "running", 5_000, "the head running");
     // The second is taken anyway — an ask is never refused because that workspace is busy — and
-    // its turn answers the FIRST one by name, which is the only thing that can route it there.
-    const a2 = await bench.ask("api", `[reply ${a1.exchange}] the first one is done`, two);
+    // waits in pi's own queue behind the turn already running.
+    const a2 = await bench.ask("api", "hang too", two);
     assert.notEqual(a1.exchange, a2.exchange);
+    assert.deepEqual(bench.exchanges.bySession(two).map((e) => [e.dir, e.state]), [["out", "queued"]]);
 
+    // A turn that names the FIRST ask answers that one, whichever order they arrived in.
+    await bench.rpc("w-api", { type: "prompt", message: `[reply ${a1.exchange}] the first one is done` });
     await until(() => bench.exchanges.bySession(one).some((e) => e.dir === "in"), 5_000, "session one's answer");
     const back = bench.exchanges.bySession(one);
     assert.equal(back.find((e) => e.id === a1.exchange)!.state, "done", "the ask it named settled");
     assert.match(back.find((e) => e.dir === "in")!.text, /the first one is done/);
-    // The asker of the answering turn is still waiting: its own ask was not the one answered.
-    assert.deepEqual(bench.exchanges.bySession(two).map((e) => [e.dir, e.state]), [["out", "queued"]]);
+    assert.deepEqual(bench.exchanges.bySession(two).map((e) => [e.dir, e.state]), [["out", "queued"]], "the other is still waiting");
     const said = (await bench.messages(one)).messages as { role: string; content: string }[];
     assert.ok(said.some((m) => String(m.content).startsWith("[from workspace api]")), JSON.stringify(said));
   } finally {
