@@ -338,3 +338,23 @@ export function procName(row: { name?: string; command?: string }): string {
   const what = (cd ? cd[2] : command || name).trim().split("\n")[0];
   return (where ? `${where}: ${what}` : what).slice(0, 60);
 }
+
+/**
+ * A tree row's two facts, read in the tool server's own words (`crates/ide/src/fs/tree.rs:14`):
+ * `kind` is `dir` / `file` / `symlink`, and `ignored` is what the global gitignore and `.git`
+ * already cover. Reading a `dir` boolean we had invented is why every entry drew as a file
+ * (owner, 2026-09-18).
+ */
+export const isDir = (e: { kind?: string }): boolean => e.kind === "dir";
+
+/** What a workspace's own ignore rules cover, for a tool server that did not say so itself. */
+const NOISE = new Set([".git", ".cache", "graft", ".direnv", "node_modules", ".pnpm-store", "dist", "target", ".venv"]);
+
+/** Tucked under the "N ignored" line rather than listed: the server's own flag first, names after. */
+export const hidden = (e: { name: string; ignored?: boolean }): boolean => e.ignored === true || NOISE.has(e.name);
+
+/**
+ * The open-set key for a directory's "N ignored" fold. It cannot collide with a path: a path never
+ * ends in a slash, and this always does.
+ */
+export const ignoredKey = (path?: string): string => `${path ?? ""}/ignored/`;

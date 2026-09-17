@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { isCardAnswer, isCommandLine } from "../../src/renderer/live.ts";
-import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, pickerRows, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, cloneLabel, displayModel, exchangeText, hidden, ignoredKey, inFlightItems, isDir, modeLine, modeParts, modelOfThread, nestWorkspaces, noteModelNames, pickerRows, procLabel, procName, procState, procsOf, proposalHeader, turnMeta } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -257,4 +257,60 @@ test("a bare answer after a card is not a second row", () => {
   assert.equal(isCardAnswer("yes", false), false);
   // Anything they actually wrote stays, wherever it sits.
   for (const t of ["yes, and also add the index", "no idea", "postgres"]) assert.equal(isCardAnswer(t, true), false, t);
+});
+
+/**
+ * The Files tab drew every entry — `.cache`, `.git`, `src` — with the file glyph and no chevron
+ * (owner, 2026-09-18): the rows were read for a `dir` boolean this app invented, while the tool
+ * server says `kind` (`crates/ide/src/fs/tree.rs:14`).
+ */
+test("a tree row is a directory when the tool server says so, and noise is tucked away", () => {
+  assert.equal(isDir({ kind: "dir" }), true);
+  assert.equal(isDir({ kind: "file" }), false);
+  assert.equal(isDir({ kind: "symlink" }), false, "a symlink opens as a file, not as a folder");
+  assert.equal(isDir({}), false, "no kind at all is not a folder");
+
+  // The server's own flag decides first.
+  assert.equal(hidden({ name: "src", ignored: true }), true);
+  assert.equal(hidden({ name: "src" }), false);
+  // And with no flag, the names a workspace's global gitignore covers.
+  for (const noisy of [".git", ".cache", "graft", ".direnv", "node_modules", ".pnpm-store", "dist", "target"])
+    assert.equal(hidden({ name: noisy }), true, noisy);
+  for (const real of ["src", "Cargo.toml", "README.md", ".github"]) assert.equal(hidden({ name: real }), false, real);
+
+  // The "N ignored" fold has its own key, and it can never collide with a path.
+  assert.equal(ignoredKey(undefined), "/ignored/");
+  assert.equal(ignoredKey("src"), "src/ignored/");
+  assert.notEqual(ignoredKey("src"), "src");
+});
+
+/**
+ * "things are shown collapsed. when opening they are automatically collapsing" — the open state
+ * lived in the fetched rows, so every refetch (the live poll, a tab switch) rebuilt them shut.
+ * It belongs to the panel, keyed by path, and it outlives the data.
+ */
+test("the open set is the panel's, and survives a refetch of the rows", () => {
+  // The panel's own toggle, as WorkView holds it.
+  let open = new Set<string>();
+  const toggle = (path: string) => {
+    const next = new Set(open);
+    if (!next.delete(path)) next.add(path);
+    open = next;
+  };
+
+  toggle("src");
+  toggle("src/renderer");
+  assert.deepEqual([...open].sort(), ["src", "src/renderer"]);
+
+  // A refetch replaces every row object; the open set is untouched by that.
+  const before = new Set(open);
+  const refetched = [{ name: "src", kind: "dir" as const }, { name: "README.md", kind: "file" as const }];
+  assert.deepEqual([...open].sort(), [...before].sort(), "rows arriving again close nothing");
+  // A row is open because the SET says so, never because a row object remembered it.
+  assert.equal(open.has("src"), true);
+  assert.equal(refetched.some((e) => "open" in e), false, "no row carries its own open flag");
+
+  // Toggling closes exactly one path and leaves its children's keys alone.
+  toggle("src");
+  assert.deepEqual([...open].sort(), ["src/renderer"]);
 });

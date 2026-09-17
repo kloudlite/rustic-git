@@ -731,7 +731,13 @@ export function usage(tokens: number, cost?: number, context?: number): string {
  * Cached per workspace and per directory, because a tree is asked for again every time a fold
  * opens, and the answer carries an ETag the tool server would rather we reused.
  */
-export type FsEntry = { name: string; dir?: boolean; path?: string };
+/**
+ * One row of `/fs/tree`, as the tool server writes it (`crates/ide/src/fs/tree.rs:14`): `kind` is
+ * `dir` / `file` / `symlink`, `ignored` is what the global gitignore and `.git` cover, and `git` is
+ * one letter of status. We read ITS field names — a `dir` boolean of our own invention is how every
+ * entry came out looking like a file (owner, 2026-09-18).
+ */
+export type FsEntry = { name: string; kind?: "dir" | "file" | "symlink"; ignored?: boolean; git?: string; size?: number; target?: string };
 export type FsChanges = { changes: { path: string; status?: string; add?: number; del?: number }[]; repo: boolean };
 
 const fsCache = new Map<string, unknown>();

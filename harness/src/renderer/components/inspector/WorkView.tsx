@@ -4,6 +4,7 @@ import * as live from "../../live";
 import { Icon } from "../../ui/Icon";
 import { Empty } from "../../ui/parts";
 import { FileTree } from "./FileTree";
+import { FsTree } from "./FsTree";
 import { ChangeList } from "./ChangeList";
 import { PackageList } from "./PackageList";
 import type { Package, Change, FileNode } from "../../model";
@@ -32,13 +33,23 @@ export function WorkView(props: {
 }) {
   const [tab, setTab] = createSignal<View>(((location.hash.split("/")[1] === "changes" ? "files" : location.hash.split("/")[1]) as View) || "overview");
   /**
-   * The workspace's own files, read when the tab is opened. `files`/`changes` from the model are
-   * the fallback for a view that has no tool server (an ephemeral's source, the fixtures).
+   * The workspace's own changes, read when the tab is opened. `changes` from the model is the
+   * fallback for a view with no tool server (an ephemeral's source, the fixtures); the TREE is
+   * `FsTree`'s own business, one directory at a time.
    */
-  const [tree] = createResource(() => (tab() === "files" && props.scope ? props.scope : undefined), async (scope) => (await live.fsTree(scope))?.entries ?? []);
   const [diff] = createResource(() => (tab() === "files" && props.scope ? props.scope : undefined), (scope) => live.fsChanges(scope));
-  const nodes = (): FileNode[] =>
-    tree()?.length ? tree()!.map((e) => ({ name: e.name, dir: e.dir, children: e.dir ? [] : undefined })) : props.files;
+  /**
+   * Which folders are open, by PATH, held here rather than in the rows: the tree refetches — on the
+   * live poll, on a tab switch — and a fold whose state lived in the fetched data snapped shut
+   * every time (owner, 2026-09-18). A Set is enough; the rows are redrawn from it.
+   */
+  const [open, setOpen] = createSignal(new Set<string>());
+  const toggle = (path: string) =>
+    setOpen((was) => {
+      const next = new Set(was);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
   const changes = (): Change[] =>
     diff()?.changes?.length
       ? diff()!.changes.map((c) => ({ path: c.path, status: (c.status ?? "M") as Change["status"], add: c.add ?? 0, del: c.del ?? 0 }))
@@ -74,8 +85,10 @@ export function WorkView(props: {
         </Fold>
         <Fold title="Files" meta={<span class="text-subtle">{props.against}</span>}>
           <div class="py-0.5">
-            <Show when={nodes().length} fallback={<Empty>{tree.loading ? "reading…" : "No files."}</Empty>}>
-              <FileTree nodes={nodes()} onOpen={props.onOpenFile} />
+            {/* A workspace reads its own tree from its tool server; a view with none (the fixtures,
+                an ephemeral's source) keeps the static one. */}
+            <Show when={props.scope} fallback={<Show when={props.files.length} fallback={<Empty>No files.</Empty>}><FileTree nodes={props.files} onOpen={props.onOpenFile} /></Show>}>
+              {(scope) => <FsTree scope={scope()} open={open()} onToggle={toggle} onOpen={props.onOpenFile} />}
             </Show>
           </div>
         </Fold>
