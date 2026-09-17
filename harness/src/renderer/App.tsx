@@ -491,18 +491,29 @@ export function App() {
     return out;
   });
   const commandItems = createMemo<PaletteItem[]>(() => [
-    { id: "composer", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
-    { id: "shell", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell() },
-    { id: "env", label: envTab() ? "Close the environment" : "Open the environment", keys: KEYS.environment.keys, run: () => (setFile(undefined), setEnvTab((v) => !v)) },
-    { id: "panel", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: KEYS.panel.keys, run: () => setLeftOpen((v) => !v) },
-    { id: "inspector", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
-    { id: "workspaces", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
-    { id: "go", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
-    { id: "settings", label: "Settings", keys: KEYS.settings.keys, run: () => openSettings() },
-    { id: "bg", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
-    { id: "abort", label: "Stop this session", run: () => void pi({ type: "abort" }) },
-    { id: "newSession", label: "New session", run: newSession },
-    { id: "benchImport", label: "Import this laptop's sessions into the bench", run: () => {
+    // Suggested: what a person does next. Session: what they do to this conversation.
+    { id: "mode", group: "Suggested", label: `Switch to ${live.mode() === "build" ? "Plan" : "Build"} mode`, keys: KEYS.mode.keys, run: () => {
+      const next = live.mode() === "build" ? "plan" : "build";
+      live.setMode(next);
+      void pi({ type: "prompt", message: `/mode ${next}` })?.catch(() => undefined);
+    } },
+    { id: "level", group: "Suggested", label: `Thinking level: ${live.level()}`, keys: KEYS.level.keys, run: () => {
+      const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
+      live.setLevel(next);
+      void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
+    } },
+    { id: "composer", group: "Suggested", label: "Focus the prompt", keys: KEYS.composer.keys, run: () => composer()?.focus() },
+    { id: "shell", group: "Suggested", label: shellShown() ? "Hide the shell" : tabsHere().length ? "Show the shell" : "Open a shell", keys: KEYS.shell.keys, run: () => toggleShell() },
+    { id: "env", group: "Suggested", label: envTab() ? "Close the environment" : "Open the environment", keys: KEYS.environment.keys, run: () => (setFile(undefined), setEnvTab((v) => !v)) },
+    { id: "panel", group: "Suggested", label: leftOpen() ? "Hide workspaces" : "Show workspaces", keys: KEYS.panel.keys, run: () => setLeftOpen((v) => !v) },
+    { id: "inspector", group: "Suggested", label: rightOpen() ? "Hide the inspector" : "Show the inspector", keys: KEYS.inspector.keys, run: () => setRightOpen((v) => !v) },
+    { id: "workspaces", group: "Suggested", label: "Switch workspace…", keys: KEYS.workspaces.keys, run: () => setPalette("workspaces") },
+    { id: "go", group: "Suggested", label: "Go to…", keys: KEYS.quickOpen.keys, run: () => setPalette("go") },
+    { id: "settings", group: "Suggested", label: "Settings", keys: KEYS.settings.keys, run: () => openSettings() },
+    { id: "bg", group: "Session", label: "Send the running command to the background", keys: KEYS.background.keys, run: () => void pi({ type: "prompt", message: "/bg" }) },
+    { id: "abort", group: "Session", label: "Stop this session", run: () => void pi({ type: "abort" }) },
+    { id: "newSession", group: "Session", label: "New session", run: newSession },
+    { id: "benchImport", group: "Session", label: "Import this laptop's sessions into the bench", run: () => {
       if (!live.connected() || !live.writable().ok) return void live.thread(cur()).note("not connected to the bench; nothing was sent");
       const raw = localStorage.getItem("harness.sessions");
       if (!raw) return void live.thread(cur()).note("nothing to import: this laptop has no local session list");
@@ -542,7 +553,25 @@ export function App() {
     if (hit(KEYS.background)) return (stop(), void pi({ type: "prompt", message: "/bg" }));
     if (hit(KEYS.split)) return (stop(), splitRight());
     if (hit(KEYS.focusPane)) return (stop(), void setActivePane((p) => (p + 1) % panes.length));
-    if (hit(KEYS.commands)) return (stop(), void setPalette("commands"));
+    if (hit(KEYS.commands) || hit(KEYS.palette)) return (stop(), void setPalette("commands"));
+    // Build ⇄ Plan. PLAN is read-only: the platform tools that change something are turned off in
+    // pi itself, so a plan cannot quietly become a change (§16b's `tab`).
+    if (hit(KEYS.mode)) {
+      stop();
+      const next = live.mode() === "build" ? "plan" : "build";
+      live.setMode(next);
+      // The extension owns which tools are live; the desktop asks for the mode by name.
+      void pi({ type: "prompt", message: `/mode ${next}` })?.catch(() => undefined);
+      return;
+    }
+    // How hard the model thinks, cycled: pi's own `set_thinking_level`.
+    if (hit(KEYS.level)) {
+      stop();
+      const next = live.LEVELS[(live.LEVELS.indexOf(live.level()) + 1) % live.LEVELS.length];
+      live.setLevel(next);
+      void pi({ type: "set_thinking_level", level: next })?.catch(() => undefined);
+      return;
+    }
     if (hit(KEYS.quickOpen)) return (stop(), void setPalette("go"));
     if (hit(KEYS.workspaces)) return (stop(), void setPalette("workspaces"));
     if (hit(KEYS.find)) return (stop(), openFind());

@@ -13,6 +13,8 @@ import { Kbd } from "../ui/parts";
 export type PaletteItem = {
   id: string;
   label: string;
+  /** Which list it belongs to — opencode groups a palette Suggested / Session, and so do we. */
+  group?: string;
   detail?: string;   // where it is, or what it does
   kind?: string;     // shown as a faint tag: workspace, thread, file, service
   icon?: string;
@@ -89,6 +91,12 @@ export function Palette(props: {
           <div class="max-h-[50vh] overflow-y-auto py-1">
             <For each={list()} fallback={<div class="px-3 py-2 text-sm text-subtle">nothing matches</div>}>
               {(it, i) => (
+                <>
+                {/* The group heading, once, where the group starts: a flat list of twenty commands
+                    is a list nobody reads to the end. */}
+                <Show when={it.group && it.group !== list()[i() - 1]?.group}>
+                  <div class="px-3 pt-2 pb-0.5 text-2xs uppercase text-subtle">{it.group}</div>
+                </Show>
                 <button
                   class="flex h-5.5 w-full items-center gap-2 px-3 text-left text-base"
                   classList={{ "bg-selected text-selected-fg": i() === cursor(), "text-fg": i() !== cursor() }}
@@ -102,6 +110,7 @@ export function Palette(props: {
                   <Show when={it.kind}>{(k) => <span class="text-2xs uppercase text-subtle">{k()}</span>}</Show>
                   <Show when={it.keys}>{(k) => <Kbd>{k()}</Kbd>}</Show>
                 </button>
+                </>
               )}
             </For>
           </div>

@@ -290,6 +290,9 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  */
 export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory"];
 
+/** What Plan mode leaves on: everything that reads, plus the plan itself. */
+export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "kl_capabilities", "kl_workspace_progress"];
+
 /** The six skills, read from beside the extension: product words, not tool lists. */
 const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
 function skillText(name: string): string | undefined {
@@ -347,6 +350,23 @@ export function memoryTools(reg: ReturnType<typeof makeReg>) {
       return r.ok ? text(`saved ${a.save.name}`) : { ...text(String(r.data?.error ?? "it was not saved")), isError: true };
     },
   );
+}
+
+/**
+ * Build ⇄ Plan, as a command the desktop sends (`/mode plan`). pi's RPC has no "set active tools",
+ * and it should not: which tools a session may call is the EXTENSION's business, and this is the
+ * extension turning its own writes off. Plan mode is read-only plus `plan`, so a plan cannot
+ * quietly become a change.
+ */
+export function modeCommand(pi: ExtensionAPI, planTools: string[]) {
+  pi.registerCommand?.("mode", {
+    description: "build (everything) or plan (read-only, plus the plan tool)",
+    handler: async (args: string, ctx: { ui?: { notify?: (m: string, k?: string) => void } }) => {
+      const plan = String(args ?? "").trim().toLowerCase() === "plan";
+      pi.setActiveTools?.(plan ? planTools.filter((n) => (pi.getAllTools?.() ?? []).some((t: { name: string }) => t.name === n)) : ALWAYS_ON);
+      ctx.ui?.notify?.(plan ? "plan mode: nothing changes until you switch back" : "build mode", "info");
+    },
+  });
 }
 
 export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
@@ -751,6 +771,7 @@ export function tools(pi: ExtensionAPI) {
   searchTools(reg, pi);
   memoryTools(reg);
   capabilities(reg);
+  modeCommand(pi, PLAN_TOOLS);
   // Thirteen to start with; the rest are one `tool_search` away.
   pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
 }
@@ -781,6 +802,7 @@ export default function (pi: ExtensionAPI) {
     searchTools(reg, pi);
     memoryTools(reg);
     capabilities(reg);
+    modeCommand(pi, PLAN_TOOLS);
     return pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
   }
   tools(pi);

@@ -2,6 +2,7 @@ import { Show, createSignal } from "solid-js";
 import { Segmented } from "../../ui/Segmented";
 import { Heading, Empty } from "../../ui/parts";
 import { Button } from "../../ui/Button";
+import * as live from "../../live";
 import { PlanTree, leaves } from "./PlanTree";
 import { Queue } from "./Inspector";
 import type { Machine } from "../../model";
@@ -51,6 +52,18 @@ export function MachineView(props: { machine: Machine; session: string; onOpenSh
           {props.machine.goal}
         </Show>
       </p>
+
+      {/* What this session has spent: opencode's Context block, from pi's own usage. */}
+      <Show when={live.thread(props.session).spend().tokens}>
+        <Heading>Context</Heading>
+        <div class="flex flex-col gap-0.5 px-5 pt-1 pb-3 font-mono text-xs text-muted">
+          <div class="tabular-nums">{live.thread(props.session).spend().tokens.toLocaleString()} tokens</div>
+          <Show when={live.thread(props.session).spend().context}>
+            {(w) => <div class="tabular-nums">{Math.min(100, Math.round((live.thread(props.session).spend().tokens / w()) * 100))}% used</div>}
+          </Show>
+          <Show when={live.thread(props.session).spend().cost}>{(c) => <div class="tabular-nums">${c().toFixed(2)} spent</div>}</Show>
+        </div>
+      </Show>
 
       {/* Progress is the plan's own headline, not a section of its own. */}
       <Heading meta={`${done()}/${total()} done`}>Plan</Heading>

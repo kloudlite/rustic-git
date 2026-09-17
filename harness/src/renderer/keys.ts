@@ -36,6 +36,10 @@ export const KEYS = {
   focusPane: { keys: "⌘⌥→", label: "next pane", match: (e) => meta(e) && e.altKey && e.key === "ArrowRight" },
   find: { keys: "⌘F", label: "find", match: (e) => meta(e) && key(e, "f") },
   workspaces: { keys: "⌘T", label: "switch workspace", match: (e) => meta(e) && key(e, "t") },
+  // opencode's own three, on our shapes: Build/Plan, how hard the model thinks, and the palette.
+  mode: { keys: "tab", label: "Build / Plan", hint: true, match: (e) => e.key === "Tab" && !e.shiftKey && !meta(e) && !e.altKey && (e.target as HTMLElement | null)?.hasAttribute("data-composer") !== true },
+  level: { keys: "^T", label: "thinking level", match: (e) => e.ctrlKey && !e.metaKey && key(e, "t") },
+  palette: { keys: "^P", label: "commands", hint: true, match: (e) => e.ctrlKey && !e.metaKey && key(e, "p") },
 } as const satisfies Record<string, Binding>;
 
 /** ⌘1…⌘9 select a thread tab by position; listed in the command palette as one row. */

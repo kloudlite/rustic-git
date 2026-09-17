@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
 import kloudlite, { ALWAYS_ON, identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import workspaceTools from "../../pi/workspace-tools.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
 import { IDE_TOOLS } from "../src/rpc-child.ts";
@@ -16,6 +17,7 @@ type Registered = { name: string; description: string; parameters: any };
 /** Just enough of pi's extension API to see what an extension registers and hooks. */
 function fakePi() {
   const tools: Registered[] = [];
+  const commands: Record<string, { handler: (a: string, ctx: any) => Promise<void> }> = {};
   const hooks: Record<string, ((ev: any) => Promise<any>)[]> = {};
   let active: string[] = [];
   const pi = {
@@ -24,8 +26,9 @@ function fakePi() {
     getAllTools: () => tools,
     getActiveTools: () => active,
     setActiveTools: (names: string[]) => void (active = names),
+    registerCommand: (name: string, def: { handler: (a: string, ctx: any) => Promise<void> }) => void (commands[name] = def),
   } as any;
-  return { pi, tools, hooks, active: () => active };
+  return { pi, tools, hooks, commands, active: () => active };
 }
 const withEnv = (vars: Record<string, string | undefined>) => {
   const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
@@ -653,6 +656,32 @@ test("an agent cannot start agents", () => {
     assert.ok(!tools.some((t) => t.name === "ask"), tools.map((t) => t.name).join(","));
     assert.ok(!active().includes("ask"), active().join(","));
     assert.ok(active().includes("tool_search"), "it can still find a tool it needs");
+  } finally {
+    restore();
+  }
+});
+
+test("plan mode turns the writes off in pi itself, and build turns them back on", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, commands, active } = fakePi();
+    // Both extensions, as a real session loads them: the machine's own hands come from
+    // workspace-tools.ts, and plan mode has to turn those off too.
+    const back = withEnv({ KL_TOOLS_ADDRESS: "127.0.0.1:7788" });
+    workspaceTools(pi);
+    back();
+    kloudlite(pi);
+    const said: string[] = [];
+    const ctx = { ui: { notify: (m: string) => said.push(m) } };
+
+    await commands.mode.handler("plan", ctx);
+    // A plan cannot quietly become a change: every tool that writes is off.
+    for (const gone of ["write", "edit", "bash", "ask", "kl_workspace_create", "kl_environment_service_add"]) assert.ok(!active().includes(gone), `${gone}: ${active().join(",")}`);
+    for (const kept of ["read", "grep", "plan", "tool_search"]) assert.ok(active().includes(kept), kept);
+    assert.match(said[0], /plan mode/);
+
+    await commands.mode.handler("build", ctx);
+    assert.ok(active().includes("bash") && active().includes("ask"), active().join(","));
   } finally {
     restore();
   }
