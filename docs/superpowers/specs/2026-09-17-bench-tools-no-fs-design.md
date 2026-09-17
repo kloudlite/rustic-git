@@ -476,3 +476,12 @@ servers, endpoints etc. it may not have detailed knowledge of implementation")
   so). The document is snapshotted with the bench.
 - **Desktop**: an Architecture page (sidebar) renders the document read-only with the contracts
   table; the environment page links services to the components that call them.
+- **Workspaces report upward on their own** (owner, 19:05 IST): whenever something happens in a
+  workspace — a contract or port changes, a service starts or dies, a build fails, a branch is
+  pushed, a person does something there directly — the workspace session sends an UPDATE to the
+  bench through a separate `updates` queue (tool `report {kind: contract|process|build|git|note,
+  text}`; also emitted by the harness itself from events: process exit, push, plan change), never
+  through the ask/reply queue. The bench folds updates into the architecture document (contract
+  kind) and shows them as a muted `⇡ <workspace>: …` row in the bench transcript, batched per
+  turn; the bench model sees them as a short system message at its next turn ("updates from
+  workspaces: …"). Updates never interrupt a turn and are never re-ordered by the fork.
