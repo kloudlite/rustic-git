@@ -215,18 +215,24 @@ pub(super) const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
 
 
 pub(super) fn quantities(res: &PodResources) -> ResourceRequirements {
+    quantities_with_disk(res, EPHEMERAL_REQUEST, EPHEMERAL_LIMIT)
+}
+
+/// The same, for a container whose disk appetite is not a workspace's — the `bench` one, which
+/// holds transcripts rather than a checkout.
+pub(super) fn quantities_with_disk(res: &PodResources, disk_request: &str, disk_limit: &str) -> ResourceRequirements {
     // Requests AND limits on every user container: requests are what the scheduler packs against,
     // limits are what stops one workspace eating a node its neighbours share.
     ResourceRequirements {
         requests: Some(BTreeMap::from([
             ("cpu".to_string(), Quantity(res.cpu_request.clone())),
             ("memory".to_string(), Quantity(res.memory_request.clone())),
-            ("ephemeral-storage".to_string(), Quantity(EPHEMERAL_REQUEST.to_string())),
+            ("ephemeral-storage".to_string(), Quantity(disk_request.to_string())),
         ])),
         limits: Some(BTreeMap::from([
             ("cpu".to_string(), Quantity(res.cpu_limit.clone())),
             ("memory".to_string(), Quantity(res.memory_limit.clone())),
-            ("ephemeral-storage".to_string(), Quantity(EPHEMERAL_LIMIT.to_string())),
+            ("ephemeral-storage".to_string(), Quantity(disk_limit.to_string())),
         ])),
         ..Default::default()
     }

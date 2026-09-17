@@ -106,7 +106,11 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
             // exactly as their shell does. The volume IS the file, so no subPath.
             VolumeMount { name: "attach".into(), mount_path: "/etc/resolv.conf".into(), read_only: Some(true), ..Default::default() },
         ]),
-        resources: Some(quantities(&crate::model::bench_container_resources())),
+        resources: Some(quantities_with_disk(
+            &crate::model::bench_container_resources(),
+            crate::model::BENCH_EPHEMERAL.0,
+            crate::model::BENCH_EPHEMERAL.1,
+        )),
         security_context: Some(security),
         // `--ping` does GET /healthz on `BENCH_PORT`, but that request isn't counted as a
         // client by the idle clock `harness-bench` keeps — only WebSockets count — so the

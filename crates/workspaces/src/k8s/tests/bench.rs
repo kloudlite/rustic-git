@@ -73,6 +73,22 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     let caps = c.security_context.as_ref().unwrap().capabilities.clone().unwrap();
     assert!(!caps.add.unwrap().contains(&"SYS_CHROOT".to_string()));
     assert_eq!(c.readiness_probe.as_ref().unwrap().period_seconds, Some(2));
+    // What the SCHEDULER packs against: a node process, not a second workspace. The two
+    // containers together used to request 4 CPU, and a second bench on an 8-core node sat
+    // `Pending`/`Insufficient cpu` with every `bench.*` probe timing out (fleet, 2026-09-17).
+    let r = c.resources.as_ref().unwrap();
+    let req = r.requests.as_ref().unwrap();
+    let lim = r.limits.as_ref().unwrap();
+    assert_eq!(req["cpu"].0, "250m");
+    assert_eq!(req["memory"].0, "512Mi");
+    assert_eq!(req["ephemeral-storage"].0, "512Mi");
+    // The burst a turn may take is still a real one.
+    assert_eq!(lim["cpu"].0, "2");
+    assert_eq!(lim["memory"].0, "4Gi");
+    assert_eq!(lim["ephemeral-storage"].0, "2Gi");
+    // And the workspace container beside it is untouched: that is the slot the person works in.
+    let ws = spec.containers[0].resources.as_ref().unwrap().requests.as_ref().unwrap();
+    assert_eq!(ws["cpu"].0, crate::crd::PodResources::default().cpu_request);
 
     let get = |n: &str| c.env.as_ref().unwrap().iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));

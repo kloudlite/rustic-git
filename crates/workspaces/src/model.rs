@@ -35,16 +35,32 @@ pub const DEFAULT_BENCH_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-bench:latest"
 
 /// What the `bench` container of a bench pod is sized at. FIXED, not `spec.resources`: that field
 /// sizes the `workspace` container the person actually works in, and a bench that shrank because
-/// somebody sized their workspace small would OOM mid-turn. The same value a bench pod cost on its
-/// own before it became a container beside a workspace, so no bench got cheaper or dearer in the
-/// move. `k8s` stamps this on the container and `quota` charges it — one definition, or the number
-/// that runs and the number that is billed drift apart.
+/// somebody sized their workspace small would OOM mid-turn. `k8s` stamps this on the container and
+/// `quota` charges it — one definition, or the number that runs and the number that is billed
+/// drift apart.
+///
+/// Sized for WHAT IT RUNS: one node process (`harness-bench`) and the pi children a turn spawns.
+/// It used to be the workspace slot's own default, so a bench pod REQUESTED 2 CPU for the
+/// workspace container and another 2 for this one — 4 of an 8-core node for one bench, which left
+/// benches pinned to a node by their volumes sitting `Pending`/`Insufficient cpu` and every
+/// `bench.*` probe timing out (fleet, 2026-09-17). The request is what the scheduler packs
+/// against; the LIMIT still allows a real burst mid-turn, because that is what a limit is for.
 pub fn bench_container_resources() -> crate::crd::PodResources {
-    crate::crd::PodResources::default()
+    crate::crd::PodResources {
+        cpu_request: "250m".into(),
+        cpu_limit: "2".into(),
+        memory_request: "512Mi".into(),
+        memory_limit: "4Gi".into(),
+    }
 }
 
+/// The bench container's own ephemeral-storage pair, smaller than a workspace's for the same
+/// reason: it holds transcripts and a session dir, not a checkout and a build tree.
+pub const BENCH_EPHEMERAL: (&str, &str) = ("512Mi", "2Gi");
+
 /// What a BENCH pod holds on a node: both of its containers. `(millicores, mebibytes)`, the units
-/// `quota` sums in.
+/// `quota` sums in — LIMITS, as every other row in `quota` is charged, and read straight off the
+/// two definitions so the charge follows a resize rather than repeating it.
 pub fn bench_pod_capacity(workspace: &crate::crd::PodResources) -> (u64, u64) {
     let bench = bench_container_resources();
     (
@@ -480,13 +496,32 @@ mod bench_capacity_tests {
     #[test]
     fn a_bench_pod_costs_both_of_its_containers() {
         let ws = crate::crd::PodResources::default();
+        let bench = bench_container_resources();
         let (cpu, mem) = bench_pod_capacity(&ws);
-        assert_eq!(cpu, 2 * crate::quota::millicores(&ws.cpu_limit));
-        assert_eq!(mem, 2 * crate::quota::mebibytes(&ws.memory_limit));
+        assert_eq!(cpu, crate::quota::millicores(&ws.cpu_limit) + crate::quota::millicores(&bench.cpu_limit));
+        assert_eq!(mem, crate::quota::mebibytes(&ws.memory_limit) + crate::quota::mebibytes(&bench.memory_limit));
         // The bench container is sized independently of the workspace one.
         let small = crate::crd::PodResources { cpu_limit: "500m".into(), memory_limit: "512Mi".into(), ..ws.clone() };
         let (cpu, mem) = bench_pod_capacity(&small);
-        assert_eq!(cpu, 500 + crate::quota::millicores(&ws.cpu_limit));
-        assert_eq!(mem, 512 + crate::quota::mebibytes(&ws.memory_limit));
+        assert_eq!(cpu, 500 + crate::quota::millicores(&bench.cpu_limit));
+        assert_eq!(mem, 512 + crate::quota::mebibytes(&bench.memory_limit));
+    }
+
+    /// What the scheduler packs against, which is what the fleet ran out of: the bench container
+    /// is a node process, not a second workspace. Two of these fit beside their workspace
+    /// containers on an 8-core node; two of the old ones did not (`Insufficient cpu`, 2026-09-17).
+    #[test]
+    fn the_bench_container_requests_what_a_node_process_needs() {
+        let bench = bench_container_resources();
+        let ws = crate::crd::PodResources::default();
+        assert_eq!(crate::quota::millicores(&bench.cpu_request), 250);
+        assert_eq!(crate::quota::mebibytes(&bench.memory_request), 512);
+        assert!(
+            crate::quota::millicores(&bench.cpu_request) * 4 < crate::quota::millicores(&ws.cpu_request),
+            "a bench container that packs like a workspace is the defect this test exists for"
+        );
+        // The LIMIT still allows a real burst mid-turn — a request is not a ceiling.
+        assert_eq!(crate::quota::millicores(&bench.cpu_limit), 2000);
+        assert_eq!(crate::quota::mebibytes(&bench.memory_limit), 4096);
     }
 }
