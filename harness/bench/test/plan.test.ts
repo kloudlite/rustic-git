@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { itemText, nudge, reduce } from "../src/plan.ts";
+import { brief, itemText, nudge, reduce } from "../src/plan.ts";
 import type { PlanItem } from "../src/ledger.ts";
 
 /** The harness keeps the plan true: every rule is (plan, event) → plan, and nothing else. */
@@ -47,4 +47,24 @@ test("what the harness says when a turn ends with the plan out of date", () => {
   assert.equal(nudge(plan(["a", "doing"], ["b", "doing"], ["c", "done"]), 5), "[harness] the plan still shows 2 item(s) doing — mark each done or later (with why) before you stop");
   // A plan that is current says nothing at all.
   assert.equal(nudge(plan(["a", "done"], ["b", "later"]), 5), undefined);
+});
+
+test("what crosses to the asking session is a standup answer, not a transcript", () => {
+  // A bench handed 300 lines of diff is a bench whose context is gone by the third ask (§18).
+  const withCode = ["done: added /healthz", "```ts", "export function healthz() {", "  return 200;", "}", "```", "tests pass"].join("\n");
+  assert.equal(brief(withCode, "api"), "done: added /healthz\n\ntests pass");
+
+  // Long answers are cut, and say where the rest is.
+  const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+  const cut = brief(long, "svelte-frontend");
+  assert.equal(cut.split("\n").length, 13, cut);
+  assert.match(cut, /… \(full reply in the svelte-frontend tab\)$/);
+  assert.match(cut, /^line 0\nline 1/);
+
+  // A short answer is left exactly as it was.
+  assert.equal(brief("done: nothing to change", "api"), "done: nothing to change");
+  // An unterminated fence still goes: it is the thing this exists to stop.
+  assert.equal(brief("partial\n```\nhalf a file", "api"), "partial");
+  // 1,200 characters is the other bound.
+  assert.ok(brief("x".repeat(3000), "api").length < 1260);
 });

@@ -38,6 +38,8 @@ test("an agent runs in its own ephemeral session and reports back to whoever sta
     await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "its report");
     const back = (await t.bench.messages(caller)).messages as { role: string; content: string }[];
     assert.ok(back.some((m) => String(m.content).startsWith("[from agent audit-1]")), JSON.stringify(back));
+    // The exchange row keeps the whole reply; what crossed over is the standup version of it.
+    assert.match(t.bench.exchanges.bySession(caller).find((e) => e.dir === "in")!.text, /audit the routes/);
 
     // Closing one takes its transcript with it.
     assert.deepEqual(await (await fetch(`${t.base}/agents/audit-1`, { method: "DELETE" })).json(), { closed: "audit-1" });
