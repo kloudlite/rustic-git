@@ -138,3 +138,24 @@ test("the status line shows exactly one working indicator", () => {
   assert.equal((chat.match(/<WorkingDots/g) ?? []).length, 0, "the dot grid was the web app's; the TUI has one scanner");
   assert.equal((chat.match(/<Spinner/g) ?? []).length, 0, "a spinner beside the scanner is the same fact twice");
 });
+
+/**
+ * A live question takes the composer's place, as Claude Code does it (owner, 2026-09-17): while it
+ * is open there is nothing to type, and the transcript keeps only the record of what was asked and
+ * answered — never a tool row, never a second copy of the card.
+ */
+test("a live question replaces the input, and the transcript keeps only the record", () => {
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  // The card is inside the composer block, and the input is hidden while it is up.
+  assert.match(chat, /<Show when=\{waiting\(\)\}>/);
+  assert.match(chat, /classList=\{\{ hidden: !!waiting\(\) \}\}/);
+  assert.match(chat, /\+\{waitingCount\(\) - 1\} more waiting/, "a second question is counted, not stacked");
+  // The transcript renders the record component for a question row, not the card.
+  assert.match(chat, /fallback=\{<Answered q=\{b as QuestionRow\} \/>\}/);
+  assert.match(chat, /Asked 1 question/);
+  // A question carries no argument table: its own text is the argument.
+  assert.match(chat, /props\.q\.tool !== "question" && props\.q\.args/);
+  // And no tool row is ever pushed for it.
+  const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
+  assert.match(live, /if \(name === "question"\) return;/);
+});

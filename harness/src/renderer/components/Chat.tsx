@@ -125,6 +125,10 @@ export function Chat(props: {
   };
   const parts = () => modeParts(live.mode(), modelName(), live.levelKnown() ? live.level() : undefined);
   const [pick, setPick] = createSignal(0);
+  /** Questions still waiting on this person: the newest is shown, the rest are counted. */
+  const open_ = () => blocks().filter((b): b is QuestionRow => b.role === "question" && !(b as QuestionRow).answer);
+  const waiting = () => open_()[open_().length - 1];
+  const waitingCount = () => open_().length;
   /** The composer element itself, so the block cursor can follow its caret. */
   const [composerEl, setComposerEl] = createSignal<HTMLTextAreaElement>();
   /** Whether escape has shut the command list; typing opens it again. */
@@ -399,10 +403,10 @@ export function Chat(props: {
                 }>
                 {(() => { const b = (seg as { row: Message }).row; return (
                 <Show when={b.role !== "divider"} fallback={<Divider text={(b as { text: string }).text} />}>
-                <Show when={b.role !== "question"} fallback={<Question q={b as QuestionRow} session={L().id} onChat={(t) => {
-                  const c = scroller?.closest("main")?.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
-                  if (c) (c.value = t, fit(c), c.focus());
-                }} />}>
+                {/* A question that is still open is NOT in the transcript: it takes the composer's
+                    place, the way Claude Code does it (owner, 2026-09-17). What stays here is the
+                    record of what was asked and what was said. */}
+                <Show when={b.role !== "question"} fallback={<Answered q={b as QuestionRow} />}>
                 <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
                       answer is plain text beside it; the two turns are told apart by shape. */}
@@ -594,7 +598,27 @@ export function Chat(props: {
               (`packages/app/src/pages/session/composer/session-composer-region.tsx:102`), and the
               rail is the theme's accent rather than a blue of its own. */}
           <div ref={composerBox} class="pane flex flex-col border-l-2 border-accent bg-input transition-[border-color] duration-[var(--motion)] ease-out-quick focus-within:border-focus">
-            <div class="flex items-start px-4 pt-3 pb-1.5 font-mono">
+            {/* A question takes the input's place while it is open: there is nothing to type until
+                it is answered, and a card floating in the transcript left the caret somewhere else
+                (owner, 2026-09-17). The mode row below stays where it is. */}
+            <Show when={waiting()}>
+              {(q) => (
+                <div class="px-1 py-1">
+                  <Question
+                    q={q()}
+                    session={L().id}
+                    onChat={(t) => {
+                      const c = composerEl();
+                      if (c) (c.value = t, fit(c), setTyped(t), c.focus());
+                    }}
+                  />
+                  <Show when={waitingCount() > 1}>
+                    <div class="px-4 pb-1 text-subtle">+{waitingCount() - 1} more waiting</div>
+                  </Show>
+                </div>
+              )}
+            </Show>
+            <div class="flex items-start px-4 pt-3 pb-1.5 font-mono" classList={{ hidden: !!waiting() }}>
               <span class="w-4 shrink-0 text-accent">❯</span>
               {/* Grows with what is typed, up to a cap, then scrolls: ↩ sends,
                   ⇧↩ is a newline, so a long prompt is still written in place. */}
@@ -889,6 +913,31 @@ function Time(props: { at: string }) {
  * as a dialog over the thread: the person says yes or no in the transcript, and the answer stays
  * there as the record of what was agreed to. Nothing changes on the platform until they do.
  */
+/**
+ * The record a question leaves behind: what was asked, and what was said. The TUI's own shape
+ * (`routes/session/index.tsx:2539` — `Asked {count} question`, then the answer pairs).
+ */
+function Answered(props: { q: QuestionRow }) {
+  const asked = () => props.q.ask?.header ?? props.q.summary;
+  return (
+    <Show when={props.q.answer}>
+      <div class="flex flex-col font-mono">
+        <div class="flex items-baseline gap-2">
+          <span class="w-[2ch] shrink-0 text-muted">→</span>
+          <span class="text-muted">{props.q.tool === "question" ? "Asked 1 question" : "Asked to run"}</span>
+          <Time at={props.q.at} />
+        </div>
+        <div class="flex min-w-0 items-baseline gap-2 pl-[2ch]">
+          <span class="shrink-0 text-subtle">⎿</span>
+          <span class="min-w-0 truncate text-muted">{asked()}</span>
+          <span class="shrink-0 text-subtle">→</span>
+          <span class="shrink-0 text-fg">{props.q.answer}</span>
+        </div>
+      </div>
+    </Show>
+  );
+}
+
 function Question(props: { q: QuestionRow; session: string; onChat?: (text: string) => void }) {
   const answered = () => props.q.answer;
   // Claude Code's shape (§21): a `☐ header` card, numbered options with descriptions, then two
@@ -909,8 +958,11 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
     answer("no");
     props.onChat?.(props.q.summary);
   };
+  let card: HTMLDivElement | undefined;
+  // The keyboard belongs to the card while it is open: 1…n, ↑/↓, Enter, Esc all land here.
+  onMount(() => card?.focus());
   return (
-    <div class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono"
+    <div ref={card} class="my-1 flex flex-col gap-1 border-l-2 border-request-line bg-request px-3 py-2 font-mono"
       tabindex={0}
       onKeyDown={(e) => {
         if (answered()) return;
@@ -926,7 +978,11 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
         <Time at={props.q.at} />
       </div>
       <div class="pl-5 text-fg">{props.q.summary}</div>
-      <Show when={props.q.args && Object.keys(props.q.args).length}>
+      {/* A QUESTION shows no argument table: its header, its sentence and its options ARE the
+          arguments, and printing them again spelled the same question three times over
+          (owner's screenshot, 2026-09-17). A PROPOSAL — a tool waiting for a yes — still shows what
+          it is about to do, because there the arguments are the thing being agreed to. */}
+      <Show when={props.q.tool !== "question" && props.q.args && Object.keys(props.q.args).length}>
         <div class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-x-6 gap-y-0.5 pl-5">
           <For each={Object.entries(props.q.args ?? {}).filter(([, v]) => v !== undefined && v !== "")}>
             {([k, v]) => (
@@ -938,7 +994,14 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
           </For>
         </div>
       </Show>
-      <Show when={!answered()} fallback={<div class="pl-5 text-subtle">you said {answered()}</div>}>
+      {/* Answered, it collapses to the TUI's record: what was asked, and what was said
+          (`routes/session/index.tsx:2539` — `Asked {count} question`, then the answer). */}
+      <Show when={!answered()} fallback={
+        <div class="flex items-baseline gap-2 pl-5 text-subtle">
+          <span class="shrink-0">→ Asked 1 question</span>
+          <span class="min-w-0 flex-1 truncate text-muted">{answered()}</span>
+        </div>
+      }>
         <div class="flex flex-col pl-5">
           <For each={OPTIONS()}>
             {(o, i) => (

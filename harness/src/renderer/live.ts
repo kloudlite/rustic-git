@@ -442,7 +442,12 @@ function makeThread(id: string) {
         const args = ev.args as Record<string, unknown>;
         const name = ev.toolName as string;
         // The verb names what is actually happening: "Running bash…", "Waiting on agent svelte…".
-        doing(name === "ask" ? `Waiting on ${args.to === "agent" ? `agent ${args.name ?? ""}`.trim() : args.to}` : `Running ${TOOL[name] ?? name}`);
+        doing(name === "ask" ? `Waiting on ${args.to === "agent" ? `agent ${args.name ?? ""}`.trim() : args.to}` : name === "question" ? "Asking" : `Running ${TOOL[name] ?? name}`);
+        // A QUESTION is its own card and nothing else: the proposal row carries the header, the
+        // options and the answer. A tool row beside it printed the same question a second time,
+        // under a generic `Called \`question\`` line with its arguments spelled out
+        // (owner's screenshot, 2026-09-17). The card is the only rendering.
+        if (name === "question") return;
         push({ role: "action", kind: name === "bash" ? "run" : "note", target: TOOL[name] ?? name, text: argOf(name, args), at: now(), pending: true, tool: name, args });
         tools.set(ev.toolCallId as string, messages.length - 1);
         if (bench) setTasks(produce((ts) => void ts.push({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, args), state: "running", started: Date.now(), output: "" })));
