@@ -39,6 +39,31 @@ export function order(answer: string, count: number): Ordered[] | undefined {
   return out;
 }
 
+/**
+ * An item the harness itself delivered — a workspace reply, an agent report, a finished task, a
+ * watch hit — is tagged `[...]` at the front by whatever sent it. Anything else was typed by the
+ * PERSON, and their prompts are the ones whose order is not the fork's to change.
+ */
+export const fromPerson = (text: string): boolean => !/^\s*\[/.test(text);
+
+/**
+ * The fork may rank replies, reports and system items freely. It may NOT reorder the person: they
+ * typed `build the backend`, saw nothing, typed `retry`, and the fork delivered `retry` first — so
+ * pi answered a retry of nothing and then built the backend (owner, 2026-09-17T19-58-02).
+ *
+ * The person's prompts are pinned back into their original relative order, in the slots the fork
+ * chose for them. Everything else keeps the ranking it was given; nothing is added or dropped.
+ */
+export function keepPersonOrder(rows: Ordered[], items: readonly string[]): Ordered[] {
+  const mine = rows.filter((r) => fromPerson(items[r.index] ?? ""));
+  if (mine.length < 2) return rows;
+  // The slots the person's prompts occupy, and their own order as they were typed.
+  const slots = mine.map((_, i) => i);
+  const byArrival = [...mine].sort((a, b) => a.index - b.index);
+  let at = 0;
+  return rows.map((r) => (fromPerson(items[r.index] ?? "") ? byArrival[slots[at++]] : r));
+}
+
 /** What the fork is asked. One question, one shape of answer, no conversation. */
 export function question(items: string[]): string {
   return [

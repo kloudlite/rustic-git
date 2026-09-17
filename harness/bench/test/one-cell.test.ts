@@ -169,6 +169,19 @@ test("the status line shows exactly one working indicator", () => {
  * id, so `showThread` found nothing to open. Every session is a peer now (055f07c6), so every row
  * is simply its own id.
  */
+/**
+ * A prompt sent before the session's pi has answered anything shows as QUEUED at once. It used to
+ * render as an ordinary sent message into silence, and that gap is what made the owner type
+ * `retry` over his own prompt (session 2026-09-17T19-58-02).
+ */
+test("a prompt to a starting session is queued, not sent into silence", () => {
+  const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");
+  assert.match(app, /\} else if \(!L\.ready\(\)\) \{/, "a session that has answered nothing yet queues");
+  const branch = app.slice(app.indexOf("} else if (!L.ready()) {"), app.indexOf("} else L.sent("));
+  assert.match(branch, /L\.queued\(text, how\)/, "and it shows in the QUEUED dock");
+  assert.ok(!/L\.sent\(/.test(branch), "not as a sent message");
+});
+
 test("clicking a session opens it", () => {
   const panel = fs.readFileSync(path.resolve("src/renderer/components/MachinePanel.tsx"), "utf8");
   assert.ok(!/i\(\) === 0 \? props\.machine\.id/.test(panel), "the first row is not the machine's id");

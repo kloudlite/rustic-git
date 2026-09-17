@@ -811,6 +811,12 @@ export function App() {
       cmd.streamingBehavior = "steer";
       cmd.message = `The person sent a new message while you were working:\n${text || "(see image)"}`;
       L.queued(text, how);
+    } else if (!L.ready()) {
+      // The session's pi is still starting: it has answered nothing yet, so there is no turn to
+      // steer and no answer coming for a moment. Shown as QUEUED at once rather than as a sent
+      // message into silence — that gap is what made the owner type `retry` over his own prompt
+      // (session 2026-09-17T19-58-02), which is how two of his prompts came to be reordered.
+      L.queued(text, how);
     } else L.sent(text, atts.map((i) => i.n));
     void window.harness
       .pi(cmd, pi)

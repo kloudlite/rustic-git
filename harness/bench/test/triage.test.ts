@@ -6,7 +6,7 @@ import path from "node:path";
 import { Bench } from "../src/bench.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
-import { order, question } from "../src/triage.ts";
+import { fromPerson, keepPersonOrder, order, question } from "../src/triage.ts";
 
 /** A model's answer is untrusted input: whatever it is, no message is ever lost. */
 test("the fork's order is taken when it is an order, and ignored when it is not", () => {
@@ -60,4 +60,42 @@ test("a queue that builds up mid-turn is ordered by a fork of the session, and n
     await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/**
+ * The owner typed `build the backend`, saw nothing for a moment, typed `retry` — and the fork
+ * delivered `retry` FIRST, so pi retried nothing and then built the backend
+ * (session 2026-09-17T19-58-02). A fork may rank replies and reports; it may not reorder a person.
+ */
+test("a person's prompts keep the order they were typed in", () => {
+  const items = ["build the backend", "retry"];
+  // The fork put the later prompt first: pinned back.
+  assert.deepEqual(keepPersonOrder([{ index: 1, reason: "urgent" }, { index: 0 }], items).map((r) => r.index), [0, 1]);
+  // Already right: unchanged.
+  assert.deepEqual(keepPersonOrder([{ index: 0 }, { index: 1 }], items).map((r) => r.index), [0, 1]);
+});
+
+test("replies and reports are still ranked freely around them", () => {
+  const items = ["build the backend", "[from workspace api] done", "retry", "[task 3 finished: exit 0]"];
+  // The fork wants the workspace reply first, then retry, then the build, then the task.
+  const ranked = [{ index: 1, reason: "unblocks" }, { index: 2 }, { index: 0 }, { index: 3 }];
+  const got = keepPersonOrder(ranked, items).map((r) => r.index);
+  // The reply keeps its won place; the two person prompts fill their slots in arrival order.
+  assert.deepEqual(got, [1, 0, 2, 3]);
+  // Nothing added, nothing dropped.
+  assert.deepEqual([...got].sort(), [0, 1, 2, 3]);
+});
+
+test("a tagged item is the harness's, an untagged one is the person's", () => {
+  assert.equal(fromPerson("build the backend"), true);
+  assert.equal(fromPerson("[from agent svelte] done"), false);
+  assert.equal(fromPerson("[ask e-1 from api] please"), false);
+  assert.equal(fromPerson("  [task 2 finished: exit 1]"), false);
+  // A person may legitimately write brackets mid-sentence; only a LEADING tag is the harness's.
+  assert.equal(fromPerson("fix the [] case"), true);
+});
+
+test("one person prompt among many items is never moved", () => {
+  const items = ["[from workspace api] done", "ship it"];
+  assert.deepEqual(keepPersonOrder([{ index: 1 }, { index: 0 }], items).map((r) => r.index), [1, 0], "a single prompt has no relative order to keep");
 });

@@ -6,7 +6,7 @@ import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
 import { Memories, type Memory } from "./memory.ts";
 import { brief, nudge, reduce, type PlanEvent } from "./plan.ts";
-import { order, question as triageQuestion } from "./triage.ts";
+import { keepPersonOrder, order, question as triageQuestion } from "./triage.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
@@ -732,7 +732,8 @@ export class Bench {
       /* a fork that failed orders nothing */
     }
     // Whatever went wrong, every message goes back in: the only rule is never to lose one.
-    const rows = ranked ?? items.map((_, index) => ({ index }));
+    // And the person's own prompts keep the order they were typed in, whatever the fork decided.
+    const rows = keepPersonOrder(ranked ?? items.map((_, index) => ({ index })), items);
     for (const r of rows) await c.send({ type: "follow_up", message: items[r.index] }).catch(() => undefined);
     this.emit({ type: "queue_order", session: id, items: rows.map((r) => ({ text: items[r.index], reason: r.reason })) });
     return { order: rows.map((r) => r.index), reasons: rows.map((r) => r.reason) };
