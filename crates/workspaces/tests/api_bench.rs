@@ -509,9 +509,14 @@ async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
         let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
         (alice.cpu, acme.cpu)
     };
-    // 1 vCPU for the workspace container plus the bench container's own fixed 4 — a bench pod is
-    // two containers, and charging only the first handed one out per bench for free.
-    assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "full")).await, (5, 0));
+    // The fixture's 1 vCPU workspace container plus the bench container's own fixed limit — a
+    // bench pod is two containers, and charging only the first handed one out per bench for free.
+    // Read from the definition, never a literal: the bench container was resized on 2026-09-17
+    // (it requested a whole workspace slot for one node process) and a number written out here
+    // would have to be found by a failing gate rather than following the change.
+    let bench_cpu = (kloudlite_workspaces::quota::millicores(&kloudlite_workspaces::model::bench_container_resources().cpu_limit)
+        / 1000) as u32;
+    assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "full")).await, (1 + bench_cpu, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "running", Some("idle"), "full")).await, (0, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "stopped", Some("ready"), "full")).await, (0, 0));
     // Paused is the third way to have no pod, and the one the membership beat writes.
