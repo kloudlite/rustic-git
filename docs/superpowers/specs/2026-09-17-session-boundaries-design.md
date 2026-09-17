@@ -118,6 +118,20 @@ nothing else changes here.
   (`harness:event`, `{kind, id, title, by:"person"}`) on the model's next turn, drawn as the compact
   result card tool rows use — never a slash string, never a user-role message.
 
+
+### 1.6 Renderer state has four owners (owner, 02:50 IST 18 Sep: "state hierarchy is not properly managed")
+
+| level | owns | dropped when |
+|---|---|---|
+| app | connection, team, palette, settings, model catalogue | the window closes |
+| workspace | files cache, watch stream, processes, background tasks, terminals | the workspace is deleted |
+| session | transcript, plan, queue, proposals and questions, model triple | the session is archived |
+| tab (a view of a session) | open file, scroll position, composer draft, open dialog, folds | the tab closes |
+
+No state lives above its owner. A component reads from the level it belongs to; a global signal
+for a tab's or session's concern is a defect (tonight's: open file surviving its tab, dialog and
+footer read across sessions, exchanges cached under the wrong key).
+
 ## 2. The shell is a sidecar
 
 ### 2.1 Decisions
