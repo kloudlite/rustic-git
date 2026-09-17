@@ -102,3 +102,25 @@ Typeahead (ceiling above). Sharing a tmux session between two people. Terminals 
 
 No new credential; tmux runs as uid 1000 inside the workspace container behind the same fence
 as `exec`. Session names are validated; the list route is on the same fenced port.
+
+## 7. Native rendering, persistence without tmux (owner, 2026-09-17 12:00 IST: "I want to render
+the shell native and persist the sessions")
+
+tmux made the terminal feel foreign (it owns scrollback and the mouse, eats a prefix, redraws on
+attach). Persistence moves into `kl ide serve` itself, the way VS Code's pty host does it:
+
+- A named session (`/stream/pty?session=<name>`) is a PTY + login shell the tool server KEEPS
+  after the socket drops; output since the start goes to a per-session ring buffer (`PTY_RING_BYTES`
+  = 4 MiB). A reconnect with the same name replays the buffer, applies the current size
+  (`TIOCSWINSZ`), then streams live. One attached socket per session at a time; a second attach
+  detaches the first. No tmux in the path — xterm.js owns scrollback, mouse and keys.
+- `GET /stream/pty/sessions` → `[{name, attached, created, pid}]` from the in-process table;
+  `DELETE …/{name}` kills the process group. Same routes, same shapes.
+- Across a pod restart: on detach and every 30 s the ring is flushed to
+  `{ws}/.cache/shell/<name>.log` (last `PTY_RING_BYTES`), and a session created under a name that has
+  a log replays it once as history text before the new shell's first prompt. Processes never survive
+  a restart (stated ceiling, same as before).
+- tmux, `tmuxPlugins.*`, `/etc/tmux.conf` and the resurrect restore leave the image and
+  `WS_BASE_PACKAGES`; `HISTFILE` stays in `{ws}/.cache/zsh/history`.
+- Probes: `bench.shell.workspace`'s reattach marker holds; `ws.terminal.persists` (weekly) now
+  asserts the log replay after stop → start.
