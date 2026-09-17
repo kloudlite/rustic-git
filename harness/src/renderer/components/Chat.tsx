@@ -16,7 +16,7 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
+import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader, turnMeta } from "../rows";
 import { ModelDialog } from "./ModelDialog";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
@@ -449,12 +449,24 @@ export function Chat(props: {
                           {/* Copy the answer itself — the one action on a text part (`:1654`). */}
                           <Copy text={(b as { text: string }).text} />
                         </div>
-                        {/* After every assistant turn: what answered, on what, in how long. */}
-                        <div class="pt-1 font-mono text-subtle">
-                          ✻&nbsp; {[
-                            (b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : line(),
-                            (b as { interrupted?: true }).interrupted ? "Interrupted" : "",
-                          ].filter(Boolean).join(" · ")}
+                        {/* After every assistant turn: what answered, on what, in how long — THIS
+                            turn's own, stamped when it ended. It used to print `line()`, the LIVE
+                            line, so every old message changed the moment the model changed (owner,
+                            on the fleet). A message with no stamp shows only what it has; there is
+                            no fallback to the live model.
+                            Shown on hover, as opencode shows its message meta; the height is
+                            reserved so nothing jumps, so this is opacity and not a mount. */}
+                        <div class="pt-1 font-mono text-subtle opacity-0 transition-opacity duration-[var(--motion)] group-hover/text:opacity-100">
+                          ✻&nbsp; {turnMeta({
+                            mode: live.mode(),
+                            model: (b as { model?: string }).model,
+                            thinking: (b as { thinking?: string }).thinking,
+                            effort: (b as { effort?: string }).effort,
+                            duration: (b as { ms?: number }).ms
+                              ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length)
+                              : undefined,
+                            interrupted: (b as { interrupted?: true }).interrupted,
+                          })}
                         </div>
                       </div>
                       </Show>

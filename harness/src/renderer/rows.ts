@@ -123,6 +123,28 @@ export function modelOfThread(row: string | undefined, benchDefault: string | un
   return clean(row) ?? clean(benchDefault);
 }
 
+/**
+ * One finished turn's own footer. Everything here is a fact ABOUT THAT TURN, stamped when it
+ * ended — never the live line, which made every old message change as soon as the model changed
+ * (owner, on the fleet). A turn with no stamp (an older message, a transcript replayed from disk)
+ * shows only what it actually has: there is no fallback to whatever is running now.
+ */
+export type TurnMeta = { mode?: string; model?: string; thinking?: string; effort?: string; duration?: string; interrupted?: true };
+export function turnMeta(t: TurnMeta): string {
+  const model = t.model ? displayModel(t.model) : undefined;
+  return [
+    t.mode ? modeParts(t.mode, undefined).mode : undefined,
+    model,
+    t.model ? displayProvider(t.model) : undefined,
+    t.thinking ? `thinking ${t.thinking}` : undefined,
+    t.effort ? `effort ${t.effort}` : undefined,
+    t.duration,
+    t.interrupted ? "Interrupted" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 /** The status row's parts, so each can carry its own weight and colour. */
 export type ModeParts = { mode: string; model: string; provider?: string; thinking?: string; effort?: string };
 /**
@@ -150,7 +172,10 @@ export function modeParts(mode: string, model: string | undefined, thinking?: st
  */
 export function modeLine(mode: string, model: string | undefined, thinking?: string, effort?: string): string {
   const p = modeParts(mode, model, thinking, effort);
-  return [p.mode, [p.model, p.provider].filter(Boolean).join(" "), p.thinking, p.effort].filter(Boolean).join(" · ");
+  // The provider is NOT appended to the name: the footer already draws it as its own dim segment,
+  // and joining them read as the model said twice — "DeepSeek V4 Flash DeepSeek" (owner, on the
+  // fleet). `modeParts().provider` is still there for the callers that draw a segment.
+  return [p.mode, p.model, p.thinking, p.effort].filter(Boolean).join(" · ");
 }
 
 /**

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, displayModel, modeLine, modeParts, modelOfThread, noteModelNames, turnMeta, cloneLabel, exchangeText, inFlightItems, nestWorkspaces, procLabel, procName, procState, procsOf, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -157,8 +157,8 @@ test("footer segments appear only when set", () => {
 });
 
 test("the line joins only the segments that are there", () => {
-  assert.equal(modeLine("build", "deepseek/deepseek-reasoner", "high", "max"), "Build \u00b7 deepseek-reasoner DeepSeek \u00b7 thinking high \u00b7 effort max");
-  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan \u00b7 Claude Opus 5 Anthropic");
+  assert.equal(modeLine("build", "deepseek/deepseek-reasoner", "high", "max"), "Build \u00b7 deepseek-reasoner \u00b7 thinking high \u00b7 effort max");
+  assert.equal(modeLine("plan", "anthropic/claude-opus-5"), "Plan \u00b7 Claude Opus 5");
 });
 
 /**
@@ -182,4 +182,26 @@ test("a picked model renders by the name pi gave it", () => {
   assert.deepEqual(modeParts("build", "deepseek/deepseek-reasoner", "high"), {
     mode: "Build", model: "DeepSeek Reasoner", provider: "DeepSeek", thinking: "thinking high",
   });
+});
+
+/**
+ * A turn's footer is its OWN: it used to print the live line, so every old message changed the
+ * moment the model changed (owner, on the fleet). A turn with no stamp shows what it has and
+ * never falls back to what is running now.
+ */
+test("a turn's footer is stamped, not live", () => {
+  assert.equal(
+    turnMeta({ mode: "build", model: "deepseek/deepseek-v4-flash", effort: "low", duration: "Crunched for 9s" }),
+    "Build \u00b7 DeepSeek V4 Flash \u00b7 DeepSeek \u00b7 effort low \u00b7 Crunched for 9s",
+  );
+  // An older message: mode and duration only, and NOT the live model.
+  assert.equal(turnMeta({ mode: "build", duration: "Crunched for 2s" }), "Build \u00b7 Crunched for 2s");
+  assert.equal(turnMeta({}), "");
+  assert.equal(turnMeta({ mode: "build", interrupted: true }), "Build \u00b7 Interrupted");
+});
+
+/** The provider is its own segment; joined onto the name it read as the model said twice. */
+test("the model name is not doubled by its provider", () => {
+  assert.ok(!turnMeta({ model: "deepseek/deepseek-v4-flash" }).includes("Flash DeepSeek"));
+  assert.ok(!modeLine("build", "deepseek/deepseek-v4-flash").includes("Flash DeepSeek"));
 });

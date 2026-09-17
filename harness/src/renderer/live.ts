@@ -142,6 +142,14 @@ export async function models(): Promise<ProviderRow[]> {
   return rows;
 }
 
+/**
+ * Each session's current thinking and effort, kept up to date by App as the bench's rows arrive.
+ * A turn stamps these onto the message it produced, so the footer of an OLD turn keeps saying what
+ * actually answered it rather than following the live pick (owner, on the fleet).
+ */
+const sessionTriples = new Map<string, { thinking?: string; effort?: string }>();
+export const noteSessionTriple = (id: string, t: { thinking?: string; effort?: string }) => void sessionTriples.set(id, t);
+
 /** Which dialog takes the composer's place, if any. One at a time, like the permission prompt. */
 const [dialog, setDialog] = createSignal<"model" | undefined>();
 export { dialog, setDialog };
@@ -477,6 +485,24 @@ function makeThread(id: string) {
       case "message_end": {
         open = -1;
         reasoning = -1;
+        // What ANSWERED this turn, stamped on the message it produced (never read from the live
+        // line): pi's own message names the model and provider, and the session row names the
+        // thinking and effort that were in force at this instant.
+        {
+          const a = ev.message as { role?: string; model?: unknown; provider?: unknown } | undefined;
+          if (a?.role === "assistant" && typeof a.model === "string") {
+            const answered = typeof a.provider === "string" && a.provider ? `${a.provider}/${a.model}` : a.model;
+            const t = sessionTriples.get(id) ?? {};
+            for (let k = messages.length - 1; k >= 0; k--) {
+              const m = messages[k];
+              if (m.role === "user") break;
+              if (m.role === "assistant" && (m as { kind?: string }).kind !== "reasoning" && (m as { model?: string }).model === undefined) {
+                setMessages(k, { model: answered, thinking: t.thinking, effort: t.effort } as never);
+                break;
+              }
+            }
+          }
+        }
         // A background task reporting in: shown as a note, the way the terminal
         // prints a job finishing.
         const m = ev.message as { role?: string; customType?: string; content?: any; timestamp?: unknown } | undefined;

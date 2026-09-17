@@ -136,6 +136,10 @@ export function App() {
     const r = sessions.find((y) => y.id === id) as { thinking?: string; effort?: string } | undefined;
     return { thinking: r?.thinking, effort: r?.effort };
   };
+  // A turn stamps the triple that was in force when it ENDED, so live.ts needs it by session id.
+  createEffect(() => {
+    for (const r of sessions) live.noteSessionTriple(r.id, { thinking: (r as { thinking?: string }).thinking, effort: (r as { effort?: string }).effort });
+  });
   const sessionThread = (id: string): Thread | undefined => {
     const x = sessions.find((y) => y.id === id);
     // The model is the SESSION's, from sessions.json: a window that opened after the child started

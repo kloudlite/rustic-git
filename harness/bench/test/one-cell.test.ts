@@ -144,6 +144,18 @@ test("the status line shows exactly one working indicator", () => {
  * is open there is nothing to type, and the transcript keeps only the record of what was asked and
  * answered — never a tool row, never a second copy of the card.
  */
+/**
+ * The per-turn footer shows on hover (opencode's message meta) with its height reserved, so the
+ * transcript never jumps; and it is built from the MESSAGE, never from the live `line()`.
+ */
+test("a turn's footer is its own and shows on hover", () => {
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  assert.match(chat, /opacity-0 transition-opacity[^"]*group-hover\/text:opacity-100/, "hover, by opacity — the row keeps its height");
+  assert.match(chat, /✻&nbsp; \{turnMeta\(\{/, "the footer is built from the message");
+  const footer = chat.slice(chat.indexOf("✻&nbsp;"), chat.indexOf("✻&nbsp;") + 600);
+  assert.ok(!/\blinef?\(\)/.test(footer), "never the live line: an old turn must not change when the model does");
+});
+
 test("a live question replaces the input, and the transcript keeps only the record", () => {
   const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
   // The card is inside the composer block, and the input is hidden while it is up.

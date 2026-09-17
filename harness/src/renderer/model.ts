@@ -333,7 +333,9 @@ export type Message =
   /** `local`: echoed the moment it was typed, before pi reported taking it; its time is not pi's yet. */
   | { role: "user"; text: string; at: string; ts?: number; images?: number[]; local?: true }
   /** `kind: "reasoning"` is the model thinking aloud — rendered apart, and hidden when asked. */
-  | { role: "assistant"; text: string; at: string; ts?: number; kind?: "reasoning"; interrupted?: true }
+  // `model`/`thinking`/`effort` are what answered THIS turn, stamped when it ended. A turn's footer
+  // is its own: reading the live line made every old message change when the model changed.
+  | { role: "assistant"; text: string; at: string; ts?: number; kind?: "reasoning"; interrupted?: true; model?: string; thinking?: string; effort?: string }
   /** A line across the transcript: "Session compacted", "Interrupted" (`session-turn.tsx:293`). */
   | { role: "divider"; text: string; at: string; ts?: number }
   /** A question the harness is waiting on: nothing changes until the person answers it (spec §9). */
