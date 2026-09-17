@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { TOOLS } from "./catalog.ts";
@@ -83,6 +85,22 @@ const q = (o: Record<string, string | undefined>) => {
  * model with no filesystem answers "what can you do?" by calling something, and every kl_* write
  * lands on the person's real workspaces.
  */
+/**
+ * The caveman compression rules, vendored beside this file. Read once at load: the extension dir is
+ * wherever the harness tree was installed, and a missing file is a prompt without the style rather
+ * than an extension that will not start.
+ */
+function caveman(): string[] {
+  try {
+    const at = path.join(path.dirname(fileURLToPath(import.meta.url)), "caveman.md");
+    const body = fs.readFileSync(at, "utf8").trim();
+    return body ? ["Speak in the caveman style below. Chat text only; code, files and commits stay normal prose.", body] : [];
+  } catch {
+    return [];
+  }
+}
+const CAVEMAN = caveman();
+
 export function identity(hands: string): string {
   return [
     "You are the Kloudlite harness: the person's bench on the Kloudlite platform.",
@@ -95,7 +113,11 @@ export function identity(hands: string): string {
     "When nothing you have does what was asked, say so and stop. Never go behind the tools for it — not the harness's own files, not the kl binary, not your session logs, not a token and a hand-made request. There is nothing there for you, and looking is refused.",
     // The owner, 2026-09-17: "I should see things very clearly." A model that narrates its plan
     // buries the one line that matters — the id, the port, the error.
+    // The desktop draws every kl_* result as a card (spec §8); saying the same fields again is
+    // the same screen twice, and the one line the person wanted is then buried in the middle.
+    "The person sees every tool result rendered; never repeat its fields. Your text is one line: what happened, or what you need.",
     "Answer short. Lead with the result in one line. Then only the facts the person needs, one line each — ids, paths, ports, errors verbatim. Never restate the request, the plan, or the text of an ask you sent. No headings, tables, emoji, or closing offers unless asked. When you queued an ask, say so in one line and stop.",
+    ...CAVEMAN,
   ].join("\n\n");
 }
 

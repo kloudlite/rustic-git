@@ -89,6 +89,12 @@ test("the system prompt is the harness's own, not the agent CLI's", async () => 
     // Short answers, because the owner reads the id and the error, not the plan.
     assert.match(prompt, /Answer short\. Lead with the result in one line\./);
     assert.match(identity("its own hands here"), /Answer short/);
+    // A card already shows the fields; the model's line is what happened, not the card again.
+    assert.match(prompt, /never repeat its fields/);
+    // The caveman rules are embedded verbatim from the vendored file, not paraphrased.
+    assert.match(prompt, /Speak in the caveman style below\. Chat text only/);
+    assert.match(prompt, /Respond terse like smart caveman\. All technical substance stay\./);
+    assert.match(prompt, /Never drop not\/never\/no\/only\/except/);
     // Every mode is told it: a workspace session's writes land on somebody's real machine too.
     assert.match(identity("its own hands here"), /Never call a tool whose effect is write or destroy/);
     assert.match(identity("its own hands here"), /Never go behind the tools/);
