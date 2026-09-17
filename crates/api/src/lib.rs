@@ -386,7 +386,9 @@ pub async fn serve(
         app.route("/v1/teams/{slug}/members/{email}/pause", axum::routing::post(pause_member))
             .route("/v1/teams/{slug}/members/{email}/unpause", axum::routing::post(unpause_member))
     };
-    let app = app.with_state(api);
+    // Before the merge, so it covers THIS tier's routes and not the workspaces router's, which
+    // has a bench-tool gate of its own.
+    let app = app.with_state(api.clone()).layer(axum::middleware::from_fn_with_state(api, bench_acts_as_person));
     // Workspaces/environments/regions: a separate crate, a separate `MetaStore`, a separate
     // router state — merged in rather than folded into `Api` so that crate stays independent of
     // this one's git-repo machinery. Only mounted when a jwt signer is configured, same
@@ -402,6 +404,102 @@ pub async fn serve(
     let app = app.layer(axum::middleware::from_fn_with_state("api", kloudlite_core::metrics::http_metrics));
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// What a BENCH may do on this tier, acting as the person its token was minted for.
+///
+/// A bench-tool token is not a session and is refused everywhere else here (`identify`), which is
+/// what made the harness's repo tools 401. The decision (owner, 2026-09-17): a bench acts as ITS
+/// PERSON on repositories and on the team READS a repository page needs — never a key route, never
+/// a credential route, never an admin one. This table is that decision, and the complement is
+/// everything not in it: a bench token on any other path is simply not a credential.
+///
+/// `POST /v1/repos` is here because creating a repository is one of the tools; every write it
+/// admits is still gated by `may_act_under` on the owner, exactly as the same call from a browser
+/// is. The bench adds no authority of its own — it only stops being anonymous.
+pub(crate) const BENCH_PERSON_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/v1/repos"),
+    ("POST", "/v1/repos"),
+    ("GET", "/v1/repos/{owner}/{name}"),
+    ("GET", "/v1/repos/{owner}/{name}/branches"),
+    ("GET", "/v1/repos/{owner}/{name}/compare"),
+    ("GET", "/v1/repos/{owner}/{name}/pulls"),
+    ("POST", "/v1/repos/{owner}/{name}/pulls"),
+    ("GET", "/v1/repos/{owner}/{name}/pulls/{number}"),
+    ("POST", "/v1/repos/{owner}/{name}/pulls/{number}/comments"),
+    ("POST", "/v1/repos/{owner}/{name}/pulls/{number}/merge"),
+    ("POST", "/v1/repos/{owner}/{name}/pulls/{number}/close"),
+    ("POST", "/v1/repos/{owner}/{name}/commits"),
+    // Reads only: which teams the person is in, and who is in one — what a repo owner picker and
+    // a pull request's reviewer list are made of.
+    ("GET", "/v1/teams"),
+    ("GET", "/v1/teams/{slug}"),
+    ("GET", "/v1/teams/{slug}/members"),
+];
+
+/// Segment match against the table: `{x}` matches one non-empty segment, anything else itself.
+fn bench_person_route(method: &axum::http::Method, path: &str) -> bool {
+    let segs: Vec<&str> = path.split('/').collect();
+    BENCH_PERSON_ROUTES.iter().any(|(m, pat)| {
+        *m == method.as_str() && {
+            let pats: Vec<&str> = pat.split('/').collect();
+            pats.len() == segs.len()
+                && pats.iter().zip(&segs).all(|(p, s)| if p.starts_with('{') { !s.is_empty() } else { p == s })
+        }
+    })
+}
+
+/// A bench-tool token on an admitted route becomes the PERSON's own session for this request —
+/// nothing downstream needs to know a bench asked. `None` means "not a bench token, or not a route
+/// a bench may use": the header is left exactly as it came, so an ordinary caller is untouched and
+/// a bench on any other path is refused by `identify` as the non-credential it is there.
+async fn bench_session(
+    api: &Api,
+    method: &axum::http::Method,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+) -> Option<std::result::Result<axum::http::HeaderValue, Response>> {
+    let bearer = kloudlite_core::httpx::bearer_token(headers)?;
+    let jwt = api.jwt.as_deref()?;
+    let claims = jwt.verify_bench_tool(bearer.trim()).ok()?;
+    if !bench_person_route(method, path) {
+        return None;
+    }
+    let refused = || (StatusCode::UNAUTHORIZED, "this bench credential names nobody here").into_response();
+    let db = match directory(api) {
+        Ok(db) => db,
+        Err(r) => return Some(Err(r)),
+    };
+    // The token names a HANDLE; everything on this tier is keyed by email, and the directory is
+    // the one thing that maps the two. A handle nobody holds is refused rather than guessed at.
+    let user = match db.user_by_handle(&claims.sub).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return Some(Err(refused())),
+        Err(e) => {
+            tracing::error!(reason = "bench-tool", handle = %claims.sub, error = %e, "identity.read.failed");
+            return Some(Err((StatusCode::BAD_GATEWAY, "could not check this credential").into_response()));
+        }
+    };
+    let minted = jwt.mint(&user.email, &user.name, user.username.as_deref()).ok()?;
+    axum::http::HeaderValue::from_str(&format!("Bearer {minted}")).ok().map(Ok)
+}
+
+/// The layer that applies it. On the DIRECTORY tier's routes only — the workspaces router has its
+/// own bench-tool gate (`BENCH_TOOL_ROUTES`) and must keep it.
+pub(crate) async fn bench_acts_as_person(
+    axum::extract::State(api): axum::extract::State<Arc<Api>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let swap = bench_session(&api, req.method(), req.uri().path(), req.headers()).await;
+    match swap {
+        Some(Ok(v)) => {
+            req.headers_mut().insert(axum::http::header::AUTHORIZATION, v);
+        }
+        Some(Err(r)) => return r,
+        None => {}
+    }
+    next.run(req).await
 }
 
 /// Who is asking, resolved once. `name` is `Some` only for a session token — the peer path
@@ -572,6 +670,61 @@ mod tests {
         h.insert(kloudlite_core::peer::PEER_HEADER, "".parse().unwrap());
         h.insert(kloudlite_core::peer::OWNER_HEADER, "alice".parse().unwrap());
         assert!(caller(&api, &h).is_err());
+    }
+
+    /// The decision of 2026-09-17, as a table: a bench acts as its person on repositories and on
+    /// the team reads a repository page needs, and on NOTHING else. Every admitted route is named
+    /// here with the method it is admitted under, and the refusals are the ones that would matter.
+    #[test]
+    fn a_bench_acts_as_its_person_on_repositories_and_nowhere_else() {
+        use axum::http::Method;
+        let admitted: &[(Method, &str)] = &[
+            (Method::GET, "/v1/repos"),
+            (Method::POST, "/v1/repos"),
+            (Method::GET, "/v1/repos/alice/web"),
+            (Method::GET, "/v1/repos/alice/web/branches"),
+            (Method::GET, "/v1/repos/alice/web/compare"),
+            (Method::GET, "/v1/repos/alice/web/pulls"),
+            (Method::POST, "/v1/repos/alice/web/pulls"),
+            (Method::GET, "/v1/repos/alice/web/pulls/7"),
+            (Method::POST, "/v1/repos/alice/web/pulls/7/comments"),
+            (Method::POST, "/v1/repos/alice/web/pulls/7/merge"),
+            (Method::POST, "/v1/repos/alice/web/pulls/7/close"),
+            (Method::POST, "/v1/repos/alice/web/commits"),
+            (Method::GET, "/v1/teams"),
+            (Method::GET, "/v1/teams/acme"),
+            (Method::GET, "/v1/teams/acme/members"),
+        ];
+        for (m, p) in admitted {
+            assert!(bench_person_route(m, p), "{m} {p} is not admitted");
+        }
+        let refused: &[(Method, &str)] = &[
+            // Credentials and keys: a bench must never mint or read one.
+            (Method::GET, "/v1/keys"),
+            (Method::POST, "/v1/keys"),
+            (Method::GET, "/v1/cli/tokens"),
+            (Method::GET, "/v1/tokens"),
+            // A read is admitted; the write beside it is not.
+            (Method::PATCH, "/v1/repos/alice/web"),
+            (Method::DELETE, "/v1/repos/alice/web"),
+            (Method::POST, "/v1/repos/alice/web/protection"),
+            (Method::DELETE, "/v1/repos/alice/web/branches/x"),
+            // Team WRITES, and the admin surface.
+            (Method::POST, "/v1/teams"),
+            (Method::POST, "/v1/teams/acme/invites"),
+            (Method::GET, "/api/admin/superadmins"),
+            // Shapes, not just names: an empty segment matches nothing.
+            (Method::GET, "/v1/repos//web"),
+            (Method::GET, "/v1/repos/alice/web/pulls/7/files"),
+        ];
+        for (m, p) in refused {
+            assert!(!bench_person_route(m, p), "{m} {p} admits a bench token");
+        }
+        // Every entry names a route this tier actually serves, spelled as the router spells it.
+        let src = include_str!("lib.rs");
+        for (_, p) in BENCH_PERSON_ROUTES {
+            assert!(src.contains(&format!("\"{p}\"")), "{p} is not a route of this tier");
+        }
     }
 
     /// `/v1/cli/*` and `/v1/keys*` authenticate through `identify`/`user_identity`: a bench's
