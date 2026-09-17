@@ -167,8 +167,8 @@ const PLATFORM = [
   "You have workspaces, environments, snapshots, repos and images. Each has a skill saying what it is and the verbs it has:",
   "%SKILLS%",
   "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
-  "You start with your own machine's tools — read, write, edit, bash, grep, find, ls, process — plus ask, plan, skill and tool_search. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
-  "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
+  "You start with ask, plan, skill, tool_search, memory, architecture and question. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
+  "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
@@ -176,6 +176,7 @@ const PLATFORM = [
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each gets its own copy of the workspace and leaves a branch or a pull request behind; `shared: true` is for a read-only or tiny task in your own.",
   "Before work with more than one step, write the plan with the plan tool; mark each item doing then done as you go; anything you push to later goes into the plan as later with the reason. Keep it current — the person reads the plan, not your text.",
   "",
+  "A package is installed in a workspace, never \"on the bench\": name the workspace.",
   "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
@@ -192,7 +193,12 @@ export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = 
 }
 
 /** The opening line: which machine this session is. Everything after it is the same for both. */
-export const BENCH_HANDS = "You are the Kloudlite harness, the person's bench.";
+export const BENCH_HANDS = [
+  "You are the Kloudlite harness, the person's bench.",
+  // Spec §3.1 and §3.5, verbatim: the bench session has no hands and no directory at all.
+  "You have no filesystem or shell where you run. Every read, edit and command is a tool call that names a workspace and a tree.",
+  "You have no working directory. Name a workspace.",
+].join("\n");
 
 
 /**
@@ -249,14 +255,12 @@ export function capabilities(reg: ReturnType<typeof makeReg>) {
       const rows = mine.filter((t) => t.group === g);
       return rows.length ? [`${g}:`, ...rows.map((t) => `  ${t.name} [${t.effect}] — ${t.summary}`)] : [];
     });
-    return text(
-      [
-        "this machine (its own files and shell, nowhere else):",
-        "  read, write, edit, bash (background: true for a long-running one), process, grep, find, ls [write where they change a file]",
-        ...lines,
-        "anything not listed is not something you can do — say so.",
-      ].join("\n"),
-    );
+    // What this session actually holds. A bench session has no files and no shell of its own; a
+    // workspace session's hands reach ITS workspace over the tool interface, never this container.
+    const hands = reg.names.some((n) => n === "read" || n === "bash")
+      ? ["your workspace, through the tool interface (paths are relative to your working directory):", "  read, write, edit, bash (background: true for a long-running one), process, grep, find, ls [write where they change a file]"]
+      : ["you have no files and no shell of your own: name a workspace, and its session does the work."];
+    return text([...hands, ...lines, "anything not listed is not something you can do — say so."].join("\n"));
   });
 }
 
@@ -293,6 +297,13 @@ const benchCall = async (method: string, p: string, body?: unknown): Promise<{ o
  * inactive until `tool_search` finds it, which is also how a model learns the name it needs.
  */
 export const ALWAYS_ON = ["read", "write", "edit", "bash", "grep", "find", "ls", "process", "ask", "ask_close", "plan", "skill", "tool_search", "memory", "architecture", "question"];
+
+/**
+ * What a BENCH session starts with. No `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` or
+ * `process`: it has no filesystem and no shell where it runs (spec §3.1), and those names do not
+ * exist in that mode at all — a name that answers "not found" teaches a model to try again.
+ */
+export const BENCH_ALWAYS_ON = ["ask", "ask_close", "plan", "skill", "tool_search", "memory", "architecture", "question"];
 
 /** What Plan mode leaves on: everything that reads, plus the plan itself. */
 export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "architecture", "kl_capabilities", "kl_workspace_progress"];
@@ -609,6 +620,61 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
  * session, that workspace. Packages are read-modify-write against `/v1` because
  * PATCH takes the WHOLE list — "add nats" has to keep what is already there.
  */
+/**
+ * The SPACE's environment, which belongs to the person and not to any one machine: a bench session
+ * keeps these even though it has no machine of its own (spec §3.1 removes hands, not the platform).
+ */
+export function spaceTools(reg: ReturnType<typeof makeReg>, space: string | undefined) {
+  if (!space) return;
+  reg("kl_env_current", {}, () => answer("GET", "/v1/me/environments"));
+  reg("kl_env_switch", { environment: Type.String({ description: "environment id owned by this space" }) }, (a) => answer("PUT", `/v1/me/environments/${encodeURIComponent(space)}`, { environment: a.environment }));
+  reg("kl_env_clear", {}, () => answer("DELETE", `/v1/me/environments/${encodeURIComponent(space)}`));
+}
+
+/**
+ * Packages, from a session that has no machine of its own: the WORKSPACE is named, and the change
+ * lands on that workspace's spec (spec §3.1, "a package request always names a workspace"). The
+ * refusal is the spec's own sentence, because a model that assumed "here" was the defect.
+ */
+export function packageTools(reg: ReturnType<typeof makeReg>) {
+  const P = Type.Array(Type.String(), { description: "nixpkgs ATTRIBUTE names, not language names: rustc cargo (Rust), nodejs_22, go, python3, bun, pnpm, jdk21, gcc, gnumake; `attr@version` pins one" });
+  const WS = Type.Optional(Type.String({ description: "the workspace to act on, by name or id — required: this session has no machine of its own" }));
+  const attr = (e: string) => e.split("@")[0];
+  const NAME_IT = { ...text("name the workspace: packages are installed in a workspace, and this session has no machine of its own"), isError: true };
+  const named = (workspace: unknown) => (typeof workspace === "string" && workspace.trim() ? workspace.trim() : undefined);
+  const have = async (id: string): Promise<string[]> => {
+    const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(id)}`);
+    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+    return ((data as { packages?: string[] } | null)?.packages ?? []).slice();
+  };
+
+  reg("kl_pkg_list", { workspace: WS }, async (a) => {
+    const id = named(a.workspace);
+    return id ? text(await have(id)) : NAME_IT;
+  });
+  reg("kl_pkg_add", { workspace: WS, packages: P }, async (a) => {
+    const id = named(a.workspace);
+    if (!id) return NAME_IT;
+    const now = await have(id);
+    // A re-pin replaces the entry it pins rather than sitting beside it.
+    const next = [...now.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e))), ...a.packages];
+    return answer("PATCH", `/v1/workspaces/${encodeURIComponent(id)}`, { packages: next });
+  });
+  reg("kl_pkg_rm", { workspace: WS, packages: P }, async (a) => {
+    const id = named(a.workspace);
+    if (!id) return NAME_IT;
+    const now = await have(id);
+    const next = now.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e)));
+    if (next.length === now.length) return { ...text(`none of ${a.packages.join(", ")} is installed in ${id}`), isError: true };
+    return answer("PATCH", `/v1/workspaces/${encodeURIComponent(id)}`, { packages: next });
+  });
+}
+
+/**
+ * A WORKSPACE session's own machine: its packages, and the space's environment. The bench session
+ * does not have this — it has no machine (spec §3.2) — and `kl_pkg_*` with no workspace named is
+ * refused rather than guessed at.
+ */
 export function ownTools(pi: ExtensionAPI, own: string, space: string | undefined, reg = makeReg(pi)) {
   const packages = async (): Promise<string[]> => {
     const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(own)}`);
@@ -888,9 +954,12 @@ export function tools(pi: ExtensionAPI) {
   memoryTools(reg);
   architectureTools(reg);
   questionTool(reg, pi);
+  packageTools(reg);
+  spaceTools(reg, process.env.KL_TEAM);
   capabilities(reg);
   modeCommand(pi, PLAN_TOOLS);
-  startWith(pi);
+  // A bench session's active set has no local hands in it (spec §3.1).
+  startWith(pi, BENCH_ALWAYS_ON);
 }
 
 /**
@@ -899,8 +968,8 @@ export function tools(pi: ExtensionAPI) {
  * not initialized" and every bench session on the fleet exited (2026-09-17). Registering is
  * describing; activating is doing, and doing waits for a session.
  */
-function startWith(pi: ExtensionAPI) {
-  const set = () => pi.setActiveTools?.(ALWAYS_ON.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
+function startWith(pi: ExtensionAPI, on: string[] = ALWAYS_ON) {
+  const set = () => pi.setActiveTools?.(on.filter((n) => !n.startsWith("ask") || process.env.KL_EPHEMERAL !== "1"));
   pi.on("session_start", async () => void set());
 }
 
@@ -939,8 +1008,9 @@ export default function (pi: ExtensionAPI) {
     modeCommand(pi, PLAN_TOOLS);
     return startWith(pi);
   }
+  // A bench session has NO hands where it runs (spec §3.1): no ide tools on this container, no
+  // package tools bound to "here", no shell. Everything it does to the world is a `kl_*` call or a
+  // message to a session that does have hands.
   tools(pi);
-  const own = process.env.KL_WORKSPACE_ID;
-  if (own) ownTools(pi, own, process.env.KL_TEAM);
   tellItWhereItStands(pi, BENCH_HANDS);
 }

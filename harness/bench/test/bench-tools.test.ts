@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TOOLS } from "../../pi/catalog.ts";
-import kloudlite, { ALWAYS_ON, identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
+import kloudlite, { ALWAYS_ON, BENCH_ALWAYS_ON, identity, settle, BENCH_HANDS } from "../../pi/kloudlite.ts";
 import workspaceTools from "../../pi/workspace-tools.ts";
 import http from "node:http";
 import { Bench } from "../src/bench.ts";
@@ -50,9 +50,11 @@ test("a bench session registers exactly the catalogue; a workspace session only 
     const registered = tools.map((t) => t.name).sort();
     // `kloudlite.ts` registers the catalogue except the entries that run ON this machine —
     // those are `workspace-tools.ts`'s, because they go to a tool server rather than to /v1.
+    // `kl_pkg_*` and `kl_env_switch`/`_clear` are a WORKSPACE's own machine's; a bench session has
+    // no machine, so it does not register them either (spec §3.1).
     assert.deepEqual(registered, TOOLS.map((t) => t.name).filter((n) => !IDE_TOOLS.includes(n)).sort());
-    // Registered is not active: a session starts with twelve and searches for the rest.
-    assert.deepEqual(activeNow().slice().sort(), ALWAYS_ON.slice().sort());
+    // Registered is not active: a session starts with what it needs and searches for the rest.
+    assert.deepEqual(activeNow().slice().sort(), BENCH_ALWAYS_ON.slice().sort());
     assert.equal(new Set(registered).size, registered.length, "no tool is registered twice");
     // The shell is gone: nothing a bench session can call runs in the bench pod.
     for (const gone of ["bash", "read", "write", "edit", "grep", "find", "ls", "process"]) assert.ok(!registered.includes(gone), gone);
@@ -97,7 +99,10 @@ test("the system prompt is the harness's own, and says only what the model must 
     for (const rule of [
       /Before acting in one of these areas, load its skill with `skill \{name\}` once per session, then tool_search the verb\./,
       /Every platform tool is one `tool_search` away/,
-      /Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell\./,
+      // Spec §3.1: there is no bash here to reach for, and the prompt says where work happens.
+      /You have no files and no shell here\. Anything that reads, writes or runs happens in a WORKSPACE/,
+      /You have no filesystem or shell where you run\./,
+      /You have no working directory\. Name a workspace\./,
       /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
       /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\./,
@@ -337,7 +342,8 @@ test("kl_capabilities answers this session's own catalogue, and says what is not
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const out = (await (tools.find((t) => t.name === "kl_capabilities") as any).execute("c1", {}, undefined, undefined, undefined)).content[0].text as string;
-    assert.match(out, /^this machine \(its own files and shell, nowhere else\):/);
+    // A bench session has no files and no shell to offer (spec §3.1).
+    assert.match(out, /^you have no files and no shell of your own: name a workspace/);
     for (const g of ["workspace:", "environment:", "platform:"]) assert.ok(out.includes(g), g);
     assert.match(out, /ask \[write\]/);
     assert.match(out, /anything not listed is not something you can do — say so\.$/);
@@ -575,7 +581,7 @@ test("a snapshot is a snapshot: create from one, list them, and never the word v
   }
 });
 
-test("twelve tools on, the rest one search away, and the six skills read", async () => {
+test("a bench session starts with what it can use, the rest one search away, and the six skills read", async () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
   try {
     const { pi, tools, active, start } = fakePi();
@@ -584,8 +590,9 @@ test("twelve tools on, the rest one search away, and the six skills read", async
     const tool = (n: string) => tools.find((t) => t.name === n)! as unknown as { execute: (...a: any[]) => Promise<any> };
     const run = (n: string, a: any) => tool(n).execute("c1", a, undefined, undefined, undefined);
 
-    // 43 tools in front of a model is a menu it reads instead of working.
-    assert.deepEqual(active().slice().sort(), ALWAYS_ON.slice().sort());
+    // 43 tools in front of a model is a menu it reads instead of working — and a bench session's
+    // set has no local hands in it at all (spec §3.1).
+    assert.deepEqual(active().slice().sort(), BENCH_ALWAYS_ON.slice().sort());
     assert.ok(tools.some((t) => t.name === "kl_intercept"), "still registered, just not active");
 
     // A search finds it, says what it takes, and turns it on for the rest of the session.
@@ -732,7 +739,7 @@ test("loading the extension calls no action method; the active set is applied on
 
     started = true;
     for (const fn of hooks["session_start"]) await fn({});
-    assert.deepEqual(active.slice().sort(), ALWAYS_ON.slice().sort());
+    assert.deepEqual(active.slice().sort(), BENCH_ALWAYS_ON.slice().sort());
   } finally {
     restore();
   }
@@ -886,13 +893,101 @@ test("packages are named as nixpkgs attributes wherever they are asked for", asy
     await start();
     const param = (tool: string) =>
       String((tools.find((t) => t.name === tool) as unknown as { parameters?: { properties?: Record<string, { description?: string }> } })?.parameters?.properties?.packages?.description ?? "");
-    for (const tool of ["kl_pkg_add", "kl_pkg_rm", "kl_workspace_create"]) {
-      assert.match(param(tool), /nixpkgs ATTRIBUTE names/, tool);
-      assert.match(param(tool), /rustc cargo \(Rust\)/, tool);
-      assert.match(param(tool), /attr@version/, tool);
-    }
+    // On the bench, the only packages parameter is the one that CREATES a workspace with them.
+    assert.match(param("kl_workspace_create"), /nixpkgs ATTRIBUTE names/);
+    assert.match(param("kl_workspace_create"), /rustc cargo \(Rust\)/);
+    assert.match(param("kl_workspace_create"), /attr@version/);
     // And the identity says it once, so a model that never opens the skill still knows.
     assert.match(identity(BENCH_HANDS), /Packages are nixpkgs attributes, not language names/);
+  } finally {
+    restore();
+  }
+  // A workspace session owns `kl_pkg_*`, and they say the same thing.
+  const inWs = withEnv({ KL_TOOLS_WORKSPACE: "ws-1", KL_WORKSPACE_ID: "ws-1", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const param = (tool: string) =>
+      String((tools.find((t) => t.name === tool) as unknown as { parameters?: { properties?: Record<string, { description?: string }> } })?.parameters?.properties?.packages?.description ?? "");
+    for (const tool of ["kl_pkg_add", "kl_pkg_rm"]) assert.match(param(tool), /nixpkgs ATTRIBUTE names/, tool);
+  } finally {
+    inWs();
+  }
+});
+
+/**
+ * A session has no hands where it runs (spec §3.1). The bench session's ide tools on this
+ * container are gone with `ownTools`: there is no tool server in the sessions container, no shell
+ * on the model's path, and no package tool bound to "here".
+ */
+test("a bench session has no filesystem, no shell and no machine of its own", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, active, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const names = tools.map((t) => t.name);
+    // Not merely inactive: the names do not exist, so a model cannot call one and be told "not found".
+    for (const hand of ["read", "write", "edit", "bash", "grep", "find", "ls", "process"]) assert.ok(!names.includes(hand), `${hand} is registered on the bench`);
+    // Packages ARE reachable — but only by naming a workspace, never "here" (spec §3.1).
+    for (const pkg of ["kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]) {
+      const takes = (tools.find((t) => t.name === pkg) as unknown as { parameters?: { properties?: Record<string, unknown> } })?.parameters?.properties ?? {};
+      assert.ok("workspace" in takes, `${pkg} does not take a workspace`);
+    }
+    assert.deepEqual(active().slice().sort(), BENCH_ALWAYS_ON.slice().sort());
+    // Searching for a shell finds nothing, in the words the model should use with the person.
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    assert.equal((await run("tool_search", { query: "shell" })).content[0].text, "no tool for that here; say so to the person");
+    // And what it says it can do never promises files or a shell.
+    const can = (await run("kl_capabilities", {})).content[0].text as string;
+    assert.match(can, /you have no files and no shell of your own/);
+  } finally {
+    restore();
+  }
+});
+
+test("every identity says where paths are relative to, and the bench that it has no directory", () => {
+  const paragraph =
+    "You work in one working directory. Every path you give or receive is relative to it. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out; none of that is yours, and tools refuse it. If a task seems to need a path outside your directory, say so in your reply instead.";
+  // The bench: no hands, no directory (spec §3.1, §3.5).
+  const bench = identity(BENCH_HANDS);
+  assert.match(bench, /You have no filesystem or shell where you run\./);
+  assert.match(bench, /You have no working directory\. Name a workspace\./);
+  assert.match(bench, /A package is installed in a workspace, never "on the bench": name the workspace\./);
+  // A workspace session: one directory, and nothing about the machine under it.
+  const restore = withEnv({ KL_TOOLS_WORKSPACE: "ws-1", KL_WORKSPACE_ID: "ws-1", KL_TEAM: "acme", KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, hooks } = fakePi();
+    workspaceTools(pi);
+    const said = hooks["before_agent_start"]?.[0];
+    assert.ok(said, "no before_agent_start hook in workspace mode");
+    return said({ prompt: "", systemPrompt: "" }).then((out: { systemPrompt: string }) => {
+      assert.ok(out.systemPrompt.includes(paragraph), "the workspace identity carries §3.5 verbatim");
+      restore();
+    });
+  } catch (e) {
+    restore();
+    throw e;
+  }
+});
+
+/**
+ * A package is installed in a WORKSPACE (spec §3.1). A bench session has no machine of its own, so
+ * the tool takes the workspace and refuses in the spec's own words when it is not named.
+ */
+test("packages from the bench name a workspace, or are refused", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    for (const tool of ["kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]) {
+      const r = await run(tool, { packages: ["ripgrep"] });
+      assert.equal(r.isError, true, tool);
+      assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
+    }
   } finally {
     restore();
   }

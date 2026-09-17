@@ -11,7 +11,9 @@ You are one. Another person's work, another project, another language — each g
 Verbs: `kl_workspaces` (what exists), `kl_workspace` (one in full), `kl_workspace_create`
 (empty, from a repo and branch, or `from_snapshot`), `kl_workspace_start`, `kl_workspace_stop`,
 `kl_workspace_clone` (a copy to try something in), `kl_workspace_delete`.
-Your own packages: `kl_pkg_list`, `kl_pkg_add`, `kl_pkg_rm` — `attr` or `attr@version`.
+A workspace's own packages: `kl_pkg_list`, `kl_pkg_add`, `kl_pkg_rm` — `attr` or `attr@version`.
+Packages are installed in a WORKSPACE. There is no "on the bench" to install into: a bench session
+has no machine of its own, so a package request names the workspace it is for.
 What another one is doing: `kl_workspace_progress`.
 
 ## Packages
