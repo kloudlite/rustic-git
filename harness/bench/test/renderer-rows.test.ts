@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { benchSessions, inFlightItems, procLabel, procState } from "../../src/renderer/rows.ts";
+import { benchSessions, inFlightItems, nestWorkspaces, procLabel, procState } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -43,4 +43,28 @@ test("refusal: offline and sessionless refuse everything; unwritable refuses onl
   const ro = { ...up, writable: { ok: false, reason: "disk full" } };
   for (const type of ["prompt", "new_session", "compact", "set_model"]) assert.match(refusal({ type }, ro)!, /disk full/);
   assert.equal(refusal({ type: "abort" }, ro), undefined);
+});
+
+/**
+ * A clone belongs under the workspace it was cut from. The api lists both flat and the owner saw
+ * `ws-30b60ec83f5ff77f-eph-5m3k1p` sitting at the top level by its id (2026-09-17) — the deferred
+ * clone path names a clone after the parent's ID, a person's after its NAME, so both must match.
+ */
+test("workspaces nest their clones, by the parent's id or its name", () => {
+  const rows = [
+    { id: "ws-30b60ec83f5ff77f", name: "svelte-frontend" },
+    { id: "ws-30b60ec83f5ff77f-eph-5m3k1p", name: "ws-30b60ec83f5ff77f-eph-5m3k1p" },
+    { id: "ws-api", name: "api" },
+    { id: "ws-api-clone", name: "api-eph-9q2z" },
+    { id: "ws-alone", name: "alone" },
+  ];
+  const tree = nestWorkspaces(rows, { "ws-30b60ec83f5ff77f-eph-5m3k1p": "audit-1" });
+  assert.deepEqual(tree.map((n) => n.row.id), ["ws-30b60ec83f5ff77f", "ws-api", "ws-alone"], "only real machines at the top");
+  assert.deepEqual(tree[0].clones.map((c) => c.row.id), ["ws-30b60ec83f5ff77f-eph-5m3k1p"], "matched by the parent's id");
+  assert.equal(tree[0].clones[0].agent, "audit-1", "and labelled by the agent working in it");
+  assert.deepEqual(tree[1].clones.map((c) => c.row.id), ["ws-api-clone"], "matched by the parent's name");
+  assert.equal(tree[2].clones.length, 0);
+  // An orphan clone is still a machine, not a row that disappears.
+  const orphan = nestWorkspaces([{ id: "ws-x-eph-1", name: "gone-eph-1" }]);
+  assert.deepEqual(orphan.map((n) => n.row.id), ["ws-x-eph-1"]);
 });

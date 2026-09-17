@@ -131,3 +131,50 @@ export function modeLine(mode: string, model: string | undefined, level?: string
   const p = modeParts(mode, model, level);
   return [p.mode, [p.model, p.provider].filter(Boolean).join(" "), p.level].filter(Boolean).join(" · ");
 }
+
+/**
+ * A clone is a CHILD of the workspace it was cut from, not a top-level machine. The api lists both
+ * flat, and an agent's clone is named `<parent>-eph-<hex>` — by the parent's ID when the deferred
+ * `kl_workspace_clone` path made it, by its NAME when a person did — so both are matched
+ * (owner, 2026-09-17: `ws-30b60ec83f5ff77f-eph-5m…` sat at the top level by its id).
+ *
+ * Pure, and the tree the sidebar and the tab picker both draw.
+ */
+export type Nested<T> = { row: T; clones: { row: T; agent?: string }[] };
+
+const CLONE = /^(.*)-eph-([a-z0-9]+)$/i;
+
+export function nestWorkspaces<T extends { id: string; name?: string }>(
+  rows: readonly T[],
+  /** What the bench knows: the agent working in each clone, by the clone's id. */
+  agents: Record<string, string> = {},
+): Nested<T>[] {
+  const byId = new Map(rows.map((w) => [w.id, w] as const));
+  const byName = new Map(rows.filter((w) => w.name).map((w) => [w.name!, w] as const));
+  const out: Nested<T>[] = [];
+  const at = new Map<string, Nested<T>>();
+  const parentOf = (w: T): T | undefined => {
+    const m = CLONE.exec(w.name ?? w.id) ?? CLONE.exec(w.id);
+    if (!m) return undefined;
+    const key = m[1];
+    const p = byId.get(key) ?? byName.get(key);
+    return p && p.id !== w.id ? p : undefined;
+  };
+  // Parents first, so a clone always has somewhere to go.
+  for (const w of rows) {
+    if (parentOf(w)) continue;
+    const node = { row: w, clones: [] as { row: T; agent?: string }[] };
+    at.set(w.id, node);
+    out.push(node);
+  }
+  for (const w of rows) {
+    const p = parentOf(w);
+    if (!p) continue;
+    const node = at.get(p.id);
+    const child = { row: w, agent: agents[w.id] };
+    // A clone whose parent is not in the list is still a machine of its own, not a lost row.
+    if (node) node.clones.push(child);
+    else out.push({ row: w, clones: [] });
+  }
+  return out;
+}

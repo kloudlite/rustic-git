@@ -673,7 +673,16 @@ export function App() {
     // handshake at the edge (measured 2026-09-17), and the bench's own answers were never the
     // slow part. Live updates still arrive over the events socket.
     const boot = (await window.harness.benchBootstrap(cur()).catch(() => undefined)) as
-      | { model?: string; sessions?: Session[]; plans?: { session: string; items: unknown[] }[]; procs?: unknown[]; tasks?: { row?: unknown }[]; exchanges?: unknown[]; messages?: { messages: unknown[] } }
+      | {
+          model?: string;
+          sessions?: Session[];
+          plans?: { session: string; items: unknown[] }[];
+          procs?: unknown[];
+          tasks?: { row?: unknown }[];
+          exchanges?: unknown[];
+          proposals?: { id: string; session: string }[];
+          messages?: { messages: unknown[] };
+        }
       | undefined;
     if (boot?.model) live.setBenchModel(boot.model);
     if (boot?.sessions) setSessions(reconcile(boot.sessions));
@@ -681,6 +690,11 @@ export function App() {
     if (boot?.procs) live.onEvent({ type: "procs", rows: boot.procs });
     for (const row of boot?.tasks ?? []) live.onEvent({ type: "task", row });
     if (boot?.exchanges) live.seedExchanges(boot.exchanges);
+    // A question the bench is HOLDING must show the moment a window connects. The bootstrap carried
+    // these all along and nothing read them: after the bench pod was recreated the desktop showed no
+    // card at all while `GET /proposals` had an open one, and the person was blocked with no idea
+    // why (owner, 2026-09-17).
+    for (const row of boot?.proposals ?? []) live.onEvent({ type: "proposal", row });
     if (boot?.messages) live.thread(cur()).replay(boot.messages.messages);
     if (boot) return;
     await refreshSessions().catch(fail);
@@ -871,6 +885,13 @@ export function App() {
         </Show>
         <Show when={leftOpen() && view() === "workspaces"}>
           <MachinePanel
+            /* Which agent works in which clone: an ephemeral session is `e-<agent>` and its own
+               row names the workspace it runs in, so the tree can label a clone by its agent. */
+            agents={Object.fromEntries(
+              sessions
+                .filter((x) => (x as unknown as { kind?: string }).kind === "ephemeral" && (x as unknown as { workspace?: string }).workspace)
+                .map((x) => [(x as unknown as { workspace: string }).workspace, x.id.replace(/^e-/, "")]),
+            )}
             machine={machine()}
             team={teamName()}
             sessions={live_()}

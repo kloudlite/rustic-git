@@ -4,6 +4,7 @@ import { Menu, MenuItem, MenuSep } from "../ui/Menu";
 import { Button } from "../ui/Button";
 import { Heading, Row, Gutter, Empty } from "../ui/parts";
 import { AGENT, ROLE_SHORT } from "./status";
+import { nestWorkspaces } from "../rows";
 import { EnvironmentDock } from "./EnvironmentDock";
 import type { AgentState, Environment, Machine, Thread } from "../model";
 
@@ -43,6 +44,8 @@ export function MachinePanel(props: {
   onSelect: (id: string) => void;
   onOpenEnv: () => void;
   onConnect: (id: string) => void;
+  /** Which agent is working in each clone, by the clone's workspace id — the bench knows this. */
+  agents?: Record<string, string>;
 }) {
   // Collapsing is per workspace and lives here: it is a view preference, not
   // something the machine or the AI has an opinion about.
@@ -172,9 +175,12 @@ export function MachinePanel(props: {
           <Empty>No workspaces yet. Ask for something and the AI will make what it needs.</Empty>
         </Show>
 
-        <For each={props.machine.workspaces}>
-          {(ws) => {
+        <For each={nestWorkspaces(props.machine.workspaces, props.agents ?? {})}>
+          {(node) => {
+            const ws = node.row;
             const open = () => !collapsed().has(ws.id);
+            /** A clone is a child row, and so is an agent's log: both live under this machine. */
+            const children = () => node.clones.length + ws.ephemerals.length;
             return (
               <div class="mt-2 first:mt-0">
                 <Row
@@ -182,7 +188,6 @@ export function MachinePanel(props: {
                   selected={props.selected === ws.id}
                   state={ws.state}
                   onClick={() => props.onSelect(ws.id)}
-                  title={`${ws.repo} @ ${ws.branch}`}
                 >
                   <button
                     class="inline-flex h-4.5 w-4.5 shrink-0 items-center justify-center text-subtle hover:text-fg"
@@ -192,7 +197,7 @@ export function MachinePanel(props: {
                       toggle(ws.id);
                     }}
                   >
-                    <Show when={ws.ephemerals.length}>
+                    <Show when={children()}>
                       <Icon name={open() ? "chevronDown" : "chevronRight"} size={16} />
                     </Show>
                   </button>
@@ -200,8 +205,8 @@ export function MachinePanel(props: {
                   <span class={`min-w-0 flex-1 truncate px-1 ${ws.state === "stopped" ? "text-muted" : "text-fg"}`}>
                     {ws.name}
                   </span>
-                  <Show when={!open() && ws.ephemerals.length}>
-                    <span class="shrink-0 font-mono text-xs tabular-nums text-subtle">{ws.ephemerals.length}</span>
+                  <Show when={!open() && children()}>
+                    <span class="shrink-0 font-mono text-xs tabular-nums text-subtle">{children()}</span>
                   </Show>
                   <StateDot state={ws.state === "running" ? "running" : "idle"} label={ws.state} />
                 </Row>
@@ -213,15 +218,36 @@ export function MachinePanel(props: {
                       that is selected then paints its own guide over its own
                       fill, the way the editor's tree does. */}
                   <div>
+                    {/* A clone of this machine, under it: the TUI's own connector, the agent's name
+                        where there is one, and `clone` said once, muted (owner, 2026-09-17). */}
+                    <For each={node.clones}>
+                      {(c, i) => (
+                        <Row
+                          class="pl-[26px]"
+                          selected={props.selected === c.row.id}
+                          state={c.row.state}
+                          onClick={() => props.onSelect(c.row.id)}
+                        >
+                          <span class="shrink-0 font-mono text-subtle select-none">
+                            {i() === node.clones.length - 1 && !ws.ephemerals.length ? "└" : "├"}
+                          </span>
+                          <Icon name="workspace" size={16} class={`mx-1 shrink-0 ${c.row.state === "stopped" ? "text-subtle" : "text-accent"}`} />
+                          <span class="min-w-0 flex-1 truncate pr-2 text-muted">{c.agent ?? "clone"}</span>
+                          <span class="shrink-0 text-subtle">clone</span>
+                          <StateDot state={c.row.state === "running" ? "running" : "idle"} label={c.row.state} />
+                        </Row>
+                      )}
+                    </For>
                     <For each={ws.ephemerals}>
                       {(e) => (
                         <Row
-                          class="relative pl-[34px] before:absolute before:top-0 before:bottom-0 before:left-[21px] before:w-px before:bg-guide"
+                          class="pl-[26px]"
                           selected={props.selected === e.id}
                           onClick={() => props.onSelect(e.id)}
                           title={`${e.agent} · ${AGENT[e.state].label} · ${e.task}`}
                         >
-                          <Icon name="ephemeral" size={16} class="mr-1.5 shrink-0 text-subtle" />
+                          <span class="shrink-0 font-mono text-subtle select-none">{e === ws.ephemerals[ws.ephemerals.length - 1] ? "└" : "├"}</span>
+                          <Icon name="ephemeral" size={16} class="mx-1 shrink-0 text-subtle" />
                           <span class="min-w-0 flex-1 truncate pr-2 text-muted">{e.task}</span>
                           <span class="shrink-0 text-xs text-subtle">{ROLE_SHORT[e.agent] ?? e.agent}</span>
                           <StateDot state={e.state} label={AGENT[e.state].label} />

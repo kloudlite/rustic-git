@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { thread, onEvent, asksOf, exchangesOf, seedExchanges } from "../../src/renderer/live.ts";
+import { asksOf, exchangesOf, onEvent, seedExchanges, thread } from "../../src/renderer/live.ts";
 
 /**
  * A queued prompt is echoed where pi TAKES it, not where pi gets round to reporting its queue:
@@ -93,4 +93,31 @@ test("the status line says what the turn is doing, for how long, and what it has
 
   t.onEvent({ type: "agent_end" });
   assert.equal(t.turn(), undefined, "the turn ended; the line goes with it");
+});
+
+/**
+ * A question the bench is HOLDING must show the moment a window connects, not only when the event
+ * happens to arrive. After the bench pod was recreated, `GET /proposals` had an open question and
+ * the desktop showed no card at all — the person was blocked with nothing on screen
+ * (owner, 2026-09-17). The bootstrap carried them all along; nothing read it.
+ */
+test("an open proposal at connect becomes a question in its thread", () => {
+  const session = "s-1";
+  onEvent({
+    type: "proposal",
+    row: {
+      id: "q-mu5k0jez-b56s",
+      session,
+      tool: "question",
+      summary: "Stuck sandboxes",
+      question: { header: "Stuck sandboxes", options: [{ label: "Start both", description: "bring them back up" }] },
+    },
+  } as never);
+  const rows = thread(session).messages.filter((m) => m.role === "question");
+  assert.equal(rows.length, 1);
+  assert.equal((rows[0] as { id: string }).id, "q-mu5k0jez-b56s");
+  assert.equal((rows[0] as { answer?: string }).answer, undefined, "open, so the composer shows it");
+  // The same row arriving twice is one question, not two cards.
+  onEvent({ type: "proposal", row: { id: "q-mu5k0jez-b56s", session, tool: "question", summary: "Stuck sandboxes" } } as never);
+  assert.equal(thread(session).messages.filter((m) => m.role === "question").length, 1);
 });
