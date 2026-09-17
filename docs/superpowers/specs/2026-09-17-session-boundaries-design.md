@@ -83,9 +83,11 @@ nothing else changes here.
 
 - **Status line** (composer footer, opencode row grammar): `deepseek/deepseek-reasoner · thinking
   high · effort max`. Segments that do not apply are absent, never shown as `—`.
-- **`/model`**: dialog rendered in place of the composer like the permission prompt: a provider
-  column (every pi provider, the unwired ones dimmed with "not configured"), a model column for the
-  selected provider from `get_available_models`, a filter box. Enter picks, Esc leaves it.
+- **`/model`**: dialog rendered in place of the composer like the permission prompt: ONE list in
+  opencode's `/models` shape — a dim group header per CONFIGURED provider (owner, 00:20 IST 18 Sep:
+  "show only configured"; the unwired providers appear only in Settings), its models indented
+  beneath, a filter box that narrows across providers, the cursor row a full-width bar with the `❯`
+  glyph, the picked model marked `●`. No tags (no `thinking` — owner). Enter picks, Esc leaves it.
 - **`Ctrl+T`**: cycles thinking through the levels the model supports; the footer segment changes
   in place.
 - **Effort**: a third row in the `/model` dialog, present only when the model takes one; `Ctrl+E`
