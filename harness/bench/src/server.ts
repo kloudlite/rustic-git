@@ -100,6 +100,8 @@ export function serve(
         if (p.length === 3 && p[2] === "ask" && m === "POST") {
           const b = await body(req);
           if (typeof b.from !== "string" || !bench.sessions.get(b.from)) return send(res, 400, { error: `not a live session: ${JSON.stringify(b.from ?? null)}` });
+          // A question is answered beside the work, never in front of it.
+          if (b.kind === "info") return send(res, 202, await bench.infoAsk(p[1], String(b.text ?? ""), b.from));
           return send(res, 202, await bench.ask(p[1], String(b.text ?? ""), b.from));
         }
         if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await thread(`w-${p[1]}`));

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
+import { INFO_TOOLS } from "../src/rpc-child.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
@@ -189,6 +190,59 @@ test("an agent that is not working is closed without waiting for anything", asyn
     const began = Date.now();
     await fetch(`${t.base}/agents/fast-1`, { method: "DELETE" });
     assert.ok(Date.now() - began < 2_000, "an idle agent is not waited on");
+  } finally {
+    await t.down();
+  }
+});
+
+test("an information ask is answered by a read-only fork, and never touches the workspace's queue", async () => {
+  const t = await up("bench-info-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    // The workspace is working on something of its own, and stays working on it.
+    await post(t.base, "/workspaces/api/ask", { text: "hang", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller)[0].state === "running", 5_000, "its work started");
+    const before = (await t.bench.messages("w-api")).messages.length;
+
+    const argvFile = path.join(t.dir, "argv.json");
+    process.env.FAKE_PI_ARGV_FILE = argvFile;
+    let r: Response;
+    try {
+      r = await post(t.base, "/workspaces/api/ask", { text: "which routes have no auth?", kind: "info", from: caller });
+    } finally {
+      delete process.env.FAKE_PI_ARGV_FILE;
+    }
+    assert.equal(r.status, 202);
+
+    await until(() => t.bench.exchanges.bySession(caller).some((e) => e.id.startsWith("info-") && e.dir === "in"), 5_000, "the answer");
+    const back = (await t.bench.messages(caller)).messages as { content: string }[];
+    assert.ok(back.some((m) => String(m.content).startsWith("[info from api] ")), JSON.stringify(back));
+
+    // The fork read the workspace, not the bench: read-only tools, on that workspace's tool server.
+    const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
+    assert.equal(argv[argv.indexOf("--tools") + 1], INFO_TOOLS);
+    assert.ok(argv.includes("--fork"), argv.join(" "));
+
+    // Its own session was never prompted, and its work is still outstanding.
+    assert.equal((await t.bench.messages("w-api")).messages.length, before, "the queue was not touched");
+    assert.equal(t.bench.exchanges.bySession(caller)[0].state, "running", "its work is still running");
+    // The WORK is a plan item; the question is not — nobody is waiting on a question to finish anything.
+    assert.deepEqual(t.bench.plans.get(caller).length, 1);
+    assert.ok(!t.bench.plans.get(caller).some((x) => x.text.includes("which routes")), JSON.stringify(t.bench.plans.get(caller)));
+  } finally {
+    await t.down();
+  }
+});
+
+test("a workspace with no session still answers a question, from the tools without the history", async () => {
+  const t = await up("bench-info-fresh-");
+  try {
+    const caller = t.bench.sessions.all().find((s) => !s.archived)!.id;
+    assert.equal(t.bench.sessions.get("w-cold"), undefined);
+    await post(t.base, "/workspaces/cold/ask", { text: "what is in here?", kind: "info", from: caller });
+    await until(() => t.bench.exchanges.bySession(caller).some((e) => e.dir === "in"), 5_000, "the answer");
+    // Answering a question never opened a session for it.
+    assert.equal(t.bench.sessions.get("w-cold"), undefined, "no session was created to answer a question");
   } finally {
     await t.down();
   }

@@ -165,6 +165,7 @@ const PLATFORM = [
   "You start with your own machine's tools — read, write, edit, bash, grep, find, ls, process — plus ask, plan, skill and tool_search. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
   "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
+  "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent; parallel or risky changes → isolated agents.",
@@ -437,6 +438,7 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
       workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
       isolated: Type.Optional(Type.Boolean({ description: "give the agent its own clone of that workspace: for parallel or risky changes" })),
+      kind: Type.Optional(Type.String({ description: 'work (default: it does something) or info (a question about the workspace\'s code or state that changes nothing)' })),
     },
     async (a) => {
       // One verb, two shapes: a workspace REMEMBERS (its own session, a teammate), an agent starts
@@ -461,9 +463,10 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       }
       // A live agent by name RESUMES it — "one more thing", "fix round" — with everything it has
       // done still in front of it; the bench routes on the name, so one verb covers both.
-      const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: [a.task, a.brief].filter(Boolean).join("\n\n"), from: process.env.KL_SESSION });
+      const kind = a.kind === "info" ? "info" : "work";
+      const r = await benchCall("POST", `/workspaces/${encodeURIComponent(String(a.to))}/ask`, { text: [a.task, a.brief].filter(Boolean).join("\n\n"), kind, from: process.env.KL_SESSION });
       if (!r.ok) return { ...text(String(r.data?.error ?? `the bench answered about ${a.to}`)), isError: true };
-      return text(`queued in ${a.to}'s session; its reply arrives here`);
+      return text(kind === "info" ? `asked ${a.to}; it answers from a read-only copy without stopping` : `queued in ${a.to}'s session; its reply arrives here`);
     },
   );
   reg("ask_close", { name: Type.String({ description: "the agent's name" }) }, async (a) => {

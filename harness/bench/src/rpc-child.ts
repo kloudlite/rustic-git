@@ -41,7 +41,9 @@ const PI_BUILTINS = ["read", "write", "edit", "bash", "grep", "find", "ls"];
 export const IDE_TOOLS = [...PI_BUILTINS, "process", "kl_repo_clone", "kl_container_build", "kl_container_push", "kl_images"];
 
 /** `tools`: the workspace whose tool server runs this session's tools. */
-export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean };
+/** `info`: a READ-ONLY fork that answers one question about a workspace, on that workspace's tool server. */
+export const INFO_TOOLS = "read,grep,find,ls";
+export type ChildOpts = { dir: string; file?: string; fork?: string; model: string; bin?: string; extDir?: string; cwd?: string; tools?: string; ephemeral?: boolean; info?: boolean };
 
 export class RpcChild {
   readonly id: string;
@@ -81,8 +83,10 @@ export class RpcChild {
     // equal to the catalogue by hand.
     // The btw fork answers one question from the transcript it forked: `--no-tools`, and
     // `kloudlite.ts` loaded in fork mode purely so it is told what it is and registers nothing.
-    const exts = (o.fork ? ["kloudlite.ts"] : ["workspace-tools.ts", "kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
-    return ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, "--no-tools"] : []), ...(o.fork ? [] : ["--no-builtin-tools"])];
+    // An INFO fork keeps the workspace's own hands — read-only ones — because the question is about
+    // that workspace's files; an ordinary btw fork has none at all.
+    const exts = (o.fork && !o.info ? ["kloudlite.ts"] : ["workspace-tools.ts", "kloudlite.ts"]).flatMap((f) => ["-e", path.join(extDir, f)]);
+    return ["--mode", "rpc", "--model", o.model, "--session-dir", o.dir, ...exts, ...(o.file ? ["--session", o.file] : []), ...(o.fork ? ["--fork", o.fork, ...(o.info ? ["--tools", INFO_TOOLS] : ["--no-tools"])] : []), ...(o.info && !o.fork ? ["--tools", INFO_TOOLS] : []), ...(o.fork && !o.info ? [] : ["--no-builtin-tools"])];
   }
 
   /**
@@ -132,7 +136,7 @@ export class RpcChild {
     // after `TRACE_MAX_AGE_S`. The upgrade is a context refreshed per prompt (a field in pi's RPC)
     // or re-spawning the child's env when it goes idle.
     // KL_SESSION is how a tool call names the session it came from when it asks the bench for something.
-    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
+    const env = { ...process.env, KL_SESSION: this.id, ...(o.fork || o.info ? { KL_FORK: "1" } : {}), ...(o.ephemeral ? { KL_EPHEMERAL: "1" } : {}), ...(o.fork || o.tools ? {} : { KL_TOOLS_ADDRESS: BENCH_TOOLS }), ...(o.tools ? { KL_TOOLS_WORKSPACE: o.tools } : {}), ...childTraceEnv() };
     const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], env, cwd: o.cwd ?? process.env.HOME });
     this.child = child;
     child.stdout!.on("data", (d: Buffer) => this.feed(d.toString("utf8")));

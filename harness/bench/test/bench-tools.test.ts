@@ -636,14 +636,19 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
     // A workspace REMEMBERS: its own session, which has done everything it has done before.
     const teammate = await ask.execute("c1", { to: "svelte-frontend", task: "run the tests" }, undefined, undefined, undefined);
     assert.equal(seen[0].url, "/workspaces/svelte-frontend/ask");
-    assert.deepEqual(seen[0].body, { text: "run the tests", from: "s-1" });
+    assert.deepEqual(seen[0].body, { text: "run the tests", kind: "work", from: "s-1" });
     assert.match(teammate.content[0].text, /queued in svelte-frontend's session/);
+
+    // A QUESTION is not work: it says so on the wire, and says what it means in the answer.
+    const info = await ask.execute("c1b", { to: "svelte-frontend", task: "which routes have no auth?", kind: "info" }, undefined, undefined, undefined);
+    assert.equal(seen[1].body.kind, "info");
+    assert.match(info.content[0].text, /answers from a read-only copy without stopping/);
 
     // An agent starts clean, is named, and works on this machine unless told otherwise.
     const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
-    assert.equal(seen[1].url, "/agents");
-    assert.match(seen[1].body.name, /^audit-[a-z0-9]{6}$/);
-    assert.deepEqual([seen[1].body.task, seen[1].body.workspace, seen[1].body.from], ["audit the routes", "bench-ada", "s-1"]);
+    assert.equal(seen[2].url, "/agents");
+    assert.match(seen[2].body.name, /^audit-[a-z0-9]{6}$/);
+    assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "bench-ada", "s-1"]);
     assert.match(agent.content[0].text, /^agent audit-[a-z0-9]{6} started$/);
   } finally {
     restore();

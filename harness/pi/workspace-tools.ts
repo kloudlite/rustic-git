@@ -330,6 +330,14 @@ export default function (pi: ExtensionAPI) {
       [
         `You are the Kloudlite harness, working inside workspace ${ws}.`,
         "",
+        ...(process.env.KL_FORK === "1"
+          ? [
+              // A read-only fork: it answers one question about this workspace and is discarded.
+              "You are answering ONE question about this workspace, from a read-only copy of it. You can read, grep, find and list; you cannot change anything, and nothing you do affects the session you were copied from.",
+              "Answer in the short standup shape: the answer first, then where you found it (file names, not contents). No code, no command output, at most 8 lines.",
+              "",
+            ]
+          : []),
         ...(process.env.KL_EPHEMERAL === "1"
           ? [
               // An agent answers once, to somebody who cannot see what it did. The status is the

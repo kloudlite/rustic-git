@@ -47,6 +47,8 @@ const UNREACHABLE_SWEEPS = 3;
 const WATCH_MAX_LINES = 20;
 /** How long a btw fork may run before it is stopped and the call rejects. */
 const BTW_TIMEOUT_MS = 5 * 60_000;
+/** A question about a workspace is a question, not a job: it answers or it does not. */
+const INFO_TIMEOUT_MS = 2 * 60_000;
 // A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
 const WS_ID = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 /** Only bench sessions count as "an open session"; a workspace thread never stands in for one. */
@@ -943,6 +945,59 @@ export class Bench {
       clearTimeout(timer);
       await child.stop();
       // The fork's session file is pi's scratch; the answer is kept under btw/{session}.
+      fs.rmSync(forkDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * A question ABOUT a workspace, answered without stopping it (§19). The workspace's own session
+   * keeps its queue and its turn; a read-only FORK of it — its context, `read/grep/find/ls` on its
+   * own tool server, nothing that writes — answers once and is thrown away. Many run at once.
+   *
+   * It is not work, so it is not a plan item: nobody is waiting on it to finish anything.
+   */
+  async infoAsk(workspace: string, question: string, from: string, timeoutMs = INFO_TIMEOUT_MS): Promise<{ exchange: string; workspace: string }> {
+    this.refuse(true);
+    if (typeof question !== "string" || !question.trim()) throw new Error("an info ask needs a question");
+    if (!this.sessions.get(from)) throw new Error(`no session ${from}`);
+    const exchange = `info-${++this.askSeq}-${Date.now().toString(36)}`;
+    const row = this.write(() => this.exchanges.record({ id: exchange, session: from, workspace, dir: "out", text: question, state: "running" }));
+    this.emit({ type: "exchange", row });
+    void this.answerInfo(workspace, question, from, exchange, timeoutMs).catch(() => this.transitionAsk({ exchange, from, workspace }, "failed"));
+    return { exchange, workspace };
+  }
+
+  private async answerInfo(workspace: string, question: string, from: string, exchange: string, timeoutMs: number) {
+    // Its own session's transcript is the context worth having; with none, the fork is a fresh
+    // read-only session on that workspace — the tools, without the history.
+    const target = this.sessions.get(`e-${workspace}`) ?? this.sessions.get(`w-${workspace}`);
+    const file = target?.file && fs.existsSync(target.file) ? target.file : undefined;
+    const id = `info-${Math.random().toString(36).slice(2, 8)}`;
+    const forkDir = path.join(this.opts.dir, "btw", ".forks", id);
+    fs.mkdirSync(forkDir, { recursive: true });
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const child = new RpcChild(id, { dir: forkDir, fork: file, info: true, tools: target?.target ?? workspace, model: target?.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => {
+      this.emit({ ...ev, pi: id });
+      if (ev.type === "agent_end" || ev.type === "exit") done();
+    });
+    child.start();
+    const timer = setTimeout(done, timeoutMs);
+    timer.unref?.();
+    try {
+      const before = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages?.length ?? 0;
+      await child.send({ type: "prompt", message: question });
+      await ended;
+      const all = (((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages ?? []) as { role?: string; content?: unknown }[];
+      const last = [...all.slice(before)].reverse().find((m) => m.role === "assistant");
+      const answer = typeof last?.content === "string" ? last.content : ((last?.content as { text?: string }[]) ?? []).map((c) => c.text ?? "").join("").trim();
+      this.transitionAsk({ exchange, from, workspace }, answer ? "done" : "failed");
+      const back = this.write(() => this.exchanges.record({ id: `${exchange}-in`, session: from, workspace, dir: "in", text: answer.slice(0, 2000), state: "done", ref: exchange }));
+      this.emit({ type: "exchange", row: back });
+      if (answer && this.sessions.get(from)) await this.send(from, `[info from ${workspace}] ${brief(answer, workspace)}`).catch(() => undefined);
+    } finally {
+      clearTimeout(timer);
+      await child.stop();
       fs.rmSync(forkDir, { recursive: true, force: true });
     }
   }
