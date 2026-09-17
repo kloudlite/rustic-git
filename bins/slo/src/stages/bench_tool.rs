@@ -44,8 +44,9 @@ async fn node(c: &Ctx, argv: &[&str]) -> Result<String> {
     let owner = &c.cfg.probe_user;
     let mut full = vec!["node", "-e"];
     full.extend_from_slice(argv);
+    let pod = super::bench_pod(c, None).await?;
     let (code, out, _) =
-        crate::kube::exec(&k, &crd::ws_namespace(owner, owner), k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), &full, EXEC).await?;
+        crate::kube::exec(&k, &crd::ws_namespace(owner, owner), &pod, Some(k8s::BENCH_CONTAINER), &full, EXEC).await?;
     if code != 0 {
         bail!("node in the bench pod exited {code}");
     }

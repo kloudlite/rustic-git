@@ -17,7 +17,6 @@ use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 pub const BENCH_PORT: u16 = 7789;
 pub const BENCH_DIR: &str = "/bench";
 pub const BENCH_CONTAINER: &str = "bench";
-pub const BENCH_POD: &str = "bench";
 pub const BENCH_TOOL_PATH: &str = "/etc/kloudlite/bench-tool";
 
 

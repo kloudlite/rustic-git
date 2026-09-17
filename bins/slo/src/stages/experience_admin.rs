@@ -37,12 +37,6 @@ const FEED_CEILING: Duration = Duration::from_secs(45);
 /// grant taking effect.
 const AFTER_APPROVE: Duration = Duration::from_secs(10);
 
-/// The gigabytes the request asks for on top of the current limit, and the amount by which the
-/// first create overshoots it. The same number on purpose: after the raise the create fits
-/// EXACTLY (`quota::check` refuses on `>`, not `>=`), so a probe that passes proves the grant
-/// landed rather than that some other headroom appeared.
-const HEADROOM: u64 = 5;
-
 /// Every admin write on this platform carries a note onto its audit row, and an empty one is a 422.
 const NOTE: &str = "slo probe";
 
@@ -101,15 +95,17 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
     let made: Arc<Mutex<Option<String>>> = Arc::default();
     let created = made.clone();
     let body = async {
-        let q = get(c, &quota_url, &jwt).await.context("could not read the quota")?;
-        let limit =
-            q.get("limit").cloned().ok_or_else(|| anyhow!("the quota answer carried no limit"))?;
-        let cap = disk_gb(&limit).ok_or_else(|| anyhow!("the quota limit carries no diskGb"))?;
-        let used = q.get("used").and_then(disk_gb).unwrap_or(0);
+        // Disk is charged by what the volumes OCCUPY since 2026-09-17, so a create asking for a
+        // huge `quota_gb` is no longer over anything — it answered 202 and this id measured nothing
+        // (hourly-manual-0456). The only way to stand a create against the disk gate is to bring
+        // the LIMIT below what the run already holds, exactly as `quota.refused` does; the request
+        // then asks for the yaml's own number back, and the approve is what lets the create through.
+        let pinch = super::workspace::pinched_disk(c, &jwt).await?;
+        super::workspace::pinch_quota(c, &pinch).await?;
         let create = json!({
             "name": name,
             "region": region,
-            "quota_gb": cap.saturating_sub(used) + HEADROOM,
+            "quota_gb": 1,
             "packages": [],
         });
         let (status, text) =
@@ -119,10 +115,11 @@ async fn approve(c: &Ctx, cap: Duration, name: String, reason: String) -> Result
             *created.lock().expect("lock") = serde_json::from_str::<Value>(&text).ok().and_then(|v| id_of(&v).ok());
             return Err(anyhow!("an over-quota create answered {status}: {}", clip(&text)));
         }
+        let want = disk_gb(&probe_quota()).unwrap_or(0);
         let body = json!({
             "kind": "quota",
             "reason": reason,
-            "quota": { "diskGb": cap + HEADROOM },
+            "quota": { "diskGb": want },
         });
         let made =
             post(c, &req_url, &jwt, body).await.context("could not open the quota request")?;
@@ -407,7 +404,7 @@ mod tests {
         };
         use axum::response::IntoResponse;
         Router::new()
-            .route("/v1/quota", get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }))
+            .route("/v1/quota", get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}, "disk": {"usedGb": 10, "limitGb": 100}})) }))
             .route("/v1/workspaces", post(creates))
             .route("/v1/workspaces/{id}", get(ws).delete(|_: Path<String>| async { Json(json!({})) }))
             .route("/v1/requests", post(|| async { Json(json!({ "id": "req-1" })) }))
@@ -463,7 +460,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/quota",
-                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }),
+                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}, "disk": {"usedGb": 10, "limitGb": 100}})) }),
             )
             // Never answers: the body can only end at its ceiling.
             .route(
@@ -478,9 +475,12 @@ mod tests {
                 put(move |Json(b): Json<Value>| {
                     let p = p.clone();
                     async move {
-                        // The yaml's values, not whatever the step happened to read.
-                        assert_eq!(b["spec"], probe_quota());
-                        p.fetch_add(1, Ordering::SeqCst);
+                        // Two writes now: the PINCH the refused create stands against, and the
+                        // restore. Only the restore is counted, and it carries the yaml's values —
+                        // never whatever the step happened to read.
+                        if b["spec"] == probe_quota() {
+                            p.fetch_add(1, Ordering::SeqCst);
+                        }
                         Json(json!({}))
                     }
                 }),
@@ -506,7 +506,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/quota",
-                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}})) }),
+                get(|| async { Json(json!({"limit": {"diskGb": 100}, "used": {"diskGb": 10}, "disk": {"usedGb": 10, "limitGb": 100}})) }),
             )
             // A create that is NOT refused: the quota did not do its job, and the workspace it
             // made is the undo's problem.
@@ -517,10 +517,13 @@ mod tests {
             )
             .route(
                 "/admin/quota/{owner}",
-                put(move || {
+                put(move |Json(b): Json<Value>| {
                     let p = p.clone();
                     async move {
-                        p.fetch_add(1, Ordering::SeqCst);
+                        // The pinch is the other write; the restore is the one that matters here.
+                        if b["spec"] == probe_quota() {
+                            p.fetch_add(1, Ordering::SeqCst);
+                        }
                         Json(json!({}))
                     }
                 }),

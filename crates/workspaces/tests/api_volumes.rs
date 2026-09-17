@@ -661,3 +661,50 @@ async fn a_volume_with_two_worktrees_names_the_one_that_owns_it() {
     let (_, body) = get_json(&s.base, &token(&s.jwt, "karthik"), "/v1/volumes").await;
     assert_eq!(body[0]["display_name"], "source", "the volume's own parent names it: {body}");
 }
+
+fn volume(name: &str, owner: &str) -> Value {
+    json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": name, "labels": {"kloudlite.io/owner": owner}},
+        "spec": {"owner": owner, "team": "", "nodeName": NODE, "region": "centralindia", "quotaGb": 20},
+    })
+}
+
+/// A detached volume whose last snapshot is already gone is real, ownable, and was UNREACHABLE: the
+/// delete resolved ownership through the snapshot listing, which cannot see a volume that has none,
+/// so it answered 404 and nothing could ever collect it — the probe's teardown logged exactly that
+/// once a run, daily since 2026-09-13. Ownership comes off the Volume itself in that case.
+#[tokio::test]
+async fn a_volume_with_no_snapshots_left_is_still_its_owners_to_delete() {
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![])),
+        kget(format!("{API}/volumes/ws-1"), volume("ws-1", "karthik")),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+        Route { method: "DELETE", path: format!("{API}/volumes/ws-1"), status: 200, body: json!({"kind": "Status"}) },
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-1").await, 204);
+    assert!(s.rec.calls().iter().any(|c| c == &format!("DELETE {API}/volumes/ws-1")), "{:?}", s.rec.calls());
+}
+
+/// Absent both ways, and someone else's, stay indistinguishable 404s — the rule the snapshot
+/// listing enforced and the Volume read must not loosen.
+#[tokio::test]
+async fn a_volume_that_is_gone_or_someone_elses_is_still_a_404() {
+    let s = server(vec![
+        kget(SNAPS, snap_list(vec![])),
+        kloudlite_workspaces::kube_test::not_found(format!("{API}/volumes/ws-gone")),
+        kget(format!("{API}/volumes/ws-theirs"), volume("ws-theirs", "someone")),
+        kget(format!("{API}/workspaces"), ws_list(vec![])),
+        kget(format!("{API}/environments"), env_list(vec![])),
+    ])
+    .await;
+    let tok = token(&s.jwt, "karthik");
+
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-gone").await, 404);
+    assert_eq!(delete(&s.base, &tok, "/v1/volumes/ws-theirs").await, 404);
+    assert!(s.rec.calls().iter().all(|c| !c.starts_with("DELETE")), "nothing was deleted: {:?}", s.rec.calls());
+}

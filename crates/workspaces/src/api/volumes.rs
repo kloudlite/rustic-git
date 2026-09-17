@@ -373,13 +373,24 @@ pub(crate) async fn delete_volume(
     Path(name): Path<String>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
-    // The ownership check IS the snapshot listing: a volume with no `Snapshot` under a label the
-    // caller may read is indistinguishable from one that does not exist.
-    snapshots_for_caller(&s, &caller_id, &name).await?;
+    let owners: HashSet<String> = caller_owners(&s, &caller_id).await.into_iter().collect();
+    // Ownership comes from the snapshot listing where there are snapshots, and from the VOLUME
+    // itself where there are none. A detached volume whose last snapshot is already gone is real,
+    // ownable and — until 2026-09-17 — unreachable: the listing answered 404 and no other route
+    // could take it, so every one the probe made that way was litter nobody could sweep through
+    // `/v1` (`slo.teardown.failed … volume delete 404`, daily since 2026-09-13). Absent BOTH ways
+    // is still a 404, and a volume under an owner the caller may not read still cannot be told
+    // apart from one that does not exist.
+    if snapshots_for_caller_maybe_empty(&s, &caller_id, &name).await?.is_empty() {
+        let vols: Api<crd::Volume> = Api::all(kube(&s)?.clone());
+        let mine = vols.get_opt(&name).await.map_err(kube_err)?.is_some_and(|v| owners.contains(&v.spec.owner));
+        if !mine {
+            return Err(not_found());
+        }
+    }
     // Deleting the Volume CR cascades to every Snapshot on it, so a volume carrying somebody
     // else's push is not this caller's to collect — the owner-filtered listing above cannot even
     // see those, which is how one team member's delete used to take the team's whole history.
-    let owners: HashSet<String> = caller_owners(&s, &caller_id).await.into_iter().collect();
     if snapshots_on_volume(&s, &name).await?.iter().any(|sn| !owners.contains(&sn.spec.owner)) {
         return Err((
             StatusCode::CONFLICT,

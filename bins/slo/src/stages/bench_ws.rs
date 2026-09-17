@@ -59,14 +59,20 @@ pub async fn run(c: &mut Ctx) {
 /// lists the cut. A `working` row is not a push anybody could restore from, so the row must be
 /// `ready` — the same judgement `ws.push.p95` makes, through `row_ready`.
 async fn push(c: &mut Ctx, id: &str) {
-    let id = id.to_string();
+    let cut: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let (id, taken) = (id.to_string(), cut.clone());
+    let (push_path, history_path) = (format!("/v1/workspaces/{id}/push"), format!("/v1/volumes/{id}/history"));
     c.step("bench.push.p95", PUSH_CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
-        let url = api(c, &format!("/v1/workspaces/{id}/push"));
-        let history = api(c, &format!("/v1/volumes/{id}/history"));
+        let url = api(c, &push_path);
+        let history = api(c, &history_path);
+        let taken = taken.clone();
         async move {
             let doc = post(c, &url, &jwt, json!({})).await.context("could not push the bench")?;
             let snap = doc.get("id").and_then(Value::as_str).context("the push answered no snapshot id")?.to_string();
+            // Recorded before the wait: a cut that never turned ready is still a snapshot holding
+            // a quota slot, and teardown has to know about it either way.
+            *taken.lock().unwrap() = Some(snap.clone());
             poll_json(c, &history, &jwt, PUSH_CEILING, |v| super::workspace::row_ready(v, &snap))
                 .await
                 .context("the bench's snapshot never turned ready")
@@ -74,6 +80,37 @@ async fn push(c: &mut Ctx, id: &str) {
         .boxed()
     })
     .await;
+    // Untimed teardown, and the reason this id needs one where `ws.push.p95` does not: the bench is
+    // LONG-LIVED, so its volume keeps every hour's push until the owner's `snapshots` quota is full
+    // — "snapshots: 20 of 20" is what failed this id AND `vol.history` in hourly-manual-0456.
+    //
+    // Never this run's own cut: a push advances `status.head`, so the newest snapshot is the running
+    // bench's base and `/v1` refuses it 409 (`delete_snapshot`). What goes is every OLDER push —
+    // last hour's and the ones before it — which is exactly the leak, and leaves the volume with one
+    // restorable point.
+    if cut.lock().unwrap().is_some() {
+        prune_pushes(c, &id).await;
+    }
+}
+
+/// Every push on the bench's volume but the newest, deleted. Warnings only: a teardown that failed
+/// a sample would report the state of last hour's run.
+async fn prune_pushes(c: &Ctx, id: &str) {
+    let history = match get(c, &api(c, &format!("/v1/volumes/{id}/history")), &c.probe_jwt).await {
+        Ok(v) => v,
+        Err(e) => return tracing::warn!(error = %format!("{e:#}"), "slo.bench_ws.push.history"),
+    };
+    // Newest first (`vol.history`'s own contract), so the head is row zero.
+    let older: Vec<String> = history
+        .as_array()
+        .map(|rows| rows.iter().skip(1).filter_map(|r| r.get("id").and_then(Value::as_str)).map(str::to_string).collect())
+        .unwrap_or_default();
+    for snap in older {
+        let url = api(c, &format!("/v1/volumes/{id}/snapshots/{snap}"));
+        if let Err(e) = call(c, reqwest::Method::DELETE, &url, &c.probe_jwt, None).await {
+            tracing::warn!(error = %format!("{e:#}"), snapshot = %snap, "slo.bench_ws.push.teardown");
+        }
+    }
 }
 
 /// `bench.pkg.add`: `kl pkg add` in the bench's own shell — the workspace container's zsh behind

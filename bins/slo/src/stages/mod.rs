@@ -284,6 +284,25 @@ pub(crate) fn api(c: &Ctx, path: &str) -> String {
     format!("{}{path}", c.cfg.api_url.trim_end_matches('/'))
 }
 
+/// The bench pod's NAME, for the execs several stages make into it.
+///
+/// A bench is a Workspace and its pod is named by its workspace id (`bench-…`), so there is no
+/// constant to use: `k8s::BENCH_POD` was `"bench"` and every exec that used it waited on a pod
+/// that has never existed, reading "pods \"bench\" not found" as "coming up" until the step's
+/// ceiling (hourly-manual-0456, 2026-09-17). `/v1/bench` is the same doc the desktop reads.
+pub(crate) async fn bench_pod(c: &Ctx, team: Option<&str>) -> Result<String> {
+    let url = match team {
+        Some(t) => api(c, &format!("/v1/bench?team={t}")),
+        None => api(c, "/v1/bench"),
+    };
+    let doc = get(c, &url, &c.probe_jwt).await.context("could not read the bench")?;
+    doc.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("the bench document names no id"))
+}
+
 /// The same, against the admin process. Deliberately a second function rather than a flag: the two
 /// URLs are different processes, and `sec.user.process` is the SLO that says so.
 pub(crate) fn admin(c: &Ctx, path: &str) -> String {

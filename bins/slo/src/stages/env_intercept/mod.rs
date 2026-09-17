@@ -415,7 +415,7 @@ async fn space_bench(c: &mut Ctx, j: &Journey) {
             bench_ready(c, &team, Duration::from_secs(90)).await?;
             let start = std::time::Instant::now();
             loop {
-                let out = bench_exec(c, &ns, &["cat", "/etc/resolv.conf"]).await.unwrap_or_default();
+                let out = bench_exec(c, &team, &ns, &["cat", "/etc/resolv.conf"]).await.unwrap_or_default();
                 if out.contains(&want) {
                     return Ok(());
                 }
@@ -447,12 +447,14 @@ async fn bench_ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
     }
 }
 
-/// One exec in the bench pod of `ns` — the bench's own path, the one `env.space.bench` reads its
-/// `resolv.conf` through.
+/// One exec in the team bench's pod — the bench's own path, the one `env.space.bench` reads its
+/// `resolv.conf` through. The pod is named by the bench's workspace id, so it is asked for
+/// (`stages::bench_pod`) rather than assumed.
 /// An argv, not a script: the bench image is the harness's, and a shell there is not a promise.
-async fn bench_exec(c: &Ctx, ns: &str, argv: &[&str]) -> Result<String> {
+async fn bench_exec(c: &Ctx, team: &str, ns: &str, argv: &[&str]) -> Result<String> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
-    let (_, out, _) = crate::kube::exec(k, ns, k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), argv, EXEC_CEILING).await?;
+    let pod = super::bench_pod(c, Some(team)).await?;
+    let (_, out, _) = crate::kube::exec(k, ns, &pod, Some(k8s::BENCH_CONTAINER), argv, EXEC_CEILING).await?;
     Ok(out)
 }
 

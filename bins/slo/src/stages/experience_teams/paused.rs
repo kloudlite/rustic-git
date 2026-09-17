@@ -53,7 +53,9 @@ struct Prep {
 async fn in_bench(c: &Ctx, team: &str, js: &str, arg: &str) -> Result<String> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     let ns = crd::ws_namespace(&c.probe_user, team);
-    let (code, out, err) = crate::kube::exec(k, &ns, k8s::BENCH_POD, Some(k8s::BENCH_CONTAINER), &["node", "-e", js, arg], EXEC).await?;
+    // Named by the bench's workspace id, asked for rather than assumed — see `stages::bench_pod`.
+    let pod = super::super::bench_pod(c, Some(team)).await?;
+    let (code, out, err) = crate::kube::exec(k, &ns, &pod, Some(k8s::BENCH_CONTAINER), &["node", "-e", js, arg], EXEC).await?;
     if code != 0 {
         return Err(anyhow!("node in the member's bench exited {code}: {}", clip(&err)));
     }

@@ -830,10 +830,7 @@ async fn quota_refused(c: &mut Ctx, ws: &str) {
 async fn pinching(c: &Ctx, spec: Value, body: impl std::future::Future<Output = Result<()>>) -> Result<()> {
     let admin_jwt = c.admin_jwt();
     let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
-    let pinch = serde_json::json!({ "spec": spec, "note": "slo probe quota refusal" });
-    super::call(c, reqwest::Method::PUT, &write, &admin_jwt, Some(pinch))
-        .await
-        .context("could not bring the quota down to what the run holds")?;
+    pinch_quota(c, &spec).await?;
     let restore_quota = || async {
         let back = serde_json::json!({
             "spec": super::experience_admin::probe_quota(),
@@ -847,10 +844,21 @@ async fn pinching(c: &Ctx, spec: Value, body: impl std::future::Future<Output = 
     crate::drill::undoing(QUOTA_BODY, body, restore_quota).await
 }
 
+/// Write `spec` as the probe owner's quota. Shared with `request.approve`, which stands its
+/// refused create against the same gate and restores the same way.
+pub(super) async fn pinch_quota(c: &Ctx, spec: &Value) -> Result<()> {
+    let write = super::admin(c, &format!("/admin/quota/{}", c.probe_user));
+    let pinch = serde_json::json!({ "spec": spec, "note": "slo probe quota refusal" });
+    super::call(c, reqwest::Method::PUT, &write, &c.admin_jwt(), Some(pinch))
+        .await
+        .map(|_| ())
+        .context("could not bring the quota down to what the run holds")
+}
+
 /// The yaml's quota with `diskGb` brought just BELOW what the owner's volumes occupy, so the next
 /// verb that fills is one over. Read from `/v1/quota`'s `disk` block — the same stamps the gate
 /// sums — rather than from a ceiling, which is no longer what disk is charged on.
-async fn pinched_disk(c: &Ctx, jwt: &str) -> Result<Value> {
+pub(super) async fn pinched_disk(c: &Ctx, jwt: &str) -> Result<Value> {
     let seen = super::get(c, &api(c, "/v1/quota"), jwt).await.context("could not read the quota")?;
     let used = seen.pointer("/disk/usedGb").and_then(Value::as_u64);
     let Some(used) = used.filter(|u| *u > 0) else {

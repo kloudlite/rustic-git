@@ -280,6 +280,8 @@ pub async fn hourly(c: &mut Ctx) {
                 drop(child);
                 let owner = c.cfg.probe_user.clone();
                 let pods: Api<Pod> = Api::namespaced(k.clone(), &crd::ws_namespace(&owner, &owner));
+                // The pod is named by the bench's workspace id; there is no constant for it.
+                let pod_name = super::bench_pod(c, None).await?;
                 // One budget for the whole chain: readiness false, then the pod gone, then idle.
                 let deadline = Instant::now() + Duration::from_secs(idle) + IDLE_GRACE;
                 // The idle SIGNAL is the `bench` container's readiness, not the pod's exit code —
@@ -290,7 +292,7 @@ pub async fn hourly(c: &mut Ctx) {
                 // `idle` phase) is what it records.
                 let mut saw_not_ready = false;
                 loop {
-                    match pods.get_opt(kloudlite_workspaces::k8s::BENCH_POD).await? {
+                    match pods.get_opt(&pod_name).await? {
                         None => break,
                         Some(pod) => {
                             if bench_ready(&pod) == Some(false) && !saw_not_ready {

@@ -160,13 +160,13 @@ pub(super) async fn bench_reaches(c: &mut Ctx, j: &Journey, held: bool) {
         return c.skip("env.intercept.bench", &why.clone());
     }
     let host = format!("{TARGET}.{}.svc.cluster.local", env_namespace(&j.env));
-    let ns = j.ws_ns(&c.probe_user);
+    let (team, ns) = (j.team.clone(), j.ws_ns(&c.probe_user));
     c.step("env.intercept.bench", BENCH_DIAL_CEILING, move |c| {
         async move {
             let script = super::node_get(&format!("http://{host}:{TARGET_PORT}/"));
             let start = std::time::Instant::now();
             loop {
-                let out = bench_exec(c, &ns, &["node", "-e", &script]).await.unwrap_or_default();
+                let out = bench_exec(c, &team, &ns, &["node", "-e", &script]).await.unwrap_or_default();
                 if out.contains(MARKER) {
                     return Ok(());
                 }
