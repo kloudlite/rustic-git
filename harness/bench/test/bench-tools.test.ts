@@ -118,7 +118,10 @@ test("the system prompt is the harness's own, and says only what the model must 
     const before = prompt.slice(0, prompt.indexOf("Speak in the caveman style"));
     for (const word of ["proposal", "render", "exchange", "widget", "quota", "region"]) assert.ok(!new RegExp(word, "i").test(before), `${word} is mechanism, not prompt: ${before}`);
     // The style still rides along.
-    assert.match(prompt, /Speak in the caveman style below\. Chat text only/);
+    // The style is not only for the person: an ask and a report cross to another session, and a
+    // paragraph of lead-in is what the receiver pays for (owner, 2026-09-18).
+    assert.match(prompt, /Speak in the caveman style below\. It applies to what you say to the person AND to every message that crosses to another session/);
+    assert.match(prompt, /no preamble, no restating what they already hold/);
     assert.match(prompt, /Respond terse like smart caveman\./);
   } finally {
     restore();
@@ -1655,6 +1658,28 @@ test("the ask a workspace receives is the person's words, not a tool name", asyn
     // The tag routes it; everything after the tag is what the person said, unrewritten.
     assert.match(first, new RegExp(`^\\[ask ${a.exchange} from [^\\]]+\\] ${words}$`), first);
     for (const invented of ["kl_container_build", "kl_workspace", "context:", "Please"]) assert.ok(!first.includes(invented), `${invented}: ${first}`);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * What crosses between sessions carries no throat-clearing. A model asking on the person's behalf
+ * writes "Sure! I'll ask the workspace to …" in front of their words, and the receiver pays for
+ * that in tokens and attention (owner, 2026-09-18).
+ */
+test("an ask crosses without the model's preamble", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-terse-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("api", "Sure! I'll go ahead and add a version endpoint and push it", asker);
+    const got = (await bench.messages(a.session)).messages as { role: string; content: unknown }[];
+    const first = String(got.find((m) => m.role === "user")!.content);
+    assert.match(first, /\] add a version endpoint and push it$/, first);
+    for (const gone of ["Sure!", "I'll", "go ahead"]) assert.ok(!first.includes(gone), `${gone}: ${first}`);
   } finally {
     await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });

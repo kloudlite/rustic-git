@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { brief, itemText, nudge, reduce } from "../src/plan.ts";
+import { brief, itemText, nudge, reduce, terse } from "../src/plan.ts";
 import type { PlanItem } from "../src/ledger.ts";
 
 /** The harness keeps the plan true: every rule is (plan, event) → plan, and nothing else. */
@@ -171,4 +171,22 @@ test("a plan keeps no empty items, and no empty name can tick one", () => {
   // And a cleared session keeps nothing.
   plans.discard("s-1");
   assert.deepEqual(plans.get("s-1"), []);
+});
+
+/**
+ * Every message that crosses to another session is terse (spec §3.8): two sessions already share
+ * the context, so the lead-in is tokens and attention the receiver pays for nothing (owner,
+ * 2026-09-18: "not waste too much on trying to build up the context").
+ */
+test("a message to another session carries no boilerplate", () => {
+  assert.equal(terse("Sure! I'll go ahead and add the endpoint."), "add the endpoint.");
+  assert.equal(terse("Certainly. Here's what I found: the service has no version route"), "the service has no version route");
+  assert.equal(terse("Context: the backend is a Go service.\nadd GET /version"), "the backend is a Go service.\nadd GET /version");
+  assert.equal(terse("  Okay, let me check the tests: they pass"), "they pass");
+  // What is already a fragment is left exactly as it is.
+  for (const said of ["add GET /version and push", "DONE — the service reports its version", "BLOCKED — no registry credential"])
+    assert.equal(terse(said), said);
+  // And a sentence that merely STARTS with a kept word is not eaten.
+  assert.equal(terse("I'll be blunt: this needs a decision"), "this needs a decision");
+  assert.equal(terse("status: running"), "running");
 });

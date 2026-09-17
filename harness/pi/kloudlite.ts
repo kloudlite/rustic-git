@@ -203,7 +203,16 @@ function caveman(): string[] {
   try {
     const at = path.join(path.dirname(fileURLToPath(import.meta.url)), "caveman.md");
     const body = fs.readFileSync(at, "utf8").trim();
-    return body ? ["Speak in the caveman style below. Chat text only; code, files and commits stay normal prose.", body] : [];
+    return body
+      ? [
+          // "Chat text only" was read as "the reply only", so every ask and report crossed as a
+          // paragraph with a lead-in and a restatement of what the receiver already held (owner,
+          // 2026-09-18). Code, files and commits stay normal prose; a message to another SESSION is
+          // not prose, it is a note between two things that already share the context.
+          "Speak in the caveman style below. It applies to what you say to the person AND to every message that crosses to another session — `ask`'s task and brief, `report`'s text, an agent's brief and its report: no preamble, no restating what they already hold, no \"context:\" section. Code, files and commits stay normal prose.",
+          body,
+        ]
+      : [];
   } catch {
     return [];
   }

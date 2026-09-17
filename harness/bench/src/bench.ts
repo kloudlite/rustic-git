@@ -5,7 +5,7 @@ import { ExchangeLog, type Exchange } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Plans, Procs, Tasks, type PlanState, type ProcRow } from "./ledger.ts";
 import { Memories, type Memory } from "./memory.ts";
-import { brief, nudge, reduce, type PlanEvent } from "./plan.ts";
+import { brief, nudge, reduce, terse, type PlanEvent } from "./plan.ts";
 import { keepPersonOrder, order, question as triageQuestion } from "./triage.ts";
 import { page, transcript } from "./reader.ts";
 import { RpcChild, type ChildOpts, type PiEvent } from "./rpc-child.ts";
@@ -404,7 +404,8 @@ export class Bench {
     const queue = this.asked.get(session) ?? [];
     const a = queue.find((x) => x.exchange === ask) ?? (queue.length === 1 ? queue[0] : undefined);
     if (!a) throw new Error(`no open ask ${ask} here`);
-    const said = String(text ?? "").trim();
+    // A report crosses to another session too: their note, not a paragraph about it (§3.8).
+    const said = terse(String(text ?? ""));
     if (!said) throw new Error("a report needs something to say");
     if (kind === "progress") {
       // The ask stays running: a decision is not an answer, and the asking session waits for one.
@@ -845,7 +846,10 @@ export class Bench {
     this.plan(from, { type: "asked", exchange, to: workspace, task: text });
     try {
       // A live agent of this session is talked to directly; a workspace is a teammate with a queue.
-      await this.send(s.id, direct ? text : `[ask ${exchange} from ${asker.name}] ${text}`, direct);
+      // The person's words as they stand — but a model asking on their behalf writes "Sure! I'll
+      // ask the workspace to …" in front of them, and that is not the person's words (§3.8).
+      const said = terse(text);
+      await this.send(s.id, direct ? said : `[ask ${exchange} from ${asker.name}] ${said}`, direct);
     } catch (e) {
       this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
       this.transitionAsk({ exchange, from, workspace }, "failed");
@@ -929,7 +933,7 @@ export class Bench {
       // No tag and no history: an agent is given the task and nothing else, so its answer is the
       // answer to that task rather than to a conversation it was not part of. Direct: an agent is
       // this session's own, not a queue it has to wait in.
-      await this.send(s.id, task, true);
+      await this.send(s.id, terse(task), true);
     } catch (e) {
       this.asked.set(s.id, queue.filter((x) => x.exchange !== exchange));
       this.transitionAsk({ exchange, from, workspace: name }, "failed");
