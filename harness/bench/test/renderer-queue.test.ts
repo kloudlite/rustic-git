@@ -161,3 +161,39 @@ test("a question makes no task row; work that runs does", () => {
   assert.equal(tasks[tasks.length - 1].tool, "Bash");
   assert.equal(tasks[tasks.length - 1].session, "s-4", "and it belongs to the session that started it");
 });
+
+/**
+ * The owner's "frontend" session opened on its last few events: the first prompt — the one that
+ * asked for the TS Node project — and everything before the turn summary were simply absent. The
+ * replay must keep every real prompt; only a slash line and a card's own bare answer are dropped.
+ */
+test("a replayed session keeps its first prompt", () => {
+  const t = thread("w-visible-1");
+  t.replay([
+    { role: "user", content: "create a TS Node project", timestamp: 1 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }], timestamp: 2 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "read", arguments: { path: "a.ts" } }], timestamp: 3 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c3", name: "write", arguments: { path: "b.ts" } }], timestamp: 4 },
+    { role: "assistant", content: [{ type: "text", text: "made it" }], timestamp: 5 },
+    { role: "assistant", content: [{ type: "toolCall", id: "c4", name: "question", arguments: { header: "which" } }], timestamp: 6 },
+    { role: "user", content: "yes", timestamp: 7 },
+  ]);
+  assert.equal(t.messages[0].role, "user", "the first row is the prompt that started it");
+  assert.equal((t.messages[0] as { text: string }).text, "create a TS Node project");
+  assert.equal(t.messages.filter((m) => m.role === "user").length, 1, "the card's own `yes` is not a second row");
+  assert.equal(t.messages.filter((m) => m.role === "action").length, 4);
+});
+
+/**
+ * The question card is drawn from the bench's proposal event, which carries only a session id —
+ * so it works the same on a WORKSPACE thread as on the bench's own, and the generic
+ * `Called \`question\`` row is never drawn beside it.
+ */
+test("a question on a workspace session is a card, not a tool row", () => {
+  const ws = "w-ce63ce4079301bd9";
+  onEvent({ type: "tool_execution_start", toolName: "question", toolCallId: "t1", args: { header: "which new project" }, pi: ws } as never);
+  onEvent({ type: "proposal", row: { id: "q-ws", session: ws, tool: "question", summary: "which new project?", question: { header: "which", options: [{ label: "a", description: "" }] } } } as never);
+  const rows = thread(ws).messages;
+  assert.ok(rows.some((m) => m.role === "question"), "the card is drawn on the workspace thread");
+  assert.ok(!rows.some((m) => m.role === "action" && (m as { tool?: string }).tool === "question"), "and no generic `Called question` row beside it");
+});

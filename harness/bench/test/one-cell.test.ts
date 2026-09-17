@@ -158,6 +158,17 @@ test("the status line shows exactly one working indicator", () => {
  * history. remove such unnecessary things"). A command echo, a plan repeat and a failed desktop
  * call are not conversation; a state change worth reading back is a quiet divider.
  */
+/** The whole session is visible: filled from the top when short, and read whole when it is small. */
+test("a session is shown whole", () => {
+  const chat = fs.readFileSync(path.resolve("src/renderer/components/Chat.tsx"), "utf8");
+  // A reversed column stacks from the bottom; without this a short thread sat pinned low with the
+  // upper 40% of the pane blank (owner's screenshot).
+  assert.match(chat, /flex-col-reverse justify-end/);
+  const client = fs.readFileSync(path.resolve("src/bench-client.ts"), "utf8");
+  // Opening with a tail and never filling it in is what hid the first prompt.
+  assert.match(client, /r\.total <= FULL_UNDER/, "a short session is read whole, not left on its tail");
+});
+
 test("only the conversation reaches the transcript", () => {
   const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
   const app = fs.readFileSync(path.resolve("src/renderer/App.tsx"), "utf8");

@@ -366,7 +366,10 @@ export function Chat(props: {
             once a person scrolls up — the terminal's behaviour, no script. */}
         <div
           ref={scroller}
-          class="pane relative flex min-w-0 flex-col-reverse overflow-x-clip overflow-y-auto px-9 pt-5 select-text"
+          // `justify-end` fills a SHORT session from the top: a reversed column stacks from the
+          // bottom, so a thread shorter than the pane sat pinned low with the upper 40% blank
+          // (owner's screenshot). It changes nothing once the content overflows.
+          class="pane relative flex min-w-0 flex-col-reverse justify-end overflow-x-clip overflow-y-auto px-9 pt-5 select-text"
           style={{ "padding-bottom": `calc(var(--composer-h, 0px) + 16px)` }}
           classList={{ hidden: onFile() }}
           onScroll={() => { if (atBottom()) setBehind(false); }}

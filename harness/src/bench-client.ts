@@ -17,6 +17,13 @@ export type Emit = (ev: Record<string, unknown> & { type: string; pi?: string })
 type Cache = { base: string; sessions: unknown[]; exchanges: unknown[]; messages: Record<string, { total: number; tail: unknown[] }> };
 /** What a window asks for when it opens a thread it has never seen. */
 const OPEN_WITH = 60;
+/**
+ * A session shorter than this is read WHOLE on open, so nothing of it is missing. Past it the tail
+ * stands on its own: a thread of thousands would read every message back through pi before the
+ * window could draw. ponytail: no scroll-up paging yet — the upgrade is a `before=` page fetched
+ * when the person reaches the top.
+ */
+const FULL_UNDER = 2000;
 const KEEP_MESSAGES = 200;
 const KEEP_EXCHANGES = 500;
 export type PtySession = { name: string; windows: number; attached: number; created: number };
@@ -276,10 +283,15 @@ export class BenchClient {
     if (!this.up) return have.tail;
     const at = `/sessions/${encodeURIComponent(session)}/messages`;
     try {
-      // With nothing cached, ask for the NEWEST page rather than the whole history: a long thread
-      // otherwise reads every message back through pi before the window can draw anything.
+      // With nothing cached, ask for the newest page FIRST so the window can draw, then — unless
+      // the session is genuinely long — fetch the rest and keep the whole thing. Opening with a
+      // tail and never filling it in is what hid the owner's first prompt behind eleven tool calls:
+      // the session looked like it began mid-conversation, because the start had never been asked
+      // for (owner: "session is not fully visible").
       const q = have.total ? `after=${have.total}` : `tail=${OPEN_WITH}`;
-      const r = await this.rest<{ messages: unknown[]; total: number }>("GET", `${at}?${q}`);
+      let r = await this.rest<{ messages: unknown[]; total: number }>("GET", `${at}?${q}`);
+      if (!have.total && r.total > r.messages.length && r.total <= FULL_UNDER)
+        r = await this.rest<{ messages: unknown[]; total: number }>("GET", at).catch(() => r);
       // A shorter history than the cache means it was cleared or compacted:
       // start over rather than append to a history that no longer exists.
       const all = r.total < have.total ? (await this.rest<{ messages: unknown[] }>("GET", at)).messages : [...have.tail, ...r.messages];
