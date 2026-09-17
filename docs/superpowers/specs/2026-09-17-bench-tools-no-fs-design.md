@@ -454,3 +454,25 @@ is Solid, like the harness. The centre pane becomes a PORT of that package, not 
   set through their font variables. The terminal, sidebar and inspector keep our components.
 - Result: pixel-parity by construction. Our previous hand-drawn pane components are deleted once
   the port renders every part; the render-contract document stays as the map.
+
+## 24. The bench knows the architecture (owner, 2026-09-17 19:00 IST: "top level bench session
+should already be having details about the entire architecture, contracts between any two
+servers, endpoints etc. it may not have detailed knowledge of implementation")
+
+- **One living document per space**: `{bench}/.bench/architecture.md` — components (workspace
+  → what runs there, language, port), environment services (name, image, port, who uses it),
+  contracts between any two of them (endpoint, method, request/response shape, auth, owner
+  workspace), data stores and their schemas at contract level, env vars each component expects,
+  public URLs when any exist. Structured markdown with one `##` per component and a
+  `## Contracts` table; never implementation detail.
+- **Kept current by the workspace sessions, enforced by the bench**: a work reply (§18) MUST end
+  with a `contracts:` line — `none` or the changed/added items in one line each; the bench parses
+  it and merges into the document (tool `architecture {set?: section, text}` also exists for
+  explicit edits, in every session). A reply without the line is bounced once with "[harness]
+  add the contracts: line". Agents' reports carry it too.
+- **Loaded into the bench identity at session start** (like the memory index), so the bench
+  answers architecture questions itself and never asks a workspace for a port, an endpoint or a
+  schema it already holds; `kind: info` asks are for implementation details only (identity says
+  so). The document is snapshotted with the bench.
+- **Desktop**: an Architecture page (sidebar) renders the document read-only with the contracts
+  table; the environment page links services to the components that call them.
