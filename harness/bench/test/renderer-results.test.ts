@@ -6,6 +6,7 @@ import { onEvent, planOf } from "../../src/renderer/live.ts";
 import { grepBlock, plainBlock, readBlock } from "../../src/renderer/components/results/code.ts";
 import { render as renderLine, report, toolLine } from "../../src/renderer/components/results/toolline.ts";
 import { elapsed, segments, timing, verb } from "../../src/renderer/components/results/group.ts";
+import { notification, spinnerMeta, summary, turnFooter, verbAt } from "../../src/renderer/components/results/summary.ts";
 
 test("a tool's answer picks its card, and an unknown shape keeps the block", () => {
   const ws = JSON.stringify({ id: "api", name: "api", state: "running", packages: ["go@1.22"] });
@@ -174,4 +175,40 @@ test("consecutive tool calls of one turn read as one group", () => {
   assert.equal(elapsed(1400), "1.4s");
   assert.equal(elapsed(12_000), "12s");
   assert.equal(elapsed(310_000), "5m 10s");
+});
+
+test("the live summary says what is happening, then what happened", () => {
+  const t = (tool: string) => ({ role: "action" as const, kind: "run" as const, text: "", at: "", tool });
+  const rows = [t("read"), t("ls"), t("bash")];
+  assert.equal(summary(rows as never), "Reading 1 file, listing 1 directory, running 1 shell command");
+  assert.equal(summary(rows as never, true), "Read 1 file, listed 1 directory, ran 1 shell command");
+  // Counts agree with their nouns, and several of a kind are one clause.
+  assert.equal(summary([t("read"), t("read"), t("grep")] as never), "Reading 2 files, searching 1 search");
+  assert.equal(summary([t("bash"), t("bash")] as never, true), "Ran 2 shell commands");
+  assert.equal(summary([] as never), "");
+  // A tool with no shape of its own still reads.
+  assert.equal(summary([t("kl_workspace_create")] as never, true), "Made 1 tool call");
+
+  // The spinner says it is alive: the verb changes with the seconds, and only known facts are shown.
+  assert.notEqual(verbAt(0), verbAt(60));
+  assert.equal(verbAt(0), verbAt(3), "it does not flicker every second");
+  assert.equal(spinnerMeta(3), "3s");
+  assert.equal(spinnerMeta(3, 123), "3s · ↓ 123 tokens");
+  assert.equal(spinnerMeta(3, 1500, 1200), "3s · ↓ 1.5k tokens · thought for 1s");
+
+  // The turn footer, and what is still running after it.
+  const at = new Date("2026-09-17T15:33:00");
+  assert.match(turnFooter(9000, at, 0), /^Crunched for 9s · done /);
+  assert.match(turnFooter(9000, at, 1), /· 1 still running$/);
+});
+
+test("what the harness delivers reads as a row, not as something the person typed", () => {
+  assert.deepEqual(notification("[from agent audit-1] DONE — 3 routes"), { verb: 'Agent "audit-1" finished', detail: "DONE — 3 routes" });
+  assert.deepEqual(notification("[task svelte dev server finished: exit 1]\nboom"), { verb: 'Background command "svelte dev server" completed (exit code 1)' });
+  assert.deepEqual(notification("[info from api] four of them"), { verb: "api answered", detail: "four of them" });
+  assert.deepEqual(notification("[from workspace api] done: added /healthz"), { verb: "api replied", detail: "done: added /healthz" });
+  assert.deepEqual(notification("[watch vite /error/]\nerror: boom"), { verb: "vite matched /error/", detail: "error: boom" });
+  assert.deepEqual(notification("[harness] write the plan"), { verb: "Harness", detail: "write the plan" });
+  // A person's own message is a person's own message.
+  assert.equal(notification("add nats to the env"), undefined);
 });

@@ -444,9 +444,16 @@ export function onEvent(ev: Ev & { pi?: string }) {
       // wondering where the middle of their transcript went.
       if (typeof ev.session === "string") thread(ev.session).note("⟲ compacted — the conversation was summarised to keep going");
       return;
-    case "plan":
-      if (typeof ev.session === "string") setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
+    case "plan": {
+      if (typeof ev.session !== "string") return;
+      const before = plans[ev.session];
+      setPlans(ev.session, (ev.items as PlanRow[]) ?? []);
+      // The plan changing is worth a row: it is the model saying what it is going to do.
+      const now = plans[ev.session] ?? [];
+      const said = (rows: PlanRow[] | undefined) => (rows ?? []).map((x) => `${x.state}:${x.text}`).join("|");
+      if (said(before) !== said(now) && now.length) thread(ev.session).note(`Todo: ${now.map((x) => `${x.state === "done" ? "✓" : x.state === "doing" ? "▸" : x.state === "later" ? "↷" : "☐"} ${x.text.split("\u0000")[0]}`).join("  ")}`);
       return;
+    }
     case "exchange":
       // One row per publish: a record, or a transition of one already held.
       if (ev.row) foldExchange(ev.row as Exchange);

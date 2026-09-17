@@ -12,6 +12,7 @@ import { TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
 import { elapsed, segments, timing, verb } from "./results/group";
+import { notification, spinnerMeta, subjects, summary, turnFooter, verbAt } from "./results/summary";
 import { displayModel } from "../rows";
 import { HINTS } from "../keys";
 import * as live from "../live";
@@ -393,16 +394,43 @@ export function Chat(props: {
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
                       answer is plain text beside it; the two turns are told apart by shape. */}
                   <Show
-                    when={b.role === "user"}
-                    /* No rail and no card: an answer is text, and the pane is monospace. */
+                    when={b.role === "user" && !notification((b as { text: string }).text)}
+                    /* A message the HARNESS delivered is a row of its own — an agent reporting, a
+                       command finishing, a question answered — never a prompt the person appears
+                       to have typed. An answer is plain text. */
                     fallback={
+                      <Show when={b.role === "user"} fallback={
                       <div class="flex flex-col">
                         <div class="flex items-start">
                           <Prose text={(b as { text: string }).text} latest={b === blocks()[blocks().length - 1]} />
                         </div>
                         {/* After every assistant turn: what answered, on what, in how long. */}
-                        <div class="pt-1 font-mono text-subtle">▣&nbsp; {mode()} · {modelName()}<Show when={(b as { ms?: number }).ms}>{(ms) => <> · {(ms() / 1000).toFixed(1)}s</>}</Show></div>
+                        <div class="pt-1 font-mono text-subtle">
+                          ✻&nbsp; {(b as { ms?: number }).ms ? turnFooter((b as { ms: number }).ms, new Date((b as { ts?: number }).ts ?? Date.now()), live.procs.filter((p) => !p.ended).length) : `${mode()} · ${modelName()}`}
+                        </div>
                       </div>
+                      }>
+                        {(() => {
+                          const n = notification((b as { text: string }).text)!;
+                          return (
+                            <div class="flex flex-col">
+                              <div class="flex min-w-0 items-baseline gap-2">
+                                <span class="w-4 shrink-0 text-success">⏺</span>
+                                <span class="min-w-0 flex-1 truncate text-fg">{n.verb}</span>
+                                <Time at={(b as { at: string }).at} />
+                              </div>
+                              <Show when={n.detail}>
+                                {(d) => (
+                                  <div class="flex min-w-0 items-baseline gap-1 pl-4 text-muted">
+                                    <span class="shrink-0 text-subtle">⎿</span>
+                                    <span class="min-w-0 truncate">{d()}</span>
+                                  </div>
+                                )}
+                              </Show>
+                            </div>
+                          );
+                        })()}
+                      </Show>
                     }
                   >
                     <div class="flex flex-col font-mono">
@@ -599,10 +627,10 @@ export function Chat(props: {
               when={L().busy()}
               fallback={<span class="min-w-0 truncate">{props.machine.id}{thread()?.kind === "workspace" ? ` · ${thread()?.name}` : ""}</span>}
             >
-              <span class="animate-pulse text-accent">⬝■■■■■■⬝</span>
-              <span class="text-muted">{L().turn()?.verb ?? "Thinking"}…</span>
-              <span class="tabular-nums">{elapsed()}s</span>
-              <span>esc interrupt</span>
+              <span class="animate-pulse text-accent">✳</span>
+              <span class="text-muted">{verbAt(elapsed())}…</span>
+              <span class="tabular-nums">({spinnerMeta(elapsed(), L().turn()?.tokens)})</span>
+              <span>esc to interrupt</span>
             </Show>
             <span class="flex-1" />
             <Show when={L().spend().tokens}>
@@ -834,12 +862,26 @@ function ToolGroup(props: { rows: Action[] }) {
     <div class="flex flex-col">
       <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
         <span class={`w-4 shrink-0 ${state().running ? "text-accent" : props.rows.some((r) => r.ok === false) ? "text-danger" : "text-subtle"}`} classList={{ "animate-pulse": state().running }}>●</span>
+        {/* What is happening, as a sentence: "Reading 1 file, listing 1 directory…", and the same
+            sentence in the past tense once it is over. */}
         <span class="min-w-0 flex-1 truncate text-muted">
-          <Show when={state().running} fallback={<>{verb(props.rows)}</>}>Running {verb(props.rows)}</Show>
+          {summary(props.rows, !state().running)}
           <span class="text-subtle"> · {elapsed(state().ms)}{state().running ? "…" : ""}</span>
         </span>
         <Icon name={open() ? "chevronDown" : "chevronRight"} size={14} class="shrink-0 text-subtle opacity-40 group-hover:opacity-100" />
       </button>
+      {/* While it runs, the ⎿ sub-lines say what each call is on; the rows themselves come when
+          it is opened, which is also when it has something to show. */}
+      <Show when={state().running && !open()}>
+        <For each={subjects(props.rows)}>
+          {(t) => (
+            <div class="flex min-w-0 items-baseline gap-1 text-subtle">
+              <span class="shrink-0">⎿</span>
+              <span class="min-w-0 truncate">{t}</span>
+            </div>
+          )}
+        </For>
+      </Show>
       <Show when={open()}>
         <div class="flex flex-col pl-2">
           <For each={props.rows}>

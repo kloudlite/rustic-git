@@ -42,7 +42,7 @@ export function ToolCall(props: { a: Action }) {
     <div class="flex flex-col font-mono" classList={{ "border-l border-line pl-3 -ml-px my-1": railed() }}>
       {/* One muted line: glyph, verb, argument, what came back. The card is what a click opens. */}
       <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
-        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-subtle"}`} classList={{ "animate-pulse": a().pending }}>{line().glyph}</span>
+        <span class={`w-4 shrink-0 ${failed() ? "text-danger" : a().pending ? "text-accent" : "text-success"}`} classList={{ "animate-pulse": a().pending }}>⏺</span>
         <span class="min-w-0 flex-1 truncate text-muted">
           <Show when={line().verb}><span class="text-fg">{line().verb} </span></Show>
           {line().arg}
@@ -60,10 +60,13 @@ export function ToolCall(props: { a: Action }) {
         </div>
       </Show>
       <Show when={open()}>
-        <div classList={{ "ml-4 border-l border-line pl-3": !railed(), "pl-4": railed() }}>
+        <div class="flex min-w-0">
+          <span class="w-4 shrink-0 text-subtle">⎿</span>
+          <div class="min-w-0 flex-1" classList={{ "border-l border-line pl-3": !railed() }}>
           <Show when={failed()} fallback={<Body a={a()} />}>
             <Fail text={a().output ?? ""} />
           </Show>
+          </div>
         </div>
       </Show>
     </div>
@@ -153,7 +156,7 @@ function Out(props: { text: string; empty?: string; head?: number }) {
     <Show when={props.text.trim()} fallback={<div class="py-1 text-subtle">{props.empty ?? ""}</div>}>
       <pre class="m-0 py-1 whitespace-pre-wrap wrap-words font-[inherit] text-muted [tab-size:4]">{all() ? ls().join("\n") : folded()}</pre>
       <Show when={more()}>
-        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : ls().length > HEAD ? `… ${ls().length - HEAD} more lines` : "… show all"}</button>
+        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : ls().length > HEAD ? `… +${ls().length - HEAD} lines (click to expand)` : "… show all"}</button>
       </Show>
     </Show>
   );
@@ -190,7 +193,7 @@ function Code(props: { path: string; text: string; from: number; block?: CodeBlo
       </div>
       <div class="flex items-baseline gap-3 pb-1">
         <Show when={block().lines.length > HEAD}>
-          <button class="text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${block().lines.length - HEAD} more lines`}</button>
+          <button class="text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… +${block().lines.length - HEAD} lines (click to expand)`}</button>
         </Show>
         <Show when={block().footer}>{(f) => <span class="text-subtle">{f()}</span>}</Show>
       </div>
@@ -245,7 +248,7 @@ function Hits(props: { text: string }) {
         </Show>
       </div>
       <Show when={(rows().length || plain().length) > HEAD}>
-        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… ${(rows().length || plain().length) - HEAD} more`}</button>
+        <button class="pb-1 text-subtle hover:text-fg" onClick={() => setAll((v) => !v)}>{all() ? "collapse" : `… +${(rows().length || plain().length) - HEAD} lines (click to expand)`}</button>
       </Show>
     </Show>
   );
