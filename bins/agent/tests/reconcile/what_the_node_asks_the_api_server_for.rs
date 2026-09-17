@@ -73,6 +73,18 @@ async fn every_watch_is_scoped_to_this_node_or_label_selected() {
     for r in of("/apis/apps/v1/statefulsets") {
         assert!(r.contains("labelSelector=kloudlite.io%2Fkind%3Denvironment"), "every StatefulSet in the cluster: {r}");
     }
+    // A BENCH pod is labelled `kind=bench`, so a workspace-only selector delivered no event for
+    // one — and a converged pass awaits a change. That is how an idle bench kept its pod
+    // (2026-09-17); the selector names both kinds, and this is what holds it.
+    let pods = of("/api/v1/pods");
+    let ours: Vec<&String> = pods.iter().filter(|r| r.contains("kloudlite.io%2Fkind")).collect();
+    assert!(!ours.is_empty(), "the workspace controller's pod watch is not label-selected: {pods:?}");
+    for r in &ours {
+        let selects_both = r.contains("kloudlite.io%2Fkind+in+%28workspace%2Cbench%29")
+            || r.contains("kloudlite.io%2Fkind%20in%20%28workspace%2Cbench%29")
+            || r.contains("kloudlite.io%2Fkind%3Denvironment");
+        assert!(selects_both, "a pod watch that misses bench pods: {r}");
+    }
     let snaps = of("/apis/kloudlite.io/v1alpha1/snapshots");
     assert!(
         snaps.iter().any(|r| r.contains("labelSelector=kloudlite.io%2Fstop-of")),

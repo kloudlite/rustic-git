@@ -249,4 +249,47 @@ mod tests {
             "never started is not idleness"
         );
     }
+
+    /// The shape a real bench pod has: TWO containers, the workspace one still ready and the bench
+    /// one not, with the pod-level `Ready` and `ContainersReady` conditions both False since the
+    /// flip. The single-container fixture above cannot tell a verdict that reads the right
+    /// container from one that reads the first, nor one that reads `ContainersReady` by accident.
+    #[test]
+    fn a_real_two_container_bench_pod_reads_as_idle() {
+        let at = "2026-09-17T03:56:10Z";
+        let container = |name: &str, ready: bool| {
+            serde_json::json!({
+                "name": name, "ready": ready, "started": true, "restartCount": 0,
+                "image": "i", "imageID": "", "state": {"running": {"startedAt": "2026-09-17T03:20:00Z"}},
+            })
+        };
+        let pod: Pod = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "bench-fbb352553329"},
+            "spec": {"containers": []},
+            "status": {
+                "phase": "Running",
+                // The order a kubelet writes them in, `Ready` last — and both dated by the flip of
+                // the one container that went unready.
+                "conditions": [
+                    {"type": "Initialized", "status": "True", "lastTransitionTime": "2026-09-17T03:20:00Z"},
+                    {"type": "PodReadyToStartContainers", "status": "True", "lastTransitionTime": "2026-09-17T03:20:00Z"},
+                    {"type": "ContainersReady", "status": "False", "lastTransitionTime": at},
+                    {"type": "Ready", "status": "False", "lastTransitionTime": at},
+                ],
+                "containerStatuses": [container("workspace", true), container(k8s::BENCH_CONTAINER, false)],
+            },
+        }))
+        .unwrap();
+
+        let settled: Timestamp = "2026-09-17T03:56:40Z".parse().unwrap();
+        assert_eq!(bench_verdict(&pod, settled), BenchVerdict::Idle(at.into()));
+        // And the workspace container going unready instead is NOT idleness: that is an ordinary
+        // pod fault, which the readiness path reports.
+        let mut serving = pod.clone();
+        if let Some(cs) = serving.status.as_mut().and_then(|s| s.container_statuses.as_mut()) {
+            cs[0].ready = false;
+            cs[1].ready = true;
+        }
+        assert_eq!(bench_verdict(&serving, settled), BenchVerdict::Serving);
+    }
 }

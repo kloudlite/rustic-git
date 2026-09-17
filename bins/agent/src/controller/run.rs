@@ -320,7 +320,15 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<(), String> {
     let placed = crate::controller::watch_config().fields(&format!("status.nodeName={}", ctx.node));
     // Label-selected, not every Pod in the cluster: a controller that streams every pod event in
     // the cluster to filter for its own is the cheapest way to peg an API server.
-    let our_pods = crate::controller::watch_config().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+    //
+    // BOTH kinds: a bench workspace's pod is labelled `kind=bench` (`k8s::workspace_pod` stamps it
+    // so `allow-bench-tools` and the gateway can select on it), so a selector of `workspace` alone
+    // delivered NO pod event for a bench — and a converged pass ends in `await_change()`. The
+    // readiness flip that says "idle" then woke nothing, and the bench slept forever with its pod
+    // still running (hourly, 2026-09-17 03:56: `/healthz` idle at 03:51, `.idle` written, no
+    // status write for four minutes, `bench.idle.wake` red).
+    let our_pods =
+        crate::controller::watch_config().labels(&format!("{} in (workspace,bench)", k8s::KIND_LABEL));
     let workspaces = Controller::new(Api::<crd::Workspace>::all(ctx.client.clone()), placed.clone());
     // Taken before the child watches so their mappers can ask it — see `held`.
     let ws_store = workspaces.store();
