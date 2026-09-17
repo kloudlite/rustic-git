@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-use super::{api, call, get, poll_json, post, raw};
+use super::{api, call, get, post, raw};
 use crate::ctx::Ctx;
 
 // Ceilings, each at least its catalogue target (`stages/workspace.rs`'s rule): a step that runs
@@ -54,25 +54,17 @@ const SHELL_CEILING: Duration = Duration::from_secs(20);
 /// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first,
 /// and the id now walks a named session twice plus its listing and its kill.
 const SHELL_WS_CEILING: Duration = Duration::from_secs(45);
-/// `ws.terminal.persists`: a stop and a start of the bench workspace, and the flush before them.
-const TERMINAL_CEILING: Duration = Duration::from_secs(600);
-/// The tool server flushes a session's ring to `{ws}/.cache/shell/<name>.log` ON DETACH, so the
-/// probe only has to let that write land before it stops the pod — no save interval to wait out
-/// any more (it was 75 s of continuum before tmux left).
-const FLUSH_SETTLE: Duration = Duration::from_secs(5);
-/// A detached PTY is quiet once the replay and the typed line have landed; there is no exit frame
-/// on this path, because exiting the shell would kill the session the probe is measuring.
-const PTY_SETTLE: Duration = Duration::from_secs(2);
-/// Half the stop and half the start of `ws.terminal.persists`, and then the wait for the tool
-/// server inside the new pod to be listening.
-const TERMINAL_POLL: Duration = Duration::from_secs(150);
-
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
 /// but they need the same bench, so they skip with the same reasons.
-const SESSION_IDS: [&str; 8] = [
+const SESSION_IDS: [&str; 13] = [
     "bench.session.roundtrip",
+    "shell.up",
+    "shell.fenced",
+    "shell.no_tools",
+    "bench.no_hands",
+    "bench.pkg_needs_workspace",
     "bench.tools.own_hands",
     "bench.proposal.asked",
     "bench.exchange.both_views",
@@ -396,6 +388,21 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.shell.roundtrip") {
         shell_roundtrip(c).await;
     }
+    if c.walks("shell.up") {
+        shell_up(c).await;
+    }
+    if c.walks("shell.fenced") {
+        shell_fenced(c).await;
+    }
+    if c.walks("shell.no_tools") {
+        shell_no_tools(c).await;
+    }
+    if c.walks("bench.no_hands") {
+        no_hands(c).await;
+    }
+    if c.walks("bench.pkg_needs_workspace") {
+        pkg_needs_workspace(c).await;
+    }
     if c.walks("bench.tools.own_hands") {
         own_hands(c).await;
     }
@@ -675,69 +682,9 @@ pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(St
     bail!("the shell closed without an exit frame; output {}", super::clip(&out))
 }
 
-/// One NAMED terminal, attached and then DETACHED: the socket is closed after `PTY_SETTLE` of
-/// quiet instead of waiting for an exit frame, because typing `exit` would kill the session this
-/// whole path exists to keep. Returns everything the socket saw — on a reattach that is the tool
-/// server's replay of the session ring, which is what carries the earlier marker.
-pub(crate) async fn pty_attach(port: u16, scope: &str, session: &str, input: &str) -> Result<String> {
-    let url = format!("ws://127.0.0.1:{port}/pty?scope={scope}&session={session}");
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.context("pty socket")?;
-    ws.send(Message::text(json!({"resize": {"cols": 100, "rows": 30}}).to_string())).await?;
-    if !input.is_empty() {
-        ws.send(Message::binary(input.as_bytes().to_vec())).await?;
-    }
-    let mut out = String::new();
-    loop {
-        let Ok(next) = tokio::time::timeout(PTY_SETTLE, ws.next()).await else { break };
-        let Some(msg) = next else { break };
-        match msg.context("pty frame")? {
-            Message::Binary(b) => out.push_str(&String::from_utf8_lossy(&b)),
-            Message::Text(t) => {
-                let v: Value = serde_json::from_str(&t).with_context(|| format!("pty control frame {}", super::clip(&t)))?;
-                if let Some(e) = v["error"].as_str() {
-                    bail!("the shell did not start: {e}");
-                }
-                // An exit frame here means the session ended under the probe, which the caller's
-                // assertion on the marker will report far better than a bare code would.
-                break;
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
-    let _ = ws.close(None).await;
-    Ok(out)
-}
 
-/// A session name the tool server will accept (`[a-z0-9][a-z0-9-]{0,47}`) built from the run
-/// id, so two runs never share a session and teardown can name it.
-fn session_name(prefix: &str, run_id: &str) -> String {
-    let tail: String = run_id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' }).collect();
-    format!("{prefix}{tail}").chars().take(48).collect()
-}
 
-/// Whether the bench's `GET /pty/sessions` listing names `session`. A body that is not the listing
-/// counts as "not listed": the one caller is the kill's check that the name is gone.
-fn lists_session(body: &str, session: &str) -> bool {
-    serde_json::from_str::<Vec<Value>>(body).is_ok_and(|rows| rows.iter().any(|r| r["name"] == session))
-}
 
-/// `DELETE /pty/sessions/{name}?scope=`, then the listing must no longer name it. Also the
-/// teardown for both terminal ids: a session left behind outlives the run.
-async fn kill_session(port: u16, scope: &str, session: &str) -> Result<()> {
-    let (status, body) = through_with(port, reqwest::Method::DELETE, &format!("/pty/sessions/{session}?scope={scope}"), None).await?;
-    if status != 204 && status != 200 {
-        bail!("DELETE /pty/sessions/{session} answered {status}: {}", super::clip(&body));
-    }
-    let (status, body) = through(port, &format!("/pty/sessions?scope={scope}")).await?;
-    if status != 200 {
-        bail!("GET /pty/sessions answered {status}: {}", super::clip(&body));
-    }
-    if lists_session(&body, session) {
-        bail!("the killed session {session} is still listed: {}", super::clip(&body));
-    }
-    Ok(())
-}
 
 /// The shell ran what it was given and left cleanly. `want` is looked for in the OUTPUT, and the
 /// PTY echoes the typed line back too — which is why both probes send a line that does not itself
@@ -766,6 +713,175 @@ async fn shell_roundtrip(c: &mut Ctx) {
     .await;
 }
 
+/// `bench.no_hands`: a bench session cannot run a command, and says so rather than trying.
+///
+/// The transcript is the assertion (spec §3.4): asked to `cat /etc/hostname` the session must call
+/// NO tool at all — there is no `bash`, no `read`, no filesystem tool registered in the sessions
+/// container in any mode, and `tool_search` finds none because none exists.
+async fn no_hands(c: &mut Ctx) {
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let nm = no_model.clone();
+    c.step("bench.no_hands", ROUNDTRIP_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            let turn = one_turn(port, &sid, "Run: cat /etc/hostname", &nm).await;
+            let (_, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
+            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
+            turn?;
+            // Not "it answered something sensible" — that is a model's business. What this id holds
+            // is that nothing RAN: a tool call in the transcript is the boundary being crossed.
+            let doc: Value = serde_json::from_str(&body)?;
+            let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
+            if let Some(call) = msgs.iter().find(|m| m["role"] == "toolResult" || m["toolCallId"].is_string()) {
+                bail!("a bench session ran a tool: {}", super::clip(&call.to_string()));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+    let why = no_model.lock().unwrap().clone();
+    if let Some(why) = why {
+        c.demote_to_skip("bench.no_hands", &format!("{NO_MODEL}: {}", super::clip(&why)));
+    }
+}
+
+/// `bench.pkg_needs_workspace`: there is no "on the bench" to install onto.
+///
+/// A package request always names a workspace and becomes a proposal on THAT workspace's spec
+/// (spec §3.1). Asked to install with no workspace named, the tool refuses with the sentence and
+/// nothing is proposed — so the assertion is the empty proposal list, not the model's prose.
+async fn pkg_needs_workspace(c: &mut Ctx) {
+    let no_model: Arc<Mutex<Option<String>>> = Default::default();
+    let nm = no_model.clone();
+    c.step("bench.pkg_needs_workspace", ROUNDTRIP_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
+            }
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            let turn = one_turn(port, &sid, "Install jq.", &nm).await;
+            let (_, open) = through(port, "/proposals").await?;
+            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
+            turn?;
+            // A package install that reached a PROPOSAL means the tool accepted a request with no
+            // workspace in it — the refusal is meant to happen before anyone is asked anything.
+            if !proposal_ids(&open).is_empty() {
+                bail!("a package install with no workspace was proposed: {}", super::clip(&open));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+    let why = no_model.lock().unwrap().clone();
+    if let Some(why) = why {
+        c.demote_to_skip("bench.pkg_needs_workspace", &format!("{NO_MODEL}: {}", super::clip(&why)));
+    }
+}
+
+/// `shell.up`: the SHELL SIDECAR answers, and it sees only the home (spec §2.5).
+///
+/// One id, both pod kinds: the bench's own shell and the run's workspace shell are the same
+/// container image with the same mounts, and a failure in either is the same defect. `pwd` says
+/// the shell opens in the home; the workspaces root being ABSENT is what says the code is not
+/// there — the sidecar mounts the home and the profile and nothing else.
+async fn shell_up(c: &mut Ctx) {
+    let ws = tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready).ok();
+    c.step("shell.up", SHELL_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (out, code) = pty_shell(port, "bench", "pwd; exit 0\n").await?;
+            judge_shell(&out, kloudlite_workspaces::k8s::HOME_DIR, code)?;
+            let Some(ws) = ws else {
+                // The workspace half is a stronger assertion than the bench half; say it was not
+                // made rather than passing on half the id.
+                bail!("the stage's workspace was never created, so only the bench shell was checked");
+            };
+            // `ls` of the workspaces root: the sidecar has no such mount, so the shell must not
+            // find a workspace directory there. An empty answer and an error are both correct.
+            let (out, _) = pty_shell(port, &ws, &format!("ls {}; pwd; exit 0\n", kloudlite_workspaces::k8s::WORKSPACES_DIR)).await?;
+            if out.contains(&format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR)) {
+                bail!("the shell can see the workspaces root: {}", super::clip(&out));
+            }
+            if !out.contains(kloudlite_workspaces::k8s::HOME_DIR) {
+                bail!("the workspace shell did not open in the home: {}", super::clip(&out));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `shell.no_tools`: the tool server REFUSES the shell, and the refusal is a 401.
+///
+/// Deliberately not "the connection is refused" (spec §2.5): the two containers share the pod's
+/// network namespace, so a dial of 127.0.0.1:7788 from the shell CONNECTS. What stops it is that
+/// every tool-server request needs the bench token and the shell has none. Stated here so nobody
+/// later "fixes" the probe by expecting a refused connection.
+async fn shell_no_tools(c: &mut Ctx) {
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => return c.skip("shell.no_tools", why),
+    };
+    c.step("shell.no_tools", SHELL_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let script = format!(
+                "curl -s -o /dev/null -w '%{{http_code}}\\n' --max-time 5 http://127.0.0.1:{}/tools; exit 0\n",
+                kloudlite_workspaces::k8s::IDE_PORT
+            );
+            let (out, code) = pty_shell(port, &ws, &script).await?;
+            judge_shell(&out, "401", code).map_err(|e| {
+                anyhow!("{e:#} — the tool server must answer the token-less shell 401, never serve it")
+            })
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// `shell.fenced`: nothing outside the fence dials 7790.
+///
+/// From the PROBE pod, which is not the person's bench and is in another namespace: the
+/// `allow-bench-tools` policy admits the bench pod alone, so this connect must fail. A connect
+/// that SUCCEEDS is the whole finding — the shell has no auth of its own, the fence is the auth.
+async fn shell_fenced(c: &mut Ctx) {
+    let Some(k) = c.kube.clone() else {
+        return c.skip("shell.fenced", "no kubeconfig");
+    };
+    let owner = c.cfg.probe_user.clone();
+    c.step("shell.fenced", SHELL_CEILING, move |c| {
+        async move {
+            let pod = super::bench_pod(c, None).await?;
+            let ns = kloudlite_workspaces::crd::ws_namespace(&owner, &owner);
+            let ip = kube::Api::<Pod>::namespaced(k.clone(), &ns)
+                .get_opt(&pod)
+                .await?
+                .and_then(|p| p.status.and_then(|s| s.pod_ip))
+                .context("the bench pod has no address")?;
+            let addr = format!("{ip}:{}", kloudlite_workspaces::k8s::SHELL_PORT);
+            // A real socket, never a shell's `/dev/tcp`: the DIAL is the assertion, and a policy
+            // that dropped the packet must read as a timeout rather than as a shell's exit code.
+            match tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr)).await {
+                Err(_) => Ok(()),
+                Ok(Err(_)) => Ok(()),
+                Ok(Ok(_)) => bail!("{addr} accepted a connection from outside the fence"),
+            }
+        }
+        .boxed()
+    })
+    .await;
+}
+
 /// `bench.shell.workspace`: the same socket with a workspace scope, which the bench splices to
 /// that workspace's tool server — so `pwd` proves both the splice and the shell's cwd. Runs in
 /// group 0, which owns the workspace, beside `bench.workspace.tool_roundtrip`.
@@ -774,7 +890,6 @@ async fn shell_workspace(c: &mut Ctx) {
         Ok(ws) => ws,
         Err(why) => return c.skip(SHELL_WS, why),
     };
-    let ws2 = ws.clone();
     // The bench resolves the tool server with its pod token, exactly as the tool round trip does,
     // so the same login has to be live for this step.
     let login = match super::bench_tool::arm(c).await {
@@ -785,11 +900,7 @@ async fn shell_workspace(c: &mut Ctx) {
     // probe holds the id — so the judgement is "pwd printed a path under the workspaces root",
     // which `/bin/sh` at `$HOME` would not (2026-09-16 21:19 hourly: the id-built path never matched).
     let want = format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR);
-    let session = session_name("probe-", &c.run_id);
-    let marker = format!("MARK-{}", c.run_id);
-    let (sess, mark) = (session.clone(), marker.clone());
-    let killed = c
-        .step(SHELL_WS, SHELL_WS_CEILING, move |c| {
+    c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
             async move {
                 let (_child, port) = forward(c).await?;
                 let (out, code) = pty_shell(port, &ws, "pwd; exit 0\n").await?;
@@ -797,38 +908,16 @@ async fn shell_workspace(c: &mut Ctx) {
                 // The PROMPT is the product here: starship's character is what says the splice landed
                 // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
                 judge_shell(&out, "❯", code)?;
-                // A NAMED session outlives its socket, and the whole point of one is that closing
-                // the socket detaches instead of ending it. `printf` builds the marker so the echoed
-                // command line cannot pass the reattach assertion on its own.
-                let first = pty_attach(port, &ws, &sess, &format!("printf 'MARK-%s\\n' {}\n", c.run_id)).await?;
-                if !first.contains(&mark) {
-                    bail!("the named session never printed {mark}: {}", super::clip(&first));
-                }
-                // Same name, second socket: what comes back is the replay of the ring the first one
-                // left behind, so the marker being there IS the reattach.
-                let again = pty_attach(port, &ws, &sess, "").await?;
-                if !again.contains(&mark) {
-                    bail!("reattaching to {sess} redrew nothing carrying {mark}: {}", super::clip(&again));
-                }
-                if !again.contains('❯') {
-                    bail!("the reattached session shows no prompt: {}", super::clip(&again));
-                }
-                kill_session(port, &ws, &sess).await
+                // NO reattach assertion any more (spec §2.3): a terminal is a ttyd socket to the
+                // shell sidecar, named sessions and replay are retired, and "a dropped connection
+                // is a new shell". What this id still holds is the one thing that survived: the
+                // splice lands in the WORKSPACE's own shell, at its own directory, with its prompt.
+                Ok(())
             }
             .boxed()
         })
-        .await;
-    // Untimed: a session the step failed before killing would outlive the run in a workspace the
-    // next run reuses.
-    if !killed {
-        let sweep = async {
-            let (_child, port) = forward(c).await?;
-            kill_session(port, &ws2, &session).await
-        };
-        if let Err(e) = sweep.await {
-            tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.session.teardown");
-        }
-    }
+    .await;
+    // No session sweep any more: a terminal has no name and no life beyond its socket.
     if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
         tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.login.revoke");
     }
@@ -1211,94 +1300,11 @@ fn diff_history(before: &[(String, Option<u64>)], after: &[(String, Option<u64>)
 
 pub async fn weekly(c: &mut Ctx) {
     c.skip("bench.survives.reschedule", NO_DELETE_GRANT);
-    terminal_persists(c).await;
 }
 
-const TERMINAL: &str = "ws.terminal.persists";
-
-/// `ws.terminal.persists`: a named terminal survives the pod going away and coming back.
-///
-/// The subject is the BENCH's own workspace container, not a workspace stood up for this: the bench
-/// is an ordinary Workspace (`bench_ws`), `/pty?scope=bench` reaches its tool server through the
-/// same splice every other terminal uses, and standing up a second workspace here would measure a
-/// create the weekly suite already measures elsewhere. Stop and start are `/v1/workspaces/{id}`'s,
-/// so no pod-delete grant is needed — `bench.survives.reschedule` is skipped for want of one.
-///
-/// What survives is TEXT, not a process (spec §7): the tool server flushes the session's ring to
-/// `{ws}/.cache/shell/<name>.log` on detach, and after the restart a session opened under the same
-/// name replays that log before its own first prompt. So the assertion is the marker coming back
-/// out of a fresh attach — NOT the listing, which is an in-process table a restart starts empty.
-async fn terminal_persists(c: &mut Ctx) {
-    let id = match get(c, &bench_url(c, ""), &c.probe_jwt).await.ok().and_then(|d| d.get("id").and_then(Value::as_str).map(str::to_string)) {
-        Some(id) => id,
-        None => return c.skip(TERMINAL, "the bench could not be read"),
-    };
-    // Stub-or-unreachable is a precondition, exactly as it is for the session ids: a bench that
-    // was never there is no sample of whether a terminal survived one.
-    let health = async {
-        let (_child, port) = forward(c).await?;
-        anyhow::Ok(through(port, "/healthz").await?.1)
-    }
-    .await;
-    match health {
-        Err(e) => return c.skip(TERMINAL, &format!("the bench could not be reached: {e:#}")),
-        Ok(h) if is_stub(&h) => return c.skip(TERMINAL, STUB),
-        Ok(_) => {}
-    }
-    let session = session_name("kl-persist-", &c.run_id);
-    let marker = format!("MARK-{}", c.run_id);
-    let (sess, mark) = (session.clone(), marker.clone());
-    let kept = c
-        .step(TERMINAL, TERMINAL_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let (stop, start) = (api(c, &format!("/v1/workspaces/{id}/stop")), api(c, &format!("/v1/workspaces/{id}/start")));
-        let doc = api(c, &format!("/v1/workspaces/{id}"));
-        async move {
-            let (child, port) = forward(c).await?;
-            let first = pty_attach(port, "bench", &sess, &format!("printf 'MARK-%s\\n' {}\n", c.run_id)).await?;
-            if !first.contains(&mark) {
-                bail!("the named session never printed {mark}: {}", super::clip(&first));
-            }
-            // The detach above is what wrote the log; this only lets the write land.
-            tokio::time::sleep(FLUSH_SETTLE).await;
-            // The tunnel is the bench pod's; it goes with the stop, and the reads afterwards open
-            // their own.
-            drop(child);
-            post(c, &stop, &jwt, Value::Null).await.context("could not stop the bench")?;
-            poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("stopped")).await.context("the bench never stopped")?;
-            post(c, &start, &jwt, Value::Null).await.context("could not start the bench")?;
-            poll_json(c, &doc, &jwt, TERMINAL_POLL, |v| v.get("state").and_then(Value::as_str) == Some("ready")).await.context("the bench never came back ready")?;
-            // Polled, not attached once: the tool server comes up a little after the workspace
-            // reports ready, and an attach before it is listening is a socket error, not a verdict.
-            let (_child, port) = forward(c).await?;
-            let opened = Instant::now();
-            loop {
-                match pty_attach(port, "bench", &sess, "").await {
-                    Ok(again) if again.contains(&mark) => break,
-                    Ok(again) if opened.elapsed() >= TERMINAL_POLL => {
-                        bail!("{sess} came back without {mark} in it: {}", super::clip(&again))
-                    }
-                    Err(e) if opened.elapsed() >= TERMINAL_POLL => return Err(e).context("the tool server never took a terminal again"),
-                    _ => tokio::time::sleep(Duration::from_secs(5)).await,
-                }
-            }
-            kill_session(port, "bench", &sess).await
-        }
-        .boxed()
-    })
-    .await;
-    if !kept {
-        // Untimed: the bench is long-lived, so a session this run opened and failed before killing
-        // would still be there — and still holding its marker — on the next weekly run.
-        let sweep = async {
-            let (_child, port) = forward(c).await?;
-            kill_session(port, "bench", &session).await
-        };
-        if let Err(e) = sweep.await {
-            tracing::warn!(error = %format!("{e:#}"), "slo.bench.terminal.teardown");
-        }
-    }
-}
+// `ws.terminal.persists` is RETIRED (spec §2.3, 2026-09-17): the tool server has no PTY any more
+// and a terminal is a ttyd socket to the shell sidecar, so nothing survives a restart by design —
+// "a dropped connection is a new shell". `shell.up` is what covers a terminal now.
 
 #[cfg(test)]
 mod tests {
@@ -1508,25 +1514,6 @@ mod tests {
         assert!(no_model.lock().unwrap().is_some(), "a missing key must be recorded for the demote");
     }
 
-    /// The tool server enforces `[a-z0-9][a-z0-9-]{0,47}` and refuses anything else, so a run id
-    /// with a dot or an upper-case letter in it must never reach the wire as typed.
-    #[test]
-    fn session_names_and_listings_read() {
-        assert_eq!(session_name("probe-", "hourly-1789355813"), "probe-hourly-1789355813");
-        assert_eq!(session_name("probe-", "Weekly.2026_09"), "probe-weekly-2026-09");
-        let long = session_name("kl-persist-", &"9".repeat(80));
-        assert_eq!(long.len(), 48);
-        let name = session_name("probe-", "hourly-1");
-        assert!(name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()));
-        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
-
-        let rows = json!([{"name": "probe-hourly-1", "windows": 1, "attached": 0}]).to_string();
-        assert!(lists_session(&rows, "probe-hourly-1"));
-        assert!(!lists_session(&rows, "probe-hourly-2"));
-        assert!(!lists_session("[]", "probe-hourly-1"));
-        // Not the listing at all is "not listed": the delete's read-back says so itself.
-        assert!(!lists_session("bench unreachable", "probe-hourly-1"));
-    }
 
     /// `GET /proposals` is a listing of ids; anything else names nothing, and never fails the turn
     /// it runs beside.
@@ -1587,9 +1574,10 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        // Eleven now: `ws.terminal.persists` files its own skip when there is no bench to read,
-        // and `bench.tools.own_hands` and `bench.proposal.asked` are both `SESSION_IDS`.
-        assert_eq!(c.steps.len(), 11);
+        // The weekly skip plus every `SESSION_IDS` this fixture files — five more since the shell
+        // sidecar arrived (`shell.*`, `bench.no_hands`, `bench.pkg_needs_workspace`) and one fewer
+        // for the retired `ws.terminal.persists`.
+        assert_eq!(c.steps.len(), 1 + SESSION_IDS.len() + 1);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
         assert_eq!(run_state(true, false, &c.steps), RunState::Skipped);

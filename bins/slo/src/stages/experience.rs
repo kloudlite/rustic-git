@@ -99,6 +99,11 @@ pub const IDS: &[&str] = &[
     "bench.proposal.asked",
     "bench.exchange.both_views",
     "bench.two_clients",
+    "shell.up",
+    "shell.fenced",
+    "shell.no_tools",
+    "bench.no_hands",
+    "bench.pkg_needs_workspace",
     "bench.shell.roundtrip",
     "bench.tool.token",
     "bench.tool.audience",
@@ -216,6 +221,8 @@ pub async fn run(c: &mut Ctx) {
             // the workspace shell beside the tool round trip, in the group that owns the workspace.
             "bench.session.roundtrip" | "bench.tools.own_hands" | "bench.proposal.asked" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             "bench.shell.roundtrip" | "bench.shell.workspace" => {}
+            // Filed by the bench journey's own call, in group 3 with the rest of the shell ids.
+            "shell.up" | "shell.fenced" | "shell.no_tools" | "bench.no_hands" | "bench.pkg_needs_workspace" => {}
             _ => c.skip(id, "not implemented yet"),
         }
     }

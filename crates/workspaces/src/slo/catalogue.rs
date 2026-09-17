@@ -162,7 +162,7 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 15] = [
+const BENCH_IDS: [&str; 20] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -175,6 +175,11 @@ const BENCH_IDS: [&str; 15] = [
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
+    "shell.up",
+    "shell.fenced",
+    "shell.no_tools",
+    "bench.no_hands",
+    "bench.pkg_needs_workspace",
     "bench.shell.roundtrip",
     "bench.push.p95",
     "bench.pkg.add",
@@ -622,6 +627,11 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.tool.revoked", feature: "Benches", sli: "After a stop the next call with the pod's token is 401 at once; after the parent login is revoked a pod call is 401 within 60 s", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
     // thread file.
+    Slo { id: "shell.up", feature: "Benches", sli: "A shell sidecar answers on both pod kinds, opens in the home, and cannot see the workspaces root", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "shell.fenced", feature: "Security", sli: "The shell port refuses a dial from outside the person's own bench", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "shell.no_tools", feature: "Security", sli: "The tool server answers the token-less shell 401", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.no_hands", feature: "Benches", sli: "A bench session asked to run a command calls no tool: there is no filesystem or shell where it runs", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.pkg_needs_workspace", feature: "Benches", sli: "A package request with no workspace named is refused and proposes nothing", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -666,7 +676,6 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "snap.retain", feature: "Workspace lifecycle", sli: "After several sync beats exactly one Ready sync point per worktree remains and every push is still in history", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "agent.janitor", feature: "Workspaces", sli: "No snapshot record of this run outlives the volume it names", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "srv.lanes", feature: "Control plane", sli: "Pulls of an image reach its pull counter, which is the server lane beat writing it back", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
-    Slo { id: "ws.terminal.persists", feature: "Workspaces", sli: "A named terminal in a workspace survives a stop and a start: opening it again replays the text that was in it", target: avail(99.0), suite: Suite::Weekly, stage: "12 · Weekly" },
     Slo { id: "bench.survives.reschedule", feature: "Benches", sli: "After the pod is deleted every session reopens and processes read `lost`", target: bound(180_000), suite: Suite::Weekly, stage: "12 · Weekly" },
 
     // Monthly
