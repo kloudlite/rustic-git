@@ -1,3 +1,8 @@
+---
+name: workspaces
+description: Use when the person wants a new machine, another project or language, or asks what workspaces exist or to start/stop/clone/delete one
+---
+
 # Workspaces
 
 A workspace is a machine: a disk, packages, a shell, and a place your files stay between sessions.

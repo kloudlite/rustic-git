@@ -1,3 +1,8 @@
+---
+name: images
+description: Use when a container image must be built, pushed or listed
+---
+
 # Images
 
 An image is built from a directory in your own workspace and pushed to the platform's registry under

@@ -129,9 +129,12 @@ function caveman(): string[] {
 const CAVEMAN = caveman();
 
 export function identity(hands: string, platform = true, memory = MEMORY): string {
+  // Filled here, not at module load: `skillIndex` reads the files, and a const above them would run
+  // before they are declared.
+  const platformText = PLATFORM.replace("%SKILLS%", skillIndex().map((s) => `- ${s.name} — ${s.description}`).join("\n"));
   // The memory is the person's, so it rides in every session — including a fork, which has no
   // tools but may well be asked what the person prefers.
-  return [hands, ...(platform ? [PLATFORM] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
+  return [hands, ...(platform ? [platformText] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
 }
 
 /**
@@ -156,7 +159,9 @@ const MEMORY = memoryIndex();
  * (owner, 2026-09-17: "keep the skills simple").
  */
 const PLATFORM = [
-  "You have workspaces, environments, snapshots, repos and images. `skill {name}` says what each one is and the verbs it has: workspaces, environments, snapshots, repos, images, agents.",
+  "You have workspaces, environments, snapshots, repos and images. Each has a skill saying what it is and the verbs it has:",
+  "%SKILLS%",
+  "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
   "You start with your own machine's tools — read, write, edit, bash, grep, find, ls, process — plus ask, plan, skill and tool_search. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
   "Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell.",
   "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
@@ -296,6 +301,15 @@ function skillText(name: string): string | undefined {
   }
 }
 
+/**
+ * When to load each one. A list of names is a list a model skips: what makes a skill get used is
+ * the sentence saying what it is FOR, in the prompt, where it is read before anything is decided
+ * (owner, 2026-09-17 — Claude Code's own shape). Read from each file's frontmatter, so the file
+ * and the prompt cannot drift.
+ */
+export const skillIndex = (): { name: string; description: string }[] =>
+  SKILLS.map((name) => ({ name, description: /^description:\s*(.*)$/m.exec(skillText(name) ?? "")?.[1]?.trim() ?? "" })).filter((x) => x.description);
+
 /** One line per match, as the catalogue describes it: what it is called, what it does, what it takes. */
 function describeTool(pi: ExtensionAPI, name: string): string {
   const t = TOOLS.find((x) => x.name === name);
@@ -336,7 +350,8 @@ export function memoryTools(reg: ReturnType<typeof makeReg>) {
 }
 
 export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
-  reg("skill", { name: Type.String({ description: SKILLS.join(", ") }) }, async (a) => {
+  reg("skill", { name: Type.Optional(Type.String({ description: `${SKILLS.join(", ")}; absent lists them` })) }, async (a) => {
+    if (!a.name) return text(skillIndex().map((s) => `${s.name} — ${s.description}`).join("\n"));
     const body = skillText(String(a.name));
     return body ? text(body) : { ...text(`no skill ${a.name}; there are ${SKILLS.join(", ")}`), isError: true };
   });

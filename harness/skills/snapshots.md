@@ -1,3 +1,8 @@
+---
+name: snapshots
+description: Use before a risky change, when asked to save/restore/roll back state, or to start something from an earlier point
+---
+
 # Snapshots
 
 A snapshot is a workspace or an environment as it was at one moment — the whole disk, kept until

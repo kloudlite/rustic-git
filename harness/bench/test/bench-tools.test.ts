@@ -89,7 +89,7 @@ test("the system prompt is the harness's own, and says only what the model must 
 
     // What it must know: the five things, in the person's words.
     for (const rule of [
-      /`skill \{name\}` says what each one is and the verbs it has: workspaces, environments, snapshots, repos, images, agents\./,
+      /Before acting in one of these areas, load its skill with `skill \{name\}` once per session, then tool_search the verb\./,
       /Every platform tool is one `tool_search` away/,
       /Before reaching for bash to do something with a workspace, environment, snapshot, repo or image, run tool_search first; use bash only for work inside your own files and shell\./,
       /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
@@ -592,8 +592,16 @@ test("twelve tools on, the rest one search away, and the six skills read", async
     // The skills are product words, not tool lists, and each one loads from beside the extension.
     for (const name of ["workspaces", "environments", "snapshots", "repos", "images", "agents"]) {
       const r = await run("skill", { name });
-      assert.match(r.content[0].text, new RegExp(`^# ${name[0].toUpperCase()}`, "i"));
+      // A skill says WHEN to load it, in its own frontmatter — a list of names is a list a model skips.
+      assert.match(r.content[0].text, new RegExp(`^---\nname: ${name}\ndescription: Use \\w`));
+      assert.match(r.content[0].text, new RegExp(`# ${name[0].toUpperCase()}`, "i"));
+      // And the identity carries that same sentence, so it is read before anything is decided.
+      assert.ok(identity(BENCH_HANDS).includes(`- ${name} — ${/^description:\s*(.*)$/m.exec(r.content[0].text)![1]}`), name);
     }
+    // No name lists them, with what each is for.
+    const listed = (await run("skill", {})).content[0].text as string;
+    assert.equal(listed.split("\n").length, 6);
+    assert.match(listed, /^workspaces — Use when the person wants a new machine/m);
     assert.equal((await run("skill", { name: "nope" })).isError, true);
   } finally {
     restore();

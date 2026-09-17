@@ -1,3 +1,8 @@
+---
+name: repos
+description: Use when code must be cloned, committed, pushed, or a pull request opened/merged
+---
+
 # Repositories
 
 Code lives in a repository. You do not edit it through the platform: you clone it into your own

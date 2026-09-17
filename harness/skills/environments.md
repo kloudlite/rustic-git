@@ -1,3 +1,8 @@
+---
+name: environments
+description: Use when a service (database, queue, web) must exist, change, be reached by name, or its traffic sent to a workspace
+---
+
 # Environments
 
 An environment runs the services your code talks to: a database, a queue, a web service. It has a

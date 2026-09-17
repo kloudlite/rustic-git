@@ -1,3 +1,8 @@
+---
+name: agents
+description: Use when work can run in parallel, does not need this conversation's context, or is risky enough to want its own clone
+---
+
 # Agents
 
 An agent is a fresh session with one task, working in a workspace, reporting back once. It has no
