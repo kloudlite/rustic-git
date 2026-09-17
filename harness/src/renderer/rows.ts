@@ -214,3 +214,18 @@ export function proposalHeader(tool: string | undefined, summary = ""): string {
   const said = verb ? `${verb} ${subject}` : subject;
   return said.charAt(0).toUpperCase() + said.slice(1);
 }
+
+/**
+ * The one muted line under a proposal's verb: what it would act on, values only —
+ * `new-workspace · nrt · node, bun`. The key names were noise; a person reading
+ * "Create workspace" already knows the first value is the name (owner, 2026-09-17).
+ */
+export function argLine(args: Record<string, unknown> = {}, summary = ""): string {
+  const said = Object.entries(args)
+    .filter(([k]) => !/^(team|owner|session|from|id)$/.test(k))
+    .map(([, v]) => (Array.isArray(v) ? v.join(", ") : v))
+    .filter((v) => v !== undefined && v !== null && v !== "" && typeof v !== "object")
+    .map(String);
+  // Nothing worth showing: the summary minus its own verb, which is already the header.
+  return said.length ? said.join(" · ") : summary.replace(/^[A-Z][a-z]+( [a-z]+)? /, "");
+}

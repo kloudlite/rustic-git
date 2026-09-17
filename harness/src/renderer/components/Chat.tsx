@@ -16,7 +16,7 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
+import { argLine, modeLine, modeParts, modelOfThread, proposalHeader } from "../rows";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
 import { BoxCursor } from "./BoxCursor";
@@ -942,40 +942,64 @@ function Answered(props: { q: QuestionRow }) {
 
 function Question(props: { q: QuestionRow; session: string; onChat?: (text: string) => void }) {
   const answered = () => props.q.answer;
+  /** A proposal is a PERMISSION prompt; a question is a question. They are not the same card. */
+  const isQuestion = () => props.q.tool === "question";
+  const verb = () => proposalHeader(props.q.tool, props.q.summary);
   /**
-   * Claude Code's own shape (§21, observed live): `☐ Header`, a blank line, the question, then the
-   * options — the selected one marked `❯` in the accent with its label bold — each with its
-   * description on the next line, indented four cells and muted. No box, no background, no table:
-   * the composer block's rail is the only frame, and everything sits on the cell grid.
+   * The permission prompt, compact, as Claude Code asks it: the verb, what it would act on, one
+   * sentence, and three ways out. Option 2 is a standing yes for that tool FOR THIS SESSION; option
+   * 3 is escape, and says so.
    */
-  const OPTIONS = () =>
+  const PERMISSION = () => [
+    { key: "yes", label: "Yes" },
+    { key: "always", label: `Yes, and don't ask again for ${verb().toLowerCase()} this session` },
+    { key: "no", label: "No, and tell the bench what to do differently (esc)" },
+  ];
+  const ASK = () =>
     props.q.ask?.options?.length
       ? props.q.ask.options.map((o) => ({ key: o.label, label: o.label, hint: o.description }))
-      : [{ key: "yes", label: "Yes", hint: "do it now" }, { key: "no", label: "No", hint: "leave it alone" }];
+      : [{ key: "yes", label: "Yes", hint: "" }, { key: "no", label: "No", hint: "" }];
+  const OPTIONS = () => (isQuestion() ? ASK() : PERMISSION());
   const [pick, setPick] = createSignal(0);
   const [typing, setTyping] = createSignal(false);
   const [own, setOwn] = createSignal("");
   const answer = (a: string) => live.answerProposal(props.session, props.q.id, a);
-  const rows = () => OPTIONS().length + 2;
+  /** A question offers two more ways out; a permission prompt offers exactly its three. */
+  const rows = () => OPTIONS().length + (isQuestion() ? 2 : 0);
   const take = (i: number) => {
-    if (i < OPTIONS().length) return answer(OPTIONS()[i].key);
+    const o = OPTIONS()[i];
+    if (o) {
+      if (o.key === "always") {
+        live.allowTool(props.session, props.q.tool);
+        return answer("yes");
+      }
+      return answer(o.key);
+    }
     if (i === OPTIONS().length) return setTyping(true);
     // "Chat about this": the question goes back as an ordinary prompt, and the card is done with.
     answer("no");
     props.onChat?.(props.q.summary);
   };
   let card: HTMLDivElement | undefined;
-  // The keyboard belongs to the card while it is open: 1…n, ↑/↓, Enter, Esc all land here.
   onMount(() => card?.focus());
-  /** `❯ ` on the row the keyboard is on, two spaces on every other: one grid, no bar. */
+  /** `❯` on the row the keyboard is on, a blank cell on every other: one grid, no bar. */
   const Marker = (p: { on: boolean }) => (
     <span class="w-[2ch] shrink-0 select-none" classList={{ "text-accent": p.on, "text-transparent": !p.on }}>❯</span>
+  );
+  const Option = (p: { i: number; label: string; hint?: string }) => (
+    <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(p.i)} onClick={() => take(p.i)}>
+      <Marker on={pick() === p.i} />
+      <span class="shrink-0 text-subtle">{p.i + 1}.&nbsp;</span>
+      <span class="min-w-0 truncate" classList={{ "text-fg": pick() === p.i, "text-muted": pick() !== p.i }}>{p.label}</span>
+      {/* A description belongs beside its option, not on a line of its own. */}
+      <Show when={p.hint}>{(h) => <span class="min-w-0 shrink truncate text-subtle">&nbsp;&nbsp;— {h()}</span>}</Show>
+    </button>
   );
   return (
     <div
       ref={card}
       data-component="question-card"
-      class="flex flex-col px-4 py-2 font-mono outline-none"
+      class="flex flex-col px-4 py-1 font-mono outline-none"
       tabindex={0}
       onKeyDown={(e) => {
         if (answered() || typing()) return;
@@ -987,67 +1011,49 @@ function Question(props: { q: QuestionRow; session: string; onChat?: (text: stri
         if (e.key === "Escape") return (e.preventDefault(), answer("no"));
       }}
     >
-      <div class="flex items-baseline gap-2">
-        <span class="shrink-0 text-subtle select-none">☐</span>
-        {/* A question names itself; a proposal is titled by the tool's own verb. No timestamp:
-            the card is a thing to answer, not a row in a log. */}
-        <span class="min-w-0 flex-1 font-bold text-fg-strong">{props.q.ask?.header ?? proposalHeader(props.q.tool, props.q.summary)}</span>
-      </div>
-      <div class="h-[var(--cell-lh)]" />
-      <div class="wrap-words whitespace-pre-wrap text-fg">{props.q.summary}</div>
-      <div class="h-[var(--cell-lh)]" />
-      <For each={OPTIONS()}>
-        {(o, i) => (
-          <div>
-            <button
-              class="flex w-full items-baseline text-left"
-              onMouseEnter={() => setPick(i())}
-              onClick={() => take(i())}
-            >
-              <Marker on={pick() === i()} />
-              <span class="shrink-0 text-subtle">{i() + 1}.&nbsp;</span>
-              <span class="min-w-0 flex-1 truncate" classList={{ "font-bold text-fg": pick() === i(), "text-muted": pick() !== i() }}>{o.label}</span>
-            </button>
-            <Show when={o.hint}>
-              <div class="pl-[4ch] wrap-words text-subtle">{o.hint}</div>
-            </Show>
-          </div>
-        )}
-      </For>
-      <div class="h-[var(--cell-lh)]" />
       <Show
-        when={typing()}
+        when={isQuestion()}
         fallback={
-          <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(OPTIONS().length)} onClick={() => setTyping(true)}>
-            <Marker on={pick() === OPTIONS().length} />
-            <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.&nbsp;</span>
-            <span classList={{ "font-bold text-fg": pick() === OPTIONS().length, "text-muted": pick() !== OPTIONS().length }}>Type something.</span>
-          </button>
+          <>
+            <div class="font-bold text-fg-strong">{verb()}</div>
+            {/* What it would act on, values only. */}
+            <div class="truncate text-muted">{argLine(props.q.args, props.q.summary)}</div>
+            <div class="text-fg">Do you want to proceed?</div>
+            <div class="h-[var(--cell-lh)]" />
+            <For each={OPTIONS()}>{(o, i) => <Option i={i()} label={o.label} />}</For>
+          </>
         }
       >
-        <div class="flex items-baseline">
-          <Marker on={true} />
-          <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.&nbsp;</span>
-          <input
-            autofocus
-            class="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-subtle"
-            placeholder="your answer"
-            value={own()}
-            onInput={(e) => setOwn(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && own().trim()) return (e.preventDefault(), e.stopPropagation(), answer(own().trim()));
-              if (e.key === "Escape") return (e.preventDefault(), e.stopPropagation(), setTyping(false));
-            }}
-          />
+        <div class="flex items-baseline gap-2">
+          <span class="shrink-0 text-subtle select-none">☐</span>
+          <span class="min-w-0 flex-1 font-bold text-fg-strong">{props.q.ask?.header ?? verb()}</span>
         </div>
+        <div class="wrap-words whitespace-pre-wrap text-fg">{props.q.summary}</div>
+        <div class="h-[var(--cell-lh)]" />
+        <For each={OPTIONS()}>{(o, i) => <Option i={i()} label={o.label} hint={(o as { hint?: string }).hint} />}</For>
+        <Show
+          when={typing()}
+          fallback={<Option i={OPTIONS().length} label="Type something." />}
+        >
+          <div class="flex items-baseline">
+            <Marker on={true} />
+            <span class="shrink-0 text-subtle">{OPTIONS().length + 1}.&nbsp;</span>
+            <input
+              autofocus
+              class="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-subtle"
+              placeholder="your answer"
+              value={own()}
+              onInput={(e) => setOwn(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && own().trim()) return (e.preventDefault(), e.stopPropagation(), answer(own().trim()));
+                if (e.key === "Escape") return (e.preventDefault(), e.stopPropagation(), setTyping(false));
+              }}
+            />
+          </div>
+        </Show>
+        <Option i={OPTIONS().length + 1} label="Chat about this" />
+        <div class="text-subtle">Enter to select · ↑/↓ to navigate · Esc to cancel</div>
       </Show>
-      <button class="flex w-full items-baseline text-left" onMouseEnter={() => setPick(OPTIONS().length + 1)} onClick={() => take(OPTIONS().length + 1)}>
-        <Marker on={pick() === OPTIONS().length + 1} />
-        <span class="shrink-0 text-subtle">{OPTIONS().length + 2}.&nbsp;</span>
-        <span classList={{ "font-bold text-fg": pick() === OPTIONS().length + 1, "text-muted": pick() !== OPTIONS().length + 1 }}>Chat about this</span>
-      </button>
-      <div class="h-[var(--cell-lh)]" />
-      <div class="text-subtle">Enter to select · ↑/↓ to navigate · Esc to cancel</div>
     </div>
   );
 }

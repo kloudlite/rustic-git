@@ -92,6 +92,17 @@ const [mode, setMode] = createSignal<Mode>("build");
 export { mode, setMode };
 /** What accept-edits may answer for the person. Everything else still asks. */
 export const AUTO_YES = ["write", "edit"];
+
+/**
+ * Tools this person has said "don't ask again" about, for this session only. It is the permission
+ * prompt's second option, and it is deliberately not remembered past the session: a standing yes
+ * that outlives the work it was given for is how something gets agreed to twice.
+ */
+const [allowed, setAllowed] = createSignal<Record<string, string[]>>({});
+export const allowsTool = (session: string, tool: string) => (allowed()[session] ?? []).includes(tool);
+export function allowTool(session: string, tool: string) {
+  setAllowed((a) => ({ ...a, [session]: [...new Set([...(a[session] ?? []), tool])] }));
+}
 export const LEVELS = ["low", "medium", "high"] as const;
 const [level, setLevel] = createSignal<(typeof LEVELS)[number]>("low");
 export { level, setLevel };
@@ -503,7 +514,10 @@ export function onEvent(ev: Ev & { pi?: string }) {
       if (!row?.session) return;
       thread(row.session).proposal(row);
       // In accept-edits, a change to this machine's own files is answered without asking.
-      if (!row.answer && mode() === "accept-edits" && AUTO_YES.includes(row.tool)) answerProposal(row.session, row.id, "yes");
+      // Already agreed to for this session, or accept-edits on this machine's own files: answered
+      // without asking again.
+      if (!row.answer && (allowsTool(row.session, row.tool) || (mode() === "accept-edits" && AUTO_YES.includes(row.tool))))
+        answerProposal(row.session, row.id, "yes");
       return;
     }
     case "queue_order":

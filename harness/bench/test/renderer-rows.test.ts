@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, proposalHeader } from "../../src/renderer/rows.ts";
+import { argLine, benchSessions, cloneLabel, inFlightItems, nestWorkspaces, procLabel, procState, proposalHeader } from "../../src/renderer/rows.ts";
 
 test("benchSessions lists bench sessions only", () => {
   const rows = [
@@ -93,4 +93,10 @@ test("a proposal is titled by the tool's own verb", () => {
   assert.equal(proposalHeader("edit"), "Edit");
   assert.equal(proposalHeader("bash"), "Run");
   assert.equal(proposalHeader(undefined, "Do the thing: now"), "Do the thing", "nothing known: the sentence's own head");
+});
+
+test("a proposal says what it would act on, values only", () => {
+  assert.equal(argLine({ name: "new-workspace", region: "nrt", packages: ["node", "bun"] }), "new-workspace · nrt · node, bun");
+  assert.equal(argLine({ name: "test", team: "kloudlite", session: "s-1" }), "test", "routing fields are not the subject");
+  assert.equal(argLine({}, "Create workspace test"), "test", "nothing to show: the summary minus the verb the header already says");
 });

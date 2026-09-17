@@ -154,11 +154,23 @@ test("a live question replaces the input, and the transcript keeps only the reco
   assert.match(chat, /fallback=\{<Answered q=\{b as QuestionRow\} \/>\}/);
   assert.match(chat, /You answered:/, "§21's record: what you answered, then one line per answer");
   // The card carries no argument table and no frame of its own: the composer's rail is the frame.
-  assert.ok(!/props\.q\.args/.test(chat), "no key/value dump in the card");
+  // The only use of the arguments is the one muted VALUES line under a proposal's verb.
+  assert.equal((chat.match(/props\.q\.args/g) ?? []).length, 1);
+  assert.match(chat, /argLine\(props\.q\.args, props\.q\.summary\)/);
   const card = chat.slice(chat.indexOf('data-component="question-card"'), chat.indexOf("Enter to select"));
   assert.ok(!/border|bg-request|rounded/.test(card), "no border, no background, no rounding");
   assert.ok(!/<Time /.test(card), "a card is a thing to answer, not a row in a log");
-  assert.match(card, /<Marker on=\{pick\(\) === i\(\)\} \/>/, "the selected row is marked (❯), not filled with a bar");
+  // The permission prompt: the verb, what it acts on, one sentence, three ways out. One blank line.
+  assert.match(chat, /Do you want to proceed\?/);
+  assert.match(chat, /don't ask again for \$\{verb\(\)\.toLowerCase\(\)\} this session/);
+  assert.match(chat, /No, and tell the bench what to do differently \(esc\)/);
+  assert.equal((chat.match(/h-\[var\(--cell-lh\)\]/g) ?? []).length, 2, "one blank line per shape, no more air");
+  // A question's descriptions sit beside their option, not on a line of their own.
+  assert.match(chat, /&nbsp;&nbsp;— \{h\(\)\}/);
+  // Option 2 is a standing yes for this tool, for this session only.
+  assert.match(chat, /live\.allowTool\(props\.session, props\.q\.tool\)/);
+  assert.match(chat, /<Marker on=\{pick\(\) === p\.i\} \/>/, "the selected row is marked (❯), not filled with a bar");
+  assert.ok(!/bg-accent|bg-selected/.test(card), "no bar behind the selected option");
   // And no tool row is ever pushed for it.
   const live = fs.readFileSync(path.resolve("src/renderer/live.ts"), "utf8");
   assert.match(live, /if \(name === "question"\) return;/);
