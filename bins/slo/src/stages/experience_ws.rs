@@ -491,6 +491,11 @@ use kloudlite_workspaces::k8s::IDE_LOG;
 const WS_TOKEN_FILE: &str = "/etc/kloudlite/ssh/workspace-token";
 
 pub(crate) async fn ws_tool(c: &Ctx, id: &str, tool: &str, args: &Value) -> Result<(u16, String)> {
+    ws_tool_within(c, id, tool, args, EXEC).await
+}
+
+/// The same, with the caller's own bound — a 200 MB `dd` through `exec` is not a `read`.
+pub(crate) async fn ws_tool_within(c: &Ctx, id: &str, tool: &str, args: &Value, bound: Duration) -> Result<(u16, String)> {
     // Single-quoted into a shell, so a single quote inside the JSON would end the string early.
     // None of ours carry one today; escaped anyway, because a probe that mangles its own request
     // reports a fleet failure that is its own.
@@ -503,7 +508,7 @@ pub(crate) async fn ws_tool(c: &Ctx, id: &str, tool: &str, args: &Value) -> Resu
          -H 'content-type: application/json' \
          -H \"authorization: Bearer $(cat {WS_TOKEN_FILE})\" -d '{body}'; echo; cat /tmp/kl-tool.out"
     );
-    let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
+    let (code, out, err) = ws_exec(c, id, &script, bound).await?;
     if code != 0 {
         return Err(anyhow!("the tool call could not be made: exit {code}: {}", err.trim()));
     }

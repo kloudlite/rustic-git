@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use kloudlite_workspaces::slo::catalogue::Suite;
 
-use super::workspace::ws_exec;
+use super::experience_ws::ws_tool_within;
 use super::{admin, api, get};
 use crate::ctx::Ctx;
 
@@ -108,16 +108,12 @@ async fn used_bytes(c: &Ctx, url: &str, jwt: &str, ws: &str) -> Result<Option<u6
 async fn write_bytes(c: &Ctx, ws: &str, name: &str) -> Result<()> {
     let dir = kloudlite_workspaces::k8s::workspace_dir(name);
     let cmd = format!("dd if=/dev/urandom of={dir}/slo-usage.bin bs=1M count={WRITTEN_MB} conv=fsync");
-    let body = serde_json::json!({ "cmd": cmd }).to_string();
-    // Single-quoted: the body is JSON this probe built, so it carries no quote of its own, and the
-    // tool server is reached over loopback exactly as `ide.exec` reaches it.
-    let script = format!(
-        "curl -sf --max-time {} -X POST http://127.0.0.1:7788/tools/exec -H 'content-type: application/json' -d '{body}'",
-        WRITE.as_secs()
-    );
-    let (code, out, err) = ws_exec(c, ws, &script, WRITE).await?;
-    if code != 0 {
-        return Err(anyhow!("the tool call exited {code}: {}", err.trim()));
+    // Through the shared helper, which reads the workspace's token from the file this container
+    // mounts. Hand-rolling the curl here is what made this probe the one caller without a
+    // credential: it exited 22 on every run the moment the tool server began requiring one.
+    let (status, out) = ws_tool_within(c, ws, "exec", &serde_json::json!({ "cmd": cmd }), WRITE).await?;
+    if status != 200 {
+        return Err(anyhow!("the tool server answered {status}: {}", out.trim()));
     }
     if !out.contains("\"exit_code\":0") {
         return Err(anyhow!("the tool server did not write the file: {}", out.trim()));
