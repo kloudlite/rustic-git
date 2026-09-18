@@ -636,14 +636,10 @@ pub(crate) async fn bench_tool_check(
     if !bench_tool_route(method, path) {
         return Ok(Err("audience"));
     }
-    // The pod's credential dies with the login it was minted from, on the same 30 s cache.
-    if !cli_token_live(state, &claims.parent).await {
-        return Ok(Err("parent"));
-    }
-    let benches: Api<crd::Workspace> = Api::all(kube(state)?.clone());
-    let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
-    if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
-        return Ok(Err("bench"));
+    match bench_credential_admission(state, claims).await? {
+        BenchCredentialAdmission::Live => {}
+        BenchCredentialAdmission::ParentRevoked => return Ok(Err("parent")),
+        BenchCredentialAdmission::BenchInactive => return Ok(Err("bench")),
     }
     Ok(Ok(Caller {
         name: claims.sub.clone(),
@@ -652,6 +648,28 @@ pub(crate) async fn bench_tool_check(
         scope: Some(claims.team.clone()),
         jti8: Some(claims.jti.chars().take(8).collect()),
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchCredentialAdmission {
+    Live,
+    ParentRevoked,
+    BenchInactive,
+}
+
+pub async fn bench_credential_admission(
+    state: &ApiState,
+    claims: &kloudlite_core::jwt::BenchToolClaims,
+) -> Result<BenchCredentialAdmission, Response> {
+    if !cli_token_live(state, &claims.parent).await {
+        return Ok(BenchCredentialAdmission::ParentRevoked);
+    }
+    let benches: Api<crd::Workspace> = Api::all(kube(state)?.clone());
+    let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
+    if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
+        return Ok(BenchCredentialAdmission::BenchInactive);
+    }
+    Ok(BenchCredentialAdmission::Live)
 }
 
 /// Whether a bench's tools may act now. One predicate so a new way to suspend a bench (pause) is

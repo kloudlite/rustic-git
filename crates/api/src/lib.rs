@@ -114,6 +114,7 @@ pub struct Api {
     pub region_check: Option<RegionCheck>,
     /// `None` without a cluster: a new person then simply starts with no region.
     pub active_regions: Option<ActiveRegions>,
+    pub bench_admission: Option<BenchAdmission>,
     /// See `browse::Membership`: the browse path's answer to "may this person read under
     /// this owner", kept for a minute.
     pub membership: crate::browse::Membership,
@@ -139,6 +140,17 @@ pub type ActiveRegions = Arc<
         + Sync,
 >;
 
+pub type BenchAdmissionFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<kloudlite_workspaces::api::BenchCredentialAdmission, ()>,
+            > + Send,
+    >,
+>;
+pub type BenchAdmission = Arc<
+    dyn Fn(kloudlite_core::jwt::BenchToolClaims) -> BenchAdmissionFuture + Send + Sync,
+>;
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::expect_used)] // boot-time: the one HTTP client is built here, at process start
 pub async fn serve(
@@ -157,6 +169,7 @@ pub async fn serve(
     on_member_state: Option<MemberStateChanged>,
     region_check: Option<RegionCheck>,
     active_regions: Option<ActiveRegions>,
+    bench_admission: Option<BenchAdmission>,
     // Same `KLOUDLITE_API_ROLE` read that picks `workspaces`' router: the superadmin roster
     // routes are as admin-only as `/admin/*` is, so a user-role process must not compile them in
     // either, not just refuse them at auth time.
@@ -199,6 +212,7 @@ pub async fn serve(
         on_member_state,
         region_check,
         active_regions,
+        bench_admission,
         membership: crate::browse::Membership::default(),
         central,
     });
@@ -465,6 +479,17 @@ async fn bench_session(
     if !bench_person_route(method, path) {
         return None;
     }
+    let Some(check) = api.bench_admission.as_ref() else {
+        return Some(Err((StatusCode::SERVICE_UNAVAILABLE, "bench admission unavailable").into_response()));
+    };
+    match check(claims.clone()).await {
+        Ok(kloudlite_workspaces::api::BenchCredentialAdmission::Live) => {}
+        Ok(kloudlite_workspaces::api::BenchCredentialAdmission::ParentRevoked)
+        | Ok(kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive) => {
+            return Some(Err((StatusCode::UNAUTHORIZED, "this bench credential is no longer valid").into_response()))
+        }
+        Err(()) => return Some(Err((StatusCode::SERVICE_UNAVAILABLE, "could not check this bench credential").into_response())),
+    }
     let refused = || (StatusCode::UNAUTHORIZED, "this bench credential names nobody here").into_response();
     let db = match directory(api) {
         Ok(db) => db,
@@ -623,6 +648,7 @@ pub(crate) mod testing {
             on_member_state: None,
             region_check: None,
             active_regions: None,
+            bench_admission: None,
             membership: crate::browse::Membership::default(),
             central: kloudlite_core::settings::LiveSettings::new(
                 kloudlite_core::settings::CentralSettings::from_env(),
@@ -739,5 +765,25 @@ mod tests {
         h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
         assert_eq!(identify(&api, &h).err().unwrap().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(user_identity(&api, &h).await.err().unwrap().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn an_invalidated_bench_is_refused_before_directory_identity_conversion() {
+        for admission in [
+            kloudlite_workspaces::api::BenchCredentialAdmission::ParentRevoked,
+            kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive,
+        ] {
+            let mut api = test_api_with_secret("s").await;
+            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap().0;
+            api.jwt = Some(jwt);
+            api.bench_admission = Some(Arc::new(move |_| {
+                Box::pin(async move { Ok(admission) }) as BenchAdmissionFuture
+            }));
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+            let result = bench_session(&api, &axum::http::Method::GET, "/v1/repos", &h).await;
+            assert_eq!(result.unwrap().err().unwrap().status(), StatusCode::UNAUTHORIZED);
+        }
     }
 }

@@ -595,6 +595,16 @@ async fn run() -> Result<()> {
     // a `/v1` authorization bug literally cannot reach an admin handler on that process; the user
     // role mounts ONLY `/v1` and never sees an admin route (design doc §5). `role` was read once,
     // above, before the bootstrap decided whether to run.
+    let bench_admission: Option<kloudlite_api::BenchAdmission> = workspaces.clone().map(|ws| {
+        Arc::new(move |claims: kloudlite_core::jwt::BenchToolClaims| {
+            let ws = ws.clone();
+            Box::pin(async move {
+                kloudlite_workspaces::api::bench_credential_admission(&ws, &claims)
+                    .await
+                    .map_err(|_| ())
+            }) as kloudlite_api::BenchAdmissionFuture
+        }) as kloudlite_api::BenchAdmission
+    });
     let workspaces_router = workspaces.map(|ws| workspaces_router(&role, ws));
     kloudlite_api::serve(
         store,
@@ -609,6 +619,7 @@ async fn run() -> Result<()> {
         on_member_state,
         region_check,
         active_regions,
+        bench_admission,
         role == "admin",
     )
     .await
