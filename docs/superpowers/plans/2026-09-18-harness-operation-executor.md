@@ -1,7 +1,7 @@
 # Harness operation executor — Flash implementation plan
 
 Date: 2026-09-18
-Status: Reviewed by Sol; ready for O01; no implementation agents have been launched for this plan
+Status: Implementation active — Flash O01 on feature/operation-executor-o01; Sol contract review pending
 Design: [Harness operation executor specification](../specs/2026-09-18-harness-operation-executor-design.md)
 Review record: [Sol findings and resolution](../specs/2026-09-18-harness-operation-executor-review.md)
 Capability formats: [Minimal instructions and internal file edits](../specs/2026-09-18-harness-capability-contracts.md)

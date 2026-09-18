@@ -1,7 +1,7 @@
 # Harness operation executor
 
 Date: 2026-09-18
-Status: Reviewed by Sol; ready for O01 contract definition; implementation has not started
+Status: Reviewed by Sol; O01 contract implementation in progress
 Audience: Flash implementation agents, Astra planners, Sol reviewers, harness maintainers
 Implementation plan: [Agent work plan](../plans/2026-09-18-harness-operation-executor.md)
 Review record: [Sol findings and resolution](2026-09-18-harness-operation-executor-review.md)
