@@ -254,6 +254,12 @@ pub const BENCH_IDLE: &str = "Idle";
 /// `Ready=False` reason: another node still holds this owner's bench folder.
 pub const FOLDER_LOCKED: &str = "FolderLocked";
 
+/// `Ready=False` reason: the bench's sessions container keeps dying and the kubelet is backing
+/// off. The MESSAGE carries what it died of, which is the only place the cause appears — without
+/// this the workspace sat in `creating` for its whole ceiling and then reported only that it
+/// never came up (2026-09-18).
+pub const BENCH_CRASH_LOOPING: &str = "BenchCrashLooping";
+
 /// Condition type recording that the legacy `{homes}/.benches/{team}/{owner}` folder has been
 /// moved into this workspace's volume, so the migration runs once per bench and never again.
 pub const FOLDER_MIGRATED: &str = "FolderMigrated";

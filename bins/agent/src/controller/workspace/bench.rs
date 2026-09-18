@@ -37,10 +37,41 @@ pub(crate) enum BenchVerdict {
     Idle(String),
     /// Another pod holds the folder lock; the message names the holder.
     Locked(String),
+    /// The sessions container keeps dying. Carries what it died OF — the terminated message,
+    /// which is the only place the cause appears at all.
+    ///
+    /// Distinct from `Serving` because a crash loop used to read as one: the workspace sat in
+    /// `creating` for its whole 240 s ceiling and then timed out as "never came up", while the
+    /// kubelet had the reason on the container status the entire time (2026-09-18).
+    CrashLooping(String),
 }
 
 fn bench_status(pod: &Pod) -> Option<&ContainerStatus> {
     pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == k8s::BENCH_CONTAINER)
+}
+
+/// What the sessions container last died of, when the kubelet is backing off from restarting it.
+///
+/// Both halves are required: `waiting` alone is also how a pulling image looks, and a non-zero
+/// last exit alone is how a container that has since recovered looks. Together they are a pod that
+/// is going nowhere.
+///
+/// A zero exit is not a crash — `--idle-secs` ends the process on purpose.
+fn crash_looping(c: &ContainerStatus) -> Option<String> {
+    let waiting = c.state.as_ref()?.waiting.as_ref()?;
+    if waiting.reason.as_deref() != Some("CrashLoopBackOff") {
+        return None;
+    }
+    let t = terminated(c)?;
+    if t.exit_code == 0 {
+        return None;
+    }
+    // The message, else the code: `harness-bench`'s EACCES arrives as a message, but a container
+    // killed by a signal has none and the number is all there is.
+    Some(match t.message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m.to_string(),
+        None => format!("exit {}", t.exit_code),
+    })
 }
 
 fn terminated(c: &ContainerStatus) -> Option<&ContainerStateTerminated> {
@@ -67,6 +98,15 @@ pub(crate) fn bench_verdict(pod: &Pod, now: Timestamp) -> BenchVerdict {
         if t.exit_code == EXIT_LOCKED {
             return BenchVerdict::Locked(t.message.clone().unwrap_or_default());
         }
+    }
+    // A container the kubelet is backing off from is crash-looping, and the reason it gives is the
+    // one thing a person can act on. Read from `lastState` because the CURRENT state is the
+    // backoff's `waiting`, which says only that it is waiting.
+    //
+    // After the lock check above and before idleness below: a held folder is a crash loop the
+    // kubelet SHOULD keep retrying, so it keeps its own answer.
+    if let Some(t) = crash_looping(c) {
+        return BenchVerdict::CrashLooping(t);
     }
     // Idle is the READINESS channel, and only while the container is actually RUNNING: a crash
     // loop is `ready=false` too, and treating that as idleness would delete the pod, hide the
@@ -183,6 +223,21 @@ pub(crate) async fn bench_verdict_action(
             write_ws_status(w, st, ctx).await?;
             Ok(Some(Action::await_change()))
         }
+        BenchVerdict::CrashLooping(why) => {
+            // `Starting`, not `Error`: the kubelet is still retrying and a restart may yet
+            // succeed — an image that was slow to pull, a node that was briefly out of memory.
+            // What changes is that the REASON is said now, every pass, instead of the workspace
+            // sitting in `creating` until its ceiling ran out and reporting only that.
+            let st = crd::WorkspaceStatus {
+                phase: crd::Phase::Starting,
+                observed_generation: None,
+                pod_ref: Some(format!("{ns}/{pod_name}")),
+                conditions: ws_conditions(prev, crd::condition("Ready", false, crd::BENCH_CRASH_LOOPING, &why, gen)),
+                ..prev.clone()
+            };
+            write_ws_status(w, st, ctx).await?;
+            Ok(Some(Action::requeue(TICK)))
+        }
         BenchVerdict::Locked(holder) => {
             let message = if holder.is_empty() { "another pod holds this bench's folder".to_string() } else { format!("folder held by {holder}") };
             let st = crd::WorkspaceStatus {
@@ -229,6 +284,26 @@ mod tests {
         .unwrap()
     }
 
+/// A bench whose sessions container keeps dying said nothing for 240 s and then timed out as a
+    /// workspace that never came up. The cause is on the container status the whole time — every
+    /// team bench crash-looped on `EACCES ... mkdir '.bench'` and the fleet's only signal was a
+    /// phase that reads as "still starting" (2026-09-18).
+    #[test]
+    fn a_crash_looping_bench_is_reported_rather_than_left_looking_slow() {
+        let long_after: Timestamp = "2026-09-13T11:00:00Z".parse().unwrap();
+        // Waiting in CrashLoopBackOff with a non-zero last exit: the message is what it died of.
+        assert_eq!(
+            bench_verdict(&pod(false, false, Some(1)), long_after),
+            BenchVerdict::CrashLooping("node-b".into())
+        );
+        // The LOCK still wins: a held folder is the one exit the kubelet should keep retrying,
+        // and the person needs the holder's name rather than "it is crashing".
+        assert_eq!(bench_verdict(&pod(false, false, Some(EXIT_LOCKED)), long_after), BenchVerdict::Locked("node-b".into()));
+        // A container that is up, or that exited cleanly, is not crash-looping.
+        assert_eq!(bench_verdict(&pod(true, true, None), long_after), BenchVerdict::Serving);
+        assert_eq!(bench_verdict(&pod(false, false, Some(0)), long_after), BenchVerdict::Serving, "a clean exit is not a crash");
+    }
+
     #[test]
     fn readiness_is_the_idle_channel_and_only_for_a_container_that_is_still_running() {
         let long_after: Timestamp = "2026-09-13T11:00:00Z".parse().unwrap();
@@ -236,7 +311,11 @@ mod tests {
         assert_eq!(bench_verdict(&pod(true, true, None), long_after), BenchVerdict::Serving, "serving");
         assert_eq!(bench_verdict(&pod(false, true, None), just_after), BenchVerdict::Serving, "not ready yet is starting, not asleep");
         assert_eq!(bench_verdict(&pod(false, true, None), long_after), BenchVerdict::Idle(AT.into()));
-        assert_eq!(bench_verdict(&pod(false, false, Some(1)), long_after), BenchVerdict::Serving, "a crash loop is not idleness");
+        assert_eq!(
+            bench_verdict(&pod(false, false, Some(1)), long_after),
+            BenchVerdict::CrashLooping("node-b".into()),
+            "a crash loop is named, not left to look like a slow start"
+        );
         assert_eq!(bench_verdict(&pod(false, false, Some(EXIT_LOCKED)), long_after), BenchVerdict::Locked("node-b".into()));
         // The lock wins even once the kubelet has it running again: the restart is the backoff,
         // not a recovery, and the person needs the holder's name either way.
