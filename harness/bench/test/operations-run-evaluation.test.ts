@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { atomicWriteJson, runEvaluationCli } from "../src/operations/run-evaluation.ts";
+import type { AtomicFs } from "../src/operations/run-evaluation.ts";
 import type { EvaluationAttempt } from "../src/operations/evaluation.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +27,21 @@ const testTypeSafeConfig = {
 
 function temp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "operation-evaluation-"));
+}
+
+function resolveBunExecutable(): string | undefined {
+  if (process.env.BUN_EXE) return process.env.BUN_EXE;
+  if (process.versions.bun) return process.execPath;
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    const candidate = path.join(directory, process.platform === "win32" ? "bun.exe" : "bun");
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching PATH.
+    }
+  }
+  return undefined;
 }
 
 function capture() {
@@ -150,6 +167,7 @@ test("writes deterministic report atomically with unavailable current", async ()
     cohortFingerprint: report.cohortFingerprint,
   });
   const proposed = report.subjects.find((subject: { role: string }) => subject.role === "proposed");
+  assert.ok(proposed);
   assert.equal(proposed.availability, "available");
 });
 
@@ -181,7 +199,6 @@ test("injected provider config can run without live network", async () => {
     ...io,
     repoRoot: path.resolve(here, "../../.."),
     clock: fixedClock,
-    faultScenarios,
     loadBootstrap: async () => ({
       faultScenarios,
       typeSafeConfig: {
@@ -279,20 +296,20 @@ test("output failure preserves the prior report and removes temporary files", as
 function atomicFs(failAt?: "file_sync" | "rename") {
   const calls: Array<readonly unknown[]> = [];
   let nextFd = 10;
-  const api = {
-    mkdirSync: (...args: unknown[]) => { calls.push(["mkdir", ...args]); },
-    openSync: (...args: unknown[]) => { calls.push(["open", ...args]); return nextFd++; },
-    writeFileSync: (...args: unknown[]) => { calls.push(["write", ...args]); },
+  const api: AtomicFs = {
+    mkdirSync: (file, options) => { calls.push(["mkdir", file, options]); return undefined; },
+    openSync: (file, flags, mode) => { calls.push(["open", file, flags, ...(mode === undefined ? [] : [mode])]); return nextFd++; },
+    writeFileSync: (file, data, options) => { calls.push(["write", file, data, options]); },
     fsyncSync: (fd: number) => {
       calls.push(["sync", fd]);
       if (failAt === "file_sync" && fd === 10) throw new Error("file sync failed");
     },
-    closeSync: (...args: unknown[]) => { calls.push(["close", ...args]); },
-    renameSync: (...args: unknown[]) => {
-      calls.push(["rename", ...args]);
+    closeSync: (fd) => { calls.push(["close", fd]); },
+    renameSync: (oldPath, newPath) => {
+      calls.push(["rename", oldPath, newPath]);
       if (failAt === "rename") throw new Error("rename failed");
     },
-    unlinkSync: (...args: unknown[]) => { calls.push(["unlink", ...args]); },
+    unlinkSync: (file) => { calls.push(["unlink", file]); },
   };
   return { api, calls };
 }
@@ -346,7 +363,6 @@ test("spawned CLI loads an external trusted bootstrap and emits compact stdout",
   const bootstrapFile = path.join(root, "bootstrap.mjs");
   fs.writeFileSync(bootstrapFile, `export async function createEvaluationBootstrap() { return {\n  typeSafeConfig: { apiKey: "spawn-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 },\n  faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) }\n}; }\n`);
   const output = path.join(root, "report.json");
-  const { spawnSync } = await import("node:child_process");
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../src/operations/run-evaluation.ts", import.meta.url)), "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile, "--run-id", "spawn-run"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(output), true);
@@ -356,15 +372,16 @@ test("spawned CLI loads an external trusted bootstrap and emits compact stdout",
 });
 
 test("package script preserves the executable argument boundary", async () => {
+  const bun = resolveBunExecutable();
+  assert.ok(bun, "bun executable required");
   const root = temp();
   const oracle = path.join(root, "reviewer-oracles.json");
   fs.copyFileSync(oracleFixture, oracle);
   const bootstrapFile = path.join(root, "bootstrap.mjs");
   fs.writeFileSync(bootstrapFile, `export function createEvaluationBootstrap() { return { typeSafeConfig: { apiKey: "package-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 }, faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) } }; }\n`);
   const output = path.join(root, "package-report.json");
-  const { spawnSync } = await import("node:child_process");
   const harnessRoot = path.resolve(here, "../..");
-  const result = spawnSync("npm", ["run", "evaluation:operations", "--", "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile], { cwd: harnessRoot, encoding: "utf8" });
+  const result = spawnSync(bun, ["run", "evaluation:operations", "--", "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile], { cwd: harnessRoot, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(output), true);
   assert.equal(result.stdout.includes("package-test-key"), false);

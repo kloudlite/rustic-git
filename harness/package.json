@@ -9,7 +9,9 @@
     "build": "npm run build:main && npm run build:renderer",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck:operations": "tsc --noEmit -p tsconfig.operations.json",
     "bench:test": "node --test --test-concurrency=4 'bench/test/*.test.ts'",
+    "test:operations": "node --test --test-concurrency=4 bench/test/operations-contracts.test.ts bench/test/operations-evaluation-subjects.test.ts bench/test/operations-evaluation.test.ts bench/test/operations-run-evaluation.test.ts bench/test/operations-typesafe.test.ts",
     "bench:start": "node bench/src/main.ts",
     "evaluation:operations": "node bench/src/operations/run-evaluation.ts"
   },

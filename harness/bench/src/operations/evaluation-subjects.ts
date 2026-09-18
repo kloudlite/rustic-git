@@ -71,7 +71,7 @@ function failureCodeOf(code: string | undefined): EvaluationFailureCode {
 
 function usageOf(batch: {
   model: { model: string; version: string };
-  records: Array<{ usage: { inputTokens: number; outputTokens: number } }>;
+  records: Array<{ attempts: number; usage: { inputTokens: number; outputTokens: number } }>;
 }): ProviderUsage[] {
   const usage = batch.records[0]?.usage;
   if (!usage || (batch.records[0]?.attempts === 0 && usage.inputTokens === 0 && usage.outputTokens === 0)) return [];

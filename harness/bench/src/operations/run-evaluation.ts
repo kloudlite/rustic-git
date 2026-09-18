@@ -104,7 +104,15 @@ async function importBootstrap(file: string): Promise<EvaluationBootstrap> {
   return await (module.createEvaluationBootstrap as () => Promise<EvaluationBootstrap> | EvaluationBootstrap)();
 }
 
-export type AtomicFs = Pick<typeof fs, "mkdirSync" | "openSync" | "writeFileSync" | "fsyncSync" | "closeSync" | "renameSync" | "unlinkSync">;
+export type AtomicFs = {
+  mkdirSync(path: fs.PathLike, options: fs.MakeDirectoryOptions & { recursive: true }): string | undefined;
+  openSync(path: fs.PathLike, flags: string, mode?: fs.Mode): number;
+  writeFileSync(file: number, data: string, options: BufferEncoding): void;
+  fsyncSync(fd: number): void;
+  closeSync(fd: number): void;
+  renameSync(oldPath: fs.PathLike, newPath: fs.PathLike): void;
+  unlinkSync(path: fs.PathLike): void;
+};
 
 export function atomicWriteJson(file: string, value: unknown, io: AtomicFs = fs, nonce: () => string = crypto.randomUUID): void {
   const directory = path.dirname(path.resolve(file));

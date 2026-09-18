@@ -370,6 +370,10 @@ export type UnavailableSubjectReport = {
 
 export type SubjectReport = AvailableSubjectReport | UnavailableSubjectReport;
 
+export function isAvailableSubjectReport(subject: SubjectReport): subject is AvailableSubjectReport {
+  return subject.availability === "available";
+}
+
 export type DeltaMetric = { baseline: number | null; subject: number | null; delta: number | null };
 
 export type ComparisonSummary = {
@@ -1631,7 +1635,7 @@ export function resolveEvaluationCases(
     oracleById.set(oracle.caseId, oracle);
   }
 
-  const resolved = selected.map((testCase) => {
+  const resolved: EvaluationCase[] = selected.map((testCase): EvaluationCase => {
     if (testCase.split === "tuning") return testCase;
     const oracle = oracleById.get(testCase.caseId);
     if (oracle === undefined) throw new Error(`missing reviewer oracle ${testCase.caseId}`);
@@ -1854,6 +1858,7 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
   const subjectsByRole = new Map(subjects.map((subject) => [subject.role, subject]));
   const baseline = subjectsByRole.get("baseline");
   if (baseline === undefined) throw new Error("baseline subject report is missing");
+  if (!isAvailableSubjectReport(baseline)) throw new Error("baseline subject must be available");
   const comparisons: ComparisonSummary[] = [];
   const delta = (baselineValue: number | null, subjectValue: number | null): DeltaMetric => ({
     baseline: baselineValue,
@@ -1865,7 +1870,7 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
     if (subject === undefined) throw new Error(`${role} subject report is missing`);
     for (const split of splits) {
       const baselineScore = baseline.splits.find((entry) => entry.split === split)?.score;
-      if (baseline.availability !== "available") throw new Error("baseline subject must be available");
+      if (baselineScore === undefined) throw new Error(`baseline ${split} summary is missing`);
       if (subject.availability === "unavailable") {
         comparisons.push({
           subjectId: subject.subjectId,
@@ -1884,7 +1889,6 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
         continue;
       }
       const subjectScore = subject.splits.find((entry) => entry.split === split)?.score;
-      if (baselineScore === undefined) throw new Error(`baseline ${split} summary is missing`);
       if (subjectScore === undefined) throw new Error(`${role} ${split} summary is missing`);
       comparisons.push({
         subjectId: subject.subjectId,
