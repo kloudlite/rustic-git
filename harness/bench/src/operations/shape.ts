@@ -86,6 +86,7 @@ export type IssueCode =
   | "invalid_transition"
   | "stale_contract"
   | "validation_failure"
+  | "permission_denied"
   | "decision_mismatch"
   | "decision_expired"
   | "decision_replayed";

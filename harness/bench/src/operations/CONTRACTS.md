@@ -48,6 +48,17 @@ listing every rejected path.
   out, not that work may run. A matching `granted` record yields `requiredAction:
   "dispatch"`; a validly recorded **denial** yields `"refuse_step"` and
   `dispatchAuthorized: false`, and O05/O06 must refuse the step.
+- Expiry is mandatory. `RecordedDecision.expiresAt` must be after `recordedAt`, and
+  `checkResumeAgainstRecord` refuses a record whose `expiresAt` passes the trusted
+  `expiryBound` or is already past `now`, so no authorization is indefinite.
+  `PendingDecision.expiresAt` is mandatory and after `createdAt` for every class,
+  including additional input, so a waiting operation always has a persisted deadline.
+- Policy source is checked at dispatch, by O05. Before running an approved step, compare
+  `record.policySource` with the pending capability's current trusted approval policy in
+  the durable operation record: refuse a `trusted_policy` record where that capability
+  currently requires `user_ui` (a policy downgrade must not resurrect an automatic
+  approval), and accept `trusted_policy` where automatic policy is still current. O05
+  tests both cases; this contract only fixes the field, so the comparison cannot drift.
 - The compact result is the only shape returned to the main model: no source, patches,
   actor, or scope. `OperationSnapshot` is internal.
 
@@ -55,7 +66,7 @@ listing every rejected path.
 
 All values are JSON-safe with finite numbers. Per-request limits live in `REQUEST_LIMITS`;
 `shape.ts` also counts **every string and key across the whole document** against
-`REQUEST_LIMITS.requestChars` (256 KiB) and caps keys at 64 characters, so many
+`REQUEST_LIMITS.requestChars` (262144 UTF-16 characters) and caps keys at 64, so many
 individually-legal strings cannot add up to an unbounded payload. Defaults and ceilings
 are in `DEFAULT_BUDGETS` (12 steps, 3 selection rounds, 2 generation calls, 4 concurrent
 reads, 2 concurrent mutations, 10-minute deadline, 2-second handle, 64 KiB generated
