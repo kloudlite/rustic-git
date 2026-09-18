@@ -119,6 +119,8 @@ const ASK_IDLE_MS = 10 * 60_000;
 const ASK_NUDGE_GRACE_MS = 2 * 60_000;
 /** How often deadlines are advanced, orphans reaped and lost work marked. */
 const SWEEP_MS = 30_000;
+/** How long a sent prompt holds the seat when no turn is ever seen for it. */
+const START_GRACE_MS = 5_000;
 /**
  * A background task with nobody watching it: a job that has run this long without ending is
  * reported once as expired rather than sitting in the panel forever (spec §3.9 rule 8). It is not
@@ -165,6 +167,8 @@ export class Bench {
   /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
+  /** Sessions with a prompt sent whose turn has not been seen yet: the gap `turning` cannot cover. */
+  private starting = new Set<string>();
   /** When this process started: an exchange older than it was left behind by a restart. */
   private readonly bootedAt = Date.now();
   /** Per exchange: when it entered its state, and whether it has already been redelivered or nudged. */
@@ -400,6 +404,8 @@ export class Bench {
       const a = this.asked.get(id)?.[0];
       if (a) this.transitionAsk(a, "running");
       this.turning.add(id);
+      // The turn this prompt was waiting to see: the seat it held is now `turning`'s.
+      this.starting.delete(id);
       this.write(() => this.sessions.update(id, { lastActive: now }));
     }
     if (ev.type === "agent_end") {
@@ -1171,13 +1177,29 @@ export class Bench {
 
   /** A prompt into a session that may be mid-turn: pi queues a follow-up rather than refusing. */
   private send(id: string, message: string, direct = false): Promise<PiEvent> {
-    const mid = this.turning.has(id);
+    /**
+     * `turning` only becomes true when `agent_start` comes BACK from the child, and that is a round
+     * trip later than the prompt that caused it. Three asks half a second apart therefore raced:
+     * the first was sent as a `prompt` and the second arrived while the answer to it was still in
+     * flight, so it was sent as a prompt too — and pi, already starting a turn, kept the last one.
+     * Ask #1 never ran (api-test-report R-D24). A prompt this session has SENT but not yet seen
+     * start counts as mid-turn, which is what it is.
+     */
+    const mid = this.turning.has(id) || this.starting.has(id);
     // A session and its OWN agents talk directly (owner, 2026-09-17): a dispatch goes at once, and
     // a report comes back at once — as a steer when the caller is mid-turn, so it is read in this
     // turn rather than behind whatever else is queued. The fork-ordered inbox is for prompts from
     // OTHER sessions and from people, which is where ordering is a judgement at all.
     if (direct) return this.rpc(id, { type: mid ? "steer" : "prompt", message });
-    const r = this.rpc(id, { type: mid ? "follow_up" : "prompt", message });
+    // Held from here until the turn this prompt starts is seen, so the next one queues behind it.
+    if (!mid) this.starting.add(id);
+    const r = this.rpc(id, { type: mid ? "follow_up" : "prompt", message }).finally(() => {
+      if (mid) return;
+      // The turn either started (and `turning` now holds it) or the send failed; either way this
+      // seat is free.
+      if (this.turning.has(id)) this.starting.delete(id);
+      else setTimeout(() => this.starting.delete(id), START_GRACE_MS).unref?.();
+    });
     if (mid) this.triageSoon(id);
     return r;
   }

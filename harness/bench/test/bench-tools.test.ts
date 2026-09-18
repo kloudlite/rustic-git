@@ -2311,3 +2311,31 @@ test("a running ask does not survive a restart as running", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D24 (api-test-report round 3): three asks half a second apart to one workspace — the second and
+ * third ran and answered, the first never ran at all. `turning` only becomes true when `agent_start`
+ * comes back from the child, a round trip after the prompt that caused it, so two prompts could be
+ * in flight at once and pi kept the later one.
+ */
+test("three asks in quick succession all reach the workspace", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-rd24-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    // No await between them: this is the race, not a queue.
+    const [a1, a2, a3] = await Promise.all([bench.ask("api", "first", asker), bench.ask("api", "second", asker), bench.ask("api", "third", asker)]);
+    assert.equal(new Set([a1.exchange, a2.exchange, a3.exchange]).size, 3, "three asks, three exchanges");
+
+    // Each one reached the workspace: either still owed, or already taken and answered. What must
+    // never happen is the first simply vanishing, which is what the report caught.
+    const got = ((await bench.messages(a1.session)).messages as { role: string; content: unknown }[])
+      .filter((m) => m.role === "user")
+      .map((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+    for (const word of ["first", "second", "third"]) assert.ok(got.some((t) => t.includes(word)), `${word} never arrived: ${got.join(" | ")}`);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
