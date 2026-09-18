@@ -82,6 +82,12 @@ pub struct Azure {
     pub cosmos_account: String,
 }
 
+/// The provider half of the bench's default model id — `deepseek` out of `deepseek/deepseek-v4-flash`.
+/// Read from the constant the pod itself is given, so the two cannot drift apart.
+fn default_model_provider() -> &'static str {
+    kloudlite_workspaces::model::DEFAULT_BENCH_MODEL.split('/').next().unwrap_or("deepseek")
+}
+
 fn req(k: &str) -> Result<String> {
     std::env::var(k).with_context(|| format!("{k} is required"))
 }
@@ -115,7 +121,11 @@ impl Config {
                 .with_context(|| "KLOUDLITE_JWT_SECRET is not set".to_string())?,
             model_key: kloudlite_core::secret::read("KLOUDLITE_SLO_MODEL_KEY")
                 .filter(|v| !v.trim().is_empty())
-                .map(|key| (opt("KLOUDLITE_SLO_MODEL_PROVIDER", "anthropic"), key.trim().to_string())),
+                // The provider of the model a bench actually runs, not a favourite: the default
+                // model is `deepseek/…` (`model::DEFAULT_BENCH_MODEL`), so seeding `anthropic`
+                // wrote a real key under a provider nothing asks for and pi still answered "No API
+                // key found for deepseek" (hourly 08:05, 2026-09-18).
+                .map(|key| (opt("KLOUDLITE_SLO_MODEL_PROVIDER", default_model_provider()), key.trim().to_string())),
             probe_user: opt("KLOUDLITE_SLO_USER", crate::ctx::PROBE_USER),
             other_user: opt("KLOUDLITE_SLO_OTHER", crate::ctx::OTHER_USER),
             ssh_key_path: opt("KLOUDLITE_SLO_SSH_KEY", "/etc/slo-ssh/id_ed25519"),

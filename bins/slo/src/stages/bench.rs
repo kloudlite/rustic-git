@@ -259,7 +259,10 @@ pub async fn fast(c: &mut Ctx) {
 /// rule the route itself documents.
 pub(crate) async fn seed_model_key(c: &mut Ctx) {
     let Some((provider, key)) = c.cfg.model_key.clone() else {
-        return tracing::info!("slo.bench.model_key.unset");
+        // Loud, not silent: an unset credential and a working one looked identical in the run
+        // report, and every model probe then failed with pi's own "No API key found" while the
+        // seeding step said nothing at all (hourly 08:05, 2026-09-18).
+        return tracing::warn!("slo.bench.model_key.unset: KLOUDLITE_SLO_MODEL_KEY is not set, so every model turn will be refused");
     };
     let out = async {
         let (_child, port) = forward(c).await?;
@@ -269,10 +272,27 @@ pub(crate) async fn seed_model_key(c: &mut Ctx) {
         if status != 204 {
             bail!("the bench refused the model key for {provider}: {status}");
         }
+        // Read it back: a 204 says the route ran, not that pi will find a key for the model this
+        // bench runs. `configured` is a boolean per provider and carries no byte of the key, so
+        // the check is safe to make and safe to log.
+        let (status, body) = through(port, "/providers").await?;
+        if status != 200 {
+            bail!("the bench would not list its providers: {status}");
+        }
+        let rows: Value = serde_json::from_str(&body).context("the providers listing is not JSON")?;
+        let configured = rows
+            .as_array()
+            .map(|rs| rs.iter().any(|r| r["id"] == provider.as_str() && r["configured"] == true))
+            .unwrap_or(false);
+        if !configured {
+            bail!("the bench still reports no key for {provider} after the write");
+        }
         Ok::<_, anyhow::Error>(())
     }
     .await;
     match out {
+        // The provider id, never the key: `listProviders` answers `configured` per provider, which
+        // is the one read-back that says the seed took without any byte of the key coming back.
         Ok(()) => tracing::info!(%provider, "slo.bench.model_key.seeded"),
         Err(e) => tracing::warn!(%provider, error = %format!("{e:#}"), "slo.bench.model_key.failed"),
     }
