@@ -899,8 +899,7 @@ export class Bench {
   }
 
   private async listProcs(session: string): Promise<{ id: string; state?: string; exit_code?: number | null }[]> {
-    const at = await this.toolsAddress(session);
-    const r = await fetch(`http://${at}/tools/process_list`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const r = await this.toolsFetch(session, "/tools/process_list", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     if (!r.ok) throw new Error(`process_list: ${r.status}`);
     return ((await r.json()) as { processes?: { id: string; state?: string; exit_code?: number | null }[] }).processes ?? [];
   }
@@ -1007,8 +1006,7 @@ export class Bench {
   ): Promise<{ stdout: string; stderr: string; next: number; next_err?: number; state?: string; exit_code?: number | null }> {
     const row = this.procs.all().find((p) => p.id === id);
     if (!row) throw new Error(`no process ${id}`);
-    const at = await this.toolsAddress(row.session);
-    const r = await fetch(`http://${at}/tools/process_output`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since, since_err: sinceErr }) });
+    const r = await this.toolsFetch(row.session, "/tools/process_output", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, since, since_err: sinceErr }) });
     if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
     return (await r.json()) as { stdout: string; stderr: string; next: number; next_err?: number };
   }
@@ -1031,11 +1029,49 @@ export class Bench {
    * that never had hands, answered as that rather than dialled at the bench's own pod.
    */
   private async toolsAddress(session: string): Promise<string> {
+    return (await this.toolsFor(session)).address;
+  }
+
+  /**
+   * Where a session's tool server is AND the token it requires. Every `/tools/*`, `/fs/*` and
+   * `/stream/*` call the bench makes goes through here, so the header is sent in one place rather
+   * than at five call sites that each forgot it. The token is never logged, never put in a tool
+   * result, and never sent to the renderer.
+   */
+  private async toolsFor(session: string, fresh = false): Promise<{ address: string; token?: string }> {
     const s = this.sessions.get(session);
     if (!s) throw new Error(`no session ${session}`);
     if (!s.target) throw new Error("this session has no machine; a process runs in a workspace");
-    const resolve = this.opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
-    return await resolve(s.target);
+    return this.toolsOf(s.target, fresh);
+  }
+
+  /** The same, by workspace id: the tree-readiness wait has no session to ask with. */
+  private async toolsOf(workspace: string, fresh = false): Promise<{ address: string; token?: string }> {
+    const mod = await import("../../pi/workspace-tools.ts");
+    // An injected resolver (tests, and a bench pointed at a fixed address) answers an address only.
+    if (this.opts.resolveTools) {
+      const address = await this.opts.resolveTools(workspace);
+      const token = await mod.toolsAuth(workspace, fresh).then((a) => a.token, () => undefined);
+      return { address, ...(token ? { token } : {}) };
+    }
+    return mod.toolsAuth(workspace, fresh);
+  }
+
+  /**
+   * One call to a tool server, with the workspace's token. A 401 is a STALE token — the keys beat
+   * re-mints it — so it resolves once more and tries again; a second 401 is a plain error.
+   */
+  private async toolsFetch(session: string, path: string, init: RequestInit & { headers?: Record<string, string> } = {}): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const at = await this.toolsFor(session, attempt > 0);
+      const headers = { ...(init.headers ?? {}), ...(at.token ? { authorization: `Bearer ${at.token}` } : {}) };
+      const r = await fetch(`http://${at.address}${path}`, { ...init, headers });
+      if (r.status !== 401 || attempt > 0) return r;
+      await r.body?.cancel().catch(() => undefined);
+      const mod = await import("../../pi/workspace-tools.ts");
+      const s = this.sessions.get(session);
+      if (s?.target) mod.forgetToolsAuth(s.target);
+    }
   }
 
   /**
@@ -1043,8 +1079,7 @@ export class Bench {
    * the harness reaching the same place the tool did, never a command typed at the model.
    */
   async killProc(session: string, id: string): Promise<void> {
-    const at = await this.toolsAddress(session);
-    const r = await fetch(`http://${at}/tools/process_kill`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+    const r = await this.toolsFetch(session, "/tools/process_kill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
     if (!r.ok) throw new Error(`process ${id}: the tool server answered ${r.status}`);
     const row = this.write(() => this.procs.transitionEnded(session, id));
     if (row) this.emit({ type: "procs", rows: this.procs.all() });
@@ -1416,8 +1451,8 @@ export class Bench {
   /** Whether the workspace's tool server serves this tree yet: a read of its root, nothing more. */
   private async treeServed(workspace: string, tree: string): Promise<boolean> {
     try {
-      const at = this.opts.resolveTools ? await this.opts.resolveTools(workspace) : await (await import("../../pi/workspace-tools.ts")).resolveFromApi(workspace);
-      const r = await fetch(`http://${at}/fs/stat?tree=${encodeURIComponent(tree)}&path=.`);
+      const at = await this.toolsOf(workspace);
+      const r = await fetch(`http://${at.address}/fs/stat?tree=${encodeURIComponent(tree)}&path=.`, { headers: at.token ? { authorization: `Bearer ${at.token}` } : {} });
       return r.ok;
     } catch {
       // Not answering yet is not a refusal: the pod may still be coming up, and the cap is the bound.

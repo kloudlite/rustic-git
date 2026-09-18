@@ -57,6 +57,22 @@ export function serve(
   opts: { resolveTools?: (ws: string) => Promise<string> } = {},
 ): Promise<{ port: number; close(): Promise<void>; server: http.Server; sweepOnce(): void }> {
   const resolveTools = opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
+  /**
+   * Where a scope's tool server is AND the token every `/tools/*`, `/fs/*` and `/stream/*` call
+   * must carry. The bench's own container (`bench`) is loopback in the same pod and takes none.
+   * The token is a header and nothing else: never a log line, never an answer to the renderer.
+   */
+  const toolsFor = async (scope: string): Promise<{ address: string; token?: string }> => {
+    if (scope === "bench") return { address: LOCAL_TOOLS };
+    const mod = await import("../../pi/workspace-tools.ts");
+    if (opts.resolveTools) {
+      const address = await opts.resolveTools(scope);
+      const token = await mod.toolsAuth(scope).then((a) => a.token, () => undefined);
+      return { address, ...(token ? { token } : {}) };
+    }
+    return mod.toolsAuth(scope);
+  };
+  const bearer = (t?: string): Record<string, string> => (t ? { authorization: `Bearer ${t}` } : {});
   const body = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
     let s = "";
     let size = 0;
@@ -325,10 +341,10 @@ export function serve(
         const scope = u.searchParams.get("scope") ?? "";
         const tree = u.searchParams.get("tree") ?? "";
         if (!SCOPE_RE.test(scope) || !/^[a-z0-9-]{1,32}$/.test(tree)) return send(res, 400, { error: "a workspace and one of its trees" });
-        const addr = await resolveTools(scope);
-        const r = await fetch(`http://${addr}/tools/exec`, {
+        const at = await toolsFor(scope);
+        const r = await fetch(`http://${at.address}/tools/exec`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...bearer(at.token) },
           body: JSON.stringify({ tree, cmd: ["git", "diff", "main...HEAD"], timeout_ms: 30_000 }),
         }).catch(() => undefined);
         if (!r) return send(res, 502, { error: "the workspace's tools did not answer" });
@@ -345,14 +361,14 @@ export function serve(
       if (p[0] === "fs" && m === "GET" && p.length >= 2) {
         const scope = u.searchParams.get("scope") ?? "";
         if (scope !== "bench" && !SCOPE_RE.test(scope)) return send(res, 400, { error: `bad scope ${JSON.stringify(scope)}` });
-        const addr = scope === "bench" ? LOCAL_TOOLS : await resolveTools(scope);
+        const at = await toolsFor(scope);
         const rest = p.slice(1).join("/");
         // `etag` is ours, not the tool server's: it becomes the conditional header, so a file the
         // desktop already holds costs a 304 and no bytes.
         const etag = u.searchParams.get("etag") ?? undefined;
         const q = new URLSearchParams([...u.searchParams].filter(([k]) => k !== "scope" && k !== "etag")).toString();
-        const r = await fetch(`http://${addr}/fs/${rest}${q ? `?${q}` : ""}`, {
-          headers: etag ? { "if-none-match": etag } : undefined,
+        const r = await fetch(`http://${at.address}/fs/${rest}${q ? `?${q}` : ""}`, {
+          headers: { ...(etag ? { "if-none-match": etag } : {}), ...bearer(at.token) },
         }).catch((e: Error) => ({ ok: false, status: 502, headers: new Headers(), text: async () => e.message, arrayBuffer: async () => new ArrayBuffer(0) }) as unknown as Response);
         /**
          * `/fs/file` answers the FILE — bytes with a content type and an ETag — while every other
@@ -472,9 +488,8 @@ export function serve(
       // An oversized frame (maxPayload) or a torn socket errors before it closes; unheard, it would crash the bench.
       w.on("error", () => undefined);
       if (watch !== undefined) {
-        const where = watch === "bench" ? Promise.resolve(LOCAL_TOOLS) : resolveTools(watch);
-        void where.then(
-          (a) => spliceWatch(w, a),
+        void toolsFor(watch).then(
+          (a) => spliceWatch(w, a.address, undefined, a.token),
           (e: Error) => {
             w.send(JSON.stringify({ error: e.message }));
             w.close();

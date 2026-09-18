@@ -58,7 +58,10 @@ type Fetch = typeof fetch;
  * socket: the desktop going away stops it, so a workspace never accumulates watchers (the tool
  * server allows 32 and then refuses).
  */
-export async function spliceWatch(w: WebSocket, address: string, f: Fetch = fetch): Promise<void> {
+export async function spliceWatch(w: WebSocket, address: string, f: Fetch = fetch, token?: string): Promise<void> {
+  // `/healthz` is open; `/tools/*` and `/stream/*` require the workspace's token. It is a header
+  // and a socket option, never a log line and never anything the desktop is told.
+  const auth: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
   const fail = (why: string) => {
     if (w.readyState === WebSocket.OPEN) w.send(JSON.stringify({ error: why }));
     w.close();
@@ -70,14 +73,14 @@ export async function spliceWatch(w: WebSocket, address: string, f: Fetch = fetc
     root = String(health.root ?? "");
     if (!root) throw new Error("the workspace does not say where it is");
     const started = (await (
-      await f(`http://${address}/tools/watch`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ paths: ["."] }) })
+      await f(`http://${address}/tools/watch`, { method: "POST", headers: { "content-type": "application/json", ...auth }, body: JSON.stringify({ paths: ["."] }) })
     ).json()) as { id?: string; error?: string };
     if (!started.id) throw new Error(started.error ?? "the watch did not start");
     id = started.id;
   } catch (e) {
     return fail((e as Error).message);
   }
-  const up = new WebSocket(`ws://${address}/stream/watch/${id}`);
+  const up = new WebSocket(`ws://${address}/stream/watch/${id}`, { headers: auth });
   const stop = () => {
     up.close();
     // Best effort: a watch whose socket is gone is dead weight in a pod that allows 32.

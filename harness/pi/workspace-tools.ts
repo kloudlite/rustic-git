@@ -295,6 +295,8 @@ export class ToolServer {
   private workspace: string;
   private resolve: (ws: string) => Promise<string>;
   private address?: string;
+  /** The workspace's token, resolved beside its address and sent on every call. Never logged. */
+  private auth?: ToolsAuth;
   /** The tree of that workspace this session works in; absent is the workspace itself. */
   private tree?: string;
   constructor(workspace: string, resolve: (ws: string) => Promise<string>, tree?: string) {
@@ -313,18 +315,36 @@ export class ToolServer {
     // (thrown by resolve()) does.
     for (let attempt = 0; ; attempt++) {
       try {
-        this.address ??= await this.resolve(this.workspace);
+        // The injected `resolve` is what tests and the bench pass; it answers an address only, so
+        // the token is resolved beside it and the two are kept together.
+        if (!this.address) {
+          this.address = await this.resolve(this.workspace);
+          // The token comes from the SAME answer `resolveFromApi` already read — `toolsAuth` caches
+          // it — so this costs no second request. A resolver that answers an address only (a test,
+          // a fixed KL_TOOLS_ADDRESS) simply leaves the cache empty and no header is sent.
+          this.auth = authCached(this.workspace);
+        }
       } catch (e) {
         this.address = undefined;
+        this.auth = undefined;
         if (attempt > 0) throw e;
         continue;
       }
       const at = this.address;
       try {
         // The bench's trace, handed down at spawn: pi's RPC protocol has no field for it per call.
-        const headers: Record<string, string> = { "content-type": "application/json", ...traceHeaders() };
+        const headers: Record<string, string> = { "content-type": "application/json", ...traceHeaders(), ...toolsHeader(this.auth) };
         const r = await fetch(`http://${at}/tools/${c.tool}`, { method: "POST", headers, body: JSON.stringify(c.args), signal });
+        // The keys beat re-mints the workspace token, so a 401 is a STALE token, not a refusal:
+        // resolve once more and try again. A second 401 is a plain error, and never the token.
+        if (r.status === 401 && attempt === 0) {
+          await r.body?.cancel().catch(() => undefined);
+          forgetToolsAuth(this.workspace);
+          this.auth = await toolsAuth(this.workspace, true).catch(() => undefined);
+          continue;
+        }
         const body = await r.json().catch(() => ({ error: `the tool server answered ${r.status} without JSON` }));
+        if (r.status === 401) return { status: 401, body: { error: "the workspace refused this call; its token was not accepted" } };
         if (r.status === 409) {
           this.address = undefined;
           if (attempt > 0) return { status: r.status, body };
@@ -345,14 +365,60 @@ export class ToolServer {
   }
 }
 
-export async function resolveFromApi(ws: string): Promise<string> {
-  // A laptop points every workspace session at one tool server, such as the local end of `kl-connect ws ide`.
-  if (process.env.KL_TOOLS_ADDRESS) return validAddress(process.env.KL_TOOLS_ADDRESS, "KL_TOOLS_ADDRESS");
+/**
+ * Where a workspace's tool server is, and the token it now requires. Every `/tools/*`, `/fs/*` and
+ * `/stream/*` call carries `Authorization: Bearer <token>`; `/healthz` is open, and ttyd (7790) is
+ * a separate server that takes none.
+ *
+ * The token NEVER reaches the model, the renderer, a log line or a tool result — it lives in this
+ * cache and goes out as a header, nowhere else. `token` is optional so the harness works against a
+ * tool server that does not require one yet.
+ */
+export type ToolsAuth = { address: string; token?: string };
+
+const authCache = new Map<string, ToolsAuth>();
+
+/** The header a tool-server call carries, and nothing when there is no token to send. */
+export const toolsHeader = (a: ToolsAuth | undefined): Record<string, string> => (a?.token ? { authorization: `Bearer ${a.token}` } : {});
+
+/**
+ * `{address, token}` for a workspace, cached. `fresh` re-asks `/v1` — the keys beat re-mints the
+ * token, so a 401 is answered by resolving once more rather than by failing the call.
+ */
+export async function toolsAuth(ws: string, fresh = false): Promise<ToolsAuth> {
+  if (!fresh) {
+    const had = authCache.get(ws);
+    if (had) return had;
+  }
+  const at = await resolveAuthFromApi(ws);
+  authCache.set(ws, at);
+  return at;
+}
+
+/** What is already known, without asking `/v1`: a resolve has usually just filled this. */
+export const authCached = (ws: string): ToolsAuth | undefined => authCache.get(ws);
+
+/** Drops a workspace's cached address and token: the next call resolves again. */
+export const forgetToolsAuth = (ws: string) => void authCache.delete(ws);
+
+async function resolveAuthFromApi(ws: string): Promise<ToolsAuth> {
+  // A laptop points every workspace session at one tool server, such as the local end of
+  // `kl-connect ws ide`; it carries its own token in the env when it needs one.
+  if (process.env.KL_TOOLS_ADDRESS)
+    return { address: validAddress(process.env.KL_TOOLS_ADDRESS, "KL_TOOLS_ADDRESS"), ...(process.env.KL_TOOLS_TOKEN ? { token: process.env.KL_TOOLS_TOKEN } : {}) };
   if (!process.env.KL_TEAM) throw new Error("KL_TEAM is not set");
   const r = await call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools?team=${encodeURIComponent(process.env.KL_TEAM)}`);
-  const d = r.data as { address?: string; error?: string } | string | null;
-  if (r.status === 200 && d && typeof d === "object" && d.address) return validAddress(d.address, "workspace address");
+  const d = r.data as { address?: string; token?: string; error?: string } | string | null;
+  if (r.status === 200 && d && typeof d === "object" && d.address)
+    return { address: validAddress(d.address, "workspace address"), ...(typeof d.token === "string" && d.token ? { token: d.token } : {}) };
   throw new Error(d && typeof d === "object" && d.error ? d.error : `workspace ${ws}: ${typeof d === "string" ? d : r.status}`);
+}
+
+export async function resolveFromApi(ws: string): Promise<string> {
+  // One answer serves both: the address this returns and the token cached beside it.
+  const at = await resolveAuthFromApi(ws);
+  authCache.set(ws, at);
+  return at.address;
 }
 
 /**
