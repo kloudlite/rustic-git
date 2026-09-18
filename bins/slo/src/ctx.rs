@@ -206,10 +206,14 @@ impl Ctx {
         });
         let coordination_enabled = std::env::var("KLOUDLITE_SLO_COORDINATION").as_deref() == Ok("1")
             || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
-        let group_owner = parent_run && suite == Suite::Hourly && group.map_or(true, |index| index == 0);
+        let group_owner = parent_run && suite == Suite::Hourly && group.is_none_or(|index| index == 0);
         let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
         let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
             Some(crate::coordination::acquire(crate::drill::incluster()?, &effective_run_id).await?)
+        } else if parent_run && coordination_enabled && suite == Suite::Hourly && group.is_some() {
+            let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").map_err(|_| anyhow::anyhow!("hourly probe has no job name"))?;
+            crate::coordination::wait_for_group_owner(crate::drill::incluster()?, &job_name, Duration::from_secs(120)).await?;
+            None
         } else {
             None
         };
@@ -353,7 +357,7 @@ impl Ctx {
             if let Some(job_name) = self.coordination_group.take() {
                 let client = crate::drill::incluster()?;
                 let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_default();
-                crate::coordination::wait_for_group(client, &job_name, &pod_uid, Duration::from_secs(120)).await?;
+                crate::coordination::wait_for_group(client, &job_name, &pod_uid, Duration::from_secs(3300)).await?;
             }
             lock.release().await?;
         }

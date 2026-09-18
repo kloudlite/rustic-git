@@ -31,6 +31,32 @@ use serde_json::{json, Value};
 pub const DRILL_TAINT: &str = "kloudlite.io/slo-drill";
 const DRILL_ORIGINALS: &str = "kloudlite.io/slo-drill-originals";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrillAction {
+    Cordon,
+    Decommission,
+    Both,
+}
+
+impl DrillAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cordon => "cordon",
+            Self::Decommission => "decommission",
+            Self::Both => "both",
+        }
+    }
+
+    fn from_str(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("cordon") => Some(Self::Cordon),
+            Some("decommission") => Some(Self::Decommission),
+            Some("both") => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
 /// What a node is carrying from some drill: the taint's value and the label's, each `Some` only
 /// when that mark is actually on the node. Both are a run id (`run-{suite}-{unix}`), which is what
 /// lets a sweep recognise its own.
@@ -51,11 +77,17 @@ struct RestorePlan {
     decommission: Option<Option<String>>,
 }
 
-fn restore_plan(current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
+fn restore_plan_for(action: DrillAction, current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
     RestorePlan {
-        cordon: current_cordon.then_some(original_cordon),
-        decommission: (current_decommission == Some("true")).then(|| original_decommission.map(str::to_owned)),
+        cordon: matches!(action, DrillAction::Cordon | DrillAction::Both).then_some(current_cordon.then_some(original_cordon)).flatten(),
+        decommission: matches!(action, DrillAction::Decommission | DrillAction::Both)
+            .then(|| (current_decommission == Some("true")).then(|| original_decommission.map(str::to_owned)).flatten())
+            .flatten(),
     }
+}
+
+fn restore_plan(current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
+    restore_plan_for(DrillAction::Both, current_cordon, current_decommission, original_cordon, original_decommission)
 }
 
 /// The fleet mutations a drill makes, and nothing else. Each takes the run that is making it —
@@ -76,6 +108,9 @@ pub trait Cluster: Send + Sync {
     /// emptyDir file (2026-09-12): the file lived in the pod whose death is the exact case the
     /// sweep exists for, and it named no run, so any run's teardown undid any run's cordon.
     async fn mark(&self, node: &str, run: Option<&str>) -> Result<()>;
+    async fn mark_for(&self, node: &str, run: Option<&str>, _action: DrillAction) -> Result<()> {
+        self.mark(node, run).await
+    }
     async fn restore_taint(&self, node: &str, _run: &str) -> Result<()> {
         self.taint(node, None).await
     }
@@ -151,7 +186,7 @@ pub async fn with_decommission<T>(
     cap: Duration,
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    k.mark(node, Some(run)).await?;
+    k.mark_for(node, Some(run), DrillAction::Decommission).await?;
     k.decommission(node, true).await?;
     undoing(cap, body, || k.restore_marked(node, run)).await
 }
@@ -163,7 +198,7 @@ pub async fn with_cordon<T>(
     cap: Duration,
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    k.mark(node, Some(run)).await?;
+    k.mark_for(node, Some(run), DrillAction::Cordon).await?;
     k.cordon(node, true).await?;
     undoing(cap, body, || k.restore_marked(node, run)).await
 }
@@ -329,6 +364,10 @@ impl Cluster for kube::Client {
     }
 
     async fn mark(&self, node: &str, run: Option<&str>) -> Result<()> {
+        self.mark_for(node, run, DrillAction::Both).await
+    }
+
+    async fn mark_for(&self, node: &str, run: Option<&str>, action: DrillAction) -> Result<()> {
         use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS};
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let current = api.get(node).await?;
@@ -340,6 +379,25 @@ impl Cluster for kube::Client {
         let value = run.map(Value::from).unwrap_or(Value::Null);
         let annotations = match run {
             Some(run) => {
+                let existing = current
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|values| values.get(DRILL_ORIGINALS));
+                if let Some(existing) = existing {
+                    if let Ok(originals) = serde_json::from_str::<Value>(existing) {
+                        if originals.get("run").and_then(Value::as_str) == Some(run) {
+                            if DrillAction::from_str(originals.get("action").and_then(Value::as_str)) != Some(action) {
+                                return Err(anyhow!("node {node} is already marked for another drill action"));
+                            }
+                            json!({ DRILL_ORIGINALS: existing })
+                        } else {
+                            return Err(anyhow!("node {node} drill originals belong to another run"));
+                        }
+                    } else {
+                        return Err(anyhow!("node {node} has invalid drill originals"));
+                    }
+                } else {
                 let original_taint = current
                     .spec
                     .as_ref()
@@ -349,12 +407,14 @@ impl Cluster for kube::Client {
                 json!({
                     DRILL_ORIGINALS: json!({
                         "run": run,
+                        "action": action.as_str(),
                         "taint": original_taint,
                         "cordon": current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false),
                         "decommission": current.metadata.labels.as_ref().and_then(|labels| labels.get(DECOMMISSION_LABEL)),
                         "decommission_status": current.metadata.annotations.as_ref().and_then(|annotations| annotations.get(DECOMMISSION_STATUS)),
                     }).to_string(),
                 })
+                }
             }
             None => json!({ DRILL_ORIGINALS: Value::Null }),
         };
@@ -387,6 +447,7 @@ impl Cluster for kube::Client {
                 .and_then(|taints| taints.iter().position(|taint| taint.key == DRILL_TAINT && taint.value.as_deref() == Some(run)))
                 .ok_or_else(|| anyhow!("node {node} drill taint changed during cleanup"))?;
             let operations = json!([
+                { "op": "test", "path": "/metadata/resourceVersion", "value": current.metadata.resource_version.as_deref().unwrap_or_default() },
                 { "op": "test", "path": format!("/spec/taints/{index}/key"), "value": DRILL_TAINT },
                 { "op": "test", "path": format!("/spec/taints/{index}/value"), "value": run },
                 { "op": "remove", "path": format!("/spec/taints/{index}") },
@@ -412,47 +473,39 @@ impl Cluster for kube::Client {
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .filter(|value| value.get("run").and_then(Value::as_str) == Some(run))
             .ok_or_else(|| anyhow!("node {node} has no original drill state for {run}"))?;
+        let action = DrillAction::from_str(originals.get("action").and_then(Value::as_str))
+            .ok_or_else(|| anyhow!("node {node} has no valid drill action for {run}"))?;
         let cordon_was = originals.get("cordon").and_then(Value::as_bool).unwrap_or(false);
         let decommission_was = originals.get("decommission").and_then(Value::as_str).map(str::to_owned);
         let current_cordon = current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false);
         let current_decommission = labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(String::as_str);
-        let plan = restore_plan(current_cordon, current_decommission, cordon_was, decommission_was.as_deref());
-        let mut first_error: Option<anyhow::Error> = None;
-        if let Some(cordon) = plan.cordon {
-            let patch = json!([
-                { "op": "test", "path": "/spec/unschedulable", "value": true },
-                { "op": "replace", "path": "/spec/unschedulable", "value": cordon },
-            ]);
-            if let Err(error) = api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await {
-                first_error = Some(error.into());
-            }
-        }
-        if let Some(decommission) = plan.decommission {
-            let patch = match decommission {
-                Some(value) => json!([
-                    { "op": "test", "path": "/metadata/labels/kloudlite.io~1decommission", "value": "true" },
-                    { "op": "replace", "path": "/metadata/labels/kloudlite.io~1decommission", "value": value },
-                ]),
-                None => json!([
-                    { "op": "test", "path": "/metadata/labels/kloudlite.io~1decommission", "value": "true" },
-                    { "op": "remove", "path": "/metadata/labels/kloudlite.io~1decommission" },
-                ]),
-            };
-            if let Err(error) = api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await {
-                first_error.get_or_insert(error.into());
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
+        let plan = restore_plan_for(action, current_cordon, current_decommission, cordon_was, decommission_was.as_deref());
         let marker_path = "/metadata/labels/kloudlite.io~1slo-drill";
         let originals_path = "/metadata/annotations/kloudlite.io~1slo-drill-originals";
-        let patch = json!([
-            { "op": "test", "path": marker_path, "value": run },
-            { "op": "remove", "path": marker_path },
-            { "op": "remove", "path": originals_path },
+        let mut operations = vec![
+            json!({ "op": "test", "path": marker_path, "value": run }),
+        ];
+        if let Some(resource_version) = current.metadata.resource_version.as_deref() {
+            operations.push(json!({ "op": "test", "path": "/metadata/resourceVersion", "value": resource_version }));
+        }
+        if let Some(cordon) = plan.cordon {
+            operations.extend([
+                json!({ "op": "test", "path": "/spec/unschedulable", "value": true }),
+                json!({ "op": "replace", "path": "/spec/unschedulable", "value": cordon }),
+            ]);
+        }
+        if let Some(decommission) = plan.decommission {
+            operations.push(json!({ "op": "test", "path": "/metadata/labels/kloudlite.io~1decommission", "value": "true" }));
+            match decommission {
+                Some(value) => operations.push(json!({ "op": "replace", "path": "/metadata/labels/kloudlite.io~1decommission", "value": value })),
+                None => operations.push(json!({ "op": "remove", "path": "/metadata/labels/kloudlite.io~1decommission" })),
+            }
+        }
+        operations.extend([
+            json!({ "op": "remove", "path": marker_path }),
+            json!({ "op": "remove", "path": originals_path }),
         ]);
-        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await?;
+        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(serde_json::Value::Array(operations))?)).await?;
         Ok(())
     }
 

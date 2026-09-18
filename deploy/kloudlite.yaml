@@ -1799,6 +1799,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
   # The fast suite's rollout yield: a run that starts mid-roll measures the roll, not the service,
   # so it reads `api::workloads::KNOWN_CENTRAL`'s updated/ready against desired and skips every id
   # rather than filing a sample.

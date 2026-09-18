@@ -277,7 +277,7 @@ pub async fn delete_blob(
         Ok(None) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::oci_internal(e.into()),
+        Err(e) => crate::oci_internal(e),
     }
 }
 

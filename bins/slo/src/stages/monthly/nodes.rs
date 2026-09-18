@@ -3,6 +3,23 @@
 
 use super::*;
 
+async fn drill_owns_decommission(k: &kube::Client, node: &str, run: &str) -> anyhow::Result<bool> {
+    use kloudlite_workspaces::crd::DECOMMISSION_LABEL;
+    let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(k.clone());
+    let current = api.get(node).await?;
+    Ok(current
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(crate::drill::DRILL_TAINT))
+        .is_some_and(|owner| owner == run)
+        && current
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(DECOMMISSION_LABEL))
+            .is_some_and(|value| value == "true"))
+}
 
 /// `cluster.decommission`: the 409 gate, and the cordon behind it.
 ///
@@ -43,7 +60,7 @@ pub(crate) async fn decommission(c: &mut Ctx) {
             // label says which run left it and lets that run's own sweep take it back.
             {
                 use crate::drill::Cluster;
-                k.mark(&node, Some(&run)).await.context("could not mark the drill node")?;
+                k.mark_for(&node, Some(&run), crate::drill::DrillAction::Both).await.context("could not mark the drill node")?;
             }
             // The undo is established BEFORE the first decommission POST, not after it. The gate
             // being OPEN is the very failure this id exists to catch — and it is also the state a
@@ -52,7 +69,12 @@ pub(crate) async fn decommission(c: &mut Ctx) {
             // go back on every path out, in the order that leaves the node usable.
             let undo = || async {
                 use crate::drill::Cluster;
-                let undrained = verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING");
+                let owned = drill_owns_decommission(&k, &node, &run).await.context("could not verify drill decommission ownership");
+                let undrained = match owned {
+                    Ok(true) => verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING"),
+                    Ok(false) => Ok(()),
+                    Err(error) => Err(error),
+                };
                 let restored = k.restore_marked(&node, &run).await.context("the node's drill-owned state was not restored");
                 undrained.and(restored)
             };

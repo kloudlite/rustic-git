@@ -40,19 +40,30 @@ wait_for_probes
 ROLL_RUN="roll-$(date -u +%s)-$RANDOM"
 POD_UID=$(kubectl -n kloudlite get pod "${HOSTNAME:-}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
 HOLDER="${POD_UID:-operator}/$ROLL_RUN"
-kubectl -n kloudlite create configmap kloudlite-roll-coordination \
-  --from-literal="holder=$HOLDER" >/dev/null || {
+LOCK_JSON=$(kubectl -n kloudlite create configmap kloudlite-roll-coordination \
+  --from-literal="holder=$HOLDER" -o json) || {
   echo "roll coordination is held by another operation" >&2
   exit 3
 }
-LOCK_UID=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.uid}')
-LOCK_RV=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.resourceVersion}')
+LOCK_UID=$(jq -r '.metadata.uid' <<<"$LOCK_JSON")
+LOCK_RV=$(jq -r '.metadata.resourceVersion' <<<"$LOCK_JSON")
+LOCK_DELETE_OPTIONS=$(mktemp)
+cat >"$LOCK_DELETE_OPTIONS" <<EOF
+{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"$LOCK_UID","resourceVersion":"$LOCK_RV"}}
+EOF
 release_roll_lock() {
-  CURRENT_UID=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  CURRENT_UID=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.uid}') || {
+    echo "could not verify roll coordination ownership; lock remains held" >&2
+    return 1
+  }
   [ "$CURRENT_UID" = "$LOCK_UID" ] || return 0
-  kubectl -n kloudlite delete configmap kloudlite-roll-coordination --resource-version="$LOCK_RV" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl delete --raw '/api/v1/namespaces/kloudlite/configmaps/kloudlite-roll-coordination' \
+    -f "$LOCK_DELETE_OPTIONS" >/dev/null || {
+    echo "roll coordination release was refused; lock remains held" >&2
+    return 1
+  }
 }
-trap release_roll_lock EXIT
+trap 'command_status=$?; release_status=0; release_roll_lock || release_status=$?; rm -f "$LOCK_DELETE_OPTIONS"; [ "$command_status" -eq 0 ] || exit "$command_status"; exit "$release_status"' EXIT
 # A schedule suspended by hand stays suspended across the roll. The manifest says `suspend: false`
 # for the fast and hourly probes, so a plain apply would switch them back on — and a CronJob that
 # missed a tick fires the moment it is unsuspended, i.e. straight into the rollout, which is a
