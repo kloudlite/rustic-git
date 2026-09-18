@@ -1,0 +1,20 @@
+{
+  "name": "answers without reported usage are refused rather than counted as zero",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [
+    { "status": 200, "body": { "model": "jev-1.13.0", "answers": { "urgent": { "type": "noul", "noul": 0.9 } } } }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": {
+      "urgent": {
+        "outcome": "provider_failure",
+        "retryable": false,
+        "messageIncludes": ["usage_unreported"]
+      }
+    },
+    "records": [{ "questionId": "urgent", "decision": "provider_failure", "usage": { "inputTokens": 0, "outputTokens": 0 } }]
+  }
+}

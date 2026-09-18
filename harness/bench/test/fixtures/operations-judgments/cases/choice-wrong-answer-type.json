@@ -1,0 +1,29 @@
+{
+  "name": "an answer whose type does not match its question is refused",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [
+    {
+      "id": "dept",
+      "request": {
+        "question": "Which team should handle this?",
+        "questionVersion": "v1",
+        "options": [{ "id": "billing", "label": "Payments, invoicing, refunds" }]
+      }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": { "dept": { "type": "noul", "noul": 0.9 } },
+        "usage": { "input_tokens": 40, "output_tokens": 4 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "dept": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["wrong_type"] } }
+  }
+}

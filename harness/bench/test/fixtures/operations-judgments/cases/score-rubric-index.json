@@ -1,0 +1,53 @@
+{
+  "name": "score reports the rubric index expectation and records its distribution",
+  "stateInBundle": true,
+  "state": { "source": "session_context", "state": "This is the third failed payout this week and nobody has replied." },
+  "questions": [
+    {
+      "id": "frustration",
+      "request": { "question": "How frustrated is the customer?", "questionVersion": "v2", "rubric": ["Calm", "Frustrated", "Very angry"] }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "frustration": {
+            "type": "score",
+            "score": 1.6,
+            "legend": { "0": "Calm", "1": "Frustrated", "2": "Very angry" },
+            "probabilities": { "0": 0.05, "1": 0.3, "2": 0.65 },
+            "confidence": 0.78
+          }
+        },
+        "usage": { "input_tokens": 150, "output_tokens": 20 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": {
+      "frustration": {
+        "outcome": "scored",
+        "scores": [{ "criterion": "How frustrated is the customer?", "score": 1.6 }],
+        "modelVersion": "jev-1.13.0"
+      }
+    },
+    "records": [
+      {
+        "questionId": "frustration",
+        "decision": "scored",
+        "questionVersion": "v2",
+        "confidence": 0.78,
+        "distribution": [
+          { "label": "Calm", "probability": 0.05 },
+          { "label": "Frustrated", "probability": 0.3 },
+          { "label": "Very angry", "probability": 0.65 }
+        ]
+      }
+    ]
+  }
+}

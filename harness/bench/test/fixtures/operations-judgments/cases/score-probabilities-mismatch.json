@@ -1,0 +1,33 @@
+{
+  "name": "level probabilities that do not sum to one are refused",
+  "state": { "source": "session_context", "state": "Calm and collected." },
+  "questions": [
+    {
+      "id": "frustration",
+      "request": { "question": "How frustrated is the customer?", "questionVersion": "v2", "rubric": ["Calm", "Frustrated", "Very angry"] }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "frustration": {
+            "type": "score",
+            "score": 0.6,
+            "legend": { "0": "Calm", "1": "Frustrated", "2": "Very angry" },
+            "probabilities": { "0": 0.2, "1": 0.2, "2": 0.2 },
+            "confidence": 0.5
+          }
+        },
+        "usage": { "input_tokens": 50, "output_tokens": 6 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "frustration": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["out_of_range"] } }
+  }
+}

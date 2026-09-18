@@ -1,0 +1,8 @@
+{
+  "input": {
+    "source": "session_context",
+    "actorId": "user-1",
+    "state": "Help! My payouts are failing."
+  },
+  "expect": { "ok": false, "issues": ["unknown_field"] }
+}

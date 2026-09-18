@@ -1,0 +1,82 @@
+{
+  "name": "one mixed batch is a single request with one answer per question id",
+  "state": {
+    "source": "session_context",
+    "state": "Help! My payouts have been failing for 3 days."
+  },
+  "questions": [
+    { "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } },
+    {
+      "id": "dept",
+      "request": {
+        "question": "Which team should handle this?",
+        "questionVersion": "v3",
+        "options": [
+          { "id": "billing", "label": "Payments, invoicing, refunds" },
+          { "id": "technical", "label": "Bugs, outages, integrations" }
+        ]
+      }
+    },
+    {
+      "id": "frustration",
+      "request": { "question": "How frustrated is the customer?", "questionVersion": "v2", "rubric": ["Calm", "Frustrated", "Very angry"] }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "urgent": { "type": "noul", "noul": 0.92 },
+          "dept": {
+            "type": "choice",
+            "choice": "technical",
+            "probabilities": {
+              "billing": 0.08,
+              "technical": 0.85,
+              "none_of_the_listed_options": 0.04,
+              "cannot_tell_between_options": 0.03
+            },
+            "confidence": 0.82
+          },
+          "frustration": {
+            "type": "score",
+            "score": 1.6,
+            "legend": { "0": "Calm", "1": "Frustrated", "2": "Very angry" },
+            "probabilities": { "0": 0.05, "1": 0.3, "2": 0.65 },
+            "confidence": 0.78
+          }
+        },
+        "usage": { "input_tokens": 312, "output_tokens": 48 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "usage": { "calls": 1, "inputTokens": 312, "outputTokens": 48 },
+    "modelVersion": "jev-1.13.0",
+    "results": {
+      "urgent": { "outcome": "yes", "modelVersion": "jev-1.13.0" },
+      "dept": { "outcome": "selected", "optionId": "technical", "confidence": 0.82 },
+      "frustration": {
+        "outcome": "scored",
+        "scores": [{ "criterion": "How frustrated is the customer?", "score": 1.6 }],
+        "modelVersion": "jev-1.13.0"
+      }
+    },
+    "records": [
+      { "questionId": "urgent", "decision": "yes", "questionVersion": "v1", "confidence": null, "batchQuestions": 3 },
+      { "questionId": "dept", "decision": "selected", "questionVersion": "v3" },
+      { "questionId": "frustration", "decision": "scored", "questionVersion": "v2" }
+    ],
+    "request": {
+      "model": "jev-1.13.0",
+      "questionIds": ["urgent", "dept", "frustration"],
+      "criteria": {
+        "dept": ["billing", "technical", "none_of_the_listed_options", "cannot_tell_between_options"]
+      }
+    }
+  }
+}

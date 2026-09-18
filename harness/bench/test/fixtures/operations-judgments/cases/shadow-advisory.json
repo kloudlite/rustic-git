@@ -1,0 +1,33 @@
+{
+  "name": "a shadow batch resolves answers as advisory outcomes",
+  "state": { "source": "session_context", "state": "Help! My payouts have been failing for 3 days." },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "config": { "mode": "shadow" },
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": { "urgent": { "type": "noul", "noul": 0.92 } },
+        "usage": { "input_tokens": 40, "output_tokens": 5 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "actionability": "advisory",
+    "modelVersion": "jev-1.13.0",
+    "results": { "urgent": { "outcome": "yes", "modelVersion": "jev-1.13.0" } },
+    "records": [
+      {
+        "questionId": "urgent",
+        "decision": "yes",
+        "mode": "shadow",
+        "advisory": true,
+        "modelObserved": true,
+        "versionChanged": false
+      }
+    ]
+  }
+}

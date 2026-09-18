@@ -1,0 +1,33 @@
+{
+  "name": "a shadow answer from another version stays advisory and records the change",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "config": { "mode": "shadow" },
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.1",
+        "answers": { "urgent": { "type": "noul", "noul": 0.7 } },
+        "usage": { "input_tokens": 20, "output_tokens": 2 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "actionability": "advisory",
+    "modelVersion": "jev-1.13.1",
+    "results": { "urgent": { "outcome": "yes", "modelVersion": "jev-1.13.1" } },
+    "records": [
+      {
+        "questionId": "urgent",
+        "decision": "yes",
+        "mode": "shadow",
+        "modelObserved": true,
+        "versionChanged": true,
+        "model": { "provider": "typesafe", "model": "jev-1.13.0", "version": "jev-1.13.1" }
+      }
+    ]
+  }
+}

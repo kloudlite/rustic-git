@@ -1,0 +1,16 @@
+{
+  "name": "a non-finite number in the response is refused",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [
+    {
+      "status": 200,
+      "rawBody": "{\"model\":\"jev-1.13.0\",\"answers\":{\"urgent\":{\"type\":\"noul\",\"noul\":1e999}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "urgent": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["non_finite_number"] } }
+  }
+}
