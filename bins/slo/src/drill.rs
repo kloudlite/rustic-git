@@ -80,9 +80,11 @@ struct RestorePlan {
 fn restore_plan_for(action: DrillAction, current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
     RestorePlan {
         cordon: matches!(action, DrillAction::Cordon | DrillAction::Both).then_some(current_cordon.then_some(original_cordon)).flatten(),
-        decommission: matches!(action, DrillAction::Decommission | DrillAction::Both)
-            .then(|| (current_decommission == Some("true")).then(|| original_decommission.map(str::to_owned)).flatten())
-            .flatten(),
+        decommission: if matches!(action, DrillAction::Decommission | DrillAction::Both) && current_decommission == Some("true") {
+            Some(original_decommission.map(str::to_owned))
+        } else {
+            None
+        },
     }
 }
 
@@ -418,12 +420,30 @@ impl Cluster for kube::Client {
             }
             None => json!({ DRILL_ORIGINALS: Value::Null }),
         };
-        api.patch(
-            node,
-            &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DRILL_TAINT: value }, "annotations": annotations } })),
-        )
-        .await?;
+        match run {
+            Some(_) => {
+                let original = annotations.get(DRILL_ORIGINALS).cloned().ok_or_else(|| anyhow!("node {node} has no drill originals"))?;
+                let resource_version = current.metadata.resource_version.as_deref().ok_or_else(|| anyhow!("node {node} has no resourceVersion"))?;
+                let mut operations = vec![json!({ "op": "test", "path": "/metadata/resourceVersion", "value": resource_version })];
+                if current.metadata.labels.is_none() {
+                    operations.push(json!({ "op": "add", "path": "/metadata/labels", "value": {} }));
+                }
+                operations.push(json!({ "op": "add", "path": "/metadata/labels/kloudlite.io~1slo-drill", "value": value }));
+                if current.metadata.annotations.is_none() {
+                    operations.push(json!({ "op": "add", "path": "/metadata/annotations", "value": {} }));
+                }
+                operations.push(json!({ "op": "add", "path": "/metadata/annotations/kloudlite.io~1slo-drill-originals", "value": original }));
+                api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(serde_json::Value::Array(operations))?)).await?;
+            }
+            None => {
+                api.patch(
+                    node,
+                    &kube::api::PatchParams::default(),
+                    &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DRILL_TAINT: value }, "annotations": annotations } })),
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -458,7 +478,7 @@ impl Cluster for kube::Client {
     }
 
     async fn restore_marked(&self, node: &str, run: &str) -> Result<()> {
-        use kloudlite_workspaces::crd::DECOMMISSION_LABEL;
+        use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS, DRAINED_PREFIX};
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let current = api.get(node).await?;
         let labels = current.metadata.labels.as_ref();
@@ -477,8 +497,15 @@ impl Cluster for kube::Client {
             .ok_or_else(|| anyhow!("node {node} has no valid drill action for {run}"))?;
         let cordon_was = originals.get("cordon").and_then(Value::as_bool).unwrap_or(false);
         let decommission_was = originals.get("decommission").and_then(Value::as_str).map(str::to_owned);
+        let decommission_status_was = originals.get("decommission_status").and_then(Value::as_str).map(str::to_owned);
         let current_cordon = current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false);
         let current_decommission = labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(String::as_str);
+        let current_decommission_status = current
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|values| values.get(DECOMMISSION_STATUS))
+            .map(String::as_str);
         let plan = restore_plan_for(action, current_cordon, current_decommission, cordon_was, decommission_was.as_deref());
         let marker_path = "/metadata/labels/kloudlite.io~1slo-drill";
         let originals_path = "/metadata/annotations/kloudlite.io~1slo-drill-originals";
@@ -499,6 +526,13 @@ impl Cluster for kube::Client {
             match decommission {
                 Some(value) => operations.push(json!({ "op": "replace", "path": "/metadata/labels/kloudlite.io~1decommission", "value": value })),
                 None => operations.push(json!({ "op": "remove", "path": "/metadata/labels/kloudlite.io~1decommission" })),
+            }
+            if current_decommission_status.is_some_and(|status| status.starts_with("draining ") || status.starts_with(DRAINED_PREFIX)) {
+                operations.push(json!({ "op": "test", "path": "/metadata/annotations/kloudlite.io~1decommission-status", "value": current_decommission_status }));
+                match decommission_status_was {
+                    Some(value) => operations.push(json!({ "op": "replace", "path": "/metadata/annotations/kloudlite.io~1decommission-status", "value": value })),
+                    None => operations.push(json!({ "op": "remove", "path": "/metadata/annotations/kloudlite.io~1decommission-status" })),
+                }
             }
         }
         operations.extend([

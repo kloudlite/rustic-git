@@ -43,7 +43,7 @@ pub async fn wait_for_group_owner(client: kube::Client, job_name: &str, timeout:
     let jobs: Api<Job> = Api::namespaced(client.clone(), NAMESPACE);
     let job = jobs.get(job_name).await.map_err(|e| anyhow!("could not inspect hourly probe job: {e}"))?;
     let job_uid = job.uid().ok_or_else(|| anyhow!("hourly probe job has no uid"))?;
-    let api = Api::namespaced(client, NAMESPACE);
+    let api: Api<ConfigMap> = Api::namespaced(client, NAMESPACE);
     let started = Instant::now();
     loop {
         match api.get(NAME).await {
