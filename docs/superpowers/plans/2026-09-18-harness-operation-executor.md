@@ -1,7 +1,7 @@
 # Harness operation executor — Flash implementation plan
 
 Date: 2026-09-18
-Status: Implementation active — Flash O01 on feature/operation-executor-o01; Sol contract review pending
+Status: Implementation active — O01 accepted; O02/O03/O05 implementing in parallel with Flash
 Design: [Harness operation executor specification](../specs/2026-09-18-harness-operation-executor-design.md)
 Review record: [Sol findings and resolution](../specs/2026-09-18-harness-operation-executor-review.md)
 Capability formats: [Minimal instructions and internal file edits](../specs/2026-09-18-harness-capability-contracts.md)
@@ -296,3 +296,11 @@ The integrated evidence must cover at least:
 15. Bench pilot process inspection cannot invoke workspace tools; later exact workspace steps retain scope/path policy and spawn no hidden LLM session.
 
 These cases verify real invariants. Avoid tests that only repeat implementation constants or mock away authorization and recovery boundaries.
+
+## 8. Implementation checkpoint — 2026-09-18
+
+O01 accepted by Sol and integrated at `09829457`. Dev-pod Node24 verification: 22/22 contract tests pass, zero failures/skips, strict TypeScript passes. Exact source hashes and logs: `/Volumes/kdisk/operation-executor-records/o01-20260918T122640Z`.
+
+O02, O03 and O05 started in isolated `feature/operation-executor-o02`, `-o03` and `-o05` worktrees from that SHA. DeepSeek Flash implements; Sol reviews each verified slice. Automatic verification uses separate dev-pod lanes and reports observed results to the taskboard. No new executor runtime is enabled or deployed at this checkpoint.
+
+[O08 integration and authentication map](2026-09-18-harness-operation-integration.md) records Astra's follow-up design for the existing desktop/bench boundaries. It requires implementation and Sol security review before acceptance.
