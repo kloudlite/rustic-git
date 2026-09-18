@@ -27,6 +27,43 @@ use crate::trees::TreeCtx;
 /// never be the reason a person's command does not run.
 const BINDS: [&str; 3] = ["/nix", "/etc/passwd", "/etc/resolv.conf"];
 
+/// What a USERLAND needs from `/etc` beyond a name and a resolver, bound read-only when it exists.
+///
+/// Optional, every one: a workspace image that lays `/etc` out differently must cost the sandbox
+/// nothing — and `bwrap` refuses to start on a missing `--ro-bind` source, so an unconditional
+/// list here would be the same outage as `/home/kl/.nix-profile` wearing a different path.
+///
+/// `/etc/ssl` is the one that matters and the one that was missing: with only `passwd` and
+/// `resolv.conf` inside, every HTTPS fetch in every workspace failed the moment the wrapper first
+/// worked — `curl: (60) unable to get local issuer certificate`, and with it git-over-https, npm,
+/// cargo, pip and go mod, fleet-wide (2026-09-18). The rest are the same class of thing: a host
+/// alias, a resolver order, a group name, a timezone. Cheap, read-only, and each absent on some
+/// image somewhere.
+///
+/// `/etc/kloudlite` is deliberately NOT here and must never be: the workspace token lives there,
+/// and the whole point of the wrapper is that an exec cannot read it.
+const OPTIONAL_BINDS: [&str; 7] = [
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/group",
+    "/etc/localtime",
+];
+
+/// The cert-bundle variables a userland reads, passed through when the image sets them. Nix images
+/// point these at a store path rather than at `/etc/ssl`, and a store path is already bound with
+/// `/nix` — so passing the variable is the whole of it.
+const CERT_VARS: [&str; 3] = ["SSL_CERT_FILE", "NIX_SSL_CERT_FILE", "CURL_CA_BUNDLE"];
+
+/// The optional binds this filesystem actually has. Resolved per call rather than cached: the
+/// argv is built per exec anyway, and a list computed once at boot would miss a path that appears
+/// when a mount lands.
+fn present_optional() -> Vec<&'static str> {
+    OPTIONAL_BINDS.into_iter().filter(|p| std::path::Path::new(p).exists()).collect()
+}
+
 /// `bwrap`'s own arguments, up to and including the `--` that ends them. `cmd` is appended whole.
 pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
     let root = tree.root.to_string_lossy().into_owned();
@@ -45,6 +82,10 @@ pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
     for f in BINDS {
         a.extend(["--ro-bind".to_string(), f.into(), f.into()]);
     }
+    // Skip-if-absent, so an image that lays `/etc` out differently costs the sandbox nothing.
+    for f in present_optional() {
+        a.extend(["--ro-bind".to_string(), f.into(), f.into()]);
+    }
     a.extend([
         "--tmpfs".to_string(),
         "/tmp".into(),
@@ -59,8 +100,15 @@ pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
         tree.sandbox_home().to_string_lossy().into_owned(),
         "--chdir".into(),
         root,
-        "--".into(),
     ]);
+    // `--unshare-all` keeps the environment, but a caller that clears it would still want these:
+    // pass them explicitly so the sandbox's view of the trust store never depends on inheritance.
+    for k in CERT_VARS {
+        if let Ok(v) = std::env::var(k) {
+            a.extend(["--setenv".to_string(), k.into(), v]);
+        }
+    }
+    a.push("--".into());
     a.extend(cmd.iter().cloned());
     a
 }
@@ -95,6 +143,22 @@ const PROFILE_BWRAP: &str = "/nix/profile/current/bin/bwrap";
 /// Its absence would be a real answer too: a sandbox whose profile carries no `true` carries no
 /// shell either, and an exec in it could not run anything.
 const PROFILE_TRUE: &str = "/nix/profile/current/bin/true";
+
+/// The profile's `test`, used to ask a question INSIDE the sandbox rather than about it.
+const PROFILE_TEST: &str = "/nix/profile/current/bin/test";
+
+/// The trust store a userland looks for. Checked from inside the sandbox by the preflight, because
+/// "bwrap started" and "a program in there can fetch over HTTPS" turned out to be different facts:
+/// the wrapper worked on its first real roll and took every HTTPS fetch in the fleet down with it,
+/// since `/etc` held only `passwd` and `resolv.conf` (2026-09-18).
+///
+/// The FIRST of these that the sandbox can read is enough — images disagree about where the bundle
+/// lives, and the question is whether a bundle is reachable at all, not which one.
+const CERT_BUNDLES: [&str; 3] = [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/ssl/certs/ca-bundle.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+];
 
 /// The `bwrap` to run: the profile's, else whatever PATH finds. Answered once — which binary
 /// exists is a fact about the image, not a per-exec coin flip.
@@ -172,7 +236,24 @@ fn preflight(bwrap: &'static str, tree: &TreeCtx) -> Option<&'static str> {
     {
         // The HOME the real argv sets must exist before the real argv is run, preflight included.
         let _ = std::fs::create_dir_all(tree.sandbox_home());
-        let argv = bwrap_argv(tree, &[PROFILE_TRUE.to_string()]);
+        // Two questions in one run: does the wrapper START, and can something inside it reach a
+        // trust store. The second is asked with the profile's own `test` against the bundles the
+        // image might carry — `-r` on the first that answers, so an image with a different layout
+        // passes on its own path rather than on this file's guess.
+        //
+        // Deliberately NOT a real HTTPS fetch: a preflight that dials the internet makes every
+        // workspace's sandbox depend on a network that may be down for reasons of its own, and
+        // turns an outage out there into the sandbox switching itself off in here.
+        let probe_certs = CERT_BUNDLES.map(|b| format!("{PROFILE_TEST} -r {b}")).join(" || ");
+        let argv = bwrap_argv(
+            tree,
+            &[
+                "/nix/profile/current/bin/sh".to_string(),
+                "-c".to_string(),
+                // `true` first so a sandbox that starts but has no certs still names the reason.
+                format!("{PROFILE_TRUE} && {{ {probe_certs}; }}"),
+            ],
+        );
         match std::process::Command::new(bwrap).args(&argv).output() {
             Ok(o) if o.status.success() => {
                 // ONLY here. A passing preflight is the one thing that earns this line, so a log
@@ -184,7 +265,13 @@ fn preflight(bwrap: &'static str, tree: &TreeCtx) -> Option<&'static str> {
             // The FIRST stderr line: bwrap says what it could not do on line one and usage after,
             // and the reason has to fit a log field a person reads at a glance.
             Ok(o) => {
-                tracing::info!(reason = %format!("preflight:{}", first_line(&o.stderr)), "ide.sandbox.unavailable");
+                // A non-zero exit with NOTHING on stderr is the cert check failing: `test` is
+                // silent. Say which, or a reader sees "preflight:no stderr" and learns nothing.
+                let why = match first_line(&o.stderr).as_str() {
+                    "no stderr" => format!("no readable trust store inside the sandbox (tried {})", CERT_BUNDLES.join(", ")),
+                    line => line.to_string(),
+                };
+                tracing::info!(reason = %format!("preflight:{why}"), "ide.sandbox.unavailable");
                 None
             }
             Err(e) => {
@@ -234,8 +321,11 @@ mod tests {
         assert_eq!(&argv[dashdash + 1..], &["sh".to_string(), "-c".into(), "true".into()]);
         // No path under a HOME is ever a bind SOURCE. The pod has no `~/.nix-profile`, and naming
         // one made bwrap refuse to start on every exec in the fleet (2026-09-18).
+        // The REQUIRED ones, in order, first — the optional `/etc/*` follow and depend on what
+        // this machine happens to have, which is the point of them being optional.
         let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
-        assert_eq!(sources, vec!["/nix", "/etc/passwd", "/etc/resolv.conf"], "{argv:?}");
+        assert!(sources[..BINDS.len()].iter().zip(BINDS).all(|(got, want)| *got == want), "{argv:?}");
+        assert!(sources[BINDS.len()..].iter().all(|s| OPTIONAL_BINDS.contains(&s.as_str())), "{sources:?}");
     }
 
     /// A `bwrap` that EXISTS but cannot START must not be trusted. Under the workspace pods'
@@ -303,6 +393,49 @@ mod tests {
 
     /// The candidate really is under the profile the pod mounts, not some other spelling of it:
     /// `packages::PROFILE_LINK` is where the agent points `current`, and `PATH` is built from it.
+    /// A userland needs more from `/etc` than a name and a resolver. With only `passwd` and
+    /// `resolv.conf` inside, every HTTPS fetch in every workspace failed the moment the wrapper
+    /// first worked — git over https, npm, cargo, pip, go mod, all of it (2026-09-18).
+    #[test]
+    fn the_sandbox_carries_a_trust_store_and_never_the_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let x = Trees::new(root, None).resolve(None).unwrap();
+        let argv = bwrap_argv(&x, &["true".into()]);
+        let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
+
+        // The token dir is the one path under /etc that must NEVER be bound: reading it is
+        // exactly what the wrapper exists to prevent.
+        assert!(
+            !sources.iter().any(|s| s.starts_with("/etc/kloudlite")),
+            "the workspace token is inside the sandbox: {sources:?}"
+        );
+        // Every optional bind that exists on THIS machine is bound, and every one that does not is
+        // skipped — a missing source is what bwrap refuses to start on.
+        for p in OPTIONAL_BINDS {
+            let there = std::path::Path::new(p).exists();
+            assert_eq!(sources.iter().any(|s| *s == p), there, "{p} present={there}");
+        }
+        // `/etc/ssl` is in the list at all — the bind the outage was about.
+        assert!(OPTIONAL_BINDS.contains(&"/etc/ssl"));
+    }
+
+    /// The preflight asks about the trust store from INSIDE, and the paths it asks about are ones
+    /// a bind can actually reach. A check against a path outside every bind would pass on a
+    /// developer machine and fail in a pod, which is how the last three of these went.
+    #[test]
+    fn the_cert_check_asks_about_paths_the_sandbox_binds() {
+        for bundle in CERT_BUNDLES {
+            let reachable = BINDS.iter().chain(OPTIONAL_BINDS.iter()).any(|b| bundle.starts_with(&format!("{b}/")));
+            assert!(reachable, "{bundle} is under none of the binds, so the sandbox can never read it");
+        }
+        // And the tools the preflight runs come from the profile, which `/nix` carries.
+        for tool in [PROFILE_TRUE, PROFILE_TEST] {
+            assert!(tool.starts_with("/nix/"), "{tool}");
+        }
+    }
+
     /// The preflight's own command must exist INSIDE the sandbox, which is the one place it runs.
     ///
     /// The first preflight on the fleet failed with `execvp /bin/true: No such file or directory`
@@ -338,7 +471,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let x = Trees::new(root, None).resolve(None).unwrap();
         let argv = bwrap_argv(&x, &["true".into()]);
+        // Required first, then whichever optional ones exist here: `missing_bind` speaks for the
+        // required list, and the optional ones are filtered by existence before they are named.
         let sources: Vec<String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| w[1].clone()).collect();
-        assert_eq!(sources, BINDS.map(str::to_string).to_vec());
+        assert_eq!(sources[..BINDS.len()], BINDS.map(str::to_string)[..]);
+        assert_eq!(&sources[BINDS.len()..], &present_optional().iter().map(|s| s.to_string()).collect::<Vec<_>>()[..]);
     }
 }

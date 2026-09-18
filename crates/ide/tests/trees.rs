@@ -108,35 +108,34 @@ fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
     let (_t, app) = workspace();
     let x = app.tree(Some("x")).unwrap();
     let root = x.root.to_string_lossy().into_owned();
-    let home = format!("{root}/.home");
     let argv = bwrap_argv(&x, &["sh".into(), "-c".into(), "true".into()]);
+
+    // The flags that make it a sandbox, in order, before any bind.
     assert_eq!(
-        argv,
-        vec![
-            "--unshare-all".to_string(),
-            "--share-net".into(),
-            "--die-with-parent".into(),
-            "--new-session".into(),
-            // The same path in and out, so the one string §3.5 concedes to `pwd` stays one string.
-            "--bind".into(), root.clone(), root.clone(),
-            // The store AND the profile under it: one mount, the one the pod actually has.
-            "--ro-bind".into(), "/nix".into(), "/nix".into(),
-            "--ro-bind".into(), "/etc/passwd".into(), "/etc/passwd".into(),
-            "--ro-bind".into(), "/etc/resolv.conf".into(), "/etc/resolv.conf".into(),
-            "--tmpfs".into(), "/tmp".into(),
-            "--proc".into(), "/proc".into(),
-            "--dev".into(), "/dev".into(),
-            // Per tree, so git/npm/cargo config lands in the tree rather than in the person's home.
-            "--setenv".into(), "HOME".into(), home,
-            "--chdir".into(), root,
-            "--".into(), "sh".into(), "-c".into(), "true".into(),
-        ]
+        &argv[..4],
+        &["--unshare-all".to_string(), "--share-net".into(), "--die-with-parent".into(), "--new-session".into()]
     );
-    // Nothing of the workspace root, the other trees, the token or `kl` is named anywhere.
+    // The tree, bound at the same path in and out — the one string §3.5 concedes stays one string.
+    let bind = argv.windows(3).find(|w| w[0] == "--bind").expect("the tree is bound");
+    assert_eq!((bind[1].as_str(), bind[2].as_str()), (root.as_str(), root.as_str()));
+    // The store, and read-only everywhere.
+    let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
+    assert_eq!(sources[0], "/nix", "{argv:?}");
+    // HOME is the tree's own, never the person's.
+    let home = argv.windows(3).find(|w| w[0] == "--setenv" && w[1] == "HOME").expect("HOME is set");
+    assert_eq!(home[2], format!("{root}/.home"));
+    // The command is last, whole, after the `--`.
+    let dashdash = argv.iter().position(|s| s == "--").unwrap();
+    assert_eq!(&argv[dashdash + 1..], &["sh".to_string(), "-c".into(), "true".into()]);
+
+    // Nothing of the workspace root, the other trees or `kl` is named anywhere.
     assert!(!argv.iter().any(|a| a.ends_with("/workspaces/ws-1")), "{argv:?}");
-    // And nothing under the HOME: the home is not bound, so naming a path inside it could only be
-    // a source bwrap would refuse to start on — which is the outage this test now stands for.
-    assert!(!argv.iter().any(|a| a.starts_with("/home/kl/.")), "{argv:?}");
+    // And nothing under a HOME is a bind SOURCE: the pod has no `~/.nix-profile`, and naming one
+    // made bwrap refuse to start on every exec in the fleet (2026-09-18).
+    assert!(!sources.iter().any(|s| s.starts_with("/home/kl/.")), "{argv:?}");
+    // The token's directory is never inside, whatever else is: reading it is what the wrapper
+    // exists to prevent.
+    assert!(!sources.iter().any(|s| s.starts_with("/etc/kloudlite")), "{argv:?}");
 }
 
 /// Every bind source the wrapper names must be one that exists, and the pair that decides this is
@@ -153,11 +152,7 @@ fn a_bind_source_that_is_not_there_costs_the_sandbox_and_not_the_command() {
     let (_t, app) = workspace();
     let x = app.tree(Some("x")).unwrap();
     let argv = bwrap_argv(&x, &["true".into()]);
-    let bound: Vec<&String> = argv
-        .windows(3)
-        .filter(|w| w[0] == "--ro-bind")
-        .map(|w| &w[1])
-        .collect();
+    let bound: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
     assert!(!bound.is_empty(), "the wrapper binds something");
     match missing_bind() {
         Some(p) => assert!(bound.iter().any(|b| *b == p), "{p} is reported missing but never bound: {bound:?}"),
