@@ -127,7 +127,7 @@ async fn blob_response(
         Err(slatedb::object_store::Error::NotFound { .. }) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
-        Err(e) => crate::oci_internal(e),
+        Err(e) => crate::oci_internal(Box::new(e)),
     }
 }
 
