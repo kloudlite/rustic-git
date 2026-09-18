@@ -88,6 +88,7 @@ fn restore_plan_for(action: DrillAction, current_cordon: bool, current_decommiss
     }
 }
 
+#[cfg(test)]
 fn restore_plan(current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
     restore_plan_for(DrillAction::Both, current_cordon, current_decommission, original_cordon, original_decommission)
 }
@@ -304,6 +305,7 @@ impl Cluster for kube::Client {
         // wrong element when the list has moved under us.
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let obj = api.get(node).await?;
+        let resource_version = obj.metadata.resource_version.clone();
         let taints = obj.spec.and_then(|s| s.taints).unwrap_or_default();
         let at = taints.iter().position(|t| t.key == DRILL_TAINT);
         if let (Some(run), Some(index)) = (run, at) {
@@ -327,6 +329,14 @@ impl Cluster for kube::Client {
                 { "op": "test", "path": format!("/spec/taints/{i}/key"), "value": DRILL_TAINT },
                 { "op": "remove", "path": format!("/spec/taints/{i}") },
             ]),
+        };
+        let ops = if run.is_some() {
+            let resource_version = resource_version.ok_or_else(|| anyhow!("node {node} has no resourceVersion"))?;
+            let mut operations = ops.as_array().cloned().ok_or_else(|| anyhow!("invalid node taint patch"))?;
+            operations.insert(0, json!({ "op": "test", "path": "/metadata/resourceVersion", "value": resource_version }));
+            serde_json::Value::Array(operations)
+        } else {
+            ops
         };
         api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(
             serde_json::from_value(ops)?,

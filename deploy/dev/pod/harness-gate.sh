@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'exit 130' INT TERM
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NODE24_BIN=${KL_NODE24_BIN:-/work/review-node24/node_modules/node/bin}
