@@ -79,34 +79,68 @@ pub fn missing_bind() -> Option<&'static str> {
     BINDS.into_iter().find(|p| !std::path::Path::new(p).exists())
 }
 
-/// Whether the wrapper can be used at all: `bwrap` on PATH, and every bind source present.
-/// Answered once per process — both are facts about the image and the pod's mounts, not per-exec
-/// coin flips, and the line that says so must not repeat per command.
+/// Where the profile puts `bwrap`. The server is started by the pod's prelude and inherits a PATH
+/// that does NOT carry the profile's bin (the shell's does, which is why `bwrap` on a terminal's
+/// PATH proved nothing): a bare `Command::new("bwrap")` found nothing, `available()` answered
+/// false, and every exec ran unwrapped with no line in the log because the warning was at WARN on
+/// a path nobody read (2026-09-18).
+const PROFILE_BWRAP: &str = "/nix/profile/current/bin/bwrap";
+
+/// The `bwrap` to run: the profile's, else whatever PATH finds. Answered once — which binary
+/// exists is a fact about the image, not a per-exec coin flip.
 ///
-/// False means every exec runs UNWRAPPED, with `paths::confine` as its only fence. That is worse
-/// than the wrapper and far better than the alternative this replaced: refusing to run anything.
-/// `ide.sandbox.unavailable` is how the fleet sees which of the two states a pod is in.
-pub fn available() -> bool {
-    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
-        let found = std::process::Command::new("bwrap")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !found {
-            // Once, loudly: every exec after this runs with `confine` as its only fence, which is
-            // the state the fleet has to be able to see it is in.
-            tracing::warn!(reason = "no-bwrap", "ide.sandbox.unavailable");
-            return false;
+/// `None` means every exec runs UNWRAPPED, with `paths::confine` as its only fence. That is worse
+/// than the wrapper and far better than refusing to run anything.
+pub fn binary() -> Option<&'static str> {
+    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let found = pick(&|p: &str| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        });
+        match found {
+            None => {
+                // INFO, not WARN: the pods run at the default level, and a WARN nobody reads is
+                // the reason this went ten minutes unnoticed. Once — it is a fact about the image.
+                tracing::info!(reason = "no-bwrap", "ide.sandbox.unavailable");
+                None
+            }
+            Some(p) => match missing_bind() {
+                Some(path) => {
+                    tracing::info!(reason = %format!("missing-bind:{path}"), "ide.sandbox.unavailable");
+                    None
+                }
+                None => Some(p),
+            },
         }
-        if let Some(path) = missing_bind() {
-            tracing::warn!(reason = %format!("missing-bind:{path}"), "ide.sandbox.unavailable");
-            return false;
-        }
-        true
     })
+}
+
+/// Which candidate to take, given a way to ask whether one runs. Split from `binary` so the ORDER
+/// — the profile's absolute path before a bare PATH lookup — has a test that does not depend on
+/// what happens to be installed on the machine running it, and does not burn the `OnceLock`.
+fn pick(runnable: &dyn Fn(&str) -> bool) -> Option<&'static str> {
+    // The profile first and by absolute path, because that is the one place the pod is guaranteed
+    // to have it and the one place this process's PATH is guaranteed not to look.
+    [PROFILE_BWRAP, "bwrap"].into_iter().find(|p| runnable(p))
+}
+
+/// Whether the wrapper can be used at all. See `binary`.
+pub fn available() -> bool {
+    binary().is_some()
+}
+
+/// Said ONCE, on the first exec that is actually wrapped. The fleet signal has to be positive: an
+/// absence proves nothing — a log with no `ide.sandbox.unavailable` is equally what a server that
+/// never ran an exec looks like, which is exactly how "bwrap is on" was believed for ten minutes
+/// while nothing was wrapped at all.
+pub fn note_active(bwrap: &str) {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| tracing::info!(bwrap, "ide.sandbox.active"));
 }
 
 #[cfg(test)]
@@ -138,6 +172,34 @@ mod tests {
         // one made bwrap refuse to start on every exec in the fleet (2026-09-18).
         let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
         assert_eq!(sources, vec!["/nix", "/etc/passwd", "/etc/resolv.conf"], "{argv:?}");
+    }
+
+    /// The profile's absolute path wins, and a bare PATH lookup is only the fallback.
+    ///
+    /// This is the regression test for the second half of the 2026-09-18 outage: the server's own
+    /// PATH does not carry `/nix/profile/current/bin`, so a bare `bwrap` resolved to nothing, the
+    /// wrapper silently switched itself off, and the only line that would have said so was at a
+    /// level the pods do not print. Order is the fix, so order is what is pinned.
+    #[test]
+    fn the_profiles_bwrap_is_preferred_and_a_bare_name_is_the_fallback() {
+        // A "profile" that has it: the absolute path is taken even though the bare name would run.
+        assert_eq!(pick(&|_| true), Some(PROFILE_BWRAP));
+        // A pod whose profile has it and whose PATH does not — the real workspace pod.
+        assert_eq!(pick(&|p| p == PROFILE_BWRAP), Some(PROFILE_BWRAP));
+        // A developer machine: nothing at the profile path, `bwrap` on PATH.
+        assert_eq!(pick(&|p| p == "bwrap"), Some("bwrap"));
+        // Neither: unwrapped, and `binary()` says so once at INFO.
+        assert_eq!(pick(&|_| false), None);
+    }
+
+    /// The candidate really is under the profile the pod mounts, not some other spelling of it:
+    /// `packages::PROFILE_LINK` is where the agent points `current`, and `PATH` is built from it.
+    #[test]
+    fn the_candidate_is_under_the_profile_the_pod_mounts() {
+        assert_eq!(PROFILE_BWRAP, "/nix/profile/current/bin/bwrap");
+        assert!(PROFILE_BWRAP.starts_with("/nix/profile/current/"), "{PROFILE_BWRAP}");
+        // And it is under a path the wrapper binds, or a wrapped exec could not see its own bwrap.
+        assert!(BINDS.iter().any(|b| PROFILE_BWRAP.starts_with(&format!("{b}/"))), "{BINDS:?}");
     }
 
     /// Every source the argv names is one `missing_bind` speaks for, so a path added to `BINDS`

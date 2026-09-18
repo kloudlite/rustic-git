@@ -53,12 +53,17 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
     // exec is a shell that can `cd ..` past everything `confine` guards (spec §4.7). A missing
     // `bwrap` runs the command unwrapped rather than refusing to run anything — the fleet reports
     // whether it works under the runtime class, by the owner's ruling.
-    let mut cmd = if sandbox::available() {
+    let mut cmd = if let Some(bwrap) = sandbox::binary() {
         // The sandbox's HOME must exist before bwrap sets it, or every tool that writes a dotfile
         // fails inside an empty namespace.
         let _ = std::fs::create_dir_all(t.sandbox_home());
-        let mut c = Command::new("bwrap");
+        // The RESOLVED path, never the bare name: this process's PATH does not carry the profile's
+        // bin, so `Command::new("bwrap")` found nothing and silently ran every exec unwrapped.
+        let mut c = Command::new(bwrap);
         c.args(sandbox::bwrap_argv(t, &words));
+        // Once, on the first exec that is really wrapped — a positive signal, since an absent
+        // warning is indistinguishable from a server that has run no execs at all.
+        sandbox::note_active(bwrap);
         // bwrap's own --chdir is the tree; a `cwd` deeper in it is set here, where the path is
         // the same string on both sides of the bind.
         c.current_dir(&cwd);
