@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Bench } from "../src/bench.ts";
+import { Bench, withNames } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
 import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
@@ -172,6 +172,55 @@ test("two sessions raising the same tool call id get two cards", async () => {
     assert.equal(bench.answerProposal(forB.id, "yes").answer, "yes", "B's answer is B's own");
     assert.equal(await waitingB, "yes", "and B's tool call is released with it, not with A's");
     assert.equal(bench.openProposals().length, 0, "both settled");
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * R-D15. A card said "Deliver mongodb traffic in env-2193… to workspace ws-9e16…" while its
+ * siblings used names. A card is read by a PERSON, so it says what they call things.
+ */
+test("a card says names, not raw ids", () => {
+  const names = { "ws-9e16aa01bb22cc33": "frontend", "env-2193aa44": "staging" };
+  assert.equal(
+    withNames("Deliver mongodb traffic in env-2193aa44 to workspace ws-9e16aa01bb22cc33", names),
+    "Deliver mongodb traffic in staging to workspace frontend",
+  );
+  // An id nobody has a name for is left alone: a wrong name is worse than an id.
+  assert.equal(withNames("Write a file in ws-000000000000dead", names), "Write a file in ws-000000000000dead");
+  // Nothing else in the sentence is touched.
+  assert.equal(withNames("no ids here at all", names), "no ids here at all");
+  assert.equal(withNames("", names), "");
+});
+
+/** The whole card — summary, preview and the question's own options — is what a person reads. */
+test("the whole card is named, not only its first line", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-names-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const session = bench.sessions.all().find((s) => !s.archived)!.id;
+    // A workspace session gives the bench the name for its own id.
+    await bench.openWorkspace("ws-9e16aa01bb22cc33").catch(() => undefined);
+    (bench as unknown as { sessions: { update: (id: string, p: unknown) => void } }).sessions.update("w-ws-9e16aa01bb22cc33", { name: "frontend" });
+    (bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({
+        id: "p-named",
+        tool: "question",
+        args: {},
+        summary: "Send traffic to ws-9e16aa01bb22cc33",
+        preview: "target: ws-9e16aa01bb22cc33",
+        question: { header: "ws-9e16aa01bb22cc33", options: [{ label: "yes, ws-9e16aa01bb22cc33", description: "it runs in ws-9e16aa01bb22cc33" }] },
+      })],
+    });
+    const card = bench.openProposals().find((p) => p.id.endsWith("p-named"))!;
+    assert.match(card.summary, /frontend/, "the summary is named");
+    assert.ok(!/ws-9e16/.test(JSON.stringify(card)), `no raw id anywhere in the card: ${JSON.stringify(card)}`);
   } finally {
     await bench.stop();
     fs.rmSync(dir, { recursive: true, force: true });

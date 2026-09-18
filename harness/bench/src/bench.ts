@@ -22,6 +22,17 @@ export type BenchEvent = { type: string; [k: string]: unknown };
  */
 const proposalKey = (session: string, id: string) => `${session}~${id}`;
 
+/**
+ * Card text reads to a PERSON, so it says names. A card said "Deliver mongodb traffic in
+ * env-2193… to workspace ws-9e16…" while its siblings used names (api-test-report R-D15): every
+ * workspace and environment id in what a person is asked to agree to is replaced by the name when
+ * one is known. Unknown ids are left exactly as they are — a wrong name is worse than an id.
+ */
+export function withNames(text: string, names: Record<string, string>): string {
+  if (!text) return text;
+  return text.replace(/\b(?:ws|env)-[0-9a-z]{4,}\b/gi, (id) => names[id] ?? id);
+}
+
 /** A card that already has an answer: the first stands, and the second is refused (D12). */
 export class AlreadyAnswered extends Error {
   readonly answer: string;
@@ -477,6 +488,18 @@ export class Bench {
           // The id the DESKTOP answers by stays the child's own while only one session holds it —
           // the contract the routes and every window already use. A second session raising the same
           // id gets the scoped key, so both cards exist and each answer finds its own tool call.
+          // A person reads this: ids become names where the bench knows one (R-D15).
+          const named = this.knownNames();
+          p.summary = withNames(p.summary, named);
+          if (p.preview) p.preview = withNames(p.preview, named);
+          if (p.question && typeof p.question === "object") {
+            const q = p.question as { header?: string; options?: { label?: string; description?: string }[] };
+            if (typeof q.header === "string") q.header = withNames(q.header, named);
+            for (const o of q.options ?? []) {
+              if (typeof o.label === "string") o.label = withNames(o.label, named);
+              if (typeof o.description === "string") o.description = withNames(o.description, named);
+            }
+          }
           const taken = [...this.proposals.entries()].some(([k, x]) => x.raw === p.id && x.session !== id && !x.answer && k === p.id);
           const key = taken ? proposalKey(id, p.id) : p.id;
           if (!this.proposals.has(key)) this.proposals.set(key, { session: id, raw: p.id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
@@ -1586,6 +1609,15 @@ Your working directory is the tree ${tree} of this workspace; the main tree owns
 
   /** What a name lookup found, and how long ago: a list call per ask is a round trip nobody needs. */
   private workspaces?: { at: number; rows: { id: string; name?: string }[] };
+
+  /** Every id → name the bench already holds: the workspace list it caches, and its own sessions. */
+  private knownNames(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const w of this.workspaces?.rows ?? []) if (w.name) out[w.id] = w.name;
+    // A session names its own workspace even when the list has not been fetched in this process.
+    for (const s of this.sessions.all()) if (s.workspace && s.name && !out[s.workspace]) out[s.workspace] = s.name;
+    return out;
+  }
 
   /**
    * A workspace NAME becomes its ID, once, before anything is spawned (owner, 2026-09-17: an
