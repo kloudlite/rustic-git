@@ -1,5 +1,5 @@
 //! Blob pull and the two single-shot push forms. Chunked upload lives in `uploads.rs`.
-use super::{auth, oci_err, store::blob_path, store::ImageExt, Digest};
+use super::{auth, blob_state, oci_err, store::ImageExt, Digest};
 use crate::Trusted;
 use crate::App;
 use axum::{
@@ -90,7 +90,12 @@ async fn blob_response(
             Err(r) => return r,
         }
     }
-    let path = blob_path(&owner, &d);
+    let Some(path) = match blob_state::resolve(&app.store.os, &owner, &d).await {
+        Ok(path) => path,
+        Err(e) => return crate::oci_internal(e),
+    } else {
+        return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob");
+    };
     let hdrs = |size: u64| {
         [
             (header::CONTENT_LENGTH, size.to_string()),
@@ -150,8 +155,11 @@ pub async fn start_upload(
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
         };
         let from_owner = from.split('/').next().unwrap_or_default();
-        let mount_path = blob_path(&owner, &d);
-        if from_owner == owner && app.store.os.head(&mount_path).await.is_ok() {
+        let present = match blob_state::exists(&app.store.os, &owner, &d).await {
+            Ok(present) => present,
+            Err(e) => return crate::oci_internal(e),
+        };
+        if from_owner == owner && present {
             if let Err(r) = crate::fenced_retry(&app, &owner, &name, true, || {
                 super::store::hold_blob(&app.store, &owner, &name, &d)
             })
@@ -203,7 +211,9 @@ pub(super) async fn finish_blob(
     // Verified against the algorithm the client CLAIMED (`d.algo`, from the digest it pushed
     // under), not assumed sha256. `pour` lands the object only after the hash matches, so a
     // corrupt layer never becomes readable under a name that promises different bytes.
-    match super::uploads::pour(&app.store.os, &blob_path(owner, &d), Some(&d), super::uploads::body_stream(body), max_layer_live(app)).await {
+    let (_, generation) = blob_state::new_generation(owner, &d);
+    let generation_key = generation.to_string();
+    match super::uploads::pour(&app.store.os, &generation, Some(&d), super::uploads::body_stream(body), max_layer_live(app)).await {
         Ok(_) => {}
         Err(super::uploads::Refused::TooLarge) => {
             return oci_err(StatusCode::PAYLOAD_TOO_LARGE, "SIZE_INVALID", "layer too large")
@@ -212,6 +222,11 @@ pub(super) async fn finish_blob(
             return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "content does not match digest")
         }
         Err(super::uploads::Refused::Failed(e)) => return crate::oci_internal(e),
+    }
+    match blob_state::install(&app.store.os, owner, &d, &generation_key).await {
+        Ok(Ok(())) => {}
+        Ok(Err(blob_state::InstallError::Busy)) => return crate::oci_internal(crate::err("blob publication is busy")),
+        Err(e) => return crate::oci_internal(e),
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `hold_blob`, never
@@ -241,8 +256,8 @@ pub async fn delete_blob(
     let Some(d) = Digest::parse(&digest) else {
         return oci_err(StatusCode::BAD_REQUEST, "DIGEST_INVALID", "malformed digest");
     };
-    match app.store.os.delete(&blob_path(&owner, &d)).await {
-        Ok(()) => {
+    match blob_state::delete_active(&app.store.os, &owner, &d).await {
+        Ok(Some(_)) => {
             // The rows say this image HOLDS these bytes, so they must not outlive them — the
             // mirror of `forget_manifest_blobs` on the manifest path. A row cleanup that fails
             // is logged, never a failed delete: the object is already gone, and a stale row only
@@ -259,7 +274,7 @@ pub async fn delete_blob(
             }
             StatusCode::ACCEPTED.into_response()
         }
-        Err(slatedb::object_store::Error::NotFound { .. }) => {
+        Ok(None) => {
             oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob")
         }
         Err(e) => crate::oci_internal(e.into()),

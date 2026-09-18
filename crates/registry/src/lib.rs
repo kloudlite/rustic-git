@@ -32,6 +32,7 @@ const IMAGE_TAILS: [&str; 4] = ["blobs", "manifests", "tags", "referrers"];
 pub const LOCAL_V2: [&str; 3] = ["", "token", "_catalog"];
 
 pub mod auth;
+pub mod blob_state;
 pub mod blobs;
 pub mod gc;
 pub mod manifests;

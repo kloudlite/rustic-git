@@ -1,5 +1,5 @@
 mod common;
-use kloudlite_registry::{gc, store::blob_path, store::ImageExt, uploads::UploadsExt, Digest};
+use kloudlite_registry::{blob_state, gc, store::blob_path, store::ImageExt, uploads::UploadsExt, Digest};
 use slatedb::object_store::{ObjectStoreExt, PutPayload};
 use std::time::Duration;
 
@@ -207,6 +207,37 @@ async fn a_blob_referenced_between_the_two_manifest_reads_survives_the_mount_rac
     let n = gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap();
     assert_eq!(n, 0, "the mount's manifest protects the blob");
     assert!(e.store.os.head(&blob_path("acme", &ad)).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_stale_gc_version_cannot_retire_a_blob_that_was_pinned_and_released() {
+    let e = common::env().await;
+    let d = Digest::of(b"generation race");
+    let (_, generation) = blob_state::new_generation("acme", &d);
+    e.store.os.put(&generation, PutPayload::from("generation race")).await.unwrap();
+    let generation_key = generation.to_string();
+    blob_state::install(&e.store.os, "acme", &d, &generation_key).await.unwrap().unwrap();
+    let snapshot = blob_state::candidates(&e.store.os, "acme").await.unwrap().pop().unwrap().2;
+    blob_state::pin(&e.store.os, "acme", &d, "manifest").await.unwrap();
+    blob_state::unpin(&e.store.os, "acme", &d, "manifest").await.unwrap();
+    assert!(blob_state::retire_if_unpinned(&e.store.os, "acme", &d, &snapshot).await.unwrap().is_none());
+    assert!(blob_state::resolve(&e.store.os, "acme", &d).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_delayed_old_generation_delete_cannot_remove_a_reupload() {
+    let e = common::env().await;
+    let d = Digest::of(b"reuploaded");
+    let (_, old) = blob_state::new_generation("acme", &d);
+    e.store.os.put(&old, PutPayload::from("old")).await.unwrap();
+    let old_key = old.to_string();
+    blob_state::install(&e.store.os, "acme", &d, &old_key).await.unwrap().unwrap();
+    let (_, new) = blob_state::new_generation("acme", &d);
+    e.store.os.put(&new, PutPayload::from("new")).await.unwrap();
+    let new_key = new.to_string();
+    blob_state::install(&e.store.os, "acme", &d, &new_key).await.unwrap().unwrap();
+    blob_state::delete_retired(&e.store.os, "acme", &d, &old_key).await.unwrap();
+    assert_eq!(blob_state::resolve(&e.store.os, "acme", &d).await.unwrap(), Some(new));
 }
 
 /// CLAUDE.md calls the Redis-down fallback load-bearing: with Redis unreachable, every stream

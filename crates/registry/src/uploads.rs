@@ -19,7 +19,7 @@
 //! The sidecar carries the trailing bytes of a chunk that were too few to be a part ("the tail")
 //! along with the part list, in ONE object: split across two objects there is no write order that
 //! is not torn by a crash — either the tail is counted twice or the parts are lost.
-use super::{auth, blobs, oci_err, store::blob_path, store::Hasher, store::ImageExt, Digest};
+use super::{auth, blob_state, blobs, oci_err, store::Hasher, store::ImageExt, Digest};
 use crate::Trusted;
 use crate::dbstore::Store;
 use crate::App;
@@ -751,7 +751,9 @@ pub async fn complete(
                 }
                 Err(e) => return crate::oci_internal(e),
             };
-            match pour(&app.store.os, &blob_path(owner, &d), Some(&d), src.chain(body_stream(body)), blobs::max_layer_live(app))
+            let (_, generation) = blob_state::new_generation(owner, &d);
+            let generation_key = generation.to_string();
+            let len = match pour(&app.store.os, &generation, Some(&d), src.chain(body_stream(body)), blobs::max_layer_live(app))
                 .await
             {
                 Ok(len) => len,
@@ -770,7 +772,13 @@ pub async fn complete(
                     )
                 }
                 Err(Refused::Failed(e)) => return crate::oci_internal(e),
+            };
+            match blob_state::install(&app.store.os, owner, &d, &generation_key).await {
+                Ok(Ok(())) => {}
+                Ok(Err(blob_state::InstallError::Busy)) => return crate::oci_internal(crate::err("blob publication is busy")),
+                Err(e) => return crate::oci_internal(e),
             }
+            len
         }
     };
     // The blob has landed under a digest that matched — content-addressed, so a lying
@@ -874,11 +882,18 @@ async fn complete_parts(
             "content does not match digest",
         ));
     }
+    let (_, generation) = blob_state::new_generation(owner, d);
+    let generation_key = generation.to_string();
     app.store
         .os
-        .copy(&path, &blob_path(owner, d))
+        .copy(&path, &generation)
         .await
         .map_err(|e| crate::oci_internal(e.into()))?;
+    match blob_state::install(&app.store.os, owner, d, &generation_key).await {
+        Ok(Ok(())) => {}
+        Ok(Err(blob_state::InstallError::Busy)) => return Err(crate::oci_internal(crate::err("blob publication is busy"))),
+        Err(e) => return Err(crate::oci_internal(e)),
+    }
     Ok(size)
 }
 

@@ -540,7 +540,7 @@ const GC_OWNER_GAP: std::time::Duration = std::time::Duration::from_secs(5);
 /// logged and skipped: the others still get their turn.
 async fn image_owners(store: &kloudlite_storage::store::Store) -> std::collections::BTreeSet<String> {
     let mut owners = std::collections::BTreeSet::new();
-    for prefix in ["blobs/", "manifests/", "repo/img/"] {
+    for prefix in ["blobs/", "blob-state/", "manifests/", "repo/img/"] {
         owners.extend(owners_under(store, prefix).await);
     }
     owners

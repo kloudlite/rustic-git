@@ -4,7 +4,7 @@
 //! so re-serializing a parsed manifest — even to identical-looking JSON — changes the digest and
 //! breaks every client that verifies one. Nothing here parses a manifest except to read `subject`
 //! for the referrers index.
-use super::store::{blob_path, manifest_prefix, ImageExt};
+use super::{blob_state, store::{manifest_prefix, ImageExt}};
 
 /// Whether this image holds any sha512-digested manifest at all. One LIST, stopped at the first
 /// object: the by-tag push path asks before paying a second full-body hash. `false` on a read
@@ -224,36 +224,6 @@ pub async fn put_manifest(
     // because it is advisory in both directions (GC keeps what it over-collects, and this only
     // decides what to probe for), and refusing here turned that leniency into a rejected push.
     let digests: Vec<Digest> = named.iter().filter_map(|s| Digest::parse(s)).collect();
-    // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
-    // write. Bounded at 16 for the same reason `gc` bounds its walk — an index may name
-    // thousands of children, and one push must not open thousands of connections. Each probe is
-    // independent; blob path first because that is where layers live — the manifest path is
-    // only hit for an index's entries.
-    // ponytail: a sweep can still delete an old blob between this head and the put below —
-    // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
-    let probes: Vec<_> = digests
-        .iter()
-        .map(|bd| async {
-            app.store.os.head(&blob_path(&owner, bd)).await.is_ok()
-                || app.store.os.head(&manifest_path(&owner, &name, bd)).await.is_ok()
-        })
-        .collect();
-    let present: Vec<bool> =
-        futures::StreamExt::collect::<Vec<bool>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
-    if present.iter().any(|ok| !ok) {
-        return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
-    }
-    let media = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/vnd.oci.image.manifest.v1+json")
-        .to_string();
-    // The media type travels with the manifest: a GET must answer the same Content-Type the push
-    // declared, and the bytes themselves are not re-parsed to recover it.
-    // Tags named by the request, validated BEFORE anything is written: a push by digest may name
-    // tags as `?tag=` (the spec's tag param, possibly repeated), and a malformed one refuses the
-    // whole push rather than being skipped — a client that asked for a tag and did not get it has
-    // been lied to by a 201.
     let mut tags: Vec<String> = Vec::new();
     match &r {
         Reference::Tag(t) => tags.push(t.clone()),
@@ -269,8 +239,63 @@ pub async fn put_manifest(
             }
         }
     }
+    let publication = blob_state::publication_id();
+    let mut pinned = Vec::new();
+    for bd in &digests {
+        match blob_state::pin(&app.store.os, &owner, bd, &publication).await {
+            Ok(true) => pinned.push(bd.clone()),
+            Ok(false) => {}
+            Err(e) => return crate::oci_internal(e),
+        }
+    }
+    // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
+    // write. Bounded at 16 for the same reason `gc` bounds its walk — an index may name
+    // thousands of children, and one push must not open thousands of connections. Each probe is
+    // independent; blob path first because that is where layers live — the manifest path is
+    // only hit for an index's entries.
+    // ponytail: a sweep can still delete an old blob between this head and the put below —
+    // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
+    let probes: Vec<_> = digests
+        .iter()
+        .map(|bd| async {
+            if blob_state::exists(&app.store.os, &owner, bd).await? {
+                return Ok(true);
+            }
+            match app.store.os.head(&manifest_path(&owner, &name, bd)).await {
+                Ok(_) => Ok(true),
+                Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .collect();
+    let present: Vec<crate::Result<bool>> =
+        futures::StreamExt::collect::<Vec<crate::Result<bool>>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
+    if let Some(error) = present.iter().find_map(|r| r.as_ref().err()) {
+        for bd in &pinned {
+            let _ = blob_state::unpin(&app.store.os, &owner, bd, &publication).await;
+        }
+        return crate::oci_internal(crate::err(error.to_string()));
+    }
+    if present.iter().any(|ok| matches!(ok, Ok(false))) {
+        for bd in &pinned {
+            let _ = blob_state::unpin(&app.store.os, &owner, bd, &publication).await;
+        }
+        return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
+    }
+    let media = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/vnd.oci.image.manifest.v1+json")
+        .to_string();
+    // The media type travels with the manifest: a GET must answer the same Content-Type the push
+    // declared, and the bytes themselves are not re-parsed to recover it.
     if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
         return crate::oci_internal(e.into());
+    }
+    for bd in &pinned {
+        if let Err(e) = blob_state::unpin(&app.store.os, &owner, bd, &publication).await {
+            tracing::warn!(owner = %owner, digest = %bd, error = %e, "registry.blob.unpin.failed");
+        }
     }
     // One re-runnable unit, so the fence arm can replay the whole thing: every row this push
     // writes goes in ONE batch, and a retry has to rebuild it (a `WriteBatch` is consumed by the

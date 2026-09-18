@@ -10,7 +10,7 @@
 //!
 //! `src/registry/blobs.rs`'s delete handler removes exactly the blob a client named; this is the
 //! only other code path in the registry allowed to delete a blob.
-use super::store::manifest_stat;
+use super::{blob_state, store::{manifest_stat, Digest}};
 use crate::dbstore::Store;
 use crate::Result;
 use slatedb::object_store::{ObjectStore, ObjectStoreExt};
@@ -294,57 +294,32 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded
 /// before its manifest exists is unreferenced for as long as the push takes.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {
-    let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
     let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
-    // One listing serves both the "anything old enough?" probe and the doomed pass below. It is
-    // taken BEFORE the manifests are read, which the module doc forbids for deciding deletions —
-    // but this list never decides one alone: a blob is only deleted if both `referenced()` reads
-    // (each newer than this listing) miss it, and a blob written after the listing is simply
-    // absent from it, i.e. kept. Nothing past grace means nothing deletable whatever the
-    // manifests say, so an idle registry still reads no manifests at all.
-    let mut listing = store.os.list(Some(&prefix));
-    let mut metas = vec![];
-    while let Some(m) = futures::StreamExt::next(&mut listing).await {
-        metas.push(m?);
+    let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
+    let mut legacy = store.os.list(Some(&prefix));
+    while let Some(meta) = futures::StreamExt::next(&mut legacy).await {
+        let meta = meta?;
+        let Some(digest) = digest_from_path(&meta.location).and_then(|s| Digest::parse(&s)) else { continue };
+        let _ = blob_state::resolve(&store.os, owner, &digest).await?;
     }
-    if !metas.iter().any(|m| m.last_modified <= cutoff) {
-        return Ok(0);
-    }
-
+    let candidates = blob_state::candidates(&store.os, owner).await?;
     let keep = referenced(store, owner).await?;
-    let mut doomed = vec![];
-    for m in metas {
-        let Some(digest) = digest_from_path(&m.location) else { continue };
-        if keep.contains(&digest) {
+    let mut n = 0;
+    for (digest, record, version) in candidates {
+        for retired in &record.retired {
+            blob_state::delete_retired(&store.os, owner, &digest, &retired.physical_key).await?;
+        }
+        if keep.contains(&digest.to_string()) || record.active.as_ref().is_none_or(|a| !a.pins.is_empty()) {
             continue;
         }
-        if m.last_modified > cutoff {
+        let Some(active) = record.active.as_ref() else { continue };
+        let Some(meta) = store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await.ok() else { continue };
+        if meta.last_modified > cutoff {
             continue;
         }
-        doomed.push(m.location);
-    }
-    // Grace protects a blob uploaded and not yet referenced. It does NOT protect an old blob a
-    // client skipped uploading (a HEAD hit, or a cross-repo mount) and then referenced from a
-    // manifest written after the scan above: that blob's own timestamp never changes, so the
-    // grace check above cannot catch it. Re-reading `referenced()` now and deleting only what is
-    // still unreferenced in both reads closes that window without any lock.
-    // The other half of that protection is `put_manifest`, which refuses a manifest naming a blob
-    // that is already gone, so a delete that wins this race produces a 404 the client can retry,
-    // never a 201 over a missing layer.
-    // Nothing doomed is the steady state, and the second read only ever REMOVES entries from an
-    // empty list — so it is a full re-read of every manifest of this owner that cannot change the
-    // answer.
-    if doomed.is_empty() {
-        return Ok(0);
-    }
-    let keep_again = referenced(store, owner).await?;
-    doomed.retain(|p| digest_from_path(p).is_some_and(|d| !keep_again.contains(&d)));
-    let n = doomed.len();
-    for p in doomed {
-        match store.os.delete(&p).await {
-            Ok(()) | Err(slatedb::object_store::Error::NotFound { .. }) => {}
-            Err(e) => return Err(e.into()),
-        }
+        let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version).await? else { continue };
+        blob_state::delete_retired(&store.os, owner, &digest, &retired).await?;
+        n += 1;
     }
     Ok(n)
 }
