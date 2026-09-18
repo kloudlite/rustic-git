@@ -50,10 +50,11 @@ export const EVALUATION_SUBJECT_LIMITS = {
 
 export type TypeSafeEvaluationSubjectConfig = TypeSafeConfig;
 
-function providerFailure(code: EvaluationFailureCode, usage?: ProviderUsage[]): EvaluationAttempt {
+function providerFailure(code: EvaluationFailureCode, attempts: number, usage?: ProviderUsage[]): EvaluationAttempt {
   return {
     outcome: "provider_failure",
     failure: { code },
+    providerAttempts: { typesafe: attempts },
     ...(usage && usage.length ? { usage } : {}),
   };
 }
@@ -75,6 +76,10 @@ function usageOf(batch: {
   const usage = batch.records[0]?.usage;
   if (!usage || (batch.records[0]?.attempts === 0 && usage.inputTokens === 0 && usage.outputTokens === 0)) return [];
   return [{ provider: "typesafe", inputTokens: usage.inputTokens, cachedInputTokens: 0, outputTokens: usage.outputTokens, model: batch.model.model, version: batch.model.version }];
+}
+
+function attemptsOf(batch: { usage: { calls: number } }): Record<string, number> {
+  return { typesafe: batch.usage.calls };
 }
 
 function boundedInput(input: EvaluationSubjectInput): boolean {
@@ -121,22 +126,23 @@ function syntheticState(input: EvaluationSubjectInput): JsonValue {
 export function typeSafeEvaluationSubject(config?: TypeSafeEvaluationSubjectConfig): EvaluationSubject {
   return {
     subjectId: "typesafe-jev-1.13.0-shadow",
+    availability: "available",
     kind: "injected_adapter",
     providers: ["typesafe"],
     async attempt(input, runtime) {
-      if (!config) return providerFailure("missing_credentials");
-      if (!boundedInput(input)) return providerFailure("invalid_response");
+      if (!config) return providerFailure("missing_credentials", 0);
+      if (!boundedInput(input)) return providerFailure("invalid_response", 0);
 
       const synthetic = syntheticState(input);
-      if (Buffer.byteLength(JSON.stringify(synthetic), "utf8") > EVALUATION_SUBJECT_LIMITS.stateBytes) return providerFailure("invalid_response");
+      if (Buffer.byteLength(JSON.stringify(synthetic), "utf8") > EVALUATION_SUBJECT_LIMITS.stateBytes) return providerFailure("invalid_response", 0);
       const state = approveProviderState({ state: synthetic, source: "synthetic_evaluation", maxChars: EVALUATION_SUBJECT_LIMITS.stateBytes });
-      if (!state.ok) return providerFailure("provider_error");
+      if (!state.ok) return providerFailure("provider_error", 0);
 
       let adapter: ReturnType<typeof createTypeSafeJudgmentAdapter>;
       try {
         adapter = createTypeSafeJudgmentAdapter({ ...config, mode: "shadow", state: state.value });
       } catch {
-        return providerFailure("missing_credentials");
+        return providerFailure("missing_credentials", 0);
       }
       const result = await adapter.judge(
         {
@@ -157,24 +163,25 @@ export function typeSafeEvaluationSubject(config?: TypeSafeEvaluationSubjectConf
         },
         runtime.signal,
       );
-      if (!result.ok) return providerFailure("invalid_response");
+      if (!result.ok) return providerFailure("invalid_response", result.usage.calls);
 
       const usage = usageOf(result);
+      const providerAttempts = attemptsOf(result);
       const judgment = result.results[QUESTION_ID];
-      if (!judgment) return providerFailure("invalid_response", usage);
-      if (judgment.outcome === "provider_failure") return providerFailure(failureCodeOf(result.failureCode), usage);
+      if (!judgment) return providerFailure("invalid_response", result.usage.calls, usage);
+      if (judgment.outcome === "provider_failure") return providerFailure(failureCodeOf(result.failureCode), result.usage.calls, usage);
       if (judgment.outcome === "no_match") {
-        return { outcome: "abstain", reason: "no_match", errorCode: "no_match", ...(usage.length ? { usage } : {}) };
+        return { outcome: "abstain", reason: "no_match", errorCode: "no_match", providerAttempts, ...(usage.length ? { usage } : {}) };
       }
       if (judgment.outcome === "ambiguous") {
-        return { outcome: "abstain", reason: "ambiguous", errorCode: "ambiguous_match", ...(usage.length ? { usage } : {}) };
+        return { outcome: "abstain", reason: "ambiguous", errorCode: "ambiguous_match", providerAttempts, ...(usage.length ? { usage } : {}) };
       }
-      if (judgment.outcome !== "selected") return providerFailure("invalid_response", usage);
+      if (judgment.outcome !== "selected") return providerFailure("invalid_response", result.usage.calls, usage);
 
       const selectedIndex = /^c([0-9]+)$/.exec(judgment.optionId);
       const candidate = selectedIndex ? input.candidates[Number(selectedIndex[1])] : undefined;
-      if (!candidate) return providerFailure("invalid_response", usage);
-      return { ...proposal(candidate), ...(usage.length ? { usage } : {}) };
+      if (!candidate) return providerFailure("invalid_response", result.usage.calls, usage);
+      return { ...proposal(candidate), providerAttempts, ...(usage.length ? { usage } : {}) };
     },
   };
 }

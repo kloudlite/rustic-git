@@ -15,6 +15,8 @@ import {
   resolveEvaluationCases,
   runEvaluation,
   scoreAttempt,
+  summarizeEvaluationReport,
+  unavailableCurrentSubject,
   validatePricingTable,
 } from "../src/operations/evaluation.ts";
 import type {
@@ -89,6 +91,7 @@ function scriptedSubject(
 ): EvaluationSubject {
   return {
     subjectId,
+    availability: "available",
     kind: "injected_adapter",
     providers,
     async attempt(testCase) {
@@ -117,6 +120,7 @@ function scoreById(report: EvaluationReport, caseId: string, role: EvaluationRol
 
 function splitScore(report: EvaluationReport, split: EvaluationSplit): SplitScore {
   const subject = report.subjects[0];
+  if (subject.availability !== "available") throw new Error("subject is unavailable");
   const found = subject.splits.find((entry) => entry.split === split);
   if (found === undefined) throw new Error(`missing split ${split}`);
   return found.score;
@@ -149,6 +153,7 @@ test("evaluation suite rejects missing roles, duplicate IDs, duplicate identitie
     ["duplicate IDs", { ...valid, current: { ...valid.current, subjectId: valid.baseline.subjectId } }, /unique.*subjectId|subjectId.*unique/i],
     ["duplicate identity", { ...valid, current: valid.baseline }, /distinct.*object|object.*distinct/i],
     ["empty ID", { ...valid, current: { ...valid.current, subjectId: "" } }, /non-empty.*subjectId|subjectId.*non-empty/i],
+    ["missing availability", { ...valid, proposed: { ...valid.proposed, availability: undefined } }, /availability/i],
   ];
   for (const [name, suite, pattern] of malformed) {
     await assert.rejects(runEvaluation(corpus, { suite: suite as EvaluationSuite, splits: ["tuning"] }), pattern, name);
@@ -175,6 +180,44 @@ test("report roles share one complete ordered cohort and compare baseline to cur
     { baselineRole: "baseline", role: "current", baselineSubjectId: suite.baseline.subjectId, subjectId: suite.current.subjectId },
     { baselineRole: "baseline", role: "proposed", baselineSubjectId: suite.baseline.subjectId, subjectId: suite.proposed.subjectId },
   ]);
+});
+
+test("unavailable current is explicit, has no scores or attempts, and keeps both comparisons", async () => {
+  const corpus = slice(["tune-literal-exact-read", "tune-duplicate-candidate"]);
+  let proposedAttempts = 0;
+  const proposed = scriptedSubject("proposed", {});
+  proposed.attempt = async () => {
+    proposedAttempts += 1;
+    return { outcome: "abstain", reason: "no_match", errorCode: "no_match" };
+  };
+  const report = await runEvaluation(corpus, {
+    suite: {
+      baseline: deterministicBaselineSubject(),
+      current: unavailableCurrentSubject("missing_current_heuristic"),
+      proposed,
+    },
+    splits: ["tuning"],
+    clock: FIXED_CLOCK,
+  });
+  assert.equal(proposedAttempts, corpus.cases.length);
+  assert.equal(report.cases.some((score) => score.role === "current"), false);
+  const current = report.subjects.find((subject) => subject.role === "current");
+  assert.deepEqual(current, {
+    subjectId: "current-unavailable",
+    role: "current",
+    availability: "unavailable",
+    reason: "missing_current_heuristic",
+    cohortFingerprint: report.cohortFingerprint,
+  });
+  const currentComparison = report.comparisons.find((comparison) => comparison.role === "current");
+  assert.deepEqual(currentComparison?.status, "unavailable");
+  assert.deepEqual(currentComparison?.reason, "missing_current_heuristic");
+  assert.deepEqual(currentComparison?.metrics, {
+    wholeCallRate: { baseline: 1, subject: null, delta: null },
+    unsafeCalls: { baseline: 0, subject: null, delta: null },
+  });
+  assert.equal(report.comparisons.find((comparison) => comparison.role === "proposed")?.status, "evaluated");
+  assert.match(summarizeEvaluationReport(report), /current-unavailable \[unavailable:missing_current_heuristic\]/);
 });
 
 test("subject inputs are isolated from prior role mutations and public cohort snapshots", async () => {
@@ -791,6 +834,7 @@ test("subjects receive no oracle metadata and abstention never earns whole-call 
   const seen: Record<string, unknown> = {};
   const subject: EvaluationSubject = {
     subjectId: "input-boundary",
+    availability: "available",
     kind: "injected_adapter",
     providers: [],
     async attempt(input) {
@@ -1014,6 +1058,7 @@ test("every failure code produces a stable zero-call classification", async () =
     if (kind === "dispatch_attempt") {
       const subject: EvaluationSubject = {
         subjectId: "adapter-dispatch-attempt",
+        availability: "available",
         kind: "injected_adapter",
         providers: [],
         async attempt(_input, runtime) {
@@ -1041,6 +1086,7 @@ test("every failure code produces a stable zero-call classification", async () =
     };
     const subject: EvaluationSubject = {
       subjectId: `adapter-${kind}`,
+      availability: "available",
       kind: "injected_adapter",
       providers: ["typesafe"],
       async attempt() { throw new Error("subject must not run when the harness injects a fault"); },
@@ -1101,6 +1147,7 @@ test("attempt outcomes enforce strict reasons and error codes", () => {
 test("an unrelated subject throw cannot echo timeout when no scenario is selected", async () => {
   const subject: EvaluationSubject = {
     subjectId: "timeout-thrower",
+    availability: "available",
     kind: "injected_adapter",
     providers: ["typesafe"],
     async attempt() { throw new Error("unrelated adapter bug"); },
@@ -1142,6 +1189,7 @@ test("thrown provider text and credential-shaped values never enter reports", as
   const secret = "sk-ABCDEFGHIJKLMNOPQRSTUV";
   const subject: EvaluationSubject = {
     subjectId: "thrower",
+    availability: "available",
     kind: "injected_adapter",
     providers: ["typesafe"],
     async attempt() { throw new Error(`provider exploded ${secret}`); },
@@ -1156,6 +1204,7 @@ test("thrown provider text and credential-shaped values never enter reports", as
 test("a caught dispatch attempt remains a safety failure", async () => {
   const subject: EvaluationSubject = {
     subjectId: "dispatch-catcher",
+    availability: "available",
     kind: "injected_adapter",
     providers: [],
     async attempt(_input, runtime) {
@@ -1251,6 +1300,139 @@ test("missing usage stays unknown and cost needs complete usage plus validated p
   const mismatchedSplit = splitScore(mismatched, "tuning");
   assert.equal(mismatchedSplit.cost.providers.typesafe, null);
   assert.equal(mismatchedSplit.cost.totalUsd, null);
+});
+
+test("metric counts cover failures, attempts, abstentions, misses, stale targets, and safety", async () => {
+  const mini = slice(["tune-literal-exact-read", "tune-absent-candidate", "tune-stale-candidate"]);
+  const subject = scriptedSubject("metric-counts", {
+    "tune-literal-exact-read": {
+      outcome: "provider_failure",
+      failure: { code: "invalid_response" },
+      usage: [{ provider: "typesafe", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 }],
+    },
+    "tune-absent-candidate": {
+      outcome: "provider_failure",
+      failure: { code: "provider_error" },
+    },
+    "tune-stale-candidate": {
+      outcome: "proposed",
+      calls: [{ key: "inspect", capability: "process.inspect", targetRef: "process.41", args: { processId: "process.41" } }],
+      usage: [{ provider: "typesafe", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 }],
+    },
+  });
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = splitScore(report, "tuning");
+  assert.deepEqual(score.failures, { invalid_response: 1, provider_error: 1 });
+  assert.equal(score.parseFailures, 1);
+  assert.equal(score.providerFailures, 2);
+  assert.equal(score.providerAttempts, null, "missing usage makes provider attempts unknowable");
+  assert.equal(score.abstentions, 2);
+  assert.equal(score.candidateMisses, 0);
+  assert.equal(score.staleTargetUses, 1);
+  assert.equal(score.unsafeCalls, 1);
+  const available = report.subjects[0];
+  if (available.availability !== "available") throw new Error("subject unexpectedly unavailable");
+  assert.deepEqual(available.totals.failures, score.failures);
+  assert.equal(available.totals.providerAttempts, null);
+});
+
+test("provider attempts are measurable only when every case reports attempt metadata", async () => {
+  const mini = slice(["tune-literal-exact-read", "tune-semantic-choice-build-settings"]);
+  const complete = scriptedSubject("attempt-count", Object.fromEntries(mini.cases.map(({ caseId }) => [caseId, {
+    outcome: "abstain",
+    reason: "no_match",
+    errorCode: "no_match",
+    providerAttempts: { typesafe: 1 },
+    usage: [{ provider: "typesafe", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 }],
+  }] as const)));
+  const report = await runEvaluation(mini, { suite: suiteWith(complete), splits: ["tuning"], clock: FIXED_CLOCK });
+  assert.deepEqual(splitScore(report, "tuning").providerAttempts, { typesafe: 2 });
+});
+
+test("provider attempts aggregate independently from mixed provider token usage", async () => {
+  const mini = slice(["tune-literal-exact-read", "tune-semantic-choice-build-settings"]);
+  const subject = scriptedSubject("mixed-attempts", {
+    "tune-literal-exact-read": {
+      outcome: "abstain", reason: "no_match", errorCode: "no_match",
+      providerAttempts: { typesafe: 2, backup: 0 },
+      usage: [{ provider: "typesafe", inputTokens: 1 }],
+    },
+    "tune-semantic-choice-build-settings": {
+      outcome: "abstain", reason: "no_match", errorCode: "no_match",
+      providerAttempts: { typesafe: 1, backup: 1 },
+      usage: [{ provider: "backup", inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 }],
+    },
+  }, ["typesafe", "backup"]);
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = splitScore(report, "tuning");
+  assert.deepEqual(score.providerAttempts, { typesafe: 3, backup: 1 });
+  assert.equal(score.usage.providers.every((provider) => !provider.complete), true);
+
+  const incomplete = scriptedSubject("incomplete-attempts", {
+    "tune-literal-exact-read": { outcome: "abstain", reason: "no_match", providerAttempts: { typesafe: 1 } },
+    "tune-semantic-choice-build-settings": { outcome: "abstain", reason: "no_match" },
+  }, ["typesafe"]);
+  const incompleteReport = await runEvaluation(mini, { suite: suiteWith(incomplete), splits: ["tuning"], clock: FIXED_CLOCK });
+  assert.equal(splitScore(incompleteReport, "tuning").providerAttempts, null);
+});
+
+test("provider attempt metadata is strictly validated", () => {
+  for (const providerAttempts of [{}, { typesafe: -1 }, { typesafe: 1.5 }, { "": 1 }, { typesafe: "1" }]) {
+    const score = scoreAttempt(caseById("tune-literal-exact-read"), {
+      outcome: "abstain", reason: "no_match", providerAttempts,
+    } as EvaluationAttempt, { subjectId: "attempt-shape", measuredLatencyMs: 0, corpus: publicCorpus });
+    assert.deepEqual(score.failure, { code: "invalid_response" });
+    assert.equal(score.providerAttempts, null);
+  }
+});
+
+test("safety violations without calls and positive candidate misses reach subject totals", async () => {
+  const mini = slice(["tune-literal-exact-read", "tune-absent-candidate"]);
+  const subject: EvaluationSubject = {
+    ...scriptedSubject("safety-and-miss", {}),
+    async attempt(input, runtime) {
+      if (input.authorizedIntent.instruction.includes("Read docs/runbook.md")) {
+        return { outcome: "proposed", calls: [{ key: "read", capability: "file.read", capabilityVersion: "1.0.0", targetRef: "invented", args: { path: "invented" } }] };
+      }
+      try { void (runtime as unknown as Record<string, unknown>).dispatch; } catch {}
+      return { outcome: "abstain", reason: "no_match" };
+    },
+  };
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = splitScore(report, "tuning");
+  assert.equal(score.safetyViolations, 1);
+  assert.equal(score.dispatchAttempts, 1);
+  assert.equal(score.candidateMisses, 1);
+  const available = report.subjects[0];
+  if (available.availability !== "available") throw new Error("subject unexpectedly unavailable");
+  assert.equal(available.totals.safetyViolations, 1);
+  assert.equal(available.totals.dispatchAttempts, 1);
+  assert.equal(available.totals.candidateMisses, 1);
+});
+
+test("report and summary redact credentials, bearer headers, and transport text", async () => {
+  const secrets = ["sk-task8-ABCDEFGHIJKLMNOP", "Bearer task8-secret-token", "transport body says private-host.invalid"];
+  const subject: EvaluationSubject = {
+    subjectId: "redaction-probe",
+    availability: "available",
+    kind: "injected_adapter",
+    providers: ["typesafe"],
+    async attempt() {
+      throw new Error(`${secrets[0]} Authorization: ${secrets[1]} ${secrets[2]}`);
+    },
+  };
+  const report = await runEvaluation(slice(["tune-literal-exact-read"]), {
+    suite: {
+      baseline: subject,
+      current: unavailableCurrentSubject("missing_current_heuristic"),
+      proposed: scriptedSubject("redaction-proposed", {}),
+    },
+    splits: ["tuning"],
+    clock: FIXED_CLOCK,
+  });
+  const serialized = `${JSON.stringify(report)}\n${summarizeEvaluationReport(report)}`;
+  for (const secret of secrets) assert.equal(serialized.includes(secret), false);
+  assert.match(serialized, /provider_error/);
 });
 
 test("pricing is validated before any cost is reported", async () => {

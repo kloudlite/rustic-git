@@ -84,6 +84,7 @@ test("selected opaque candidates map to exact O01 calls without dispatch", async
     outcome: "proposed",
     calls: [{ key: "call_1", capability: "file.read", capabilityVersion: "1.0.0", targetRef: "src.config.ts", args: { path: "src/config.ts" } }],
     usage: [{ provider: "typesafe", inputTokens: 23, cachedInputTokens: 0, outputTokens: 5, model: TYPESAFE_DEFAULT_MODEL, version: TYPESAFE_DEFAULT_MODEL }],
+    providerAttempts: { typesafe: 1 },
   });
   assert.equal(calls.length, 1);
   assert.equal(Object.keys(calls[0].body).sort().join(","), "model,questions,state");
@@ -107,6 +108,7 @@ test("no_match and ambiguous remain correct abstentions", async () => {
     outcome: "abstain",
     reason: "no_match",
     errorCode: "no_match",
+    providerAttempts: { typesafe: 1 },
     usage: [{ provider: "typesafe", inputTokens: 23, cachedInputTokens: 0, outputTokens: 5, model: TYPESAFE_DEFAULT_MODEL, version: TYPESAFE_DEFAULT_MODEL }],
   });
   const ambiguous = await subjectWith(async () => answer(AMBIGUOUS_OPTION)).attempt(input, runtime());
@@ -171,13 +173,13 @@ test("missing or denying provider input policy maps to stable provider failure w
   let calls = 0;
   const fetch: TypeSafeFetch = async () => { calls += 1; return answer("c0"); };
   const missing = typeSafeEvaluationSubject({ apiKey: API_KEY, fetch });
-  assert.deepEqual(await missing.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" } });
+  assert.deepEqual(await missing.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" }, providerAttempts: { typesafe: 0 } });
   const denied = typeSafeEvaluationSubject({
     apiKey: API_KEY,
     fetch,
     providerInputPolicy: () => ({ authorized: false, code: "evaluation_denied" }),
   });
-  assert.deepEqual(await denied.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" } });
+  assert.deepEqual(await denied.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" }, providerAttempts: { typesafe: 0 } });
   assert.equal(calls, 0);
 });
 
@@ -254,6 +256,7 @@ test("malformed responses, timeout, abort, and exhausted budget use stable Task 
   const timeoutFetch: TypeSafeFetch = async (_url, init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new Error("secret timeout body")), { once: true }));
   const timedOut = await subjectWith(timeoutFetch, { timeoutMs: 100, maxAttempts: 1 }).attempt(input, runtime());
   assert.deepEqual(timedOut.failure, { code: "timeout" });
+  assert.deepEqual(timedOut.providerAttempts, { typesafe: 1 });
   assert.equal(JSON.stringify(timedOut).includes("secret timeout body"), false);
 
   const controller = new AbortController();
@@ -268,6 +271,17 @@ test("malformed responses, timeout, abort, and exhausted budget use stable Task 
   assert.equal(dispatched, 0);
 });
 
+test("retry count is reported independently from token usage", async () => {
+  let calls = 0;
+  const result = await subjectWith(async () => {
+    calls += 1;
+    if (calls === 1) return { ...response({}), status: 429, headers: { get: () => "0" } };
+    return answer("c0");
+  }, { maxAttempts: 2, backoffMs: 0, maxBackoffMs: 0 }).attempt(input, runtime());
+  assert.equal(calls, 2);
+  assert.deepEqual(result.providerAttempts, { typesafe: 2 });
+});
+
 test("subject bounds reject oversized evaluation input before provider policy or fetch", async () => {
   let policyCalls = 0;
   let fetches = 0;
@@ -275,9 +289,10 @@ test("subject bounds reject oversized evaluation input before provider policy or
     providerInputPolicy: (request: ProviderInputRequest) => { policyCalls += 1; return { authorized: true, digest: request.digest }; },
   });
   const tooMany = { ...input, candidates: Array.from({ length: EVALUATION_SUBJECT_LIMITS.candidates + 1 }, (_, index) => ({ ...input.candidates[0], candidateId: `sensitive-${index}`, label: `label ${index}` })) };
-  assert.deepEqual(await subject.attempt(tooMany, runtime()), { outcome: "provider_failure", failure: { code: "invalid_response" } });
-  assert.deepEqual(await subject.attempt({ ...input, authorizedIntent: { instruction: "x".repeat(EVALUATION_SUBJECT_LIMITS.instructionChars + 1) } }, runtime()), { outcome: "provider_failure", failure: { code: "invalid_response" } });
-  assert.deepEqual(await subject.attempt({ ...input, candidates: [{ ...input.candidates[0], label: "x".repeat(EVALUATION_SUBJECT_LIMITS.labelChars + 1) }] }, runtime()), { outcome: "provider_failure", failure: { code: "invalid_response" } });
+  const rejected = { outcome: "provider_failure", failure: { code: "invalid_response" }, providerAttempts: { typesafe: 0 } };
+  assert.deepEqual(await subject.attempt(tooMany, runtime()), rejected);
+  assert.deepEqual(await subject.attempt({ ...input, authorizedIntent: { instruction: "x".repeat(EVALUATION_SUBJECT_LIMITS.instructionChars + 1) } }, runtime()), rejected);
+  assert.deepEqual(await subject.attempt({ ...input, candidates: [{ ...input.candidates[0], label: "x".repeat(EVALUATION_SUBJECT_LIMITS.labelChars + 1) }] }, runtime()), rejected);
   assert.equal(policyCalls, 0);
   assert.equal(fetches, 0);
 });
@@ -298,8 +313,9 @@ test("import provenance remains explicit after local compatibility changes", () 
 test("missing trusted config fails closed without reading credentials or reporting secrets", async () => {
   const subject = typeSafeEvaluationSubject(undefined);
   const result = await subject.attempt(input, runtime());
-  assert.deepEqual(result, { outcome: "provider_failure", failure: { code: "missing_credentials" } });
+  assert.deepEqual(result, { outcome: "provider_failure", failure: { code: "missing_credentials" }, providerAttempts: { typesafe: 0 } });
   assert.equal(JSON.stringify(result).includes(API_KEY), false);
   assert.deepEqual(subject.providers, ["typesafe"]);
   assert.equal(subject.kind, "injected_adapter");
+  assert.equal(subject.availability, "available");
 });

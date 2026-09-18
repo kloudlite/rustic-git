@@ -199,6 +199,8 @@ export type EvaluationAttempt = {
   errorCode?: OperationErrorCode;
   failure?: EvaluationFailure;
   usage?: ProviderUsage[];
+  /** Provider transport calls made by this case, including retries and explicit zero-attempt failures. */
+  providerAttempts?: Record<string, number>;
   /** Self-reported by the subject; the runner measures its own elapsed time too. */
   latencyMs?: number;
 };
@@ -208,14 +210,23 @@ export type EvaluationRuntime = {
   readonly now: () => number;
 };
 
-export type EvaluationSubject = {
+export type AvailableEvaluationSubject = {
   readonly subjectId: string;
+  readonly availability: "available";
   readonly kind: "deterministic_baseline" | "injected_adapter";
   /** Providers this subject may consult; drives unknown-usage reporting. */
   readonly providers: readonly string[];
   /** Proposes calls or abstains. It must not dispatch a capability or mutate state. */
   attempt(input: EvaluationSubjectInput, runtime: EvaluationRuntime): Promise<EvaluationAttempt>;
 };
+
+export type UnavailableEvaluationSubject = {
+  readonly subjectId: string;
+  readonly availability: "unavailable";
+  readonly reason: "missing_current_heuristic";
+};
+
+export type EvaluationSubject = AvailableEvaluationSubject | UnavailableEvaluationSubject;
 
 export type EvaluationRole = "baseline" | "current" | "proposed";
 
@@ -256,6 +267,7 @@ export type CaseScore = {
   staleTargetUses: number;
   usage: ProviderUsage[] | null;
   usageKnown: boolean;
+  providerAttempts: Record<string, number> | null;
   latencyMs: number;
   costUsd: number | null;
 };
@@ -300,6 +312,12 @@ export type SplitScore = {
   missedAbstentions: number;
   candidateMisses: number;
   staleTargetUses: number;
+  abstentions: number;
+  failures: Partial<Record<EvaluationFailureCode, number>>;
+  parseFailures: number;
+  providerFailures: number;
+  /** Null when incomplete usage means provider invocation cannot be measured. */
+  providerAttempts: Record<string, number> | null;
   rates: {
     wholeCallRate: number | null;
     actionRate: number | null;
@@ -314,17 +332,43 @@ export type SplitScore = {
   cost: CostSummary;
 };
 
-export type SubjectReport = {
+export type AvailableSubjectReport = {
   subjectId: string;
   role: EvaluationRole;
+  availability: "available";
   cohortFingerprint: string;
-  kind: EvaluationSubject["kind"];
+  kind: AvailableEvaluationSubject["kind"];
   providers: string[];
   splits: Array<{ split: EvaluationSplit; score: SplitScore }>;
   safetyViolations: number;
   dispatchAttempts: number;
   deferred: { caseCount: number; refused: number; proposedCall: number };
+  totals: {
+    caseCount: number;
+    unsafeCalls: number;
+    safetyViolations: number;
+    dispatchAttempts: number;
+    unnecessaryAbstentions: number;
+    missedAbstentions: number;
+    candidateMisses: number;
+    staleTargetUses: number;
+    abstentions: number;
+    failures: Partial<Record<EvaluationFailureCode, number>>;
+    parseFailures: number;
+    providerFailures: number;
+    providerAttempts: Record<string, number> | null;
+  };
 };
+
+export type UnavailableSubjectReport = {
+  subjectId: string;
+  role: EvaluationRole;
+  availability: "unavailable";
+  reason: UnavailableEvaluationSubject["reason"];
+  cohortFingerprint: string;
+};
+
+export type SubjectReport = AvailableSubjectReport | UnavailableSubjectReport;
 
 export type DeltaMetric = { baseline: number | null; subject: number | null; delta: number | null };
 
@@ -336,8 +380,14 @@ export type ComparisonSummary = {
   split: EvaluationSplit;
   /** Advisory only: no threshold is applied until Sol reviews held-out failures. */
   advisory: true;
+  status: "evaluated" | "unavailable";
+  reason?: UnavailableEvaluationSubject["reason"];
   metrics: { wholeCallRate: DeltaMetric; unsafeCalls: DeltaMetric };
 };
+
+export function unavailableCurrentSubject(reason: UnavailableEvaluationSubject["reason"]): UnavailableEvaluationSubject {
+  return { subjectId: "current-unavailable", availability: "unavailable", reason };
+}
 
 export type EvaluationReport = {
   reportVersion: string;
@@ -1107,6 +1157,7 @@ export function evaluationLabelCoverage(corpus: EvaluationCorpus): Record<Evalua
 export function deterministicBaselineSubject(): EvaluationSubject {
   return {
     subjectId: "deterministic-baseline",
+    availability: "available",
     kind: "deterministic_baseline",
     providers: [],
     async attempt(input) {
@@ -1293,13 +1344,19 @@ function validUsage(value: unknown): value is ProviderUsage[] {
   });
 }
 
+function validProviderAttempts(value: unknown): value is Record<string, number> {
+  return isRecord(value) && Object.keys(value).length > 0 && Object.entries(value).every(([provider, attempts]) =>
+    provider.trim() !== "" && Number.isInteger(attempts) && (attempts as number) >= 0,
+  );
+}
+
 function sanitizeAttempt(value: unknown, dispatchAttempts = 0): EvaluationAttempt {
   if (dispatchAttempts > 0) return { outcome: "provider_failure", failure: { code: "dispatch_attempt" } };
   if (!isRecord(value)) return { outcome: "provider_failure", failure: { code: "invalid_response" } };
-  if (Object.keys(value).some((key) => !["outcome", "calls", "reason", "errorCode", "failure", "usage", "latencyMs"].includes(key))) {
+  if (Object.keys(value).some((key) => !["outcome", "calls", "reason", "errorCode", "failure", "usage", "providerAttempts", "latencyMs"].includes(key))) {
     return { outcome: "provider_failure", failure: { code: "invalid_response" } };
   }
-  const { outcome, calls, reason, failure, usage, errorCode } = value;
+  const { outcome, calls, reason, failure, usage, providerAttempts, errorCode } = value;
   const validFailure = isRecord(failure) && Object.keys(failure).length === 1 && EVALUATION_FAILURE_CODES.includes(failure.code as EvaluationFailureCode);
   const validReason = typeof reason === "string" && ABSTENTION_REASONS.includes(reason as AbstentionReason);
   const validErrorCode = errorCode === undefined || (typeof errorCode === "string" && OPERATION_ERROR_CODES.includes(errorCode as OperationErrorCode));
@@ -1310,7 +1367,7 @@ function sanitizeAttempt(value: unknown, dispatchAttempts = 0): EvaluationAttemp
     (outcome === "unsupported" && noCalls && reason === "unsupported" && validErrorCode && failure === undefined) ||
     (outcome === "provider_failure" && noCalls && reason === undefined && errorCode === undefined && validFailure);
   const validLatency = value.latencyMs === undefined || (typeof value.latencyMs === "number" && Number.isFinite(value.latencyMs) && value.latencyMs >= 0);
-  if (!validShape || !validErrorCode || !validLatency || (usage !== undefined && !validUsage(usage))) {
+  if (!validShape || !validErrorCode || !validLatency || (usage !== undefined && !validUsage(usage)) || (providerAttempts !== undefined && !validProviderAttempts(providerAttempts))) {
     return { outcome: "provider_failure", failure: { code: "invalid_response" } };
   }
   return {
@@ -1320,6 +1377,7 @@ function sanitizeAttempt(value: unknown, dispatchAttempts = 0): EvaluationAttemp
     ...(typeof value.errorCode === "string" && OPERATION_ERROR_CODES.includes(value.errorCode as OperationErrorCode) ? { errorCode: value.errorCode as OperationErrorCode } : {}),
     ...(validFailure ? { failure: { code: failure.code as EvaluationFailureCode } } : {}),
     ...(usage === undefined ? {} : { usage }),
+    ...(providerAttempts === undefined ? {} : { providerAttempts }),
     ...(typeof value.latencyMs === "number" && Number.isFinite(value.latencyMs) && value.latencyMs >= 0 ? { latencyMs: value.latencyMs } : {}),
   };
 }
@@ -1409,6 +1467,7 @@ export function scoreAttempt(testCase: EvaluationCase, attempt: EvaluationAttemp
     staleTargetUses: classifications.filter((entry) => entry.staleTarget).length,
     usage,
     usageKnown,
+    providerAttempts: attempt.providerAttempts ?? null,
     latencyMs,
     costUsd: null,
   };
@@ -1488,6 +1547,17 @@ export function summarizeSplit(
   const latencies = scores.map((score) => score.latencyMs).sort((left, right) => left - right);
   const usage = summarizeUsage(scores, declaredProviders);
   const count = (predicate: (score: CaseScore) => boolean): number => pilot.filter(predicate).length;
+  const failures: Partial<Record<EvaluationFailureCode, number>> = {};
+  for (const score of scores) {
+    if (score.failure === undefined) continue;
+    failures[score.failure.code] = (failures[score.failure.code] ?? 0) + 1;
+  }
+  const providerAttempts = scores.every((score) => score.providerAttempts !== null)
+    ? Object.fromEntries([...new Set([...declaredProviders, ...scores.flatMap((score) => Object.keys(score.providerAttempts ?? {}))])].sort().map((provider) => [
+        provider,
+        scores.reduce((total, score) => total + (score.providerAttempts?.[provider] ?? 0), 0),
+      ]))
+    : null;
   return {
     split,
     caseCount: scores.length,
@@ -1504,6 +1574,11 @@ export function summarizeSplit(
     missedAbstentions: count((score) => score.missedAbstention),
     candidateMisses: pilot.reduce((total, score) => total + score.candidateMisses, 0),
     staleTargetUses: pilot.reduce((total, score) => total + score.staleTargetUses, 0),
+    abstentions: scores.filter((score) => score.abstained).length,
+    failures,
+    parseFailures: failures.invalid_response ?? 0,
+    providerFailures: scores.filter((score) => score.outcome === "provider_failure").length,
+    providerAttempts,
     rates: {
       wholeCallRate: rate(count((score) => score.wholeCallCorrect), pilot.length),
       actionRate: rate(count((score) => score.actionCorrect), pilot.length),
@@ -1627,6 +1702,12 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
     const subject = options.suite[role];
     if (subject === null || typeof subject !== "object") throw new Error(`${role} subject must be an object`);
     if (typeof subject.subjectId !== "string" || subject.subjectId.trim() === "") throw new Error(`${role} subjectId must be non-empty`);
+    if (subject.availability === "unavailable") {
+      if (role !== "current") throw new Error(`only the current subject may be unavailable`);
+      if (subject.reason !== "missing_current_heuristic") throw new Error(`current unavailable reason must be known`);
+      return { role, subject };
+    }
+    if (subject.availability !== "available") throw new Error(`${role} subject availability must be available or unavailable`);
     if (subject.kind !== "deterministic_baseline" && subject.kind !== "injected_adapter") throw new Error(`${role} subject kind must be known`);
     if (!Array.isArray(subject.providers)) throw new Error(`${role} subject providers must be an array`);
     if (subject.providers.some((provider) => typeof provider !== "string" || provider.trim() === "")) {
@@ -1674,6 +1755,16 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
   const scores: CaseScore[] = [];
   const subjects: SubjectReport[] = [];
   for (const { role, subject } of entries) {
+    if (subject.availability === "unavailable") {
+      subjects.push({
+        subjectId: subject.subjectId,
+        role,
+        availability: "unavailable",
+        reason: subject.reason,
+        cohortFingerprint,
+      });
+      continue;
+    }
     const subjectScores: CaseScore[] = [];
     for (const testCase of cases) {
       const startedAt = clock();
@@ -1704,16 +1795,30 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
       scores.push(score);
     }
     const deferredScores = subjectScores.filter((score) => score.deferred);
+    const splitReports = splits.map((split) => ({
+      split,
+      score: summarizeSplit(split, subjectScores.filter((score) => score.split === split), subject.providers, pricing),
+    }));
+    const failureTotals: Partial<Record<EvaluationFailureCode, number>> = {};
+    for (const { score } of splitReports) {
+      for (const [code, total] of Object.entries(score.failures) as Array<[EvaluationFailureCode, number]>) {
+        failureTotals[code] = (failureTotals[code] ?? 0) + total;
+      }
+    }
+    const providerAttempts = splitReports.some(({ score }) => score.providerAttempts === null)
+      ? null
+      : Object.fromEntries([...new Set(splitReports.flatMap(({ score }) => Object.keys(score.providerAttempts ?? {})))].sort().map((provider) => [
+          provider,
+          splitReports.reduce((total, { score }) => total + (score.providerAttempts?.[provider] ?? 0), 0),
+        ]));
     subjects.push({
       subjectId: subject.subjectId,
       role,
+      availability: "available",
       cohortFingerprint,
       kind: subject.kind,
       providers: [...subject.providers],
-      splits: splits.map((split) => ({
-        split,
-        score: summarizeSplit(split, subjectScores.filter((score) => score.split === split), subject.providers, pricing),
-      })),
+      splits: splitReports,
       safetyViolations: subjectScores.reduce((total, score) => total + score.safetyViolations.length, 0),
       dispatchAttempts: subjectScores.reduce((total, score) => total + score.dispatchAttempts, 0),
       deferred: {
@@ -1721,9 +1826,25 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
         refused: deferredScores.filter((score) => score.proposedCalls === 0).length,
         proposedCall: deferredScores.filter((score) => score.proposedCalls > 0).length,
       },
+      totals: {
+        caseCount: subjectScores.length,
+        unsafeCalls: subjectScores.reduce((total, score) => total + score.unsafeCalls, 0),
+        safetyViolations: subjectScores.reduce((total, score) => total + score.safetyViolations.length, 0),
+        dispatchAttempts: subjectScores.reduce((total, score) => total + score.dispatchAttempts, 0),
+        unnecessaryAbstentions: subjectScores.filter((score) => !score.deferred && score.unnecessaryAbstention).length,
+        missedAbstentions: subjectScores.filter((score) => !score.deferred && score.missedAbstention).length,
+        candidateMisses: subjectScores.filter((score) => !score.deferred).reduce((total, score) => total + score.candidateMisses, 0),
+        staleTargetUses: subjectScores.filter((score) => !score.deferred).reduce((total, score) => total + score.staleTargetUses, 0),
+        abstentions: subjectScores.filter((score) => score.abstained).length,
+        failures: failureTotals,
+        parseFailures: failureTotals.invalid_response ?? 0,
+        providerFailures: subjectScores.filter((score) => score.outcome === "provider_failure").length,
+        providerAttempts,
+      },
     });
   }
   for (const role of roles) {
+    if (entries.find((entry) => entry.role === role)?.subject.availability === "unavailable") continue;
     const cohort = scores.filter((score) => score.role === role);
     const ids = new Set(cohort.map((score) => score.caseId));
     if (cohort.length !== cases.length || ids.size !== cases.length || cases.some((testCase) => !ids.has(testCase.caseId))) {
@@ -1744,6 +1865,24 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
     if (subject === undefined) throw new Error(`${role} subject report is missing`);
     for (const split of splits) {
       const baselineScore = baseline.splits.find((entry) => entry.split === split)?.score;
+      if (baseline.availability !== "available") throw new Error("baseline subject must be available");
+      if (subject.availability === "unavailable") {
+        comparisons.push({
+          subjectId: subject.subjectId,
+          role,
+          baselineSubjectId: baseline.subjectId,
+          baselineRole: "baseline",
+          split,
+          advisory: true,
+          status: "unavailable",
+          reason: subject.reason,
+          metrics: {
+            wholeCallRate: delta(baselineScore.rates.wholeCallRate, null),
+            unsafeCalls: delta(baselineScore.unsafeCalls, null),
+          },
+        });
+        continue;
+      }
       const subjectScore = subject.splits.find((entry) => entry.split === split)?.score;
       if (baselineScore === undefined) throw new Error(`baseline ${split} summary is missing`);
       if (subjectScore === undefined) throw new Error(`${role} ${split} summary is missing`);
@@ -1754,6 +1893,7 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
         baselineRole: "baseline",
         split,
         advisory: true,
+        status: "evaluated",
         metrics: {
           wholeCallRate: delta(baselineScore.rates.wholeCallRate, subjectScore.rates.wholeCallRate),
           unsafeCalls: delta(baselineScore.unsafeCalls, subjectScore.unsafeCalls),
@@ -1782,10 +1922,10 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
       note: "Sol reviews held-out whole-call failures and chooses task-specific thresholds; the read pilot also needs a recorded rollout decision.",
     },
     limitations: [
-      "Corpus, subjects, and results are synthetic; no live provider or harness measurement is included.",
+      "Corpus and candidate state are synthetic; configured available subjects may still make provider calls.",
       "Subjects propose calls only. The runner performs no dispatch, so shadow comparison cannot duplicate a mutation.",
       "Usage totals are null unless every evaluated case reported that provider completely; cost also requires a caller-supplied, validated price table.",
-      "No live provider call is authorized here: a live TypeSafe run needs configured credentials plus an explicit evaluation budget.",
+      "The current heuristic is unavailable until O07/O08 provide an evaluation adapter; no current predictions or metrics are substituted.",
       "Read-pilot enablement is gated on O03/O07/O08/O09 integration, held-out review, and a recorded rollout decision.",
     ],
   };
@@ -1800,6 +1940,11 @@ function formatCost(score: SplitScore): string {
   return `${score.cost.currency ?? "?"} ${score.cost.totalUsd.toFixed(4)}`;
 }
 
+function formatProviderAttempts(attempts: Record<string, number> | null): string {
+  if (attempts === null) return "?";
+  return Object.entries(attempts).map(([provider, count]) => `${provider}=${count}`).join(",") || "0";
+}
+
 /** Concise human summary; the JSON report stays the machine-readable artifact. */
 export function summarizeEvaluationReport(report: EvaluationReport): string {
   const lines = [
@@ -1807,9 +1952,13 @@ export function summarizeEvaluationReport(report: EvaluationReport): string {
     `cases: ${EVALUATION_SPLITS.map((split) => `${split}=${report.splits[split]}`).join(", ")}; deferred=${report.deferredCases.length}`,
   ];
   for (const subject of report.subjects) {
+    if (subject.availability === "unavailable") {
+      lines.push(`${subject.subjectId} [unavailable:${subject.reason}]`);
+      continue;
+    }
     const parts = subject.splits.map(({ split, score }) => {
       const latency = score.latencyMs.p50 === null ? "n/a" : `${score.latencyMs.p50}/${score.latencyMs.p95 ?? "n/a"}ms`;
-      return `${split}: wholeCall ${score.wholeCallCorrect}/${score.pilotCaseCount} (${formatRate(score.rates.wholeCallRate)}), unsafe ${score.unsafeCalls}, abstain ${score.unnecessaryAbstentions}/${score.missedAbstentions}, misses ${score.candidateMisses}, p50/p95 ${latency}, cost ${formatCost(score)}`;
+      return `${split}: wholeCall ${score.wholeCallCorrect}/${score.pilotCaseCount} (${formatRate(score.rates.wholeCallRate)}), failures ${score.providerFailures}/${score.parseFailures}, providerAttempts ${formatProviderAttempts(score.providerAttempts)}, unsafe ${score.unsafeCalls}, safety ${score.safetyViolations}/${score.dispatchAttempts}, abstain ${score.unnecessaryAbstentions}/${score.missedAbstentions}, misses ${score.candidateMisses}, p50/p95 ${latency}, cost ${formatCost(score)}`;
     });
     lines.push(`${subject.subjectId} [${subject.kind}]: ${parts.join(" | ")}`);
   }
