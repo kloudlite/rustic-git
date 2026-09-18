@@ -59,7 +59,25 @@ process.stdin.on("data", (d) => {
     else if (cmd.type === "compact") { compacted.push(String(cmd.customInstructions ?? "")); ok({ summary: "…", tokensBefore: 100, estimatedTokensAfter: 20 }); }
     // Enough of pi's queue for the harness's own triage: what is held, and putting it back.
     else if (cmd.type === "clear_queue") { const held = { steering: steering.splice(0), followUp: queued.splice(0) }; ok(held); }
-    else if (cmd.type === "steer") { steering.push(String(cmd.message)); ok(); }
+    /**
+     * A steer reaches the turn that is RUNNING — that is what makes it one. A person's line is
+     * answered in that turn; the harness's own tagged lines (`[from …]`, `[task …]`, `[watch …]`)
+     * are context for the turn to carry on with, which is why a hung turn stays hung while agents
+     * report into it.
+     */
+    else if (cmd.type === "steer") {
+      // endsWith, not equality: a steer carries a tag too, and a tagged "crash" is still a crash.
+      if (String(cmd.message).endsWith("crash")) process.exit(3);
+      steering.push(String(cmd.message));
+      ok();
+      if (turning && !/^\[(from|task|watch|harness) /.test(String(cmd.message))) {
+        const said = { role: "user", content: String(cmd.message), timestamp: Date.now() };
+        const answer = { role: "assistant", content: `echo ${cmd.message}`, timestamp: Date.now() };
+        messages.push(said, answer);
+        turning = false;
+        out({ type: "agent_end", messages: [said, answer] });
+      }
+    }
     // A follow-up DURING a turn is held, the way pi holds one; outside a turn it simply runs,
     // which is what a test of the harness's own queueing needs to see.
     else if (cmd.type === "follow_up" && turning) { queued.push(String(cmd.message)); ok(); }

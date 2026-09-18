@@ -2146,15 +2146,22 @@ test("the report's stale case: one ask, no second progress poll", async () => {
  * SPACE — so both the tool and the identity say which verb that sentence means.
  */
 test("attaching a workspace to an environment is the space's verb, and says so", () => {
-  const env = TOOLS.find((t) => t.name === "kl_env_switch")!;
-  assert.match(env.summary, /THIS is how a workspace is attached to one/);
-  assert.match(env.summary, /no per-workspace attach any more/);
+  // Each of the three says whose choice it is, so a model reading any one of them knows.
+  const of = (n: string) => TOOLS.find((t) => t.name === n)!.summary;
+  assert.match(of("kl_env_switch"), /Choose the environment for the whole SPACE \(the team\)/);
+  assert.match(of("kl_env_switch"), /There is no per-workspace attach/);
+  assert.match(of("kl_env_current"), /chosen for the whole SPACE \(the team\), not per workspace/);
+  assert.match(of("kl_env_clear"), /for every workspace in it/);
   // Nothing offers a verb the platform refuses.
   for (const invented of ["kl_workspace_attach", "kl_workspace_detach"]) assert.ok(!TOOLS.some((t) => t.name === invented), invented);
 
   const id = identity(BENCH_HANDS);
-  assert.match(id, /"Attach this workspace to that environment" is kl_env_switch/);
-  assert.match(id, /never spend an ask looking for it/);
+  assert.match(id, /An environment is chosen for the whole SPACE \(the team\), never for one workspace/);
+  assert.match(id, /"attach this workspace to that environment" is kl_env_switch/);
+  assert.match(id, /no per-workspace attach to look for/);
+  // And the skill a person loads before working on environments says the same thing.
+  const skill = fs.readFileSync(path.resolve("skills/environments.md"), "utf8");
+  assert.match(skill, /chosen for the whole space \(the team\) with `kl_env_switch`, never for one workspace/);
 });
 
 /**

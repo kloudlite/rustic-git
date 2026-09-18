@@ -1667,8 +1667,18 @@ Your working directory is the tree ${tree} of this workspace; the main tree owns
      * (api-test-report D2, regressed). Held as a follow-up instead, the way `send()` does it, so
      * the queue pi already owns takes it and nothing is lost.
      */
+    /**
+     * A PERSON's own line mid-turn is a STEER, first (spec 2026-09-17-bench-tools-no-fs §4: "a
+     * person's own message is a steer, first"). This door is the desktop's socket, so that is who
+     * is typing. Held as a follow-up it waited for a turn that might never end: a `[reply <id>]`
+     * sat behind the very turn that was waiting for it, and a person adding a line to work in
+     * flight was not read until that work finished.
+     *
+     * The fork-ordered queue is still the right home for a prompt from ANOTHER session — that
+     * comes through `send()`, which sends a follow-up and lets pi's own queue take it.
+     */
     if (cmd.type === "prompt" && this.turning.has(id)) {
-      const r = await c.send({ ...cmd, type: "follow_up" });
+      const r = await c.send({ ...cmd, type: "steer" });
       this.triageSoon(id);
       return r;
     }
