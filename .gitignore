@@ -34,3 +34,4 @@ core.[0-9]*
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+harness/node_modules
