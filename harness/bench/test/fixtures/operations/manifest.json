@@ -1,0 +1,26 @@
+{
+  "contractVersion": "v1",
+  "description": "O01 operation-executor contract fixtures. Every file here is validated by operations-contracts.test.ts against the kind named below; an unlisted file fails the corpus test.",
+  "files": [
+    { "path": "requests/minimal-edit-instruction.json", "kind": "operate_request" },
+    { "path": "requests/minimal-edit-with-constraint.json", "kind": "operate_request" },
+    { "path": "requests/describe-capability-guide.json", "kind": "operate_request" },
+    { "path": "requests/describe-capability-schema.json", "kind": "operate_request" },
+    { "path": "requests/exact-read.json", "kind": "operate_request" },
+    { "path": "requests/inspect.json", "kind": "operate_request" },
+    { "path": "requests/cancel.json", "kind": "operate_request" },
+    { "path": "requests/resume-recorded-decision.json", "kind": "operate_request" },
+    { "path": "requests/resume-additional-input.json", "kind": "operate_request" },
+    { "path": "results/minimal-edit-completed.json", "kind": "compact_result" },
+    { "path": "results/ambiguous-target-needs-input.json", "kind": "compact_result" },
+    { "path": "results/unknown-mutation-outcome.json", "kind": "compact_result" },
+    { "path": "results/partial-completion.json", "kind": "compact_result" },
+    { "path": "snapshots/edit-operation.json", "kind": "operation_snapshot" },
+    { "path": "events/queued-read.json", "kind": "operation_event" },
+    { "path": "events/unknown-outcome.json", "kind": "operation_event" },
+    { "path": "capabilities/file-read.json", "kind": "capability_descriptor" },
+    { "path": "capabilities/file-edit.json", "kind": "capability_descriptor" },
+    { "path": "decisions/recorded-grant.json", "kind": "recorded_decision" },
+    { "path": "decisions/pending-additional-input.json", "kind": "pending_decision" }
+  ]
+}

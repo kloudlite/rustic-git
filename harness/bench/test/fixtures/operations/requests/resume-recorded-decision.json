@@ -1,0 +1,10 @@
+{
+  "action": "resume",
+  "operationId": "op-42",
+  "decisionId": "dec-42",
+  "expectedRevision": 3,
+  "resolution": {
+    "kind": "recorded_user_decision",
+    "recordId": "decision-7"
+  }
+}

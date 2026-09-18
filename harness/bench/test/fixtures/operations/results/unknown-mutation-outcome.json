@@ -1,0 +1,13 @@
+{
+  "operationId": "op-44",
+  "revision": 5,
+  "state": "reconciling",
+  "summary": "The package update did not return an outcome; reconciling before any retry.",
+  "unknownOutcomes": ["step-3"],
+  "error": {
+    "code": "unknown_outcome",
+    "message": "dispatch timed out after the request may have been applied",
+    "retryable": false,
+    "refs": ["op-44/step-3"]
+  }
+}

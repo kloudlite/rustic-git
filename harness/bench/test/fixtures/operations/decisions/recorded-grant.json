@@ -1,0 +1,16 @@
+{
+  "recordId": "decision-7",
+  "operationId": "op-42",
+  "stepId": "step-2",
+  "decisionId": "dec-42",
+  "decisionClass": "user_authorization",
+  "actorId": "user-1",
+  "tenantId": "tenant-1",
+  "sessionId": "s-1",
+  "payloadDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "revision": 3,
+  "policySource": "user_ui",
+  "outcome": "granted",
+  "recordedAt": 1760000002000,
+  "expiresAt": 1760000600000
+}

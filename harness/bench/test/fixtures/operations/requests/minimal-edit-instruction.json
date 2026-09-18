@@ -1,0 +1,3 @@
+{
+  "instruction": "In src/config.ts, change the timeout to 30000."
+}
