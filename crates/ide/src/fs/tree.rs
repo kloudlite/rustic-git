@@ -64,7 +64,7 @@ fn ignored(st: &Status, rel: &str, is_dir: bool) -> bool {
     st.ignored.iter().any(|i| *i == rel || (is_dir && *i == as_dir) || (i.ends_with('/') && rel.starts_with(i.as_str())))
 }
 
-fn read_level(dir: &Path, root: &Path, st: &Status, depth: u8, budget: &mut usize) -> std::io::Result<(Vec<Entry>, bool)> {
+fn read_level(dir: &Path, root: &Path, hide: bool, st: &Status, depth: u8, budget: &mut usize) -> std::io::Result<(Vec<Entry>, bool)> {
     let mut rows: Vec<(std::fs::DirEntry, std::fs::Metadata)> = Vec::new();
     for e in std::fs::read_dir(dir)? {
         let e = e?;
@@ -79,8 +79,15 @@ fn read_level(dir: &Path, root: &Path, st: &Status, depth: u8, budget: &mut usiz
             truncated = true;
             break;
         }
-        *budget -= 1;
         let path = e.path();
+        // Pruned BEFORE the budget is spent and before the row is built: `.agents/` is another
+        // session's working directory, and the main tree may not see it — the same rule `confine`
+        // gives a named path (spec §4.4). Every walk asks this; `glob` and `grep` ask it through
+        // `WalkBuilder::filter_entry`.
+        if hide && path.strip_prefix(root).is_ok_and(|r| r.starts_with(crate::trees::TREES_DIR)) {
+            continue;
+        }
+        *budget -= 1;
         let rel = path.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned());
         let kind = if m.is_symlink() { "symlink" } else if m.is_dir() { "dir" } else { "file" };
         let is_dir = kind == "dir";
@@ -102,7 +109,7 @@ fn read_level(dir: &Path, root: &Path, st: &Status, depth: u8, budget: &mut usiz
         if is_dir && depth > 1 && !ign {
             // An ignored directory (`.cache`, `graft`, `node_modules`) is shown but never descended
             // into unasked: it is where the thousands of entries live.
-            let (kids, t) = read_level(&path, root, st, depth - 1, budget)?;
+            let (kids, t) = read_level(&path, root, hide, st, depth - 1, budget)?;
             truncated |= t;
             entry.entries = Some(kids);
         }
@@ -122,10 +129,10 @@ pub async fn tree(t: &TreeCtx, path: &str, depth: u8) -> Result<(String, Vec<Ent
         return Err(ToolError::Failed(format!("{}: not a directory", crate::paths::relative(t, &dir))));
     }
     let st = git::status(&t.root, true).await.map_err(ToolError::Failed)?;
-    let (root, dir2) = (t.root.clone(), dir.clone());
+    let (root, dir2, hide) = (t.root.clone(), dir.clone(), crate::paths::hides_agents(t).is_some());
     let (entries, truncated) = tokio::task::spawn_blocking(move || {
         let mut budget = MAX_ENTRIES;
-        read_level(&dir2, &root, &st, depth, &mut budget)
+        read_level(&dir2, &root, hide, &st, depth, &mut budget)
     })
     .await
     .map_err(|e| ToolError::Failed(e.to_string()))?

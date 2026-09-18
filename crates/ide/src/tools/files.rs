@@ -151,13 +151,29 @@ pub fn edit(t: &TreeCtx, args: &Value) -> Result<Value, ToolError> {
     Ok(json!({ "files": staged.iter().map(|(p, _, _, n)| json!({ "path": relative(t, p), "applied": n })).collect::<Vec<_>>(), "applied": staged.iter().map(|s| s.3).sum::<usize>() }))
 }
 
+/// The walk `glob` and `grep` share, with the one thing a walk must not show pruned at the
+/// directory: `filter_entry` is asked before descending, so `.agents` costs one call rather than
+/// one per file under it. `confine` guards a NAMED path; this is the same rule for a discovered one.
+fn walk(t: &TreeCtx, cwd: &Path) -> ignore::Walk {
+    // One owned `PathBuf`, not the ctx: `filter_entry` wants a `'static` predicate.
+    let hide = crate::paths::hides_agents(t).map(Path::to_path_buf);
+    ignore::WalkBuilder::new(cwd)
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(move |e| match &hide {
+            Some(root) => !e.path().strip_prefix(root).is_ok_and(|r| r.starts_with(crate::trees::TREES_DIR)),
+            None => true,
+        })
+        .build()
+}
+
 pub fn glob(t: &TreeCtx, args: &Value) -> Result<Value, ToolError> {
     let pattern = str_arg(args, "pattern")?;
     let cwd = confine(t, opt_str(args, "cwd").unwrap_or("."))?;
     let matcher = globset::GlobBuilder::new(pattern).literal_separator(false).build().map_err(|e| ToolError::Invalid(format!("pattern: {e}")))?.compile_matcher();
     let mut hits: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let mut truncated = false;
-    for entry in ignore::WalkBuilder::new(&cwd).hidden(false).require_git(false).build().flatten() {
+    for entry in walk(t, &cwd).flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -187,7 +203,7 @@ pub fn grep(t: &TreeCtx, args: &Value) -> Result<Value, ToolError> {
     let mut files: Vec<Value> = Vec::new();
     let mut counts: Vec<Value> = Vec::new();
     let mut truncated = false;
-    'files: for entry in ignore::WalkBuilder::new(&cwd).hidden(false).require_git(false).build().flatten() {
+    'files: for entry in walk(t, &cwd).flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }

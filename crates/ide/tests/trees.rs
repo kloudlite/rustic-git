@@ -226,3 +226,47 @@ fn a_bind_failure_is_reported_as_a_sentence_naming_the_holder() {
     // A bind failure with no readable port still reports the failure, without inventing a number.
     assert_eq!(port_conflict(ring, "node server.js"), None);
 }
+
+/// A walk DISCOVERS paths rather than being handed them, so it prunes where `confine` refuses.
+/// `read` of `.agents/probe/x` from main is a 403 — and `glob`, `grep` and `/fs/tree` must not
+/// list the same file, or the fence holds only for whoever already knows the path.
+///
+/// The fleet found this: `ws.tree.cut` compared main's listing to the tree's and main's carried
+/// `.agents/probe/…` (2026-09-18). One predicate now, so a fourth walk cannot forget.
+#[tokio::test]
+async fn no_walk_on_the_main_tree_shows_another_sessions_files() {
+    let (_t, app) = workspace();
+    // Something to find under both roots, with the same name, so a hit is unambiguous.
+    std::fs::write(app.tree(None).unwrap().root.join("marker.rs"), "// main\n").unwrap();
+    std::fs::write(app.tree(Some("x")).unwrap().root.join("marker.rs"), "// tree\n").unwrap();
+
+    let hits = |v: &serde_json::Value| -> Vec<String> {
+        v["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect()
+    };
+    let main = app.registry.call("glob", serde_json::json!({ "pattern": "**/*.rs" })).await.unwrap();
+    let found = hits(&main);
+    assert!(found.iter().any(|p| p == "marker.rs"), "main finds its own: {found:?}");
+    assert!(!found.iter().any(|p| p.contains(".agents")), "main's glob shows a tree's files: {found:?}");
+
+    // The tree finds its own — the fixture gives it a `src/main.rs` of its own too — and nothing
+    // of main's, because its root is the fence and main's files are simply not under it.
+    let inside = app.registry.call("glob", serde_json::json!({ "pattern": "**/*.rs", "tree": "x" })).await.unwrap();
+    assert_eq!(hits(&inside), vec!["marker.rs".to_string(), "src/main.rs".to_string()], "{inside}");
+    // Same NAMES, different files: the listings are equal, which is exactly what `ws.tree.cut`
+    // compares, and it must hold without either side reaching into the other.
+    assert_eq!(hits(&inside), found, "a fresh tree lists what its source does");
+
+    // grep walks the same way.
+    let g = app.registry.call("grep", serde_json::json!({ "pattern": "tree", "mode": "files" })).await.unwrap();
+    let files: Vec<String> = g["files"].as_array().unwrap().iter().map(|f| f.to_string()).collect();
+    assert!(!files.iter().any(|f| f.contains(".agents")), "main's grep reaches into a tree: {files:?}");
+
+    // And so does the listing a console renders from.
+    let (dir, rows, _) = kloudlite_ide::fs::tree::tree(&app.tree(None).unwrap(), ".", 2).await.unwrap();
+    assert_eq!(dir, ".");
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(!names.contains(&".agents"), "main's tree listing shows .agents: {names:?}");
+    // The tree's own listing is unaffected: there are no trees inside a tree.
+    let (_, rows, _) = kloudlite_ide::fs::tree::tree(&app.tree(Some("x")).unwrap(), ".", 1).await.unwrap();
+    assert!(rows.iter().any(|r| r.name == "marker.rs"), "a tree lists its own files");
+}

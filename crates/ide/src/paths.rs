@@ -53,6 +53,30 @@ pub fn confine(tree: &TreeCtx, given: &str) -> Result<PathBuf, ToolError> {
     Ok(resolved)
 }
 
+/// Whether a path a WALK reached is one this tree may show. The same rule `confine` enforces for a
+/// named path, asked the other way round — a walk does not hand its entries to `confine`, it
+/// discovers them, so it has to prune rather than refuse.
+///
+/// Only the main tree has anything to hide, and only `.agents/`: a subagent's files. `glob`,
+/// `grep` and `/fs/tree` all go through this, so a fourth walk added later cannot quietly leak
+/// what the path tools refuse — which is what `ws.tree.cut` caught on the fleet, main's `glob`
+/// listing carrying `.agents/probe/…` while `read` of the same path answered 403 (2026-09-18).
+///
+/// Takes the path as walked, absolute: pruning is cheapest at the directory, before descending.
+pub fn walk_allows(tree: &TreeCtx, p: &Path) -> bool {
+    hides_agents(tree).is_none_or(|root| !p.strip_prefix(root).is_ok_and(|rest| rest.starts_with(TREES_DIR)))
+}
+
+/// The root a walk must prune `.agents/` under, or `None` when it must prune nothing. Split from
+/// `walk_allows` so a walker that needs an owned `'static` predicate — `ignore::WalkBuilder`'s
+/// `filter_entry` does — can capture one `PathBuf` instead of the whole `TreeCtx`.
+///
+/// Only the main tree hides anything: inside a tree there are no trees, and its own root is the
+/// fence.
+pub fn hides_agents(tree: &TreeCtx) -> Option<&Path> {
+    tree.is_main().then_some(tree.root.as_path())
+}
+
 /// Canonicalise the longest existing prefix and re-append the rest, so a path that does not exist
 /// yet (a `write` target) is still checked through whatever symlinks lead to it.
 fn resolve_existing_prefix(p: &Path) -> PathBuf {
