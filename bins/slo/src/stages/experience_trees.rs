@@ -198,13 +198,21 @@ pub async fn trees(c: &mut Ctx) {
             // Read with `kubectl exec`, not through the tool server: no tree was ever asked for
             // on the copy, so `tree=probe` would rightly 400 there. What is being checked is the
             // BYTES, and only a shell in the pod can see them.
-            let (code, out, _) =
-                ws_exec(c, &copy, "ls -A /home/kl/workspaces/$KL_WORKSPACE/.agents/probe 2>&1 || true", EXEC).await?;
+            // Three outcomes, told apart: the directory is there and EMPTY (the mount point
+            // `btrfs send` left behind — a pass), it is there and holds something (the tree
+            // travelled — a fail), or it is not there at all (also a pass: nothing of the tree
+            // survived). `ls ... || true` alone conflated the third with the second, because the
+            // error text landed in stdout and read as content.
+            let script = "d=\"$KL_WORKSPACE\"/.agents/probe; if [ -d \"$d\" ]; then echo PRESENT; ls -A \"$d\"; else echo ABSENT; fi";
+            let (code, out, err) = ws_exec(c, &copy, script, EXEC).await?;
             if code != 0 {
-                return Err(anyhow!("could not list the restored .agents/probe: exit {code}"));
+                return Err(anyhow!("could not look at the restored .agents/probe: exit {code}: {}", err.trim()));
             }
-            if !out.trim().is_empty() {
-                return Err(anyhow!("a tree travelled with the push; the copy holds {:?}", out.trim()));
+            let mut lines = out.lines();
+            let present = lines.next().unwrap_or("").trim() == "PRESENT";
+            let held: Vec<&str> = lines.map(str::trim).filter(|l| !l.is_empty()).collect();
+            if present && !held.is_empty() {
+                return Err(anyhow!("a tree travelled with the push; the copy holds {held:?}"));
             }
             Ok(())
         }
@@ -224,7 +232,7 @@ pub async fn trees(c: &mut Ctx) {
             poll_json(c, &doc, &c.probe_jwt, PASS, |v| !names(v).iter().any(|n| n == TREE))
                 .await
                 .context("the tree never left status.trees")?;
-            let (_, out, _) = ws_exec(c, &id, "ls -A /home/kl/workspaces/$KL_WORKSPACE/.agents 2>&1 || true", EXEC).await?;
+            let (_, out, _) = ws_exec(c, &id, "ls -A \"$KL_WORKSPACE\"/.agents 2>&1 || true", EXEC).await?;
             if out.contains(TREE) {
                 return Err(anyhow!("the subvolume is still on disk: {:?}", out.trim()));
             }
