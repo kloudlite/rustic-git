@@ -49,8 +49,9 @@ next), ≤ 8 lines; the person's words forwarded, never rewritten into tool name
 ## 3. Environments and services
 
 3.1 "create an environment t-env with mongodb and redis" → proposal → services Ready in `/v1`.
-3.2 "attach t-go to t-env" → attached; from t-go's session "can you reach mongodb?" → the
-    workspace runs a TCP check (exec card in build mode) and answers.
+3.2 "use t-env for my workspaces" → the SPACE environment switches (per-workspace attach is retired
+    by the platform: `/v1 …/attach` → 410); from t-go's session "can you reach mongodb?" → a TCP
+    check (exec card in build mode) and an answer.
 3.3 "intercept mongodb in t-env with t-go on 27017→27017" → proposal → intercept in force
     (`status.intercepted_by`); "release it" → released.
 3.4 "add nats to t-env" → PATCH services, mongodb's data path untouched (read back the spec).
