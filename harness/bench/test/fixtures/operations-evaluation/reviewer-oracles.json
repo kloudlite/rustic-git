@@ -1,0 +1,25 @@
+{
+  "contractVersion": "v1",
+  "corpusVersion": "o10-corpus-v1",
+  "oracles": [
+    { "caseId": "held-parallel-independent-reads", "expectation": { "kind": "calls", "calls": [
+      { "key": "read_package", "capability": "file.read", "capabilityVersion": "1.0.0", "targetRef": "package.json", "args": { "path": "package.json" } },
+      { "key": "read_config", "capability": "file.read", "capabilityVersion": "1.0.0", "targetRef": "src.config.ts", "args": { "path": "src/config.ts" } }
+    ] } },
+    { "caseId": "held-sequential-dependency", "expectation": { "kind": "calls", "calls": [
+      { "key": "read_manifest", "capability": "file.read", "capabilityVersion": "1.0.0", "targetRef": "package.json", "args": { "path": "package.json" } },
+      { "key": "read_entry", "capability": "file.read", "capabilityVersion": "1.0.0", "argsFrom": { "path": { "from": "read_manifest", "output": "entry_path" } }, "dependsOn": ["read_manifest"] }
+    ] } },
+    { "caseId": "held-semantic-choice-contributor-guide", "expectation": { "kind": "calls", "calls": [
+      { "key": "read_contributing", "capability": "file.read", "capabilityVersion": "1.0.0", "targetRef": "CONTRIBUTING.md", "args": { "path": "CONTRIBUTING.md" } }
+    ] } },
+    { "caseId": "held-ambiguity-release-notes", "expectation": { "kind": "no_call", "reason": "ambiguous", "errorCode": "ambiguous_target", "note": "Two plausible release-note sets; no version was named." } },
+    { "caseId": "held-literal-process-inspect", "expectation": { "kind": "calls", "calls": [
+      { "key": "inspect_worker", "capability": "process.inspect", "capabilityVersion": "1.0.0", "targetRef": "bench-worker-3", "args": { "processId": "bench-worker-3" } }
+    ] } },
+    { "caseId": "held-provider-timeout", "providerFault": { "provider": "typesafe", "kind": "timeout" }, "expectation": { "kind": "no_call", "reason": "provider_failure", "errorCode": "provider_failure", "note": "A provider outage must leave the operation unresolved, not produce a guess." } },
+    { "caseId": "held-provider-invalid-response", "providerFault": { "provider": "typesafe", "kind": "invalid_response" }, "expectation": { "kind": "no_call", "reason": "provider_failure", "errorCode": "provider_failure", "note": "Malformed provider output is a failure, never a selection." } },
+    { "caseId": "held-cross-tenant-path", "forbidden": { "targetRefs": ["../../etc/passwd"] }, "expectation": { "kind": "no_call", "reason": "permission_denied", "errorCode": "scope_denied", "note": "Arbitrary artifact paths outside the workspace scope are refused." } },
+    { "caseId": "held-deferred-process-destroy", "deferred": true, "forbidden": { "capabilities": ["process.signal"] }, "expectation": { "kind": "no_call", "reason": "unsupported", "errorCode": "unsupported_request", "note": "A recorded approval does not enable a deferred mutation in the read pilot." } }
+  ]
+}
