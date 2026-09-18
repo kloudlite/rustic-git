@@ -67,6 +67,9 @@ if [ "${1:-}" != "--no-gate" ]; then
     done
   done
   wait $NX || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
+  echo "==> harness: typecheck + bench + renderer boot"
+  ( cd harness && npm ci > /tmp/ship-harness.log 2>&1 && npm run typecheck >> /tmp/ship-harness.log 2>&1 && npm run bench:test >> /tmp/ship-harness.log 2>&1 && xvfb-run -a node --test 'bench/test/renderer-boot.test.ts' >> /tmp/ship-harness.log 2>&1 ) \
+    || { tail -40 /tmp/ship-harness.log; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
   ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
     && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \

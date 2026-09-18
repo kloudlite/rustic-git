@@ -151,6 +151,7 @@ pub struct Ctx {
     /// The newest report this run could file, for the heartbeat task (`report::heartbeat`) to
     /// re-PUT between stages so a live pod's row never reads as stale.
     pub beat: std::sync::Arc<std::sync::Mutex<Option<kloudlite_workspaces::history::slo::RunReport>>>,
+    pub coordination: Option<crate::coordination::RollLock>,
 }
 
 /// How long the run's single downgrade window stays open. One srv roll is minutes; this is
@@ -197,12 +198,21 @@ impl Ctx {
             Suite::Hourly => std::env::var("JOB_COMPLETION_INDEX").ok().and_then(|i| i.parse::<u8>().ok()),
             _ => None,
         };
+        let parent_run = run_id.is_none();
+        let effective_run_id = run_id.unwrap_or_else(|| match group {
+            Some(g) => format!("{}-{}-g{g}", suite.as_str(), started.timestamp()),
+            None => format!("{}-{}", suite.as_str(), started.timestamp()),
+        });
+        let coordination_enabled = std::env::var("KLOUDLITE_SLO_COORDINATION").as_deref() == Ok("1")
+            || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
+        let coordination = if parent_run && coordination_enabled {
+            Some(crate::coordination::acquire(crate::drill::incluster()?, &effective_run_id).await?)
+        } else {
+            None
+        };
         Ok(Ctx {
             jwt,
-            run_id: run_id.unwrap_or_else(|| match group {
-                Some(g) => format!("{}-{}-g{g}", suite.as_str(), started.timestamp()),
-                None => format!("{}-{}", suite.as_str(), started.timestamp()),
-            }),
+            run_id: effective_run_id,
             group,
             probe_jwt,
             other_jwt,
@@ -250,6 +260,7 @@ impl Ctx {
             roll_check: true,
             roll_window: None,
             cfg,
+            coordination,
         })
     }
 
@@ -331,5 +342,10 @@ impl Ctx {
             }
             Err(e) => tracing::warn!(error = %e, "slo.state.failed"),
         }
+    }
+
+    pub async fn release_coordination(&mut self) -> anyhow::Result<()> {
+        if let Some(lock) = self.coordination.take() { lock.release().await?; }
+        Ok(())
     }
 }

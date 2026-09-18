@@ -313,8 +313,14 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
             continue;
         }
         let Some(active) = record.active.as_ref() else { continue };
-        let Some(meta) = store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await.ok() else { continue };
-        if meta.last_modified > cutoff {
+        let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
+            Ok(meta) => meta,
+            Err(slatedb::object_store::Error::NotFound { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at)
+            .unwrap_or(meta.last_modified);
+        if installed_at.is_some_and(|installed_at| installed_at > cutoff) {
             continue;
         }
         let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version).await? else { continue };

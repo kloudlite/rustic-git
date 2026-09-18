@@ -29,15 +29,20 @@ use serde_json::{json, Value};
 /// One string for both: a node carries at most one drill's marks, and a reader that finds either
 /// wants the same answer — which run put it there.
 pub const DRILL_TAINT: &str = "kloudlite.io/slo-drill";
+const DRILL_ORIGINALS: &str = "kloudlite.io/slo-drill-originals";
 
 /// What a node is carrying from some drill: the taint's value and the label's, each `Some` only
 /// when that mark is actually on the node. Both are a run id (`run-{suite}-{unix}`), which is what
 /// lets a sweep recognise its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mark {
     pub node: String,
     pub taint: Option<String>,
     pub label: Option<String>,
+    pub original_taint: Option<String>,
+    pub original_cordon: Option<bool>,
+    pub original_decommission: Option<String>,
+    pub original_decommission_status: Option<String>,
 }
 
 /// The fleet mutations a drill makes, and nothing else. Each takes the run that is making it —
@@ -58,6 +63,14 @@ pub trait Cluster: Send + Sync {
     /// emptyDir file (2026-09-12): the file lived in the pod whose death is the exact case the
     /// sweep exists for, and it named no run, so any run's teardown undid any run's cordon.
     async fn mark(&self, node: &str, run: Option<&str>) -> Result<()>;
+    async fn restore_taint(&self, node: &str, _run: &str) -> Result<()> {
+        self.taint(node, None).await
+    }
+    async fn restore_marked(&self, node: &str, _run: &str) -> Result<()> {
+        self.cordon(node, false).await?;
+        self.decommission(node, false).await?;
+        self.mark(node, None).await
+    }
     /// `Some(spec)` creates the NetworkPolicy, `None` deletes it.
     async fn netpol(&self, ns: &str, name: &str, spec: Option<Value>) -> Result<()>;
     async fn netpol_names(&self, ns: &str) -> Result<Vec<String>>;
@@ -110,7 +123,7 @@ pub async fn with_taint<T>(
     body: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     k.taint(node, Some(run)).await?;
-    undoing(cap, body, || k.taint(node, None)).await
+    undoing(cap, body, || k.restore_taint(node, run)).await
 }
 
 /// Make a node unplaceable the way the platform does, for the length of `body`.
@@ -127,11 +140,7 @@ pub async fn with_decommission<T>(
 ) -> Result<T> {
     k.mark(node, Some(run)).await?;
     k.decommission(node, true).await?;
-    undoing(cap, body, || async {
-        k.decommission(node, false).await?;
-        k.mark(node, None).await
-    })
-    .await
+    undoing(cap, body, || k.restore_marked(node, run)).await
 }
 
 pub async fn with_cordon<T>(
@@ -143,11 +152,7 @@ pub async fn with_cordon<T>(
 ) -> Result<T> {
     k.mark(node, Some(run)).await?;
     k.cordon(node, true).await?;
-    undoing(cap, body, || async {
-        k.cordon(node, false).await?;
-        k.mark(node, None).await
-    })
-    .await
+    undoing(cap, body, || k.restore_marked(node, run)).await
 }
 
 pub async fn with_netpol<T>(
@@ -180,7 +185,7 @@ pub async fn sweep_nodes(k: &dyn Cluster, mine: &dyn Fn(&str) -> bool) {
     };
     for m in marks {
         if m.taint.as_deref().is_some_and(&mine) {
-            match k.taint(&m.node, None).await {
+            match k.restore_taint(&m.node, m.taint.as_deref().unwrap_or_default()).await {
                 Ok(()) => tracing::info!(kind = "taint", name = %m.node, "slo.drill.swept"),
                 Err(e) => tracing::warn!(kind = "taint", name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
             }
@@ -188,17 +193,9 @@ pub async fn sweep_nodes(k: &dyn Cluster, mine: &dyn Fn(&str) -> bool) {
         if !m.label.as_deref().is_some_and(&mine) {
             continue;
         }
-        // Both, blind: the one label records either mutation, and a decommission label left on a
-        // node is a node placement will never use again.
-        for (kind, out) in [
-            ("cordon", k.cordon(&m.node, false).await),
-            ("decommission", k.decommission(&m.node, false).await),
-            ("mark", k.mark(&m.node, None).await),
-        ] {
-            match out {
-                Ok(()) => tracing::info!(kind, name = %m.node, "slo.drill.swept"),
-                Err(e) => tracing::warn!(kind, name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
-            }
+        match k.restore_marked(&m.node, m.label.as_deref().unwrap_or_default()).await {
+            Ok(()) => tracing::info!(kind = "marked-node", name = %m.node, "slo.drill.swept"),
+            Err(e) => tracing::warn!(kind = "marked-node", name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
         }
     }
 }
@@ -259,6 +256,11 @@ impl Cluster for kube::Client {
         let obj = api.get(node).await?;
         let taints = obj.spec.and_then(|s| s.taints).unwrap_or_default();
         let at = taints.iter().position(|t| t.key == DRILL_TAINT);
+        if let (Some(run), Some(index)) = (run, at) {
+            if taints[index].value.as_deref() != Some(run) {
+                return Err(anyhow!("node {node} is marked by another drill"));
+            }
+        }
         let ops = match (run, at) {
             (Some(run), _) => {
                 let one = json!({ "key": DRILL_TAINT, "value": run, "effect": "NoExecute" });
@@ -314,14 +316,101 @@ impl Cluster for kube::Client {
     }
 
     async fn mark(&self, node: &str, run: Option<&str>) -> Result<()> {
+        use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS};
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
+        let current = api.get(node).await?;
+        if let Some(run) = run {
+            if current.metadata.labels.as_ref().and_then(|labels| labels.get(DRILL_TAINT)).is_some_and(|value| value != run) {
+                return Err(anyhow!("node {node} is marked by another drill"));
+            }
+        }
         let value = run.map(Value::from).unwrap_or(Value::Null);
+        let annotations = match run {
+            Some(run) => {
+                let original_taint = current
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.taints.as_ref())
+                    .and_then(|taints| taints.iter().find(|taint| taint.key == DRILL_TAINT))
+                    .and_then(|taint| taint.value.clone());
+                json!({
+                    DRILL_ORIGINALS: json!({
+                        "run": run,
+                        "taint": original_taint,
+                        "cordon": current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false),
+                        "decommission": current.metadata.labels.as_ref().and_then(|labels| labels.get(DECOMMISSION_LABEL)),
+                        "decommission_status": current.metadata.annotations.as_ref().and_then(|annotations| annotations.get(DECOMMISSION_STATUS)),
+                    }).to_string(),
+                })
+            }
+            None => json!({ DRILL_ORIGINALS: Value::Null }),
+        };
         api.patch(
             node,
             &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DRILL_TAINT: value } } })),
+            &kube::api::Patch::Merge(&json!({ "metadata": { "labels": { DRILL_TAINT: value }, "annotations": annotations } })),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn restore_taint(&self, node: &str, run: &str) -> Result<()> {
+        let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
+        let current = api.get(node).await?;
+        let owned = current
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.taints.as_ref())
+            .and_then(|taints| taints.iter().find(|taint| taint.key == DRILL_TAINT))
+            .and_then(|taint| taint.value.as_deref())
+            .is_some_and(|value| value == run);
+        if !owned {
+            Ok(())
+        } else {
+            let index = current
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.taints.as_ref())
+                .and_then(|taints| taints.iter().position(|taint| taint.key == DRILL_TAINT && taint.value.as_deref() == Some(run)))
+                .ok_or_else(|| anyhow!("node {node} drill taint changed during cleanup"))?;
+            let operations = json!([
+                { "op": "test", "path": format!("/spec/taints/{index}/key"), "value": DRILL_TAINT },
+                { "op": "test", "path": format!("/spec/taints/{index}/value"), "value": run },
+                { "op": "remove", "path": format!("/spec/taints/{index}") },
+            ]);
+            api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(operations)?)).await?;
+            Ok(())
+        }
+    }
+
+    async fn restore_marked(&self, node: &str, run: &str) -> Result<()> {
+        use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS};
+        let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
+        let current = api.get(node).await?;
+        let labels = current.metadata.labels.as_ref();
+        if !labels.and_then(|values| values.get(DRILL_TAINT)).is_some_and(|value| value == run) {
+            return Ok(());
+        }
+        let originals = current
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|values| values.get(DRILL_ORIGINALS))
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .filter(|value| value.get("run").and_then(Value::as_str) == Some(run))
+            .ok_or_else(|| anyhow!("node {node} has no original drill state for {run}"))?;
+        let cordon_was = originals.as_ref().and_then(|value| value.get("cordon")).and_then(Value::as_bool).unwrap_or(false);
+        let decommission_was = originals.as_ref().and_then(|value| value.get("decommission")).and_then(Value::as_str).map(|value| Value::String(value.to_owned())).unwrap_or(Value::Null);
+        let status_was = originals.as_ref().and_then(|value| value.get("decommission_status")).and_then(Value::as_str).map(|value| Value::String(value.to_owned())).unwrap_or(Value::Null);
+        let decommission_is_owned = labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(String::as_str) == Some("true");
+        let patch = json!({
+            "metadata": {
+                "labels": { DRILL_TAINT: Value::Null, DECOMMISSION_LABEL: if decommission_is_owned { decommission_was } else { labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(|value| Value::String(value.clone())).unwrap_or(Value::Null) } },
+                "annotations": { DRILL_ORIGINALS: Value::Null, DECOMMISSION_STATUS: if decommission_is_owned { status_was } else { current.metadata.annotations.as_ref().and_then(|values| values.get(DECOMMISSION_STATUS)).map(|value| Value::String(value.clone())).unwrap_or(Value::Null) } },
+            },
+            "spec": { "unschedulable": if current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false) { cordon_was } else { current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false) } },
+        });
+        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await?;
         Ok(())
     }
 
@@ -339,8 +428,21 @@ impl Cluster for kube::Client {
                     .and_then(|t| t.iter().find(|t| t.key == DRILL_TAINT))
                     .map(|t| t.value.clone().unwrap_or_default());
                 let label = n.metadata.labels.as_ref().and_then(|l| l.get(DRILL_TAINT)).cloned();
-                (taint.is_some() || label.is_some())
-                    .then(|| Mark { node: kube::ResourceExt::name_any(n), taint, label })
+                let originals = n
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|values| values.get(DRILL_ORIGINALS))
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok());
+                (taint.is_some() || label.is_some()).then(|| Mark {
+                    node: kube::ResourceExt::name_any(n),
+                    taint,
+                    label,
+                    original_taint: originals.as_ref().and_then(|value| value.get("taint")).and_then(Value::as_str).map(str::to_owned),
+                    original_cordon: originals.as_ref().and_then(|value| value.get("cordon")).and_then(Value::as_bool),
+                    original_decommission: originals.as_ref().and_then(|value| value.get("decommission")).and_then(Value::as_str).map(str::to_owned),
+                    original_decommission_status: originals.as_ref().and_then(|value| value.get("decommission_status")).and_then(Value::as_str).map(str::to_owned),
+                })
             })
             .collect())
     }
@@ -515,8 +617,8 @@ pub(crate) mod tests {
     async fn teardown_sweeps_a_taint_and_a_cordon_a_dead_run_left() {
         let k = FakeKube::default();
         *k.marks.lock().expect("lock") = vec![
-            Mark { node: "node-a".into(), taint: Some(RUN.into()), label: None },
-            Mark { node: "node-b".into(), taint: None, label: Some(RUN.into()) },
+            Mark { node: "node-a".into(), taint: Some(RUN.into()), label: None, ..Default::default() },
+            Mark { node: "node-b".into(), taint: None, label: Some(RUN.into()), ..Default::default() },
         ];
         sweep_nodes(&k, &|v| v == RUN).await;
         assert_eq!(
@@ -535,6 +637,7 @@ pub(crate) mod tests {
             node: "node-a".into(),
             taint: Some("run-weekly-9999".into()),
             label: Some("run-weekly-9999".into()),
+            ..Default::default()
         }];
         *k.policies.lock().expect("lock") = vec!["run-weekly-9999-redis".into(), "run-fast-1-redis".into()];
         let mine = |v: &str| v.starts_with("run-fast-1");

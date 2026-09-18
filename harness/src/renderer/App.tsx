@@ -30,6 +30,7 @@ export function App() {
   const [teams, setTeams] = createSignal<Team[]>([]);
   const [teamId, setTeamId] = createSignal("");
   const [who, setWho] = createSignal("");
+  const bootTest = new URLSearchParams(location.search).has("boot-test");
   const teamName = () => teams().find((t) => t.slug === teamId())?.name || teamId();
   // The team's real workspaces and environments, read by main from /v1. What the API has no field
   // for — the bench's goal and plan — stays empty rather than faked.
@@ -41,6 +42,17 @@ export function App() {
   const [snapshots, setSnapshots] = createSignal<Snapshot[]>([]);
   const [wsNote, setWsNote] = createSignal<string | undefined>(LOADING);
   const [envNote, setEnvNote] = createSignal<string | undefined>(LOADING);
+  if (bootTest) {
+    setTeams([{ slug: "boot-team", name: "Boot Team", region: "boot", personal: true }]);
+    setWho("boot-user");
+    setTeamId("boot-team");
+    setWorkspaces([{
+      id: "boot-workspace", name: "boot-workspace", repo: "boot-repo", branch: "main", state: "running",
+      queue: [], packages: [], ephemerals: [], files: [], changes: [],
+    }]);
+    setWsNote(undefined);
+    setEnvNote(undefined);
+  }
   /**
    * The workspaces, with each one's AGENTS nested under it (spec §4.5). An agent works in a tree of
    * the workspace now, not in a clone of it, so its row comes from the bench's own session list
@@ -109,6 +121,7 @@ export function App() {
     }
   };
   void window.harness.auth.status().then((s) => {
+    if (bootTest) return;
     if (s.phase !== "ready") return;
     setWho(s.username);
     setTeamId(s.team);
@@ -664,6 +677,15 @@ export function App() {
     if (ev.type === "bench:resync") void refreshSessions().then(() => Promise.all(live_().map((x) => loadThread(x.id))), () => undefined);
   });
   void window.harness.benchState().then(async (st) => {
+    if (bootTest) {
+      live.setConnected(true);
+      setSessions([{ id: "boot-session", name: "Boot session", seq: 1, kind: "bench" }]);
+      live.thread("boot-session").replay([
+        { role: "user", content: "Show the boot fixture", timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "The authenticated fixture is ready." }], timestamp: 2 },
+      ]);
+      return;
+    }
     live.setConnected(st.connected);
     if (!st.configured) return void live.setStatusNote("not connected to your bench yet");
     // Cold and offline: the cached list and messages, read-only until connected.

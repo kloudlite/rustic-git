@@ -6,6 +6,7 @@ pub mod config;
 pub mod events;
 pub mod index;
 pub mod metered;
+pub mod local_cas;
 pub mod ownership;
 pub mod pool;
 pub mod refmeta;

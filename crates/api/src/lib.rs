@@ -782,8 +782,41 @@ mod tests {
             }));
             let mut h = axum::http::HeaderMap::new();
             h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
-            let result = bench_session(&api, &axum::http::Method::GET, "/v1/repos", &h).await;
-            assert_eq!(result.unwrap().err().unwrap().status(), StatusCode::UNAUTHORIZED);
+            for method in [axum::http::Method::GET, axum::http::Method::POST] {
+                let result = bench_session(&api, &method, "/v1/repos", &h).await;
+                assert_eq!(result.unwrap().err().unwrap().status(), StatusCode::UNAUTHORIZED);
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn bench_admission_missing_or_failing_is_unavailable_for_get_and_post() {
+        for failing in [false, true] {
+            let mut api = test_api_with_secret("s").await;
+            let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap().0;
+            api.jwt = Some(jwt);
+            if failing {
+                api.bench_admission = Some(Arc::new(|_| Box::pin(async { Err(()) }) as BenchAdmissionFuture));
+            }
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+            for method in [axum::http::Method::GET, axum::http::Method::POST] {
+                let result = bench_session(&api, &method, "/v1/repos", &h).await;
+                assert_eq!(result.unwrap().err().unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_session_bypasses_bench_admission() {
+        let mut api = test_api_with_secret("s").await;
+        let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
+        let tok = jwt.mint("alice", "Alice", None).unwrap();
+        api.jwt = Some(jwt);
+        api.bench_admission = Some(Arc::new(|_| Box::pin(async { Err(()) }) as BenchAdmissionFuture));
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
+        assert!(bench_session(&api, &axum::http::Method::GET, "/v1/repos", &h).await.is_none());
     }
 }

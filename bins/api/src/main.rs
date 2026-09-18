@@ -465,7 +465,11 @@ async fn run() -> Result<()> {
                             Ok(n) => tracing::info!(count = n, "history.migrations.applied"),
                             Err(e) => tracing::error!(error = %e, "history.migrations.failed"),
                         }
-                        let h = Arc::new(h);
+                        let h = Arc::new(h.with_outbox(store.os.clone()));
+                        let drainer_history = h.clone();
+                        tokio::spawn(async move {
+                            kloudlite_workspaces::history::outbox::drain_outbox_forever(drainer_history).await;
+                        });
                         // The second consumer group on the one `events` stream. Spawned only in
                         // the admin role, because it is the only writer of `kloudlite.events`.
                         let consumer_cache = cache.clone();

@@ -239,7 +239,7 @@ pub async fn put_manifest(
             }
         }
     }
-    let publication = blob_state::publication_id();
+    let publication = blob_state::manifest_publication(&owner, &name, &d);
     let mut pinned = Vec::new();
     for bd in &digests {
         match blob_state::pin(&app.store.os, &owner, bd, &publication).await {
@@ -253,9 +253,15 @@ pub async fn put_manifest(
     // generation. An unpinned digest may still be a child manifest in an index.
     let probes: Vec<_> = digests
         .iter()
-        .map(|bd| async {
+        .map(|bd| {
+            let app = app.clone();
+            let owner = owner.clone();
+            let name = name.clone();
+            let pinned = pinned.clone();
+            let bd = bd.clone();
+            async move {
             if pinned.iter().any(|p| p == bd) {
-                let Some(path) = blob_state::resolve(&app.store.os, &owner, bd).await? else {
+                let Some(path) = blob_state::resolve(&app.store.os, &owner, &bd).await? else {
                     return Ok(false);
                 };
                 return match app.store.os.head(&path).await {
@@ -264,10 +270,11 @@ pub async fn put_manifest(
                     Err(e) => Err(e.into()),
                 };
             }
-            match app.store.os.head(&manifest_path(&owner, &name, bd)).await {
+            match app.store.os.head(&manifest_path(&owner, &name, &bd)).await {
                 Ok(_) => Ok(true),
                 Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
                 Err(e) => Err(e.into()),
+            }
             }
         })
         .collect();
@@ -296,6 +303,9 @@ pub async fn put_manifest(
         return crate::oci_internal(e.into());
     }
     for bd in &pinned {
+        if let Err(e) = blob_state::release_durable_manifest_pins(&app.store.os, &owner, &name, &d, bd).await {
+            return crate::oci_internal(e);
+        }
         if let Err(e) = blob_state::unpin(&app.store.os, &owner, bd, &publication).await {
             tracing::warn!(owner = %owner, digest = %bd, error = %e, "registry.blob.unpin.failed");
         }

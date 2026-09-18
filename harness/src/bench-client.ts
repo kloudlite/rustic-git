@@ -58,16 +58,18 @@ export class BenchClient {
   private seq = 0;
 
   private nonce?: string;
+  private requestTimeoutMs: number;
 
   // `cacheKey` defaults to the address; the desktop app passes the username, because the
   // tunnel's port is new every launch and would otherwise empty the cache every time.
   // `nonce` is the in-process tunnel's per-launch secret, sent on every request and upgrade;
   // unset for a HARNESS_BENCH address, which has no such gate.
-  constructor(base: string, emit: Emit, cacheFile: string, cacheKey = base, nonce?: string) {
+  constructor(base: string, emit: Emit, cacheFile: string, cacheKey = base, nonce?: string, requestTimeoutMs = 30_000) {
     this.base = base.replace(/\/$/, "");
     this.emit = emit;
     this.cacheFile = cacheFile;
     this.nonce = nonce;
+    this.requestTimeoutMs = requestTimeoutMs;
     const empty: Cache = { base: cacheKey, sessions: [], exchanges: [], messages: {} };
     try {
       const c = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as Cache;
@@ -104,6 +106,15 @@ export class BenchClient {
     this.agents[url.protocol] ??= url.protocol === "https:" ? new https.Agent(KEEP_ALIVE) : new http.Agent(KEEP_ALIVE);
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (value: { status: number; body: string } | Error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (value instanceof Error) reject(value);
+        else resolve(value);
+      };
       const req = mod.request(
         url,
         {
@@ -115,10 +126,18 @@ export class BenchClient {
           let text = "";
           res.setEncoding("utf8");
           res.on("data", (c: string) => (text += c));
-          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: text }));
+          res.once("end", () => finish({ status: res.statusCode ?? 0, body: text }));
+          res.once("aborted", () => finish(new Error("bench response aborted")));
+          res.once("error", (error) => finish(error));
         },
       );
-      req.on("error", reject);
+      req.once("error", (error) => finish(error));
+      timer = setTimeout(() => {
+        const error = new Error(`bench request timed out after ${this.requestTimeoutMs}ms`);
+        req.destroy(error);
+        finish(error);
+      }, this.requestTimeoutMs);
+      timer.unref?.();
       if (payload) req.write(payload);
       req.end();
     });

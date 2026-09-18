@@ -62,7 +62,7 @@ pub fn object_store_views() -> Result<StoreViews> {
         // `slatedb::Db::resolve_object_store` rejects this URL shape (it requires an empty
         // leftover path after the scheme), so it is built directly instead.
         std::fs::create_dir_all(dir)?;
-        Arc::new(slatedb::object_store::local::LocalFileSystem::new_with_prefix(dir)?)
+        Arc::new(crate::local_cas::LocalCas::new(dir)?)
     } else if let Some(bucket) = url.strip_prefix("s3://") {
         // Built by hand rather than via resolve_object_store so the request timeout can be
         // raised: repack uploads a whole repository in one PUT, and object_store's 180s default

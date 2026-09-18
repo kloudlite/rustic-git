@@ -1,7 +1,8 @@
 import path from "node:path";
 import { appendLine, readLines } from "./log.ts";
+import { isActiveExchangeState, type ExchangeState } from "./exchange-state.ts";
 
-export type Exchange = { ts: number; id: string; session: string; workspace: string; dir: "in" | "out"; text: string; state: string; ref?: string };
+export type Exchange = { ts: number; id: string; session: string; workspace: string; dir: "in" | "out"; text: string; state: ExchangeState; ref?: string };
 type Line = Partial<Exchange> & { ts: number; discarded?: true };
 
 /**
@@ -38,7 +39,7 @@ export class ExchangeLog {
     return row;
   }
   transition(id: string, state: string): void {
-    this.write({ ts: Date.now(), id, state });
+    this.write({ ts: Date.now(), id, state: state as ExchangeState });
   }
   discard(session: string): void {
     this.write({ ts: Date.now(), session, discarded: true });
@@ -51,6 +52,12 @@ export class ExchangeLog {
   }
   byWorkspace(workspace: string, after?: number): Exchange[] {
     return this.where((e) => e.workspace === workspace, after);
+  }
+  get(id: string): Exchange | undefined {
+    return this.rows.get(id);
+  }
+  active(): Exchange[] {
+    return this.where((e) => e.dir === "out" && isActiveExchangeState(e.state));
   }
   recent(n: number): Exchange[] {
     return this.where(() => true).slice(-n);

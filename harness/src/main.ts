@@ -14,6 +14,10 @@ import { clearMyEnvironment, getEnvironment, listEnvironments, listRepos, listWo
 import { checkPty, checkWatch, closeSocket, readTtydFrame } from "./pty-ipc";
 import type WebSocket from "ws";
 
+if (process.env.KL_BOOT_TEST) {
+  app.setPath("userData", process.env.KL_BOOT_TEST_PROFILE ?? path.join(os.tmpdir(), `kloudlite-boot-${process.pid}`));
+}
+
 // One app, one login, one tunnel: a second launch focuses the first instead. `exit`, not
 // `quit`: quit is asynchronous and whenReady below would still open a window first.
 if (!app.requestSingleInstanceLock()) app.exit(0);
@@ -67,8 +71,8 @@ function createWindow(): void {
 
   mainWin = win;
   void win.loadFile(path.join(__dirname, "renderer", "index.html"), {
-    hash: process.env.HARNESS_HASH ?? "",
-    search: process.env.HARNESS_THEME ? `theme=${process.env.HARNESS_THEME}` : "",
+    hash: process.env.HARNESS_HASH ?? (process.env.KL_BOOT_TEST ? "boot-session" : ""),
+    search: [process.env.HARNESS_THEME && `theme=${process.env.HARNESS_THEME}`, process.env.KL_BOOT_TEST && "boot-test=1"].filter(Boolean).join("&"),
   });
 
   // HARNESS_SHOT=<file.png>: write one screenshot after first paint and exit, so

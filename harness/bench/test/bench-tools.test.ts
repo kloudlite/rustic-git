@@ -2292,6 +2292,7 @@ test("a queued ask does not survive a restart as queued", async () => {
     await one.openWorkspace("api");
     // The row as the log holds it when the bench goes down mid-queue.
     one.exchanges.record({ id: "ask-q1", session: asker, workspace: "api", dir: "out", text: "add a version endpoint", state: "queued" });
+    for (let i = 0; i < 501; i++) one.exchanges.record({ id: `done-${i}`, session: asker, workspace: "api", dir: "out", text: "finished work", state: "done" });
   } finally {
     await one.stop();
   }

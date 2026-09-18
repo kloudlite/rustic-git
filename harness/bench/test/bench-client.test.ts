@@ -154,3 +154,22 @@ test("the client pings its events socket, and stops when it closes", async () =>
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a stalled REST body is bounded by the request deadline", async () => {
+  const http = await import("node:http");
+  const srv = http.createServer((_q, r) => {
+    r.writeHead(200, { "content-type": "application/json" });
+    r.write("[");
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const c = new BenchClient(base, () => undefined, path.join(os.tmpdir(), `bench-timeout-${process.pid}.json`), base, undefined, 40);
+  const started = Date.now();
+  try {
+    await assert.rejects(c.rest("GET", "/stalled"), /bench request timed out after 40ms/);
+    assert.ok(Date.now() - started < 1000, "a body that never ends must not hold the caller");
+  } finally {
+    c.close();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});

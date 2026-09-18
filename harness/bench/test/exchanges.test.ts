@@ -41,3 +41,10 @@ test("after pages by timestamp", async () => {
   a.record({ id: "e2", session: "s-1", workspace: "api", dir: "in", text: "ok", state: "done" });
   assert.deepEqual(a.bySession("s-1", first.ts).map((e) => e.id), ["e2"]);
 });
+
+test("active views include every open row after an unbounded log tail", () => {
+  const a = new ExchangeLog(dir());
+  a.record({ id: "open", session: "s-1", workspace: "api", dir: "out", text: "still open", state: "queued" });
+  for (let i = 0; i < 501; i++) a.record({ id: `done-${i}`, session: "s-1", workspace: "api", dir: "out", text: "finished", state: "done" });
+  assert.deepEqual(a.active().map((e) => e.id), ["open"]);
+});

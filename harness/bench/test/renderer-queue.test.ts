@@ -290,6 +290,22 @@ test("the queue keeps info asks and finished rows, in the order they happened", 
   assert.deepEqual(q.map((x) => x.state), ["working", "done", "pending"]);
 });
 
+test("terminal exchange states leave the asks view and render as settled", () => {
+  seedExchanges([
+    { id: "blocked", session: "s-states", workspace: "api", dir: "out", text: "blocked", state: "blocked", ts: 40 },
+    { id: "cancelled", session: "s-states", workspace: "api", dir: "out", text: "cancelled", state: "cancelled", ts: 41 },
+    { id: "expired", session: "s-states", workspace: "api", dir: "out", text: "expired", state: "expired", ts: 42 },
+    { id: "running", session: "s-states", workspace: "api", dir: "out", text: "running", state: "running", ts: 43 },
+  ]);
+  assert.deepEqual(asksOf("s-states").map((e) => e.id), ["running"]);
+  assert.deepEqual(queueOf("s-states").map((e) => [e.text, e.state]), [
+    ["blocked", "done"],
+    ["cancelled", "done"],
+    ["expired", "done"],
+    ["running", "working"],
+  ]);
+});
+
 /**
  * The modes in the footer decide what a mutating tool costs a person. Build asks about everything
  * that changes; accept-edits answers the FILE tools for them and still asks about a command, which

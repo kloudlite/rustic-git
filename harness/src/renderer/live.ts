@@ -1,6 +1,7 @@
 import { createSignal, untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { Message } from "./model";
+import { isActiveExchangeState, rendererExchangeState, type ExchangeState } from "../../bench/src/exchange-state.ts";
 
 /**
  * The bench thread as pi streams it. Events fold into the same `Message`
@@ -33,7 +34,7 @@ export { procs };
  * record (`/exchanges`); this is the live view of the same rows, and it is what shows a person
  * what became of an ask — it was reaching the renderer and being dropped on the floor.
  */
-export type Exchange = { ts: number; id: string; session: string; workspace: string; dir: "in" | "out"; text: string; state: string; ref?: string };
+export type Exchange = { ts: number; id: string; session: string; workspace: string; dir: "in" | "out"; text: string; state: ExchangeState; ref?: string };
 const [exchanges, setExchanges] = createStore<Exchange[]>([]);
 export { exchanges };
 function foldExchange(row: Exchange) {
@@ -83,12 +84,12 @@ export const queueOf = (session: string) =>
       session: e.session,
       // The store keeps a timestamp; the row renders a clock.
       at: new Date(e.ts).toTimeString().slice(0, 5),
-      state: (e.state === "done" || e.state === "failed" ? "done" : e.state === "working" ? "working" : "pending") as "pending" | "working" | "done",
+      state: rendererExchangeState(e.state),
       workspace: wsNames()[e.workspace] ?? e.workspace,
     }));
 
 /** What a session has asked of a workspace and has not had back yet: its own queue. */
-export const asksOf = (session: string) => exchanges.filter((e) => e.session === session && e.dir === "out" && e.state !== "done" && e.state !== "failed");
+export const asksOf = (session: string) => exchanges.filter((e) => e.session === session && e.dir === "out" && isActiveExchangeState(e.state));
 
 /**
  * Workspace id → the name a person gave it. An intercept, an exchange and a process all name a

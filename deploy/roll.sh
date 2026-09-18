@@ -15,11 +15,16 @@ wait_for_probes() {
   local waited=0
   while :; do
     local active
-    active=$(kubectl -n kloudlite get jobs -o json | python3 -c '
+active=$(kubectl -n kloudlite get jobs -o json | python3 -c '
 import sys, json
 for j in json.load(sys.stdin)["items"]:
     n = j["metadata"]["name"]
-    if ("slo-" in n) and (j.get("status", {}).get("active") or 0) > 0:
+    labels = j["metadata"].get("labels", {})
+    owners = j["metadata"].get("ownerReferences", [])
+    probe = labels.get("kloudlite.io/probe") == "true" or any(o.get("kind") == "CronJob" and o.get("name", "").startswith("kloudlite-slo-") for o in owners) or n.startswith(("slo-", "fast-", "hourly-", "weekly-", "monthly-"))
+    status = j.get("status", {})
+    pending = not status.get("completionTime") and not status.get("failed") and not status.get("succeeded")
+    if probe and ((status.get("active") or 0) > 0 or pending):
         print(n)')
     [ -z "$active" ] && return 0
     if [ "$waited" -ge 7200 ]; then
@@ -32,6 +37,20 @@ for j in json.load(sys.stdin)["items"]:
 }
 wait_for_probes
 [ "${1:-}" = "--wait-only" ] && exit 0
+ROLL_RUN="roll-$(date -u +%s)-$RANDOM"
+POD_UID=$(kubectl -n kloudlite get pod "${HOSTNAME:-}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+HOLDER="${POD_UID:-operator}/$ROLL_RUN"
+kubectl -n kloudlite create configmap kloudlite-roll-coordination \
+  --from-literal="holder=$HOLDER" >/dev/null || {
+  echo "roll coordination is held by another operation" >&2
+  exit 3
+}
+release_roll_lock() {
+  kubectl -n kloudlite get configmap kloudlite-roll-coordination -o json \
+    | jq '{apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,uid:.metadata.uid,resourceVersion:.metadata.resourceVersion}}' \
+    | kubectl delete -f - >/dev/null 2>&1 || true
+}
+trap release_roll_lock EXIT
 # A schedule suspended by hand stays suspended across the roll. The manifest says `suspend: false`
 # for the fast and hourly probes, so a plain apply would switch them back on — and a CronJob that
 # missed a tick fires the moment it is unsuspended, i.e. straight into the rollout, which is a
@@ -48,7 +67,7 @@ kubectl create --dry-run=client -o json -f kloudlite.yaml -f kloudlite-web.yaml 
   | kubectl apply -f -
 for c in $suspended; do echo "kept $c suspended"; done
 kubectl -n kloudlite rollout status statefulset/kloudlite-srv --timeout=900s
-for d in kloudlite-api kloudlite-worker kloudlite-web; do
+for d in kloudlite-api kloudlite-worker kloudlite-admin kloudlite-web; do
   kubectl -n kloudlite rollout status "deployment/$d" --timeout=300s
 done
 echo "AKS rolled. The k3s side is separate: kubectl apply -f deploy/k3s/agent-daemonset.yaml -f deploy/k3s/gateway.yaml with that cluster's kubeconfig."

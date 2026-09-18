@@ -1790,6 +1790,13 @@ metadata:
   namespace: kloudlite
 rules:
   - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kloudlite-roll-coordination"]
+    verbs: ["get", "delete"]
+  - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]
   # The fast suite's rollout yield: a run that starts mid-roll measures the roll, not the service,
@@ -1907,6 +1914,7 @@ data:
   # not hairpin, so from a pod the public address never answers (8 s timeout, verified
   # 2026-09-06), while the Service answers the same plain-HTTP request Cloudflare sends.
   KLOUDLITE_SLO_ORIGIN_IP: "ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+  KLOUDLITE_SLO_COORDINATION: "1"
   # The ClickHouse host `drill.clickhouse.down` (monthly) denies the admin process egress to.
   # Empty: that drill skips, like `drill.redis.down` does without its own host.
   KLOUDLITE_SLO_CLICKHOUSE_HOST: ""
@@ -1949,7 +1957,7 @@ spec:
       backoffLimit: 0
       template:
         metadata:
-          labels: { app: kloudlite-slo, suite: fast }
+          labels: { app: kloudlite-slo, suite: fast, "kloudlite.io/probe": "true" }
           annotations:
             # The probe writes its results to ClickHouse through the admin process; its own
             # /metrics is never up long enough to scrape, and a scrape target that is absent 99 %
@@ -1974,6 +1982,8 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                - name: KLOUDLITE_POD_UID
+                  valueFrom: { fieldRef: { fieldPath: metadata.uid } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
                 # same key the server tier signs with — mounted as a file in the `secrets` volume
                 # below, never env (2026-09-12 review #70).
@@ -2100,7 +2110,7 @@ spec:
       backoffLimitPerIndex: 0
       template:
         metadata:
-          labels: { app: kloudlite-slo, suite: hourly }
+          labels: { app: kloudlite-slo, suite: hourly, "kloudlite.io/probe": "true" }
           annotations:
             # The probe writes its results to ClickHouse through the admin process; its own
             # /metrics is never up long enough to scrape, and a scrape target that is absent 99 %
@@ -2125,6 +2135,8 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                - name: KLOUDLITE_POD_UID
+                  valueFrom: { fieldRef: { fieldPath: metadata.uid } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
                 # same key the server tier signs with — mounted as a file in the `secrets` volume
                 # below, never env (2026-09-12 review #70).
@@ -2246,7 +2258,7 @@ spec:
       backoffLimit: 0
       template:
         metadata:
-          labels: { app: kloudlite-slo, suite: weekly }
+          labels: { app: kloudlite-slo, suite: weekly, "kloudlite.io/probe": "true" }
           annotations:
             prometheus.io/scrape: "false"
         spec:
@@ -2265,6 +2277,8 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                - name: KLOUDLITE_POD_UID
+                  valueFrom: { fieldRef: { fieldPath: metadata.uid } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
@@ -2365,7 +2379,7 @@ spec:
       backoffLimit: 0
       template:
         metadata:
-          labels: { app: kloudlite-slo, suite: monthly }
+          labels: { app: kloudlite-slo, suite: monthly, "kloudlite.io/probe": "true" }
           annotations:
             prometheus.io/scrape: "false"
         spec:
@@ -2384,6 +2398,8 @@ spec:
               envFrom:
                 - configMapRef: { name: kloudlite-slo-env }
               env:
+                - name: KLOUDLITE_POD_UID
+                  valueFrom: { fieldRef: { fieldPath: metadata.uid } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the

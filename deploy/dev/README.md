@@ -5,8 +5,10 @@ a script piped into `kubectl exec -i`), then commit and push from the pod. The l
 mirror that only pulls. Nothing is built or tested on the laptop. The checkout, the cargo target and the registry cache
 live on the `dev-work` disk of the `dev` pod in namespace `kloudlite`, on the tainted `builder`
 node of the main AKS cluster (`deploy/dev/builder.yaml`). The pod's checkout is fed by **git
-only**: edit and commit anywhere (the pod itself, via `exec.sh`, or the laptop), push, and the pod
-pulls. There is no rsync, so what runs in the cluster is always a pushed commit.
+only**: the normal loop edits and commits in the pod, then pushes; the laptop pulls the result.
+An explicitly authorized isolated checkout may supply a pushed review branch, which the pod
+checks out for validation. There is no rsync. Record the exact source SHA for every build/test;
+a checkout having been pulled does not by itself prove which commit a later command tested.
 
 | want | run |
 | --- | --- |
@@ -25,6 +27,13 @@ pulls. There is no rsync, so what runs in the cluster is always a pushed commit.
 `git commit && git push`), and the laptop catches up with `git pull`. Uncommitted edits in the pod
 block the fast-forward — commit or stash them first.
 
+For a review branch, do not use `sync.sh` or `test.sh`: their automatic `origin/master` pull can
+change the source under review. Fetch its remote branch, create an isolated worktree in the pod,
+and run the required commands there with a worktree-specific `CARGO_TARGET_DIR`. Record
+`git rev-parse HEAD` and `git status --porcelain` before the checks and retain their full logs and
+exit codes. A filtered log excerpt is not a test result. Keep build, test, image and release
+records tied to the same commit; no deployment is implied by validating a branch.
+
 One-time, done by a person because it is a login:
 
 ```sh
@@ -41,11 +50,13 @@ rule by hand: no tool attribution in messages.
 
 Rules that keep this honest:
 
-- **Never roll over a probe run.** `deploy/roll.sh` waits for every SLO Job; before the hand-run
-  k3s agent apply use `deploy/roll.sh --wait-only`.
+- **Never roll over a probe run.** Rollout and every probe entrypoint need the same coordination
+  guard held through completion. A `deploy/roll.sh --wait-only` observation does not reserve the
+  subsequent k3s apply interval. Validate the coordination implementation and pending/manual job
+  handling before relying on it; see [the hardening tracker](../../docs/review-hardening-2026-09-18.md).
 - **Schedules stay suspended while iterating** (`kubectl -n kloudlite patch cronjob kloudlite-slo-fast
-  -p '{"spec":{"suspend":true}}'`, same for hourly). `deploy/roll.sh` re-enables them from the
-  manifest; re-suspend after a roll until every suite is green, then switch them back on.
+  -p '{"spec":{"suspend":true}}'`, same for hourly). `deploy/roll.sh` preserves schedules that
+  were already suspended. Restore only the recorded intended schedule state after verification.
 - **Fail fast.** Run a suite under a watcher that deletes the Job on the first failed step, then
   close that run's `running` row (`PUT /admin/slo/runs/{id}` with its own steps and
   `state: failed`) or the next run of the suite yields to the ghost for ten minutes; delete the
@@ -55,9 +66,9 @@ Rules that keep this honest:
 - **Agent changes still need an image**: the k3s agents run from `ghcr.io`, so a change under
   `bins/agent` or `crates/workspaces` used by the agent goes through `deploy/k3s/dev-push.sh` (build
   VM) or CI; the pod covers the probe and the AKS tiers.
-- The pod runs as root and `rsync -a` keeps the laptop's uid on the files, so git in the pod
-  needs `git config --global --add safe.directory /work/src` once per pod restart (the pod's
-  own root filesystem is not on the disk).
+- If git reports ownership mismatch for the trusted mounted checkout, configure that exact
+  checkout with `git config --global --add safe.directory /work/src`. The development transport
+  is git; do not use rsync to substitute unrecorded source for a tested commit.
 
 `rustup target add x86_64-unknown-linux-musl` once per pod: `ship.sh` builds the workspace CLI (`kl`)
 for the Alpine workspace image with it.

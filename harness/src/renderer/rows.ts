@@ -2,6 +2,7 @@
  * Pure readings of the bench's rows, kept free of Solid and `window` so
  * `node --test` can hold them (bench/test/renderer-rows.test.ts).
  */
+import { isTerminalExchangeState } from "../../bench/src/exchange-state.ts";
 export type SessionRow = { id: string; name: string; seq: number; lastActive?: number; archived?: boolean; file?: string; kind?: string; workspace?: string; tree?: string };
 
 /**
@@ -25,7 +26,7 @@ export function agentRows(
       // The ask was recorded against the AGENT's name, which is what routes a report back to it.
       const ask = exchanges.filter((e) => e.dir === "out" && e.workspace === agent).at(-1);
       const state: AgentRow["state"] =
-        ask?.state === "failed" ? "failed" : ask?.state === "done" ? "done" : ask?.state === "running" ? "running" : "waiting";
+        ask?.state === "failed" ? "failed" : ask?.state === "running" ? "running" : isTerminalExchangeState(ask?.state ?? "") ? "done" : "waiting";
       return { id: s.id, agent, workspace: s.workspace!, ...(s.tree ? { tree: s.tree } : {}), task: ask?.text?.split("\n")[0]?.slice(0, 80) ?? agent, state };
     });
 }

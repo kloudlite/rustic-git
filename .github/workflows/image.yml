@@ -135,6 +135,7 @@ jobs:
             /ci-target/release/kl-connect
           if-no-files-found: error
           retention-days: 1
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kl-musl
@@ -144,6 +145,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+
+  harness:
+    runs-on: [self-hosted, build-0]
+    timeout-minutes: 15
+    needs: [test]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: harness checks
+        working-directory: harness
+        run: |
+          npm ci
+          npm run typecheck
+          npm run bench:test
+          xvfb-run -a node --test 'bench/test/renderer-boot.test.ts'
+
   image:
     # Docker on the plain runner: buildx and the ghcr login have no business inside the rust
     # container, and the artifact hop for five binaries is seconds.
@@ -151,7 +167,7 @@ jobs:
     # `needs: test` as well as `build`: a commit whose tests fail gets NO package — neither
     # `:<sha>` nor `:latest`. The deploy side (`deploy/pin.sh`) can then treat "the tag exists"
     # as "the tests passed", which is the only signal a repin from `git log` ever sees.
-    needs: [build, test]
+    needs: [build, test, harness]
     runs-on: [self-hosted, build-0]
     timeout-minutes: 30
     permissions:

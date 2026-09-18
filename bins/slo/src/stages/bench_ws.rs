@@ -19,11 +19,11 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use futures::FutureExt;
 use serde_json::{json, Value};
 
-use super::bench::{forward, pty_shell, wait_phase};
+use super::bench::wait_phase;
 use super::{api, call, get, poll_json, post};
 use crate::ctx::Ctx;
 
@@ -113,22 +113,18 @@ async fn prune_pushes(c: &Ctx, id: &str) {
     }
 }
 
-/// `bench.pkg.add`: `kl pkg add` in the bench's own shell — the workspace container's zsh behind
-/// `/pty?scope=bench` — reaching `/v1` with the projected `workspace-token` and landing in
-/// `spec.packages`. The wait is on the SPEC, never on `PackagesReady`: a nix build is minutes and
-/// is `ws.packages.add`'s sample, not this one's.
+/// `bench.pkg.add` uses the authenticated workspace package route. The wait is on the SPEC, never
+/// on `PackagesReady`: a nix build is minutes and is `ws.packages.add`'s sample, not this one's.
 async fn pkg_add(c: &mut Ctx, id: &str) {
+    let workspace_id = id.to_owned();
     let ws = api(c, &format!("/v1/workspaces/{id}"));
     let landed = c
         .step("bench.pkg.add", PKG_CEILING, move |c| {
             let jwt = c.probe_jwt.clone();
             let ws = ws.clone();
+            let workspace_id = workspace_id.clone();
             async move {
-                let (_child, port) = forward(c).await?;
-                let (out, code) = pty_shell(port, "bench", &format!("kl pkg add {PKG}; exit $?\n")).await?;
-                if code != 0 {
-                    bail!("`kl pkg add {PKG}` in the bench shell exited {code}: {}", super::clip(&out));
-                }
+                set_packages(c, &workspace_id, &["bash", PKG]).await.context("the authenticated workspace package update failed")?;
                 poll_json(c, &ws, &jwt, PKG_CEILING, |v| declares(v, PKG)).await.context("the package never reached the bench's spec")
             }
             .boxed()
@@ -150,6 +146,18 @@ async fn pkg_add(c: &mut Ctx, id: &str) {
     if let Err(e) = removed.await {
         tracing::warn!(error = %format!("{e:#}"), "slo.bench_ws.pkg.teardown");
     }
+}
+
+async fn set_packages(c: &Ctx, id: &str, packages: &[&str]) -> Result<()> {
+    call(
+        c,
+        reqwest::Method::PATCH,
+        &api(c, &format!("/v1/workspaces/{id}")),
+        &c.probe_jwt,
+        Some(json!({ "packages": packages })),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Whether a `/v1/workspaces/{id}` doc declares `want`, pinned or not (`attr@version`).

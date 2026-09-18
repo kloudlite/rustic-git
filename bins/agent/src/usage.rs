@@ -275,11 +275,10 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_volume_read_does_not_refresh_its_stamp() {
         let tmp = tempfile::tempdir().unwrap();
-        let at = "2026-09-17T00:00:00Z";
-        let routes = vec![volume_route(serde_json::json!({"phase": "ready", "usedBytes": 5_000_000_000u64, "usedAt": at}))];
+        let routes = vec![];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         read_and_stamp(&ctx, "vol-1").await;
-        assert_eq!(rec.calls(), vec!["GET /apis/kloudlite.io/v1alpha1/volumes/vol-1".to_string()]);
+        assert!(rec.calls().is_empty(), "unknown local usage must not read or refresh status: {:?}", rec.calls());
     }
 
     #[tokio::test]

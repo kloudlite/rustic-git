@@ -333,6 +333,9 @@ mod route_tests {
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "stopped", "full"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "readOnly"), "alice", "acme"));
         assert!(!super::bench_admits_tool(&bench("alice", "acme", "running", "paused"), "alice", "acme"));
+        let mut terminating = bench("alice", "acme", "running", "full");
+        terminating.metadata.deletion_timestamp = Some(serde_json::from_value(serde_json::json!("2026-09-18T00:00:00Z")).unwrap());
+        assert!(!super::bench_admits_tool(&terminating, "alice", "acme"));
         // An ordinary workspace of the same owner is not this token's audience.
         let mut plain = bench("alice", "acme", "running", "full");
         plain.spec.bench = None;
@@ -685,6 +688,7 @@ pub(crate) fn bench_admits_tool(w: &crd::Workspace, sub: &str, team: &str) -> bo
     crd::is_bench(w)
         && w.spec.owner == sub
         && crd::space_slug(&w.spec.owner, &w.spec.team) == crd::space_slug(sub, team)
+        && w.metadata.deletion_timestamp.is_none()
         && w.spec.desired_state != crd::DesiredState::Stopped
         && w.spec.access == crd::Access::Full
 }

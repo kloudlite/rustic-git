@@ -100,6 +100,8 @@ spec:
             - { name: DOCKER_CONFIG, value: /work/home/.docker }
             - { name: BUILDKIT_HOST, value: unix:///run/buildkit/buildkitd.sock }
             - { name: KUBECONFIG, value: /etc/kloudlite/k3s/config }
+            - name: KLOUDLITE_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
             - name: KLOUDLITE_JWT_SECRET
               valueFrom: { secretKeyRef: { name: kloudlite-jwt, key: secret } }
           envFrom:

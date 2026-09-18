@@ -15,11 +15,12 @@ declare global {
 function Gate() {
   const [state, setState] = createSignal<AuthState>({ phase: "starting" });
   let pushed = false;
+  const bootTest = new URLSearchParams(location.search).has("boot-test");
   window.harness.auth.onState((s) => ((pushed = true), setState(s)));
   // A pushed state is newer than the reply to a status asked before it, and may carry a sign-out reason the controller does not keep.
   void window.harness.auth.status().then((s) => pushed || setState(s));
   return (
-    <Show when={state().phase === "ready"} fallback={<LoginScreen state={state()} />}>
+    <Show when={bootTest || state().phase === "ready"} fallback={<LoginScreen state={state()} />}>
       <App />
     </Show>
   );

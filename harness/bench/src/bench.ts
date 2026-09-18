@@ -258,7 +258,7 @@ export class Bench {
    * waiting on a session that will never answer.
    */
   private resumeAsks(): void {
-    const open = this.exchanges.recent(500).filter((e) => e.dir === "out" && (e.state === "queued" || e.state === "running"));
+    const open = this.exchanges.active();
     for (const e of open) {
       const asker = this.sessions.get(e.session);
       const holder = this.sessions.all().find((s) => !s.archived && (s.workspace === e.workspace || s.target === e.workspace || s.id === `w-${e.workspace}`));
@@ -789,8 +789,7 @@ export class Bench {
       if (row) this.emit({ type: "task", row });
       this.tell(t.session, `[task ${t.arg} expired: it has been running for an hour with nothing to say]`);
     }
-    for (const e of this.exchanges.recent(500)) {
-      if (e.dir !== "out" || (e.state !== "queued" && e.state !== "running")) continue;
+    for (const e of this.exchanges.active()) {
       const clock = this.clocks.get(e.id) ?? { at: e.ts };
       this.clocks.set(e.id, clock);
       const holder = [...this.asked.entries()].find(([, q]) => q.some((x) => x.exchange === e.id))?.[0];
@@ -848,7 +847,7 @@ export class Bench {
    * something worth saying, and dropping it silently is the same stale stop from the other end.
    */
   private appendUpdate(exchange: string, text: string): void {
-    const of = this.exchanges.recent(500).find((e) => e.id === exchange);
+    const of = this.exchanges.get(exchange);
     if (!of || !text.trim()) return;
     const row = this.write(() => this.exchanges.record({ id: `${exchange}-late-${Date.now().toString(36)}`, session: of.session, workspace: of.workspace, dir: "in", text: text.slice(0, 2000), state: "note", ref: exchange }));
     this.emit({ type: "exchange", row });
@@ -964,8 +963,8 @@ export class Bench {
    * it worked in is deleted — a tree that is gone is a machine that is gone.
    */
   workspaceGone(workspace: string, why = "workspace stopped"): void {
-    for (const e of this.exchanges.recent(500)) {
-      if (e.dir !== "out" || e.workspace !== workspace || (e.state !== "queued" && e.state !== "running")) continue;
+    for (const e of this.exchanges.active()) {
+      if (e.workspace !== workspace) continue;
       this.settle(e, "blocked", why);
     }
     /**
@@ -1289,9 +1288,7 @@ export class Bench {
     const direct = !!agent && !agent.archived;
     // The SAME ask, again, while the first is still open: one exchange, not two (spec §3.9 rule 6).
     // A bench that re-asks after a poll would otherwise have the workspace do the work twice.
-    const open = this.exchanges.recent(500).find(
-      (e) => e.dir === "out" && e.session === from && e.workspace === workspace && e.text.trim() === text.trim() && (e.state === "queued" || e.state === "running"),
-    );
+    const open = this.exchanges.active().find((e) => e.session === from && e.workspace === workspace && e.text.trim() === text.trim());
     if (open) {
       void this.send(from, `[harness] already asked: ${open.id}, still ${open.state}`).catch(() => undefined);
       return { session: s.id, exchange: open.id, workspace, queued: (this.asked.get(s.id) ?? []).length };
@@ -1720,8 +1717,7 @@ Your working directory is the tree ${tree} of this workspace; the main tree owns
    * holding. Nothing is left `running` with no session to answer it or hear the answer.
    */
   private settleOpen(session: string, state: string, _why: string): void {
-    for (const e of this.exchanges.recent(500)) {
-      if (e.dir !== "out" || (e.state !== "queued" && e.state !== "running")) continue;
+    for (const e of this.exchanges.active()) {
       const holder = this.asked.get(session)?.some((q) => q.exchange === e.id);
       if (e.session !== session && !holder) continue;
       this.write(() => this.exchanges.transition(e.id, state));

@@ -121,11 +121,15 @@ fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> 
         dir = child;
     }
     let leaf = parts.last().unwrap();
-    let file = unsafe { libc::openat(dir, leaf.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    let file = unsafe { libc::openat(dir, leaf.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK) };
     if file >= 0 {
         unsafe { libc::close(dir) };
+        let mut file = unsafe { std::fs::File::from_raw_fd(file) };
+        if !file.metadata().ok()?.file_type().is_file() {
+            return None;
+        }
         let mut bytes = Vec::new();
-        return unsafe { std::fs::File::from_raw_fd(file) }.read_to_end(&mut bytes).ok().map(|_| bytes);
+        return file.read_to_end(&mut bytes).ok().map(|_| bytes);
     }
     let is_symlink = std::io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP);
     if is_symlink {
@@ -621,6 +625,18 @@ mod tests {
         assert!(patch.contains(&format!("+{}", outside.path().join("sentinel").display())), "{patch}");
         assert!(!patch.contains("PRIVATE_SENTINEL"), "{patch}");
         assert!(!patch.contains("PRIVATE_AGENT"), "{patch}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rooted_reader_does_not_open_a_fifo_as_a_file() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(worktree_bytes(tmp.path(), "fifo", false), None);
     }
 
     #[tokio::test]

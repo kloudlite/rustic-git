@@ -13,6 +13,7 @@ SUITE=${1:?suite}
 case "$SUITE" in fast) T=slo-probe;; hourly) T=slo-hourly;; weekly|monthly) T=slo-drill;; *) echo "unknown suite $SUITE" >&2; exit 2;; esac
 ACTIVE=$(kubectl -n kloudlite get jobs -o json | python3 -c 'import sys,json; print(" ".join(j["metadata"]["name"] for j in json.load(sys.stdin)["items"] if (j.get("status",{}).get("active") or 0)>0))')
 [ -z "$ACTIVE" ] || { echo "a probe Job is active: $ACTIVE" >&2; exit 3; }
+J="$SUITE-$(date -u +%H%M%S)-$RANDOM"
 # A manual run and the cron's own run share one owner and its quota (two workspaces), so one that
 # straddles the cron's firing fails on `quota.refused` and files a false sample. Refuse to start
 # within the two minutes before the CronJob's next tick; the active-Job check above covers after.
@@ -31,7 +32,6 @@ for ahead in range(0, 121, 30):
     if t.minute in allowed and (hour == "*" or t.hour == int(hour)) and t.second < 30:
         sys.exit(f"the cron fires at :{t.minute:02d}, within two minutes; run after it finishes")
 PY
-J=$SUITE-$(date -u +%H%M%S)
 kubectl -n kloudlite create job "$J" --from="cronjob/kloudlite-slo-$SUITE" >/dev/null || exit 1
 for _ in $(seq 1 60); do
   P=$(kubectl -n kloudlite get pods -l job-name="$J" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
@@ -71,10 +71,6 @@ if [ -z "$VERDICT" ]; then
   echo "FAIL FAST: $J killed"
 fi
 [ -n "$RUN" ] && kubectl -n kloudlite exec -c dev "$DEV" -- /work/src/deploy/dev/pod/close-run.py "$T" "$RUN"
-K3S="${K3S_KUBECONFIG:-$(dirname "$0")/../../.local/k3s.yaml}"
-for n in $(kubectl --kubeconfig "$K3S" get nodes -l kloudlite.io/decommission=true -o name 2>/dev/null); do
-  kubectl --kubeconfig "$K3S" label "$n" kloudlite.io/decommission- >/dev/null && kubectl --kubeconfig "$K3S" annotate "$n" kloudlite.io/decommission-status- >/dev/null; echo "undid a drill's decommission label on $n"
-done
 case "$VERDICT" in
   passed) kubectl -n kloudlite delete job "$J" >/dev/null 2>&1; echo "$SUITE passed ($RUN)"; exit 0;;
   skipped) echo "$SUITE skipped ($RUN): ${WHY:-no reason recorded} [${COUNTS:-}]"; exit 2;;

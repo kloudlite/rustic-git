@@ -61,7 +61,7 @@ impl Engine {
         // Checked and validated BEFORE any directory is created, so a refused checkout — existing
         // worktree, or (below) a missing snapshot — truly creates nothing.
         match std::fs::symlink_metadata(&dst) {
-            Ok(meta) if meta.file_type().is_dir() && is_subvolume(&dst) => return Err(EngErr::other(WORKTREE_EXISTS)),
+            Ok(meta) if meta.file_type().is_dir() => return Err(EngErr::other(WORKTREE_EXISTS)),
             Ok(_) => return Err(EngErr::other("worktree path is not a subvolume")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(EngErr::io(e)),
@@ -113,8 +113,30 @@ impl Engine {
         if unsafe { libc::geteuid() } != 0 {
             return Ok(());
         }
-        let uid = crate::k8s::SSH_UID as u32;
-        std::os::unix::fs::chown(dst, Some(uid), Some(uid)).map_err(EngErr::io)
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| EngErr::other("worktree path contains NUL"))?;
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        if fd < 0 {
+            return Err(EngErr::io(std::io::Error::last_os_error()));
+        }
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        let valid = unsafe { libc::fstat(fd, &mut stat) == 0 && stat.st_ino == 256 };
+        let result = if valid {
+            let uid = crate::k8s::SSH_UID as libc::uid_t;
+            unsafe { libc::fchown(fd, uid, uid) }
+        } else {
+            -1
+        };
+        let error = if valid && result == 0 {
+            None
+        } else if !valid {
+            Some(EngErr::other("worktree staging path is not a subvolume"))
+        } else {
+            Some(EngErr::io(std::io::Error::last_os_error()))
+        };
+        unsafe { libc::close(fd) };
+        error.map_or(Ok(()), Err)
     }
 
     /// Restore-in-place, reinterpreted as a checkout: replace worktree `ws` of `volume` with a
@@ -127,8 +149,13 @@ impl Engine {
     pub fn swap_worktree(&self, volume: &str, ws: &str, name: &str) -> Result<(), EngErr> {
         let staging = restoring_name(ws);
         let staging_path = self.pool.worktree(volume, &staging);
-        if staging_path.exists() {
-            run(&["btrfs", "subvolume", "delete", staging_path.to_str().unwrap()])?;
+        match std::fs::symlink_metadata(&staging_path) {
+            Ok(meta) if meta.file_type().is_dir() && is_subvolume(&staging_path) => {
+                run(&["btrfs", "subvolume", "delete", staging_path.to_str().unwrap()])?;
+            }
+            Ok(_) => return Err(EngErr::other("restore staging path is not a subvolume")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(EngErr::io(e)),
         }
         self.checkout(volume, Some(name), &staging)?;
 
@@ -368,6 +395,20 @@ mod tests {
         let err = engine.checkout("v", None, "ws").unwrap_err();
         assert!(err.0.contains("not a subvolume"));
         assert!(target.is_dir());
+        assert!(std::fs::symlink_metadata(&dst).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_dangling_symlink_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::engine::Pool::new(tmp.path());
+        let dst = pool.worktree("v", "ws");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("missing"), &dst).unwrap();
+
+        let err = Engine::new(pool).checkout("v", None, "ws").unwrap_err();
+        assert!(err.0.contains("not a subvolume"));
         assert!(std::fs::symlink_metadata(&dst).unwrap().file_type().is_symlink());
     }
 

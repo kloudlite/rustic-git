@@ -15,7 +15,8 @@
 //! `spec.owner` is truth (CLAUDE.md): every `owner` field below reads the spec, never the
 //! `kloudlite.io/owner` label, which is a view maintained for label selectors.
 
-use super::events::{write_events, EventRow};
+use super::events::EventRow;
+use super::outbox::enqueue_events;
 use super::History;
 use crate::crd::{self, Phase, RequestState};
 use futures::StreamExt;
@@ -756,6 +757,15 @@ fn from_a_builder(s: &crd::SnapshotSpec) -> bool {
     s.worktree.starts_with(&crd::builder_id(""))
 }
 
+fn apply_state_change<K>(previous: &mut HashMap<String, K>, change: Option<(String, Option<K>)>) {
+    if let Some((uid, object)) = change {
+        match object {
+            Some(object) => { previous.insert(uid, object); }
+            None => { previous.remove(&uid); }
+        }
+    }
+}
+
 /// A sync point is cut and pruned every beat; only a real snapshot's deletion is history.
 pub fn snapshot_deleted(o: &crd::Snapshot, region: &str) -> Vec<EventRow> {
     match o.spec.transient || from_a_builder(&o.spec) {
@@ -809,23 +819,19 @@ async fn watch_kind<K>(
         let mut prev: HashMap<String, K> = HashMap::new();
         let mut stream = kube::runtime::watcher(api.clone(), cfg.clone()).boxed();
         while let Some(ev) = stream.next().await {
-            let rows = match ev {
+            let (rows, state_change) = match ev {
                 Ok(kube::runtime::watcher::Event::Apply(o))
                 | Ok(kube::runtime::watcher::Event::InitApply(o)) => {
                     let Some(uid) = o.meta().uid.clone() else {
                         continue;
                     };
                     let rows = map(prev.get(&uid), &o, &region);
-                    prev.insert(uid, o);
-                    rows
+                    (rows, Some((uid, Some(o))))
                 }
                 // The previous state goes with it, so an object recreated under the same name (a
                 // new uid) reads as a fresh `created` rather than a phantom transition.
                 Ok(kube::runtime::watcher::Event::Delete(o)) => {
-                    if let Some(uid) = o.meta().uid.as_ref() {
-                        prev.remove(uid);
-                    }
-                    on_delete(&o, &region)
+                    (on_delete(&o, &region), o.meta().uid.clone().map(|uid| (uid, None)))
                 }
                 Ok(_) => continue,
                 Err(e) => {
@@ -846,11 +852,21 @@ async fn watch_kind<K>(
             failures = 0;
             backoff = MIN_BACKOFF;
             if rows.is_empty() {
+                apply_state_change(&mut prev, state_change);
                 continue;
             }
-            if let Err(e) = write_events(&history, &rows).await {
-                tracing::warn!(%region, count = rows.len(), error = %e, "history.write.failed");
+            let mut retry = std::time::Duration::from_secs(1);
+            loop {
+                match enqueue_events(&history, &rows).await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        tracing::warn!(%region, count = rows.len(), error = %e, "history.write.failed");
+                        tokio::time::sleep(retry).await;
+                        retry = (retry * 2).min(std::time::Duration::from_secs(30));
+                    }
+                }
             }
+            apply_state_change(&mut prev, state_change);
         }
         // A watcher that ended restarts after a growing pause rather than spinning on a cluster
         // that is not answering.

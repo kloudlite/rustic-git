@@ -10,6 +10,8 @@ pub struct BlobGeneration {
     pub physical_key: String,
     #[serde(default)]
     pub pins: Vec<String>,
+    #[serde(default)]
+    pub installed_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -60,6 +62,14 @@ pub fn publication_id() -> String {
     nonce()
 }
 
+pub fn manifest_publication(owner: &str, name: &str, d: &Digest) -> String {
+    format!("manifest/{owner}/{name}/{d}#{}", nonce())
+}
+
+fn manifest_publication_prefix(owner: &str, name: &str, d: &Digest) -> String {
+    format!("manifest/{owner}/{name}/{d}#")
+}
+
 fn encode(record: &BlobRecord) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(record)?)
 }
@@ -106,10 +116,12 @@ async fn load(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Option<Lo
     if let Some(found) = read(os, &path).await? {
         return Ok(Some(found));
     }
-    if os.head(&canonical_path(owner, d)).await.is_err() {
-        return Ok(None);
-    }
-    let record = BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: canonical_path(owner, d).to_string(), pins: Vec::new() }), retired: Vec::new() };
+    let installed_at = match os.head(&canonical_path(owner, d)).await {
+        Ok(meta) => meta.last_modified.timestamp_millis(),
+        Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let record = BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: canonical_path(owner, d).to_string(), pins: Vec::new(), installed_at }), retired: Vec::new() };
     if create(os, &path, &record).await? {
         return Ok(read(os, &path).await?);
     }
@@ -122,7 +134,11 @@ pub async fn resolve(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Op
 
 pub async fn exists(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<bool> {
     let Some(path) = resolve(os, owner, d).await? else { return Ok(false) };
-    Ok(os.head(&path).await.is_ok())
+    match os.head(&path).await {
+        Ok(_) => Ok(true),
+        Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn new_generation(owner: &str, d: &Digest) -> (String, Path) {
@@ -136,21 +152,20 @@ pub async fn install(os: &dyn ObjectStore, owner: &str, d: &Digest, physical_key
         let current = load(os, owner, d).await?;
         let next = match current {
             Some(mut loaded) => {
-                if loaded.record.active.as_ref().is_some_and(|a| !a.pins.is_empty()) {
-                    return Ok(Err(InstallError::Busy));
-                }
                 if loaded.record.active.as_ref().is_some_and(|a| a.physical_key == physical_key) {
                     return Ok(Ok(()));
                 }
                 if let Some(old) = loaded.record.active.take() {
                     loaded.record.retired.push(RetiredGeneration { physical_key: old.physical_key });
+                    loaded.record.active = Some(BlobGeneration { physical_key: physical_key.to_string(), pins: old.pins, installed_at: chrono::Utc::now().timestamp_millis() });
+                } else {
+                    loaded.record.active = Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new(), installed_at: chrono::Utc::now().timestamp_millis() });
                 }
-                loaded.record.active = Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new() });
                 loaded.record.nonce = nonce();
                 if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(Ok(())) }
                 continue;
             }
-            None => BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new() }), retired: Vec::new() },
+            None => BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new(), installed_at: chrono::Utc::now().timestamp_millis() }), retired: Vec::new() },
         };
         if create(os, &path, &next).await? { return Ok(Ok(())) }
     }
@@ -179,6 +194,30 @@ pub async fn unpin(os: &dyn ObjectStore, owner: &str, d: &Digest, publication: &
         if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
     }
     Err(crate::err("blob unpin CAS retries exhausted"))
+}
+
+pub async fn release_durable_manifest_pins(
+    os: &dyn ObjectStore,
+    owner: &str,
+    name: &str,
+    manifest: &Digest,
+    blob: &Digest,
+) -> Result<()> {
+    match os.head(&crate::store::manifest_path(owner, name, manifest)).await {
+        Ok(_) => {}
+        Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    let prefix = manifest_publication_prefix(owner, name, manifest);
+    let path = state_path(owner, blob);
+    for _ in 0..8 {
+        let Some(mut loaded) = read(os, &path).await? else { return Ok(()) };
+        let Some(active) = loaded.record.active.as_mut() else { return Ok(()) };
+        active.pins.retain(|pin| !pin.starts_with(&prefix));
+        loaded.record.nonce = nonce();
+        if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
+    }
+    Err(crate::err("durable manifest pin cleanup CAS retries exhausted"))
 }
 
 pub async fn retire(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Option<String>> {
@@ -297,9 +336,10 @@ mod tests {
         let (_, new) = new_generation("acme", &d);
         os.put(&new, PutPayload::from("new")).await.unwrap();
         let new_key = new.to_string();
-        assert_eq!(install(os.as_ref(), "acme", &d, &new_key).await.unwrap(), Err(InstallError::Busy));
-        unpin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
         install(os.as_ref(), "acme", &d, &new_key).await.unwrap().unwrap();
+        assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(new.clone()));
+        unpin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
+        assert!(candidates(os.as_ref(), "acme").await.unwrap().into_iter().all(|(_, record, _)| record.active.as_ref().is_none_or(|active| active.pins.is_empty())));
     }
 
     #[tokio::test]
@@ -327,5 +367,21 @@ mod tests {
         install(os.as_ref(), "acme", &d, &generation.to_string()).await.unwrap().unwrap();
         assert!(pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(generation));
+    }
+
+    #[tokio::test]
+    async fn durable_manifest_releases_only_its_manifest_pins() {
+        let os = Arc::new(InMemory::new());
+        let blob = digest();
+        let manifest = Digest::of(b"manifest");
+        let (_, generation) = new_generation("acme", &blob);
+        os.put(&generation, PutPayload::from("blob")).await.unwrap();
+        install(os.as_ref(), "acme", &blob, &generation.to_string()).await.unwrap().unwrap();
+        let stale = manifest_publication("acme", "image", &manifest);
+        pin(os.as_ref(), "acme", &blob, &stale).await.unwrap();
+        os.put(&crate::store::manifest_path("acme", "image", &manifest), PutPayload::from("manifest")).await.unwrap();
+        release_durable_manifest_pins(os.as_ref(), "acme", "image", &manifest, &blob).await.unwrap();
+        let record = read(os.as_ref(), &state_path("acme", &blob)).await.unwrap().unwrap();
+        assert!(record.record.active.unwrap().pins.is_empty());
     }
 }

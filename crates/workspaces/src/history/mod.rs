@@ -16,12 +16,17 @@
 //! Optional by design: `from_env` answers `None` when `KLOUDLITE_CLICKHOUSE_URL` is unset, and
 //! every caller treats that as "history unavailable" rather than an error, so a deployment without
 //! ClickStack behaves exactly as it did before this module existed.
+//!
+//! Watch state is advanced only after its outbox record is durable. A process crash between the
+//! Kubernetes event and that enqueue remains a watch-compaction gap and is recovered by the next
+//! relist when the object is still present.
 
 pub mod alerts;
 pub mod beats;
 pub mod events;
 pub mod exclusions;
 pub mod notify;
+pub mod outbox;
 pub mod schema;
 pub mod series;
 pub mod slo;
@@ -45,6 +50,7 @@ pub enum HistoryError {
     /// `Code: 60. DB::Exception: …` is the only useful thing about the failure, so it is carried
     /// rather than discarded.
     Server { status: u16, body: String },
+    Outbox(String),
 }
 
 impl std::fmt::Display for HistoryError {
@@ -54,6 +60,7 @@ impl std::fmt::Display for HistoryError {
             HistoryError::Server { status, body } => {
                 write!(f, "clickhouse {status}: {}", body.trim())
             }
+            HistoryError::Outbox(e) => write!(f, "history outbox: {e}"),
         }
     }
 }
@@ -84,6 +91,8 @@ pub struct History {
     user: String,
     password: String,
     client: reqwest::Client,
+    outbox: Option<std::sync::Arc<dyn slatedb::object_store::ObjectStore>>,
+    outbox_cursor: std::sync::Arc<std::sync::Mutex<Option<slatedb::object_store::path::Path>>>,
 }
 
 impl History {
@@ -104,7 +113,25 @@ impl History {
             user: user.to_string(),
             password: password.to_string(),
             client,
+            outbox: None,
+            outbox_cursor: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    pub fn with_outbox(
+        mut self,
+        outbox: std::sync::Arc<dyn slatedb::object_store::ObjectStore>,
+    ) -> Self {
+        self.outbox = Some(outbox);
+        self
+    }
+
+    pub(crate) fn outbox(&self) -> Option<&std::sync::Arc<dyn slatedb::object_store::ObjectStore>> {
+        self.outbox.as_ref()
+    }
+
+    pub(crate) fn outbox_cursor(&self) -> &std::sync::Arc<std::sync::Mutex<Option<slatedb::object_store::path::Path>>> {
+        &self.outbox_cursor
     }
 
     /// `None` is a supported configuration, not a failure: see the module doc. The credentials come
