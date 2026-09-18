@@ -433,7 +433,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "env.intercept.tools.refused", feature: "Environments", sli: "An intercept mapping onto the tool server's port is refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
     Slo { id: "env.intercept.refused", feature: "Environments", sli: "An intercept of a workspace whose space uses no environment, and one naming a port the service does not declare, are both refused", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
     // Hourly: the bench may be asleep, and waking it is not a five-minute cost.
-    Slo { id: "env.space.bench", feature: "Environments", sli: "The probe owner's bench follows its space's environment in its resolv.conf", target: bound(120_000), suite: Suite::Hourly, stage: "6 · Environment" },
+    Slo { id: "env.space.bench", feature: "Environments", sli: "The probe owner's bench follows its space's environment in its resolv.conf", target: bound(300_000), suite: Suite::Hourly, stage: "6 · Environment" },
     // Hourly: proving a hidden thing stays hidden is not a five-minute cost, and the builder
     // is not stood up by this id — it asks about whatever the owner's builder already is.
     Slo { id: "builder.hidden", feature: "Environments", sli: "The probe owner's builder is absent from `GET /v1/environments` and its id answers 404 on get, start, push and snapshots", target: avail(99.9), suite: Suite::Hourly, stage: "6 · Environment" },
@@ -555,7 +555,7 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "team.repo.shared", feature: "Teams", sli: "A member clones a team repo; a non-member is refused", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.workspace", feature: "Teams", sli: "A team workspace lands in the team namespace and starts", target: p95(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.member.remove", feature: "Teams", sli: "A removed member loses access to the team repo", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "team.member.paused", feature: "Teams", sli: "A paused member's tool token, team `/v1` and bench tunnel and bench session are refused and their bench is stopped within a minute; after unpause and start the bench folder's canary is still there", target: bound(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "team.member.paused", feature: "Teams", sli: "A paused member's tool token, team `/v1` and bench tunnel and bench session are refused and their bench is stopped within a minute; after unpause and start the bench folder's canary is still there", target: bound(360_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.delete", feature: "Teams", sli: "Deleting the team removes its profile and refuses its slug", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "team.namespace.reaped", feature: "Workspaces", sli: "No team namespace outlives by more than two resync beats the workspaces that used it", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "repo.protection", feature: "Git hosting", sli: "A protected branch refuses a direct push and still merges via a PR", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },

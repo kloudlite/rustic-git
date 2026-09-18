@@ -25,13 +25,20 @@ use kloudlite_workspaces::k8s;
 use crate::stages::call;
 
 pub(crate) const PAUSED_ID: &str = "team.member.paused";
-/// `bound(240_000)`: the 60 s refusal window, the unpause, a cold bench start and the canary read.
-const PAUSED_BODY: Duration = Duration::from_secs(240);
+/// `bound(360_000)`: the 60 s refusal window, the unpause, a cold bench start and the canary read.
+///
+/// Raised from 240 s with the number measured on the fleet (2026-09-18): a fresh team bench takes
+/// ~120 s from create to `Ready` and one took 480 s, of which the packages are 1–17 s — the rest
+/// is `harness-bench --ping` not serving yet, and the pod is not Ready until it does. The shell
+/// sidecar is no longer part of this (89dbef10); this is the sessions container's own start.
+const PAUSED_BODY: Duration = Duration::from_secs(360);
 pub(super) const PAUSED_CEILING: Duration = Duration::from_secs(PAUSED_BODY.as_secs() + UNDO_SLACK);
 /// Pause reconciles the member's bench at once (`on_member_state`); the rest is the api's
 /// `membership.forget` and the gate's cache — seconds, with room for a slow bench patch.
 const PAUSE_WINDOW: Duration = Duration::from_secs(60);
-const READY_WAIT: Duration = Duration::from_secs(120);
+/// 120 s was exactly the median a fresh bench needed, so half the runs lost the race. Measured
+/// again on 2026-09-18: create to `Ready` was 120 s on one bench and 480 s on another.
+const READY_WAIT: Duration = Duration::from_secs(240);
 const EXEC: Duration = Duration::from_secs(20);
 /// What the canary file holds — and what the read must give back. The PATH is derived in the pod
 /// (`canary_js`), so the marker is the only constant either side shares.

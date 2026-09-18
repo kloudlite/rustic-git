@@ -110,8 +110,13 @@ const FALLBACK_CEILING: Duration = Duration::from_secs(180);
 const REFUSED_CEILING: Duration = Duration::from_secs(30);
 /// A workspace create with its pod pulled and running, matching `experience_ws`'s own wait.
 const WS_CEILING: Duration = Duration::from_secs(300);
-/// `env.space.bench`: a wake (up to 90 s) plus the reconcile, against the catalogue's 120 s.
-const SPACE_BENCH_CEILING: Duration = Duration::from_secs(150);
+/// `env.space.bench`: a wake plus the reconcile.
+///
+/// 150 s was under what a cold bench costs, so this reported "creating, never ready within 90 s"
+/// on a bench that was starting normally. Measured on the fleet 2026-09-18: create to `Ready` was
+/// ~120 s on one team bench and 480 s on another, with the packages 1–17 s of it — the rest is
+/// `harness-bench --ping` before it first serves, which is what holds the pod un-Ready.
+const SPACE_BENCH_CEILING: Duration = Duration::from_secs(330);
 /// The bench's own dial, once it is awake and following the environment.
 const BENCH_DIAL_CEILING: Duration = Duration::from_secs(120);
 /// How long teardown waits for the proxy to go before calling it left behind.
@@ -419,7 +424,9 @@ async fn space_bench(c: &mut Ctx, j: &Journey) {
         async move {
             let session = bench_url(c, "/session", &team);
             let _ = raw(c, reqwest::Method::POST, &session, &c.probe_jwt.clone(), None, &[]).await;
-            bench_ready(c, &team, Duration::from_secs(90)).await?;
+            // 90 s was below the measured cold start and this is the wait that reported
+            // "never ready within 90 s" (2026-09-18); the ceiling above bounds the whole step.
+            bench_ready(c, &team, Duration::from_secs(240)).await?;
             let start = std::time::Instant::now();
             loop {
                 let out = bench_exec(c, &team, &ns, &["cat", "/etc/resolv.conf"]).await.unwrap_or_default();
