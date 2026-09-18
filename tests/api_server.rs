@@ -52,7 +52,7 @@ async fn api_with_jwt(e: &common::TestEnv, up: &Upstream, secret: &str) -> Strin
     let cache = Arc::new(kloudlite_storage::cache::Cache::connect(None).await);
     let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(secret).unwrap());
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, None, None, None, false)
+        kloudlite_api::serve(store, cache, None, Some(jwt), upstream, "s".into(), l, None, None, None, None, None, None, false)
             .await
             .unwrap()
     });
@@ -69,7 +69,7 @@ async fn api_with_dir(e: &common::TestEnv, up: &Upstream, d: &common::TestDirect
     let jwt = Arc::new(kloudlite_core::jwt::Jwt::new(KEY).unwrap());
     let dir = d.dir.clone();
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, None, None, None, false)
+        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, None, None, None, None, false)
             .await
             .unwrap()
     });
@@ -86,7 +86,7 @@ async fn api_with(
     let addr = l.local_addr().unwrap();
     let (store, upstream) = (e.store.clone(), format!("http://{}", up.addr));
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, None, None, None, false)
+        kloudlite_api::serve(store, cache, None, None, upstream, "s".into(), l, None, None, None, None, None, None, false)
             .await
             .unwrap()
     });
@@ -1310,7 +1310,7 @@ async fn a_team_is_created_in_a_known_region() {
     let dir = d.dir.clone();
     let check: kloudlite_api::RegionCheck = Arc::new(|r: String| Box::pin(async move { Ok(r == "r1") }));
     tokio::spawn(async move {
-        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, None, Some(check), None, false)
+        kloudlite_api::serve(store, cache, Some(dir), Some(jwt), upstream, "s".into(), l, None, None, None, Some(check), None, None, false)
             .await
             .unwrap()
     });
