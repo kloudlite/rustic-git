@@ -11,5 +11,18 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["bench/src/operations/**/*.ts", "bench/test/operations-*.test.ts"]
+  "include": [
+    "bench/src/operations/contracts.ts",
+    "bench/src/operations/evaluation.ts",
+    "bench/src/operations/evaluation-subjects.ts",
+    "bench/src/operations/judgments.ts",
+    "bench/src/operations/run-evaluation.ts",
+    "bench/src/operations/shape.ts",
+    "bench/src/operations/typesafe.ts",
+    "bench/test/operations-contracts.test.ts",
+    "bench/test/operations-evaluation-subjects.test.ts",
+    "bench/test/operations-evaluation.test.ts",
+    "bench/test/operations-run-evaluation.test.ts",
+    "bench/test/operations-typesafe.test.ts"
+  ]
 }

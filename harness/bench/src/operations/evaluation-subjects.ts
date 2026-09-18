@@ -71,10 +71,10 @@ function failureCodeOf(code: string | undefined): EvaluationFailureCode {
 
 function usageOf(batch: {
   model: { model: string; version: string };
-  records: Array<{ attempts: number; usage: { inputTokens: number; outputTokens: number } }>;
+  records: Array<{ usage: { inputTokens: number; outputTokens: number } }>;
 }): ProviderUsage[] {
   const usage = batch.records[0]?.usage;
-  if (!usage || (batch.records[0]?.attempts === 0 && usage.inputTokens === 0 && usage.outputTokens === 0)) return [];
+  if (!usage || (usage.inputTokens === 0 && usage.outputTokens === 0)) return [];
   return [{ provider: "typesafe", inputTokens: usage.inputTokens, cachedInputTokens: 0, outputTokens: usage.outputTokens, model: batch.model.model, version: batch.model.version }];
 }
 
@@ -163,7 +163,7 @@ export function typeSafeEvaluationSubject(config?: TypeSafeEvaluationSubjectConf
         },
         runtime.signal,
       );
-      if (!result.ok) return providerFailure("invalid_response", result.usage.calls);
+      if (!result.ok) return providerFailure("invalid_response", 0);
 
       const usage = usageOf(result);
       const providerAttempts = attemptsOf(result);

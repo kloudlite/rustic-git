@@ -28,6 +28,7 @@ import type {
   EvaluationReport,
   EvaluationRole,
   EvaluationRuntime,
+  AvailableEvaluationSubject,
   EvaluationSuite,
   EvaluationSplit,
   EvaluationSubject,
@@ -78,8 +79,8 @@ function runOptions(corpus: EvaluationCorpus, options: Omit<Parameters<typeof ru
     ...options,
     reviewerOracles: oraclesFor(corpus),
     faultScenarios: {
-      f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }),
-      f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }),
+      f001: async (): Promise<EvaluationAttempt> => ({ outcome: "provider_failure", failure: { code: "timeout" } }),
+      f002: async (): Promise<EvaluationAttempt> => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }),
     },
   } : options;
 }
@@ -88,7 +89,7 @@ function scriptedSubject(
   subjectId: string,
   attempts: Record<string, EvaluationAttempt>,
   providers: readonly string[] = ["typesafe"],
-): EvaluationSubject {
+): AvailableEvaluationSubject {
   return {
     subjectId,
     availability: "available",
@@ -232,6 +233,7 @@ test("subject inputs are isolated from prior role mutations and public cohort sn
     },
   });
   const baseline = observing("mutating-baseline");
+  if (baseline.availability !== "available") throw new Error("subject unexpectedly unavailable");
   baseline.attempt = async (input) => {
     input.authorizedIntent.instruction = "mutated";
     input.candidates[0].label = "mutated";
@@ -326,8 +328,10 @@ test("runtime omits capabilities and instruments forbidden executor-shaped acces
   assert.equal(score.wholeCallCorrect, false, "a caught guard error still invalidates a matching proposal");
   assert.equal(splitScore(report, "tuning").dispatchAttempts, 9);
   assert.equal(splitScore(report, "tuning").safetyViolations, 1);
-  assert.equal(report.subjects[0].dispatchAttempts, 9);
-  assert.equal(report.subjects[0].safetyViolations, 1);
+  const subjectReport = report.subjects[0];
+  if (subjectReport.availability !== "available") throw new Error("subject unexpectedly unavailable");
+  assert.equal(subjectReport.dispatchAttempts, 9);
+  assert.equal(subjectReport.safetyViolations, 1);
 });
 
 test("runtime instruments reflective forbidden-name probes without revealing capabilities", async () => {
@@ -504,7 +508,7 @@ test("private fault scenario configuration is validated before subject attempts"
   for (const [name, faultScenarios, pattern] of [
     ["missing", {}, /missing private fault scenario/i],
     ["conflicting", { f001: async () => ({ outcome: "provider_failure", failure: { code: "provider_error" } }) }, /conflicts with expectedFailureCode/i],
-  ] as const) {
+  ] satisfies ReadonlyArray<readonly [string, Readonly<Record<string, () => Promise<EvaluationAttempt>>>, RegExp]>) {
     let attempts = 0;
     const subject = scriptedSubject(`scenario-${name}`, {});
     subject.attempt = async () => { attempts += 1; return { outcome: "abstain", reason: "no_match" }; };
@@ -536,7 +540,7 @@ test("malformed and throwing fault scenarios are sanitized without running subje
       suite: suiteWith(subject),
       splits: ["held_out"],
       reviewerOracles: oracle,
-      faultScenarios: { f002: scenario },
+      faultScenarios: { f002: scenario as () => Promise<EvaluationAttempt> },
       clock: FIXED_CLOCK,
     });
     assert.equal(attempts, 0, name);
@@ -977,7 +981,7 @@ test("deferred dispatch attempts count in safety totals but stay out of pilot qu
     ...scriptedSubject("deferred-dispatch", {}),
     async attempt(_input, runtime) {
       assert.throws(() => (runtime as unknown as Record<string, unknown>).execute, /unavailable/i);
-      return { outcome: "abstain", reason: "deferred_mutation", errorCode: "unsupported" };
+      return { outcome: "unsupported", reason: "unsupported", errorCode: "unsupported_request" };
     },
   };
   const report = await runEvaluation(corpus, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
@@ -1160,29 +1164,32 @@ test("an unrelated subject throw cannot echo timeout when no scenario is selecte
 });
 
 test("failure metadata rejects arbitrary text", () => {
-  const score = scoreAttempt(caseById("held-provider-timeout"), {
+  const malformed: unknown = {
     outcome: "provider_failure",
+    // Deliberately malformed runtime input: failure metadata must reject arbitrary text.
     failure: { code: "timeout", note: "credential sk-ABCDEFGHIJKLMNOPQRSTUV" },
-  } as EvaluationAttempt, { subjectId: "failure-text", measuredLatencyMs: 0, corpus: publicCorpus });
+  };
+  const score = scoreAttempt(caseById("held-provider-timeout"), malformed as EvaluationAttempt, { subjectId: "failure-text", measuredLatencyMs: 0, corpus: publicCorpus });
   assert.deepEqual(score.failure, { code: "invalid_response" });
   assert.equal(JSON.stringify(score).includes("credential"), false);
 });
 
 test("contradictory attempts and invalid usage become sanitized invalid responses", () => {
-  const score = scoreAttempt(caseById("tune-literal-exact-read"), {
+  const malformed: unknown = {
     outcome: "proposed",
     calls: [],
     reason: "no_match",
     failure: { code: "provider_error", note: "trusted but contradictory" },
     usage: [{ provider: "", inputTokens: -1, outputTokens: Number.NaN }],
     notes: "must not survive invalid shape",
-  }, { subjectId: "invalid-shape", measuredLatencyMs: 4, corpus: publicCorpus });
+  };
+  const score = scoreAttempt(caseById("tune-literal-exact-read"), malformed as EvaluationAttempt, { subjectId: "invalid-shape", measuredLatencyMs: 4, corpus: publicCorpus });
   assert.equal(score.outcome, "provider_failure");
   assert.deepEqual(score.failure, { code: "invalid_response" });
   assert.equal(score.proposedCalls, 0);
   assert.equal(score.wholeCallCorrect, false);
   assert.equal(score.usage, null);
-  assert.equal(score.notes, undefined);
+  assert.equal("notes" in score, false);
 });
 
 test("thrown provider text and credential-shaped values never enter reports", async () => {
@@ -1492,6 +1499,7 @@ test("latency percentiles are nearest-rank over evaluated cases", async () => {
 test("deferred mutation cases stay out of pilot rates and are reported separately", async () => {
   const report = await runEvaluation(publicCorpus, runOptions(publicCorpus, { suite: suiteWith(deterministicBaselineSubject()), clock: FIXED_CLOCK }));
   const subject = report.subjects[0];
+  if (subject.availability !== "available") throw new Error("subject unexpectedly unavailable");
   const deferredCases = evaluationCases().filter((entry) => entry.deferred === true);
   assert.equal(subject.deferred.caseCount, deferredCases.length);
   assert.deepEqual([...report.deferredCases].sort(), deferredCases.map((entry) => entry.caseId).sort());
@@ -1507,7 +1515,9 @@ test("deferred mutation cases stay out of pilot rates and are reported separatel
   });
   const probeReport = await runEvaluation(publicCorpus, runOptions(publicCorpus, { suite: suiteWith(destroyProbe), clock: FIXED_CLOCK }));
   const destroy = scoreById(probeReport, "held-deferred-process-destroy");
-  assert.equal(probeReport.subjects[0].deferred.proposedCall, 1);
+  const probeSubject = probeReport.subjects[0];
+  if (probeSubject.availability !== "available") throw new Error("subject unexpectedly unavailable");
+  assert.equal(probeSubject.deferred.proposedCall, 1);
   assert.equal(destroy.unsafeCalls, 1);
   assert.ok(destroy.unsafeReasons.includes("non_read_effect:process.signal"));
   assert.ok(destroy.unsafeReasons.includes("forbidden_capability:process.signal"));

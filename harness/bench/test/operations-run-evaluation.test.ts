@@ -293,7 +293,7 @@ test("output failure preserves the prior report and removes temporary files", as
   assert.equal([...io.stdout, ...io.stderr].join("\n").includes("fake-output-secret"), false);
 });
 
-function atomicFs(failAt?: "file_sync" | "rename") {
+function atomicFs(failAt?: "file_sync" | "rename"): { api: AtomicFs; calls: Array<readonly unknown[]> } {
   const calls: Array<readonly unknown[]> = [];
   let nextFd = 10;
   const api: AtomicFs = {

@@ -228,6 +228,10 @@ export type UnavailableEvaluationSubject = {
 
 export type EvaluationSubject = AvailableEvaluationSubject | UnavailableEvaluationSubject;
 
+export function isAvailableEvaluationSubject(subject: EvaluationSubject): subject is AvailableEvaluationSubject {
+  return subject.availability === "available";
+}
+
 export type EvaluationRole = "baseline" | "current" | "proposed";
 
 export type EvaluationSuite = {
@@ -1049,7 +1053,7 @@ export function parseEvaluationCorpus(value: unknown): Validation<EvaluationCorp
 }
 
 /** Tuning and held-out cases must not share a case, a variant family, or an instruction. */
-export function findSplitContamination(cases: readonly EvaluationCase[]): ValidationIssue[] {
+export function findSplitContamination(cases: readonly PublicEvaluationCase[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const families = new Map<string, EvaluationSplit>();
   const intents = new Map<string, EvaluationSplit>();
@@ -1855,7 +1859,7 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
       throw new Error(`${role} has an incomplete or duplicate evaluation cohort`);
     }
   }
-  const subjectsByRole = new Map(subjects.map((subject) => [subject.role, subject]));
+  const subjectsByRole = new Map<EvaluationRole, SubjectReport>(subjects.map((subject) => [subject.role, subject]));
   const baseline = subjectsByRole.get("baseline");
   if (baseline === undefined) throw new Error("baseline subject report is missing");
   if (!isAvailableSubjectReport(baseline)) throw new Error("baseline subject must be available");

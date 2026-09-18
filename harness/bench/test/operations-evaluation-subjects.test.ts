@@ -6,6 +6,7 @@ import { AMBIGUOUS_OPTION, NO_MATCH_OPTION, createJudgmentBudgetAccount } from "
 import { TYPESAFE_DEFAULT_MODEL } from "../src/operations/typesafe.ts";
 import { EVALUATION_SUBJECT_IMPORT_PROVENANCE, EVALUATION_SUBJECT_LIMITS } from "../src/operations/evaluation-subjects.ts";
 import type { ProviderInputRequest, TypeSafeFetch, TypeSafeFetchInit, TypeSafeResponseLike } from "../src/operations/typesafe.ts";
+import { isAvailableEvaluationSubject, isAvailableSubjectReport } from "../src/operations/evaluation.ts";
 import type { EvaluationSubjectInput } from "../src/operations/evaluation.ts";
 
 const API_KEY = "ts_test_key_0123456789";
@@ -59,7 +60,7 @@ function answer(choice: string, model = TYPESAFE_DEFAULT_MODEL): TypeSafeRespons
 }
 
 function subjectWith(fetch: TypeSafeFetch, overrides: Record<string, unknown> = {}, seen: ProviderInputRequest[] = []) {
-  return typeSafeEvaluationSubject({
+  const subject = typeSafeEvaluationSubject({
     apiKey: API_KEY,
     fetch,
     providerInputScope: "evaluation-task-6",
@@ -69,6 +70,8 @@ function subjectWith(fetch: TypeSafeFetch, overrides: Record<string, unknown> = 
     },
     ...overrides,
   });
+  assert.ok(isAvailableEvaluationSubject(subject));
+  return subject;
 }
 
 const runtime = (signal = new AbortController().signal) => ({ signal, now: () => 1_700_000_000_000 });
@@ -163,7 +166,9 @@ test("reported TypeSafe usage is complete for evaluation aggregation and pricing
   });
   const proposed = report.cases.find((entry) => entry.role === "proposed");
   assert.equal(proposed?.usageKnown, true);
-  const split = report.subjects.find((entry) => entry.role === "proposed")?.splits[0].score;
+  const proposedReport = report.subjects.find((entry) => entry.role === "proposed");
+  assert.ok(proposedReport && isAvailableSubjectReport(proposedReport));
+  const split = proposedReport.splits[0].score;
   assert.equal(split?.usage.providers[0].complete, true);
   assert.equal(split?.usage.providers[0].cachedInputTokens, 0);
   assert.equal(split?.cost.totalUsd, (23 + 5 * 2) / 1_000_000);
@@ -173,12 +178,14 @@ test("missing or denying provider input policy maps to stable provider failure w
   let calls = 0;
   const fetch: TypeSafeFetch = async () => { calls += 1; return answer("c0"); };
   const missing = typeSafeEvaluationSubject({ apiKey: API_KEY, fetch });
+  assert.ok(isAvailableEvaluationSubject(missing));
   assert.deepEqual(await missing.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" }, providerAttempts: { typesafe: 0 } });
   const denied = typeSafeEvaluationSubject({
     apiKey: API_KEY,
     fetch,
     providerInputPolicy: () => ({ authorized: false, code: "evaluation_denied" }),
   });
+  assert.ok(isAvailableEvaluationSubject(denied));
   assert.deepEqual(await denied.attempt(input, runtime()), { outcome: "provider_failure", failure: { code: "provider_error" }, providerAttempts: { typesafe: 0 } });
   assert.equal(calls, 0);
 });
@@ -312,6 +319,7 @@ test("import provenance remains explicit after local compatibility changes", () 
 
 test("missing trusted config fails closed without reading credentials or reporting secrets", async () => {
   const subject = typeSafeEvaluationSubject(undefined);
+  assert.ok(isAvailableEvaluationSubject(subject));
   const result = await subject.attempt(input, runtime());
   assert.deepEqual(result, { outcome: "provider_failure", failure: { code: "missing_credentials" }, providerAttempts: { typesafe: 0 } });
   assert.equal(JSON.stringify(result).includes(API_KEY), false);
