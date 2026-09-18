@@ -8,7 +8,6 @@ use crate::trees::{TreeCtx, Trees};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -20,9 +19,6 @@ pub const JOB_CAP: usize = 4 << 20;
 pub struct Exec {
     pub trees: Arc<Trees>,
     pub procs: Arc<Procs>,
-    /// Where the nix profile is, for the sandbox's read-only bind. The one thing the home is
-    /// still read for here; it is no longer a confinement boundary.
-    pub profile: PathBuf,
 }
 
 /// The words the command actually is, before any wrapper: a shell string becomes `sh -c ...`,
@@ -50,7 +46,7 @@ fn words_of(args: &Value) -> Result<(Vec<String>, String), ToolError> {
 /// `KL_TREE`, `PORT`, `KL_PORT_RANGE`. `HOME` is the sandbox's (`{tree}/.home`) and `KL_WORKSPACE`
 /// is REMOVED: it names the layout §3.5 says a model is never taught, and it was in the pod
 /// environment this process inherited.
-fn command(t: &TreeCtx, profile: &std::path::Path, args: &Value) -> Result<(Command, String), ToolError> {
+fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
     let (words, line) = words_of(args)?;
     let cwd = confine(t, opt_str(args, "cwd").unwrap_or("."))?;
     // Wrapping each exec, never the server: the server must see every tree to serve them, and an
@@ -62,7 +58,7 @@ fn command(t: &TreeCtx, profile: &std::path::Path, args: &Value) -> Result<(Comm
         // fails inside an empty namespace.
         let _ = std::fs::create_dir_all(t.sandbox_home());
         let mut c = Command::new("bwrap");
-        c.args(sandbox::bwrap_argv(t, profile, &words));
+        c.args(sandbox::bwrap_argv(t, &words));
         // bwrap's own --chdir is the tree; a `cwd` deeper in it is set here, where the path is
         // the same string on both sides of the bind.
         c.current_dir(&cwd);
@@ -203,7 +199,7 @@ impl ToolSet for Exec {
                     if opt_bool(&args, "pty") {
                         return Err(ToolError::Invalid("pty: unsupported in this version".into()));
                     }
-                    let (cmd, line) = command(&t, &self.profile, &args)?;
+                    let (cmd, line) = command(&t, &args)?;
                     if opt_bool(&args, "detach") {
                         let id = self.procs.spawn(&t.name, cmd, line).map_err(ToolError::Failed)?;
                         return Ok(json!({ "id": id }));
@@ -276,7 +272,7 @@ mod tests {
         let root = home.join("ws");
         std::fs::create_dir_all(root.join(".agents/x")).unwrap();
         let trees = Arc::new(Trees::new(root, None));
-        (tmp, Exec { trees: trees.clone(), procs: Arc::new(Procs::default()), profile: home.join(".nix-profile") }, trees)
+        (tmp, Exec { trees: trees.clone(), procs: Arc::new(Procs::default()) }, trees)
     }
 
     #[tokio::test]

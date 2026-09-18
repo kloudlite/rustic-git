@@ -16,10 +16,19 @@
 //! (no spike): a missing or refused `bwrap` runs the command unwrapped and says so once.
 
 use crate::trees::TreeCtx;
-use std::path::Path;
+
+/// Every path the wrapper binds from the host, besides the tree itself. `/nix` is BOTH the store
+/// and the profile: the profile is `/nix/profile/current` (`packages::PROFILE_LINK`), a symlink
+/// into `/nix/store`, and the pod has exactly one `nix` volume mounted at `/nix` covering both.
+///
+/// This used to also bind `{home}/.nix-profile`, which is a path no workspace pod has — every exec
+/// on the fleet died with `bwrap: Can't find source path /home/kl/.nix-profile` (2026-09-18).
+/// The lesson is in `missing_bind` below, not in this list: a bind source that is not there must
+/// never be the reason a person's command does not run.
+const BINDS: [&str; 3] = ["/nix", "/etc/passwd", "/etc/resolv.conf"];
 
 /// `bwrap`'s own arguments, up to and including the `--` that ends them. `cmd` is appended whole.
-pub fn bwrap_argv(tree: &TreeCtx, profile: &Path, cmd: &[String]) -> Vec<String> {
+pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
     let root = tree.root.to_string_lossy().into_owned();
     let mut a: Vec<String> = vec![
         "--unshare-all".into(),
@@ -32,12 +41,8 @@ pub fn bwrap_argv(tree: &TreeCtx, profile: &Path, cmd: &[String]) -> Vec<String>
         "--bind".into(),
         root.clone(),
         root.clone(),
-        "--ro-bind".into(),
-        "/nix".into(),
-        "/nix".into(),
     ];
-    a.extend(["--ro-bind".to_string(), profile.to_string_lossy().into_owned(), profile.to_string_lossy().into_owned()]);
-    for f in ["/etc/passwd", "/etc/resolv.conf"] {
+    for f in BINDS {
         a.extend(["--ro-bind".to_string(), f.into(), f.into()]);
     }
     a.extend([
@@ -60,8 +65,27 @@ pub fn bwrap_argv(tree: &TreeCtx, profile: &Path, cmd: &[String]) -> Vec<String>
     a
 }
 
-/// Whether `bwrap` can be used at all. Answered once per process: a missing binary is a fact about
-/// the image, not a per-exec coin flip, and the log line that says so must not repeat per command.
+/// The first bind source that is not on this filesystem, if any.
+///
+/// `bwrap` refuses to start when a `--ro-bind` source is missing, and that refusal is indisting-
+/// uishable to a caller from the command itself failing — which is exactly how a wrong path in
+/// this file became "every exec on the fleet exits 1". Checked here instead, so a layout this
+/// code does not expect COSTS the sandbox and nothing else.
+///
+/// The tree's own root is deliberately not checked: it is the thing being served, `tree_of`
+/// already refused a tree whose directory is gone, and a missing root is a real error rather than
+/// a reason to run the command somewhere else.
+pub fn missing_bind() -> Option<&'static str> {
+    BINDS.into_iter().find(|p| !std::path::Path::new(p).exists())
+}
+
+/// Whether the wrapper can be used at all: `bwrap` on PATH, and every bind source present.
+/// Answered once per process — both are facts about the image and the pod's mounts, not per-exec
+/// coin flips, and the line that says so must not repeat per command.
+///
+/// False means every exec runs UNWRAPPED, with `paths::confine` as its only fence. That is worse
+/// than the wrapper and far better than the alternative this replaced: refusing to run anything.
+/// `ide.sandbox.unavailable` is how the fleet sees which of the two states a pod is in.
 pub fn available() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
@@ -75,8 +99,13 @@ pub fn available() -> bool {
             // Once, loudly: every exec after this runs with `confine` as its only fence, which is
             // the state the fleet has to be able to see it is in.
             tracing::warn!(reason = "no-bwrap", "ide.sandbox.unavailable");
+            return false;
         }
-        found
+        if let Some(path) = missing_bind() {
+            tracing::warn!(reason = %format!("missing-bind:{path}"), "ide.sandbox.unavailable");
+            return false;
+        }
+        true
     })
 }
 
@@ -92,7 +121,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".agents/x")).unwrap();
         let trees = Trees::new(root.clone(), None);
         let x = trees.resolve(Some("x")).unwrap();
-        let argv = bwrap_argv(&x, Path::new("/home/kl/.nix-profile"), &["sh".into(), "-c".into(), "true".into()]);
+        let argv = bwrap_argv(&x, &["sh".into(), "-c".into(), "true".into()]);
         let tree_path = x.root.to_string_lossy().into_owned();
         // Bound at the same path in and out — the one string §3.5 concedes stays one string.
         let bind = argv.windows(3).find(|w| w[0] == "--bind").expect("the tree is bound");
@@ -105,5 +134,22 @@ mod tests {
         // The command is last, whole, after the `--`.
         let dashdash = argv.iter().position(|s| s == "--").unwrap();
         assert_eq!(&argv[dashdash + 1..], &["sh".to_string(), "-c".into(), "true".into()]);
+        // No path under a HOME is ever a bind SOURCE. The pod has no `~/.nix-profile`, and naming
+        // one made bwrap refuse to start on every exec in the fleet (2026-09-18).
+        let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
+        assert_eq!(sources, vec!["/nix", "/etc/passwd", "/etc/resolv.conf"], "{argv:?}");
+    }
+
+    /// Every source the argv names is one `missing_bind` speaks for, so a path added to `BINDS`
+    /// without being checked cannot ship: the degradation is the whole safety of this file.
+    #[test]
+    fn every_bound_source_is_one_the_preflight_checks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let x = Trees::new(root, None).resolve(None).unwrap();
+        let argv = bwrap_argv(&x, &["true".into()]);
+        let sources: Vec<String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| w[1].clone()).collect();
+        assert_eq!(sources, BINDS.map(str::to_string).to_vec());
     }
 }

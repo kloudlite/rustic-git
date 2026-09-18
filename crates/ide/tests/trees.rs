@@ -7,7 +7,7 @@
 //! to correct, not a permission to deny.
 
 use kloudlite_ide::paths::{confine, relative};
-use kloudlite_ide::sandbox::bwrap_argv;
+use kloudlite_ide::sandbox::{bwrap_argv, missing_bind};
 use kloudlite_ide::server::App;
 use kloudlite_ide::tools::ToolError;
 use kloudlite_ide::{Config, TreeCtx};
@@ -96,16 +96,20 @@ fn every_path_out_is_relative_to_its_own_tree() {
     assert_eq!(relative(&x, &x.root.join("src/main.rs")), "src/main.rs", "the tree's root, not the workspace's");
 }
 
-/// The argv of spec §4.7, exactly. A wrapper is only worth having if what it binds is checkable,
+/// The argv of spec §4.7, as BUILT. A wrapper is only worth having if what it binds is checkable,
 /// so this reads as the list it is rather than as a shape.
+///
+/// One bind, `/nix`, carries both the store and the profile: the profile is `/nix/profile/current`
+/// and the pod mounts exactly one `nix` volume over both. The spec's draft argv also named
+/// `{profile}` separately as `/home/kl/.nix-profile`, a path no workspace pod has — every exec on
+/// the fleet exited 1 on `bwrap: Can't find source path` until that was removed (2026-09-18).
 #[test]
 fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
     let (_t, app) = workspace();
     let x = app.tree(Some("x")).unwrap();
     let root = x.root.to_string_lossy().into_owned();
     let home = format!("{root}/.home");
-    let profile = std::path::Path::new("/home/kl/.nix-profile");
-    let argv = bwrap_argv(&x, profile, &["sh".into(), "-c".into(), "true".into()]);
+    let argv = bwrap_argv(&x, &["sh".into(), "-c".into(), "true".into()]);
     assert_eq!(
         argv,
         vec![
@@ -115,8 +119,8 @@ fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
             "--new-session".into(),
             // The same path in and out, so the one string §3.5 concedes to `pwd` stays one string.
             "--bind".into(), root.clone(), root.clone(),
+            // The store AND the profile under it: one mount, the one the pod actually has.
             "--ro-bind".into(), "/nix".into(), "/nix".into(),
-            "--ro-bind".into(), "/home/kl/.nix-profile".into(), "/home/kl/.nix-profile".into(),
             "--ro-bind".into(), "/etc/passwd".into(), "/etc/passwd".into(),
             "--ro-bind".into(), "/etc/resolv.conf".into(), "/etc/resolv.conf".into(),
             "--tmpfs".into(), "/tmp".into(),
@@ -130,6 +134,39 @@ fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
     );
     // Nothing of the workspace root, the other trees, the token or `kl` is named anywhere.
     assert!(!argv.iter().any(|a| a.ends_with("/workspaces/ws-1")), "{argv:?}");
+    // And nothing under the HOME: the home is not bound, so naming a path inside it could only be
+    // a source bwrap would refuse to start on — which is the outage this test now stands for.
+    assert!(!argv.iter().any(|a| a.starts_with("/home/kl/.")), "{argv:?}");
+}
+
+/// Every bind source the wrapper names must be one that exists, and the pair that decides this is
+/// what keeps a layout this code does not expect from costing a person their command.
+///
+/// This is the regression test for the fleet-wide outage: `bwrap` refuses to start when a
+/// `--ro-bind` source is missing, and to the caller that refusal is indistinguishable from the
+/// command itself failing. Now it costs the sandbox and nothing else.
+#[test]
+fn a_bind_source_that_is_not_there_costs_the_sandbox_and_not_the_command() {
+    // On any machine that runs this, `/nix` may or may not exist — so the assertion is the
+    // AGREEMENT between the two functions, not a fixed answer: whatever `missing_bind` names must
+    // be a path `bwrap_argv` actually binds, and when it names nothing every source must be real.
+    let (_t, app) = workspace();
+    let x = app.tree(Some("x")).unwrap();
+    let argv = bwrap_argv(&x, &["true".into()]);
+    let bound: Vec<&String> = argv
+        .windows(3)
+        .filter(|w| w[0] == "--ro-bind")
+        .map(|w| &w[1])
+        .collect();
+    assert!(!bound.is_empty(), "the wrapper binds something");
+    match missing_bind() {
+        Some(p) => assert!(bound.iter().any(|b| *b == p), "{p} is reported missing but never bound: {bound:?}"),
+        None => {
+            for b in bound {
+                assert!(std::path::Path::new(b).exists(), "{b} is bound but missing, and nothing said so");
+            }
+        }
+    }
 }
 
 /// What `env` shows a model: the profile's own variables plus the three that are ours. Not `HOME`

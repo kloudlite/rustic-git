@@ -23,12 +23,9 @@ impl App {
         let procs = Arc::new(Procs::default());
         let watches = Arc::new(Watches::default());
         let trees = Arc::new(Trees::new(cfg.root.clone(), cfg.graft_dir.clone()));
-        // The nix profile, for the sandbox's read-only bind. The home is read for this and for
-        // nothing else now — it stopped being a confinement boundary with §4.4.
-        let profile = cfg.home.join(".nix-profile");
         let registry = Registry::new(vec![
             Box::new(Files { trees: trees.clone() }),
-            Box::new(Exec { trees: trees.clone(), procs: procs.clone(), profile }),
+            Box::new(Exec { trees: trees.clone(), procs: procs.clone() }),
             Box::new(WatchTools { trees: trees.clone(), procs: procs.clone(), watches: watches.clone() }),
             Box::new(GraftTools { trees: trees.clone(), procs: procs.clone() }),
         ]);
