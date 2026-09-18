@@ -295,7 +295,9 @@ test("two prompts close together over the socket both land", async () => {
     await until(() => frames.filter((f) => f.type === "response" && f.id === "2").length > 0, 8_000, "the second prompt to be answered");
     const second = frames.find((f) => f.type === "response" && f.id === "2")!;
     assert.notEqual(second.success, false, `the second prompt was refused: ${JSON.stringify(second)}`);
-    assert.equal(second.command, "follow_up", "it is held as a follow-up, which is the queue pi owns");
+    // A person's own line mid-turn is a STEER, first (spec §4): it reaches the turn that is
+    // running, so a second line is read in the work it is about rather than after it.
+    assert.equal(second.command, "steer", "a person's line reaches the turn it was typed into");
     a.close();
   } finally {
     await t.down();
