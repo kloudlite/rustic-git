@@ -129,18 +129,72 @@ fn pick(runnable: &dyn Fn(&str) -> bool) -> Option<&'static str> {
     [PROFILE_BWRAP, "bwrap"].into_iter().find(|p| runnable(p))
 }
 
-/// Whether the wrapper can be used at all. See `binary`.
+/// Whether a `bwrap` binary exists at all. NOT enough to use it — see `usable`.
 pub fn available() -> bool {
     binary().is_some()
 }
 
-/// Said ONCE, on the first exec that is actually wrapped. The fleet signal has to be positive: an
-/// absence proves nothing — a log with no `ide.sandbox.unavailable` is equally what a server that
-/// never ran an exec looks like, which is exactly how "bwrap is on" was believed for ten minutes
-/// while nothing was wrapped at all.
-pub fn note_active(bwrap: &str) {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| tracing::info!(bwrap, "ide.sandbox.active"));
+/// The one-time RUNTIME proof, and the only thing that may be trusted.
+///
+/// A binary that exists and binds that exist do not mean the wrapper WORKS. Under the workspace
+/// pods' runtime (gVisor) an unprivileged user namespace is refused to uid 1000, so the real argv
+/// dies with `bwrap: setting up uid map: Operation not permitted` — a failure invisible to every
+/// check that came before it, and the third outage of this exact shape would have been the one
+/// that shipped it (2026-09-18, caught by hand before the roll).
+///
+/// So the sandbox proves it can start before it is trusted: the resolved binary, the REAL flags,
+/// and `/bin/true` as the command. A preflight with fewer namespaces would pass where the thing it
+/// stands for fails, which is the whole lesson of the three outages this file has now caused.
+///
+/// Cached for the life of the process: the runtime's answer does not change under a running pod,
+/// and paying a fork per exec to re-ask would be its own defect.
+///
+/// `None` means every exec runs unwrapped, with `paths::confine` and the tree cwd as the fence —
+/// a weaker boundary, and the only honest one available.
+pub fn usable(tree: &TreeCtx) -> Option<&'static str> {
+    static OK: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| preflight(binary()?, tree))
+}
+
+/// The proof itself, uncached, so a test can run it against a fake `bwrap` without burning the
+/// `OnceLock` — the caching is `usable`'s and the DECISION is this function's.
+fn preflight(bwrap: &'static str, tree: &TreeCtx) -> Option<&'static str> {
+    {
+        // The HOME the real argv sets must exist before the real argv is run, preflight included.
+        let _ = std::fs::create_dir_all(tree.sandbox_home());
+        let argv = bwrap_argv(tree, &["/bin/true".to_string()]);
+        match std::process::Command::new(bwrap).args(&argv).output() {
+            Ok(o) if o.status.success() => {
+                // ONLY here. A passing preflight is the one thing that earns this line, so a log
+                // carrying it means execs really are wrapped rather than that something was found
+                // on disk.
+                tracing::info!(bwrap, "ide.sandbox.active");
+                Some(bwrap)
+            }
+            // The FIRST stderr line: bwrap says what it could not do on line one and usage after,
+            // and the reason has to fit a log field a person reads at a glance.
+            Ok(o) => {
+                tracing::info!(reason = %format!("preflight:{}", first_line(&o.stderr)), "ide.sandbox.unavailable");
+                None
+            }
+            Err(e) => {
+                tracing::info!(reason = %format!("preflight:{e}"), "ide.sandbox.unavailable");
+                None
+            }
+        }
+    }
+}
+
+/// The first non-empty line of a child's stderr, trimmed and bounded — a log field, not a dump.
+fn first_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no stderr")
+        .chars()
+        .take(200)
+        .collect()
 }
 
 #[cfg(test)]
@@ -172,6 +226,51 @@ mod tests {
         // one made bwrap refuse to start on every exec in the fleet (2026-09-18).
         let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
         assert_eq!(sources, vec!["/nix", "/etc/passwd", "/etc/resolv.conf"], "{argv:?}");
+    }
+
+    /// A `bwrap` that EXISTS but cannot START must not be trusted. Under the workspace pods'
+    /// runtime an unprivileged user namespace is refused to uid 1000 and the real argv dies with
+    /// `setting up uid map: Operation not permitted` — which every earlier check passed, because
+    /// every earlier check asked something weaker than "does this argv run".
+    ///
+    /// The fake stands in for the runtime: a script that prints bwrap's own refusal and exits 1.
+    #[test]
+    fn a_bwrap_that_cannot_start_is_not_used_and_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let tree = Trees::new(root, None).resolve(None).unwrap();
+
+        let fake = tmp.path().join("bwrap-fails");
+        std::fs::write(&fake, "#!/bin/sh\necho 'bwrap: setting up uid map: Operation not permitted' >&2\nexit 1\n").unwrap();
+        make_executable(&fake);
+        // Leaked so the signature matches the cached form; a test binary's lifetime is the leak's.
+        let path: &'static str = Box::leak(fake.to_string_lossy().into_owned().into_boxed_str());
+        assert_eq!(preflight(path, &tree), None, "a wrapper that cannot start is not a wrapper");
+
+        // And the other way: one that starts is taken.
+        let ok = tmp.path().join("bwrap-works");
+        std::fs::write(&ok, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&ok);
+        let ok_path: &'static str = Box::leak(ok.to_string_lossy().into_owned().into_boxed_str());
+        assert_eq!(preflight(ok_path, &tree), Some(ok_path));
+    }
+
+    fn make_executable(p: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The reason that reaches the log is bwrap's own first line, not its usage text — a person
+    /// reading `ide.sandbox.unavailable` has to see WHY in the field, not be sent to the pod.
+    #[test]
+    fn the_reason_is_the_first_line_of_what_the_wrapper_said() {
+        let stderr = b"bwrap: setting up uid map: Operation not permitted\nusage: bwrap [OPTIONS]\n  --unshare-all\n";
+        assert_eq!(first_line(stderr), "bwrap: setting up uid map: Operation not permitted");
+        assert_eq!(first_line(b"\n\n  indented and late\n"), "indented and late");
+        assert_eq!(first_line(b""), "no stderr");
+        // Bounded: a wrapper that printed a megabyte must not put a megabyte in a log field.
+        assert_eq!(first_line(&vec![b'x'; 5000]).len(), 200);
     }
 
     /// The profile's absolute path wins, and a bare PATH lookup is only the fallback.
