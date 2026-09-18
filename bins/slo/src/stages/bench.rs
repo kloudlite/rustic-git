@@ -844,7 +844,7 @@ async fn agent_tree_run(c: &mut Ctx) {
                 let (code, out, _) = super::workspace::ws_exec(
                     c,
                     &ws_id,
-                    &format!("cd /home/kl/workspaces/$KL_WORKSPACE && cat .agents/{tree}/{f} 2>&1; echo ---; ls {f} 2>&1"),
+                    &format!("cd \"$KL_WORKSPACE\" && cat .agents/{tree}/{f} 2>&1; echo ---; ls {f} 2>&1"),
                     Duration::from_secs(20),
                 )
                 .await?;
@@ -941,28 +941,75 @@ where
 /// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
 /// goes as binary frames, output comes back as binary frames, and the server ends with one text
 /// control frame. Returns what the shell printed and its exit code.
+/// One shell exchange through the bench's `/pty` splice, which is a TRANSPARENT pipe to the
+/// sidecar's ttyd (`harness/bench/src/pty.ts`, `spliceShell`). So this speaks ttyd's own
+/// protocol, not the retired tool-server PTY's:
+///
+/// | direction | opcode | payload |
+/// |---|---|---|
+/// | client → | (first frame) | `{"AuthToken":"","columns":N,"rows":N}` |
+/// | client → | `0` | input bytes |
+/// | → client | `0` | output bytes |
+/// | → client | `1` | the title |
+/// | → client | `2` | ttyd's preferences JSON |
+///
+/// Two things this got wrong until 2026-09-18, both of which made every shell id time out while
+/// the shell itself was perfectly healthy: it sent a bare JSON resize and unprefixed input, which
+/// ttyd reads as opcode bytes of its own; and it waited for a JSON `exit` control frame, which
+/// nothing in this path ever sends — ttyd closes the socket instead (verified against the live
+/// bench: frames `BIN op=1, op=2, op=0`, marker received, `CLOSE code 1000`, no exit frame). The
+/// probe therefore held the socket open until its ceiling, which is the 24 s ttyd logged.
+///
+/// The EXIT STATUS is gone with it: ttyd reports none. The caller's script prints its own status
+/// marker instead, which is also what a person reads off a terminal.
 pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(String, i64)> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/pty?scope={scope}")).await.context("pty socket")?;
-    ws.send(Message::text(json!({"resize": {"cols": 100, "rows": 30}}).to_string())).await?;
-    ws.send(Message::binary(input.as_bytes().to_vec())).await?;
+    let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
+        tokio_tungstenite::tungstenite::handshake::client::Request::builder()
+            .uri(format!("ws://127.0.0.1:{port}/pty?scope={scope}"))
+            .header("Host", format!("127.0.0.1:{port}"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            // ttyd refuses a socket that does not ask for its subprotocol, and the splice carries
+            // the handshake through.
+            .header("Sec-WebSocket-Protocol", "tty")
+            .body(())?,
+        None,
+        false,
+    )
+    .await
+    .context("pty socket")?;
+    // The auth frame is FIRST and carries the size; the token is empty because the NetworkPolicy
+    // is the fence here, not ttyd's own auth (spec §2.3).
+    ws.send(Message::text(json!({"AuthToken": "", "columns": 100, "rows": 30}).to_string())).await?;
+    let mut framed = vec![b'0'];
+    framed.extend_from_slice(input.as_bytes());
+    ws.send(Message::binary(framed)).await?;
     let mut out = String::new();
     while let Some(msg) = ws.next().await {
         match msg.context("pty frame")? {
-            // Not necessarily UTF-8 on a boundary — this is a judgement, not a terminal.
-            Message::Binary(b) => out.push_str(&String::from_utf8_lossy(&b)),
+            // Opcode `0` is OUTPUT; the title (`1`) and the preferences (`2`) say nothing about
+            // what the shell did. Not necessarily UTF-8 on a boundary — this is a judgement, not
+            // a terminal.
+            Message::Binary(b) => {
+                if let Some((b'0', rest)) = b.split_first() {
+                    out.push_str(&String::from_utf8_lossy(rest));
+                }
+            }
+            // The splice's own control frame, and the only place an error is reported now.
             Message::Text(t) => {
                 let v: Value = serde_json::from_str(&t).with_context(|| format!("pty control frame {}", super::clip(&t)))?;
                 if let Some(e) = v["error"].as_str() {
                     bail!("the shell did not start: {e}");
                 }
-                let code = v["exit"].as_i64().with_context(|| format!("a control frame that is neither exit nor error: {}", super::clip(&t)))?;
-                return Ok((out, code));
             }
             Message::Close(_) => break,
             _ => {}
         }
     }
-    bail!("the shell closed without an exit frame; output {}", super::clip(&out))
+    // A clean close is how a ttyd shell ends; `0` keeps `judge_shell`'s shape for callers.
+    Ok((out, 0))
 }
 
 
@@ -976,6 +1023,9 @@ fn judge_shell(out: &str, want: &str, code: i64) -> Result<()> {
     if !out.contains(want) {
         bail!("the shell never printed {want}: {}", super::clip(out));
     }
+    // ttyd reports no exit status (it is not in its protocol), so `pty_shell` answers 0 and the
+    // OUTPUT is the whole judgement — a script that wants its status asserted prints it. Kept as
+    // a parameter rather than removed so a caller that does have one is still checked.
     if code != 0 {
         bail!("the shell exited {code}");
     }
@@ -1678,6 +1728,61 @@ mod tests {
         assert!(health_ok(&body));
 
         assert!(!health_ok("{\"ok\":false}"));
+    }
+
+    /// A ttyd-shaped server: it answers the subprotocol, expects the auth frame first, expects
+    /// input prefixed with `0`, replies with `1` (title) and `2` (prefs) before any output, and
+    /// ENDS BY CLOSING — there is no exit frame anywhere in this path. Every one of those cost a
+    /// timeout on a healthy shell before 2026-09-18.
+    #[tokio::test]
+    async fn a_shell_exchange_speaks_ttyds_frames_and_ends_on_the_close() {
+        use futures::SinkExt;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let heard = seen.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // `result_large_err`: the error type is tungstenite's own handshake response, fixed by
+            // the callback's signature — there is nothing here to box.
+            #[allow(clippy::result_large_err)]
+            let on_handshake = |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                mut res: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                // ttyd refuses a socket that does not ask for `tty`; the probe must offer it.
+                let offered = req.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+                heard.lock().unwrap().push(format!("subprotocol:{offered}"));
+                res.headers_mut().insert("sec-websocket-protocol", "tty".parse().unwrap());
+                Ok::<_, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse>(res)
+            };
+            let mut ws = tokio_tungstenite::accept_hdr_async(stream, on_handshake)
+            .await
+            .unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    Message::Text(t) => heard.lock().unwrap().push(format!("auth:{t}")),
+                    Message::Binary(b) => {
+                        heard.lock().unwrap().push(format!("input:{}", String::from_utf8_lossy(&b)));
+                        // Title and preferences first, as ttyd does, then the output, then close.
+                        let _ = ws.send(Message::binary(b"1a title".to_vec())).await;
+                        let _ = ws.send(Message::binary(b"2{\"prefs\":1}".to_vec())).await;
+                        let _ = ws.send(Message::binary(b"0kl-ok\r\n".to_vec())).await;
+                        let _ = ws.close(None).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (out, code) = pty_shell(port, "bench", "printf ok\n").await.unwrap();
+        // The close is the end, not an exit frame — waiting for one is what held the socket open
+        // for the whole ceiling while the shell had already answered.
+        assert_eq!(code, 0);
+        assert!(out.contains("kl-ok"), "the output frame was not read: {out:?}");
+        assert!(!out.contains("a title") && !out.contains("prefs"), "a non-output frame reached the judgement: {out:?}");
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.iter().any(|s| s == "subprotocol:tty"), "{seen:?}");
+        assert!(seen.iter().any(|s| s.starts_with("auth:") && s.contains("AuthToken") && s.contains("columns")), "{seen:?}");
+        assert!(seen.iter().any(|s| s.starts_with("input:0")), "input must carry ttyd's `0` opcode: {seen:?}");
     }
 
     #[tokio::test]
