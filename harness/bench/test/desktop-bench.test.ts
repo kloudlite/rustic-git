@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { BadGateway, ensureBench, Expired, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "../../src/connect/bench.ts";
+import { until } from "./wait.ts";
 
 type Answer = { status: number; body?: unknown };
 /** A stub api answering each route (method + path + query) from its own queue; the last answer repeats. */
@@ -190,7 +191,8 @@ test("an abort cancels the 202 wait loop instead of retrying forever", async () 
   const ac = new AbortController();
   try {
     const p = mintSession(s.api, "tok", "acme", { sleepMs: 20, waitMs: 2000, signal: ac.signal });
-    setTimeout(() => ac.abort(), 5);
+    await until(() => s.calls.length === 1, 1000, "the initial session request");
+    ac.abort();
     await assert.rejects(p);
     const seenAfterAbort = s.calls.length;
     await new Promise((r) => setTimeout(r, 60));

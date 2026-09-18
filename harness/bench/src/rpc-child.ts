@@ -178,7 +178,8 @@ export class RpcChild {
     // The child primes ITSELF: every kind of child gets one `get_state`, so the buffer above always
     // has something that proves readiness. A fork is created directly rather than through `open()`,
     // and waiting on a `get_state` nobody sent would hold its commands forever.
-    if (!this.ready) c2.stdin!.write(JSON.stringify({ type: "get_state", id: `c${++this.seq}` }) + "\n");
+    c2.stdin!.on("error", (error) => this.rejectWaiting(error instanceof Error ? error : new Error(String(error))));
+    if (!this.ready) this.write(JSON.stringify({ type: "get_state", id: `c${++this.seq}` }) + "\n");
     this.onEvent({ type: "started", host: "bench", model: o.model, resumed: !!o.file, forked: !!o.fork });
   }
 
@@ -242,16 +243,40 @@ export class RpcChild {
       this.waiting.set(id, { resolve, reject });
       const line = JSON.stringify({ ...cmd, id }) + "\n";
       // `get_state` is what proves the child is up, so it goes first and never waits on itself.
-      if (this.ready || cmd.type === "get_state") return void c.stdin!.write(line);
+      if (this.ready || cmd.type === "get_state") {
+        if (!this.write(line)) this.rejectWaiting(new Error("pi stdin is closed"));
+        return;
+      }
       this.pending.push(line);
     });
+  }
+
+  private write(line: string): boolean {
+    const stdin = this.child?.stdin;
+    if (!stdin || stdin.destroyed) return false;
+    try {
+      stdin.write(line);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private rejectWaiting(error: Error): void {
+    for (const w of this.waiting.values()) w.reject(error);
+    this.waiting.clear();
   }
 
   /** Whatever arrived before pi could answer, in the order it was sent. */
   private flush(): void {
     const c = this.child;
     if (!c) return;
-    for (const line of this.pending.splice(0)) c.stdin!.write(line);
+    for (const line of this.pending.splice(0)) {
+      if (!this.write(line)) {
+        this.rejectWaiting(new Error("pi stdin is closed"));
+        break;
+      }
+    }
   }
 
   private feed(chunk: string) {

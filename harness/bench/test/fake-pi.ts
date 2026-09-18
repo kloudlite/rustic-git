@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url";
 
 export const FAKE = fileURLToPath(import.meta.url);
 
+function writeJson(file: string, value: unknown): void {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value));
+  fs.renameSync(tmp, file);
+}
+
 // Importing this module (for FAKE) must not also run it — it would attach a
 // stdin listener in whatever process did the importing, hanging it forever.
 if (process.argv[1] === FAKE) main();
@@ -20,7 +26,7 @@ if (!fs.existsSync(file)) fs.writeFileSync(file, JSON.stringify({ type: "session
 // A test that wants this process's argv (e.g. to check `--tools`) sets this
 // env var to a path; writing it here never touches the RPC stream, so it
 // cannot shift the event order a real client's test asserts on.
-if (process.env.FAKE_PI_ARGV_FILE) fs.writeFileSync(process.env.FAKE_PI_ARGV_FILE, JSON.stringify(argv));
+if (process.env.FAKE_PI_ARGV_FILE) writeJson(process.env.FAKE_PI_ARGV_FILE, argv);
 // Every command this child was sent, for a test that asserts what the bench applies on start.
 // Keyed by the session the bench spawned it for (KL_SESSION), never by pid: the file has to be
 // findable before the child is.
@@ -46,7 +52,7 @@ process.stdin.on("data", (d) => {
     const cmd = JSON.parse(buf.slice(0, at));
     buf = buf.slice(at + 1);
     seenCmds.push(cmd);
-    if (cmdLog) fs.writeFileSync(cmdLog, JSON.stringify(seenCmds));
+    if (cmdLog) writeJson(cmdLog, seenCmds);
     const ok = (data?: unknown) => out({ type: "response", id: cmd.id, command: cmd.type, success: true, data });
     if (cmd.type === "get_state") ok({ sessionFile: file, isStreaming: false, argv, tools: process.env.KL_TOOLS_WORKSPACE, team: process.env.KL_TEAM, compacted });
     else if (cmd.type === "get_messages") ok({ messages });

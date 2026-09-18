@@ -111,10 +111,11 @@ test("two prompts on a cold child both land, in order", async () => {
     // buffer guarantees is asserted directly: nothing is written before pi has answered once, and
     // the child primes ITSELF so a fork (created outside `open()`) is never held forever.
     const src = fs.readFileSync(new URL("../src/rpc-child.ts", import.meta.url), "utf8");
-    assert.match(src, /if \(this\.ready \|\| cmd\.type === "get_state"\) return void c\.stdin!\.write\(line\);/);
+    assert.match(src, /if \(this\.ready \|\| cmd\.type === "get_state"\)/);
+    assert.match(src, /if \(!this\.write\(line\)\) this\.rejectWaiting/);
     assert.match(src, /this\.pending\.push\(line\);/, "everything else is held");
     assert.match(src, /if \(ev\.type === "response" && !this\.ready\)/, "and released when pi answers");
-    assert.match(src, /if \(!this\.ready\) c2\.stdin!\.write\(JSON\.stringify\(\{ type: "get_state"/, "every child primes itself");
+    assert.match(src, /if \(!this\.ready\) this\.write\(JSON\.stringify\(\{ type: "get_state"/, "every child primes itself");
   } finally {
     await c.stop();
     fs.rmSync(dir, { recursive: true, force: true });
