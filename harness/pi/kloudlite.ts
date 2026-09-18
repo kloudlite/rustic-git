@@ -263,7 +263,7 @@ const SHARED = [
   "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
   "You start with ask, plan, skill, tool_search, memory, architecture and question. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
-  "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a machine to move work along — it is already running.",
+  "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a RUNNING machine to move work along — it is already running. A machine that is STOPPED is the exception: start it, because nothing can happen on it until somebody does.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each works in its own copy of the workspace's working directory and leaves a branch or a pull request behind; its copy and its transcript stay until you close it with `ask_close`.",
   "More than one step? The plan tool is the FIRST call, before any other. Mark each item doing then done as you go, and anything you push to later as later with the reason. The person reads the plan, not your text.",
@@ -286,6 +286,7 @@ const BENCH_ONLY = [
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "An ask carries the person's words, not your paraphrase.",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
+  "A `blocked` or `needs the person` reply is a question for the person: put it to them with `question` (or say it in one line if it is not a choice), then re-ask the same workspace with their answer. A workspace that is stopped is started with its start verb — that is not moving work along, it is the person's machine being off.",
 ];
 
 /** True only where the session IS the machine. */

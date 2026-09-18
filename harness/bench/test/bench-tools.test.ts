@@ -1550,7 +1550,7 @@ test("the bench is never a workspace target, and never in a listing", async () =
 
 test("waiting on an ask is waiting, not restarting a machine", () => {
   // The model reached for `start` with an ask in flight; the identity now says what to do instead.
-  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it, and never start, stop or restart a machine to move work along/);
+  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it, and never start, stop or restart a RUNNING machine to move work along/);
 });
 
 /**
