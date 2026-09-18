@@ -567,7 +567,40 @@ pub(crate) async fn ws_tools(
         .and_then(|p| p.status)
         .and_then(|st| st.pod_ip)
         .ok_or_else(between_pods)?;
-    Ok(Json(serde_json::json!({"address": format!("{ip}:{}", crate::k8s::IDE_PORT)})).into_response())
+    // The token BESIDE the address, because the address alone cannot be used: the tool server
+    // requires the workspace's own credential, and a caller in another pod — the bench, which is
+    // what calls this route — cannot read the file it is projected into. This route is already
+    // owner-only and already the one place a caller learns where the server is; the token is
+    // worth exactly what the address is.
+    //
+    // Read back from the Secret the keys beat wrote, NEVER minted here: the tool server compares
+    // against the file in the pod, so a freshly minted token would be a valid JWT the server
+    // refuses — the most confusing failure available.
+    //
+    // Absent rather than null when the beat has not written it yet: a caller handed `null` would
+    // send the word "null" as a bearer and read the 401 as a rejected credential rather than one
+    // that does not exist yet. Never an error — the address is still useful, and a pod that has
+    // just started is not a fault.
+    let mut doc = serde_json::json!({"address": format!("{ip}:{}", crate::k8s::IDE_PORT)});
+    if let Some(token) = workspace_token(c, ns).await {
+        doc["token"] = serde_json::json!(token);
+    }
+    Ok(Json(doc).into_response())
+}
+
+
+/// The `workspace-token` in this namespace's `user-key` Secret, or `None` while the keys beat has
+/// not written one. Deliberately quiet on every failure — a missing Secret, an unreadable one, an
+/// empty value — because the caller's next step is the same either way and the address is still
+/// worth answering with.
+///
+/// Never logged, and never returned on any other route: it is a bearer token for a shell.
+async fn workspace_token(c: &kube::Client, ns: &str) -> Option<String> {
+    let secrets: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
+    let s = secrets.get_opt(crate::k8s::USER_KEY_SECRET).await.ok()??;
+    let raw = s.data?.remove("workspace-token")?;
+    let t = String::from_utf8(raw.0).ok()?.trim().to_string();
+    (!t.is_empty()).then_some(t)
 }
 
 
